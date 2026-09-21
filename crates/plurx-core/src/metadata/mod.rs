@@ -860,7 +860,7 @@ async fn enrich_library_for_targets_inner(
                         }
                     };
                     if let Some(show_tmdb_id) = show_tmdb_id {
-                        enrich_episodes(
+                        let _ = enrich_episodes(
                             store,
                             tmdb,
                             artwork_dir,
@@ -976,13 +976,17 @@ async fn enrich_library_for_targets_inner(
                             // once-per-run genre vocabulary. Either way this is
                             // the only place either lands.
                             genres: genre_patch(m.genres),
-                            enriched: true,
+                            // The show leaves the ordinary enrichment queue
+                            // only after every local season below has had its
+                            // provider pass. A deadline during that traversal
+                            // must keep this partially written parent retryable.
+                            enriched: false,
                             ..Default::default()
                         };
-                        if apply(store, item.id, patch, &mut report, repair_fence).await {
-                            report.matched += 1;
+                        if !apply(store, item.id, patch, &mut report, repair_fence).await {
+                            return;
                         }
-                        enrich_episodes(
+                        if enrich_episodes(
                             store,
                             tmdb,
                             artwork_dir,
@@ -992,7 +996,21 @@ async fn enrich_library_for_targets_inner(
                             &mut report,
                             repair_fence,
                         )
-                        .await;
+                        .await
+                            && apply(
+                                store,
+                                item.id,
+                                MetadataPatch {
+                                    enriched: true,
+                                    ..Default::default()
+                                },
+                                &mut report,
+                                repair_fence,
+                            )
+                            .await
+                        {
+                            report.matched += 1;
+                        }
                     }
                     Ok(None) => report.unmatched += 1,
                     Err(e) => {
@@ -1354,24 +1372,30 @@ async fn enrich_episodes(
     only: Option<&[i64]>,
     report: &mut EnrichReport,
     repair_fence: Option<&ArtworkRepairFence>,
-) {
+) -> bool {
     let episodes = match store.episodes_for_show(show_id).await {
         Ok(eps) => eps,
         Err(e) => {
             tracing::error!(error = %e, "listing episodes");
             report.errors += 1;
             report.note(format!("cannot list episodes of item {show_id}: {e}"));
-            return;
+            return false;
         }
     };
     // The season items themselves get the season's own poster + overview --
     // a seasons grid of blank cards is what this prevents. Build this map
     // before filtering episodes because a retry may explicitly target a
     // season whose episode stills are already healthy.
-    let season_items: std::collections::HashMap<i32, crate::domain::Item> = store
-        .get_item_children(show_id)
-        .await
-        .unwrap_or_default()
+    let season_items: std::collections::HashMap<i32, crate::domain::Item> =
+        match store.get_item_children(show_id).await {
+            Ok(items) => items,
+            Err(e) => {
+                tracing::error!(error = %e, "listing seasons");
+                report.errors += 1;
+                report.note(format!("cannot list seasons of item {show_id}: {e}"));
+                return false;
+            }
+        }
         .into_iter()
         .filter(|s| s.kind == ItemKind::Season)
         .filter_map(|s| s.season_number.map(|n| (n, s)))
@@ -1409,6 +1433,7 @@ async fn enrich_episodes(
         }
     }
 
+    let mut complete = true;
     for (season_number, locals) in by_season {
         let remote = match tmdb.season_detail(show_tmdb_id, season_number).await {
             Ok(detail) => detail,
@@ -1416,6 +1441,7 @@ async fn enrich_episodes(
                 tracing::error!(season = season_number, error = %e, "season fetch failed");
                 report.errors += 1;
                 report.note(format!("season {season_number} fetch failed: {e}"));
+                complete = false;
                 continue;
             }
         };
@@ -1452,8 +1478,9 @@ async fn enrich_episodes(
                 poster_path: poster.file,
                 ..Default::default()
             };
-            if !patch.is_empty() {
-                apply(store, season_item.id, patch, report, repair_fence).await;
+            if !patch.is_empty() && !apply(store, season_item.id, patch, report, repair_fence).await
+            {
+                complete = false;
             }
         }
         for ep in locals {
@@ -1468,7 +1495,7 @@ async fn enrich_episodes(
                 // can back it off without fabricating an artwork attempt for
                 // paths that never reached TMDB.
                 if ep.poster_path.is_none() {
-                    apply(
+                    if !apply(
                         store,
                         ep.id,
                         MetadataPatch {
@@ -1480,7 +1507,10 @@ async fn enrich_episodes(
                         report,
                         repair_fence,
                     )
-                    .await;
+                    .await
+                    {
+                        complete = false;
+                    }
                 }
                 continue;
             };
@@ -1505,9 +1535,12 @@ async fn enrich_episodes(
             };
             if apply(store, ep.id, patch, report, repair_fence).await {
                 report.episodes_matched += 1;
+            } else {
+                complete = false;
             }
         }
     }
+    complete
 }
 
 async fn apply(
@@ -1927,6 +1960,201 @@ mod tests {
             .expect("retry candidates");
         assert!(retryable.iter().any(|item| item.id == slow));
         assert!(!retryable.iter().any(|item| item.id == quick));
+    }
+
+    #[tokio::test]
+    async fn a_show_deadline_after_one_season_keeps_the_parent_retryable() {
+        use axum::routing::get;
+        use axum::Json;
+
+        let store = SqliteStore::open_in_memory().expect("open");
+        let lib = store
+            .create_library(&NewLibrary {
+                name: "Deadline TV".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let show = store
+            .insert_item(&NewItem {
+                library_id: lib.id,
+                kind: ItemKind::Show,
+                parent_id: None,
+                title: "Partial Show".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("show");
+        store
+            .apply_metadata(
+                show,
+                &MetadataPatch {
+                    tmdb_id: Some(42),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("seed show id");
+        let mut episodes = Vec::new();
+        for season_number in 1..=2 {
+            let season = store
+                .insert_item(&NewItem {
+                    library_id: lib.id,
+                    kind: ItemKind::Season,
+                    parent_id: Some(show),
+                    title: format!("Season {season_number}"),
+                    year: None,
+                    season_number: Some(season_number),
+                    episode_number: None,
+                })
+                .await
+                .expect("season");
+            episodes.push(
+                store
+                    .insert_item(&NewItem {
+                        library_id: lib.id,
+                        kind: ItemKind::Episode,
+                        parent_id: Some(season),
+                        title: format!("Pending {season_number}"),
+                        year: None,
+                        season_number: Some(season_number),
+                        episode_number: Some(1),
+                    })
+                    .await
+                    .expect("episode"),
+            );
+        }
+
+        let season_two_hits = Arc::new(AtomicUsize::new(0));
+        let season_two_handler_hits = Arc::clone(&season_two_hits);
+        let base = serve(
+            axum::Router::new()
+                .route(
+                    "/tv/42",
+                    get(|| async {
+                        Json(json!({
+                            "id": 42,
+                            "name": "Partial Show enriched",
+                            "first_air_date": "2020-01-01"
+                        }))
+                    }),
+                )
+                .route(
+                    "/tv/42/season/1",
+                    get(|| async {
+                        Json(json!({
+                            "overview": "first season",
+                            "episodes": [{
+                                "episode_number": 1,
+                                "name": "First complete",
+                                "runtime": 40
+                            }]
+                        }))
+                    }),
+                )
+                .route(
+                    "/tv/42/season/2",
+                    get(move || {
+                        let hits = Arc::clone(&season_two_handler_hits);
+                        async move {
+                            if hits.fetch_add(1, Ordering::SeqCst) == 0 {
+                                tokio::time::sleep(Duration::from_secs(30)).await;
+                            }
+                            Json(json!({
+                                "overview": "second season",
+                                "episodes": [{
+                                    "episode_number": 1,
+                                    "name": "Second complete",
+                                    "runtime": 45
+                                }]
+                            }))
+                        }
+                    }),
+                ),
+        )
+        .await;
+        let tmdb = TmdbClient::new("k").with_base(&base, &base);
+        let artwork = canonical_tempdir();
+        let publisher = PublicationStore::unfenced(&store);
+
+        let first = enrich_library_for_targets_inner(
+            &publisher,
+            &tmdb,
+            artwork.path(),
+            Some(lib.id),
+            false,
+            None,
+            None,
+            None,
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(first.errors, 1);
+        assert_eq!(first.matched, 0);
+        assert_eq!(
+            store
+                .get_item(episodes[0])
+                .await
+                .expect("first episode read")
+                .expect("first episode")
+                .title,
+            "First complete"
+        );
+        assert_eq!(
+            store
+                .get_item(episodes[1])
+                .await
+                .expect("second episode read")
+                .expect("second episode")
+                .title,
+            "Pending 2"
+        );
+        assert!(
+            store
+                .items_needing_metadata(Some(lib.id), false, None)
+                .await
+                .expect("retry candidates")
+                .iter()
+                .any(|item| item.id == show),
+            "partial child enrichment must not stamp the parent complete"
+        );
+
+        let second = enrich_library_for_targets_inner(
+            &publisher,
+            &tmdb,
+            artwork.path(),
+            Some(lib.id),
+            false,
+            None,
+            None,
+            None,
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(second.errors, 0, "ordinary retry completes: {second:?}");
+        assert_eq!(second.matched, 1);
+        assert_eq!(
+            store
+                .get_item(episodes[1])
+                .await
+                .expect("retried episode read")
+                .expect("retried episode")
+                .title,
+            "Second complete"
+        );
+        assert!(
+            store
+                .items_needing_metadata(Some(lib.id), false, None)
+                .await
+                .expect("completed candidates")
+                .iter()
+                .all(|item| item.id != show),
+            "the parent is stamped only after every season completes"
+        );
     }
 
     /// A healthy show can be only the route to one blank season. If that show
