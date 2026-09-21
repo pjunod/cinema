@@ -1033,7 +1033,7 @@ compiles when its acceptance cases remain unexecuted.
 
 | Milestone | State at handoff | Evidence / blocker |
 |---|---|---|
-| M0 source/VOD proof | open | No actual drive, engine-capability or optical seek evidence collected |
+| M0 source/VOD proof | partial | [2026-09-20 evidence](../evidence/OPTICAL-M0-2026-09-20.md): pinned compiler and typed source/helper contracts established; local FFmpeg lacks both optical inputs, lab nodes were unreachable, and no identified drive exists on the reachable host. Physical DVD/Blu-ray VOD proof remains open. |
 | M1 domain/Store | open | No implementation |
 | M2 device lifecycle | open | No implementation |
 | M3 playback/API | open | Depends on M0 source/VOD decision |

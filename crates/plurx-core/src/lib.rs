@@ -25,6 +25,7 @@ pub mod channel_subjects;
 pub mod library_channels;
 pub mod mediafacts;
 pub mod metadata;
+pub mod optical;
 pub mod playback;
 pub mod scan;
 pub mod secrets;
