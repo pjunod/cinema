@@ -1568,7 +1568,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # reviewed under `all-detached-tokio-tasks` above.
 # +2 with the seek-scratch ledger: the retired scratch conversion owner and the
 # copy reader whose writer guard is now registered before the spawn.
-expected_occurrences = 524
+# +3 for C-01 HTTP ownership: startup precompression is one `spawn_blocking`
+# awaited before the listener binds; each accepted connection is a graceful-
+# shutdown-watched task; and the shortened-timeout listener fixture joins its
+# server task before returning. None owns a media producer or child process.
+expected_occurrences = 527
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1980,7 +1984,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +4 with the seek-scratch ledger: the conversion retry interval, the copy
 # writer's grant-wait poll, the writer-settle barrier's bounded wait, and the
 # retired cleanup owner's shortenable deadline.
-expected_occurrences = 809
+# +8 net for C-01: one shipped handler deadline bounds JSON work; two fixture
+# sleeps model slow handlers; and five fixture timeouts bound server teardown,
+# socket reads, and the raw HTTP/2 PING observation. The existing shutdown
+# drain sleep moved into the new accept-loop helper and remains one occurrence.
+# Every fixture task is joined; the shipped timers own no media producer.
+expected_occurrences = 817
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2318,7 +2327,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # are ordinary in-process methods and launch no child.
 # +1: the 503 classification is asserted through the real HTTP mapper, which
 # reads the response `.status()`.
-expected_occurrences = 319
+# +6 for C-01 HTTP response construction/tests: one `Response::builder().status`
+# selects 200 vs 304 and five `.status()` reads assert in-process Axum answers.
+# None is a command launch or process owner.
+expected_occurrences = 325
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

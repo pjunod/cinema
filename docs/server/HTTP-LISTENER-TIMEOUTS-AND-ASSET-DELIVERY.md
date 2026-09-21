@@ -596,4 +596,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c01_builder | M1–M3 (single PR at explicit user direction) | #395 | Draft implementation complete. Rust 1.97.1: focused listener, route-deadline, asset-delivery, security-header, publication-frame, and preserved serve/connect-info tests pass; `cargo check -p plurxd --all-targets --locked` and rustfmt pass; 25 body-limit registrations preserved; dependency tree has no duplicate `hyper`/`hyper-util`. `node --test tests/web/`: 51/51 pass. Baseline #394 independently reproduces the unrelated `first_media_retains_advancing_deadline_and_published_failure_is_immutable` failure, the Android `behindLiveWindow.attached()` `make web-check` failure, and four existing Clippy `-D warnings` findings; C-01 does not touch those files. Needs after merge: §6.2 lab1 listener/metric soak, §6.3 cold/warm waterfall HARs, and §6.4 browser/native reader device prompt; no deployment or device authority was available during implementation. |

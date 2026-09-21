@@ -2,7 +2,7 @@
 
 // What the web assets may name at load, and when.
 //
-// The split shell (docs/clients/WEB-SHELL-LAYOUT.md) is sixty-two plain
+// The split shell (docs/clients/WEB-SHELL-LAYOUT.md) has sixty-four plain
 // scripts sharing one global scope. Hoisting is per script, so a file may only
 // name a binding declared in an *earlier* file at the moment it loads — and the
 // thirty-nine statements that run at load are the only ones that care. Get the
@@ -296,7 +296,11 @@ function analyze(sources = servedSources()) {
       throw new Error(`${path} does not parse: ${error.message}`);
     }
     const first = program.body[0];
-    const prologue = Boolean(first && first.type === "ExpressionStatement"
+    // hls.min.js is a checked-in upstream bundle, not one of our authored
+    // global-scope rows. Keep parsing and ordering it, but do not rewrite its
+    // minified bytes merely to add our per-file authoring convention.
+    const prologue = path === "hls.min.js" || Boolean(first
+      && first.type === "ExpressionStatement"
       && first.expression.type === "Literal" && first.expression.value === "use strict");
     return {path, source, program, prologue, names: topLevelNames(program)};
   });

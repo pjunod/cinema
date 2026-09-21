@@ -65,7 +65,7 @@ pub(crate) mod test_agents {
 
 mod users;
 mod watch;
-mod web;
+pub(crate) mod web;
 
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
@@ -74,23 +74,91 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::state::AppState;
 use plurx_core::cluster::membership::LocalServingRole;
 use serde::{Deserialize, Serialize};
 
+const JSON_SHORT_DEADLINE: Duration = Duration::from_secs(30);
+const JSON_LONG_DEADLINE: Duration = Duration::from_secs(300);
+static HANDLER_DEADLINES: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+#[derive(Clone, Copy)]
+enum DeadlineGroup {
+    JsonShort,
+    JsonLong,
+}
+
+impl DeadlineGroup {
+    const fn index(self) -> usize {
+        match self {
+            Self::JsonShort => 0,
+            Self::JsonLong => 1,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::JsonShort => "json_short",
+            Self::JsonLong => "json_long",
+        }
+    }
+}
+
+async fn handler_deadline(
+    request: Request<axum::body::Body>,
+    next: Next,
+    deadline: Duration,
+    group: DeadlineGroup,
+) -> Response {
+    match tokio::time::timeout(deadline, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => {
+            HANDLER_DEADLINES[group.index()].fetch_add(1, Ordering::Relaxed);
+            error::ApiError::TypedRetry {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "handler_deadline",
+                message: "the server did not finish this request before its deadline; the request may still complete, so re-read state before retrying a mutation".to_owned(),
+                retry_after_seconds: 2,
+            }
+            .into_response()
+        }
+    }
+}
+
+async fn json_short_deadline(request: Request<axum::body::Body>, next: Next) -> Response {
+    handler_deadline(request, next, JSON_SHORT_DEADLINE, DeadlineGroup::JsonShort).await
+}
+
+async fn json_long_deadline(request: Request<axum::body::Body>, next: Next) -> Response {
+    handler_deadline(request, next, JSON_LONG_DEADLINE, DeadlineGroup::JsonLong).await
+}
+
+pub(crate) fn prometheus_handler_deadlines() -> String {
+    let mut out = String::from(
+        "# HELP plurx_http_handler_deadlines_total Requests ended by the server-side handler deadline.\n\
+         # TYPE plurx_http_handler_deadlines_total counter\n",
+    );
+    for group in [DeadlineGroup::JsonShort, DeadlineGroup::JsonLong] {
+        out.push_str(&format!(
+            "plurx_http_handler_deadlines_total{{group=\"{}\"}} {}\n",
+            group.label(),
+            HANDLER_DEADLINES[group.index()].load(Ordering::Relaxed)
+        ));
+    }
+    out
+}
+
 pub fn router(state: AppState) -> Router {
-    let api = Router::new()
-        // System / auth (public where noted)
+    // A route belongs to exactly one deadline group. The grouping is applied
+    // before the shared serving gate so media bodies and blocked GETs remain
+    // unlimited while JSON work cannot occupy a request slot forever.
+    let json_short = Router::new()
         .route("/server", get(system::server_info))
-        .route("/setup", post(system::setup))
-        .route("/auth/login", post(auth::login))
-        .route("/auth/logout", post(auth::logout))
         .route("/me", get(auth::me))
-        .route(
-            "/settings",
-            get(system::get_settings).put(system::update_settings),
-        )
+        .route("/settings", get(system::get_settings))
         // Advisory only. The Developer section lists what must be true
         // before each switch is safe; this is the other half — what this
         // process can currently observe. Nothing reads it to decide
@@ -100,14 +168,226 @@ pub fn router(state: AppState) -> Router {
         .nest("/library-channels", library_channels::router())
         .nest("/dvr", dvr::router())
         .route("/live-tv/readiness", get(live_tv::readiness))
+        .route("/live-tv/channels", get(live_tv::channels))
+        .route("/live-tv/guide", get(live_tv::guide_document))
+        .route("/live-tv/guide/readiness", get(live_tv::guide_readiness))
+        .route("/scan/status", get(system::scan_status))
+        .route("/activity", get(system::activity))
+        .route("/activity/detail", get(system::activity_detail))
+        .route(
+            "/activity/sessions/{id}",
+            axum::routing::delete(system::stop_session),
+        )
+        .route(
+            "/activity/offline/{id}",
+            axum::routing::delete(system::stop_offline_package),
+        )
+        .route(
+            "/activity/producer",
+            axum::routing::delete(system::stop_producer),
+        )
+        .route("/trakt/status", get(trakt::status))
+        .route("/system", get(system::system_info))
+        .route("/system/logs", get(system::logs))
+        .route("/system/playback-events", get(system::playback_events))
+        .route("/cluster/nodes", get(cluster::nodes))
+        .route("/cluster/status", get(cluster_operations::aggregate))
+        .route("/cluster/ingress", get(cluster::ingress))
+        .route("/cluster/media", get(internal_media::directory))
+        // Any signed-in user can post a client-side playback error here so it
+        // lands in the admin log (browsers that reject a stream produce no
+        // server log on their own).
+        .route("/client-log", post(system::client_log))
+        // Users (admin)
+        .route("/users", get(users::list).post(users::create))
+        .route("/users/{id}", put(users::update).delete(users::delete))
+        // API keys (admin) — the machine credential. Managing keys is a
+        // user action; USING one is not, and those routes take ScopedKey.
+        .route("/keys", get(keys::list).post(keys::create))
+        .route("/keys/{id}", delete(keys::delete))
+        // Targeted scan — key-scoped, for other applications. Not under
+        // /libraries/{id} on purpose: the caller knows a path, not a plurx
+        // library id, and plurx resolving it is one less thing for two
+        // applications to keep in sync.
+        .route("/coming-soon", get(comingsoon::coming_soon))
+        .route("/monarr/status", get(comingsoon::monarr_status))
+        .route("/scan/requests/{id}", get(scan::request_status))
+        // Libraries
+        .route("/libraries", get(libraries::list))
+        .route(
+            "/libraries/{id}/identity-repairs/{plan_id}",
+            get(scan_identity::status),
+        )
+        .route("/libraries/{id}/items", get(browse::list_items))
+        // Browse
+        .route("/items/{id}", get(browse::item_detail).patch(items::edit))
+        .route("/files/{id}/dv-conversion", get(dv_disk::file_status))
+        .route("/dv-conversions", get(dv_disk::status))
+        .route("/analysis/summary", get(analysis::summary))
+        .route("/analysis/jobs", get(analysis::jobs))
+        .route("/analysis/jobs/{id}", get(analysis::job))
+        .route("/hubs", get(browse::hubs))
+        .route("/home/previews", get(browse::home_previews))
+        .route("/search", get(browse::search))
+        .route(
+            "/search/related",
+            get(crate::library_search::related_search),
+        )
+        .route(
+            "/search/settings",
+            get(crate::library_search::settings).put(crate::library_search::update_settings),
+        )
+        .route(
+            "/items/{id}/classification",
+            get(crate::library_search::get_classification)
+                .put(crate::library_search::correct_classification),
+        )
+        // Watch
+        .route("/items/{id}/progress", post(watch::progress))
+        .route("/items/{id}/scrobble", post(watch::scrobble))
+        .route("/items/{id}/unscrobble", post(watch::unscrobble))
+        .route(
+            "/items/{id}/reading-state",
+            get(reading::get_state)
+                .put(reading::put_state)
+                .delete(reading::delete_state)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        // Playback
+        .route(
+            "/files/{id}/decision",
+            get(stream::decision)
+                .post(stream::decision_post)
+                // A capabilities document is a short list of codecs and a
+                // handful of learned limits; axum's 2 MiB default is four
+                // orders of magnitude of headroom for an authenticated caller
+                // to spend on a body the server has to walk. The same 64 KiB
+                // the reading-state route uses is more than any real client
+                // needs.
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route("/files/{id}/audio-offset", put(stream::set_audio_offset))
+        .route("/files/{id}/offline-options", get(offline::options))
+        .route(
+            "/offline/packages/{id}",
+            get(offline::package_status).delete(offline::delete_package),
+        )
+        .route("/offline/packages/{id}/lease", put(offline::put_lease))
+        .route(
+            "/offline/packages/{id}/complete",
+            post(offline::complete_package),
+        )
+        .layer(axum::middleware::from_fn(json_short_deadline));
+
+    let json_long = Router::new()
+        // These handlers legitimately coordinate cluster writes, password
+        // hashing, scans, or child work. Five minutes stays above their own
+        // fences while still making a wedged request finite.
+        .route("/setup", post(system::setup))
+        .route("/auth/login", post(auth::login))
+        .route("/auth/logout", post(auth::logout))
+        .route("/settings", put(system::update_settings))
         .route(
             "/live-tv/readiness/refresh",
             post(live_tv::refresh_readiness),
         )
-        .route("/live-tv/channels", get(live_tv::channels))
-        .route("/live-tv/guide", get(live_tv::guide_document))
         .route("/live-tv/guide/refresh", post(live_tv::refresh_guide))
-        .route("/live-tv/guide/readiness", get(live_tv::guide_readiness))
+        .route("/trakt/link", post(trakt::link).delete(trakt::unlink))
+        .route("/trakt/sync", post(trakt::sync_now))
+        // Membership control is admin-only. Join tokens remain the narrow
+        // credential for role-specific peer admission.
+        .route("/cluster/join-tokens", post(cluster::issue_join_token))
+        .route(
+            "/cluster/learner-join-tokens",
+            post(cluster::issue_learner_join_token),
+        )
+        .route(
+            "/cluster/support-bundle",
+            get(cluster_operations::support_bundle),
+        )
+        .route(
+            "/cluster/nodes/{node_id}/restart-preparation",
+            post(cluster_operations::prepare_restart).delete(cluster_operations::cancel_restart),
+        )
+        .route(
+            "/cluster/nodes/{node_id}/promote",
+            post(cluster::promote_node),
+        )
+        .route(
+            "/cluster/nodes/{node_id}/maintenance",
+            post(cluster::enter_maintenance).delete(cluster::exit_maintenance),
+        )
+        .route("/cluster/election", post(cluster::force_election))
+        .route("/cluster/leave", post(cluster::leave))
+        .route(
+            "/cluster/protocol/learner/activate",
+            post(cluster::activate_learner_protocol),
+        )
+        .route(
+            "/cluster/protocol/learner/deactivate",
+            post(cluster::deactivate_learner_protocol),
+        )
+        .route("/cluster/nodes/{node_id}", delete(cluster::remove_node))
+        .route("/cluster/join/redeem", post(cluster::redeem_join))
+        .route("/cluster/join/finalize", post(cluster::finalize_join))
+        .route(
+            "/cluster/learner/join/redeem",
+            post(cluster::redeem_learner_join),
+        )
+        .route(
+            "/cluster/learner/join/finalize",
+            post(cluster::finalize_learner_join),
+        )
+        .route("/system/library-shape", get(system::library_shape))
+        .route("/system/storage", post(system::remeasure_storage))
+        .route(
+            "/system/search-index/rebuild",
+            post(system::rebuild_search_index),
+        )
+        .route("/scan", post(scan::scan))
+        .route("/libraries", post(libraries::create))
+        .route(
+            "/libraries/{id}",
+            put(libraries::update).delete(libraries::delete),
+        )
+        .route("/libraries/{id}/schedule", put(libraries::set_schedule))
+        .route("/libraries/{id}/scan", post(libraries::scan))
+        .route(
+            "/libraries/{id}/identity-repairs/preview",
+            post(scan_identity::preview),
+        )
+        .route(
+            "/libraries/{id}/identity-repairs/{plan_id}/apply",
+            post(scan_identity::apply),
+        )
+        .route("/libraries/{id}/refresh", post(libraries::refresh))
+        .route("/libraries/{id}/dv-conversion", put(dv_disk::set_mode))
+        .route(
+            "/libraries/{id}/dv-conversions",
+            post(dv_disk::queue_library),
+        )
+        .route(
+            "/libraries/{id}/root-identity/reset",
+            post(libraries::reset_root_identity),
+        )
+        .route("/items/{id}/reanalyze", post(items::reanalyze))
+        .route("/items/{id}/refresh-artwork", post(items::refresh_artwork))
+        .route("/files/{id}/analysis", post(analysis::request))
+        .route("/files/{id}/dv-conversion", post(dv_disk::queue_file))
+        .route(
+            "/files/{id}/timeline-annotations/{kind}",
+            put(analysis::set_manual_annotation).delete(analysis::discard_manual_annotation),
+        )
+        .route("/analysis/jobs/{id}", delete(analysis::cancel_job))
+        .route("/analysis/jobs/{id}/retry", post(analysis::retry_job))
+        .route("/analysis/reopen", post(analysis::reopen))
+        .route("/files/{id}/offline-packages", post(offline::create))
+        .route("/files/{id}/publication", post(publication::open))
+        .layer(axum::middleware::from_fn(json_long_deadline));
+
+    // No deadline here. These bodies, blocked GETs, paced remuxes, live
+    // playlists, and session creates own their deadlines at the subsystem.
+    let media = Router::new()
         .route(
             "/live-tv/channels/{channel}/sessions",
             post(live_tv::start_session).layer(DefaultBodyLimit::max(
@@ -134,9 +414,6 @@ pub fn router(state: AppState) -> Router {
             "/live-tv/sessions/{capability}",
             delete(live_tv::stop_session),
         )
-        // The three recovery routes, keyed by the client's own request id
-        // rather than by a capability: after an unclean end the id is the only
-        // handle the client still has.
         .route(
             "/live-tv/starts/{request_id}",
             delete(live_tv::retire_start).get(live_tv::start_state),
@@ -145,225 +422,12 @@ pub fn router(state: AppState) -> Router {
             "/live-tv/starts/{request_id}/resume",
             post(live_tv::resume_start),
         )
-        .route("/scan/status", get(system::scan_status))
-        .route("/activity", get(system::activity))
-        .route("/activity/detail", get(system::activity_detail))
-        .route(
-            "/activity/sessions/{id}",
-            axum::routing::delete(system::stop_session),
-        )
-        .route(
-            "/activity/offline/{id}",
-            axum::routing::delete(system::stop_offline_package),
-        )
-        .route(
-            "/activity/producer",
-            axum::routing::delete(system::stop_producer),
-        )
-        .route("/trakt/status", get(trakt::status))
-        .route("/trakt/link", post(trakt::link).delete(trakt::unlink))
-        .route("/trakt/sync", post(trakt::sync_now))
-        .route("/system", get(system::system_info))
-        .route("/system/logs", get(system::logs))
-        .route("/system/playback-events", get(system::playback_events))
-        // Membership control is admin-only. The role-specific join routes
-        // below are the exception: their single-use token digest is its own
-        // narrow credential, and the caller never supplies the role.
-        .route("/cluster/join-tokens", post(cluster::issue_join_token))
-        .route(
-            "/cluster/learner-join-tokens",
-            post(cluster::issue_learner_join_token),
-        )
-        .route("/cluster/nodes", get(cluster::nodes))
-        .route("/cluster/status", get(cluster_operations::aggregate))
-        .route(
-            "/cluster/support-bundle",
-            get(cluster_operations::support_bundle),
-        )
-        .route(
-            "/cluster/nodes/{node_id}/restart-preparation",
-            post(cluster_operations::prepare_restart).delete(cluster_operations::cancel_restart),
-        )
-        .route(
-            "/cluster/nodes/{node_id}/promote",
-            post(cluster::promote_node),
-        )
-        .route(
-            "/cluster/nodes/{node_id}/maintenance",
-            post(cluster::enter_maintenance).delete(cluster::exit_maintenance),
-        )
-        .route("/cluster/election", post(cluster::force_election))
-        .route("/cluster/ingress", get(cluster::ingress))
-        .route("/cluster/media", get(internal_media::directory))
         .route(
             "/cluster/media/offers",
             post(internal_media::diagnostic_offers),
         )
-        .route("/cluster/leave", post(cluster::leave))
-        // Protocol activation is a separate deliberate step from installing
-        // the binary that supports it. The active range and each node's
-        // readiness are reported by GET /cluster/nodes above.
-        .route(
-            "/cluster/protocol/learner/activate",
-            post(cluster::activate_learner_protocol),
-        )
-        .route(
-            "/cluster/protocol/learner/deactivate",
-            post(cluster::deactivate_learner_protocol),
-        )
-        .route("/cluster/nodes/{node_id}", delete(cluster::remove_node))
-        .route("/cluster/join/redeem", post(cluster::redeem_join))
-        .route("/cluster/join/finalize", post(cluster::finalize_join))
-        .route(
-            "/cluster/learner/join/redeem",
-            post(cluster::redeem_learner_join),
-        )
-        .route(
-            "/cluster/learner/join/finalize",
-            post(cluster::finalize_learner_join),
-        )
-        // Node-to-node artwork materialization. The handler verifies a
-        // filename-bound cluster HMAC and current live membership; it does
-        // not accept an account bearer and never proxies another hop.
         .route("/cluster/artwork/{filename}", get(images::serve_peer))
-        // What the libraries hold, in transcoder terms — the census PERF-PLAN
-        // §5 needs to say whether the GPU tone-map reaches a real library.
-        .route("/system/library-shape", get(system::library_shape))
-        // Re-measure storage. POST because it costs real I/O against the
-        // library, and separate from GET /system so that reading the last
-        // numbers is never the thing that goes and takes new ones.
-        .route("/system/storage", post(system::remeasure_storage))
-        .route(
-            "/system/search-index/rebuild",
-            post(system::rebuild_search_index),
-        )
-        // Any signed-in user can post a client-side playback error here so it
-        // lands in the admin log (browsers that reject a stream produce no
-        // server log on their own).
-        .route("/client-log", post(system::client_log))
-        // Users (admin)
-        .route("/users", get(users::list).post(users::create))
-        .route("/users/{id}", put(users::update).delete(users::delete))
-        // API keys (admin) — the machine credential. Managing keys is a
-        // user action; USING one is not, and those routes take ScopedKey.
-        .route("/keys", get(keys::list).post(keys::create))
-        .route("/keys/{id}", delete(keys::delete))
-        // Targeted scan — key-scoped, for other applications. Not under
-        // /libraries/{id} on purpose: the caller knows a path, not a plurx
-        // library id, and plurx resolving it is one less thing for two
-        // applications to keep in sync.
-        .route("/coming-soon", get(comingsoon::coming_soon))
-        .route("/monarr/status", get(comingsoon::monarr_status))
-        .route("/scan", post(scan::scan))
-        .route("/scan/requests/{id}", get(scan::request_status))
-        // Libraries
-        .route("/libraries", get(libraries::list).post(libraries::create))
-        .route(
-            "/libraries/{id}",
-            put(libraries::update).delete(libraries::delete),
-        )
-        .route("/libraries/{id}/schedule", put(libraries::set_schedule))
-        .route("/libraries/{id}/scan", post(libraries::scan))
-        .route(
-            "/libraries/{id}/identity-repairs/preview",
-            post(scan_identity::preview),
-        )
-        .route(
-            "/libraries/{id}/identity-repairs/{plan_id}",
-            get(scan_identity::status),
-        )
-        .route(
-            "/libraries/{id}/identity-repairs/{plan_id}/apply",
-            post(scan_identity::apply),
-        )
-        .route("/libraries/{id}/refresh", post(libraries::refresh))
-        .route("/libraries/{id}/dv-conversion", put(dv_disk::set_mode))
-        .route(
-            "/libraries/{id}/dv-conversions",
-            post(dv_disk::queue_library),
-        )
-        .route(
-            "/libraries/{id}/root-identity/reset",
-            post(libraries::reset_root_identity),
-        )
-        .route("/libraries/{id}/items", get(browse::list_items))
-        // Browse
-        .route("/items/{id}", get(browse::item_detail).patch(items::edit))
-        .route("/items/{id}/reanalyze", post(items::reanalyze))
-        .route("/items/{id}/refresh-artwork", post(items::refresh_artwork))
-        .route("/files/{id}/analysis", post(analysis::request))
-        .route(
-            "/files/{id}/dv-conversion",
-            get(dv_disk::file_status).post(dv_disk::queue_file),
-        )
-        .route("/dv-conversions", get(dv_disk::status))
-        .route(
-            "/files/{id}/timeline-annotations/{kind}",
-            put(analysis::set_manual_annotation).delete(analysis::discard_manual_annotation),
-        )
-        .route("/analysis/summary", get(analysis::summary))
-        .route("/analysis/jobs", get(analysis::jobs))
-        .route(
-            "/analysis/jobs/{id}",
-            get(analysis::job).delete(analysis::cancel_job),
-        )
-        .route("/analysis/jobs/{id}/retry", post(analysis::retry_job))
-        .route("/analysis/reopen", post(analysis::reopen))
-        .route("/hubs", get(browse::hubs))
-        .route("/home/previews", get(browse::home_previews))
-        .route("/search", get(browse::search))
-        .route(
-            "/search/related",
-            get(crate::library_search::related_search),
-        )
-        .route(
-            "/search/settings",
-            get(crate::library_search::settings).put(crate::library_search::update_settings),
-        )
-        .route(
-            "/items/{id}/classification",
-            get(crate::library_search::get_classification)
-                .put(crate::library_search::correct_classification),
-        )
-        // Watch
         .route("/items/{id}/photo", get(photos::serve))
-        .route("/items/{id}/progress", post(watch::progress))
-        .route("/items/{id}/scrobble", post(watch::scrobble))
-        .route("/items/{id}/unscrobble", post(watch::unscrobble))
-        .route(
-            "/items/{id}/reading-state",
-            get(reading::get_state)
-                .put(reading::put_state)
-                .delete(reading::delete_state)
-                .layer(DefaultBodyLimit::max(64 * 1024)),
-        )
-        // Playback
-        .route(
-            "/files/{id}/decision",
-            get(stream::decision)
-                .post(stream::decision_post)
-                // A capabilities document is a short list of codecs and a
-                // handful of learned limits; axum's 2 MiB default is four
-                // orders of magnitude of headroom for an authenticated caller
-                // to spend on a body the server has to walk. The same 64 KiB
-                // the reading-state route uses is more than any real client
-                // needs.
-                .layer(DefaultBodyLimit::max(64 * 1024)),
-        )
-        .route("/files/{id}/audio-offset", put(stream::set_audio_offset))
-        // App-managed offline viewing. JSON/package ownership uses bearer
-        // auth; only immutable child media uses the package-scoped capability.
-        .route("/files/{id}/offline-options", get(offline::options))
-        .route("/files/{id}/offline-packages", post(offline::create))
-        .route(
-            "/offline/packages/{id}",
-            get(offline::package_status).delete(offline::delete_package),
-        )
-        .route("/offline/packages/{id}/lease", put(offline::put_lease))
-        .route(
-            "/offline/packages/{id}/complete",
-            post(offline::complete_package),
-        )
         .route("/offline/media/{token}/master.m3u8", get(offline::master))
         .route("/offline/media/{token}/index.m3u8", get(offline::playlist))
         .route(
@@ -374,7 +438,6 @@ pub fn router(state: AppState) -> Router {
         .route("/files/{id}/direct", get(stream::direct))
         .route("/files/{id}/download", get(stream::download))
         .route("/files/{id}/content", get(stream::book_content))
-        .route("/files/{id}/publication", post(publication::open))
         .route("/publication/{session}", delete(publication::close))
         .route(
             "/publication/{session}/{*resource}",
@@ -436,8 +499,12 @@ pub fn router(state: AppState) -> Router {
         // can send this with `keepalive`, which cannot set headers.
         .route("/hls/{session}", delete(hls::delete))
         .route("/hls/{session}/{segment}", get(hls::segment))
-        // Images
-        .route("/images/{filename}", get(images::serve))
+        .route("/images/{filename}", get(images::serve));
+
+    let api = Router::new()
+        .merge(json_short)
+        .merge(json_long)
+        .merge(media)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             mutable_media_serving_gate,
@@ -447,7 +514,7 @@ pub fn router(state: AppState) -> Router {
     // Plex uses literal `:` path segments (`/:/timeline`, `/photo/:/transcode`)
     // which axum 0.8 rejects by default — `without_v07_checks` matches them
     // literally (we still use `{capture}` syntax for real captures).
-    let plex_routes = Router::new()
+    let plex_short = Router::new()
         .without_v07_checks()
         .route("/identity", get(plex::identity))
         .route("/library", get(plex::library_root))
@@ -456,24 +523,29 @@ pub fn router(state: AppState) -> Router {
         .route("/library/metadata/{key}", get(plex::metadata))
         .route("/library/metadata/{key}/children", get(plex::children))
         .route("/library/metadata/{key}/{kind}", get(plex::image))
-        .route("/library/parts/{file_id}/{mtime}/{name}", get(plex::part))
-        .route("/photo/:/transcode", get(plex::photo_transcode))
         .route("/:/timeline", get(plex::timeline))
         .route("/:/scrobble", get(plex::scrobble))
         .route("/:/unscrobble", get(plex::unscrobble))
         .route("/search", get(plex::search))
         .route("/hubs/search", get(plex::search))
+        .layer(axum::middleware::from_fn(json_short_deadline));
+    let plex_media = Router::new()
+        .without_v07_checks()
+        .route("/library/parts/{file_id}/{mtime}/{name}", get(plex::part))
+        .route("/photo/:/transcode", get(plex::photo_transcode));
+    let plex_routes = Router::new()
+        .without_v07_checks()
+        .merge(plex_short)
+        .merge(plex_media)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             mutable_media_serving_gate,
         ));
 
-    Router::new()
-        // Also opted out of the v0.7 checks so the merged Plex `:` routes pass.
+    let public_short = Router::new()
         .without_v07_checks()
         // `/` serves the web app for browsers, Plex capabilities for Plex clients.
         .route("/", get(root_dispatch))
-        .route("/assets/hls.min.js", get(web::hls_js))
         .route("/assets/cluster-panel.js", get(web::cluster_panel_js))
         .route("/assets/playback-policy.js", get(web::playback_policy_js))
         .route("/assets/playback-control.js", get(web::playback_control_js))
@@ -482,17 +554,25 @@ pub fn router(state: AppState) -> Router {
         .route("/assets/reader.js", get(web::reader_js))
         .route("/assets/reader.css", get(web::reader_css))
         // Everything else under /assets/ is a `web::WEB_ASSETS` row — the split
-        // web shell. The seven sidecars above keep their own routes because
+        // web shell. The six JavaScript sidecars and reader.css above keep their own routes because
         // they are not in that table (docs/clients/WEB-SHELL-LAYOUT.md).
         .route("/assets/{*path}", get(web::asset))
         .route("/connect.svg", get(web::connect_qr))
-        // PWA install assets + the sideloadable Android APK.
+        // PWA install assets. The APK is a potentially long body and belongs
+        // to the media group below.
         .route("/manifest.webmanifest", get(web::manifest))
         .route("/icons/{file}", get(web::icon))
-        .route("/download/plurx-android.apk", get(web::download_android))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(system::metrics))
+        .fallback(web::fallback)
+        .layer(axum::middleware::from_fn(json_short_deadline));
+
+    // Internal relays and control routes already carry their own subsystem
+    // deadlines and may move media. A generic handler timeout would interrupt
+    // their ownership protocols, so this group deliberately has none.
+    let public_media = Router::new()
+        .route("/download/plurx-android.apk", get(web::download_android))
         .route(internal_activity::PATH, get(internal_activity::snapshot))
         .route(
             cluster_operations::INTERNAL_PATH,
@@ -618,10 +698,15 @@ pub fn router(state: AppState) -> Router {
             post(internal_media_sessions::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_RELAY_BYTES,
             )),
-        )
+        );
+
+    Router::new()
+        // Also opted out of the v0.7 checks so the merged Plex `:` routes pass.
+        .without_v07_checks()
         .nest("/api/v1", api)
         .merge(plex_routes)
-        .fallback(web::fallback)
+        .merge(public_short)
+        .merge(public_media)
         // Never put capability credentials or query-string tokens in a span.
         // HLS session ids and offline media tokens are bearer credentials even
         // though they live in the path; query strings can also contain Plex
@@ -1145,6 +1230,203 @@ mod tests {
     use zip::{CompressionMethod, ZipWriter};
 
     use super::*;
+
+    async fn slow_test_handler() -> &'static str {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        "ok"
+    }
+
+    async fn ten_ms_short_deadline(request: Request<axum::body::Body>, next: Next) -> Response {
+        handler_deadline(
+            request,
+            next,
+            Duration::from_millis(10),
+            DeadlineGroup::JsonShort,
+        )
+        .await
+    }
+
+    async fn slow_logout_fence() -> Response {
+        // Model a peer that consumes most of its own bounded propagation
+        // window. The enclosing long deadline must leave that protocol in
+        // charge of the terminal error instead of cancelling its fence.
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        error::ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "admin_revocation_propagation_failed",
+            "the credential change was not acknowledged by every committed cluster member",
+        )
+        .into_response()
+    }
+
+    async fn hundred_ms_long_deadline(request: Request<axum::body::Body>, next: Next) -> Response {
+        handler_deadline(
+            request,
+            next,
+            Duration::from_millis(100),
+            DeadlineGroup::JsonLong,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn json_short_handler_deadline_answers_503() {
+        let app = Router::new()
+            .route("/short", axum::routing::get(slow_test_handler))
+            .layer(axum::middleware::from_fn(ten_ms_short_deadline));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/short")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "2");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let body: Value = serde_json::from_slice(&body).expect("JSON body");
+        assert_eq!(body["code"], "handler_deadline");
+        assert!(body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("re-read state")));
+    }
+
+    #[tokio::test]
+    async fn media_routes_have_no_handler_deadline() {
+        let json = Router::new()
+            .route("/short", axum::routing::get(slow_test_handler))
+            .layer(axum::middleware::from_fn(ten_ms_short_deadline));
+        let media = Router::new().route(
+            "/hls/session/segment.ts",
+            axum::routing::get(slow_test_handler),
+        );
+        let app = Router::new().merge(json).merge(media);
+
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/short")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("short response")
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            app.oneshot(
+                Request::builder()
+                    .uri("/hls/session/segment.ts")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("media response")
+            .status(),
+            StatusCode::OK,
+            "the same slow handler must finish when it is a media route"
+        );
+    }
+
+    #[tokio::test]
+    async fn deadline_does_not_cancel_a_logout_fence() {
+        let app = Router::new()
+            .route("/auth/logout", axum::routing::post(slow_logout_fence))
+            .layer(axum::middleware::from_fn(hundred_ms_long_deadline));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/auth/logout")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let body: Value = serde_json::from_slice(&body).expect("JSON body");
+        assert_eq!(body["code"], "admin_revocation_propagation_failed");
+        assert_ne!(body["code"], "handler_deadline");
+
+        let source = include_str!("mod.rs");
+        let long_group = source
+            .split_once("let json_long = Router::new()")
+            .expect("long group")
+            .1
+            .split_once("let media = Router::new()")
+            .expect("media group")
+            .0;
+        assert!(long_group.contains(".route(\"/auth/logout\", post(auth::logout))"));
+    }
+
+    #[test]
+    fn route_deadline_inventory_is_total() {
+        // axum does not expose a stable route-list API. Keep registrations
+        // total by construction instead: every `.route` and `.nest` in
+        // `router()` must be inside exactly one named group. The two aggregate
+        // merges contain no registrations, and axum itself rejects duplicate
+        // method/path pairs when `test_app()` constructs the router below.
+        let source = include_str!("mod.rs")
+            .split_once("pub fn router(state: AppState) -> Router {")
+            .expect("router start")
+            .1
+            .split_once("const LEARNER_ROUTE_INELIGIBLE_JSON")
+            .expect("router end")
+            .0;
+        let groups = [
+            "json_short",
+            "json_long",
+            "media",
+            "plex_short",
+            "plex_media",
+            "public_short",
+            "public_media",
+        ];
+        let mut current = None;
+        let mut registrations = 0usize;
+        for (line_number, line) in source.lines().enumerate() {
+            let trimmed = line.trim();
+            if let Some(group) = groups
+                .iter()
+                .find(|group| trimmed.starts_with(&format!("let {group} = Router::new()")))
+            {
+                current = Some(*group);
+            } else if trimmed.starts_with("let api = Router::new()")
+                || trimmed.starts_with("let plex_routes = Router::new()")
+                || trimmed == "Router::new()"
+            {
+                current = None;
+            }
+            if trimmed.starts_with(".route(") || trimmed.starts_with(".nest(") {
+                if trimmed == ".nest(\"/api/v1\", api)" {
+                    continue;
+                }
+                registrations += 1;
+                assert!(
+                    current.is_some(),
+                    "route registration on router() line {} is outside a deadline group: {trimmed}",
+                    line_number + 1
+                );
+            }
+        }
+        assert!(registrations > 100, "route inventory unexpectedly shrank");
+        let _ = test_app();
+    }
 
     #[test]
     fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
