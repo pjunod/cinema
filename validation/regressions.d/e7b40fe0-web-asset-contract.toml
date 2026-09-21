@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["e7b40fe0"]
+points = []
+checks = []
+reason = "Validation-metadata-only correction: this commit maps the C-01 runtime change to its retained Rust and web evidence and updates the web-experience contract from the stale pre-C-01 asset count to the source-backed 65-row inventory. No additional runtime or client behavior changed."
+ignore = true
