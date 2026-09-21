@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Optical media implementation status</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+    body { max-width: 72rem; margin: 0 auto; padding: 2rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #8888; padding: .6rem; text-align: left; vertical-align: top; }
+    code { font-family: ui-monospace, monospace; }
+    .open { color: #b66a00; }
+    .done { color: #187a36; }
+  </style>
+</head>
+<body>
+  <h1>Optical media implementation status</h1>
+  <p><strong>Updated:</strong> 2026-09-20 · <strong>Branch:</strong>
+    <code>effort/optical-media</code> · <strong>Base:</strong>
+    <code>7911325407b9</code></p>
+  <p>This page is the live execution ledger for DVD and Blu-ray playback.
+    A green implementation row means code and focused evidence exist; it does
+    not stand in for physical-media acceptance.</p>
+
+  <h2>Current position</h2>
+  <table>
+    <thead><tr><th>Work</th><th>State</th><th>Evidence or next action</th></tr></thead>
+    <tbody>
+      <tr><td>Isolated clone and effort branch</td><td class="done">complete</td><td>Fresh Forgejo clone; the user's checkout is untouched.</td></tr>
+      <tr><td>Contract rebase</td><td class="open">in progress</td><td>Reconcile the 2026-09-20 contract with current main and advisory Developer settings.</td></tr>
+      <tr><td>Pinned compiler loop</td><td class="open">in progress</td><td>Use Rust 1.97.1 explicitly; the host's first <code>rustc</code> is Homebrew 1.98.0.</td></tr>
+      <tr><td>M0 source feasibility</td><td class="open">open</td><td>Inventory packaged FFmpeg capabilities and available hardware; physical acceptance cannot be inferred from fixtures.</td></tr>
+      <tr><td>M1 domain and Store</td><td class="open">open</td><td>Not started.</td></tr>
+      <tr><td>M2 lifecycle and admission</td><td class="open">open</td><td>Not started.</td></tr>
+      <tr><td>M3 API and VOD</td><td class="open">open</td><td>Depends on the M0 source decision.</td></tr>
+      <tr><td>M4 cluster routing</td><td class="open">open</td><td>Not started.</td></tr>
+      <tr><td>M5 web UI</td><td class="open">open</td><td>Use the existing advisory Developer enable-section pattern; no readiness gate.</td></tr>
+      <tr><td>M6 native clients</td><td class="open">open</td><td>Not started.</td></tr>
+      <tr><td>M7 packaging and qualification</td><td class="open">open</td><td>Not started.</td></tr>
+      <tr><td>Adversarial review</td><td class="open">deferred</td><td>Exactly once, after implementation is merge-ready and before the fast lane.</td></tr>
+      <tr><td>Fast lane and merge</td><td class="open">deferred</td><td>Run after review findings are addressed; merge only when green.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Standing decisions</h2>
+  <ul>
+    <li>Feature enablement is explicit and authoritative. Readiness evidence is advisory and never disables or overrides the saved choice.</li>
+    <li>Operational safety checks still reject unauthorized, stale-generation, busy-drive, and unsupported-reader operations.</li>
+    <li>Compile and narrowly focused regression evidence required by the repository may run before final promotion; the full fast lane runs once on the reviewed candidate.</li>
+    <li>No deployment is part of this effort unless separately requested.</li>
+  </ul>
+</body>
+</html>
