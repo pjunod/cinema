@@ -67,6 +67,20 @@ fn spawn_walker(
     tokio::sync::mpsc::Receiver<Vec<WalkEvent>>,
     tokio::task::JoinHandle<()>,
 ) {
+    spawn_walker_with_entry_hook(roots, filter, || {})
+}
+
+fn spawn_walker_with_entry_hook<F>(
+    roots: Vec<PathBuf>,
+    filter: WalkFilter,
+    entry_hook: F,
+) -> (
+    tokio::sync::mpsc::Receiver<Vec<WalkEvent>>,
+    tokio::task::JoinHandle<()>,
+)
+where
+    F: Fn() + Send + 'static,
+{
     let (tx, rx) = tokio::sync::mpsc::channel(WALK_PAGES_IN_FLIGHT);
     let handle = tokio::task::spawn_blocking(move || {
         let mut page = Vec::with_capacity(WALK_PAGE);
@@ -77,6 +91,19 @@ fn spawn_walker(
                 page.push(WalkEvent::RootNotDirectory(root.clone()));
             } else {
                 for entry in WalkDir::new(&root).follow_links(true) {
+                    // Candidate pages are deliberately based on matching media,
+                    // but cancellation is based on every visited entry. A large
+                    // subtitles/documents tree may produce no page at all; only
+                    // checking `blocking_send` would keep walking that tree after
+                    // the scan and its lease were gone.
+                    if tx.is_closed() {
+                        tracing::warn!(
+                            path = %root.display(),
+                            "walker orphaned: consumer gone before walk finished"
+                        );
+                        return;
+                    }
+                    entry_hook();
                     let event = match entry {
                         Ok(entry)
                             if entry.file_type().is_file() && filter.accepts(entry.path()) =>
@@ -1885,22 +1912,37 @@ mod tests {
     async fn dropping_the_scan_stops_the_walker() {
         let dir = tempfile::tempdir().expect("tmp");
         for index in 0..5_000 {
-            std::fs::write(dir.path().join(format!("Movie {index:04} (2020).mkv")), b"")
-                .expect("write candidate");
+            std::fs::write(dir.path().join(format!("Document {index:04}.txt")), b"")
+                .expect("write non-media entry");
         }
-        let (mut pages, walker) = spawn_walker(
+        let visits = std::sync::Arc::new(AtomicUsize::new(0));
+        let hook_visits = std::sync::Arc::clone(&visits);
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (pages, walker) = spawn_walker_with_entry_hook(
             vec![dir.path().to_path_buf()],
             WalkFilter {
                 kind: LibraryKind::Movies,
             },
+            move || {
+                if hook_visits.fetch_add(1, Ordering::SeqCst) == 0 {
+                    started_tx.send(()).expect("signal first walked entry");
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            },
         );
-        let first = pages.recv().await.expect("first page");
-        assert_eq!(first.len(), WALK_PAGE);
+        tokio::task::spawn_blocking(move || started_rx.recv())
+            .await
+            .expect("first-entry waiter")
+            .expect("walker started");
         drop(pages);
         tokio::time::timeout(Duration::from_secs(1), walker)
             .await
-            .expect("orphaned walker should observe the dropped consumer")
+            .expect("sparse orphaned walker should observe the dropped consumer")
             .expect("walker");
+        assert!(
+            visits.load(Ordering::SeqCst) < 64,
+            "cancellation must not wait for a page of matching media"
+        );
     }
 
     #[test]
