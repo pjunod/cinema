@@ -6,7 +6,8 @@
 //! it in one place, once per process, is what keeps the answer consistent —
 //! and keeps a stream from failing to start because one path guessed.
 
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -1544,10 +1545,114 @@ const FONT_ENGINE_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const ENGINE_PROBE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const ENGINE_OBJECT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
+// Reuse the process histogram's established latency bounds. Attestation has
+// both sub-millisecond warm-cache stats and bounded 30-second probes; +Inf
+// retains the latter without inventing a second bucket vocabulary.
+const ENGINE_ATTESTATION_BUCKETS_MS: [u64; 7] = [100, 250, 500, 1_000, 2_500, 5_000, 10_000];
+const ENGINE_ATTESTATION_MEDIA: usize = 0;
+const ENGINE_ATTESTATION_FONT: usize = 1;
+const ENGINE_ATTESTATION_SPAWN: usize = 0;
+const ENGINE_ATTESTATION_STAT: usize = 1;
+static ENGINE_ATTESTATION_BUCKETS: [[[std::sync::atomic::AtomicU64; 8]; 2]; 2] = [const {
+    [const { [const { std::sync::atomic::AtomicU64::new(0) }; ENGINE_ATTESTATION_BUCKETS_MS.len() + 1] };
+        2]
+}; 2];
+static ENGINE_ATTESTATION_MICROS: [[std::sync::atomic::AtomicU64; 2]; 2] =
+    [const { [const { std::sync::atomic::AtomicU64::new(0) }; 2] }; 2];
+
+#[derive(Clone, Copy)]
+enum EngineAttestationKind {
+    Media,
+    Font,
+}
+
+impl EngineAttestationKind {
+    fn index(self) -> usize {
+        match self {
+            Self::Media => ENGINE_ATTESTATION_MEDIA,
+            Self::Font => ENGINE_ATTESTATION_FONT,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EngineAttestationPhase {
+    Spawn,
+    Stat,
+}
+
+impl EngineAttestationPhase {
+    fn index(self) -> usize {
+        match self {
+            Self::Spawn => ENGINE_ATTESTATION_SPAWN,
+            Self::Stat => ENGINE_ATTESTATION_STAT,
+        }
+    }
+}
+
+fn observe_engine_attestation(
+    kind: EngineAttestationKind,
+    phase: EngineAttestationPhase,
+    elapsed: Duration,
+) {
+    use std::sync::atomic::Ordering;
+
+    let kind = kind.index();
+    let phase = phase.index();
+    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let bucket = ENGINE_ATTESTATION_BUCKETS_MS
+        .iter()
+        .position(|bound| elapsed_ms <= *bound)
+        .unwrap_or(ENGINE_ATTESTATION_BUCKETS_MS.len());
+    ENGINE_ATTESTATION_BUCKETS[kind][phase][bucket].fetch_add(1, Ordering::Relaxed);
+    ENGINE_ATTESTATION_MICROS[kind][phase].fetch_add(
+        u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+}
+
+pub(crate) fn engine_attestation_prometheus() -> String {
+    use std::sync::atomic::Ordering;
+
+    let mut out = String::from(
+        "# HELP plurx_engine_attestation_seconds Time spent probing and statting immutable media-engine inputs.\n\
+         # TYPE plurx_engine_attestation_seconds histogram\n",
+    );
+    for (kind_index, kind) in ["media", "font"].iter().enumerate() {
+        for (phase_index, phase) in ["spawn", "stat"].iter().enumerate() {
+            let mut cumulative = 0_u64;
+            for (bucket_index, bound_ms) in ENGINE_ATTESTATION_BUCKETS_MS.iter().enumerate() {
+                cumulative = cumulative.saturating_add(
+                    ENGINE_ATTESTATION_BUCKETS[kind_index][phase_index][bucket_index]
+                        .load(Ordering::Relaxed),
+                );
+                out.push_str(&format!(
+                    "plurx_engine_attestation_seconds_bucket{{kind=\"{kind}\",phase=\"{phase}\",le=\"{}\"}} {cumulative}\n",
+                    *bound_ms as f64 / 1_000.0
+                ));
+            }
+            cumulative = cumulative.saturating_add(
+                ENGINE_ATTESTATION_BUCKETS[kind_index][phase_index]
+                    [ENGINE_ATTESTATION_BUCKETS_MS.len()]
+                .load(Ordering::Relaxed),
+            );
+            let sum = ENGINE_ATTESTATION_MICROS[kind_index][phase_index].load(Ordering::Relaxed)
+                as f64
+                / 1_000_000.0;
+            out.push_str(&format!(
+                "plurx_engine_attestation_seconds_bucket{{kind=\"{kind}\",phase=\"{phase}\",le=\"+Inf\"}} {cumulative}\n\
+                 plurx_engine_attestation_seconds_sum{{kind=\"{kind}\",phase=\"{phase}\"}} {sum}\n\
+                 plurx_engine_attestation_seconds_count{{kind=\"{kind}\",phase=\"{phase}\"}} {cumulative}\n"
+            ));
+        }
+    }
+    out
+}
+
 #[derive(Clone)]
 struct FragmentIndexEngine {
     digest: String,
-    objects: Vec<(std::path::PathBuf, String)>,
+    objects: Arc<[(std::path::PathBuf, String)]>,
     usable: bool,
 }
 
@@ -1562,7 +1667,7 @@ struct FragmentIndexEngine {
 pub(crate) struct EncodedEngine {
     pub digest: String,
     process_identity: String,
-    objects: Vec<(std::path::PathBuf, String)>,
+    objects: Arc<[(std::path::PathBuf, String)]>,
     font_digest: Option<String>,
 }
 
@@ -1571,7 +1676,13 @@ impl EncodedEngine {
         let media = FRAGMENT_INDEX_ENGINE
             .get_or_init(fragment_index_engine_inner)
             .await;
-        if !media.usable || !engine_objects_are_current(&media.objects) {
+        if !media.usable
+            || !engine_objects_are_current_async(
+                Arc::clone(&media.objects),
+                EngineAttestationKind::Media,
+            )
+            .await
+        {
             return Err("the encoder dependency closure could not be attested".to_owned());
         }
         let process = encoded_process_identity();
@@ -1579,28 +1690,34 @@ impl EncodedEngine {
         digest.update(b"plurx/encoded-vod/engine-v1\0");
         digest.update(media.digest.as_bytes());
         digest.update(process.as_bytes());
-        let mut objects = media.objects.clone();
+        let mut objects = media.objects.to_vec();
         let mut font_digest = None;
         if text_burn {
             // Fontconfig's closure is live configuration, unlike the process's
             // loaded media libraries. Probe it for every recipe capture so a
             // newly installed font or rule cannot reuse the old URI identity.
             let fonts = font_render_engine_inner().await;
-            if !fonts.usable || !engine_objects_are_current(&fonts.objects) {
+            if !fonts.usable
+                || !engine_objects_are_current_async(
+                    Arc::clone(&fonts.objects),
+                    EngineAttestationKind::Font,
+                )
+                .await
+            {
                 return Err(
                     "Fontconfig rules and resolved font files could not be attested".to_owned(),
                 );
             }
             digest.update(fonts.digest.as_bytes());
             font_digest = Some(fonts.digest.clone());
-            objects.extend(fonts.objects.clone());
+            objects.extend(fonts.objects.iter().cloned());
         }
         objects.sort_by(|left, right| left.0.cmp(&right.0));
         objects.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
         Ok(Self {
             digest: hex::encode(digest.finalize()),
             process_identity: process.to_owned(),
-            objects,
+            objects: objects.into(),
             font_digest,
         })
     }
@@ -1610,14 +1727,19 @@ impl EncodedEngine {
     /// captured earlier detects replacements and removals, but not additions
     /// which change font resolution.
     pub async fn is_current(&self) -> bool {
-        if !engine_objects_are_current(&self.objects) {
+        let kind = if self.font_digest.is_some() {
+            EngineAttestationKind::Font
+        } else {
+            EngineAttestationKind::Media
+        };
+        if !engine_objects_are_current_async(Arc::clone(&self.objects), kind).await {
             return false;
         }
         let Some(expected_font_digest) = self.font_digest.as_deref() else {
             return true;
         };
         let current_fonts = font_render_engine_inner().await;
-        font_closure_is_current(expected_font_digest, &current_fonts)
+        font_closure_is_current(expected_font_digest, &current_fonts).await
     }
 
     pub fn process_identity(&self) -> &str {
@@ -1641,7 +1763,7 @@ impl EncodedEngine {
         Ok(Self {
             digest: hex::encode(digest.finalize()),
             process_identity: process.to_owned(),
-            objects,
+            objects: objects.into(),
             font_digest: None,
         })
     }
@@ -1657,9 +1779,13 @@ pub(crate) fn encoded_process_identity() -> &'static str {
         .as_str()
 }
 
-fn font_closure_is_current(expected_digest: &str, current: &FragmentIndexEngine) -> bool {
+async fn font_closure_is_current(expected_digest: &str, current: &FragmentIndexEngine) -> bool {
     current.usable
-        && engine_objects_are_current(&current.objects)
+        && engine_objects_are_current_async(
+            Arc::clone(&current.objects),
+            EngineAttestationKind::Font,
+        )
+        .await
         && current.digest == expected_digest
 }
 
@@ -1683,11 +1809,16 @@ pub async fn fragment_index_engine_is_current() -> bool {
     let engine = FRAGMENT_INDEX_ENGINE
         .get_or_init(fragment_index_engine_inner)
         .await;
-    fragment_index_engine_snapshot_is_current(engine)
+    fragment_index_engine_snapshot_is_current(engine).await
 }
 
-fn fragment_index_engine_snapshot_is_current(engine: &FragmentIndexEngine) -> bool {
-    engine.usable && engine_objects_are_current(&engine.objects)
+async fn fragment_index_engine_snapshot_is_current(engine: &FragmentIndexEngine) -> bool {
+    engine.usable
+        && engine_objects_are_current_async(
+            Arc::clone(&engine.objects),
+            EngineAttestationKind::Media,
+        )
+        .await
 }
 
 fn engine_objects_are_current(objects: &[(std::path::PathBuf, String)]) -> bool {
@@ -1698,7 +1829,23 @@ fn engine_objects_are_current(objects: &[(std::path::PathBuf, String)]) -> bool 
     })
 }
 
+/// Run the same fail-closed identity comparison away from runtime workers.
+/// A cold or remote dependency can make `metadata` block, and this check is
+/// paid before every encoded segment is published.
+async fn engine_objects_are_current_async(
+    objects: Arc<[(std::path::PathBuf, String)]>,
+    kind: EngineAttestationKind,
+) -> bool {
+    let started = Instant::now();
+    let current = tokio::task::spawn_blocking(move || engine_objects_are_current(&objects))
+        .await
+        .unwrap_or(false);
+    observe_engine_attestation(kind, EngineAttestationPhase::Stat, started.elapsed());
+    current
+}
+
 async fn fragment_index_engine_inner() -> FragmentIndexEngine {
+    let probe_started = Instant::now();
     let bin = ffmpeg_bin();
     let resolved = resolve_executable_path(&bin);
     let mut digest = Sha256::new();
@@ -1755,6 +1902,11 @@ async fn fragment_index_engine_inner() -> FragmentIndexEngine {
     } else {
         usable = false;
     }
+    observe_engine_attestation(
+        EngineAttestationKind::Media,
+        EngineAttestationPhase::Spawn,
+        probe_started.elapsed(),
+    );
 
     if let Some(path) = resolved {
         dependency_paths.push(path);
@@ -1798,12 +1950,13 @@ async fn fragment_index_engine_inner() -> FragmentIndexEngine {
     }
     FragmentIndexEngine {
         digest: hex::encode(digest.finalize()),
-        objects,
+        objects: objects.into(),
         usable,
     }
 }
 
 async fn font_render_engine_inner() -> FragmentIndexEngine {
+    let probe_started = Instant::now();
     let mut digest = Sha256::new();
     digest.update(b"plurx/font-render/engine-v1\0");
     let mut usable = true;
@@ -1848,6 +2001,11 @@ async fn font_render_engine_inner() -> FragmentIndexEngine {
             digest.update(error.as_bytes());
         }
     }
+    observe_engine_attestation(
+        EngineAttestationKind::Font,
+        EngineAttestationPhase::Spawn,
+        probe_started.elapsed(),
+    );
 
     paths.sort();
     paths.dedup();
@@ -1855,22 +2013,12 @@ async fn font_render_engine_inner() -> FragmentIndexEngine {
         usable = false;
         digest.update(b"no font inputs discovered");
     }
-    let mut objects = Vec::new();
-    let mut object_digests = Vec::new();
-    for path in paths {
-        match engine_path_version(&path) {
-            Ok(version) => {
-                let mut identity = Sha256::new();
-                identity.update(path.as_os_str().as_encoded_bytes());
-                identity.update(version.as_bytes());
-                object_digests.push(identity.finalize().to_vec());
-                objects.push((path, version));
-            }
-            Err(error) => {
-                usable = false;
-                digest.update(error.as_bytes());
-            }
-        }
+    let versions = font_object_versions(paths).await;
+    let objects = versions.objects;
+    let mut object_digests = versions.object_digests;
+    for error in versions.errors {
+        usable = false;
+        digest.update(error.as_bytes());
     }
     object_digests.sort();
     for object_digest in object_digests {
@@ -1879,9 +2027,64 @@ async fn font_render_engine_inner() -> FragmentIndexEngine {
     }
     FragmentIndexEngine {
         digest: hex::encode(digest.finalize()),
-        objects,
+        objects: objects.into(),
         usable,
     }
+}
+
+struct FontObjectVersions {
+    objects: Vec<(std::path::PathBuf, String)>,
+    object_digests: Vec<Vec<u8>>,
+    errors: Vec<String>,
+}
+
+async fn font_object_versions(paths: Vec<std::path::PathBuf>) -> FontObjectVersions {
+    font_object_versions_observed(paths, || {}).await
+}
+
+async fn font_object_versions_observed<F>(
+    paths: Vec<std::path::PathBuf>,
+    observe_task: F,
+) -> FontObjectVersions
+where
+    F: FnOnce() + Send + 'static,
+{
+    let started = Instant::now();
+    let result = tokio::task::spawn_blocking(move || {
+        observe_task();
+        let mut objects = Vec::new();
+        let mut object_digests = Vec::new();
+        let mut errors = Vec::new();
+        for path in paths {
+            match engine_path_version(&path) {
+                Ok(version) => {
+                    let mut identity = Sha256::new();
+                    identity.update(path.as_os_str().as_encoded_bytes());
+                    identity.update(version.as_bytes());
+                    object_digests.push(identity.finalize().to_vec());
+                    objects.push((path, version));
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        FontObjectVersions {
+            objects,
+            object_digests,
+            errors,
+        }
+    })
+    .await
+    .unwrap_or_else(|error| FontObjectVersions {
+        objects: Vec::new(),
+        object_digests: Vec::new(),
+        errors: vec![format!("font object stat task failed: {error}")],
+    });
+    observe_engine_attestation(
+        EngineAttestationKind::Font,
+        EngineAttestationPhase::Stat,
+        started.elapsed(),
+    );
+    result
 }
 
 struct BoundedOutput {
@@ -3806,21 +4009,118 @@ mod tests {
         assert!(!first.is_current().await);
     }
 
+    #[tokio::test]
+    async fn a_touched_engine_object_is_not_current_after_the_move() {
+        let base = crate::test_tempdir().expect("engine closure");
+        let first = base.path().join("libcodec-a");
+        let second = base.path().join("libcodec-b");
+        tokio::fs::write(&first, b"codec-a").await.expect("first");
+        tokio::fs::write(&second, b"codec-b").await.expect("second");
+        let engine = EncodedEngine::capture_test_objects(&[first.clone(), second], "process-a")
+            .await
+            .expect("engine");
+        assert!(engine.is_current().await);
+
+        std::fs::File::options()
+            .write(true)
+            .open(first)
+            .expect("open first")
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+            )
+            .expect("touch first");
+        assert!(!engine.is_current().await);
+    }
+
     #[test]
-    fn a_changed_fontconfig_closure_invalidates_the_retained_recipe() {
+    fn a_current_engine_is_current_on_the_blocking_pool() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let base = crate::test_tempdir().expect("engine closure");
+            let dependency = base.path().join("libcodec");
+            tokio::fs::write(&dependency, b"codec")
+                .await
+                .expect("dependency");
+            let engine =
+                EncodedEngine::capture_test_objects(std::slice::from_ref(&dependency), "process-a")
+                    .await
+                    .expect("engine");
+
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).expect("announce blocking task");
+                release_rx.recv().expect("release blocking task");
+            });
+            started_rx.recv().expect("blocking task started");
+            let check = tokio::spawn(async move { engine.is_current().await });
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            assert!(
+                !check.is_finished(),
+                "the currentness check must queue behind the occupied blocking pool"
+            );
+            release_tx.send(()).expect("release blocker");
+            blocker.await.expect("blocking task");
+            assert!(tokio::time::timeout(Duration::from_secs(1), check)
+                .await
+                .expect("currentness deadline")
+                .expect("currentness task"));
+        });
+    }
+
+    #[tokio::test]
+    async fn font_object_versions_are_computed_in_one_blocking_task() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let base = crate::test_tempdir().expect("font closure");
+        let paths = [base.path().join("font-a"), base.path().join("font-b")];
+        for path in &paths {
+            tokio::fs::write(path, b"font").await.expect("font object");
+        }
+        let tasks = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&tasks);
+        let versions = font_object_versions_observed(paths.into_iter().collect(), move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+        })
+        .await;
+        assert!(versions.errors.is_empty(), "{:?}", versions.errors);
+        assert_eq!(versions.objects.len(), 2);
+        assert_eq!(tasks.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn engine_attestation_metrics_render_all_four_series() {
+        let rendered = engine_attestation_prometheus();
+        assert!(rendered.contains("# TYPE plurx_engine_attestation_seconds histogram"));
+        for kind in ["media", "font"] {
+            for phase in ["spawn", "stat"] {
+                assert!(rendered.contains(&format!(
+                    "plurx_engine_attestation_seconds_count{{kind=\"{kind}\",phase=\"{phase}\"}}"
+                )));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_changed_fontconfig_closure_invalidates_the_retained_recipe() {
         let captured = FragmentIndexEngine {
             digest: "font-closure-a".to_owned(),
-            objects: Vec::new(),
+            objects: Vec::new().into(),
             usable: true,
         };
         let added_font = FragmentIndexEngine {
             digest: "font-closure-b".to_owned(),
-            objects: Vec::new(),
+            objects: Vec::new().into(),
             usable: true,
         };
 
-        assert!(font_closure_is_current("font-closure-a", &captured));
-        assert!(!font_closure_is_current("font-closure-a", &added_font));
+        assert!(font_closure_is_current("font-closure-a", &captured).await);
+        assert!(!font_closure_is_current("font-closure-a", &added_font).await);
     }
 
     #[test]
@@ -4411,8 +4711,8 @@ mod tests {
         assert!(!engine_objects_are_current(&objects));
     }
 
-    #[test]
-    fn process_fragment_engine_baseline_detects_an_actual_object_change() {
+    #[tokio::test]
+    async fn process_fragment_engine_baseline_detects_an_actual_object_change() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("libavcodec");
         let replacement = directory.path().join("replacement");
@@ -4421,14 +4721,14 @@ mod tests {
         let expected = engine_path_version(&path).expect("object version");
         let baseline = FragmentIndexEngine {
             digest: "process-baseline".to_owned(),
-            objects: vec![(path.clone(), expected)],
+            objects: vec![(path.clone(), expected)].into(),
             usable: true,
         };
 
-        assert!(fragment_index_engine_snapshot_is_current(&baseline));
+        assert!(fragment_index_engine_snapshot_is_current(&baseline).await);
         std::fs::remove_file(&path).expect("unlink original");
         std::fs::rename(replacement, &path).expect("install replacement");
-        assert!(!fragment_index_engine_snapshot_is_current(&baseline));
+        assert!(!fragment_index_engine_snapshot_is_current(&baseline).await);
     }
 
     /// The pacing answer comes from `ffmpeg -h full`, and that listing has been
