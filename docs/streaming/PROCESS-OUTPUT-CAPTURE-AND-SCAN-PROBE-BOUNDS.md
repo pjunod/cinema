@@ -1,6 +1,6 @@
 # Process output capture and scan-probe bounds — one child-process contract for every short-lived helper
 
-**Status:** implementation in draft PR
+**Status:** M1-M3 implementation merged; M4 fleet evidence pending
 [#396](http://192.168.4.7:3000/noirr/plurx/pulls/396) · **Executes:** §2.1, C12 (§3.3.1), §5.1 items 1
 and 15 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)

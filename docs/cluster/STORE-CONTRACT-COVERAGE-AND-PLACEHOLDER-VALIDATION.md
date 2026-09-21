@@ -1,6 +1,6 @@
 # Store-contract coverage and placeholder validation — close the ten paths, then check the other dialect
 
-**Status:** implementation complete; sole review findings addressed · **Executes:** S10 / F-sc-13 and the
+**Status:** implementation merged; first-ten lane-cost evidence pending · **Executes:** S10 / F-sc-13 and the
 prescriptions of F-hist-1 / F-hist-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`

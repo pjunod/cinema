@@ -1,6 +1,6 @@
 # Architecture document reconciliation — make §1–§9 describe the tree it ships with
 
-**Status:** open — M1-M4 and both adversarial-review corrections implemented
+**Status:** implementation merged — M1-M4 and both adversarial-review corrections shipped
 in draft PR #398; exact-head validation pending · **Executes:** §4.7 /
 F-hist-10 / F-ltv-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
