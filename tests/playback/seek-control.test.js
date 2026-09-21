@@ -7,6 +7,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const control = require("../../crates/plurxd/src/web/playback-control.js");
+const policy = require("../../crates/plurxd/src/web/playback-policy.js");
 const {shellSource} = require("../web/shell-source.js");
 const ui = shellSource().bodyScript;
 function source(name) {
@@ -49,6 +50,95 @@ test("real mapper reports old buffer and new target independently", () => {
   const backward=seekSnapshot(600000,598000,620000,10000);
   assert.equal(backward.buffered_from_ms,598000);
   assert.equal(backward.seek_target_ms,10000);
+});
+
+test("rolling and progressive seeks stay local only inside advertised coverage", () => {
+  const base = {method:"transcode", targetMs:50_000,
+    bufferedMs:[{from:10_000,through:40_000}],
+    publishedMs:{from:10_000,through:80_000}, holdbackMs:10_000};
+  assert.deepEqual(policy.seekRoute({...base,targetMs:30_000}),
+    {route:"local",atMs:30_000,basis:"buffered"});
+  assert.deepEqual(policy.seekRoute(base),
+    {route:"local",atMs:50_000,basis:"published"});
+  assert.deepEqual(policy.seekRoute({...base,targetMs:75_000}),{route:"reopen"},
+    "the last target duration is not yet safe to request");
+  assert.deepEqual(policy.seekRoute({...base,targetMs:5_000}),{route:"reopen"},
+    "evicted publication cannot be rediscovered locally");
+
+  assert.equal(policy.seekRoute({method:"remux",targetMs:20_000,
+    bufferedMs:[{from:10_000,through:30_000}]}).route,"local");
+  assert.deepEqual(policy.seekRoute({method:"remux",targetMs:40_000,
+    bufferedMs:[{from:10_000,through:30_000}]}),{route:"reopen"});
+  assert.equal(policy.seekRoute({method:"direct_play",targetMs:40_000}).route,"local");
+  assert.equal(policy.seekRoute({method:"transcode",vod:true,targetMs:40_000}).route,"local");
+  assert.deepEqual(policy.seekRoute({...base,forceReopen:true}),{route:"reopen"});
+  assert.deepEqual(policy.seekRoute({...base,changing:true}),{route:"reopen"});
+});
+
+function localSeekHarness({buffered, published}) {
+  const listeners=new Map(), timers=[], changes=[], logs=[], stalls=[];
+  const video={currentTime:10,buffered,
+    addEventListener(name,fn){listeners.set(name,fn);},
+    removeEventListener(name,fn){if(listeners.get(name)===fn)listeners.delete(name);}};
+  const player={method:"transcode",copyHls:false,vod:false,offset:0,durMs:600_000,
+    mediaAttachment:{id:1},pendingMediaChange:null,
+    hls:{currentLevel:0,levels:[{details:published}]}};
+  const api=new Function("policy","video","player","timers","changes","logs","stalls",[
+    "let PLAYER=player;",
+    "const document={getElementById:()=>video};",
+    "const PlaybackPolicy=policy;",
+    "function setTimeout(fn,ms){if(ms===100){fn();return -1;}timers.push(fn);return timers.length;}",
+    "function clearTimeout(){} function markerNowMs(){return 0;} function pbTotalSec(){return 600;}",
+    "function playbackChangeAlreadyInFlight(){return false;} function endWait(){}",
+    "function restartPendingPlaybackOpen(){return false;} function hasPendingPlaybackOpen(){return false;}",
+    "function beginPlaybackControlSeek(p,target){const value={targetMs:target*1000,executed:false};p.controlSeek=value;return value;}",
+    "function markPlaybackControlSeekExecuted(p){p.controlSeek.executed=true;}",
+    "function playerActivity(){} function armStall(target,deadline){stalls.push({target,deadline});}",
+    "function clientLog(value){logs.push(value);}",
+    "function requestPlaybackMediaChange(p,change){changes.push({target:p.controlSeek.targetMs,change});}",
+    "function play(){throw new Error('multipart route not expected');}",
+    source("playbackSeekBufferedRangesMs"),source("playbackSeekPublishedRangeMs"),
+    source("playbackSeekBufferCovers"),source("seekTo"),
+    "return {seekTo,logs,changes,stalls,async expire(){for(const fn of timers.splice(0))fn();for(let i=0;i<5;i+=1)await Promise.resolve();}};",
+  ].join("\n"))(policy,video,player,timers,changes,logs,stalls);
+  return {api,video,player,listeners};
+}
+
+test("a local seek that does not settle reopens once at the same target", async () => {
+  const h=localSeekHarness({
+    buffered:{length:0,start:()=>0,end:()=>0},
+    published:{fragments:[{start:0}],edge:120,targetduration:10},
+  });
+  await h.api.seekTo(50);
+  assert.equal(h.video.currentTime,50);
+  assert.equal(h.api.logs[0].event,"seek_local");
+  assert.match(h.api.logs[0].detail,/published$/);
+  await h.api.expire();
+  assert.equal(h.api.logs[1].event,"seek_local_fallback");
+  assert.equal(h.api.changes.length,1);
+  assert.equal(h.api.changes[0].target,50_000);
+  assert.equal(h.api.changes[0].change.forceReopen,true);
+});
+
+test("buffer growth or seeked retires the local fallback", async () => {
+  let through=60;
+  const grown=localSeekHarness({
+    buffered:{length:1,start:()=>40,end:()=>through},
+    published:{fragments:[{start:0}],edge:120,targetduration:10},
+  });
+  await grown.api.seekTo(50);
+  await grown.api.expire();
+  assert.equal(grown.api.changes.length,0,"coverage at expiry proves the local seek can settle");
+
+  const seeked=localSeekHarness({
+    buffered:{length:0,start:()=>0,end:()=>0},
+    published:{fragments:[{start:0}],edge:120,targetduration:10},
+  });
+  await seeked.api.seekTo(50);
+  const event=seeked.listeners.get("seeked");
+  if(event) event();
+  await seeked.api.expire();
+  assert.equal(seeked.api.changes.length,0,"seeked retires the timer without buffer polling");
 });
 
 // ---- R1: a pending or refused replacement is not the incumbent's seek -----

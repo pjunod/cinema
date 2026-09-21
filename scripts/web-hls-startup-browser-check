@@ -61,13 +61,15 @@ def make_fixture(directory):
     subprocess.run(
         [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "color=c=black:s=320x180:r=25:d=3",
-            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
+            "-f", "lavfi", "-i", "color=c=black:s=320x180:r=25:d=24",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=24",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "25",
             "-c:a", "aac", "-b:a", "64k", "-shortest",
-            "-f", "hls", "-hls_time", "1", "-hls_playlist_type", "vod",
-            "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
-            "-hls_segment_filename", str(directory / "seg%d.m4s"),
+            "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "vod",
+            # MPEG-TS intentionally exercises hls.js's transmuxer worker.
+            # fMP4 can append without the worker and made this harness claim
+            # worker coverage from configuration alone.
+            "-hls_segment_filename", str(directory / "seg%d.ts"),
             str(directory / "index.m3u8"),
         ],
         check=True,
@@ -84,6 +86,8 @@ class FixtureServer(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), Handler)
         self.fixture = fixture
         self.manifest_requests = 0
+        self.session_creates = 0
+        self.client_logs = []
         self.lock = threading.Lock()
 
 
@@ -126,6 +130,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, fixture.read_bytes())
         self.reply(404, b"not found", "text/plain")
 
+    def do_POST(self):
+        route = self.path.split("?", 1)[0]
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        with self.server.lock:
+            if route.startswith("/api/v1/hls/"):
+                self.server.session_creates += 1
+            if route == "/api/v1/client-log":
+                try:
+                    self.server.client_logs.append(json.loads(body))
+                except json.JSONDecodeError:
+                    self.server.client_logs.append({"event": "invalid"})
+        self.reply(204)
+
 
 def add_worker_blocking_csp(page):
     """Fulfil the shell response with worker-src disabled through CDP."""
@@ -164,7 +182,17 @@ def add_worker_blocking_csp(page):
 def run_case(browser, server, *, block_worker):
     with server.lock:
         server.manifest_requests = 0
+        server.session_creates = 0
+        server.client_logs = []
     page = browser.new_page()
+    page.add_init_script("""
+      window.__plurxWorkerStarts=0;
+      const NativeWorker=window.Worker;
+      window.Worker=new Proxy(NativeWorker,{construct(target,args){
+        window.__plurxWorkerStarts+=1;
+        return Reflect.construct(target,args);
+      }});
+    """)
     console = []
     page.on("console", lambda message: console.append(f"{message.type}: {message.text}"))
     cdp = add_worker_blocking_csp(page) if block_worker else None
@@ -193,6 +221,27 @@ def run_case(browser, server, *, block_worker):
             }""",
             timeout=TIMEOUT_MS,
         )
+        page.wait_for_function(
+            """() => {
+              const video=document.getElementById('video');
+              if (!video.buffered.length) return false;
+              return video.buffered.end(video.buffered.length-1)-video.currentTime >= 10.5;
+            }""",
+            timeout=TIMEOUT_MS,
+        )
+        local_seek_target = page.evaluate("""async () => {
+          const video=document.getElementById('video');
+          const target=video.currentTime+10;
+          await seekTo(target);
+          return target;
+        }""")
+        page.wait_for_function(
+            """target => PLAYER && PLAYER.controlSeek && PLAYER.controlSeek.executed &&
+              Math.abs(document.getElementById('video').currentTime-target) < 1""",
+            arg=local_seek_target,
+            timeout=TIMEOUT_MS,
+        )
+        page.wait_for_timeout(250)
         result = page.evaluate("""() => ({
           position:document.getElementById('video').currentTime,
           readyState:document.getElementById('video').readyState,
@@ -200,9 +249,14 @@ def run_case(browser, server, *, block_worker):
           manifestState:PLAYER.hlsStartup.manifestState,
           retryState:PLAYER.hlsStartup.retry.state,
           hlsVersion:Hls.version,
+          workerStarts:window.__plurxWorkerStarts,
           browser:navigator.userAgent,
           finishedAt:performance.now(),
         })""")
+        result["local_seek_target"] = local_seek_target
+        with server.lock:
+            result["session_creates"] = server.session_creates
+            result["client_logs"] = list(server.client_logs)
     finally:
         if cdp:
             cdp.send("Fetch.disable")
@@ -248,16 +302,24 @@ def main():
             print(f"FAIL  worker: {label} did not recover and present at the requested position")
             print(json.dumps(result, indent=2))
             return 1
+        local = [event for event in result["client_logs"] if event.get("event") == "seek_local"]
+        if not local or result["session_creates"] != 0:
+            print(f"FAIL  seek: {label} did not keep the +10 s scrub on the attached HLS session")
+            print(json.dumps(result, indent=2))
+            return 1
     worker_log = "\n".join(worker["console"])
     fallback_log = "\n".join(fallback["console"])
-    if "injecting Web Worker" not in worker_log or "fallback to inline" in worker_log:
+    if worker["workerStarts"] < 1 or "fallback to inline" in worker_log:
         print("FAIL  worker-enabled run did not start the vendored hls.js worker")
+        print(worker_log)
         return 1
-    if "fallback to inline" not in fallback_log:
+    if fallback["workerStarts"] < 1 or "worker-src 'none'" not in fallback_log:
         print("FAIL  worker-blocked run did not exercise hls.js inline fallback")
+        print(fallback_log)
         return 1
     print(f"PASS  worker: started; first_frame_ms={worker['first_frame_ms']:.0f}")
     print(f"PASS  worker: fallback-inline; first_frame_ms={fallback['first_frame_ms']:.0f}")
+    print("PASS  seek: +10 s stayed local; seek_local logged; session_creates=0")
     print(f"      fixture sha256: {fixture_hash}; hls.js: {result['hlsVersion']}")
     print(f"      browser: {result['browser']}")
     return 0
