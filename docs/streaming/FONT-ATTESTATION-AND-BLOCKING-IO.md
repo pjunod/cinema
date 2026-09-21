@@ -1,9 +1,11 @@
 # Font attestation and blocking I/O — stat off the runtime now, freeze the font environment per recipe next
 
-**Status:** ready for review · **Executes:** §2.7, F-stream-7, assessment
+**Status:** M1 built in draft PR #413 · M2 blocked by deployed config-closure
+evidence · **Executes:** §2.7, F-stream-7, assessment
 correction 6, §5.1 item 7 and §5.2 "frozen font environment per recipe" from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-· **Written:** 2026-09-20 against `main` @ `88a3957a`
+· **Written:** 2026-09-20 against `main` @ `88a3957a` · **Updated:**
+2026-09-21
 
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
 
@@ -29,6 +31,20 @@ stat of the ffmpeg dependency closure (tens of files); for a **text-burn**
 rendition it is that plus `fc-list` + `fc-conflist` + a synchronous stat of
 every font file and config file. Both are on a tokio worker; only the
 second spawns.
+
+**Execution boundary, 2026-09-21.** M1 is built at `da0b96a7`. The required
+read-only media1 probe found the deployed Jellyfin FFmpeg 8.1.2 binary linked
+to its bundled `libfontconfig.so.1`, so `FONTCONFIG_FILE` is a relevant child
+boundary. The same inspection found that the active `fc-conflist` closure ends
+with `/etc/fonts/fonts.conf`. That file names `/usr/share/fonts`,
+`/usr/local/share/fonts`, XDG and home font directories, then includes
+`conf.d`; `50-user.conf` and `51-local.conf` add more live includes. Copying
+those bytes into the proposed private `conf.d` and including them from the new
+`fonts.conf` would reopen the mutable system and user closures. It cannot pass
+§5.2's two-font isolation test, so M2 is not safe to implement from this plan
+literally. The required correction must define how discovery directives are
+resolved into a closed snapshot while preserving font matching rules, then
+prove both isolation and glyph parity. A TTL remains forbidden.
 
 ## 1. Objective
 
@@ -356,13 +372,15 @@ GPT prompt for the fleet check after deploy:
 
 - Focused: `cargo test -p plurxd ffmpeg::tests` (both), plus `make
   vodencode-restart-check` for M2 because it changes what a restart reads.
-- Lane: `make unit` on both PRs.
-- Rollout: two draft PRs under the fast lane. M1 has no identity change.
-  M2 changes the engine digest prefix (`v2`); the deploy's restart already
-  invalidates every encoded key, so the only visible effect is the
-  `fontenv/` directory appearing under the runtime cache. No setting; the
-  frozen environment is not optional because an optional one would mean two
-  attestation contracts.
+- Lane: the one plan PR's ready-state fast lane runs `make unit`; this
+  execution used focused tests only while the PR remained draft.
+- Rollout: one draft plan PR, with M1 and the M2 decision as logical commits
+  under the current workboard protocol. M1 has no identity change. When its
+  corrected design is implementable, M2 stays in that same PR and changes the
+  engine digest prefix (`v2`); the deploy's restart already invalidates every
+  encoded key, so the only visible effect is the `fontenv/` directory appearing
+  under the runtime cache. No setting; the frozen environment is not optional
+  because an optional one would mean two attestation contracts.
 - Rollback: revert; `fontenv/` directories are cleaned by the runtime-cache
   startup sweep. A rolled-back binary ignores them.
 - Dependency: M2's `FONTCONFIG_FILE` needs the VOD spawn to have a place to
@@ -371,32 +389,32 @@ GPT prompt for the fleet check after deploy:
   the one variable on the bare `Command` at `vodserve.rs:6778` and the
   unification moves it later. Proposed: after, so there is one env site.
 
-## 7. Open questions
+## 7. Decisions and the remaining M2 blocker
 
-1. Symlinks into the frozen `fonts/` directory: fontconfig's directory
-   cache records the symlink's *target* mtime; a target replaced in place
-   with the same size and mtime (a `cp -p`) would not invalidate
-   fontconfig's cache, though it would change the `ctime` and therefore the
-   version string the recipe checks. That is the same guarantee the media
-   closure has (`engine_object_version` includes `ctime`). Is that
-   sufficient, or should font files be copied (cost: disk per recipe
-   digest, shared across recipes with the same digest)?
-2. Does the deployed jellyfin-ffmpeg 8 build's libass use fontconfig or
-   the "coretext/directwrite-less" built-in provider? `ffmpeg -h
-   filter=subtitles` does not say; `ldd $(which ffmpeg) | grep fontconfig`
-   on media1 does. If libass is built without fontconfig, `FONTCONFIG_FILE`
-   is ignored and `fontsdir` plus an empty provider is the lever instead.
-   Check before M2 starts (a GPT one-liner).
-3. `fc-conflist` reports config files in load order, including ones under
-   `~/.config/fontconfig` if `HOME` is set for the daemon. Should the
-   frozen environment deliberately drop user-scope configs (the daemon has
-   no user) or copy them as seen? Proposed: copy as seen — the recipe
-   freezes what capture observed, and policy about what *should* be
-   observed is a different question.
-4. The `fontenv/` purge rule: tie it to the dormant-rendition purge (a
-   digest is removed when no rendition references it) or to a count/age
-   cap? Proposed: reference counting via the rendition registry, with a
-   startup sweep as the backstop.
+1. **Keep symlinks for font bytes.** The existing attestation includes target
+   `ctime`, so a same-size, preserved-mtime replacement withdraws the recipe
+   before another launch or publication. Copying hundreds of megabytes per
+   digest would hide replacement rather than report it.
+2. **Use fontconfig, but do not claim that linkage proves isolation.** On
+   media1, `/usr/lib/jellyfin-ffmpeg/ffmpeg` 8.1.2-Jellyfin resolves
+   `libfontconfig.so.1` from `/usr/lib/jellyfin-ffmpeg/lib/`. This settles the
+   provider question only.
+3. **Freeze every rule scope capture observed.** System and user rules both
+   affect pixels and may not be silently dropped. Their live `<dir>`,
+   `<include>` and `<cachedir>` discovery directives must not survive in the
+   child configuration, however. The corrected design needs an XML-aware
+   resolved snapshot or a proved fontconfig sysroot layout; line filtering is
+   not an acceptable parser.
+4. **Use reference ownership, not age, for cleanup.** The eventual
+   `fontenv/<digest>` owner is shared by recipes with that digest, released
+   with the last rendition reference, and backed by a new-process startup
+   sweep. A count/age cap could remove inputs from a live immutable recipe.
+5. **M2 remains blocked on the configuration representation.** Before code,
+   the amended design must demonstrate that a two-font source enumerates only
+   those two fonts while default and frozen `fc-match` and rendered glyph
+   hashes agree. This is the missing safety proof; S-05 spawn unification is
+   sequencing convenience because the one child-local variable can be moved
+   later without changing the contract.
 
 ---
 
@@ -410,4 +428,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#413](http://192.168.4.7:3000/noirr/plurx/pulls/413) | Built at `da0b96a7`: identical object-version comparison now runs in one blocking task per batch and fails closed; four attestation histogram series are rendered. Rust 1.97.1 check and Clippy passed; six focused currentness, blocking-task and metric tests passed. Broad `make unit` was deliberately not run. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 decision | [#413](http://192.168.4.7:3000/noirr/plurx/pulls/413) | Not implemented. media1 links fontconfig, but its captured config closure contains live system/user discovery directives, contradicting the proposed byte-copy isolation. Needs the §7.5 design correction and its two-font isolation proof. |
