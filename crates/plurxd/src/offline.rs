@@ -658,16 +658,21 @@ impl OfflineManager {
             subtitle,
             effective_rate_control,
         };
-        let _ = self
-            .store
-            .update_offline_progress(
-                &package.id,
-                &self.node_id,
-                package.claim_generation,
-                "transcoding",
-                1,
-            )
-            .await;
+        // Best-effort progress hint: fenced completion remains authoritative
+        // and subsequent progress writes retry the current state.
+        crate::store_result::observe(
+            crate::store_result::Operation::UpdateOfflineProgressStarted,
+            crate::store_result::Discard::BestEffort,
+            self.store
+                .update_offline_progress(
+                    &package.id,
+                    &self.node_id,
+                    package.claim_generation,
+                    "transcoding",
+                    1,
+                )
+                .await,
+        );
         let outcome = self
             .transcode
             .ensure_offline(

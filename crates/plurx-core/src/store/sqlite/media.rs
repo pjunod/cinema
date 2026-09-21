@@ -874,24 +874,28 @@ impl MediaStore for SqliteStore {
             // typed, and "science fiction" meaning nothing while "Science
             // Fiction" works is not a distinction anybody asked for. ASCII-only
             // folding, which is all TMDB's genre vocabulary needs.
-            const GENRE: &str = "(?4 IS NULL OR EXISTS ( \
+            const GENRE_COUNT: &str = "(?2 IS NULL OR EXISTS ( \
+                 SELECT 1 FROM json_each(items.genres) WHERE value = ?2 COLLATE NOCASE))";
+            const GENRE_PAGE: &str = "(?4 IS NULL OR EXISTS ( \
                  SELECT 1 FROM json_each(items.genres) WHERE value = ?4 COLLATE NOCASE))";
-            // The two zeros fill ?2/?3 (offset and limit), which the count
-            // does not use — the genre clause is shared verbatim with the page
-            // query below and therefore has to keep its ?4. Sharing the string
-            // is the point: two hand-written copies of "does this item have
-            // this genre" is how a total stops agreeing with its page.
+            // Keep the count and page predicates structurally identical while
+            // giving each statement a gap-free binding sequence. The census
+            // below rejects either clause if a future edit breaks that rule.
+            debug_assert_eq!(
+                GENRE_COUNT.replace("?2", "?"),
+                GENRE_PAGE.replace("?4", "?")
+            );
             let total: i64 = conn.query_row(
                 &format!(
                     "SELECT COUNT(*) FROM items WHERE library_id = ?1 AND \
-                     {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE}"
+                     {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_COUNT}"
                 ),
-                params![library_id, 0, 0, genre],
+                params![library_id, genre],
                 |row| row.get(0),
             )?;
             let mut stmt = conn.prepare(&format!(
                 "SELECT {ITEM_COLS} FROM items
-                 WHERE library_id = ?1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE}
+                 WHERE library_id = ?1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_PAGE}
                  ORDER BY {order} LIMIT ?3 OFFSET ?2"
             ))?;
             let items = stmt
