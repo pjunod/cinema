@@ -3909,6 +3909,8 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
 #[async_trait]
 pub trait PlaybackTelemetryStore: Send + Sync + 'static {
     async fn record_playback_event(&self, event: &PlaybackEvent) -> Result<i64, StoreError>;
+    /// Persist a batch using one node-local connection lease and transaction.
+    async fn record_playback_events(&self, events: &[PlaybackEvent]) -> Result<u64, StoreError>;
     async fn prune_playback_events(&self, before_ms: i64, limit: i64) -> Result<u64, StoreError>;
     async fn playback_events(
         &self,

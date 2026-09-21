@@ -1,10 +1,16 @@
 //! Node-local playback observations and their bounded Prometheus projection.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use plurx_core::domain::{CredentialGeneration, NetworkPriorObservation, PlaybackEvent};
+use plurx_core::error::StoreError;
 use plurx_core::store::{keys, Store};
+use tokio::sync::mpsc;
 
 const TTFF_BUCKETS: [i64; 8] = [100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000];
 const METHODS: [&str; 4] = ["direct_play", "remux", "transcode", "unknown"];
@@ -24,6 +30,100 @@ const ENCODERS: [&str; 8] = [
 ];
 const MARKER_ACTIONS: [&str; 4] = ["offer", "manual_skip", "automatic_skip", "undo_seek_back"];
 const MARKER_PREWARM_RESULTS: [&str; 2] = ["hit", "miss"];
+const QUEUE: usize = 1_024;
+const BATCH: usize = 64;
+const BATCH_WINDOW: Duration = Duration::from_millis(200);
+const WRITER_RESTARTS_PER_HOUR: usize = 6;
+const SETTINGS_REFRESH: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EventClass {
+    Terminal,
+    Lifecycle,
+    Sample,
+}
+
+impl EventClass {
+    const fn index(self) -> usize {
+        match self {
+            Self::Terminal => 0,
+            Self::Lifecycle => 1,
+            Self::Sample => 2,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Job {
+    class: EventClass,
+    event: PlaybackEvent,
+    network: Option<NetworkIdentity>,
+}
+
+struct QueueMetrics {
+    enqueued: [AtomicU64; 3],
+    dropped_queue_full: AtomicU64,
+    dropped_writer_degraded: AtomicU64,
+    written_ok: AtomicU64,
+    written_error: AtomicU64,
+    queue_depth: AtomicU64,
+    setting_refresh_failures: AtomicU64,
+}
+
+impl QueueMetrics {
+    const fn new() -> Self {
+        Self {
+            enqueued: [const { AtomicU64::new(0) }; 3],
+            dropped_queue_full: AtomicU64::new(0),
+            dropped_writer_degraded: AtomicU64::new(0),
+            written_ok: AtomicU64::new(0),
+            written_error: AtomicU64::new(0),
+            queue_depth: AtomicU64::new(0),
+            setting_refresh_failures: AtomicU64::new(0),
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut out = String::from(
+            "# HELP plurx_telemetry_enqueued_total Playback telemetry jobs admitted to the bounded writer queue.\n\
+             # TYPE plurx_telemetry_enqueued_total counter\n",
+        );
+        for (label, value) in ["terminal", "lifecycle", "sample"]
+            .iter()
+            .zip(&self.enqueued)
+        {
+            out.push_str(&format!(
+                "plurx_telemetry_enqueued_total{{class=\"{label}\"}} {}\n",
+                value.load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str(&format!(
+            "# HELP plurx_telemetry_dropped_total Playback telemetry jobs discarded by bounded policy.\n\
+             # TYPE plurx_telemetry_dropped_total counter\n\
+             plurx_telemetry_dropped_total{{reason=\"queue_full\"}} {}\n\
+             plurx_telemetry_dropped_total{{reason=\"writer_degraded\"}} {}\n\
+             # HELP plurx_telemetry_written_total Playback telemetry rows offered to node-local storage.\n\
+             # TYPE plurx_telemetry_written_total counter\n\
+             plurx_telemetry_written_total{{outcome=\"ok\"}} {}\n\
+             plurx_telemetry_written_total{{outcome=\"error\"}} {}\n\
+             # HELP plurx_telemetry_queue_depth Current playback telemetry writer queue depth.\n\
+             # TYPE plurx_telemetry_queue_depth gauge\n\
+             plurx_telemetry_queue_depth {}\n\
+             # HELP plurx_telemetry_setting_refresh_failures_total Failed refreshes of cached telemetry settings.\n\
+             # TYPE plurx_telemetry_setting_refresh_failures_total counter\n\
+             plurx_telemetry_setting_refresh_failures_total {}\n",
+            self.dropped_queue_full.load(Ordering::Relaxed),
+            self.dropped_writer_degraded.load(Ordering::Relaxed),
+            self.written_ok.load(Ordering::Relaxed),
+            self.written_error.load(Ordering::Relaxed),
+            self.queue_depth.load(Ordering::Relaxed),
+            self.setting_refresh_failures.load(Ordering::Relaxed),
+        ));
+        out
+    }
+}
+
+static QUEUE_METRICS: QueueMetrics = QueueMetrics::new();
 
 struct PlaybackMetrics {
     ttff_buckets: [[AtomicU64; TTFF_BUCKETS.len() + 1]; METHODS.len()],
@@ -322,6 +422,243 @@ pub(crate) struct NetworkIdentity {
     pub(crate) user_id: Option<i64>,
 }
 
+struct TelemetrySink {
+    sender: mpsc::Sender<Job>,
+    degraded: AtomicBool,
+    settings: RwLock<EffectiveSettings>,
+}
+
+#[derive(Clone, Copy)]
+struct EffectiveSettings {
+    retain: bool,
+    priors: bool,
+    read_at: Option<Instant>,
+}
+
+static SINKS: LazyLock<Mutex<HashMap<usize, Arc<TelemetrySink>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn store_key(store: &Arc<dyn Store>) -> usize {
+    Arc::as_ptr(store) as *const () as usize
+}
+
+/// Start the single writer for this Store before the listener can accept.
+fn ensure_sink(store: Arc<dyn Store>) -> Arc<TelemetrySink> {
+    let key = store_key(&store);
+    let mut sinks = SINKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(sink) = sinks.get(&key) {
+        return Arc::clone(sink);
+    }
+    let (sender, receiver) = mpsc::channel(QUEUE);
+    let sink = Arc::new(TelemetrySink {
+        sender,
+        degraded: AtomicBool::new(false),
+        settings: RwLock::new(EffectiveSettings {
+            retain: true,
+            priors: false,
+            read_at: None,
+        }),
+    });
+    tokio::spawn(supervise_writer(
+        Arc::clone(&store),
+        receiver,
+        Arc::clone(&sink),
+    ));
+    sinks.insert(key, Arc::clone(&sink));
+    sink
+}
+
+/// Seed settings before the listener accepts the first telemetry producer.
+pub(crate) async fn initialize(store: Arc<dyn Store>) -> Result<(), StoreError> {
+    let sink = ensure_sink(Arc::clone(&store));
+    sink.refresh_settings(&store, true).await
+}
+
+fn sink_for(store: Arc<dyn Store>) -> Arc<TelemetrySink> {
+    let key = store_key(&store);
+    if let Some(sink) = SINKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .cloned()
+    {
+        sink
+    } else {
+        // Production registers during boot. Lazy construction keeps isolated
+        // handler tests on the same bounded path without making emit async.
+        ensure_sink(store)
+    }
+}
+
+impl TelemetrySink {
+    async fn refresh_settings(
+        &self,
+        store: &Arc<dyn Store>,
+        force: bool,
+    ) -> Result<(), StoreError> {
+        let due = self
+            .settings
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .read_at
+            .is_none_or(|at| at.elapsed() >= SETTINGS_REFRESH);
+        if !force && !due {
+            return Ok(());
+        }
+        match store
+            .get_setting_pair(keys::TELEMETRY_RETAIN_DAYS, keys::PLAYBACK_NETWORK_PRIORS)
+            .await
+        {
+            Ok((retain, priors)) => {
+                *self
+                    .settings
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = EffectiveSettings {
+                    retain: retain
+                        .as_deref()
+                        .and_then(|value| value.trim().parse::<i64>().ok())
+                        .unwrap_or(keys::TELEMETRY_RETAIN_DEFAULT_DAYS)
+                        > 0,
+                    priors: priors.as_deref() == Some("1"),
+                    read_at: Some(Instant::now()),
+                };
+                Ok(())
+            }
+            Err(error) => {
+                QUEUE_METRICS
+                    .setting_refresh_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                Err(error)
+            }
+        }
+    }
+
+    fn invalidate_settings(&self) {
+        self.settings
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .read_at = None;
+    }
+}
+
+pub(crate) fn invalidate_settings(store: &Arc<dyn Store>) {
+    let key = store_key(store);
+    if let Some(sink) = SINKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+    {
+        sink.invalidate_settings();
+    }
+}
+
+async fn supervise_writer(
+    store: Arc<dyn Store>,
+    mut receiver: mpsc::Receiver<Job>,
+    sink: Arc<TelemetrySink>,
+) {
+    let mut restarts = Vec::<Instant>::new();
+    loop {
+        let outcome = AssertUnwindSafe(writer_loop(Arc::clone(&store), &mut receiver, &sink))
+            .catch_unwind()
+            .await;
+        match outcome {
+            Ok(()) => return,
+            Err(_) => {
+                let now = Instant::now();
+                restarts.retain(|at| now.duration_since(*at) < Duration::from_secs(3_600));
+                restarts.push(now);
+                tracing::error!(
+                    restarts = restarts.len(),
+                    "playback telemetry writer panicked; restarting"
+                );
+                if restarts.len() >= WRITER_RESTARTS_PER_HOUR {
+                    sink.degraded.store(true, Ordering::Release);
+                    tracing::error!(
+                        "playback telemetry writer exceeded restart budget; sink degraded"
+                    );
+                }
+            }
+        }
+    }
+}
+
+async fn writer_loop(
+    store: Arc<dyn Store>,
+    receiver: &mut mpsc::Receiver<Job>,
+    sink: &TelemetrySink,
+) {
+    let mut batch = Vec::with_capacity(BATCH);
+    loop {
+        batch.clear();
+        let received = tokio::time::timeout(BATCH_WINDOW, receiver.recv_many(&mut batch, BATCH))
+            .await
+            .unwrap_or_default();
+        if received == 0 {
+            if receiver.is_closed() {
+                return;
+            }
+            continue;
+        }
+        QUEUE_METRICS
+            .queue_depth
+            .store(receiver.len() as u64, Ordering::Relaxed);
+        if let Err(error) = sink.refresh_settings(&store, false).await {
+            tracing::warn!(%error, "refreshing playback telemetry settings failed; keeping cached values");
+        }
+        let settings = *sink
+            .settings
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if settings.retain {
+            let events = batch
+                .iter()
+                .map(|job| job.event.clone())
+                .collect::<Vec<_>>();
+            match store.record_playback_events(&events).await {
+                Ok(written) => {
+                    QUEUE_METRICS
+                        .written_ok
+                        .fetch_add(written, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    QUEUE_METRICS
+                        .written_error
+                        .fetch_add(events.len() as u64, Ordering::Relaxed);
+                    tracing::warn!(%error, count = events.len(), "recording playback telemetry batch failed");
+                }
+            }
+        }
+        if settings.priors {
+            for job in &batch {
+                if let Some(observation) = prior_observation(&job.event, job.network.as_ref()) {
+                    if let Err(error) = store.observe_network_prior(&observation).await {
+                        tracing::warn!(%error, event = %job.event.event, "updating network prior failed");
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn classify(event: &PlaybackEvent) -> EventClass {
+    if event.level.as_deref() == Some("error") {
+        return EventClass::Terminal;
+    }
+    match event.event.as_str() {
+        "control_terminal"
+        | "control_retry_resource"
+        | "control_hold_withheld"
+        | "control_action_suppressed" => EventClass::Terminal,
+        "ttff" | "session_start" | "stall" | "stall_recovery" | "suspend" | "resume" => {
+            EventClass::Lifecycle
+        }
+        _ => EventClass::Sample,
+    }
+}
+
 /// Record metrics and persist an event without delaying the caller. The
 /// retention setting is read inside the task so setting `0` makes this a true
 /// no-op while HTTP ingest can still return its existing 204 immediately.
@@ -338,41 +675,34 @@ pub(crate) fn emit_with_network(
     event: PlaybackEvent,
     network: Option<NetworkIdentity>,
 ) {
-    tokio::spawn(async move {
-        let telemetry_enabled = store
-            .get_setting(keys::TELEMETRY_RETAIN_DAYS)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|value| value.trim().parse::<i64>().ok())
-            .unwrap_or(keys::TELEMETRY_RETAIN_DEFAULT_DAYS)
-            > 0;
-        let priors_enabled = if network.is_some() {
-            store
-                .get_setting(keys::PLAYBACK_NETWORK_PRIORS)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|value| value.trim() == "1")
-        } else {
-            false
-        };
-
-        if telemetry_enabled {
-            METRICS.record(&event);
-            if let Err(error) = store.record_playback_event(&event).await {
-                tracing::warn!(%error, event = %event.event, "recording playback telemetry failed");
-            }
+    let sink = sink_for(store);
+    let class = classify(&event);
+    if sink.degraded.load(Ordering::Acquire) && class != EventClass::Terminal {
+        QUEUE_METRICS
+            .dropped_writer_degraded
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    match sink.sender.try_send(Job {
+        class,
+        event,
+        network,
+    }) {
+        Ok(()) => {
+            QUEUE_METRICS.enqueued[class.index()].fetch_add(1, Ordering::Relaxed);
+            QUEUE_METRICS.queue_depth.store(
+                sink.sender
+                    .max_capacity()
+                    .saturating_sub(sink.sender.capacity()) as u64,
+                Ordering::Relaxed,
+            );
         }
-
-        if priors_enabled {
-            if let Some(observation) = prior_observation(&event, network.as_ref()) {
-                if let Err(error) = store.observe_network_prior(&observation).await {
-                    tracing::warn!(%error, event = %event.event, "updating network prior failed");
-                }
-            }
+        Err(_) => {
+            QUEUE_METRICS
+                .dropped_queue_full
+                .fetch_add(1, Ordering::Relaxed);
         }
-    });
+    }
 }
 
 fn prior_observation(
@@ -419,7 +749,9 @@ fn prior_observation(
 }
 
 pub fn prometheus() -> String {
-    METRICS.render()
+    let mut metrics = METRICS.render();
+    metrics.push_str(&QUEUE_METRICS.render());
+    metrics
 }
 
 #[cfg(test)]

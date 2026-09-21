@@ -1486,6 +1486,11 @@ async fn boot(
     // Recovery authorization changes no artifact identity, but it still has
     // to be published before the listener accepts the first session.
     state.transcode.publish_automatic_decoder_recovery().await;
+    // One bounded telemetry writer owns all node-local event persistence.
+    // Register it before the listener can accept the first producer.
+    crate::telemetry::initialize(Arc::clone(&state.store))
+        .await
+        .context("seed playback telemetry settings")?;
     let background_loops = BackgroundLoopGuard::new();
     spawn_background_loops(&state, background_loops.token());
 

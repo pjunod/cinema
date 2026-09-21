@@ -619,3 +619,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | Claim | pending | Claimed `plan/C-06` for one four-milestone implementation PR; implementation evidence follows milestone by milestone. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Added the 1,024-slot synchronous admission path, single supervised batching writer, one-transaction batch Store contract on both backends, bounded fixed-label queue metrics, boot registration, and an executable 64-row sidecar batch regression. |

@@ -132,6 +132,15 @@ pub(crate) fn insert(conn: &Connection, event: &PlaybackEvent) -> Result<i64, St
     Ok(conn.last_insert_rowid())
 }
 
+pub(crate) fn insert_batch(conn: &Connection, events: &[PlaybackEvent]) -> Result<u64, StoreError> {
+    let transaction = conn.unchecked_transaction()?;
+    for event in events {
+        insert(&transaction, event)?;
+    }
+    transaction.commit()?;
+    Ok(events.len() as u64)
+}
+
 pub(crate) fn prune(conn: &Connection, before_ms: i64, limit: i64) -> Result<u64, StoreError> {
     if limit <= 0 {
         return Ok(0);
@@ -543,6 +552,11 @@ impl NodeLocalTelemetry {
         self.with_conn(move |conn| insert(conn, &event)).await
     }
 
+    pub(crate) async fn record_batch(&self, events: Vec<PlaybackEvent>) -> Result<u64, StoreError> {
+        self.with_conn(move |conn| insert_batch(conn, &events))
+            .await
+    }
+
     pub(crate) async fn prune(&self, before_ms: i64, limit: i64) -> Result<u64, StoreError> {
         self.with_conn(move |conn| prune(conn, before_ms, limit))
             .await
@@ -763,6 +777,29 @@ mod tests {
             starved_rung_height,
             observed_at_ms: at_ms,
         }
+    }
+
+    #[tokio::test]
+    async fn a_batch_persists_every_event_in_one_transaction() {
+        let root = tempfile::tempdir().expect("sidecar root");
+        let sidecar =
+            NodeLocalTelemetry::open(&root.path().join("telemetry.db")).expect("open sidecar");
+        let events = (0..64)
+            .map(|index| event("sample", index))
+            .collect::<Vec<_>>();
+
+        assert_eq!(sidecar.record_batch(events).await.expect("batch"), 64);
+        assert_eq!(
+            sidecar
+                .events(PlaybackEventQuery {
+                    limit: 64,
+                    ..PlaybackEventQuery::default()
+                })
+                .await
+                .expect("events")
+                .len(),
+            64
+        );
     }
 
     fn prior_connection() -> Connection {
