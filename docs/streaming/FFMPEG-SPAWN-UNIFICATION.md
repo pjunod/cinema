@@ -412,4 +412,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | pending | Claimed `plan/S-05` from `f0af512d`; pinned Rust 1.97.1 available locally. |
