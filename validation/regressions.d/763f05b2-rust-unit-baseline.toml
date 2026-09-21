@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["763f05b2"]
+points = ["core.media", "server.api", "playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci", "unit-core"]
+reason = "The retained core fragment regression requires an end-of-stream fragment to honor the maximum duration without incorrectly demanding the ordinary target, while placeholder and Store inventories fail on contract drift. The daemon regressions exercise current rolling-publication readiness, response-owner fencing, retention grace, subtitle and Dolby Vision master construction, and complete playback telemetry persistence. Together they keep `make unit` meaningful as a fast-lane gate rather than masking stale expectations or permitting the previously parked delivery tests to hang."
