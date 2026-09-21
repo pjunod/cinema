@@ -243,12 +243,13 @@ gains are chosen become the `DownmixMatrix` id in the digest.
   the argv).
 - **Existing recipe keys for stereo-AAC and copy do not move**: `aaction`
   spellings preserved.
-- **A codec name is not a sink.** Absent `audio_sinks` → 2 channels; no
-  client is upgraded to 5.1 by the server's guess.
+- **A codec name is not a sink.** Absent `audio_sinks` preserves the legacy
+  codec-only copy rule and stereo full-transcode default; no client gains a
+  new surround encode from the server's guess.
 - **Prove each container/transport/codec/channel tuple on a device before
   a client claims it** (Q11). The server plan lands first with no client
-  claiming more than stereo; each client's claim is its own PR with device
-  evidence.
+  claiming more than stereo; each client claim is its own logical commit in
+  this plan PR and carries its device evidence.
 - **The pan string is illustrative until M4 measures it** (assessment
   F-stream-5); no "fixed improvement" is promised.
 - **No loudness normalisation** (`loudnorm`) in the live path.
@@ -278,7 +279,9 @@ for the three clients' translation of the claim.
 
 Acceptance: `cargo test -p plurx-core playback` green; `curl -s -X POST
 :32400/api/v1/files/<id>/decision -d @caps-v2.json | jq .delivered_audio` shows the
-struct, and with `caps-v2.json` lacking `audio_sinks` shows `channels: 2`.
+struct. With `caps-v2.json` lacking `audio_sinks`, a full transcode shows
+stereo AAC while a compatible progressive AAC 5.1 source preserves the
+legacy copy answer.
 
 Implemented server-side in `142502010`: the v2 and flat claims share one
 translation; malformed, out-of-range and duplicate claims fail closed;
@@ -309,9 +312,12 @@ Only the independently safe sample-rate slice is implemented in `659fb6372`:
 every lossy rolling/full-transcode and copy-conversion path now emits `-ar
 48000`, while copied audio remains untouched. The rest is blocked rather than
 guessing: normalized `AudioStream` records contain channel count but not
-channel layout, and M4 has not measured the per-layout gains or limiter need.
-Without those facts, emitting a pan string or assigning its recipe identity
-would repeat the universal-ordering mistake F-stream-5 explicitly rejected.
+channel layout or sample rate, `AudioSink` has no sample-rate ceiling, and M4
+has not measured the per-layout gains or limiter need. Without those facts,
+emitting a pan string, admitting a newly claimed copy tuple, or assigning its
+recipe identity would repeat the universal-ordering mistake F-stream-5
+explicitly rejected. No shipped client sends the new claim, so that incomplete
+route is not enabled.
 
 ### 5.3 M3 — first client claim, on a device
 
@@ -362,9 +368,9 @@ transcode::audio` pins each layout's string.
 
 ### 5.5 M5 — Android and web claims
 
-Each its own PR with the device evidence Q11 requires (Shield on the same
-AVR; a phone on Bluetooth; Safari/Chrome on the laptop). The server needs
-no change.
+Each client slice remains a logical commit in this plan PR, with the device
+evidence Q11 requires (Shield on the same AVR; a phone on Bluetooth;
+Safari/Chrome on the laptop). The server needs no change.
 
 Acceptance: per client, the M3 observations repeated; a phone claim of 2
 channels produces the M4 stereo matrix path.
@@ -417,7 +423,9 @@ channels produces the M4 stereo matrix path.
 3. **Unmeasured downmixes carry a requirement, not invented gains.** The pure
    decision reports `requires_layout_measurement` with the source channel
    count. M2 must not turn that into FFmpeg argv or cache identity until M4
-   supplies the source layout and measured matrix.
+   supplies the source layout and measured matrix. Likewise, a new copy route
+   must not be enabled until the source and sink contracts carry sample-rate
+   facts; the current wire claim has no sample-rate ceiling.
 4. **No feature gate or setting is added.** The server accepts and reports an
    evidence-bearing claim, but no shipped client sends one. A Developer toggle
    would imply an enablement choice where the remaining boundary is physical
@@ -437,5 +445,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) | Claimed `plan/S-09` from `665b8b5c`; M3–M5 remain evidence-gated. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) · `142502010` | Server sink claim, pure route negotiation and `delivered_audio` response implemented; 87 focused playback tests and the daemon serialization/translation/refusal checks passed. No client claim enabled. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) · `659fb6372` | Partial: lossy rolling outputs are fixed at 48 kHz. needs: normalized source channel layout and M4 matrix/clipping measurements before argv, identity, manifest, offline or prepared-handoff propagation. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) · `659fb6372` | Partial: lossy rolling outputs are fixed at 48 kHz. needs: normalized source channel-layout/sample-rate facts, a sink sample-rate contract and M4 matrix/clipping measurements before argv, identity, manifest, offline or prepared-handoff propagation. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3–M5 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) | needs: the Apple/AVR/AirPods observations, per-layout loudness/peak/clipping measurements, then Android/web device evidence. |
