@@ -1,6 +1,7 @@
 # Quality switch continuity — why every rung change is still a reopen, and the plan to make it a handoff
 
-**Status:** ruled 2026-09-16 — §9's five decisions are taken; the build plan is
+**Status:** open — decisions are taken; implementation continues in the build
+plan · **Build plan:**
 [QUALITY-SWITCH-CONTINUITY-BUILD.md](QUALITY-SWITCH-CONTINUITY-BUILD.md) ·
 **Anchors:** `main` at `c9e4edf4` (2026-09-16, deployed to nynuc/m6 the same
 evening) · **Written:** 2026-09-16 · **Companions:**

@@ -1,6 +1,6 @@
 # M6's axis case — the one measurement the milestone now waits on
 
-**Status:** done — ready to run · **Executes:** the case named in
+**Status:** done — corrective axis run recorded; retained as the reproducible procedure · **Executes:** the case named in
 [M6-CALLER-HANDOFF.md](M6-CALLER-HANDOFF.md) §3.3.3 ·
 **Written:** 2026-09-03 · **Runs on:** physical Apple hardware only
 

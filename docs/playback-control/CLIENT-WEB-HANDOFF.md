@@ -1,6 +1,6 @@
 # Web prepared-switch adapter — handoff
 
-**Status:** built — ready to build, message plumbing only · **Exclusive lock:** you own
+**Status:** built — web message adaptation merged as PR #171 · **Exclusive lock:** you own
 `crates/plurxd/src/web/index.html` for the life of this branch · **Repo:**
 `noirr/plurx` on Forgejo, branch from `effort/streaming-reliability` ·
 **Written:** 2026-09-08

@@ -4,7 +4,7 @@
 > [lifecycle status](PLAYBACK-LIFECYCLE-STATUS.md). Missing evidence does not
 > gate the Developer enable switch.
 
-**Status:** superseded — open · **Owner:** an operator with the devices, or an agent with
+**Status:** superseded 2026-09-12 — use the lifecycle status device card · **Owner:** an operator with the devices, or an agent with
 physical access · **Written:** 2026-09-08
 
 Everything else in the Apple half of M6 is discharged by

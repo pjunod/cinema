@@ -1,6 +1,6 @@
 # Android prepared-switch adapter — handoff
 
-**Status:** built — ready to build, message plumbing only · **Blocked from enabling:**
+**Status:** built — Android message adaptation merged as PR #172 · **Blocked from enabling:**
 the capability is `false` on measured evidence and must stay that way ·
 **Repo:** `noirr/plurx` on Forgejo, branch from
 `effort/streaming-reliability` · **Written:** 2026-09-08
