@@ -1,0 +1,171 @@
+{
+  "schema": "plurx-vod-presentation-grid-v1",
+  "units": "video-track ticks",
+  "box_contract": {
+    "base_decode_time": "resolved tfdt value; unsigned and relative to the generation origin",
+    "sample_duration": "resolved trun/tfhd/trex duration",
+    "composition_offset": "resolved trun sample_composition_time_offset; signed when trun version is 1",
+    "reordered_trun_version": 1,
+    "edit_list_allowed": false
+  },
+  "cases": [
+    {
+      "name": "current-zero-cto",
+      "entry_start": 0,
+      "entry_duration": 4,
+      "frame_ticks": 1,
+      "base_decode_time": 0,
+      "clean_random_access": true,
+      "trun_version": 0,
+      "samples": [
+        {"duration": 1, "cto": 0},
+        {"duration": 1, "cto": 0},
+        {"duration": 1, "cto": 0},
+        {"duration": 1, "cto": 0}
+      ],
+      "expect": {"accepted": true, "reason": "ok"}
+    },
+    {
+      "name": "version-one-closed-gop-reorder",
+      "entry_start": 0,
+      "entry_duration": 4,
+      "frame_ticks": 1,
+      "base_decode_time": 0,
+      "clean_random_access": true,
+      "trun_version": 1,
+      "samples": [
+        {"duration": 1, "cto": 0},
+        {"duration": 1, "cto": 2},
+        {"duration": 1, "cto": -1},
+        {"duration": 1, "cto": -1}
+      ],
+      "expect": {"accepted": true, "reason": "ok"}
+    },
+    {
+      "name": "unsigned-offset-reorder-is-not-the-candidate",
+      "entry_start": 0,
+      "entry_duration": 4,
+      "frame_ticks": 1,
+      "base_decode_time": 0,
+      "clean_random_access": true,
+      "trun_version": 0,
+      "samples": [
+        {"duration": 1, "cto": 2},
+        {"duration": 1, "cto": 4},
+        {"duration": 1, "cto": 1},
+        {"duration": 1, "cto": 1}
+      ],
+      "expect": {"accepted": false, "reason": "trun_version"}
+    },
+    {
+      "name": "leading-picture-precedes-entry",
+      "entry_start": 0,
+      "entry_duration": 4,
+      "frame_ticks": 1,
+      "base_decode_time": 0,
+      "clean_random_access": true,
+      "trun_version": 1,
+      "samples": [
+        {"duration": 1, "cto": 0},
+        {"duration": 1, "cto": -2},
+        {"duration": 1, "cto": -1},
+        {"duration": 1, "cto": -1}
+      ],
+      "expect": {"accepted": false, "reason": "presentation_start"}
+    },
+    {
+      "name": "duplicate-presentation-slot",
+      "entry_start": 0,
+      "entry_duration": 4,
+      "frame_ticks": 1,
+      "base_decode_time": 0,
+      "clean_random_access": true,
+      "trun_version": 1,
+      "samples": [
+        {"duration": 1, "cto": 0},
+        {"duration": 1, "cto": 2},
+        {"duration": 1, "cto": -1},
+        {"duration": 1, "cto": 0}
+      ],
+      "expect": {"accepted": false, "reason": "presentation_grid"}
+    },
+    {
+      "name": "missing-presentation-slot",
+      "entry_start": 0,
+      "entry_duration": 4,
+      "frame_ticks": 1,
+      "base_decode_time": 0,
+      "clean_random_access": true,
+      "trun_version": 1,
+      "samples": [
+        {"duration": 1, "cto": 0},
+        {"duration": 1, "cto": 1},
+        {"duration": 1, "cto": -1}
+      ],
+      "expect": {"accepted": false, "reason": "sample_count"}
+    },
+    {
+      "name": "off-grid-tfdt",
+      "entry_start": 4,
+      "entry_duration": 4,
+      "frame_ticks": 1,
+      "base_decode_time": 5,
+      "clean_random_access": true,
+      "trun_version": 1,
+      "samples": [
+        {"duration": 1, "cto": 0},
+        {"duration": 1, "cto": 2},
+        {"duration": 1, "cto": -1},
+        {"duration": 1, "cto": -1}
+      ],
+      "expect": {"accepted": false, "reason": "decode_start"}
+    },
+    {
+      "name": "nonuniform-frame-duration",
+      "entry_start": 0,
+      "entry_duration": 4,
+      "frame_ticks": 1,
+      "base_decode_time": 0,
+      "clean_random_access": true,
+      "trun_version": 1,
+      "samples": [
+        {"duration": 1, "cto": 0},
+        {"duration": 2, "cto": 1},
+        {"duration": 1, "cto": -1}
+      ],
+      "expect": {"accepted": false, "reason": "frame_duration"}
+    },
+    {
+      "name": "non-clean-first-sample",
+      "entry_start": 0,
+      "entry_duration": 4,
+      "frame_ticks": 1,
+      "base_decode_time": 0,
+      "clean_random_access": false,
+      "trun_version": 1,
+      "samples": [
+        {"duration": 1, "cto": 0},
+        {"duration": 1, "cto": 2},
+        {"duration": 1, "cto": -1},
+        {"duration": 1, "cto": -1}
+      ],
+      "expect": {"accepted": false, "reason": "random_access"}
+    },
+    {
+      "name": "composition-offset-outside-version-one-box-range",
+      "entry_start": 0,
+      "entry_duration": 4,
+      "frame_ticks": 1,
+      "base_decode_time": 0,
+      "clean_random_access": true,
+      "trun_version": 1,
+      "samples": [
+        {"duration": 1, "cto": 0},
+        {"duration": 1, "cto": 2147483648},
+        {"duration": 1, "cto": -1},
+        {"duration": 1, "cto": -1}
+      ],
+      "expect": {"accepted": false, "reason": "box_value"}
+    }
+  ]
+}
