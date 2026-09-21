@@ -300,9 +300,10 @@ fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| {
-            value
-                .split(',')
-                .any(|candidate| candidate.trim().trim_start_matches("W/") == etag)
+            value.split(',').any(|candidate| {
+                let candidate = candidate.trim();
+                candidate == "*" || candidate.trim_start_matches("W/") == etag
+            })
         })
 }
 
@@ -859,6 +860,27 @@ mod tests {
             let second = test_asset(headers);
             assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
             assert!(second
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn if_none_match_wildcard_answers_304_for_either_representation() {
+        for encoding in [None, Some("gzip")] {
+            let mut headers = HeaderMap::new();
+            if let Some(encoding) = encoding {
+                headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static(encoding));
+            }
+            headers.insert(header::IF_NONE_MATCH, HeaderValue::from_static("*"));
+            let response = test_asset(headers);
+            assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+            assert!(response.headers().get(header::CONTENT_LENGTH).is_none());
+            assert!(response
                 .into_body()
                 .collect()
                 .await

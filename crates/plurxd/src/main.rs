@@ -2454,6 +2454,7 @@ struct HttpTimeouts {
     header_read: Duration,
     h2_keepalive_interval: Duration,
     h2_keepalive_timeout: Duration,
+    accept_error_backoff: Duration,
     shutdown_drain: Duration,
 }
 
@@ -2461,11 +2462,26 @@ const HTTP_TIMEOUTS: HttpTimeouts = HttpTimeouts {
     header_read: HEADER_READ_TIMEOUT,
     h2_keepalive_interval: H2_KEEPALIVE_INTERVAL,
     h2_keepalive_timeout: H2_KEEPALIVE_TIMEOUT,
+    accept_error_backoff: Duration::from_secs(1),
     shutdown_drain: SHUTDOWN_DRAIN_TIMEOUT,
 };
 
-async fn serve_http(
-    listener: tokio::net::TcpListener,
+trait HttpAcceptor {
+    type Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static;
+
+    async fn accept(&self) -> std::io::Result<(Self::Stream, SocketAddr)>;
+}
+
+impl HttpAcceptor for tokio::net::TcpListener {
+    type Stream = tokio::net::TcpStream;
+
+    async fn accept(&self) -> std::io::Result<(Self::Stream, SocketAddr)> {
+        tokio::net::TcpListener::accept(self).await
+    }
+}
+
+async fn serve_http<A: HttpAcceptor>(
+    listener: A,
     app: axum::Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     timeouts: HttpTimeouts,
@@ -2489,9 +2505,24 @@ async fn serve_http(
     let graceful = GracefulShutdown::new();
     tokio::pin!(shutdown);
     loop {
-        let (stream, remote) = tokio::select! {
-            accepted = listener.accept() => accepted?,
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
             () = &mut shutdown => break,
+        };
+        let (stream, remote) = match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                // Accept errors are listener-local, not evidence that the
+                // bound socket is permanently unusable. In particular,
+                // descriptor and buffer exhaustion are expected to clear.
+                // Backing off keeps a persistent condition from turning the
+                // loop into a CPU/log spinner while preserving availability.
+                tracing::error!(%error, "HTTP listener accept failed; retrying");
+                tokio::select! {
+                    () = &mut shutdown => break,
+                    () = tokio::time::sleep(timeouts.accept_error_backoff) => continue,
+                }
+            }
         };
         // Connect info is load-bearing for the network-priors handlers in
         // `http::network`, which extract the peer address. The lower-level
@@ -3349,6 +3380,8 @@ mod startup_tests {
 
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     use plurx_core::domain::Library;
     use plurx_core::store::Store;
@@ -3383,8 +3416,69 @@ mod startup_tests {
             header_read: Duration::from_millis(80),
             h2_keepalive_interval: Duration::from_millis(30),
             h2_keepalive_timeout: Duration::from_millis(200),
+            accept_error_backoff: Duration::from_millis(20),
             shutdown_drain: Duration::from_millis(200),
         }
+    }
+
+    struct FailFirstAccept {
+        listener: tokio::net::TcpListener,
+        failed: Arc<AtomicBool>,
+    }
+
+    impl HttpAcceptor for FailFirstAccept {
+        type Stream = tokio::net::TcpStream;
+
+        async fn accept(&self) -> std::io::Result<(Self::Stream, SocketAddr)> {
+            if !self.failed.swap(true, Ordering::SeqCst) {
+                return Err(std::io::Error::other("simulated descriptor pressure"));
+            }
+            self.listener.accept().await
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_error_backs_off_then_serves_the_next_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let failed = Arc::new(AtomicBool::new(false));
+        let acceptor = FailFirstAccept {
+            listener,
+            failed: Arc::clone(&failed),
+        };
+        let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let started = tokio::time::Instant::now();
+        let served = tokio::spawn(serve_http(
+            acceptor,
+            app,
+            async move {
+                let _ = stopped.await;
+            },
+            test_http_timeouts(),
+        ));
+
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect after the injected accept failure");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("request");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
+            .await
+            .expect("response timeout")
+            .expect("response");
+        assert!(response.windows(2).any(|window| window == b"ok"));
+        assert!(
+            started.elapsed() >= test_http_timeouts().accept_error_backoff,
+            "the injected resource-pressure error must not spin"
+        );
+        assert!(failed.load(Ordering::SeqCst), "the failure was injected");
+        stop_timeout_test_server(stop, served).await;
     }
 
     async fn stop_timeout_test_server(

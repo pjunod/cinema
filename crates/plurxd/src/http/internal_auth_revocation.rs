@@ -270,6 +270,15 @@ impl ClusterCacheRevocation {
         let local = state
             .cache_only_admin_proofs
             .begin_digest_revocation(digest);
+        #[cfg(test)]
+        if let Some(barrier) = &state.cache_revocation_test_barrier {
+            // Hold the actual local digest fence open long enough for the
+            // production router's 30-second short deadline to expose an
+            // accidental logout misclassification. The 300-second long group
+            // must leave this protocol in charge of completion.
+            barrier.wait().await;
+            tokio::time::sleep(Duration::from_secs(40)).await;
+        }
         Self::begin(state, local, operation_guard).await
     }
 

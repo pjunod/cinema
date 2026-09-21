@@ -1246,29 +1246,6 @@ mod tests {
         .await
     }
 
-    async fn slow_logout_fence() -> Response {
-        // Model a peer that consumes most of its own bounded propagation
-        // window. The enclosing long deadline must leave that protocol in
-        // charge of the terminal error instead of cancelling its fence.
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        error::ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "admin_revocation_propagation_failed",
-            "the credential change was not acknowledged by every committed cluster member",
-        )
-        .into_response()
-    }
-
-    async fn hundred_ms_long_deadline(request: Request<axum::body::Body>, next: Next) -> Response {
-        handler_deadline(
-            request,
-            next,
-            Duration::from_millis(100),
-            DeadlineGroup::JsonLong,
-        )
-        .await
-    }
-
     #[tokio::test]
     async fn json_short_handler_deadline_answers_503() {
         let app = Router::new()
@@ -1298,61 +1275,37 @@ mod tests {
             .is_some_and(|message| message.contains("re-read state")));
     }
 
-    #[tokio::test]
-    async fn media_routes_have_no_handler_deadline() {
-        let json = Router::new()
-            .route("/short", axum::routing::get(slow_test_handler))
-            .layer(axum::middleware::from_fn(ten_ms_short_deadline));
-        let media = Router::new().route(
-            "/hls/session/segment.ts",
-            axum::routing::get(slow_test_handler),
-        );
-        let app = Router::new().merge(json).merge(media);
+    #[tokio::test(start_paused = true)]
+    async fn production_logout_fence_outlives_the_short_deadline() {
+        let (_, mut state) = test_app_with_state();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        state.cache_revocation_test_barrier = Some(Arc::clone(&barrier));
+        let app = router(state);
+        let token = setup_admin(&app).await;
+        let request = tokio::spawn({
+            let app = app.clone();
+            let token = token.clone();
+            async move {
+                app.oneshot(post("/api/v1/auth/logout", Some(&token), json!({})))
+                    .await
+                    .expect("logout response")
+            }
+        });
 
-        assert_eq!(
-            app.clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/short")
-                        .body(Body::empty())
-                        .expect("request"),
-                )
-                .await
-                .expect("short response")
-                .status(),
-            StatusCode::SERVICE_UNAVAILABLE
+        // `begin_digest` has acquired the real local revocation fence. Move
+        // beyond the short deadline and prove the production route has not
+        // cancelled it, then let the fence finish inside the long budget.
+        barrier.wait().await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(JSON_SHORT_DEADLINE + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !request.is_finished(),
+            "logout must not be classified in the 30-second short group"
         );
-        assert_eq!(
-            app.oneshot(
-                Request::builder()
-                    .uri("/hls/session/segment.ts")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("media response")
-            .status(),
-            StatusCode::OK,
-            "the same slow handler must finish when it is a media route"
-        );
-    }
-
-    #[tokio::test]
-    async fn deadline_does_not_cancel_a_logout_fence() {
-        let app = Router::new()
-            .route("/auth/logout", axum::routing::post(slow_logout_fence))
-            .layer(axum::middleware::from_fn(hundred_ms_long_deadline));
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/auth/logout")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let response = request.await.expect("logout task");
+        assert_eq!(response.status(), StatusCode::OK);
         let body = response
             .into_body()
             .collect()
@@ -1360,18 +1313,12 @@ mod tests {
             .expect("body")
             .to_bytes();
         let body: Value = serde_json::from_slice(&body).expect("JSON body");
-        assert_eq!(body["code"], "admin_revocation_propagation_failed");
-        assert_ne!(body["code"], "handler_deadline");
-
-        let source = include_str!("mod.rs");
-        let long_group = source
-            .split_once("let json_long = Router::new()")
-            .expect("long group")
-            .1
-            .split_once("let media = Router::new()")
-            .expect("media group")
-            .0;
-        assert!(long_group.contains(".route(\"/auth/logout\", post(auth::logout))"));
+        assert_eq!(body, json!({ "ok": true }));
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&token))).await.0,
+            StatusCode::UNAUTHORIZED,
+            "the real logout fence must leave the token revoked"
+        );
     }
 
     #[test]
@@ -1399,6 +1346,8 @@ mod tests {
         ];
         let mut current = None;
         let mut registrations = 0usize;
+        let mut logout_group = None;
+        let mut hls_segment_group = None;
         for (line_number, line) in source.lines().enumerate() {
             let trimmed = line.trim();
             if let Some(group) = groups
@@ -1423,8 +1372,20 @@ mod tests {
                     line_number + 1
                 );
             }
+            if trimmed == ".route(\"/auth/logout\", post(auth::logout))" {
+                logout_group = current;
+            }
+            if trimmed == ".route(\"/hls/{session}/{segment}\", get(hls::segment))" {
+                hls_segment_group = current;
+            }
         }
         assert!(registrations > 100, "route inventory unexpectedly shrank");
+        assert_eq!(logout_group, Some("json_long"));
+        assert_eq!(
+            hls_segment_group,
+            Some("media"),
+            "the production HLS body route must remain deadline-free"
+        );
         let _ = test_app();
     }
 
