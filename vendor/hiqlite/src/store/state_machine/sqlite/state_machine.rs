@@ -205,8 +205,11 @@ pub enum QueryWrite {
     Transaction(Vec<Query>),
     Batch(Cow<'static, str>),
     Migration(Vec<Migration>),
-    Backup((NodeId, i64)),
     RTT,
+    // Appended after every variant shipped by the no-backup build. This is
+    // deliberately reserved even when the handler is disabled: inserting it
+    // before RTT changed RTT's bincode ordinal during a rolling upgrade.
+    Backup((NodeId, i64)),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1514,6 +1517,21 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
 mod backup_owner_contracts {
     use super::{QueryWrite, committed_backup_owner};
     use openraft::{CommittedLeaderId, LogId};
+    use serde::{Deserialize, Serialize};
+
+    /// Exact write enum shipped before the unconditional Backup reservation.
+    ///
+    /// The payloads before RTT are immaterial to this compatibility check;
+    /// their positions are what bincode writes on the wire.
+    #[derive(Debug, Serialize, Deserialize)]
+    enum LegacyQueryWrite {
+        Execute(()),
+        ExecuteReturning(()),
+        Transaction(()),
+        Batch(()),
+        Migration(()),
+        RTT,
+    }
 
     #[test]
     fn backup_owner_follows_the_accepting_leader_after_a_client_handoff() {
@@ -1525,9 +1543,27 @@ mod backup_owner_contracts {
     }
 
     #[test]
-    fn rtt_wire_discriminant_is_stable_with_or_without_backup_support() {
-        let bytes = crate::helpers::serialize(&QueryWrite::RTT).expect("serialize RTT");
-        assert_eq!(bytes, [6, 0, 0, 0]);
+    fn old_and_reserved_backup_builds_decode_each_others_rtt() {
+        let old_bytes = crate::helpers::serialize(&LegacyQueryWrite::RTT)
+            .expect("serialize deployed RTT");
+        let new_bytes = crate::helpers::serialize(&QueryWrite::RTT)
+            .expect("serialize reserved-variant RTT");
+        assert_eq!(old_bytes, [5, 0, 0, 0]);
+        assert_eq!(new_bytes, old_bytes);
+
+        let (new_from_old, _): (QueryWrite, usize) = bincode::serde::decode_from_slice(
+            &old_bytes,
+            bincode::config::legacy(),
+        )
+        .expect("new build decodes deployed RTT");
+        assert!(matches!(new_from_old, QueryWrite::RTT));
+
+        let (old_from_new, _): (LegacyQueryWrite, usize) = bincode::serde::decode_from_slice(
+            &new_bytes,
+            bincode::config::legacy(),
+        )
+        .expect("deployed build decodes reserved-variant RTT");
+        assert!(matches!(old_from_new, LegacyQueryWrite::RTT));
     }
 }
 

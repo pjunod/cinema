@@ -130,9 +130,11 @@ deployments:
   is how a contaminating entry is identified down to its SQL. Production
   binaries compile none of it.
 - The replicated SQLite write enum always includes `QueryWrite::Backup`, even
-  when the local backup implementation is not compiled, so enabling backup
-  cannot shift the wire discriminant of `QueryWrite::RTT` during a rolling
-  deployment. The backup feature no longer implies S3 or enables cryptr's S3
+  when the local backup implementation is not compiled, and appends that
+  reservation after the deployed `QueryWrite::RTT` variant. `RTT` therefore
+  remains ordinal 5 in both directions of a rolling deployment; reserving a
+  new variant before it would itself be a wire break. The backup feature no
+  longer implies S3 or enables cryptr's S3
   support unconditionally; `backup` and `backup,s3` remain independently
   compilable, and a build without backup returns an explicit feature error if
   it receives the reserved replicated variant.
