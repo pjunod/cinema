@@ -164,6 +164,11 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
   windows_compile:
     name: fast Windows compile
     needs: [scope, preflight]

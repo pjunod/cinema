@@ -1754,6 +1754,7 @@ assert.equal(context.ACT_TIMER, null);
                 "Lint the workspace",
                 "Run the fast Rust unit and SQLite contract lane",
                 "Enforce persistent Cargo bounds",
+                "Restore persistent runner workspace ownership",
             ],
         )
         self.assertIn("container: ubuntu:24.04", fast_jobs["rust_compile"])
