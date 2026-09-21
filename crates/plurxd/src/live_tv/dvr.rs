@@ -750,24 +750,22 @@ impl LiveTvManager {
         if rules.is_empty() || !live_tv.guide_fetches() {
             return Ok(());
         }
-        let guide = self
-            .local_guide(
-                live_tv,
-                GuideWindow {
-                    start: now,
-                    end: now + DVR_SCHEDULE_DAYS_MAX * 86_400,
-                },
-            )
-            .await;
+        let Some(guide) = self.local_guide_view(live_tv).await else {
+            return Ok(());
+        };
+        let window = GuideWindow {
+            start: now,
+            end: now + DVR_SCHEDULE_DAYS_MAX * 86_400,
+        };
         let lineup = self.cached_lineup(live_tv).await;
         let at_ms = now.saturating_mul(1000);
-        for channel in &guide.channels {
+        for channel in &guide.guide.channels {
             let name = lineup
                 .iter()
                 .find(|entry| entry.id == channel.id)
                 .map(|entry| entry.guide_name.clone())
                 .unwrap_or_else(|| channel.guide_number.clone());
-            for programme in &channel.programmes {
+            for programme in channel.programmes_in(&window) {
                 if programme.start <= now {
                     continue;
                 }
@@ -845,16 +843,14 @@ impl LiveTvManager {
         // would withdraw every rule row and, worse, mark every manual row
         // `stale`, from which nothing brings it back. A settings save would
         // have silently killed every recording a person had asked for.
+        let window = GuideWindow {
+            start: now - 3600,
+            end: now + DVR_SCHEDULE_DAYS_MAX * 86_400,
+        };
         let guide = if live_tv.guide_fetches() {
-            self.local_guide(
-                live_tv,
-                GuideWindow {
-                    start: now - 3600,
-                    end: now + DVR_SCHEDULE_DAYS_MAX * 86_400,
-                },
-            )
-            .await
-            .into_some_if_populated()
+            self.local_guide_view(live_tv)
+                .await
+                .filter(|view| !view.guide.channels.is_empty())
         } else {
             None
         };
@@ -862,9 +858,9 @@ impl LiveTvManager {
         for row in rows {
             // Does the guide still carry this exact airing, under this title?
             let still_listed = guide.as_ref().map(|guide| {
-                guide.channels.iter().any(|channel| {
+                guide.guide.channels.iter().any(|channel| {
                     channel.id == row.channel_id
-                        && channel.programmes.iter().any(|programme| {
+                        && channel.programmes_in(&window).iter().any(|programme| {
                             programme.start == row.airing_start && programme.title == row.title
                         })
                 })
@@ -2280,16 +2276,10 @@ async fn reminder_tick(
     if armed.is_empty() {
         return Ok(());
     }
-    let guide = manager
-        .local_guide(
-            &live_tv,
-            GuideWindow {
-                start: now,
-                end: now + DVR_SCHEDULE_DAYS_MAX * 86_400,
-            },
-        )
-        .await;
-    if guide.channels.is_empty() {
+    let Some(guide) = manager.local_guide_view(&live_tv).await else {
+        return Ok(());
+    };
+    if guide.guide.channels.is_empty() {
         // No guide is not evidence that a programme moved.
         return Ok(());
     }
@@ -2325,9 +2315,13 @@ async fn reminder_tick(
     }
 
     for reminder in armed {
-        let listed = guide.channels.iter().any(|channel| {
+        let window = GuideWindow {
+            start: now,
+            end: now + DVR_SCHEDULE_DAYS_MAX * 86_400,
+        };
+        let listed = guide.guide.channels.iter().any(|channel| {
             channel.id == reminder.channel_id
-                && channel.programmes.iter().any(|programme| {
+                && channel.programmes_in(&window).iter().any(|programme| {
                     programme.start == reminder.airing_start && programme.title == reminder.title
                 })
         });

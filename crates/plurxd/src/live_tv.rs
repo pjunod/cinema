@@ -52,6 +52,7 @@ pub(crate) const DRAIN_PATH: &str = "/_internal/v1/live-tv/drain";
 pub(crate) const GUIDE_PATH: &str = "/_internal/v1/live-tv/guide";
 pub(crate) const MAX_INTERNAL_BODY_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
+const _: () = assert!(MAX_SNAPSHOT_BYTES == guide::MAX_GUIDE_RESPONSE_BYTES);
 const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_CHANNELS: usize = 512;
 const MAX_GUIDE_NUMBER_BYTES: usize = 32;
@@ -2004,7 +2005,16 @@ struct CachedGuide {
     /// rather than silently reporting as fresh.
     age_offset: Duration,
     fetched_at: i64,
-    guide: LiveTvGuide,
+    guide: Arc<LiveTvGuide>,
+}
+
+/// One immutable owner-side guide snapshot. Refresh replaces the cached
+/// `Arc`; a scheduler tick that already cloned it keeps a consistent view.
+pub(crate) struct GuideView {
+    pub(crate) guide: Arc<LiveTvGuide>,
+    pub(crate) fetched_at: i64,
+    pub(crate) age: Duration,
+    pub(crate) freshness: GuideFreshness,
 }
 
 impl CachedGuide {
@@ -2091,7 +2101,7 @@ impl GuideCache {
                 return None;
             }
         };
-        let persisted: PersistedGuide = match serde_json::from_slice(&bytes) {
+        let mut persisted: PersistedGuide = match serde_json::from_slice(&bytes) {
             Ok(persisted) => persisted,
             Err(error) => {
                 tracing::warn!(
@@ -2109,6 +2119,12 @@ impl GuideCache {
                 "ignoring a persisted programme guide written by another version"
             );
             return None;
+        }
+        if guide::normalise_guide_programmes(&mut persisted.guide) {
+            tracing::warn!(
+                path = %path.display(),
+                "normalised unsorted programmes in the persisted guide cache"
+            );
         }
         // Clamped: a clock step at boot must not discard a good copy, and must
         // not make one look like it came from the future.
@@ -2134,7 +2150,7 @@ impl GuideCache {
             observed,
             age_offset,
             fetched_at: persisted.fetched_at,
-            guide: persisted.guide,
+            guide: Arc::new(persisted.guide),
         })
     }
 
@@ -2149,7 +2165,7 @@ impl GuideCache {
             version: PERSISTED_GUIDE_VERSION,
             generation: cached.generation,
             fetched_at: cached.fetched_at,
-            guide: cached.guide.clone(),
+            guide: (*cached.guide).clone(),
         };
         let gate = Arc::clone(&self.persist_gate);
         let discard_epoch = Arc::clone(&self.discard_epoch);
@@ -2275,24 +2291,28 @@ impl GuideCache {
             return guide;
         };
         let age = cached.age_at(now);
-        let mut guide = cached.guide.clipped(&window);
+        let cached_guide = Arc::clone(&cached.guide);
+        let fetched_at = cached.fetched_at;
+        let refresh_error = state.error_for(config.generation);
+        let next_refresh_at = state.next_refresh_at;
+        drop(state);
+        let mut guide = cached_guide.clipped(&window);
         guide.age_seconds = age.as_secs();
-        guide.fetched_at = Some(cached.fetched_at);
+        guide.fetched_at = Some(fetched_at);
         guide.freshness = if age <= guide::GUIDE_REFRESH_INTERVAL {
             GuideFreshness::Fresh
         } else {
             GuideFreshness::Stale
         };
-        guide.refresh_error = state.error_for(config.generation);
-        guide.next_refresh_at = state.next_refresh_at;
+        guide.refresh_error = refresh_error;
+        guide.next_refresh_at = next_refresh_at;
         guide
     }
 
-    /// The owner's own copy, unclipped and without the serving dressing — what
-    /// the DVR scheduler matches rules against, and what an incremental
-    /// refresh extends rather than refetching. `None` when nothing usable is
-    /// cached for this generation.
-    async fn owner_copy(&self, generation: i64) -> Option<LiveTvGuide> {
+    /// The owner's full cached guide for this generation, never response-
+    /// clipped and shared by reference. A refresh swaps the `Arc` rather than
+    /// mutating a snapshot already held by a scheduler tick.
+    async fn view(&self, generation: i64) -> Option<GuideView> {
         let state = self.state.lock().await;
         let now = tokio::time::Instant::now();
         state
@@ -2300,7 +2320,29 @@ impl GuideCache {
             .as_ref()
             .filter(|cached| cached.generation == generation)
             .filter(|cached| cached.age_at(now) <= guide::GUIDE_STALE_TTL)
-            .map(|cached| cached.guide.clone())
+            .map(|cached| {
+                let age = cached.age_at(now);
+                GuideView {
+                    guide: Arc::clone(&cached.guide),
+                    fetched_at: cached.fetched_at,
+                    age,
+                    freshness: if age <= guide::GUIDE_REFRESH_INTERVAL {
+                        GuideFreshness::Fresh
+                    } else {
+                        GuideFreshness::Stale
+                    },
+                }
+            })
+    }
+
+    /// The owner's own copy, unclipped and without the serving dressing — what
+    /// the DVR scheduler matches rules against, and what an incremental
+    /// refresh extends rather than refetching. `None` when nothing usable is
+    /// cached for this generation.
+    async fn owner_copy(&self, generation: i64) -> Option<LiveTvGuide> {
+        self.view(generation)
+            .await
+            .map(|view| (*view.guide).clone())
     }
 
     /// A completed refresh. A failure keeps the previous cache and records the
@@ -2319,12 +2361,19 @@ impl GuideCache {
             state.published_sequence = sequence;
             match result {
                 Ok(guide) => {
+                    let mut guide = guide.clone();
+                    if guide::normalise_guide_programmes(&mut guide) {
+                        tracing::warn!(
+                            generation,
+                            "normalised unsorted programmes before caching the guide"
+                        );
+                    }
                     let cached = CachedGuide {
                         generation,
                         observed: tokio::time::Instant::now(),
                         age_offset: Duration::ZERO,
                         fetched_at: unix_seconds(),
-                        guide: guide.clone(),
+                        guide: Arc::new(guide),
                     };
                     state.cached = Some(cached.clone());
                     state.last_error = None;
@@ -3985,6 +4034,24 @@ impl LiveTvManager {
             return LiveTvGuide::unavailable(config.guide_source, window, None);
         }
         self.guide_cache.read(config, window).await
+    }
+
+    /// The owner's immutable full guide for internal scheduling. This never
+    /// fetches and never applies an HTTP response byte cap.
+    pub(crate) async fn local_guide_view(&self, config: &LiveTvConfig) -> Option<GuideView> {
+        if config.owner_node_id != self.node_id || config.guide_source == GuideSource::Off {
+            return None;
+        }
+        let view = self.guide_cache.view(config.generation).await;
+        if let Some(view) = view.as_ref() {
+            tracing::trace!(
+                fetched_at = view.fetched_at,
+                age_seconds = view.age.as_secs(),
+                freshness = ?view.freshness,
+                "using the full owner-side guide view"
+            );
+        }
+        view
     }
 
     /// Run one refresh now. Manual and background work share one admission
@@ -10904,6 +10971,71 @@ Output #0, hls, to 'index.m3u8':
             .collect::<Vec<_>>();
         assert_eq!(spans, vec![(1800, 3600), (3600, 5400)]);
         assert_eq!(clipped.window.start, 1800);
+    }
+
+    #[test]
+    fn programmes_in_matches_the_linear_window_predicate() {
+        let guide = guide_with(1, 48, 8);
+        let channel = &guide.channels[0];
+        for start in (-900..=90_000).step_by(733) {
+            let window = GuideWindow {
+                start,
+                end: start + 7_777,
+            };
+            let expected = channel
+                .programmes
+                .iter()
+                .filter(|programme| programme.end > window.start && programme.start < window.end)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(channel.programmes_in(&window), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refresh_replaces_the_guide_arc_without_changing_a_held_view() {
+        let cache = GuideCache::default();
+        let mut first = guide_with(1, 2, 8);
+        first.channels[0].programmes[0].title = "old snapshot".to_owned();
+        cache.store(4, 1, &Ok(first)).await;
+        let held = cache.view(4).await.expect("first guide view");
+
+        let mut replacement = guide_with(1, 2, 8);
+        replacement.channels[0].programmes[0].title = "new snapshot".to_owned();
+        cache.store(4, 2, &Ok(replacement)).await;
+        let current = cache.view(4).await.expect("replacement guide view");
+
+        assert!(!Arc::ptr_eq(&held.guide, &current.guide));
+        assert_eq!(held.guide.channels[0].programmes[0].title, "old snapshot");
+        assert_eq!(
+            current.guide.channels[0].programmes[0].title,
+            "new snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn guide_adoption_repairs_unsorted_programmes_before_binary_search() {
+        let cache = GuideCache::default();
+        let mut guide = guide_with(1, 3, 8);
+        guide.channels[0].programmes.swap(0, 2);
+        cache.store(4, 1, &Ok(guide)).await;
+
+        let view = cache.view(4).await.expect("normalised guide");
+        let starts = view.guide.channels[0]
+            .programmes
+            .iter()
+            .map(|programme| programme.start)
+            .collect::<Vec<_>>();
+        assert_eq!(starts, vec![0, 1800, 3600]);
+        assert_eq!(
+            view.guide.channels[0]
+                .programmes_in(&GuideWindow {
+                    start: 1700,
+                    end: 3700,
+                })
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]
