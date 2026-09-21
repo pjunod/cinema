@@ -58,7 +58,8 @@ function classicHomeBody(p){
   } else {
     previews+=`<div class="empty">No libraries yet.${ME.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':''}</div>`;
   }
-  return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
+  return opticalHomeHtml(p)+
+    `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
     `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
     `<div data-home-region="previews" data-home-slot="previews">${previews}</div>`;
 }

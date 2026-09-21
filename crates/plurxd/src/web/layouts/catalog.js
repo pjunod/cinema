@@ -197,10 +197,13 @@ function catalogFocusSearch(e){
 // the difference is what a screen reader announces.
 function catalogTabsHtml(active, homeOn){
   const on=b=>b?' class="px-tab on" aria-current="page"':' class="px-tab"';
+  const discs=typeof opticalNavEnabled==="function"&&opticalNavEnabled()
+    ? `<a href="#/discs" data-tab="discs"${on(active==="discs")}>${catalogIcon("film")}<span>Discs</span></a>`:"";
   return `<nav class="px-tabs" aria-label="Sections">
     <a href="#/" data-tab="home"${on(homeOn)}>${catalogIcon("home")}<span>Home</span></a>
     <a href="#/library-channels" data-tab="library-channels"${on(active==="library-channels")}>${catalogIcon("film")}<span>Channels</span></a>
     <a href="#/recordings" data-tab="recordings"${on(active==="recordings")}>${catalogIcon("act")}<span>Recordings</span></a>
+    ${discs}
     <button type="button" data-tab="libs" class="px-tab" aria-expanded="false" aria-controls="pxnav" onclick="catalogToggleLibs(event)">${catalogIcon("stack")}<span>Libraries</span></button>
     <button type="button" data-tab="search" class="px-tab" onclick="catalogFocusSearch(event)">${catalogIcon("search")}<span>Search</span></button>
     <a href="#/activity" data-tab="activity"${on(active==="activity")}>${catalogIcon("act")}<span>Activity</span></a>
@@ -230,6 +233,8 @@ function catalogChrome(active, inner){
     ? `<a href="#/settings" class="${active==="settings"?"on":""}"${active==="settings"?' aria-current="page"':""}>`
       +catalogIcon("gear")+`<span class="px-lbl">Settings</span></a>`
     : "";
+  const discs=typeof opticalNavEnabled==="function"&&opticalNavEnabled()
+    ? `<a href="#/discs" class="${active==="discs"?"on":""}"${active==="discs"?' aria-current="page"':""}>${catalogIcon("film")}<span class="px-lbl">Discs</span></a>`:"";
   // ${APP_NAME}, never the literal product name — the shipped header's title
   // attribute still says "plurx" here; that is a bug this layout does not copy.
   const getapp = installAvailable()
@@ -248,6 +253,7 @@ function catalogChrome(active, inner){
            <a href="#/live-tv" class="${active==="live-tv"?"on":""}"${active==="live-tv"?' aria-current="page"':""}>${catalogIcon("tv")}<span class="px-lbl">Live TV</span></a>
            <a href="#/recordings" class="${active==="recordings"?"on":""}"${active==="recordings"?' aria-current="page"':""}>${catalogIcon("act")}<span class="px-lbl">Recordings</span></a>
            <a href="#/library-channels" class="${active==="library-channels"?"on":""}"${active==="library-channels"?' aria-current="page"':""}>${catalogIcon("film")}<span class="px-lbl">Library channels</span></a>
+           ${discs}
          </nav>
          <div id="pxlibs"></div>
          <div class="px-sec">Manage</div>
@@ -342,7 +348,8 @@ function catalogHomeBody(p){
   }else{
     previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':""}</div>`;
   }
-  return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
+  return opticalHomeHtml(p)+
+    `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
     `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
     `<div data-home-region="previews" data-home-slot="previews">${previews}</div>`;
 }
@@ -668,4 +675,3 @@ LAYOUTS.catalog.views.item = catalogItemBody;
 LAYOUTS.catalog.views.library = {shell:catalogLibraryShell};
 LAYOUTS.catalog.stickyFloor = catalogStickyFloor;
 LAYOUTS.catalog.libsChanged = catalogLibsChanged;
-

@@ -206,7 +206,7 @@ function fallBackDirectedChange(p,change,why){
   // genuinely being reopened at a position, which is exactly what it is for,
   // and the change is already settled so nothing re-enters.
   beginPlaybackControlSeek(p,pos);
-  play(p.fileId,p.title||"",Math.round(pos*1000),p.knownDur||0,p.meta);
+  play(playbackInputForPlayer(p),p.title||"",Math.round(pos*1000),p.knownDur||0,p.meta);
   return true;
 }
 // A directed change that ended without a reopen: the successor took the
@@ -537,6 +537,25 @@ async function openSession(fileId, opts, signal=null, requestId=null){
   // A null height is the *absence* of a request, not a request for nothing:
   // sending the key would have the server clamp null to its floor.
   if(body.height==null) delete body.height;
+  if(playbackInputIsOptical(fileId)){
+    // The optical parser is deliberately deny_unknown_fields. Carry only the
+    // established title-session envelope, not file-only copy/transport hints.
+    const opticalBody={
+      expected_disc_id:fileId.disc_id,
+      media_generation:fileId.media_generation,
+      angle:fileId.angle,
+      playback_id:body.playback_id,
+      request_id:body.request_id,
+      start:Number(body.start)||0,
+      height:body.height==null?null:Number(body.height),
+      audio:body.audio==null?null:Number(body.audio),
+      subtitle_burn:body.subtitle_burn==null?null:Number(body.subtitle_burn),
+      audio_offset_ms:body.audio_offset_ms==null?null:Number(body.audio_offset_ms),
+      block_budget_secs:body.block_budget_secs==null?null:Number(body.block_budget_secs),
+      caps
+    };
+    return api(opticalSessionPath(fileId),{method:"POST",body:opticalBody,signal});
+  }
   const following=PLAYER&&PLAYER.libraryChannel;
   if(following){
     const result=await api(`/library-channels/${encodeURIComponent(following.channel_id)}/sessions`,{
@@ -762,4 +781,3 @@ function releaseSession(sessionId){
       headers:TOKEN?{"authorization":"Bearer "+TOKEN}:{}}).catch(()=>{});
   }catch(e){}
 }
-

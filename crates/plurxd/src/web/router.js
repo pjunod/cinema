@@ -6,6 +6,7 @@ function pagePhaseName(route){
   if(route==="#/live-tv") return "live-tv";
   if(route.startsWith("#/recordings")) return "recordings";
   if(route==="#/library-channels") return "library-channels";
+  if(route.startsWith("#/discs")) return "discs";
   if(route==="#/activity") return "activity";
   if(route==="#/analysis") return "analysis";
   if(isSettingsRoute(route)) return "settings";
@@ -96,6 +97,11 @@ async function render(){
     else if(h==="#/live-tv") await viewLiveTv(generation);
     else if(h.startsWith("#/recordings")) await viewRecordings(generation);
     else if(h==="#/library-channels") await viewLibraryChannels(generation);
+    else if(h==="#/discs") await viewDiscs(generation);
+    else if(h.startsWith("#/discs/")){
+      const parts=h.slice("#/discs/".length).split("/");
+      await viewDisc(decodeURIComponent(parts[0]||""),parts[1]?decodeURIComponent(parts[1]):null,generation);
+    }
     else if(h==="#/analysis") await viewAnalysis(generation);
     else if(isSettingsRoute(h)) await viewSettings(generation,!stayingInSettings);
     else await viewHome(generation);

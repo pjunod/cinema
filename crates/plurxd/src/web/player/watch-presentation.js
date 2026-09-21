@@ -39,7 +39,8 @@ function watchPrepare(fileId,meta){
   return ticket;
 }
 function watchAccept(ticket,owner){
-  if(!ticket||WATCH!==ticket.watch||WATCH.generation!==ticket.generation||PLAYER!==owner||String(owner.fileId)!==String(ticket.fileId))return;
+  if(!ticket||WATCH!==ticket.watch||WATCH.generation!==ticket.generation||PLAYER!==owner
+    ||!playbackInputSame(playbackInputForPlayer(owner),ticket.fileId))return;
   if(ticket.page){
     WATCH.page=ticket.page;
     WATCH.accepted=exactWireId(ticket.page.item);

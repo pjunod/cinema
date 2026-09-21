@@ -75,7 +75,7 @@ function playbackChangeRecipeKey(p,targetSec,change){
   if(!p) return null;
   const c=change||{};
   return JSON.stringify([
-    p.fileId,
+    p.mediaKey||playbackInputKey(playbackInputForPlayer(p)),
     Math.max(0,Math.round(Number(targetSec||0)*1000)),
     c.method===undefined?(p.method||null):(c.method||null),
     c.copyHls===undefined?!!p.copyHls:!!c.copyHls,
@@ -334,13 +334,13 @@ function pbSyncPlayIcon(){ const v=document.getElementById("video"), b=document.
 // session, control generation, and sequence space before the first frame.
 function replayEnded(){
   const p=PLAYER;
-  if(!p||!p.fileId) return false;
+  if(!p||!playbackInputPresent(p)) return false;
   const openAttempt=PLAY_OPEN_GATE.begin("replay");
   if(!openAttempt) return false;
   p.wantsPlayback=true;
   PENDING_ATTEMPT_REASON="replay";
   const opening=Promise.resolve(
-    play(p.fileId,p.title||"",0,p.knownDur||p.durMs||0,p.meta,openAttempt));
+    play(playbackInputForPlayer(p),p.title||"",0,p.knownDur||p.durMs||0,p.meta,openAttempt));
   opening.catch(()=>{}).finally(()=>{
     PLAY_OPEN_GATE.finish(openAttempt);
   });

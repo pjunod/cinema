@@ -15,7 +15,7 @@ function syncMenuHtml(){
 }
 function nudgeSync(d){ setSync((PLAYER.aoffset||0)+d); }
 async function setSync(v){
-  const me=PLAYER; if(!me||!me.fileId) return;
+  const me=PLAYER; if(!me||!playbackInputPresent(me)) return;
   PLAYER.aoffset=Math.max(-15000,Math.min(15000,Math.round(v)));
   const m=document.getElementById("pmenu");
   if(m&&m.classList.contains("on")&&m.dataset.kind==="settings") refreshPlayerSettingsMenu();
@@ -36,7 +36,7 @@ async function setSync(v){
   // a new audio offset. Rebuild the decision while preserving this intent.
   beginPlaybackControlSeek(me,pos);
   PENDING_ATTEMPT_REASON="audio-sync";
-  play(me.fileId,me.title||"",Math.round(pos*1000),me.knownDur||0,me.meta);
+  play(playbackInputForPlayer(me),me.title||"",Math.round(pos*1000),me.knownDur||0,me.meta);
 }
 // Subtitles. The VTT the server extracts carries the file's own timestamps. A
 // stream that starts at an offset (a transcode, a copy-HLS session, a resumed
@@ -197,7 +197,7 @@ async function burnSub(index){
     PENDING_ATTEMPT_REASON="subtitle-off";
     PENDING_DEFAULT_SUB_OFF=true;
     toast("Subtitles off");
-    play(me.fileId, me.title||"", Math.round(pos*1000), me.knownDur||0, me.meta);
+    play(playbackInputForPlayer(me), me.title||"", Math.round(pos*1000), me.knownDur||0, me.meta);
     return;
   }
   me.curSub=index;
@@ -244,4 +244,3 @@ async function switchAudio(idx){
     copyHls:!!me.copyHls,reason:"audio"});
   if(attached) toast("Audio: "+(langName(track&&track.language)||("Track "+(idx+1))));
 }
-

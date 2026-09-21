@@ -10,7 +10,7 @@
 let PREPLAY={};
 // Replaced, never mutated: prePlayPreview() compares identity after its await
 // to notice that a later change superseded the answer it is holding.
-function prePlaySelection(fileId){ return PREPLAY[fileId]||null; }
+function prePlaySelection(fileId){ return PREPLAY[playbackInputKey(fileId)]||null; }
 function clearPrePlay(){ PREPLAY={}; }
 // Which selection a play() call runs with. An internal reopen — a quality
 // change, a subtitles-off restart — is still THIS playback, and it keeps the
@@ -26,7 +26,7 @@ function clearPrePlay(){ PREPLAY={}; }
 // for the rest of the session. The carry belongs to an open playback, not to
 // the file.
 function playbackSelection(player, fileId){
-  return (player&&player.fileId===fileId&&player.preplay)
+  return (player&&playbackInputSame(playbackInputForPlayer(player),fileId)&&player.preplay)
     ? player.preplay : prePlaySelection(fileId);
 }
 function prePlaySelectionQuery(sel){
@@ -54,6 +54,19 @@ function decisionUrl(fileId, force, sel){
 async function askDecision(fileId, force, sel, signal=null){
   const query=`force=${force}${prePlaySelectionQuery(sel)}`;
   const caps=currentCapsDocument();
+  if(playbackInputIsOptical(fileId)){
+    const decision=await api(opticalDecisionPath(fileId),{method:"POST",signal,body:{
+      expected_disc_id:fileId.disc_id,
+      media_generation:fileId.media_generation,
+      angle:fileId.angle,
+      caps,
+      force,
+      audio:sel&&sel.audio!=null?sel.audio:null,
+      subtitle:sel&&sel.subtitle!=null?sel.subtitle:null
+    }});
+    Object.defineProperty(decision,"_capsSnapshot",{value:caps,enumerable:false});
+    return decision;
+  }
   try{
     const decision=await api(`/files/${fileId}/decision?${query}`,
       {method:"POST", body:{caps},signal});
@@ -78,10 +91,11 @@ async function askDecision(fileId, force, sel, signal=null){
 // that is what stops an untouched picker from turning a direct play into a
 // remux for no reason.
 function setPrePlay(fileId, kind, raw){
-  const cur=PREPLAY[fileId]||{audio:null,subtitle:null};
+  const key=playbackInputKey(fileId);
+  const cur=PREPLAY[key]||{audio:null,subtitle:null};
   const next=Object.assign({},cur);
   next[kind] = raw===""||raw==null ? null : Number(raw);
-  PREPLAY[fileId] = (next.audio==null&&next.subtitle==null) ? null : next;
+  PREPLAY[key] = (next.audio==null&&next.subtitle==null) ? null : next;
   prePlayPreview(fileId);
 }
 function prePlayPickers(f){
@@ -740,4 +754,3 @@ function classicItemBody(p){
         ${body}</div>
     </div></div>`;
 }
-

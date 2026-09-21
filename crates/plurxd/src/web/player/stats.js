@@ -462,7 +462,9 @@ async function pollSessionHealth(force){
 setInterval(()=>{ pollSessionHealth().catch(()=>{}); }, 2000);
 async function reportProgress(fileId, ended, attachedOwner){
   const p=attachedOwner||PLAYER;
-  if(!p||p.fileId!==fileId||(!attachedOwner&&!playbackOwnsAttachedMedia(p)))return;
+  const activeInput=playbackInputForPlayer(p);
+  if(!p||!playbackInputSame(activeInput,fileId)
+    ||(!attachedOwner&&!playbackOwnsAttachedMedia(p)))return;
   if(p.libraryChannel)return;
   const video=document.getElementById("video");
   const posMs=Math.round((p.bookOffset||0)+((p.offset||0)+ (video.currentTime||0))*1000);
@@ -475,6 +477,25 @@ async function reportProgress(fileId, ended, attachedOwner){
   const durMs = p.bookDuration || p.knownDur
     || ((p.method==='direct_play' && video.duration && isFinite(video.duration))
         ? Math.round(video.duration*1000) : null);
+  if(playbackInputIsOptical(activeInput)){
+    if(!p.sessionId) return;
+    const audio=p.audio&&p.audio[p.curAudio];
+    const subtitle=(p.subs||[]).find(track=>track.index===p.curSub);
+    try{
+      await api(opticalProgressPath(activeInput),{method:"POST",body:{
+        drive_id:opticalRouteDrive(activeInput),
+        media_generation:activeInput.media_generation,
+        session_id:p.sessionId,
+        angle:activeInput.angle,
+        position_ms:ended?(durMs||posMs):posMs,
+        duration_ms:durMs,
+        audio:audio?{index:audio.index}:null,
+        subtitle:subtitle?{index:subtitle.index,burned:p.burnedSub===subtitle.index}:null,
+        recorded_at_ms:Date.now()
+      }});
+    }catch(e){}
+    return;
+  }
   if(!ITEM_FOR_FILE[fileId]) return;
   try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs}}); }catch(e){}
 }
@@ -491,7 +512,9 @@ function closePlayer(options={}){
   PLAY_OPEN_GATE.invalidate();
   const progressPlayer=play.pendingIntent?play.pendingIntent.predecessor:
     play.failedPreparation?play.failedPreparation.predecessor:(PLAYER?.mediaPredecessor||PLAYER);
-  const finalProgress=progressPlayer?.fileId?reportProgress(progressPlayer.fileId,false,progressPlayer):Promise.resolve();
+  const progressInput=playbackInputForPlayer(progressPlayer);
+  const finalProgress=progressInput!=null
+    ?reportProgress(progressInput,false,progressPlayer):Promise.resolve();
   if(PLAYER&&PLAYER.libraryChannel&&!PLAYER.libraryChannelReplacing){
     LIBRARY_CHANNEL_RETURN={channelId:PLAYER.libraryChannel.channel_id};
     LIBRARY_CHANNEL_TUNE.stop();
@@ -532,7 +555,15 @@ function closePlayer(options={}){
   const closingSessionId=PLAYER&&PLAYER.sessionId;
   if(PLAYER&&PLAYER.hls) teardownHls();
   if(PLAYER) PLAYER.sessionId=null;
-  if(closingSessionId) releaseSession(closingSessionId);
+  if(closingSessionId){
+    if(playbackInputIsOptical(progressInput)){
+      // Optical progress is session-authorized. Give its terminal write a
+      // short head start before releasing the drive lease; the bound keeps a
+      // failed network request from holding the physical reader indefinitely.
+      Promise.race([Promise.resolve(finalProgress),new Promise(resolve=>setTimeout(resolve,1500))])
+        .finally(()=>releaseSession(closingSessionId));
+    }else releaseSession(closingSessionId);
+  }
   // Disarm the pending seek as well as clearing it: a skip's self-commit is a
   // timer, and PLAYER survives the close, so an armed one would have fired
   // seekTo on a player the viewer had already left.
@@ -761,4 +792,3 @@ document.getElementById("player").addEventListener("focusin",e=>{
 // player-input-adapter:end
 // map fileId → itemId, filled by viewItem so progress posts to the right item
 const ITEM_FOR_FILE={};
-

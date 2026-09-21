@@ -138,12 +138,12 @@ function forgetDecodeLimitHere(){
   closeMenu();
   if(!had){ toast("Nothing measured for this stream"); return; }
   toast("Forgotten — measuring this stream again");
-  if(qualityForce()==='auto' && p.fileId){
+  if(qualityForce()==='auto' && playbackInputPresent(p)){
     PENDING_ATTEMPT_REASON="decode-limit-cleared";
     const v=document.getElementById("video");
     const pos=positionForPlaybackIntent(v,p);
     beginPlaybackControlSeek(p,pos);
-    play(p.fileId, p.title||"", Math.round(pos*1000), p.knownDur||0, p.meta);
+    play(playbackInputForPlayer(p), p.title||"", Math.round(pos*1000), p.knownDur||0, p.meta);
   }
 }
 function decodeLimitFor(src){ const k=decodeLimitKey(src); return k? (decodeLimits()[k]||null) : null; }
@@ -516,9 +516,8 @@ function armPlaybackSampling(v,p){
   clearInterval(p.timer);
   p.timer=setInterval(()=>{
     if(!playbackOwnsAttachedMedia(p)) return;
-    reportProgress(p.fileId); reportHitches(); maybeDecodeRescue();
+    reportProgress(playbackInputForPlayer(p)); reportHitches(); maybeDecodeRescue();
     autoControllerTick().catch(()=>{}); refreshSegTimes(); libraryChannelTick();
   }, PlaybackPolicy.AUTO_DEFAULTS.sampleMs);
   p.samplingStopped=false;
 }
-

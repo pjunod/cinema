@@ -604,6 +604,7 @@ function qualityLabel(){
 }
 
 async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt, retryIntent){
+  fileId=playbackInput(fileId);
   WATCH_CLOSE_PROMISE=null;
   // Live TV holds a physical tuner and, since the dock, keeps holding it on
   // every other route. Starting a film used to be the moment it was released
@@ -623,7 +624,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     if(!openIsCurrent()) return;
     preparation.finish();
     const wanted=PLAYER;
-    const latest=wanted?.fileId===fileId;
+    const latest=playbackInputSame(playbackInputForPlayer(wanted),fileId);
     const retry={fileId,title,knownDurMs,meta,predecessor,
       resumeMs:latest&&wanted.controlSeek?Math.round(wanted.controlSeek.targetMs):resumeMs,
       wantsPlayback:fullIntent.wantsPlayback,
@@ -633,7 +634,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     if(play.pendingIntent===fullIntent)play.pendingIntent=null;
     if(predecessor){
       PLAYER=predecessor;
-      if(latest&&predecessor.fileId===fileId){
+      if(latest&&playbackInputSame(playbackInputForPlayer(predecessor),fileId)){
         const audio=selectedAudioIndex(wanted);
         Object.assign(predecessor,{wantsPlayback:wanted.wantsPlayback,
           controlSeek:wanted.controlSeek,controlSeekSequence:wanted.controlSeekSequence,
@@ -677,7 +678,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     PLAYER.retiringOpenAttempt=openAttempt;
   }
   if(predecessor)predecessor.retiringOpenAttempt=openAttempt;
-  const inputPlayer=PLAYER&&PLAYER.fileId===fileId
+  const inputPlayer=PLAYER&&playbackInputSame(playbackInputForPlayer(PLAYER),fileId)
     &&document.getElementById("modal")?.classList.contains("open")?PLAYER:null;
   if(inputPlayer){
     rememberPlaybackTransportIntent(document.getElementById("video"),inputPlayer);
@@ -698,13 +699,13 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   // keeps its correction. A different title, or a player that was closed,
   // starts clean at zero.
   const sessionAudioOffset=retryIntent?.audioOffsetMs??
-    (PLAYER&&PLAYER.fileId===fileId ? (PLAYER.aoffset||0) : 0);
-  const replacementBandwidthSeed=PLAYER&&PLAYER.fileId===fileId
+    (PLAYER&&playbackInputSame(playbackInputForPlayer(PLAYER),fileId) ? (PLAYER.aoffset||0) : 0);
+  const replacementBandwidthSeed=PLAYER&&playbackInputSame(playbackInputForPlayer(PLAYER),fileId)
     ? PlaybackPolicy.bandwidthSeedBps({
         outgoingEstimateBps:PLAYER.hls&&PLAYER.hls.bandwidthEstimate,
         priorKbps:PLAYER.priorKbps})
     : null;
-  const continuingPlayback=!!(PLAYER&&PLAYER.fileId===fileId);
+  const continuingPlayback=!!(PLAYER&&playbackInputSame(playbackInputForPlayer(PLAYER),fileId));
   const replacementControlSeek=continuingPlayback&&PLAYER.controlSeek
     ? Object.assign({},PLAYER.controlSeek,{executed:false,frameFloor:0,audioPositionMs:null})
     : null;
@@ -830,7 +831,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   // `PLAYER.burnedSub`.
   const applied=prePlayApplication(decision, selection);
   const wantSub=applied.subtitle, preBurn=applied.burnedSub;
-  PLAYER={fileId, timer:null, offset:0, hls:null, knownDur:knownDurMs||0,
+  PLAYER={fileId:playbackInputFileId(fileId), playbackSource:fileId,
+    mediaKey:playbackInputKey(fileId), timer:null, offset:0, hls:null, knownDur:knownDurMs||0,
     decodeRetest:retestDecodeLimit,
     durMs:(src.duration_ms||knownDurMs||0), method:decision.method, encoder:null,
     capsSnapshot:decision._capsSnapshot||currentCapsDocument(),
@@ -1106,7 +1108,7 @@ function restartPendingPlaybackOpen(p,reason){
   if(!p||PLAYER!==p||!p.pendingOpenAttempt||!PLAY_OPEN_GATE.current(p.pendingOpenAttempt)) return false;
   PENDING_ATTEMPT_REASON=reason;
   const position=positionForPlaybackIntent(document.getElementById("video"),p);
-  play(p.fileId,p.title||"",Math.round(position*1000),p.knownDur||0,p.meta);
+  play(playbackInputForPlayer(p),p.title||"",Math.round(position*1000),p.knownDur||0,p.meta);
   return true;
 }
 // Desired media is not the media currently attached. Keep the entire pending
@@ -1157,7 +1159,7 @@ async function executePlaybackMediaChange(p,change){
       // point: which context a create is in is decided in ONE place, not by
       // which branch of this function happened to call which function.
       const info=await preparation.run(
-        signal=>openSessionRetryingNotYet(p.fileId,opts,signal,{preparation}),
+        signal=>openSessionRetryingNotYet(playbackInputForPlayer(p),opts,signal,{preparation}),
         late=>releaseSession(late&&late.session_id));
       if(!live()){ releaseSession(info&&info.session_id); return false; }
       retirePlaybackPredecessor(p);

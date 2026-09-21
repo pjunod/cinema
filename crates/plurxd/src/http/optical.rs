@@ -507,6 +507,8 @@ struct DecisionRequest {
     caps: DeviceCaps,
     #[serde(default)]
     force: Option<String>,
+    audio: Option<i64>,
+    subtitle: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -595,7 +597,10 @@ fn optical_source_summary(facts: &PlaybackMediaFacts) -> OpticalSourceSummary {
     }
 }
 
-fn optical_audio_tracks(facts: &PlaybackMediaFacts) -> Vec<OpticalAudioTrack> {
+fn optical_audio_tracks(
+    facts: &PlaybackMediaFacts,
+    selected: Option<i64>,
+) -> Vec<OpticalAudioTrack> {
     facts
         .audio_streams
         .iter()
@@ -606,12 +611,15 @@ fn optical_audio_tracks(facts: &PlaybackMediaFacts) -> Vec<OpticalAudioTrack> {
             channels: track.channels,
             language: track.language.clone(),
             title: track.title.clone(),
-            default: track.default,
+            default: selected.map_or(track.default, |selected| selected == index as i64),
         })
         .collect()
 }
 
-fn optical_subtitle_tracks(facts: &PlaybackMediaFacts) -> Vec<OpticalSubtitleTrack> {
+fn optical_subtitle_tracks(
+    facts: &PlaybackMediaFacts,
+    selected: Option<i64>,
+) -> Vec<OpticalSubtitleTrack> {
     facts
         .subtitle_streams
         .iter()
@@ -621,7 +629,7 @@ fn optical_subtitle_tracks(facts: &PlaybackMediaFacts) -> Vec<OpticalSubtitleTra
             codec: track.codec.clone(),
             language: track.language.clone(),
             title: track.title.clone(),
-            default: track.default,
+            default: selected.map_or(track.default, |selected| selected == index as i64),
             forced: track.forced,
             // Optical subtitles currently travel through the admitted title
             // reader and encoder. Advertising a file sidecar or native HLS
@@ -710,6 +718,17 @@ async fn local_decision(
             "angle is not available for this title".into(),
         ));
     }
+    if request
+        .audio
+        .is_some_and(|index| index < 0 || index as usize >= title.facts.audio_streams.len())
+    {
+        return Err(ApiError::BadRequest("unknown audio track".to_owned()));
+    }
+    if request.subtitle.is_some_and(|index| {
+        index < -1 || (index >= 0 && index as usize >= title.facts.subtitle_streams.len())
+    }) {
+        return Err(ApiError::BadRequest("unknown subtitle track".to_owned()));
+    }
     if request.caps.v != DeviceCaps::VERSION {
         return Err(ApiError::typed(
             StatusCode::BAD_REQUEST,
@@ -734,6 +753,16 @@ async fn local_decision(
         .unwrap_or(Force::Auto);
     let mut plan =
         playback::decide_media_facts_forced(&title.facts, &profile, Force::Transcode, &node);
+    if plan.delivered_dynamic_range != "sdr" {
+        plan.reasons.insert(
+            0,
+            "managed optical VOD currently delivers SDR encoded output".to_owned(),
+        );
+        plan.delivered_dynamic_range = "sdr";
+        plan.delivered_dolby_vision_profile = None;
+        plan.preserve_dolby_vision = false;
+        plan.convert_dolby_vision = false;
+    }
     if requested_force == Force::Original {
         plan.reasons.insert(
             0,
@@ -757,8 +786,9 @@ async fn local_decision(
         drive_id, title_id
     );
     let source_summary = optical_source_summary(&title.facts);
-    let audio = optical_audio_tracks(&title.facts);
-    let subtitles = optical_subtitle_tracks(&title.facts);
+    let audio = optical_audio_tracks(&title.facts, request.audio);
+    let subtitles =
+        optical_subtitle_tracks(&title.facts, request.subtitle.filter(|index| *index >= 0));
     let ladder =
         crate::transcode::advertised_ladder(title.facts.height, title.facts.height.unwrap_or(1080));
     Ok(OpticalDecisionResponse {
@@ -767,7 +797,7 @@ async fn local_decision(
         play_url: sessions_url.clone(),
         delivery: OpticalDeliveryPlan::Transcode {
             sessions_url,
-            audio: None,
+            audio: request.audio,
         },
         source: source_summary,
         audio,
@@ -842,6 +872,51 @@ async fn start_session(
             "angle is not available for this title".to_owned(),
         ));
     }
+    if request
+        .audio
+        .is_some_and(|index| index < 0 || index as usize >= title.facts.audio_streams.len())
+    {
+        return Err(ApiError::BadRequest("unknown audio track".to_owned()));
+    }
+    if request
+        .subtitle_burn
+        .is_some_and(|index| index < 0 || index as usize >= title.facts.subtitle_streams.len())
+    {
+        return Err(ApiError::BadRequest("unknown subtitle track".to_owned()));
+    }
+    if request
+        .audio_offset_ms
+        .is_some_and(|value| value.unsigned_abs() > 15_000)
+    {
+        return Err(ApiError::BadRequest(
+            "audio offset exceeds the supported range".to_owned(),
+        ));
+    }
+    if request
+        .block_budget_secs
+        .is_some_and(|seconds| !seconds.is_finite() || seconds <= 0.0 || seconds > 120.0)
+    {
+        return Err(ApiError::BadRequest(
+            "block budget exceeds the supported range".to_owned(),
+        ));
+    }
+    if title
+        .duration_ms
+        .is_some_and(|duration_ms| request.start * 1000.0 >= duration_ms as f64)
+    {
+        return Err(ApiError::BadRequest(
+            "start is outside the title timeline".to_owned(),
+        ));
+    }
+    let source_height = title.facts.height;
+    let requested_height = request
+        .height
+        .unwrap_or_else(|| source_height.unwrap_or(1080));
+    if !(2..=4320).contains(&requested_height) {
+        return Err(ApiError::BadRequest(
+            "height must be between 2 and 4320".to_owned(),
+        ));
+    }
     let session_id = uuid::Uuid::new_v4().to_string();
     let mut request_hash = Sha256::new();
     request_hash.update(user.id.to_le_bytes());
@@ -862,7 +937,6 @@ async fn start_session(
             &request_digest,
         )
         .map_err(service_error)?;
-    let source_height = title.facts.height;
     if let plurx_core::optical::OpticalTitleClaim::Replay { session_id } = claim {
         let info = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -885,14 +959,6 @@ async fn start_session(
     let plurx_core::optical::OpticalTitleClaim::Claimed(lease) = claim else {
         unreachable!("replay returned above")
     };
-    let requested_height = request
-        .height
-        .unwrap_or_else(|| source_height.unwrap_or(1080));
-    if requested_height < 2 {
-        return Err(ApiError::BadRequest(
-            "height must be at least two".to_owned(),
-        ));
-    }
     let supersession_user = serde_json::json!(["user_id", user.id]).to_string();
     let item_title = state
         .store

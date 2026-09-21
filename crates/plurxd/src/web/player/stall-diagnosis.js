@@ -82,8 +82,9 @@ function releaseAutoFallback(p){ if(p) p.autoFallbackInFlight=false; }
 // this playback as a server transcode (guaranteed-compatible H.264/AAC HLS).
 async function startTranscodeFallback(reason, note){
   const v=document.getElementById("video");
-  if(!PLAYER || !PLAYER.fileId || !v) return;
-  if(play.pendingIntent&&play.pendingIntent.fileId!==PLAYER.fileId
+  if(!PLAYER || !playbackInputPresent(PLAYER) || !v) return;
+  if(play.pendingIntent&&!playbackInputSame(
+       play.pendingIntent.fileId,playbackInputForPlayer(PLAYER))
      &&hasPendingPlaybackOpen(PLAYER)) return false;
   if(hasPendingPlaybackOpen(PLAYER)
      &&reason!=="stall-manual"&&reason!=="stall-terminal") return false;
@@ -451,7 +452,7 @@ function retryPlayback(){
   if(play.failedPreparation){
     const retry=play.failedPreparation;play.failedPreparation=null;
     PENDING_ATTEMPT_REASON="retry";
-    if(PLAYER?.fileId===retry.fileId){
+    if(PLAYER&&playbackInputSame(playbackInputForPlayer(PLAYER),retry.fileId)){
       retry.wantsPlayback=PLAYER.wantsPlayback;
       beginPlaybackControlSeek(PLAYER,retry.resumeMs/1000);
     }
@@ -566,4 +567,3 @@ async function probePlaybackSource(url,headers,evidence){
     })()]);
   }finally{clearTimeout(timer);ctl.abort();}
 }
-

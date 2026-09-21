@@ -73,6 +73,8 @@ function theaterNavItems(active){
                {tab:"recordings", href:"#/recordings", label:"Recordings", on:active==="recordings"},
                {tab:"library-channels", href:"#/library-channels", label:"Library channels", on:active==="library-channels"},
                {tab:"activity", href:"#/activity", label:"Activity", on:active==="activity"}];
+  if(typeof opticalNavEnabled==="function"&&opticalNavEnabled())
+    items.splice(4,0,{tab:"discs",href:"#/discs",label:"Discs",on:active==="discs"});
   // Settings appears for admins only, and nowhere else in the shell — a
   // non-admin sees no Settings anywhere in theater's chrome. (The account
   // popover applies the same test to its own entry.)
@@ -270,7 +272,7 @@ function theaterHomeBody(p){
     previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':""}</div>`;
   }
   return `<div data-home-region="hubs" data-home-slot="hero">${hero}</div>`+
-    `<div class="th-rails"><div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
+    `<div class="th-rails">${opticalHomeHtml(p)}<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
     `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
     `<div data-home-region="previews" data-home-slot="previews">${previews}</div></div>`;
 }
@@ -537,4 +539,3 @@ LAYOUTS.theater={name:"Theater", surfaces:["desktop","mobile","tv"],
 // ui-baseline's REGISTRY_JS both read LAYOUTS, but only the <head> copy runs
 // before first paint.
 applyLayout();
-

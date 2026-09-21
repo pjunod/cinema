@@ -60,6 +60,7 @@ async function viewHome(generation=++PAGE_RENDER_GENERATION){
   const page={kind:"home",
     hubs:{continue_watching:[],next_up:[],recently_added:[]},
     soon:{configured:false,entries:[]},libs:[],group:homeGroup(),sections:[],
+    optical:[],opticalPending:true,opticalError:false,
     hubsPending:true,previewsPending:true,soonPending:true,
     hubsError:false,previewsError:false,soonError:false};
   const current=()=>generation===PAGE_RENDER_GENERATION&&location.hash===route;
@@ -94,6 +95,11 @@ async function viewHome(generation=++PAGE_RENDER_GENERATION){
     commit(name,visible);
   });
   await Promise.allSettled([
+    region("optical",loadOpticalDrives(),value=>{
+      page.optical=value;
+      opticalRememberAvailability(value);
+      return value.some(drive=>drive.disc||drive.state?.state==="inspecting");
+    }),
     region("hubs",api("/hubs"),value=>{
       page.hubs=value;
       return ["continue_watching","next_up","recently_added"].some(key=>(value[key]||[]).length);

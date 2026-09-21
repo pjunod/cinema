@@ -4,8 +4,8 @@
 //! routing, so the server serves the shell at `/` and as a fallback for any
 //! non-API GET path.
 //!
-//! The app is not one file. `index.html` is a 97-line shell of markup and tags;
-//! the CSS and the JavaScript live in the sixty-five files of [`WEB_ASSETS`],
+//! The app is not one file. `index.html` is a 101-line shell of markup and tags;
+//! the CSS and the JavaScript live in the sixty-seven files of [`WEB_ASSETS`],
 //! which is also their load order. There is no bundler and no build step —
 //! `docs/clients/WEB-SHELL-LAYOUT.md` is the map, and adding a file means a row
 //! there, a row here, and a tag in the shell, or the tests below say so.
@@ -54,7 +54,7 @@ pub enum WebAsset {
 ///
 /// `rustfmt::skip` because this is a table: one row per line, columns aligned,
 /// read top to bottom as the load order it is. Left to rustfmt each row
-/// becomes five lines and 65 rows become 325, which hides the one property
+/// becomes five lines and 67 rows become 335, which hides the one property
 /// the table exists to show.
 #[rustfmt::skip]
 pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
@@ -79,6 +79,7 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("detail/helpers.js",                      WebAsset::BodyScript,  include_str!("../web/detail/helpers.js")),
     ("detail/dynamic-range.js",                WebAsset::BodyScript,  include_str!("../web/detail/dynamic-range.js")),
     ("detail/track-facts.js",                  WebAsset::BodyScript,  include_str!("../web/detail/track-facts.js")),
+    ("player/source-adapter.js",               WebAsset::BodyScript,  include_str!("../web/player/source-adapter.js")),
     ("detail/preplay-selection.js",            WebAsset::BodyScript,  include_str!("../web/detail/preplay-selection.js")),
     ("detail/edit.js",                         WebAsset::BodyScript,  include_str!("../web/detail/edit.js")),
     ("player/player.js",                       WebAsset::BodyScript,  include_str!("../web/player/player.js")),
@@ -122,6 +123,7 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("layouts/theater.js",                     WebAsset::BodyScript,  include_str!("../web/layouts/theater.js")),
     ("pages/reader.js",                        WebAsset::BodyScript,  include_str!("../web/pages/reader.js")),
     ("pages/library-channels-page.js",         WebAsset::BodyScript,  include_str!("../web/pages/library-channels-page.js")),
+    ("pages/optical.js",                       WebAsset::BodyScript,  include_str!("../web/pages/optical.js")),
     ("router.js",                              WebAsset::BodyScript,  include_str!("../web/router.js")),
 ];
 

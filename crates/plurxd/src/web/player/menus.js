@@ -226,7 +226,7 @@ function setQuality(q){
   try{ localStorage.setItem("plurx_quality", q); }catch(e){}
   closeMenu();
   toast("Quality: "+qualityLabel());
-  if(PLAYER && PLAYER.fileId){
+  if(PLAYER && playbackInputPresent(PLAYER)){
     clientLog(Object.assign({level:"warn",event:"quality_switch",
       message:`quality ${from} → ${q}`,detail:`from=${from} to=${q}`,reason:"manual"},
       playbackContext()));
@@ -252,4 +252,3 @@ function setQuality(q){
     if(running&&running.catch) running.catch(()=>{});
   }
 }
-

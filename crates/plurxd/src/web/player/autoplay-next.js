@@ -225,9 +225,8 @@ async function handleEnded(fileId){
 // scrubbed away must not be dragged back to a truncation they have left.
 function endedStillOurs(p,generation,actionGeneration,fileId,pos){
   const v=document.getElementById("video");
-  return !!p && PLAYER===p && p.fileId===fileId && p.endedAt===pos
+  return !!p && PLAYER===p && playbackInputSame(playbackInputForPlayer(p),fileId) && p.endedAt===pos
     && (p._seekToken||0)===generation
     && (p.controlIntentGeneration||0)===actionGeneration
     && !!v && !v.seeking;
 }
-
