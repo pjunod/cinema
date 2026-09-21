@@ -117,7 +117,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 | S-07 | [TONE-MAP-CHAIN-CORRECTIONS](../streaming/TONE-MAP-CHAIN-CORRECTIONS.md) | Q3 | month | unclaimed | | | | 2026-09-20 | M0 is the hwdownload metadata test |
 | S-08 | [INTERLACE-IN-THE-MEDIA-CONTRACT](../streaming/INTERLACE-IN-THE-MEDIA-CONTRACT.md) | Q4, Q9 (bitrate half) | month | unclaimed | | | | 2026-09-20 | Reproduced defect; fixture in review §9 |
 | S-09 | [AUDIO-RESOLVED-INDEPENDENTLY](../streaming/AUDIO-RESOLVED-INDEPENDENTLY.md) | Q5 | month | unclaimed | | | | 2026-09-20 | |
-| S-10 | [HONEST-MASTER-PLAYLIST](../streaming/HONEST-MASTER-PLAYLIST.md) | Q7, A11 | month | unclaimed | | | | 2026-09-20 | Rolling path emits source geometry; VOD already emits output geometry; BANDWIDTH wrong on both; hard-coded string is `avc1.640034` |
+| S-10 | [HONEST-MASTER-PLAYLIST](../streaming/HONEST-MASTER-PLAYLIST.md) | Q7, A11 | month | claimed | gpt-5.6-sol | agent:/root/p01_builder | `plan/S-10` | 2026-09-21 | Rolling geometry and bounded fMP4 AVC inspection are locally provable; profile/level, SDR `CODECS`, bandwidth and Apple-panel milestones remain evidence-gated. |
 | S-11 | [CODEC-AND-GPU-QUALIFICATION](../streaming/CODEC-AND-GPU-QUALIFICATION.md) | Q12, Q6, Q8 | quarter | unclaimed | | | | 2026-09-20 | M0 encoder inventory on /metrics decides whether NVENC/VideoToolbox milestones exist |
 | S-12 | [VOD-BFRAMES-TIMELINE-DESIGN](../streaming/VOD-BFRAMES-TIMELINE-DESIGN.md) | Q2 | design | unclaimed | | | | 2026-09-20 | Design only; `vodgen.rs:399` refuses nonzero CTO today |
 | S-13 | [DECODE-FACTS-GATE-AND-FALLBACK](../streaming/DECODE-FACTS-GATE-AND-FALLBACK.md) | C13 | month | unclaimed | | | | 2026-09-20 | Measure before optimising |

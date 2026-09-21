@@ -1,6 +1,6 @@
 # Honest master playlist — say what this session delivers, not what the file is
 
-**Status:** ready for review · **Executes:** Q7 / F-stream-14 / A11 /
+**Status:** implementation in progress · **Executes:** Q7 / F-stream-14 / A11 /
 F-apple-11 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -77,8 +77,8 @@ daily.
    field on every stall beacon become comparable to delivery, and the
    before/after is reproduced on a device.
 
-Board id S-10. Milestones are one draft PR each into `main` under the fast
-lane.
+Board id S-10. All milestones are logical commits and evidence rows in one
+draft plan PR into `main`, per the work-board protocol.
 
 ## 2. Contract today
 
@@ -595,7 +595,7 @@ last for that reason.
 
 ## 5. Milestones
 
-One draft PR each, into `main`, under the fast lane (`make unit`).
+Each milestone is a logical commit in the one draft plan PR into `main`.
 
 ### 5.1 M1 — rolling geometry from the rung
 
@@ -845,9 +845,10 @@ carried (paste the #EXT-X-STREAM-INF line).
 **GPT prompt — Apple panel before/after (M6):** the recipe in §5.6, steps 1
 to 4, run once per build.
 
-Rollout: one draft PR per milestone into `main`, fast lane. No feature
-gate and no setting — each change either makes an attribute true or is not
-merged (§4). Cache and identity effects, stated in each PR body: M1 and M5
+Rollout: one draft plan PR into `main`, with milestone commits and one final
+fast lane. No feature gate and no setting — each change either makes an
+attribute true or is not merged (§4). Cache and identity effects, stated in
+the PR body: M1 and M5
 change `FrozenHlsPresentation`'s fingerprint (the file's geometry, and the
 new `HlsContext` fields plus the `"version"` bump), which is per-session
 and invalidates nothing on disk; M2 moves fMP4 AVC masters from generation
@@ -902,4 +903,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | `plan/S-10` | Claimed from `665b8b5c`; M1–M2 are locally implementable, while M3–M6 remain evidence-gated. |
