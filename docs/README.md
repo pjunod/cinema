@@ -361,7 +361,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [UI-LAYOUTS-IMPLEMENTATION.md](clients/UI-LAYOUTS-IMPLEMENTATION.md) | The accepted slice, as built. | built |
 | [UI-LAYOUTS-STATUS.md](clients/UI-LAYOUTS-STATUS.md) | Ground truth for what of that slice is proven. | open |
 | [UI-LAYOUTS-G3-DECISION.md](clients/UI-LAYOUTS-G3-DECISION.md) | Did the layout abstraction pay for itself? | done |
-| [WEB-SHELL-LAYOUT.md](clients/WEB-SHELL-LAYOUT.md) | Where the web app's sixty-four files are, what each one holds, where its code used to be in `index.html`, and the rules a new file has to obey. | live |
+| [WEB-SHELL-LAYOUT.md](clients/WEB-SHELL-LAYOUT.md) | Where the web app's sixty-five files are, what each one holds, where its code used to be in `index.html`, and the rules a new file has to obey. | live |
 | [WEB-SHELL-SPLIT-PLAN.md](clients/WEB-SHELL-SPLIT-PLAN.md) | How the 23,901-line web `index.html` became a multi-file app with no build step, and the byte-identity gate that proved nothing else changed. | built |
 | [WEB_LAYOUT_CONTAINMENT_STATUS.md](clients/WEB_LAYOUT_CONTAINMENT_STATUS.md) | Live delivery status of web layout containment. | open |
 | [OFFLINE-VIEWING-PLAN.md](clients/OFFLINE-VIEWING-PLAN.md) · [review](clients/OFFLINE-VIEWING-REVIEW.md) | One-tap, app-managed downloads — the plan and its review. | built |
@@ -485,7 +485,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [ARCHITECTURE-REVIEW-2026-09-20-APPENDIX.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-APPENDIX.md) | The nine full area reports behind that review, unrevised, with every finding's quoted evidence and each area's "already good" list; the main document wins where they disagree. | open |
 | [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md) | Checks all 82 consolidated entries and 128 appendix findings against the source, with corrections, per-finding verdicts and evidence limits; revision 2 of the review applies its dispositions. | done |
 | [ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) | The single shared status for every implementation plan from the review, across Claude, GPT and OpenRouter sessions — the claim protocol, the model/session identity rules, and one row per plan. | live |
-| [Architecture review implementation status](reviews/ARCHITECTURE-REVIEW-2026-09-20-STATUS.html) | Live searchable view of the architecture-review workboard, deriving its summary and plan rows from the canonical Markdown instead of maintaining a second ledger. | live |
+| [Architecture review implementation status](reviews/ARCHITECTURE-REVIEW-2026-09-20-STATUS.html) | Live searchable view of the canonical architecture-review workboard, with a read-only same-origin Forgejo overlay for mapped open plan PRs and exact-head CI state; API failures leave every board row visible. | live |
 | [SECURITY-ASSESSMENT-2026-09-13.md](reviews/SECURITY-ASSESSMENT-2026-09-13.md) | Which trust boundaries need work across the server, cluster, clients, media supply chain, and delivery process. | open |
 | [WEEKLY-ARCHITECTURE-SECURITY-IMPLEMENTATION.md](reviews/WEEKLY-ARCHITECTURE-SECURITY-IMPLEMENTATION.md) | Bounded implementation handoff for the September architecture, security, recovery, and playback findings. | open |
 
