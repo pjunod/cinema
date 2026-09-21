@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
@@ -51,6 +52,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tv.plurx.app.data.HomeGrouping
 import tv.plurx.app.data.Item
 import tv.plurx.app.data.Library
+import tv.plurx.app.data.OpticalDriveDto
 import tv.plurx.app.data.ThemeId
 import tv.plurx.app.ui.components.ChoicePicker
 import tv.plurx.app.ui.components.LoadingBox
@@ -86,6 +88,7 @@ fun HomeScreen(
     onOpenLiveTv: () -> Unit = {},
     onOpenRecordings: () -> Unit = {},
     onOpenLibraryChannels: () -> Unit = {},
+    onOpenOpticalDrive: (String) -> Unit = {},
 ) {
     val state by vm.home.collectAsStateWithLifecycle()
     val preferences by vm.preferences.collectAsStateWithLifecycle()
@@ -129,6 +132,7 @@ fun HomeScreen(
                 // up/down pointed straight past it at each other, so the only
                 // way to change the grouping was to have a touchscreen.
                 val visibleShelfKeys = buildList {
+                    if (state.opticalDrives.any { it.disc != null }) add("optical")
                     if (continueShelfItems.isNotEmpty()) add("continue")
                     if (state.hubs.next_up.isNotEmpty()) add("next")
                     if (state.hubs.recently_added.isNotEmpty()) add("recent")
@@ -203,6 +207,14 @@ fun HomeScreen(
                             )
                         }
                     }
+                    OpticalHomeShelf(
+                        drives = state.opticalDrives,
+                        side = side,
+                        rowFocusRequester = shelfFocus["optical"],
+                        previousRowFocusRequester = previousShelf("optical"),
+                        nextRowFocusRequester = nextShelf("optical"),
+                        onOpen = onOpenOpticalDrive,
+                    )
                     MediaRow(
                         "Continue watching",
                         continueShelfItems,
@@ -279,6 +291,70 @@ fun HomeScreen(
                         Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
                             Text("Nothing here yet — add a library on your server.", color = Muted)
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OpticalHomeShelf(
+    drives: List<OpticalDriveDto>,
+    side: Dp,
+    rowFocusRequester: FocusRequester?,
+    previousRowFocusRequester: FocusRequester?,
+    nextRowFocusRequester: FocusRequester?,
+    onOpen: (String) -> Unit,
+) {
+    val inserted = drives.filter { it.disc != null }
+    if (inserted.isEmpty()) return
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            "Inserted disc",
+            modifier = Modifier.padding(horizontal = side),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                .padding(horizontal = side),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            inserted.forEachIndexed { index, drive ->
+                Row(
+                    Modifier
+                        .then(
+                            if (index == 0 && rowFocusRequester != null) {
+                                Modifier.focusRequester(rowFocusRequester)
+                            } else Modifier,
+                        )
+                        .focusProperties {
+                            previousRowFocusRequester?.let { up = it }
+                            nextRowFocusRequester?.let { down = it }
+                        }
+                        .clip(MaterialTheme.shapes.large)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .clickable { onOpen(drive.id) }
+                        .padding(16.dp)
+                        .size(width = 310.dp, height = 92.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("◉", color = Accent, fontSize = 40.sp)
+                    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Text(
+                            drive.disc?.title ?: "Inserted disc",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 2,
+                        )
+                        Text(
+                            "${drive.disc?.format?.uppercase() ?: "DISC"} · ${drive.name}",
+                            color = Muted,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                        Text("Browse disc", color = Accent, style = MaterialTheme.typography.labelMedium)
                     }
                 }
             }

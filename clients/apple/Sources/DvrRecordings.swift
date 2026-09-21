@@ -725,6 +725,16 @@ struct DvrRecordingsPanel: View {
             switch route {
             case .item(let id): DetailView(itemId: id)
             case .collection(let collection): LibraryView(collection: collection)
+            case .opticalDrive(let driveId): OpticalDiscView(driveId: driveId)
+            case .opticalTitle(let driveId, let driveName, let discId, let mediaGeneration, let titleId):
+                OpticalTitleView(
+                    driveId: driveId,
+                    driveName: driveName,
+                    discId: discId,
+                    mediaGeneration: mediaGeneration,
+                    titleId: titleId
+                )
+            case .opticalPlayer(let context): OpticalPlayerView(context: context)
             }
         }
         #endif

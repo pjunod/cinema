@@ -309,6 +309,57 @@ struct PlurxAPI {
     func comingSoon() async throws -> ComingSoonResponse { try await get("coming-soon") }
     func item(_ id: Int) async throws -> ItemDetail { try await get("items/\(id)") }
 
+    func opticalDrives() async throws -> [OpticalDriveDTO] {
+        try await get("optical/drives")
+    }
+
+    func opticalDrive(_ driveId: String) async throws -> OpticalDriveDiscDTO {
+        try await get("optical/drives/\(driveId)/disc")
+    }
+
+    func opticalTitle(
+        discId: String,
+        titleId: String,
+        angle: Int = 1
+    ) async throws -> OpticalTitleDetailDTO {
+        try await get(
+            "optical/discs/\(discId)/titles/\(titleId)",
+            query: [URLQueryItem(name: "angle", value: String(angle))]
+        )
+    }
+
+    func opticalDecision(
+        driveId: String,
+        titleId: String,
+        body: OpticalDecisionRequest
+    ) async throws -> OpticalDecisionDTO {
+        try await post("optical/drives/\(driveId)/titles/\(titleId)/decision", body: body)
+    }
+
+    func createOpticalSession(
+        driveId: String,
+        titleId: String,
+        body: OpticalSessionRequest
+    ) async throws -> HlsStart {
+        try await post(
+            "optical/drives/\(driveId)/titles/\(titleId)/sessions",
+            body: body,
+            using: Self.playbackPreparationSession
+        )
+    }
+
+    func opticalProgress(
+        discId: String,
+        titleId: String,
+        body: OpticalProgressRequest
+    ) async throws -> OpticalProgressDTO {
+        try await post("optical/discs/\(discId)/titles/\(titleId)/progress", body: body)
+    }
+
+    func ejectOpticalDrive(driveId: String, body: OpticalEjectRequest) async throws {
+        let _: [String: Bool] = try await post("optical/drives/\(driveId)/eject", body: body)
+    }
+
     func readingState(itemId: Int, fileId: Int) async throws -> ReadingStateResponse {
         try await get("items/\(itemId)/reading-state", query: [
             URLQueryItem(name: "file_id", value: String(fileId)),

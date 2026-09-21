@@ -23,6 +23,7 @@ final class AppModel: ObservableObject {
     @Published var comingSoon: [ComingSoonEntry] = []
     @Published var libraries: [Library] = []
     @Published var libraryPreviews: [Int: [Item]] = [:]
+    @Published var opticalDrives: [OpticalDriveDTO] = []
     @Published var homeLoading = true
     @Published var homeError: String?
     @Published var libraryGrouping: LibraryGrouping
@@ -226,6 +227,7 @@ final class AppModel: ObservableObject {
             async let h = requireAPI().hubs()
             async let l = requireAPI().libraries()
             async let soon = requireAPI().comingSoon()
+            async let optical = try? requireAPI().opticalDrives()
             let loadedHubs = try await h
             let loadedLibraries = try await l
             hubs = loadedHubs
@@ -235,6 +237,7 @@ final class AppModel: ObservableObject {
             homeLoading = false
 
             comingSoon = (try? await soon)?.entries ?? []
+            opticalDrives = (await optical) ?? []
 
             // Prime the category/library shelves after the useful first paint,
             // publishing each page the moment it lands so shelves fill in
@@ -268,6 +271,7 @@ final class AppModel: ObservableObject {
             || !(hubs.nextUp ?? []).isEmpty
             || !(hubs.recentlyAdded ?? []).isEmpty
             || !comingSoon.isEmpty
+            || !opticalDrives.isEmpty
     }
 
     /// A cancelled refresh should leave the last good Home screen in place.

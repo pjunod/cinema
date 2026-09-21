@@ -39,6 +39,9 @@ import tv.plurx.app.ui.ConnectScreen
 import tv.plurx.app.ui.DetailScreen
 import tv.plurx.app.ui.DownloadsScreen
 import tv.plurx.app.ui.HomeScreen
+import tv.plurx.app.ui.OpticalDiscScreen
+import tv.plurx.app.ui.OpticalPlayerScreen
+import tv.plurx.app.ui.OpticalTitleScreen
 import tv.plurx.app.ui.LibraryScreen
 import tv.plurx.app.ui.LoginScreen
 import tv.plurx.app.ui.OfflineBookReaderScreen
@@ -187,6 +190,78 @@ private fun MainNav(
                 onOpenLiveTv = { nav.navigate("live-tv") },
                 onOpenRecordings = { nav.navigate("recordings") },
                 onOpenLibraryChannels = { nav.navigate("library-channels") },
+                onOpenOpticalDrive = { drive -> nav.navigate("optical/${Uri.encode(drive)}") },
+            )
+        }
+        composable(
+            "optical/{drive}",
+            arguments = listOf(navArgument("drive") { type = NavType.StringType }),
+        ) { entry ->
+            OpticalDiscScreen(
+                vm = vm,
+                driveId = entry.arguments?.getString("drive").orEmpty(),
+                onOpenTitle = { drive, driveName, disc, generation, title ->
+                    nav.navigate(
+                        "optical-title/${Uri.encode(drive)}/${Uri.encode(driveName)}/" +
+                            "${Uri.encode(disc)}/${Uri.encode(generation)}/${Uri.encode(title)}",
+                    )
+                },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(
+            "optical-title/{drive}/{driveName}/{disc}/{generation}/{title}",
+            arguments = listOf("drive", "driveName", "disc", "generation", "title").map {
+                navArgument(it) { type = NavType.StringType }
+            },
+        ) { entry ->
+            val a = entry.arguments!!
+            OpticalTitleScreen(
+                vm = vm,
+                driveId = a.getString("drive").orEmpty(),
+                driveName = a.getString("driveName").orEmpty(),
+                discId = a.getString("disc").orEmpty(),
+                mediaGeneration = a.getString("generation").orEmpty(),
+                titleId = a.getString("title").orEmpty(),
+                onPlay = { startMs, durationMs, audio, subtitle, title ->
+                    nav.navigate(
+                        "optical-player/${Uri.encode(a.getString("drive").orEmpty())}/" +
+                            "${Uri.encode(a.getString("disc").orEmpty())}/" +
+                            "${Uri.encode(a.getString("generation").orEmpty())}/" +
+                            "${Uri.encode(a.getString("title").orEmpty())}/$startMs/" +
+                            "${durationMs ?: -1}?audio=${audio ?: -1}&subtitle=${subtitle ?: -1}&name=${Uri.encode(title)}",
+                    )
+                },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(
+            "optical-player/{drive}/{disc}/{generation}/{title}/{startMs}/{durationMs}?audio={audio}&subtitle={subtitle}&name={name}",
+            arguments = listOf(
+                navArgument("drive") { type = NavType.StringType },
+                navArgument("disc") { type = NavType.StringType },
+                navArgument("generation") { type = NavType.StringType },
+                navArgument("title") { type = NavType.StringType },
+                navArgument("startMs") { type = NavType.LongType },
+                navArgument("durationMs") { type = NavType.LongType },
+                navArgument("audio") { type = NavType.IntType; defaultValue = -1 },
+                navArgument("subtitle") { type = NavType.IntType; defaultValue = -1 },
+                navArgument("name") { type = NavType.StringType; defaultValue = "Inserted disc" },
+            ),
+        ) { entry ->
+            val a = entry.arguments!!
+            OpticalPlayerScreen(
+                vm = vm,
+                driveId = a.getString("drive").orEmpty(),
+                discId = a.getString("disc").orEmpty(),
+                mediaGeneration = a.getString("generation").orEmpty(),
+                titleId = a.getString("title").orEmpty(),
+                title = a.getString("name").orEmpty(),
+                startMs = a.getLong("startMs"),
+                durationMs = a.getLong("durationMs").takeIf { it >= 0 },
+                audio = a.getInt("audio").takeIf { it >= 0 },
+                subtitle = a.getInt("subtitle").takeIf { it >= 0 },
+                onExit = { nav.popBackStack() },
             )
         }
         composable(

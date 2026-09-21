@@ -23,6 +23,7 @@ struct User: Codable {
     let id: Int
     let username: String
     var isAdmin: Bool?
+    var opticalPlay: Bool?
 }
 
 struct LoginResponse: Codable {

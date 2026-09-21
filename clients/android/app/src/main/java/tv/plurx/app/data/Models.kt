@@ -36,6 +36,7 @@ data class User(
     val id: Long,
     val username: String,
     val is_admin: Boolean = false,
+    val optical_play: Boolean = false,
 )
 
 @Serializable

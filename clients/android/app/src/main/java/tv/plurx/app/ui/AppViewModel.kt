@@ -26,6 +26,7 @@ import tv.plurx.app.data.HomeGrouping
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.OfflineNetwork
 import tv.plurx.app.data.OfflineQuality
+import tv.plurx.app.data.OpticalDriveDto
 import tv.plurx.app.data.PosterSize
 import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.ThemeId
@@ -73,13 +74,14 @@ data class HomeState(
     val hubs: Hubs = Hubs(),
     val libraries: List<Library> = emptyList(),
     val libraryItems: Map<Long, List<Item>> = emptyMap(),
+    val opticalDrives: List<OpticalDriveDto> = emptyList(),
     val loading: Boolean = true,
     val error: String? = null,
 ) {
     /** Anything worth painting. A spinner over real content is a regression. */
     val hasContent: Boolean
         get() = libraries.isNotEmpty() || hubs.continue_watching.isNotEmpty() ||
-            hubs.next_up.isNotEmpty() || hubs.recently_added.isNotEmpty()
+            hubs.next_up.isNotEmpty() || hubs.recently_added.isNotEmpty() || opticalDrives.isNotEmpty()
 }
 
 /** A server decision and the one live route probe that produced it. */
@@ -339,6 +341,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 coroutineScope {
                     val hubs = async { api().hubs() }
                     val libraries = async { api().libraries() }
+                    val optical = async {
+                        catchingUnlessCancelled { api().opticalDrives() }.getOrDefault(emptyList())
+                    }
                     val libs = libraries.await()
                     _home.value = _home.value.copy(libraries = libs, loading = false)
                     // Every preview at once. One library that times out costs
@@ -351,6 +356,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                     _home.value = _home.value.copy(hubs = hubs.await(), loading = false)
+                    _home.value = _home.value.copy(opticalDrives = optical.await(), loading = false)
                     previews.forEach { (id, items) ->
                         _home.value = _home.value.copy(
                             libraryItems = _home.value.libraryItems + (id to items.await()),

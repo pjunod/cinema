@@ -108,6 +108,46 @@ interface PlurxApi {
     @GET("items/{id}")
     suspend fun item(@Path("id") id: Long): ItemDetail
 
+    @GET("optical/drives")
+    suspend fun opticalDrives(): List<OpticalDriveDto>
+
+    @GET("optical/drives/{drive}/disc")
+    suspend fun opticalDrive(@Path("drive") drive: String): OpticalDriveDiscDto
+
+    @GET("optical/discs/{disc}/titles/{title}")
+    suspend fun opticalTitle(
+        @Path("disc") disc: String,
+        @Path("title") title: String,
+        @Query("angle") angle: Int = 1,
+    ): OpticalTitleDetailDto
+
+    @POST("optical/drives/{drive}/titles/{title}/decision")
+    suspend fun opticalDecision(
+        @Path("drive") drive: String,
+        @Path("title") title: String,
+        @Body body: OpticalDecisionRequest,
+    ): OpticalDecisionDto
+
+    @POST("optical/drives/{drive}/titles/{title}/sessions")
+    suspend fun createOpticalSession(
+        @Path("drive") drive: String,
+        @Path("title") title: String,
+        @Body body: OpticalSessionRequest,
+    ): HlsStart
+
+    @POST("optical/discs/{disc}/titles/{title}/progress")
+    suspend fun opticalProgress(
+        @Path("disc") disc: String,
+        @Path("title") title: String,
+        @Body body: OpticalProgressRequest,
+    ): OpticalProgressDto
+
+    @POST("optical/drives/{drive}/eject")
+    suspend fun ejectOpticalDrive(
+        @Path("drive") drive: String,
+        @Body body: OpticalEjectRequest,
+    ): Map<String, Boolean>
+
     @GET("items/{id}/reading-state")
     suspend fun readingState(
         @Path("id") id: Long,

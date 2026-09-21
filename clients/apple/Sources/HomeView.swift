@@ -196,6 +196,16 @@ private struct AppDestinations: ViewModifier {
             switch route {
             case .collection(let collection): LibraryView(collection: collection)
             case .item(let id): DetailView(itemId: id)
+            case .opticalDrive(let driveId): OpticalDiscView(driveId: driveId)
+            case .opticalTitle(let driveId, let driveName, let discId, let mediaGeneration, let titleId):
+                OpticalTitleView(
+                    driveId: driveId,
+                    driveName: driveName,
+                    discId: discId,
+                    mediaGeneration: mediaGeneration,
+                    titleId: titleId
+                )
+            case .opticalPlayer(let context): OpticalPlayerView(context: context)
             }
         }
     }
@@ -270,6 +280,8 @@ private struct HomeDashboard: View {
 
     @ViewBuilder
     private var homeContent: some View {
+        OpticalHomeRow(drives: model.opticalDrives)
+
         if HomeLayoutPolicy.usesFeaturedHero, let featured {
             FeaturedHero(item: featured, compact: horizontalSizeClass == .compact)
                 #if os(tvOS)

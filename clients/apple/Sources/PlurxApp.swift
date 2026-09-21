@@ -52,6 +52,15 @@ struct PlurxApp: App {
 enum Route: Hashable {
     case collection(LibraryCollection)
     case item(Int)
+    case opticalDrive(String)
+    case opticalTitle(
+        driveId: String,
+        driveName: String,
+        discId: String,
+        mediaGeneration: String,
+        titleId: String
+    )
+    case opticalPlayer(OpticalPlaybackContext)
 }
 
 struct RootView: View {
