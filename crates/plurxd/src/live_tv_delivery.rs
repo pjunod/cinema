@@ -5,6 +5,7 @@
 //! consumes the answer; it does not make another codec, size, or packaging
 //! decision later.
 
+use plurx_core::domain::ScanType;
 use plurx_core::playback::caps::{DeviceCaps, Transfer};
 use serde::{Deserialize, Serialize};
 
@@ -211,9 +212,10 @@ pub(crate) struct LiveSourceFacts {
 
 impl LiveSourceFacts {
     fn interlaced(&self) -> bool {
-        self.field_order
-            .as_deref()
-            .is_some_and(|order| !matches!(order, "progressive" | "unknown"))
+        matches!(
+            ScanType::from_field_order(self.field_order.as_deref()),
+            ScanType::Interlaced(_)
+        )
     }
 }
 
@@ -272,6 +274,8 @@ pub(crate) struct LiveDeliveryPlan {
     pub(crate) reasons: Vec<LiveDeliveryReason>,
     pub(crate) deinterlace: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) deinterlace_output: Option<LiveDeinterlaceOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_bitrate_bps: Option<u64>,
 }
 
@@ -279,6 +283,32 @@ pub(crate) struct LiveDeliveryPlan {
 pub(crate) struct LiveQualityPolicy {
     pub(crate) max_height: Option<u16>,
     pub(crate) max_bitrate_bps: Option<u64>,
+    pub(crate) deinterlace_output: LiveDeinterlaceOutput,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LiveDeinterlaceOutput {
+    #[default]
+    Field,
+    Frame,
+}
+
+impl LiveDeinterlaceOutput {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Field => "field",
+            Self::Frame => "frame",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "field" => Some(Self::Field),
+            "frame" => Some(Self::Frame),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -299,6 +329,23 @@ fn rate_within(source: Option<LiveRational>, limit: LiveRational) -> bool {
     source.is_none_or(|source| {
         u64::from(source.num) * u64::from(limit.den) <= u64::from(limit.num) * u64::from(source.den)
     })
+}
+
+fn doubled_rate(rate: LiveRational) -> Option<LiveRational> {
+    let numerator = u64::from(rate.num).checked_mul(2)?;
+    let denominator = u64::from(rate.den);
+    let divisor = gcd(numerator, denominator);
+    Some(LiveRational {
+        num: u32::try_from(numerator / divisor).ok()?,
+        den: u32::try_from(denominator / divisor).ok()?,
+    })
+}
+
+fn gcd(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left.max(1)
 }
 
 fn video_limit_supports(source: &LiveSourceFacts, limit: &LiveVideoLimit) -> bool {
@@ -691,6 +738,14 @@ pub(crate) fn resolve_live_delivery(
         ));
     }
 
+    let deinterlace = source.interlaced() && video_action == LiveTrackAction::Encode;
+    let output_frame_rate =
+        if deinterlace && policy.deinterlace_output == LiveDeinterlaceOutput::Field {
+            source.frame_rate.and_then(doubled_rate)
+        } else {
+            source.frame_rate
+        };
+
     Ok(LiveDeliveryPlan {
         source: source.clone(),
         output: LiveDeliveryOutput {
@@ -702,7 +757,7 @@ pub(crate) fn resolve_live_delivery(
             bit_depth: (video_action == LiveTrackAction::Copy)
                 .then_some(source.bit_depth)
                 .flatten(),
-            frame_rate: source.frame_rate,
+            frame_rate: output_frame_rate,
             hdr: (video_action == LiveTrackAction::Copy)
                 .then_some(source.hdr.clone())
                 .flatten(),
@@ -712,7 +767,8 @@ pub(crate) fn resolve_live_delivery(
         audio_action,
         packaging,
         reasons,
-        deinterlace: source.interlaced() && video_action == LiveTrackAction::Encode,
+        deinterlace,
+        deinterlace_output: deinterlace.then_some(policy.deinterlace_output),
         max_bitrate_bps,
     })
 }
@@ -799,6 +855,27 @@ mod tests {
     }
 
     #[test]
+    fn source_scan_type_is_conservative_for_unknown_and_future_tokens() {
+        let mut source = source();
+        for field_order in [
+            None,
+            Some("unknown"),
+            Some("future-order"),
+            Some("progressive"),
+        ] {
+            source.field_order = field_order.map(str::to_owned);
+            assert!(
+                !source.interlaced(),
+                "unexpected interlace for {field_order:?}"
+            );
+        }
+        for field_order in ["tt", "bb", "tb", "bt"] {
+            source.field_order = Some(field_order.to_owned());
+            assert!(source.interlaced(), "missing interlace for {field_order}");
+        }
+    }
+
+    #[test]
     fn audio_mismatch_preserves_video() {
         let plan = resolve_live_delivery(
             &source(),
@@ -872,6 +949,7 @@ mod tests {
             &LiveQualityPolicy {
                 max_height: Some(2160),
                 max_bitrate_bps: None,
+                ..LiveQualityPolicy::default()
             },
             &LiveExecutionSupport {
                 video_encode: true,
@@ -881,5 +959,59 @@ mod tests {
         )
         .expect("bounded route");
         assert_eq!(plan.output.height, 720);
+    }
+
+    #[test]
+    fn interlaced_encode_reports_the_selected_output_cadence() {
+        let mut input = source();
+        input.width = Some(1920);
+        input.height = Some(1080);
+        input.field_order = Some("tt".into());
+        input.hdr = None;
+        input.frame_rate = Some(LiveRational {
+            num: 30_000,
+            den: 1_001,
+        });
+        let field = resolve_live_delivery(
+            &input,
+            None,
+            &LiveQualityPolicy::default(),
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: false,
+            },
+        )
+        .expect("field-rate plan");
+        assert!(field.deinterlace);
+        assert_eq!(
+            field.output.frame_rate,
+            Some(LiveRational {
+                num: 60_000,
+                den: 1_001
+            })
+        );
+
+        let frame = resolve_live_delivery(
+            &input,
+            None,
+            &LiveQualityPolicy {
+                deinterlace_output: LiveDeinterlaceOutput::Frame,
+                ..LiveQualityPolicy::default()
+            },
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: false,
+            },
+        )
+        .expect("frame-rate plan");
+        assert_eq!(
+            frame.output.frame_rate,
+            Some(LiveRational {
+                num: 30_000,
+                den: 1_001
+            })
+        );
     }
 }

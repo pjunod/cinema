@@ -17,7 +17,7 @@ use super::{
     EffectiveRateControl, Encoder, OutputGrade, Pipeline, SubtitleBurn, ToneMap, TranscodeOptions,
 };
 use crate::domain::{
-    ContinuationDecodeRestriction, DecodeRestrictionError, DolbyVisionFacts, MediaFile,
+    ContinuationDecodeRestriction, DecodeRestrictionError, DolbyVisionFacts, MediaFile, ScanType,
 };
 
 const MAX_FACT_TOKEN_BYTES: usize = 128;
@@ -28,7 +28,30 @@ pub const LEGACY_DECODE_POLICY_REVISION: u32 = 1;
 
 /// Stable serialization contract for [`ResolvedTranscode::plan_digest`].
 /// Changing the meaning or order of any fed field requires a revision bump.
-pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 1;
+pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 2;
+
+/// Semantic file-transcode deinterlace decision frozen into the plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deinterlace {
+    None,
+    BwdifSendFrame,
+}
+
+impl Deinterlace {
+    pub fn for_scan_type(scan_type: ScanType) -> Self {
+        match scan_type {
+            ScanType::Interlaced(_) => Self::BwdifSendFrame,
+            ScanType::Progressive | ScanType::Unknown => Self::None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::BwdifSendFrame => "bwdif:send_frame",
+        }
+    }
+}
 
 /// Where a plan's artifacts live when nothing enforces a health receipt over
 /// them. Observation-only rollout keeps this identity, so a node that is
@@ -660,6 +683,7 @@ pub struct DecodeFacts {
     width: Option<u32>,
     height: Option<u32>,
     frame_rate: FrameRate,
+    field_order: Option<String>,
     bit_depth: Option<u8>,
     color_range: Option<String>,
     color_space: Option<String>,
@@ -692,6 +716,7 @@ struct FactsDigest<'a> {
     width: Option<u32>,
     height: Option<u32>,
     frame_rate: FrameRate,
+    field_order: &'a Option<String>,
     bit_depth: Option<u8>,
     color_range: &'a Option<String>,
     color_space: &'a Option<String>,
@@ -782,6 +807,7 @@ impl DecodeFacts {
         let width = positive_u32(selected, "width");
         let height = positive_u32(selected, "height");
         let frame_rate = parse_frame_rate(selected);
+        let field_order = bounded_token(selected, "field_order")?;
         let bit_depth = parse_bit_depth(selected, pixel_format.as_deref());
         let color_range = bounded_token(selected, "color_range")?;
         let color_space = bounded_token(selected, "color_space")?;
@@ -801,6 +827,7 @@ impl DecodeFacts {
             width,
             height,
             frame_rate,
+            field_order: &field_order,
             bit_depth,
             color_range: &color_range,
             color_space: &color_space,
@@ -823,6 +850,7 @@ impl DecodeFacts {
             width,
             height,
             frame_rate,
+            field_order,
             bit_depth,
             color_range,
             color_space,
@@ -871,6 +899,14 @@ impl DecodeFacts {
 
     pub fn frame_rate(&self) -> FrameRate {
         self.frame_rate
+    }
+
+    pub fn field_order(&self) -> Option<&str> {
+        self.field_order.as_deref()
+    }
+
+    pub fn scan_type(&self) -> ScanType {
+        ScanType::from_field_order(self.field_order())
     }
 
     pub fn bit_depth(&self) -> Option<u8> {
@@ -1911,6 +1947,7 @@ pub struct ResolvedTranscode {
     output_contract: PresentationContract,
     input_dynamic_range: Option<DynamicRangeClass>,
     routing_dynamic_range: Option<String>,
+    deinterlace: Deinterlace,
 }
 
 impl ResolvedTranscode {
@@ -1962,6 +1999,10 @@ impl ResolvedTranscode {
 
     pub fn routing_dynamic_range(&self) -> Option<&str> {
         self.routing_dynamic_range.as_deref()
+    }
+
+    pub fn deinterlace(&self) -> Deinterlace {
+        self.deinterlace
     }
 
     pub fn plan_version(&self) -> u32 {
@@ -2105,6 +2146,7 @@ impl ResolvedTranscode {
             },
         );
         feed("renderer", options.pipeline.name().as_bytes());
+        feed("deinterlace", self.deinterlace.name().as_bytes());
         let subtitle = match options.subtitle_burn.as_ref() {
             None => "none".to_owned(),
             Some(subtitle) => format!(
@@ -2289,6 +2331,18 @@ pub fn resolve_transcode(
     let codec = facts.codec().ok_or(PlanError::MissingCodec)?;
     let mut options = request.options.clone();
     validate_media_options(&options)?;
+    let deinterlace = Deinterlace::for_scan_type(facts.scan_type());
+    if deinterlace == Deinterlace::BwdifSendFrame
+        && matches!(
+            options.pipeline,
+            Pipeline::VppQsv
+                | Pipeline::TonemapVaapi
+                | Pipeline::Libplacebo
+                | Pipeline::TonemapOpencl
+        )
+    {
+        options.pipeline = grade_preserving_software_renderer(options.pipeline)?;
+    }
     let requested_max_height = u32::try_from(options.target_height)
         .map_err(|_| PlanError::InvalidMediaOption("target_height"))?;
     if !options.pipeline.pairs_with(request.encoder)
@@ -2474,6 +2528,7 @@ pub fn resolve_transcode(
         output_contract,
         input_dynamic_range: facts.dynamic_range,
         routing_dynamic_range: facts.routing_dynamic_range().map(str::to_owned),
+        deinterlace,
     })
 }
 

@@ -15681,12 +15681,13 @@ impl TranscodeManager {
             } else if dovi_reshape {
                 Pipeline::DoviTonemapx
             } else {
-                Pipeline::for_session(
+                Pipeline::for_session_with_scan(
                     self.pipeline,
                     encoder,
                     transcode::routing_hdr(file),
                     transcode::heavy_source(file),
                     subtitle_burn.as_ref().is_some_and(|b| !b.bitmap),
+                    plurx_core::domain::ScanType::from_field_order(file.field_order.as_deref()),
                 )
             },
             subtitle_burn,
@@ -21562,17 +21563,19 @@ impl TranscodeManager {
         // not. Without it `pipeline=cpu` on a 4K HDR title reads as the GPU
         // path being broken, when the usual answer is that the source is Dolby
         // Vision and the CPU chain is the *correct* choice.
-        let declined = Pipeline::declined(
+        let declined = Pipeline::declined_with_scan(
             self.pipeline,
             encoder,
             transcode::routing_hdr(&file),
             transcode::heavy_source(&file),
             opts.subtitle_burn.as_ref().is_some_and(|b| !b.bitmap),
+            plurx_core::domain::ScanType::from_field_order(file.field_order.as_deref()),
         );
         tracing::info!(
             session = %session_log_id(&session_id), encoder = encoder.label(), pipeline = opts.pipeline.name(),
             proven = self.pipeline.name(), hdr = file.hdr.as_deref().unwrap_or("sdr"),
             declined = declined.unwrap_or(""),
+            deinterlace = plan.deinterlace().name(),
             build = crate::version::BUILD,
             "{}", ffmpeg_args_log_message("transcode ffmpeg args", &args, &session_id)
         );
@@ -30478,6 +30481,7 @@ pub(crate) mod tests {
             container: Some("matroska".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),
@@ -40245,6 +40249,7 @@ pub(crate) mod tests {
             container: Some("matroska".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),
@@ -49177,6 +49182,7 @@ scope = "test"
                 container: Some("mkv".into()),
                 video_codec: Some("hevc".into()),
                 video_codec_tag: None,
+                field_order: None,
                 video_profile: None,
                 width: Some(1920),
                 height: Some(1080),

@@ -1125,6 +1125,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v63: mirror typed retry disposition and diagnostics in the standalone
     // node-local refusal store.
     crate::store::fragindex::FRAGMENT_INDEX_TYPED_OUTCOMES_SCHEMA,
+    // v64: selected-video field order retained as a catalogue fact. Existing
+    // rows remain null until the bounded stored-probe backfill considers them.
+    super::FILES_FIELD_ORDER_COLUMN,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1220,7 +1223,7 @@ const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container,
      subtitle_streams, scanned_at, hdr_format, audio_offset_ms, \
      (probe_json IS NOT NULL), \
      dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, \
-     video_codec_tag";
+     video_codec_tag, field_order";
 
 fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
     let path: String = row.get(2)?;
@@ -1236,6 +1239,7 @@ fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
         container: row.get(6)?,
         video_codec: row.get(7)?,
         video_codec_tag: row.get(25)?,
+        field_order: row.get(26)?,
         video_profile: row.get(8)?,
         width: row.get(9)?,
         height: row.get(10)?,
@@ -4224,5 +4228,36 @@ mod tests {
             .expect("terminal identity index"),
             1
         );
+    }
+
+    #[test]
+    fn v64_adds_field_order_to_the_existing_files_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(63) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.pragma_update(None, "user_version", 63)
+                .expect("v63 marker");
+        }
+
+        SqliteStore::open(&db).expect("migrate v63 to current");
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        let columns = conn
+            .prepare("PRAGMA table_info(files)")
+            .expect("prepare files columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("read files columns")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect files columns");
+        assert!(columns.iter().any(|column| column == "field_order"));
     }
 }

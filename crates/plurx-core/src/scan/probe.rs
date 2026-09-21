@@ -339,6 +339,7 @@ pub fn parse_probe_json(json: &Value) -> ProbeResult {
                 video_seen = true;
                 result.video_codec = str_field(stream, "codec_name");
                 result.video_codec_tag = video_codec_tag(stream);
+                result.field_order = str_field(stream, "field_order");
                 result.video_profile = str_field(stream, "profile");
                 result.width = int_field(stream, "width");
                 result.height = int_field(stream, "height");
@@ -1198,5 +1199,44 @@ pub(crate) mod tests {
             parse_probe_json(&valid_other).video_codec_tag.as_deref(),
             Some("avc1")
         );
+    }
+
+    #[test]
+    fn field_order_uses_the_first_playable_video_and_keeps_the_probe_token() {
+        let j = json!({
+            "streams": [
+                { "codec_type": "video", "codec_name": "mjpeg",
+                  "field_order": "progressive",
+                  "disposition": { "attached_pic": 1 } },
+                { "codec_type": "video", "codec_name": "mpeg2video",
+                  "field_order": "tt" },
+                { "codec_type": "video", "codec_name": "mpeg2video",
+                  "field_order": "bb" }
+            ]
+        });
+        let probe = parse_probe_json(&j);
+        assert_eq!(probe.field_order.as_deref(), Some("tt"));
+        assert_eq!(
+            crate::domain::ScanType::from_field_order(probe.field_order.as_deref()),
+            crate::domain::ScanType::Interlaced(crate::domain::FieldOrder::Tff)
+        );
+    }
+
+    #[test]
+    fn field_order_reader_is_conservative_for_every_probe_shape() {
+        use crate::domain::{FieldOrder, ScanType};
+
+        for (value, expected) in [
+            (Some("progressive"), ScanType::Progressive),
+            (Some("tt"), ScanType::Interlaced(FieldOrder::Tff)),
+            (Some("bb"), ScanType::Interlaced(FieldOrder::Bff)),
+            (Some("tb"), ScanType::Interlaced(FieldOrder::TffCoded)),
+            (Some("bt"), ScanType::Interlaced(FieldOrder::BffCoded)),
+            (Some("unknown"), ScanType::Unknown),
+            (Some("future-token"), ScanType::Unknown),
+            (None, ScanType::Unknown),
+        ] {
+            assert_eq!(ScanType::from_field_order(value), expected, "{value:?}");
+        }
     }
 }

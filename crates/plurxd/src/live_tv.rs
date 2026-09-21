@@ -22,8 +22,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::live_tv_delivery::{
-    LiveDeliveryPlan, LiveExecutionSupport, LivePackaging, LivePlaybackRequest, LiveQualityPolicy,
-    LiveSourceFacts, LiveTrackAction,
+    LiveDeinterlaceOutput, LiveDeliveryPlan, LiveExecutionSupport, LivePackaging,
+    LivePlaybackRequest, LiveQualityPolicy, LiveSourceFacts, LiveTrackAction,
 };
 use crate::state::SystemInfo;
 
@@ -207,6 +207,7 @@ pub(crate) struct LiveTvConfig {
     pub(crate) max_output_height: u16,
     /// Compatibility profile for old clients and old owners only.
     pub(crate) output_height: u16,
+    pub(crate) deinterlace_output: LiveDeinterlaceOutput,
     pub(crate) generation: i64,
     /// Empty/zero means no pending handoff. The original owner and cutoff
     /// survive disabled configuration edits until cleanup is confirmed.
@@ -273,6 +274,9 @@ impl LiveTvConfig {
             output_height: setting(keys::LIVE_TV_OUTPUT_HEIGHT)
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(720),
+            deinterlace_output: setting(keys::LIVE_TV_DEINTERLACE_OUTPUT)
+                .and_then(LiveDeinterlaceOutput::parse)
+                .unwrap_or_default(),
             generation: setting(keys::LIVE_TV_CONFIG_GENERATION)
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0),
@@ -5230,12 +5234,14 @@ async fn run_live_session_inner(
         LiveQualityPolicy {
             max_height: (config.max_output_height > 0).then_some(config.max_output_height),
             max_bitrate_bps: None,
+            deinterlace_output: config.deinterlace_output,
         }
     } else {
         // Mixed-version starts keep the exact old H.264/AAC height profile.
         LiveQualityPolicy {
             max_height: Some(config.output_height),
             max_bitrate_bps: None,
+            deinterlace_output: config.deinterlace_output,
         }
     };
     let delivery = crate::live_tv_delivery::resolve_live_delivery(
@@ -6006,7 +6012,7 @@ fn live_ffmpeg_command_for_input(
                     .height
                     .unwrap_or(plan.delivery.output.height),
                 plan.delivery.output.height,
-                plan.delivery.deinterlace,
+                plan.delivery.deinterlace_output,
             );
             command.args(["-vf", &filter]);
             command.args([
@@ -6114,9 +6120,16 @@ fn live_video_bitrate_kbps(plan: &LiveDeliveryPlan) -> u32 {
         721..=1080 => 8_000,
         _ => 20_000,
     };
-    let frame_scaled = plan.source.frame_rate.map_or(base, |rate| {
-        let fps = u64::from(rate.num) / u64::from(rate.den).max(1);
-        base.saturating_mul(fps.clamp(24, 60)) / 30
+    let frame_scaled = plan.output.frame_rate.map_or(base, |rate| {
+        let numerator = u64::from(rate.num);
+        let denominator = u64::from(rate.den).max(1);
+        if numerator < denominator.saturating_mul(24) {
+            base.saturating_mul(24) / 30
+        } else if numerator > denominator.saturating_mul(60) {
+            base.saturating_mul(60) / 30
+        } else {
+            base.saturating_mul(numerator) / denominator.saturating_mul(30).max(1)
+        }
     });
     let bounded = plan
         .max_bitrate_bps
@@ -6128,11 +6141,14 @@ fn live_video_filter(
     encoder: Encoder,
     source_height: u16,
     output_height: u16,
-    deinterlace: bool,
+    deinterlace: Option<LiveDeinterlaceOutput>,
 ) -> String {
     let mut filters = Vec::new();
-    if deinterlace {
-        filters.push("bwdif=mode=send_field:parity=auto:deint=interlaced".to_owned());
+    if let Some(output) = deinterlace {
+        filters.push(format!(
+            "bwdif=mode=send_{}:parity=auto:deint=interlaced",
+            output.as_str()
+        ));
     }
     if output_height < source_height {
         filters.push(format!("scale=-2:{output_height}"));
@@ -7458,6 +7474,7 @@ fn graph_probe_delivery(height: u16) -> LiveDeliveryPlan {
             explanation: "exercise the encoded live path".into(),
         }],
         deinterlace: false,
+        deinterlace_output: None,
         max_bitrate_bps: None,
     }
 }
@@ -7589,6 +7606,7 @@ mod tests {
                 explanation: "exercise the encoded live path".into(),
             }],
             deinterlace: false,
+            deinterlace_output: None,
             max_bitrate_bps: None,
         }
     }
@@ -8577,9 +8595,38 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
 
     #[test]
     fn live_filter_deinterlaces_interlaced_frames_only() {
-        let filter = live_video_filter(Encoder::Software, 1080, 720, true);
+        let filter = live_video_filter(
+            Encoder::Software,
+            1080,
+            720,
+            Some(LiveDeinterlaceOutput::Field),
+        );
         assert!(filter.contains("bwdif=mode=send_field:parity=auto:deint=interlaced"));
         assert!(filter.ends_with("scale=-2:720,format=yuv420p"));
+        let frame = live_video_filter(
+            Encoder::Software,
+            1080,
+            720,
+            Some(LiveDeinterlaceOutput::Frame),
+        );
+        assert!(frame.contains("bwdif=mode=send_frame:parity=auto:deint=interlaced"));
+    }
+
+    #[test]
+    fn live_bitrate_uses_reported_output_cadence_and_respects_the_cap() {
+        let mut plan = test_encode_delivery(1080);
+        plan.output.frame_rate = Some(crate::live_tv_delivery::LiveRational {
+            num: 60_000,
+            den: 1_001,
+        });
+        assert_eq!(live_video_bitrate_kbps(&plan), 15_984);
+        plan.output.frame_rate = Some(crate::live_tv_delivery::LiveRational {
+            num: 30_000,
+            den: 1_001,
+        });
+        assert_eq!(live_video_bitrate_kbps(&plan), 7_992);
+        plan.max_bitrate_bps = Some(6_000_000);
+        assert_eq!(live_video_bitrate_kbps(&plan), 6_000);
     }
 
     #[tokio::test]
@@ -9547,7 +9594,7 @@ Output #0, hls, to 'index.m3u8':
     #[test]
     fn the_live_chain_delivers_eight_bit_to_an_eight_bit_profile() {
         for encoder in [Encoder::Software, Encoder::Nvenc] {
-            let filter = live_video_filter(encoder, 1080, 720, false);
+            let filter = live_video_filter(encoder, 1080, 720, None);
             assert!(
                 filter.ends_with(",format=yuv420p"),
                 "{encoder:?} pins an 8-bit profile and gets whatever the \
@@ -9555,7 +9602,7 @@ Output #0, hls, to 'index.m3u8':
             );
         }
         for encoder in [Encoder::Vaapi, Encoder::Qsv] {
-            let filter = live_video_filter(encoder, 1080, 720, false);
+            let filter = live_video_filter(encoder, 1080, 720, None);
             let suffix = encoder
                 .filter_suffix()
                 .expect("a hardware upload path pins its own format");

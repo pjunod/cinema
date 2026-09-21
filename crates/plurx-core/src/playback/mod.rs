@@ -1663,6 +1663,7 @@ mod tests {
             container: Some(container.to_owned()),
             video_codec: Some(vcodec.to_owned()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: None,
             width: Some(1920),
             height: Some(1080),

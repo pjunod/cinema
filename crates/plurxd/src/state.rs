@@ -5634,6 +5634,10 @@ impl JobManager {
             let state = Arc::clone(self);
             tokio::spawn(async move { state.backfill_video_codec_tags().await });
         }
+        {
+            let state = Arc::clone(self);
+            tokio::spawn(async move { state.backfill_field_order().await });
+        }
         Ok(())
     }
 
@@ -6390,6 +6394,119 @@ impl JobManager {
             fenced,
             cursor = walked,
             "video codec tag backfill: considered stored probe rows"
+        );
+    }
+
+    /// Recover the selected playable video's field-order token from retained
+    /// probe JSON without reopening any media.
+    ///
+    /// Rows whose old probe did not report the key receive the explicit
+    /// `unknown` value. That distinguishes a completed backfill from work not
+    /// yet reached and preserves the normal scan as the only path that can
+    /// improve the fact later.
+    fn field_order_from_stored_probe(probe_json: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(probe_json)
+            .ok()
+            .map(|value| plurx_core::scan::probe::parse_probe_json(&value))
+            .and_then(|probe| probe.field_order)
+            .unwrap_or_else(|| "unknown".to_owned())
+    }
+
+    async fn backfill_field_order(self: Arc<Self>) {
+        const BACKFILL_PER_TICK: i64 = 256;
+
+        match self
+            .store
+            .get_setting(keys::JOB_FIELD_ORDER_BACKFILL_DONE)
+            .await
+        {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "reading the field-order backfill stamp");
+                return;
+            }
+        }
+        let lease = match self.acquire_job("catalogue:field-order".to_owned()).await {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "field-order backfill lease failed");
+                return;
+            }
+        };
+        let _lease = lease;
+        let cursor_key = self.local_job_key(keys::JOB_FIELD_ORDER_BACKFILL_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let pending = match self
+            .store
+            .files_missing_field_order(cursor, BACKFILL_PER_TICK)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the field-order backfill");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            if let Err(error) = self
+                .store
+                .put_setting(keys::JOB_FIELD_ORDER_BACKFILL_DONE, "1")
+                .await
+            {
+                tracing::warn!(%error, "stamping the field-order backfill as complete");
+            } else {
+                tracing::info!("field-order backfill: complete");
+            }
+            return;
+        }
+
+        let mut updated = 0usize;
+        let mut fenced = 0usize;
+        let mut walked = cursor;
+        for candidate in pending {
+            walked = walked.max(candidate.id);
+            let recovered = Self::field_order_from_stored_probe(&candidate.probe_json);
+            match self
+                .store
+                .set_file_field_order(&candidate, &recovered)
+                .await
+            {
+                Ok(true) => updated += 1,
+                Ok(false) => fenced += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        file_id = candidate.id,
+                        %error,
+                        "writing a backfilled field order"
+                    );
+                    walked = walked.min(candidate.id.saturating_sub(1));
+                    break;
+                }
+            }
+        }
+        if walked > cursor {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &walked.to_string())
+                .await
+            {
+                tracing::warn!(%error, "advancing the field-order backfill cursor");
+            }
+        }
+        tracing::info!(
+            updated,
+            fenced,
+            cursor = walked,
+            "field-order backfill: considered stored probe rows"
         );
     }
 
@@ -9098,6 +9215,27 @@ mod tests {
     use plurx_core::domain::{
         DolbyVisionFacts, ItemEdit, ItemKind, NewItem, NewLibrary, PlaybackEventQuery, ProbeResult,
     };
+
+    #[test]
+    fn field_order_backfill_recovers_selected_video_and_marks_missing_or_invalid_unknown() {
+        let stored = r#"{
+            "streams": [
+                {"codec_type":"video","codec_name":"mjpeg","field_order":"progressive","disposition":{"attached_pic":1}},
+                {"codec_type":"video","codec_name":"mpeg2video","field_order":"tt"}
+            ]
+        }"#;
+        assert_eq!(JobManager::field_order_from_stored_probe(stored), "tt");
+        assert_eq!(
+            JobManager::field_order_from_stored_probe(
+                r#"{"streams":[{"codec_type":"video","codec_name":"h264"}]}"#
+            ),
+            "unknown"
+        );
+        assert_eq!(
+            JobManager::field_order_from_stored_probe("not-json"),
+            "unknown"
+        );
+    }
 
     #[tokio::test]
     async fn playback_preparation_is_durable_exact_and_independent_of_discovery() {

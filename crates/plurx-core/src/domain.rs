@@ -453,6 +453,49 @@ impl DolbyVisionFacts {
     }
 }
 
+/// The ordering FFprobe reports for an interlaced video stream.
+///
+/// The spelling remains separate from [`MediaFile::field_order`]: storage
+/// retains the reporter token verbatim, while consumers make decisions only
+/// through [`ScanType::from_field_order`] so an unfamiliar future token is
+/// never mistaken for proof of interlace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldOrder {
+    Tff,
+    Bff,
+    TffCoded,
+    BffCoded,
+}
+
+/// The typed scan decision shared by catalogue and live-input consumers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanType {
+    Progressive,
+    Interlaced(FieldOrder),
+    #[default]
+    Unknown,
+}
+
+impl ScanType {
+    /// Interpret the finite FFprobe vocabulary conservatively.
+    ///
+    /// Missing, `unknown`, and unfamiliar values stay unknown. In particular,
+    /// this is not a `field_order != progressive` predicate: future reporter
+    /// output must not silently opt media into a destructive filter.
+    pub fn from_field_order(field_order: Option<&str>) -> Self {
+        match field_order {
+            Some("progressive") => Self::Progressive,
+            Some("tt") => Self::Interlaced(FieldOrder::Tff),
+            Some("bb") => Self::Interlaced(FieldOrder::Bff),
+            Some("tb") => Self::Interlaced(FieldOrder::TffCoded),
+            Some("bt") => Self::Interlaced(FieldOrder::BffCoded),
+            Some("unknown") | None | Some(_) => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MediaFile {
     pub id: i64,
@@ -468,6 +511,9 @@ pub struct MediaFile {
     /// stream (`hvc1`, `hev1`, `dvh1`, `dvhe`, `avc1`, …). This is packaging
     /// identity, not a second spelling of the codec family.
     pub video_codec_tag: Option<String>,
+    /// FFprobe's field-order token for the selected playable video stream.
+    /// Decisions must use [`ScanType::from_field_order`], not string inequality.
+    pub field_order: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
@@ -511,6 +557,7 @@ pub struct ProbeResult {
     pub container: Option<String>,
     pub video_codec: Option<String>,
     pub video_codec_tag: Option<String>,
+    pub field_order: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
