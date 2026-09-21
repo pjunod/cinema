@@ -6,7 +6,9 @@ use crate::store::state_machine::sqlite::state_machine::{
     StateMachineSqlite,
 };
 use crate::{Client, Error, NodeConfig};
-use chrono::{DateTime, Utc};
+#[cfg(feature = "s3")]
+use chrono::DateTime;
+use chrono::Utc;
 use std::env;
 use std::ops::Sub;
 use std::path::Path;
@@ -65,6 +67,7 @@ impl BackupConfig {
 
 #[derive(Debug, PartialEq)]
 pub enum BackupSource {
+    #[cfg(feature = "s3")]
     S3(String),
     File(String),
 }
@@ -73,6 +76,7 @@ impl BackupSource {
     fn from_env() -> Option<Self> {
         let var = env::var("HQL_BACKUP_RESTORE").ok()?;
 
+        #[cfg(feature = "s3")]
         if let Some(obj) = var.strip_prefix("s3:") {
             return Some(Self::S3(obj.to_string()));
         }
@@ -157,7 +161,7 @@ pub fn start_cron(
 
 async fn backup_cron_job(
     client: &Client,
-    keep_days: u16,
+    #[cfg_attr(not(feature = "s3"), allow(unused_variables))] keep_days: u16,
     #[cfg(feature = "s3")] s3_config: &Option<Arc<S3Config>>,
 ) -> Result<(), Error> {
     client.backup().await?;
@@ -235,6 +239,7 @@ pub(crate) async fn backup_local_cleanup(backup_path: String, keep_days: u16) ->
     Ok(())
 }
 
+#[cfg(feature = "s3")]
 fn dt_from_backup_name(name: &str) -> Option<DateTime<Utc>> {
     if let Some(backup) = name.strip_prefix("backup_node_") {
         let (_, rest) = match backup.split_once("_") {
@@ -295,6 +300,7 @@ pub(crate) async fn restore_backup_start(node_config: &NodeConfig) -> Result<boo
 pub async fn restore_backup(node_config: &NodeConfig, src: BackupSource) -> Result<(), Error> {
     info!("Starting database restore from backup {:?}", src);
 
+    #[cfg(feature = "s3")]
     if let BackupSource::S3(_) = &src
         && node_config.s3_config.is_none()
     {
@@ -315,6 +321,7 @@ pub async fn restore_backup(node_config: &NodeConfig, src: BackupSource) -> Resu
     set_path_access(&path_backups, 0o700).await?;
 
     let (path_backup, remove_src) = match src {
+        #[cfg(feature = "s3")]
         BackupSource::S3(s3_obj) => {
             let s3_config = match &node_config.s3_config {
                 None => {

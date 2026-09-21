@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries fifteen compatibility patches for clustered
+Apache-2.0. Plurx carries sixteen compatibility patches for clustered
 deployments:
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
@@ -129,8 +129,15 @@ deployments:
   additionally logs each applied entry's index and payload to stderr, which
   is how a contaminating entry is identified down to its SQL. Production
   binaries compile none of it.
+- The replicated SQLite write enum always includes `QueryWrite::Backup`, even
+  when the local backup implementation is not compiled, so enabling backup
+  cannot shift the wire discriminant of `QueryWrite::RTT` during a rolling
+  deployment. The backup feature no longer implies S3 or enables cryptr's S3
+  support unconditionally; `backup` and `backup,s3` remain independently
+  compilable, and a build without backup returns an explicit feature error if
+  it receives the reserved replicated variant.
 
-Remove this vendor when an upstream Hiqlite release contains all fifteen patches
+Remove this vendor when an upstream Hiqlite release contains all sixteen patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
 and the snapshot RPC error-boundary plus queue-saturated reset tests above keep

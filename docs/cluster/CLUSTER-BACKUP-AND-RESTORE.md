@@ -1,6 +1,6 @@
 # Cluster backup and restore — one consistent cut, restored somewhere else first
 
-**Status:** ready for review · **Executes:** §2.3, S4, F-sc-4,
+**Status:** in progress · **Executes:** §2.3, S4, F-sc-4,
 F-build-ops-codehealth-2 (the brief's "F-build-2") from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -9,7 +9,8 @@ F-build-ops-codehealth-2 (the brief's "F-build-2") from
 
 Read [OPERATIONS.md](../OPERATIONS.md) "Rolling back a deploy" first (it is
 the gap this closes), then §2 here for what the tree already gives you, then
-execute §5 one milestone per draft PR under the fast lane. The deliverable is
+execute §5 as logical milestones in the one whole-plan draft PR required by
+the work board. The deliverable is
 the procedure, not the mechanism: a backup nobody has restored is a file. If a
 step seems to require copying Raft log or snapshot directories between nodes,
 inventing a force-new-cluster command around them, or restoring straight onto
@@ -475,4 +476,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | [PR #426](http://192.168.4.7:3000/noirr/plurx/pulls/426) | Wire-stable `QueryWrite::RTT`; `backup` builds without S3 and `backup,s3` remains supported. Focused feature-matrix checks are recorded in the PR. |

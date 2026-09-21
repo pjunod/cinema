@@ -205,7 +205,6 @@ pub enum QueryWrite {
     Transaction(Vec<Query>),
     Batch(Cow<'static, str>),
     Migration(Vec<Migration>),
-    #[cfg(feature = "backup")]
     Backup((NodeId, i64)),
     RTT,
 }
@@ -1220,6 +1219,11 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
                     Response::Backup(result)
                 }
 
+                #[cfg(not(feature = "backup"))]
+                EntryPayload::Normal(QueryWrite::Backup(_)) => Response::Backup(Err(
+                    Error::Config("backup support is not enabled in this build".into()),
+                )),
+
                 EntryPayload::Normal(QueryWrite::Migration(migrations)) => {
                     let (tx, rx) = oneshot::channel();
                     let req = WriterRequest::Migrate(writer::Migrate {
@@ -1508,7 +1512,7 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
 
 #[cfg(test)]
 mod backup_owner_contracts {
-    use super::committed_backup_owner;
+    use super::{QueryWrite, committed_backup_owner};
     use openraft::{CommittedLeaderId, LogId};
 
     #[test]
@@ -1518,6 +1522,12 @@ mod backup_owner_contracts {
 
         assert_eq!(committed_backup_owner(&accepted), 2);
         assert_ne!(committed_backup_owner(&accepted), stale_client_sample);
+    }
+
+    #[test]
+    fn rtt_wire_discriminant_is_stable_with_or_without_backup_support() {
+        let bytes = crate::helpers::serialize(&QueryWrite::RTT).expect("serialize RTT");
+        assert_eq!(bytes, [6, 0, 0, 0]);
     }
 }
 
