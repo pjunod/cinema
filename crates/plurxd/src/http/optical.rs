@@ -8,11 +8,12 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use plurx_core::domain::ItemKind;
+use plurx_core::domain::{ItemKind, MediaSessionActivation, MEDIA_SESSION_PUBLICATION_BLOCKED};
 use plurx_core::optical::{
-    HostRequirement, HostRequirementStatus, OpticalDisc, OpticalDriveSnapshot, OpticalDriveState,
-    OpticalLifecycleError, OpticalMatchKind, OpticalProgress, OpticalProgressWrite,
-    OpticalServiceError, OpticalTitle, PlaybackSourceRef,
+    optical_output_identity, DurableOpticalSessionSource, HostRequirement, HostRequirementStatus,
+    OpticalDisc, OpticalDriveSnapshot, OpticalDriveState, OpticalLifecycleError, OpticalMatchKind,
+    OpticalProgress, OpticalProgressWrite, OpticalServiceError, OpticalTitle, PlaybackSourceRef,
+    OPTICAL_SESSION_PAYLOAD_V1,
 };
 use plurx_core::playback::{self, Decision, DeviceCaps, Force, PlaybackMediaFacts};
 use plurx_core::store::{keys, stored_switch};
@@ -31,6 +32,7 @@ pub(crate) const OWNER_PATH: &str = "/internal/optical/owner";
 pub(crate) const MAX_OWNER_REQUEST_BYTES: usize = 128 * 1024;
 const MAX_OWNER_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const OWNER_EXCHANGE_DEADLINE: Duration = Duration::from_secs(5);
+const OWNER_START_DEADLINE: Duration = Duration::from_secs(45);
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -143,31 +145,6 @@ async fn require_enabled(state: &AppState) -> Result<(), ApiError> {
     }
 }
 
-fn local_drive_id<'a>(state: &AppState, requested: &'a str) -> Result<&'a str, ApiError> {
-    if state.optical.manager().snapshot(requested).is_some() {
-        return Ok(requested);
-    }
-    let prefix = format!("{}:", state.node_id);
-    let local = if let Some(local) = requested.strip_prefix(&prefix) {
-        local
-    } else if requested.contains(':') {
-        return Err(ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "optical_owner_unavailable",
-            "this ingress cannot yet relay the request to the advertised drive owner",
-        ));
-    } else {
-        return Err(ApiError::NotFound("drive"));
-    };
-    state
-        .optical
-        .manager()
-        .snapshot(local)
-        .is_some()
-        .then_some(local)
-        .ok_or(ApiError::NotFound("drive"))
-}
-
 enum DriveTarget {
     Local(String),
     Remote {
@@ -218,6 +195,18 @@ enum OwnerRequest {
         title_id: String,
         request: DecisionRequest,
     },
+    StartSession {
+        user_id: i64,
+        drive_id: String,
+        title_id: String,
+        request: OpticalSessionRequest,
+    },
+    Progress {
+        user_id: i64,
+        disc_id: String,
+        title_id: String,
+        request: ProgressRequest,
+    },
     Eject {
         drive_id: String,
         request: EjectRequest,
@@ -226,7 +215,17 @@ enum OwnerRequest {
 
 impl OwnerRequest {
     fn mutates(&self) -> bool {
-        matches!(self, Self::Eject { .. })
+        matches!(
+            self,
+            Self::StartSession { .. } | Self::Progress { .. } | Self::Eject { .. }
+        )
+    }
+
+    fn deadline(&self) -> Duration {
+        match self {
+            Self::StartSession { .. } => OWNER_START_DEADLINE,
+            _ => OWNER_EXCHANGE_DEADLINE,
+        }
     }
 }
 
@@ -262,7 +261,7 @@ async fn relay_owner(
             reqwest::Method::POST,
             OWNER_PATH,
             body,
-            deadline_after(OWNER_EXCHANGE_DEADLINE),
+            deadline_after(request.deadline()),
             MAX_OWNER_RESPONSE_BYTES,
             PeerAuthMode::ExactRequestAndResponse,
         )
@@ -818,13 +817,47 @@ async fn start_session(
     State(state): State<AppState>,
     Path((drive_id, title_id)): Path<(String, String)>,
     Json(request): Json<OpticalSessionRequest>,
-) -> Result<Json<super::hls::StartResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     authorize_play(&state, user.id).await?;
     require_enabled(&state).await?;
+    match drive_target(&state, &drive_id).await? {
+        DriveTarget::Local(drive_id) => Ok(Json(
+            local_start_session(&state, user.id, &drive_id, &title_id, request).await?,
+        )
+        .into_response()),
+        DriveTarget::Remote {
+            owner_node_id,
+            drive_id,
+        } => {
+            let response = relay_owner(
+                &state,
+                &owner_node_id,
+                &OwnerRequest::StartSession {
+                    user_id: user.id,
+                    drive_id,
+                    title_id,
+                    request,
+                },
+            )
+            .await?;
+            relayed_json(response)
+        }
+    }
+}
+
+async fn local_start_session(
+    state: &AppState,
+    user_id: i64,
+    drive_id: &str,
+    title_id: &str,
+    request: OpticalSessionRequest,
+) -> Result<super::hls::StartResponse, ApiError> {
+    authorize_play(state, user_id).await?;
+    require_enabled(state).await?;
     if request.playback_id.is_empty()
-        || request.playback_id.len() > 256
+        || request.playback_id.len() > 128
         || request.request_id.is_empty()
-        || request.request_id.len() > 256
+        || request.request_id.len() > 128
         || !request.start.is_finite()
         || request.start < 0.0
         || request.angle == 0
@@ -843,19 +876,10 @@ async fn start_session(
             ),
         ));
     }
-    let drive_id =
-        match drive_target(&state, &drive_id).await? {
-            DriveTarget::Local(drive_id) => drive_id,
-            DriveTarget::Remote { .. } => return Err(ApiError::typed(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "optical_owner_unavailable",
-                "optical session start must currently reach the advertised drive owner directly",
-            )),
-        };
     let snapshot = state
         .optical
         .manager()
-        .snapshot(&drive_id)
+        .snapshot(drive_id)
         .ok_or(ApiError::NotFound("drive"))?;
     validate_ready_insertion(
         &snapshot.state,
@@ -917,6 +941,15 @@ async fn start_session(
             "height must be between 2 and 4320".to_owned(),
         ));
     }
+    let user = state.store.get_user(user_id).await?.ok_or_else(|| {
+        ApiError::typed(
+            StatusCode::FORBIDDEN,
+            "optical_play_forbidden",
+            "the optical playback user no longer exists",
+        )
+    })?;
+    let authority = state.serving.authority();
+    let admitted_generation = authority.admit().ok_or_else(owner_unavailable)?;
     let session_id = uuid::Uuid::new_v4().to_string();
     let mut request_hash = Sha256::new();
     request_hash.update(user.id.to_le_bytes());
@@ -927,7 +960,7 @@ async fn start_session(
     let claim = state
         .optical
         .claim_playback_title_request(
-            &drive_id,
+            drive_id,
             &request.media_generation,
             &request.expected_disc_id,
             &title,
@@ -937,60 +970,135 @@ async fn start_session(
             &request_digest,
         )
         .map_err(service_error)?;
-    if let plurx_core::optical::OpticalTitleClaim::Replay { session_id } = claim {
-        let info = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(info) = state.transcode.recover_optical_vod(&session_id).await {
-                    return info;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .map_err(|_| {
-            ApiError::typed(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "optical_drive_busy",
-                "the matching optical session is still preparing",
-            )
-        })?;
-        return Ok(Json(optical_start_response(info, source_height)));
-    }
-    let plurx_core::optical::OpticalTitleClaim::Claimed(lease) = claim else {
-        unreachable!("replay returned above")
+    let source = match &claim {
+        plurx_core::optical::OpticalTitleClaim::Claimed(lease) => lease.source.clone(),
+        plurx_core::optical::OpticalTitleClaim::Replay { .. } => PlaybackSourceRef::Optical {
+            owner_node_id: state.node_id.clone(),
+            drive_id: drive_id.to_owned(),
+            media_generation: request.media_generation.clone(),
+            disc_id: request.expected_disc_id.clone(),
+            title_id: title.title_id.clone(),
+            angle: request.angle,
+        },
     };
-    let supersession_user = serde_json::json!(["user_id", user.id]).to_string();
+    let audio_identity = request.audio.map(|index| index.to_string());
+    let subtitle_identity = request.subtitle_burn.map(|index| index.to_string());
+    let output_identity = optical_output_identity(
+        &source,
+        title.locator,
+        audio_identity.as_deref(),
+        subtitle_identity.as_deref(),
+        &request_digest,
+    )
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let recipe_json = DurableOpticalSessionSource {
+        version: OPTICAL_SESSION_PAYLOAD_V1,
+        source,
+        locator: title.locator,
+        output_identity,
+    }
+    .encode()
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
     let item_title = state
         .store
         .optical_disc(&request.expected_disc_id)
         .await?
         .and_then(|disc| disc.display_title.or(disc.volume_label))
         .unwrap_or_else(|| title.title_id.clone());
-    let info = state
-        .transcode
-        .start_optical_vod(
-            crate::transcode::OpticalSessionRequest {
-                playback_id: request.playback_id,
-                start_seconds: request.start,
-                target_height: requested_height,
-                audio_index: request.audio.filter(|index| *index >= 0),
-                subtitle_burn: request.subtitle_burn.filter(|index| *index >= 0),
-                audio_offset_ms: request.audio_offset_ms.unwrap_or(0),
-                block_budget_secs: request
-                    .block_budget_secs
-                    .filter(|seconds| seconds.is_finite() && *seconds > 0.0),
-            },
-            title.facts,
-            title.probe_json,
-            lease,
-            &user.username,
-            &supersession_user,
-            &item_title,
-            session_id,
-        )
-        .await
-        .map_err(optical_start_error)?;
-    Ok(Json(optical_start_response(info, source_height)))
+    let info = match claim {
+        plurx_core::optical::OpticalTitleClaim::Claimed(lease) => state
+            .transcode
+            .start_optical_vod(
+                crate::transcode::OpticalSessionRequest {
+                    playback_id: request.playback_id.clone(),
+                    start_seconds: request.start,
+                    target_height: requested_height,
+                    audio_index: request.audio.filter(|index| *index >= 0),
+                    subtitle_burn: request.subtitle_burn.filter(|index| *index >= 0),
+                    audio_offset_ms: request.audio_offset_ms.unwrap_or(0),
+                    block_budget_secs: request
+                        .block_budget_secs
+                        .filter(|seconds| seconds.is_finite() && *seconds > 0.0),
+                },
+                title.facts,
+                title.probe_json,
+                lease,
+                &user.username,
+                &supersession_user,
+                &item_title,
+                session_id,
+            )
+            .await
+            .map_err(optical_start_error)?,
+        plurx_core::optical::OpticalTitleClaim::Replay { session_id } => {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(info) = state.transcode.recover_optical_vod(&session_id).await {
+                        return info;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                ApiError::typed(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "optical_drive_busy",
+                    "the matching optical session is still preparing",
+                )
+            })?
+        }
+    };
+    let durable_session_id = info.session_id.clone();
+    let media_origin_ms = (info.media_origin_seconds * 1_000.0).round() as i64;
+    let response = optical_start_response(info, source_height);
+    let activation_now_ms = crate::media_sessions::unix_ms();
+    let activation = MediaSessionActivation {
+        incarnation_id: durable_session_id.clone(),
+        session_id: durable_session_id.clone(),
+        user_id,
+        playback_id: request.playback_id,
+        recovery_epoch: durable_session_id.clone(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: false,
+        request_id: None,
+        request_fingerprint: request_digest,
+        owner_node_id: state.node_id.clone(),
+        recipe_json,
+        response_json: serde_json::to_string(&response)
+            .map_err(|error| ApiError::Internal(error.to_string()))?,
+        publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms,
+        now_ms: activation_now_ms,
+        lease_expires_at_ms: activation_now_ms.saturating_add(crate::media_sessions::LEASE_TTL_MS),
+        expected_desired_revision: None,
+    };
+    let outcome = match super::hls::activate_session_under_authority(
+        state.clone(),
+        activation,
+        None,
+        None,
+        authority,
+        admitted_generation,
+        None,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            state
+                .transcode
+                .stop_session(
+                    &durable_session_id,
+                    "optical session durable activation failed",
+                )
+                .await;
+            return Err(error);
+        }
+    };
+    state.media_sessions.seed_owned_lease(&outcome.route).await;
+    Ok(response)
 }
 
 fn optical_start_response(
@@ -1044,7 +1152,7 @@ fn validate_ready_insertion(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProgressRequest {
     drive_id: String,
@@ -1064,26 +1172,63 @@ async fn progress(
     State(state): State<AppState>,
     Path((disc_id, title_id)): Path<(String, String)>,
     Json(request): Json<ProgressRequest>,
-) -> Result<Json<OpticalProgress>, ApiError> {
+) -> Result<Response, ApiError> {
     authorize_play(&state, user.id).await?;
-    let drive_id = local_drive_id(&state, &request.drive_id)?;
+    match drive_target(&state, &request.drive_id).await? {
+        DriveTarget::Local(drive_id) => Ok(Json(
+            local_progress(&state, user.id, &disc_id, &title_id, &drive_id, request).await?,
+        )
+        .into_response()),
+        DriveTarget::Remote {
+            owner_node_id,
+            drive_id,
+        } => {
+            let request = ProgressRequest {
+                drive_id,
+                ..request
+            };
+            let response = relay_owner(
+                &state,
+                &owner_node_id,
+                &OwnerRequest::Progress {
+                    user_id: user.id,
+                    disc_id,
+                    title_id,
+                    request,
+                },
+            )
+            .await?;
+            relayed_json(response)
+        }
+    }
+}
+
+async fn local_progress(
+    state: &AppState,
+    user_id: i64,
+    disc_id: &str,
+    title_id: &str,
+    drive_id: &str,
+    request: ProgressRequest,
+) -> Result<OpticalProgress, ApiError> {
+    authorize_play(state, user_id).await?;
     state
         .optical
         .manager()
         .authorize_session(
             drive_id,
             &request.media_generation,
-            &disc_id,
-            &title_id,
+            disc_id,
+            title_id,
             &request.session_id,
         )
         .map_err(lifecycle_error)?;
     let progress = state
         .store
         .put_optical_progress(&OpticalProgressWrite {
-            user_id: user.id,
-            disc_id,
-            title_id,
+            user_id,
+            disc_id: disc_id.to_owned(),
+            title_id: title_id.to_owned(),
             angle: request.angle,
             position_ms: request.position_ms,
             duration_ms: request.duration_ms,
@@ -1092,7 +1237,7 @@ async fn progress(
             recorded_at_ms: request.recorded_at_ms,
         })
         .await?;
-    Ok(Json(progress))
+    Ok(progress)
 }
 
 #[derive(Deserialize)]
@@ -1290,6 +1435,27 @@ pub(crate) async fn owner(
             Ok(response) => signed_owner_json(&state, &headers, StatusCode::OK, &response),
             Err(error) => signed_owner_error(&state, &headers, error).await,
         },
+        OwnerRequest::StartSession {
+            user_id,
+            drive_id,
+            title_id,
+            request,
+        } => match local_start_session(&state, user_id, &drive_id, &title_id, request).await {
+            Ok(response) => signed_owner_json(&state, &headers, StatusCode::OK, &response),
+            Err(error) => signed_owner_error(&state, &headers, error).await,
+        },
+        OwnerRequest::Progress {
+            user_id,
+            disc_id,
+            title_id,
+            request,
+        } => {
+            let drive_id = request.drive_id.clone();
+            match local_progress(&state, user_id, &disc_id, &title_id, &drive_id, request).await {
+                Ok(response) => signed_owner_json(&state, &headers, StatusCode::OK, &response),
+                Err(error) => signed_owner_error(&state, &headers, error).await,
+            }
+        }
         OwnerRequest::Eject { drive_id, request } => {
             match local_eject(&state, &drive_id, request).await {
                 Ok(()) => {
