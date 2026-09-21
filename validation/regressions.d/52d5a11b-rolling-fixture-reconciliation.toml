@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["52d5a11b"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The current-main rolling-publication fields are exercised by the exact playback-control and transcode fixture tests, while the PR fast lane runs the full workspace unit contract before merge."
