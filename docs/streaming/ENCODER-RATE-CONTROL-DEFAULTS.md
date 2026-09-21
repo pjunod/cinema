@@ -349,7 +349,7 @@ actually serve sessions; the doc row matches.
 3. Whether a flipped family should also raise `bitrate_for_height` ceilings
    (they become caps, not targets): no — unchanged caps keep
    `Rung.peak_kbps` and every advertised BANDWIDTH honest (see
-   [HONEST-MASTER-PLAYLIST.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)).
+   [HONEST-MASTER-PLAYLIST.md](HONEST-MASTER-PLAYLIST.md)).
 
 ---
 

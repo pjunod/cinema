@@ -17,7 +17,7 @@ one draft PR into `main` under the fast lane. Every `file:line` was read at
 require changing a GPU graph's operator (`bt.2390` in libplacebo,
 `tonemap=1` in vpp_qsv, `hable` in tonemap_opencl), stop and flag it: those
 belong to
-[CODEC-AND-GPU-QUALIFICATION.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md).
+[CODEC-AND-GPU-QUALIFICATION.md](CODEC-AND-GPU-QUALIFICATION.md).
 
 **Correction to the review:** the review and appendix describe two LIKELY
 failure modes for the CPU chain when no `peak=` is given — a "dark" map at

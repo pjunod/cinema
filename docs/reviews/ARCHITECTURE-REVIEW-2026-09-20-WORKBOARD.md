@@ -94,9 +94,8 @@ claiming; it can still review.
 Board ids are stable handles for claims and PR titles; the review ids in the
 third column are what the plan executes. **Priority** is from the review's
 §5: `week` · `month` · `quarter` · `design` (a design document whose output
-is a decision or a follow-on plan, not code). Plans marked `not written` are
-in the review's §5 but have no document yet; writing the document is itself
-the first claimable milestone for that row.
+is a decision or a follow-on plan, not code). Every row now has a
+document (the twelve written second landed on 2026-09-20 as well).
 
 | Id | Plan | Executes | Priority | Status | Model | Session | Branch / PR | Last update | Notes |
 |---|---|---|---|---|---|---|---|---|---|
@@ -109,8 +108,8 @@ the first claimable milestone for that row.
 | S-07 | [TONE-MAP-CHAIN-CORRECTIONS](../streaming/TONE-MAP-CHAIN-CORRECTIONS.md) | Q3 | month | unclaimed | | | | 2026-09-20 | M0 is the hwdownload metadata test |
 | S-08 | [INTERLACE-IN-THE-MEDIA-CONTRACT](../streaming/INTERLACE-IN-THE-MEDIA-CONTRACT.md) | Q4, Q9 (bitrate half) | month | unclaimed | | | | 2026-09-20 | Reproduced defect; fixture in review §9 |
 | S-09 | [AUDIO-RESOLVED-INDEPENDENTLY](../streaming/AUDIO-RESOLVED-INDEPENDENTLY.md) | Q5 | month | unclaimed | | | | 2026-09-20 | |
-| S-10 | HONEST-MASTER-PLAYLIST — **not written** | Q7, A11 | month | unclaimed | | | | 2026-09-20 | Writer cut off; first milestone is the document |
-| S-11 | CODEC-AND-GPU-QUALIFICATION — **not written** | Q12, Q6, Q8 | quarter | unclaimed | | | | 2026-09-20 | Writer cut off |
+| S-10 | [HONEST-MASTER-PLAYLIST](../streaming/HONEST-MASTER-PLAYLIST.md) | Q7, A11 | month | unclaimed | | | | 2026-09-20 | Rolling path emits source geometry; VOD already emits output geometry; BANDWIDTH wrong on both; hard-coded string is `avc1.640034` |
+| S-11 | [CODEC-AND-GPU-QUALIFICATION](../streaming/CODEC-AND-GPU-QUALIFICATION.md) | Q12, Q6, Q8 | quarter | unclaimed | | | | 2026-09-20 | M0 encoder inventory on /metrics decides whether NVENC/VideoToolbox milestones exist |
 | S-12 | [VOD-BFRAMES-TIMELINE-DESIGN](../streaming/VOD-BFRAMES-TIMELINE-DESIGN.md) | Q2 | design | unclaimed | | | | 2026-09-20 | Design only; `vodgen.rs:399` refuses nonzero CTO today |
 | S-13 | [DECODE-FACTS-GATE-AND-FALLBACK](../streaming/DECODE-FACTS-GATE-AND-FALLBACK.md) | C13 | month | unclaimed | | | | 2026-09-20 | Measure before optimising |
 | S-14 | [TRANSCODE-DECOMPOSITION-PLAN](../streaming/TRANSCODE-DECOMPOSITION-PLAN.md) | §4.1, §4.2, §4.9 | quarter | unclaimed | | | | 2026-09-20 | Behaviour-preserving moves first; registry unification separate |
@@ -119,17 +118,17 @@ the first claimable milestone for that row.
 | K-03 | [REPLICATED-WRITE-RATE-HYGIENE](../cluster/REPLICATED-WRITE-RATE-HYGIENE.md) | S3 | week | unclaimed | | | | 2026-09-20 | Keep the atomic claim |
 | K-04 | [BOUNDED-REPLICA-READS-ROLLOUT](../cluster/BOUNDED-REPLICA-READS-ROLLOUT.md) | S1 | month | unclaimed | | | | 2026-09-20 | Consistency-policy change; no auth cache |
 | K-05 | [SQLITE-READ-PATH-AND-QUERY-PLANS](../cluster/SQLITE-READ-PATH-AND-QUERY-PLANS.md) | S6, S7, S11 | month | unclaimed | | | | 2026-09-20 | Search predicate is the corrected one |
-| K-06 | CLOCK-SKEW-GUARD-DESIGN — **not written** | S9 | design | unclaimed | | | | 2026-09-20 | Writer cut off |
-| K-07 | STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION — **not written** | S10 | week | unclaimed | | | | 2026-09-20 | Writer cut off; the ten selector paths are in the review |
-| K-08 | HIQLITE-FORK-AND-DEPENDENCY-CLEANUP — **not written** | §4.3 | month | unclaimed | | | | 2026-09-20 | Writer cut off |
+| K-06 | [CLOCK-SKEW-GUARD-DESIGN](../cluster/CLOCK-SKEW-GUARD-DESIGN.md) | S9 | design | unclaimed | | | | 2026-09-20 | Half the exchange exists (`x-plurx-cluster-time-ms`); auth windows already assume ≤5 s |
+| K-07 | [STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION](../cluster/STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION.md) | S10 | week | unclaimed | | | | 2026-09-20 | Selector output confirmed 3/16 + 7/24; 29 discarded store results, not 13 |
+| K-08 | [HIQLITE-FORK-AND-DEPENDENCY-CLEANUP](../cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md) | §4.3 | month | unclaimed | | | | 2026-09-20 | Do not rename (patch-by-name); three edges reach aws-lc, cryptr fix removes one |
 | C-01 | [HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY](../server/HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY.md) | §2.5, W1, W2, W5, W6 | week | unclaimed | | | | 2026-09-20 | Three PRs |
 | C-02 | [SCAN-AND-ENRICHMENT-HYGIENE](../server/SCAN-AND-ENRICHMENT-HYGIENE.md) | C3, C5 | week | unclaimed | | | | 2026-09-20 | |
 | C-03 | [IMAGE-SERVING-AND-DERIVATIVES](../server/IMAGE-SERVING-AND-DERIVATIVES.md) | C6 | month | unclaimed | | | | 2026-09-20 | Keep `original` backdrops |
 | C-04 | [AUTH-HARDENING](../server/AUTH-HARDENING.md) | C7, C8 | month | unclaimed | | | | 2026-09-20 | Fence kept; token expiry is Paul's call |
-| C-05 | DETAIL-READS-AND-STORAGE-AVAILABILITY — **not written** | C14 | month | unclaimed | | | | 2026-09-20 | Writer cut off |
-| C-06 | TELEMETRY-BACKPRESSURE — **not written** | C15 | month | unclaimed | | | | 2026-09-20 | Writer cut off |
-| C-07 | PLEX-FACADE-PAGING — **not written** | C4, C9 | month | unclaimed | | | | 2026-09-20 | Writer cut off; only if Kodi/PKC is in use |
-| C-08 | OBSERVABILITY-BASELINE — **not written** | C10, §4.9 | month | unclaimed | | | | 2026-09-20 | Writer cut off |
+| C-05 | [DETAIL-READS-AND-STORAGE-AVAILABILITY](../server/DETAIL-READS-AND-STORAGE-AVAILABILITY.md) | C14 | month | unclaimed | | | | 2026-09-20 | M1 marker must land and backfill before M2; cost is the node-local sidecar, not raft |
+| C-06 | [TELEMETRY-BACKPRESSURE](../server/TELEMETRY-BACKPRESSURE.md) | C15 | month | unclaimed | | | | 2026-09-20 | Four small PRs; M1 first |
+| C-07 | [PLEX-FACADE-PAGING](../server/PLEX-FACADE-PAGING.md) | C4, C9 | month | unclaimed | | | | 2026-09-20 | M0 census decides whether to build; `files_for_items` does not exist yet; C9 is measure-only |
+| C-08 | [OBSERVABILITY-BASELINE](../server/OBSERVABILITY-BASELINE.md) | C10, §4.9 | month | unclaimed | | | | 2026-09-20 | M1–M4 parallel; M5 needs M1; there is no access log today at all |
 | L-01 | [DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION](../features/DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md) | L1, L10 | week (L1) / month (L10) | unclaimed | | | | 2026-09-20 | |
 | L-02 | [LIVE-TV-SESSION-FENCE-PEER-TRANSPORT-AND-START](../features/LIVE-TV-SESSION-FENCE-PEER-TRANSPORT-AND-START.md) | L2, L3, L6, L9 | week (L3) / month | unclaimed | | | | 2026-09-20 | Fence grace bound is Paul's call |
 | L-03 | [LIVE-TV-SHARED-TRANSPORT](../features/LIVE-TV-SHARED-TRANSPORT.md) | L4, Q9 (captions) | quarter | unclaimed | | | | 2026-09-20 | Design + caption audit |
@@ -138,14 +137,14 @@ the first claimable milestone for that row.
 | A-01 | [APPLE-DISPLAY-CRITERIA-AND-AUDIO-SESSION](../clients/APPLE-DISPLAY-CRITERIA-AND-AUDIO-SESSION.md) | §2.8, §2.10 | week | unclaimed | | | | 2026-09-20 | Device tests are GPT prompts in the plan |
 | A-02 | [APPLE-PLAYER-CONTROLLER-ATTEMPT-AND-OBSERVATION](../clients/APPLE-PLAYER-CONTROLLER-ATTEMPT-AND-OBSERVATION.md) | A3, A4, A6, A7 | month | unclaimed | | | | 2026-09-20 | After A-01 |
 | A-03 | [NATIVE-LIBRARY-PAGING](../clients/NATIVE-LIBRARY-PAGING.md) | A5, D6 (library) | month | unclaimed | | | | 2026-09-20 | Apple + Android |
-| A-04 | NATIVE-ADAPTIVE-QUALITY-DESIGN — **not written** | §3.8 | design | unclaimed | | | | 2026-09-20 | Writer cut off |
+| A-04 | [NATIVE-ADAPTIVE-QUALITY-DESIGN](../clients/NATIVE-ADAPTIVE-QUALITY-DESIGN.md) | §3.8 | design | unclaimed | | | | 2026-09-20 | Design; recommends revive the wire, delete the Apple helper — Paul decides |
 | D-01 | [ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET](../clients/ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET.md) | §2.9, D1 | week (measure) / month | unclaimed | | | | 2026-09-20 | Memory measurements first |
 | D-02 | [ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION](../clients/ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION.md) | D2, D3, D4, D7 | month | unclaimed | | | | 2026-09-20 | |
 | D-03 | [ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD](../clients/ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md) | D5, D6 (release) | week (backup rules) / month | unclaimed | | | | 2026-09-20 | |
 | P-01 | [RUST-TEST-EXECUTION-POLICY](../ci/RUST-TEST-EXECUTION-POLICY.md) | §2.2, §4.8 | week | unclaimed | | | | 2026-09-20 | Decision is Paul's (§7.1); the two red tests are not |
 | P-02 | [SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE](../ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md) | §4.6 | month | unclaimed | | | | 2026-09-20 | Observe inherited limits first |
-| P-03 | LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS — **not written** | §4.4, §4.5 | month | unclaimed | | | | 2026-09-20 | Writer cut off; two decisions are Paul's |
-| P-04 | ARCHITECTURE-DOC-RECONCILIATION — **not written** | §4.7 | week | unclaimed | | | | 2026-09-20 | Writer cut off |
+| P-03 | [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS](../ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md) | §4.4, §4.5 | month | unclaimed | | | | 2026-09-20 | Two decisions are Paul's; `publish_main` is unreachable on current triggers (blocks M7 behind P-01) |
+| P-04 | [ARCHITECTURE-DOC-RECONCILIATION](../ci/ARCHITECTURE-DOC-RECONCILIATION.md) | §4.7 | week | unclaimed | | | | 2026-09-20 | 46 index-row/header contradictions listed; the "1-voter" sentence is incomplete, not wrong |
 
 Not on the board by design: C16 (scratch reservations) belongs to the
 seek-scratch repair effort and is tracked there.

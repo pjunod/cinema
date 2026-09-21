@@ -184,7 +184,7 @@ return E-AC-3/AC-3. Audio offset correction still forces `Encode`.
   Encode{..})`).
 - `Rung.total_kbps` / `peak_kbps` ([`transcode.rs:26794-26808`](../../crates/plurxd/src/transcode.rs))
   add the negotiated audio bitrate, not `AUDIO_BITRATE_KBPS_DEFAULT`, so
-  [HONEST-MASTER-PLAYLIST.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)'s BANDWIDTH stays
+  [HONEST-MASTER-PLAYLIST.md](HONEST-MASTER-PLAYLIST.md)'s BANDWIDTH stays
   true; `AUDIO_BITRATE_KBPS_DEFAULT` remains the value for an absent claim.
 - `HlsContext.codecs`: `mp4a.40.2` | `ec-3` | `ac-3` from the delivery.
   plurx muxes audio into the variant (no `EXT-X-MEDIA` audio group), so

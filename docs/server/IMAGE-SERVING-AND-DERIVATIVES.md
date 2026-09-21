@@ -451,7 +451,7 @@ Do not clear the app's cache between steps.
 3. **Plex façade `?size=`.** `/photo/:/transcode` takes `width`/`height`;
    mapping them to the nearest bucket is a two-line follow-up once M2 is
    in, and only matters if Kodi/PKC is in use
-   ([PLEX-FACADE-PAGING.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)).
+   ([PLEX-FACADE-PAGING.md](PLEX-FACADE-PAGING.md)).
 4. **Should the peer route also carry the verified digest to the puller?**
    A peer already verifies by name; for legacy names an `ETag` from the
    origin node would let the puller skip a re-hash. Small; not needed for
