@@ -109,7 +109,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 | Id | Plan | Executes | Priority | Status | Model | Session | Branch / PR | Last update | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | S-01 | [PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS](../streaming/PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md) | §2.1, C12 | week | unclaimed | | | | 2026-09-20 | Do first; every other ffmpeg-probe plan assumes M1 |
-| S-02 | [MEDIA-BODY-BUFFERS](../streaming/MEDIA-BODY-BUFFERS.md) | §2.4, C1 | week | unclaimed | | | | 2026-09-20 | M1 only this week; M2 (ack batching) after measurement |
+| S-02 | [MEDIA-BODY-BUFFERS](../streaming/MEDIA-BODY-BUFFERS.md) | §2.4, C1 | week | claimed | gpt-5.6-sol | agent:/root/c02_builder | `plan/S-02` | 2026-09-21 | M1 only this week; M2 (ack batching) stays pending in this plan PR until the required deployed measurement exists. |
 | S-03 | [ENCODED-VOD-HOLD-AND-RELEASE](../streaming/ENCODED-VOD-HOLD-AND-RELEASE.md) | §2.6 | week | unclaimed | | | | 2026-09-20 | M0 fleet count first |
 | S-04 | [FONT-ATTESTATION-AND-BLOCKING-IO](../streaming/FONT-ATTESTATION-AND-BLOCKING-IO.md) | §2.7 | week (M1) / month (M2) | unclaimed | | | | 2026-09-20 | Needs `ldd \| grep fontconfig` on media1 before M2 |
 | S-05 | [FFMPEG-SPAWN-UNIFICATION](../streaming/FFMPEG-SPAWN-UNIFICATION.md) | F-stream-12/13, §4.1 | month | unclaimed | | | | 2026-09-20 | After S-01 |
