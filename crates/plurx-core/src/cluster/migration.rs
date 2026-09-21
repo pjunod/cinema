@@ -110,6 +110,7 @@ pub struct ClusterRestoreReport {
     pub node_id: Option<String>,
     pub remapped_files: u64,
     pub remapped_libraries: u64,
+    pub remapped_dvr_recordings: u64,
     pub verified_only: bool,
 }
 #[cfg(feature = "hiqlite-store")]
@@ -1679,17 +1680,42 @@ pub fn build_cluster_backup_artifact(
             .map_err(|error| migration_io("reading metadata for", &image, error))?
             .len();
 
-        if let Some(key_source) = credential_key_source.filter(|path| path.exists()) {
-            let key_target = staging.join(crate::secrets::CREDENTIAL_KEY_FILENAME);
-            std::fs::copy(key_source, &key_target)
-                .map_err(|error| migration_io("copying credential key to", &key_target, error))?;
-            #[cfg(unix)]
-            std::fs::set_permissions(&key_target, std::fs::Permissions::from_mode(0o600))
-                .map_err(|error| migration_io("protecting", &key_target, error))?;
-            File::open(&key_target)
-                .and_then(|file| file.sync_all())
-                .map_err(|error| migration_io("syncing", &key_target, error))?;
-        }
+        let copied_key_id = match credential_key_source {
+            Some(key_source) => {
+                // Load first: this both refuses a disappeared/non-regular key
+                // and binds the manifest to the bytes we are about to copy.
+                // A disappearance between load and copy fails the build and
+                // the staging directory is removed rather than published.
+                let source_key = CredentialKey::load(key_source)
+                    .map_err(|error| StoreError::Identity(error.to_string()))?;
+                if credential_key_id.is_some_and(|expected| expected != source_key.id()) {
+                    return Err(StoreError::Identity(format!(
+                        "backup requested credential key {}, but source {} holds key {}",
+                        credential_key_id.unwrap_or_default(),
+                        key_source.display(),
+                        source_key.id()
+                    )));
+                }
+                let key_target = staging.join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+                std::fs::copy(key_source, &key_target).map_err(|error| {
+                    migration_io("copying credential key to", &key_target, error)
+                })?;
+                #[cfg(unix)]
+                std::fs::set_permissions(&key_target, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|error| migration_io("protecting", &key_target, error))?;
+                File::open(&key_target)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|error| migration_io("syncing", &key_target, error))?;
+                Some(source_key.id().to_owned())
+            }
+            None if credential_key_id.is_some() => {
+                return Err(StoreError::Identity(format!(
+                    "backup manifest would declare credential key {} without a source key file",
+                    credential_key_id.unwrap_or_default()
+                )));
+            }
+            None => None,
+        };
 
         let manifest = ClusterBackupManifest {
             schema_version: 1,
@@ -1708,7 +1734,7 @@ pub fn build_cluster_backup_artifact(
             image_bytes,
             integrity_check,
             table_counts,
-            credential_key_id: credential_key_id.map(str::to_owned),
+            credential_key_id: copied_key_id,
         };
         let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)
             .map_err(|error| StoreError::Migration(format!("encoding backup manifest: {error}")))?;
@@ -1764,6 +1790,7 @@ pub fn verify_cluster_backup_archive(
         node_id: None,
         remapped_files: 0,
         remapped_libraries: 0,
+        remapped_dvr_recordings: 0,
         verified_only: true,
     })
 }
@@ -1840,7 +1867,7 @@ pub async fn restore_cluster_backup_archive(
             credential_key_override,
             manifest.credential_key_id.as_deref(),
         )?;
-        let (remapped_files, remapped_libraries) =
+        let (remapped_files, remapped_libraries, remapped_dvr_recordings) =
             apply_restore_image_changes(&mut connection, &manifest, remaps)?;
         drop(connection);
         File::open(&database)
@@ -1916,6 +1943,7 @@ pub async fn restore_cluster_backup_archive(
             node_id: Some(identity.node_id),
             remapped_files,
             remapped_libraries,
+            remapped_dvr_recordings,
             verified_only: false,
         })
     })();
@@ -1986,6 +2014,20 @@ fn verified_backup_manifest(archive: &Path) -> Result<ClusterBackupManifest, Sto
         }
     }
     let key = archive.join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+    match (manifest.credential_key_id.as_deref(), key.exists()) {
+        (Some(expected_id), false) => {
+            return Err(StoreError::Identity(format!(
+                "backup manifest names credential key {expected_id}, but credentials.key is missing"
+            )));
+        }
+        (None, true) => {
+            return Err(StoreError::Identity(
+                "backup contains credentials.key, but the manifest declares no credential key"
+                    .to_owned(),
+            ));
+        }
+        _ => {}
+    }
     if key.exists() {
         require_regular_archive_file(&key)?;
         let expected = sha256_file(&key)?;
@@ -2074,10 +2116,18 @@ fn verify_backup_key(
     let key = credential_key_override
         .map(Path::to_path_buf)
         .unwrap_or_else(|| archive.join(crate::secrets::CREDENTIAL_KEY_FILENAME));
-    if !key.exists() && census.sealed_rows() == 0 && expected_key_id.is_none() {
-        return Ok(());
+    if !key.exists() {
+        if let Some(expected) = expected_key_id {
+            return Err(StoreError::Identity(format!(
+                "backup manifest names credential key {expected}, but {} is missing",
+                key.display()
+            )));
+        }
+        if census.sealed_rows() == 0 {
+            return Ok(());
+        }
     }
-    let key = secrets::open_credential_key(&key, &census)
+    let key = secrets::load_existing_credential_key(&key, &census)
         .map_err(|error| StoreError::Identity(error.to_string()))?;
     if expected_key_id.is_some_and(|expected| expected != key.id()) {
         return Err(StoreError::Identity(format!(
@@ -2094,7 +2144,7 @@ fn apply_restore_image_changes(
     connection: &mut Connection,
     manifest: &ClusterBackupManifest,
     remaps: &[(PathBuf, PathBuf)],
-) -> Result<(u64, u64), StoreError> {
+) -> Result<(u64, u64, u64), StoreError> {
     let transaction = connection
         .transaction()
         .map_err(|error| StoreError::Migration(format!("starting restore transaction: {error}")))?;
@@ -2180,8 +2230,52 @@ fn apply_restore_image_changes(
             }
         }
     }
+    let mut remapped_dvr_recordings = 0_u64;
+    let dvr_recordings_exists: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='dvr_recordings'",
+            (),
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            StoreError::Migration(format!("checking restored DVR recordings: {error}"))
+        })?;
+    if dvr_recordings_exists != 0 {
+        let mut statement = transaction
+            .prepare("SELECT id, path FROM dvr_recordings WHERE path IS NOT NULL ORDER BY id")
+            .map_err(|error| {
+                StoreError::Migration(format!("reading restored DVR recordings: {error}"))
+            })?;
+        let rows = statement
+            .query_map((), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| {
+                StoreError::Migration(format!("reading restored DVR recordings: {error}"))
+            })?;
+        for row in rows {
+            let (id, old) = row.map_err(|error| {
+                StoreError::Migration(format!("reading restored DVR recording: {error}"))
+            })?;
+            let new = remap_path(&old, remaps)?;
+            if new != old {
+                transaction
+                    .execute(
+                        "UPDATE dvr_recordings SET path=?1 WHERE id=?2",
+                        rusqlite::params![new, id],
+                    )
+                    .map_err(|error| {
+                        StoreError::Migration(format!("remapping DVR recording {old}: {error}"))
+                    })?;
+                remapped_dvr_recordings += 1;
+            }
+        }
+    }
     for table in [
         "media_session_requests",
+        "media_session_preparations",
+        "media_session_terminal_acks",
+        "media_session_producer_recovery",
         "media_playback_pointers",
         "media_sessions",
         "job_leases",
@@ -2211,8 +2305,14 @@ fn apply_restore_image_changes(
     }
     transaction
         .execute(
-            "INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            rusqlite::params![crate::store::keys::CLUSTER_RESTORE_GENERATION, manifest.built_at_unix_ms.to_string()],
+            "INSERT INTO settings(key,value,updated_at) VALUES(?1,?2,?3)
+             ON CONFLICT(key) DO UPDATE SET
+               value=excluded.value, updated_at=excluded.updated_at",
+            rusqlite::params![
+                crate::store::keys::CLUSTER_RESTORE_GENERATION,
+                manifest.built_at_unix_ms.to_string(),
+                manifest.built_at_unix_ms,
+            ],
         )
         .map_err(|error| StoreError::Migration(format!("recording restore generation: {error}")))?;
     transaction
@@ -2226,7 +2326,7 @@ fn apply_restore_image_changes(
             "restored image integrity_check returned {integrity:?}"
         )));
     }
-    Ok((remapped_files, remapped_libraries))
+    Ok((remapped_files, remapped_libraries, remapped_dvr_recordings))
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -4450,25 +4550,63 @@ mod tests {
         )
         .expect("activation marker fixture");
         let snapshot = root.join("published-snapshot");
+        // Build the current production schema. A hand-written subset made the
+        // restore test pass while omitting exactly the durable coordination
+        // tables the restore contract promises to clear.
+        drop(SqliteStore::open(&snapshot).expect("production snapshot schema"));
         let connection = Connection::open(&snapshot).expect("snapshot fixture");
         connection
             .execute_batch(
                 "CREATE TABLE _metadata (key TEXT PRIMARY KEY, data BLOB NOT NULL);
-                 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                 CREATE TABLE users (id INTEGER PRIMARY KEY);
-                 CREATE TABLE tokens (token_hash TEXT PRIMARY KEY);
-                 CREATE TABLE libraries (id INTEGER PRIMARY KEY, paths TEXT NOT NULL);
-                 CREATE TABLE items (id INTEGER PRIMARY KEY, library_id INTEGER);
-                 CREATE TABLE files (id INTEGER PRIMARY KEY, item_id INTEGER, path TEXT UNIQUE);
-                 CREATE TABLE watch_state (user_id INTEGER, item_id INTEGER);
-                 CREATE TABLE library_roots (library_id INTEGER PRIMARY KEY, fingerprint TEXT);
-                 CREATE TABLE dvr_schedules (id INTEGER PRIMARY KEY);
-                 CREATE TABLE library_channels (id INTEGER PRIMARY KEY);
-                 INSERT INTO settings(key,value) VALUES('instance.id', 'cluster-backup-test');
-                 INSERT INTO libraries(id,paths) VALUES(1, '[\"/srv/media\"]');
+                 INSERT INTO settings(key,value) VALUES('instance.id', 'cluster-backup-test')
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+                 INSERT INTO users(id,username,password_hash,is_admin)
+                   VALUES(1,'restore-admin','hash',1);
+                 INSERT INTO libraries(id,name,kind,paths)
+                   VALUES(1,'Movies','movies','[\"/srv/media\"]');
                  INSERT INTO library_roots(library_id,fingerprint) VALUES(1, 'old-root');
-                 INSERT INTO items(id,library_id) VALUES(1,1);
-                 INSERT INTO files(id,item_id,path) VALUES(1,1,'/srv/media/movie.mkv');",
+                 INSERT INTO items(id,library_id,kind,title,sort_title)
+                   VALUES(1,1,'movie','Movie','Movie');
+                 INSERT INTO files(id,item_id,path,size,mtime)
+                   VALUES(1,1,'/srv/media/movie.mkv',1,1);
+                 INSERT INTO dvr_recordings(
+                   id,origin,channel_id,guide_number,channel_name,airing_start,
+                   airing_end,capture_start,capture_end,title,state,path,
+                   created_at_ms,updated_at_ms)
+                   VALUES('recording-1','manual','channel-1','1','One',1,2,1,2,
+                          'News','done','/srv/media/dvr/news.ts',1,1);
+                 INSERT INTO media_session_requests(
+                   user_id,request_id,request_fingerprint,playback_id,state,
+                   claim_expires_at_ms,incarnation_id,owner_node_id,updated_at_ms)
+                   VALUES(1,'request-1','fingerprint','playback-1','resolved',9,
+                          'incarnation-1','old-node',1);
+                 INSERT INTO media_sessions(
+                   incarnation_id,session_id,user_id,playback_id,
+                   request_fingerprint,owner_node_id,owner_epoch,
+                   lease_expires_at_ms,state,recipe_json,response_json,updated_at_ms)
+                   VALUES('incarnation-1','session-1',1,'playback-1','fingerprint',
+                          'old-node',1,9,'active','{}','{}',1);
+                 INSERT INTO media_playback_pointers(
+                   user_id,playback_id,current_incarnation_id,updated_at_ms)
+                   VALUES(1,'playback-1','incarnation-1',1);
+                 INSERT INTO media_session_preparations(
+                   user_id,playback_id,staged_incarnation_id,
+                   expected_predecessor_incarnation_id,deadline_ms,
+                   created_at_ms,updated_at_ms)
+                   VALUES(1,'playback-2','incarnation-2','incarnation-1',9,1,1);
+                 INSERT INTO media_session_terminal_acks(
+                   incarnation_id,session_id,owner_node_id,owner_epoch,
+                   client_instance_id,sequence,request_fingerprint,response_json,
+                   expires_at_ms,updated_at_ms)
+                   VALUES('incarnation-3','session-3','old-node',1,'client-1',1,
+                          'fingerprint','{}',9,1);
+                 INSERT INTO media_session_producer_recovery(
+                   user_id,playback_id,recovery_epoch,failed_incarnation_id,
+                   failed_producer_attempt,decision_sequence,failed_plan_digest,
+                   alternate_plan_digest,state,created_at_ms,updated_at_ms)
+                   VALUES(1,'playback-1','epoch-1','incarnation-1',1,1,
+                          lower(hex(zeroblob(32))),lower(hex(zeroblob(32))),
+                          'exhausted',1,1);",
             )
             .expect("snapshot schema");
         let metadata = hiqlite::StateMachineData {
@@ -4527,6 +4665,175 @@ mod tests {
     }
 
     #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn cluster_backup_refuses_a_declared_missing_key_without_publishing() {
+        let data = tempfile::tempdir().expect("data fixture");
+        let destination = tempfile::tempdir().expect("destination fixture");
+        let snapshot = portable_snapshot_fixture(data.path(), "cluster-backup-test");
+        let missing = data.path().join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+
+        let error = build_cluster_backup_artifact(
+            File::open(&snapshot).expect("snapshot"),
+            destination.path(),
+            data.path(),
+            Some(&missing),
+            "node-a",
+            Some("deadbeef"),
+            "test-build",
+            7,
+        )
+        .expect_err("a declared key must be copied or the build must fail");
+
+        assert!(error.to_string().contains("credential key file"));
+        assert_eq!(
+            std::fs::read_dir(destination.path())
+                .expect("empty destination")
+                .count(),
+            0,
+            "a failed key copy must publish neither staging nor archive"
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn cluster_backup_integrity_failure_cleans_staging_and_publishes_nothing() {
+        let data = tempfile::tempdir().expect("data fixture");
+        let destination = tempfile::tempdir().expect("destination fixture");
+        let snapshot = portable_snapshot_fixture(data.path(), "cluster-backup-test");
+        let connection = Connection::open(&snapshot).expect("corruptible snapshot");
+        connection
+            .execute_batch(
+                "PRAGMA writable_schema=ON;
+                 UPDATE sqlite_master SET rootpage=2147483647
+                   WHERE type='index' AND name='idx_items_library_kind';
+                 PRAGMA writable_schema=OFF;",
+            )
+            .expect("poison an index root page");
+        drop(connection);
+
+        build_cluster_backup_artifact(
+            File::open(&snapshot).expect("snapshot"),
+            destination.path(),
+            data.path(),
+            None,
+            "node-a",
+            None,
+            "test-build",
+            7,
+        )
+        .expect_err("integrity failure must refuse the artefact");
+
+        assert_eq!(
+            std::fs::read_dir(destination.path())
+                .expect("empty destination")
+                .count(),
+            0,
+            "integrity failure must clean staging and never publish"
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn restore_verify_missing_key_is_read_only_and_wrong_key_is_refused() {
+        let data = tempfile::tempdir().expect("data fixture");
+        let destination = tempfile::tempdir().expect("destination fixture");
+        let snapshot = portable_snapshot_fixture(data.path(), "cluster-backup-test");
+        let source_key_path = data.path().join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+        let source_key = CredentialKey::load_or_create(&source_key_path).expect("source key");
+        let (artifact, _) = build_cluster_backup_artifact(
+            File::open(&snapshot).expect("snapshot"),
+            destination.path(),
+            data.path(),
+            Some(&source_key_path),
+            "node-a",
+            Some(source_key.id()),
+            "test-build",
+            7,
+        )
+        .expect("keyed artefact");
+
+        let wrong_key_path = data.path().join("wrong-credentials.key");
+        let wrong_key = CredentialKey::load_or_create(&wrong_key_path).expect("wrong key");
+        assert_ne!(wrong_key.id(), source_key.id());
+        let wrong = verify_cluster_backup_archive(&artifact, Some(&wrong_key_path))
+            .expect_err("wrong override key must be refused");
+        assert!(wrong.to_string().contains("manifest names credential key"));
+
+        std::fs::remove_file(artifact.join(crate::secrets::CREDENTIAL_KEY_FILENAME))
+            .expect("simulate missing archived key");
+        let before = std::fs::read_dir(&artifact)
+            .expect("archive members before verify")
+            .map(|entry| {
+                let entry = entry.expect("archive member");
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(entry.path()).expect("archive member bytes"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let missing = verify_cluster_backup_archive(&artifact, None)
+            .expect_err("missing declared key must be refused");
+        assert!(missing.to_string().contains("credentials.key is missing"));
+        let after = std::fs::read_dir(&artifact)
+            .expect("archive members after verify")
+            .map(|entry| {
+                let entry = entry.expect("archive member");
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(entry.path()).expect("archive member bytes"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(after, before, "verify must be byte-for-byte read-only");
+        assert!(!artifact
+            .join(crate::secrets::CREDENTIAL_KEY_FILENAME)
+            .exists());
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test]
+    async fn restore_archive_newer_schema_refuses_before_creating_the_target() {
+        let data = tempfile::tempdir().expect("data fixture");
+        let destination = tempfile::tempdir().expect("destination fixture");
+        let snapshot = portable_snapshot_fixture(data.path(), "cluster-backup-test");
+        let (artifact, _) = build_cluster_backup_artifact(
+            File::open(&snapshot).expect("snapshot"),
+            destination.path(),
+            data.path(),
+            None,
+            "node-a",
+            None,
+            "test-build",
+            7,
+        )
+        .expect("newer-schema artefact");
+        let manifest_path = artifact.join("manifest.json");
+        let mut manifest: ClusterBackupManifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).expect("manifest bytes"))
+                .expect("manifest");
+        manifest.replicated_schema_version = AUTH_SCHEMA_VERSION + 1;
+        let mut manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("newer manifest");
+        manifest_bytes.push(b'\n');
+        std::fs::write(&manifest_path, manifest_bytes).expect("replace manifest");
+        let sums = format!(
+            "{}  manifest.json\n{}  {SQLITE_FILENAME}\n",
+            sha256_file(&manifest_path).expect("manifest hash"),
+            manifest.image_sha256
+        );
+        std::fs::write(artifact.join("SHA256SUMS"), sums).expect("replace checksums");
+        let target_parent = tempfile::tempdir().expect("target parent");
+        let target = target_parent.path().join("restored");
+        let config = membership_test_config(&target);
+
+        let error = restore_cluster_backup_archive(&artifact, &config, &[], None)
+            .await
+            .expect_err("newer schema must be refused");
+
+        assert!(error.to_string().contains("only knows"));
+        assert!(!target.exists(), "schema refusal must not create a target");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
     #[tokio::test]
     async fn restore_archive_remaps_paths_resets_fingerprint_and_mints_fence() {
         let data = tempfile::tempdir().expect("builder fixture");
@@ -4545,9 +4852,7 @@ mod tests {
         .expect("portable artefact");
         let target_parent = tempfile::tempdir().expect("target parent");
         let target = target_parent.path().join("restored");
-        let mut config = Config::default();
-        config.storage.data_dir = target.clone();
-        config.cluster.advertise_host = "127.0.0.1".to_owned();
+        let config = membership_test_config(&target);
 
         let report = restore_cluster_backup_archive(
             &artifact,
@@ -4561,6 +4866,7 @@ mod tests {
         assert_eq!(report.cluster_id, "cluster-backup-test");
         assert_eq!(report.remapped_files, 1);
         assert_eq!(report.remapped_libraries, 1);
+        assert_eq!(report.remapped_dvr_recordings, 1);
         assert_ne!(report.node_id.as_deref(), Some("old-node"));
         for secret in [
             RAFT_SECRET_FILENAME,
@@ -4584,6 +4890,29 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM library_roots", (), |row| row.get(0))
             .expect("root count");
         assert_eq!(roots, 0);
+        let dvr_path: String = restored
+            .query_row(
+                "SELECT path FROM dvr_recordings WHERE id='recording-1'",
+                (),
+                |row| row.get(0),
+            )
+            .expect("restored DVR path");
+        assert_eq!(dvr_path, "/mnt/nas/media/dvr/news.ts");
+        for table in [
+            "media_session_requests",
+            "media_session_preparations",
+            "media_session_terminal_acks",
+            "media_session_producer_recovery",
+            "media_playback_pointers",
+            "media_sessions",
+        ] {
+            let count: i64 = restored
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), (), |row| {
+                    row.get(0)
+                })
+                .unwrap_or_else(|error| panic!("count restored {table}: {error}"));
+            assert_eq!(count, 0, "restore retained dead coordination in {table}");
+        }
         let generation: String = restored
             .query_row(
                 "SELECT value FROM settings WHERE key=?1",
@@ -4592,6 +4921,88 @@ mod tests {
             )
             .expect("restore generation");
         assert_eq!(generation, report.source_built_at_unix_ms.to_string());
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn restore_archive_from_real_snapshot_starts_as_the_only_voter() {
+        install_default_crypto_provider();
+
+        let source_dir = tempfile::tempdir().expect("source data dir");
+        let source_config = membership_test_config(source_dir.path());
+        drop(
+            SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME))
+                .expect("legacy source store"),
+        );
+        let source = select_daemon_store(&source_config)
+            .await
+            .expect("source voter");
+        let client = source.local_client().expect("source local client");
+        let applied = client
+            .trigger_db_snapshot()
+            .await
+            .expect("trigger snapshot");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let metrics = client.metrics_db().await.expect("snapshot metrics");
+                if metrics
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|log| log.index >= applied)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("snapshot publication deadline");
+        let snapshots = source_dir
+            .path()
+            .join(HIQLITE_ACTIVE_DIRNAME)
+            .join("state_machine/snapshots");
+        let snapshot_id =
+            std::fs::read_to_string(snapshots.join("current")).expect("snapshot pointer");
+        let destination = tempfile::tempdir().expect("backup destination");
+        let key_path = source_dir
+            .path()
+            .join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+        let (artifact, _) = build_cluster_backup_artifact(
+            File::open(snapshots.join(snapshot_id.trim())).expect("published snapshot"),
+            destination.path(),
+            source_dir.path(),
+            Some(&key_path),
+            &source.identity.node_id,
+            Some(source.credential_key.id()),
+            "test-build",
+            applied,
+        )
+        .expect("portable artefact from real snapshot");
+        source.shutdown().await.expect("source voter shutdown");
+        drop(source);
+
+        let target_parent = tempfile::tempdir().expect("target parent");
+        let target = target_parent.path().join("restored");
+        let target_config = membership_test_config(&target);
+        let report = restore_cluster_backup_archive(&artifact, &target_config, &[], None)
+            .await
+            .expect("restore real snapshot");
+        let restored = select_daemon_store(&target_config)
+            .await
+            .expect("restored target starts");
+        let status = restored
+            .membership_manager()
+            .status()
+            .await
+            .expect("restored membership projection");
+        assert_eq!(status.nodes.len(), 1);
+        assert_eq!(
+            status.local_node_id,
+            report.node_id.expect("restored node id")
+        );
+        assert!(status.nodes[0].is_voter);
+        assert!(status.nodes[0].is_leader);
+        restored.shutdown().await.expect("restored voter shutdown");
     }
 
     #[cfg(feature = "hiqlite-store")]
