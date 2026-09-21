@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["381828fb"]
+points = []
+checks = []
+reason = "Documentation-only review correction: the feature status headers now distinguish landed work from open promotion, deployment, device, and follow-on evidence. The executable multiline status audit in tests/operations/test_doc_status_audit.py rejects the mechanically impossible terminal/ready combinations that triggered the review, and the exact-head audit reports no contradictions or unclear rows. No runtime or client behavior changed, so this is mapped as no-evidence."
+ignore = true
