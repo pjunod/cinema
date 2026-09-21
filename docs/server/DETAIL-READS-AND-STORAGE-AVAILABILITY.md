@@ -663,4 +663,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | claim | pending | Claimed one-plan/one-PR ownership from `main` @ `9deb58a2`; Rust 1.97.1 baseline `cargo check --locked -p plurxd --all-targets` passed before edits. M1 will be the first implementation commit and its rollout/backfill receipt remains mandatory before M2 promotion. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | claim | [#435](http://192.168.4.7:3000/noirr/plurx/pulls/435) | Claimed one-plan/one-PR ownership from `main` @ `9deb58a2`; Rust 1.97.1 baseline `cargo check --locked -p plurxd --all-targets` passed before edits. M1 will be the first implementation commit and its rollout/backfill receipt remains mandatory before M2 promotion. |
