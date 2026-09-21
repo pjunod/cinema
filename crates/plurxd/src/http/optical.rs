@@ -14,7 +14,7 @@ use plurx_core::optical::{
     OpticalLifecycleError, OpticalMatchKind, OpticalProgress, OpticalProgressWrite,
     OpticalServiceError, OpticalTitle, PlaybackSourceRef,
 };
-use plurx_core::playback::{self, Decision, DeviceCaps, Force};
+use plurx_core::playback::{self, Decision, DeviceCaps, Force, PlaybackMediaFacts};
 use plurx_core::store::{keys, stored_switch};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -511,9 +511,125 @@ struct DecisionRequest {
 
 #[derive(Serialize)]
 struct OpticalDecisionResponse {
-    source: PlaybackSourceRef,
+    playback_source: PlaybackSourceRef,
     #[serde(flatten)]
     decision: Decision,
+    play_url: String,
+    delivery: OpticalDeliveryPlan,
+    source: OpticalSourceSummary,
+    audio: Vec<OpticalAudioTrack>,
+    subtitles: Vec<OpticalSubtitleTrack>,
+    markers: Vec<serde_json::Value>,
+    audio_offset_ms: i64,
+    declared_offset_ms: Option<i64>,
+    ladder: Vec<crate::transcode::Rung>,
+    prior_kbps: Option<u32>,
+    vod_indexed: bool,
+    prefer_segmented: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum OpticalDeliveryPlan {
+    Transcode {
+        sessions_url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        audio: Option<i64>,
+    },
+}
+
+#[derive(Serialize)]
+struct OpticalSourceSummary {
+    container: Option<String>,
+    video_codec: Option<String>,
+    video_profile: Option<String>,
+    width: Option<i64>,
+    height: Option<i64>,
+    bit_depth: Option<i64>,
+    hdr: Option<String>,
+    hdr_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dv_profile: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dv_el_present: Option<bool>,
+    bitrate: Option<i64>,
+    duration_ms: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct OpticalAudioTrack {
+    index: i64,
+    codec: String,
+    channels: Option<i64>,
+    language: Option<String>,
+    title: Option<String>,
+    default: bool,
+}
+
+#[derive(Serialize)]
+struct OpticalSubtitleTrack {
+    index: i64,
+    codec: String,
+    language: Option<String>,
+    title: Option<String>,
+    default: bool,
+    forced: bool,
+    text: bool,
+    native: bool,
+}
+
+fn optical_source_summary(facts: &PlaybackMediaFacts) -> OpticalSourceSummary {
+    OpticalSourceSummary {
+        container: facts.container.clone(),
+        video_codec: facts.video_codec.clone(),
+        video_profile: facts.video_profile.clone(),
+        width: facts.width,
+        height: facts.height,
+        bit_depth: facts.bit_depth,
+        hdr: facts.hdr.clone(),
+        hdr_format: facts.hdr_format.clone(),
+        dv_profile: facts.dolby_vision.profile,
+        dv_el_present: facts.dolby_vision.el_present,
+        bitrate: facts.bitrate,
+        duration_ms: facts.duration_ms,
+    }
+}
+
+fn optical_audio_tracks(facts: &PlaybackMediaFacts) -> Vec<OpticalAudioTrack> {
+    facts
+        .audio_streams
+        .iter()
+        .enumerate()
+        .map(|(index, track)| OpticalAudioTrack {
+            index: index as i64,
+            codec: track.codec.clone(),
+            channels: track.channels,
+            language: track.language.clone(),
+            title: track.title.clone(),
+            default: track.default,
+        })
+        .collect()
+}
+
+fn optical_subtitle_tracks(facts: &PlaybackMediaFacts) -> Vec<OpticalSubtitleTrack> {
+    facts
+        .subtitle_streams
+        .iter()
+        .enumerate()
+        .map(|(index, track)| OpticalSubtitleTrack {
+            index: index as i64,
+            codec: track.codec.clone(),
+            language: track.language.clone(),
+            title: track.title.clone(),
+            default: track.default,
+            forced: track.forced,
+            // Optical subtitles currently travel through the admitted title
+            // reader and encoder. Advertising a file sidecar or native HLS
+            // rendition here would create a second, unowned physical read.
+            text: false,
+            native: false,
+        })
+        .collect()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -606,16 +722,25 @@ async fn local_decision(
     }
     let profile = playback::DeviceProfile::from_caps_v2(&request.caps);
     let node = super::stream::render_caps(&state).await;
-    let plan = playback::decide_media_facts_forced(
-        &title.facts,
-        &profile,
-        request
-            .force
-            .as_deref()
-            .map(Force::parse)
-            .unwrap_or(Force::Auto),
-        &node,
-    );
+    // The first optical producer is encoded VOD. Even a codec-compatible
+    // title cannot use file direct-play or the progressive remux endpoint,
+    // and claiming either would hand the client an executable plan that does
+    // not exist. Copy-video optical VOD can replace this forced verdict once
+    // its title-aware reader path is implemented.
+    let requested_force = request
+        .force
+        .as_deref()
+        .map(Force::parse)
+        .unwrap_or(Force::Auto);
+    let mut plan =
+        playback::decide_media_facts_forced(&title.facts, &profile, Force::Transcode, &node);
+    if requested_force == Force::Original {
+        plan.reasons.insert(
+            0,
+            "Original is not yet available for managed optical titles; using encoded VOD"
+                .to_owned(),
+        );
+    }
     let source = PlaybackSourceRef::Optical {
         owner_node_id: snapshot.owner_node_id,
         drive_id: drive_id.to_owned(),
@@ -627,9 +752,34 @@ async fn local_decision(
     source
         .validate()
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let sessions_url = format!(
+        "/api/v1/optical/drives/{}/titles/{}/sessions",
+        drive_id, title_id
+    );
+    let source_summary = optical_source_summary(&title.facts);
+    let audio = optical_audio_tracks(&title.facts);
+    let subtitles = optical_subtitle_tracks(&title.facts);
+    let ladder =
+        crate::transcode::advertised_ladder(title.facts.height, title.facts.height.unwrap_or(1080));
     Ok(OpticalDecisionResponse {
-        source,
+        playback_source: source,
         decision: plan,
+        play_url: sessions_url.clone(),
+        delivery: OpticalDeliveryPlan::Transcode {
+            sessions_url,
+            audio: None,
+        },
+        source: source_summary,
+        audio,
+        subtitles,
+        markers: Vec::new(),
+        audio_offset_ms: 0,
+        declared_offset_ms: (title.facts.audio_offset_ms != 0)
+            .then_some(title.facts.audio_offset_ms),
+        ladder,
+        prior_kbps: None,
+        vod_indexed: false,
+        prefer_segmented: Some("optical title delivery is finite HLS".to_owned()),
     })
 }
 
