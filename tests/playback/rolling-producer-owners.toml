@@ -150,7 +150,11 @@ pattern = "\\.observe_publication\\("
 # is being tested against. It is a fixture, not a producer owner.
 # +1 is the publication clock's exact-attempt frontier observation immediately
 # before its immutable bytes become visible.
-expected_occurrences = 5
+# 5 -> 7 in P-01's current-main fixture reconciliation: `mark_started` and
+# `install_seeded_served_playlist` now submit their synthetic publication to
+# the actor instead of mutating only compatibility state. Both are test-only
+# fixtures and neither owns a response or producer.
+expected_occurrences = 7
 kind = "response_admission"
 replacement = "background flow refresh plus exact fixtures; HTTP playlist observation uses the separately inventoried absolute-deadline admission"
 
@@ -173,7 +177,10 @@ replacement = "one helper and two call sites clamp polling to the already-owned 
 [[symbols]]
 id = "response-media-commit"
 pattern = "\\.commit_media\\("
-expected_occurrences = 2
+# +1 is the rolling-publication regression helper. It uses the production
+# move-only handoff and awaits actor acceptance so legacy fetch-budget tests
+# cannot manufacture a frontier the response path itself would reject.
+expected_occurrences = 3
 kind = "response_admission"
 replacement = "response EOF enters the actor with a move-only RollingMediaCommitHandoff so actor delivery, compatibility frontier, and flow wake settle synchronously; detached HTTP completion owns the bounded call"
 
@@ -238,7 +245,14 @@ pattern = "tokio::time::sleep\\("
 # (capped at 24 attempts) and the copy writer's grant-wait poll; the retired
 # cleanup owner's plain `sleep_until` became a shortenable select, so the net
 # count moves by one.
-expected_occurrences = 44
+# +1 is a test-only 10 ms poll inside a two-second timeout while the real
+# publication worker records low-rate window exhaustion. The worker owns the
+# terminal verdict; the regression only waits for that already-started owner.
+# 45 -> 41 in P-01's current-main fixture reconciliation: the post-fetch
+# publication-clock test no longer manufactures the retired inferred-ahead
+# suspend/resume path. Its fixed hold sleep and three progress/event polls were
+# removed; all four were test-only and owned no producer.
+expected_occurrences = 41
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -2003,7 +2017,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +2 net for review fixes: the shipped accept loop adds its one-second
 # resource-pressure backoff, and the real logout-fence seam replaces the old
 # dummy sleep while its listener regression adds one bounded response wait.
-expected_occurrences = 829
+# +2 are test-only bounds around low-rate publication-worker settlement: one
+# timeout and its short poll sleep. Both are awaited, own no process, and
+# exercise the production worker's existing failure/retirement authority.
+# 821 -> 814 in P-01's current-main fixture reconciliation: the same four
+# sleeps reviewed under `all-async-sleeps`, plus the event, progress and
+# republish timeout wrappers around them, left with the retired inferred-ahead
+# suspend/resume fixture. No shipped timer or owner changed.
+# 824 is a fresh measurement of the merged S-01 and current-main tree; neither
+# branch's standalone count describes the combined source.
+expected_occurrences = 824
 
 [[module_structures]]
 id = "bare-time-constructor"

@@ -15639,6 +15639,7 @@ mod tests {
         assert_eq!(held.status(), StatusCode::OK);
         let held_after = fixture.actor_snapshot().await;
         assert_status_snapshot_is_observational(held_before, held_after);
+        fixture.mark_started().await;
 
         let segment_name = "seg00000.m4s";
         let segment_bytes = b"published-media";
@@ -16977,7 +16978,7 @@ mod tests {
                 index,
                 anchor_seconds,
                 window_seconds,
-                move |tmp, _, _, _, _| async move {
+                move |tmp, _, _, anchor_seconds, _| async move {
                     runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let now = live.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     peak_live.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
@@ -17003,7 +17004,9 @@ mod tests {
                         .await
                         .expect("release window producer")
                         .forget();
-                    tokio::fs::write(tmp, b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nready cue\n")
+                    let start = format_vtt_timestamp(anchor_seconds as f64 + 1.0);
+                    let end = format_vtt_timestamp(anchor_seconds as f64 + 2.0);
+                    tokio::fs::write(tmp, format!("WEBVTT\n\n{start} --> {end}\nready cue\n"))
                         .await
                         .map_err(|error| error.to_string())
                 },
@@ -18592,7 +18595,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_subtitle_playlist_rebinds_after_video_attempt_handoff() {
+    async fn published_subtitle_playlist_refuses_in_place_video_attempt_handoff() {
         let dir = crate::test_tempdir().expect("session directory");
         let mut fixture = HlsDeliveryFixture::publish(dir.path(), "subtitle-handoff").await;
         add_http_text_subtitle(&mut fixture, "subtitle-handoff").await;
@@ -18603,18 +18606,17 @@ mod tests {
             .set_subtitle_playlist_commit_pause(Arc::clone(&pause));
         let owner_pause = Arc::new(tokio::sync::Barrier::new(2));
         fixture.pause_playlist_publication(Arc::clone(&owner_pause));
-        tokio::fs::write(dir.path().join("seg00000.ts"), b"old-zero")
+        let mut predecessor = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:4\n");
+        for index in 0..12 {
+            let name = format!("seg{index:05}.ts");
+            tokio::fs::write(dir.path().join(&name), format!("old-{index}"))
+                .await
+                .expect("predecessor segment");
+            predecessor.push_str(&format!("#EXTINF:4.000,\n{name}\n"));
+        }
+        tokio::fs::write(dir.path().join("index.m3u8"), predecessor)
             .await
-            .expect("predecessor segment zero");
-        tokio::fs::write(dir.path().join("seg00001.ts"), b"old-one")
-            .await
-            .expect("predecessor segment one");
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\nseg00000.ts\n#EXTINF:2.000,\nseg00001.ts\n",
-        )
-        .await
-        .expect("predecessor playlist");
+            .expect("predecessor playlist");
         let state = fixture.state.clone();
         let waiting =
             tokio::spawn(
@@ -18624,22 +18626,11 @@ mod tests {
             .await
             .expect("subtitle request read predecessor playlist");
 
-        assert_eq!(fixture.begin_producer_attempt().await, Ok(1));
-        tokio::fs::write(dir.path().join("seg00000.ts"), b"zero")
-            .await
-            .expect("segment zero");
-        tokio::fs::write(dir.path().join("seg00001.ts"), b"one")
-            .await
-            .expect("segment one");
-        tokio::fs::write(dir.path().join("seg00002.ts"), b"two")
-            .await
-            .expect("segment two");
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\nseg00000.ts\n#EXTINF:2.000,\nseg00001.ts\n#EXTINF:2.000,\nseg00002.ts\n",
-        )
-        .await
-        .expect("successor playlist");
+        assert_eq!(
+            fixture.begin_producer_attempt().await,
+            Err(crate::playback_control::ProducerAttemptRejection::PlaylistPublished),
+            "published media permanently closes in-place producer replacement"
+        );
         tokio::time::timeout(Duration::from_secs(5), owner_pause.wait())
             .await
             .expect("release predecessor playlist publication");
@@ -18656,14 +18647,14 @@ mod tests {
         let response = waiting
             .await
             .expect("subtitle task")
-            .expect("subtitle response commits against successor owner");
+            .expect("subtitle response commits against its published owner");
         let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
             .await
             .expect("subtitle playlist body");
         let text = String::from_utf8(body.to_vec()).expect("subtitle playlist text");
         assert!(
-            text.lines().any(|line| line == "seg00002.vtt"),
-            "subtitle child playlist must rebind to successor-relative segment URIs: {text}"
+            text.lines().any(|line| line == "seg00011.vtt"),
+            "subtitle child playlist retains its published owner: {text}"
         );
         assert_eq!(fixture.last_renewal_kind().await, "subtitle-playlist");
     }
@@ -24281,6 +24272,7 @@ mod tests {
 
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "drain").await;
+        fixture.make_segment_window_servable().await;
         let body = vec![7_u8; 12 * 1024];
         tokio::fs::write(dir.path().join("seg00001.m4s"), &body)
             .await
@@ -24327,6 +24319,7 @@ mod tests {
     async fn completed_segment_eof_does_not_wait_for_a_blocked_producer_transition() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "nonblocking-eof").await;
+        fixture.make_segment_window_servable().await;
         let body = vec![11_u8; 12 * 1024];
         tokio::fs::write(dir.path().join("seg00001.m4s"), &body)
             .await
@@ -24791,6 +24784,7 @@ mod tests {
     async fn range_and_bodyless_segment_responses_keep_delivery_truth() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "range").await;
+        fixture.mark_started().await;
         let body = vec![5_u8; 16 * 1024];
         tokio::fs::write(dir.path().join("seg00004.m4s"), &body)
             .await
@@ -24856,7 +24850,7 @@ mod tests {
             "a Range response that contains every byte advances the frontier"
         );
         assert_eq!(actor_delivery.fetched_segment, Some(4));
-        assert_eq!(actor_delivery.pending_fetched_segment, Some(4));
+        assert_eq!(actor_delivery.pending_fetched_segment, None);
         let mut stale_if_range = HeaderMap::new();
         stale_if_range.insert(
             header::RANGE,
@@ -24926,6 +24920,7 @@ mod tests {
 
         let init_dir = crate::test_tempdir().expect("init directory");
         let init_fixture = HlsDeliveryFixture::publish(init_dir.path(), "init-range").await;
+        init_fixture.mark_started().await;
         tokio::fs::write(init_dir.path().join("init.mp4"), vec![9_u8; 4_096])
             .await
             .expect("init bytes");
@@ -24984,6 +24979,7 @@ mod tests {
 
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "abandoned").await;
+        fixture.make_segment_window_servable().await;
         let renewal_before = fixture.last_renewal_kind().await;
         let frontier_before = fixture.fetched_segment();
         let body = vec![3_u8; 64 * 1024];
@@ -25053,6 +25049,7 @@ mod tests {
     async fn a_stream_resolved_before_retirement_cannot_commit_after_eof() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "retired-body").await;
+        fixture.make_segment_window_servable().await;
         let body = vec![7_u8; 32 * 1024];
         tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
             .await
@@ -25098,6 +25095,7 @@ mod tests {
     async fn a_stream_from_an_old_producer_attempt_cannot_advance_its_successor() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "old-attempt-body").await;
+        fixture.make_segment_window_servable().await;
         let body = vec![9_u8; 32 * 1024];
         tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
             .await
@@ -25133,6 +25131,7 @@ mod tests {
     async fn accepted_predecessor_eof_cannot_project_after_successor_reset() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "projection-race").await;
+        fixture.make_segment_window_servable().await;
         let body = vec![5_u8; 32 * 1024];
         tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
             .await
@@ -25175,6 +25174,7 @@ mod tests {
 
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "unreadable").await;
+        fixture.make_segment_window_servable().await;
         let renewal_before = fixture.last_renewal_kind().await;
         let frontier_before = fixture.fetched_segment();
         // A directory opens like a file and reports a length, then fails its
@@ -25234,6 +25234,7 @@ mod tests {
     async fn an_unreadable_small_init_never_commits_lease_or_frontier() {
         let dir = crate::test_tempdir().expect("init directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "unreadable-init").await;
+        fixture.make_segment_window_servable().await;
         tokio::fs::create_dir(dir.path().join("init.mp4"))
             .await
             .expect("unreadable init");
@@ -25269,6 +25270,7 @@ mod tests {
     async fn web_hls_startup_init_probe_is_not_client_delivery_or_a_short_response() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "probe").await;
+        fixture.make_segment_window_servable().await;
         // Past the inspection bound, so the read stops short of the file's
         // advertised length by design.
         let oversized = vec![0_u8; (INIT_INSPECTION_LIMIT_BYTES + 4_096) as usize];
@@ -25311,6 +25313,7 @@ mod tests {
     async fn web_hls_startup_failed_init_probe_is_internal_and_unavailable() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "probe-error").await;
+        fixture.make_segment_window_servable().await;
         tokio::fs::create_dir(dir.path().join("init.mp4"))
             .await
             .expect("unreadable init");
@@ -27835,7 +27838,7 @@ mod tests {
         assert!(master.starts_with("#EXTM3U\n#EXT-X-VERSION:7\n"));
         assert!(master.contains(
             "#EXT-X-STREAM-INF:BANDWIDTH=40000000,AVERAGE-BANDWIDTH=40000000,\
-             RESOLUTION=3840x2160,FRAME-RATE=23.976,SUBTITLES=\"subs\""
+             RESOLUTION=3840x2160,FRAME-RATE=23.976,CLOSED-CAPTIONS=NONE,SUBTITLES=\"subs\""
         ));
         assert!(!master.contains("CODECS="));
         assert!(!master.contains("#EXT-X-INDEPENDENT-SEGMENTS"));
@@ -27883,11 +27886,11 @@ mod tests {
         let minimal = master_playlist_diagnostic(&file, None, &context, Some("video-only"));
         assert_eq!(
             minimal,
-            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH=40000000,AVERAGE-BANDWIDTH=40000000,RESOLUTION=3840x2160,FRAME-RATE=23.976\nindex.m3u8\n"
+            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH=40000000,AVERAGE-BANDWIDTH=40000000,RESOLUTION=3840x2160,FRAME-RATE=23.976,CLOSED-CAPTIONS=NONE\nindex.m3u8\n"
         );
 
         let range = master_playlist_diagnostic(&file, None, &context, Some("video-only-range"));
-        assert!(range.contains("FRAME-RATE=23.976,VIDEO-RANGE=PQ\n"));
+        assert!(range.contains("VIDEO-RANGE=PQ,CLOSED-CAPTIONS=NONE\n"));
         assert!(!range.contains("CODECS="));
         assert!(!range.contains("SUBTITLES="));
 
@@ -28234,6 +28237,7 @@ mod tests {
     async fn a_preserved_dolby_vision_master_keeps_its_dolby_vision_identifier() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "dv").await;
+        fixture.make_segment_window_servable().await;
         let init = valid_dolby_vision_init(5, 6);
         tokio::fs::write(dir.path().join("init.mp4"), &init)
             .await
@@ -28264,6 +28268,7 @@ mod tests {
     async fn a_bare_dolby_vision_declaration_is_completed_from_the_init() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "dv-bare").await;
+        fixture.make_segment_window_servable().await;
         tokio::fs::write(dir.path().join("init.mp4"), valid_dolby_vision_init(5, 6))
             .await
             .expect("dolby vision init");
@@ -28288,6 +28293,7 @@ mod tests {
     async fn web_hls_startup_dolby_init_without_configuration_is_invalid() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "dv-nodvcc").await;
+        fixture.make_segment_window_servable().await;
         let init = valid_hevc_init();
         tokio::fs::write(dir.path().join("init.mp4"), &init)
             .await
