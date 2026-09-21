@@ -258,6 +258,15 @@ const SEGMENT_WAIT: Duration = Duration::from_secs(20);
 /// Record any material wait so a client-side freeze can be joined to producer
 /// starvation instead of being inferred from a later timeout.
 const SEGMENT_WAIT_EVENT_MIN: Duration = Duration::from_millis(250);
+/// Below this sustained storage rate, a material segment read is a stall.
+/// Normalizing by bytes keeps the signal comparable when body read buffers
+/// change size.
+const SEGMENT_STALL_BYTES_PER_SECOND: f64 = (1024 * 1024) as f64;
+
+fn storage_read_is_slow(bytes: u64, elapsed: Duration) -> bool {
+    elapsed >= SEGMENT_WAIT_EVENT_MIN
+        && bytes as f64 / elapsed.as_secs_f64() < SEGMENT_STALL_BYTES_PER_SECOND
+}
 /// Hold the first live transcode playlist until it has both two complete
 /// segments and this much published media. The first playlist used to expose
 /// one ~2 s segment while ffmpeg was already writing the rest; hls.js reached
@@ -9772,7 +9781,7 @@ impl SegmentDelivery {
         if self.purpose == DeliveryPurpose::ClientResponse {
             self.session.delivery.note(bytes);
         }
-        if elapsed < SEGMENT_WAIT_EVENT_MIN || self.slow_read_reported {
+        if !storage_read_is_slow(bytes, elapsed) || self.slow_read_reported {
             return;
         }
         self.slow_read_reported = true;
@@ -37016,6 +37025,20 @@ pub(crate) mod tests {
                 .as_deref()
                 .is_some_and(|extra| extra.contains("\"purpose\":\"client_response\"")),
             "every delivery event names who was reading"
+        );
+    }
+
+    #[test]
+    fn segment_storage_stall_signal_is_normalized_by_read_size() {
+        let boundary = Duration::from_millis(250);
+
+        assert!(
+            !storage_read_is_slow(256 * 1024, boundary),
+            "a 1 MiB/s body read is healthy even at the event duration boundary"
+        );
+        assert!(
+            storage_read_is_slow(4 * 1024, boundary),
+            "the same duration at 16 KiB/s is a storage stall"
         );
     }
 

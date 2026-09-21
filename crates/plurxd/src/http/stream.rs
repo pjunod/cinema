@@ -2937,7 +2937,10 @@ pub(crate) async fn serve_file_range(
             fh.seek(std::io::SeekFrom::Start(start))
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            let stream = tokio_util::io::ReaderStream::new(fh.take(count));
+            let stream = tokio_util::io::ReaderStream::with_capacity(
+                fh.take(count),
+                crate::media_sessions::MEDIA_BODY_READ_BUFFER,
+            );
             Ok((
                 StatusCode::PARTIAL_CONTENT,
                 [
@@ -2954,7 +2957,10 @@ pub(crate) async fn serve_file_range(
             let body = if method == Method::HEAD {
                 Body::empty()
             } else {
-                Body::from_stream(tokio_util::io::ReaderStream::new(fh))
+                Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+                    fh,
+                    crate::media_sessions::MEDIA_BODY_READ_BUFFER,
+                ))
             };
             Ok((
                 StatusCode::OK,

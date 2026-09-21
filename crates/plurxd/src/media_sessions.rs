@@ -60,6 +60,12 @@ const ABORT_DEADLINE: Duration = Duration::from_secs(5);
 /// deadline before headers exist; every admitted local or relayed body then
 /// gets this one bounded lifetime.
 pub(crate) const MAX_ADMITTED_MEDIA_BODY_LIFETIME: Duration = Duration::from_secs(300);
+/// Bytes requested from storage per read while streaming a media body.
+///
+/// Tokio's file reader performs one blocking-pool hop per read and caps an
+/// individual read at 2 MiB. This matches the existing fragment-index and
+/// offline transfer paths while keeping the per-body resident bound finite.
+pub(crate) const MEDIA_BODY_READ_BUFFER: usize = 256 * 1024;
 /// Longest authenticated public/relay resource envelope before response
 /// headers, including accepted inter-node clock disagreement. This is the
 /// playlist ceiling; segment and short-control envelopes are smaller.

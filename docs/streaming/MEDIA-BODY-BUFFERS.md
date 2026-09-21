@@ -1,9 +1,10 @@
 # Media body buffers — size the read, then, separately, the acknowledgement
 
-**Status:** ready for review · **Executes:** §2.4, C1, F-core-1, F-stream-8,
-§5.1 item 3 from
+**Status:** M1 implementation ready for review; lab4 acceptance and M2 pending ·
+**Executes:** §2.4, C1, F-core-1, F-stream-8, §5.1 item 3 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-· **Written:** 2026-09-20 against `main` @ `88a3957a`
+· **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @
+`882862e8`
 
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
 
@@ -13,9 +14,11 @@ and [STREAMING-RELIABILITY-IMPLEMENTATION.md](STREAMING-RELIABILITY-IMPLEMENTATI
 full before touching `hls.rs`: the pump is not a buffer, it is the thing
 that proves a byte left the server before the byte is counted or the object
 is marked complete. M1 changes one number at four sites and measures. M2 is
-a later PR that changes how often the pump asks for that proof, and it must
-keep every behaviour §2.2 lists. If M1 seems to need a change in `hls.rs`
-beyond the constructor argument, stop and flag it.
+a later milestone in this same plan PR that changes how often the pump asks
+for that proof, and it must keep every behaviour §2.2 lists. It remains
+pending until M1 has the deployment and measurement evidence in §5.2. If M1
+seems to need a change in `hls.rs` beyond the constructor argument, stop and
+flag it.
 
 ## 1. Objective
 
@@ -34,7 +37,7 @@ beyond the constructor argument, stop and flag it.
 Re-verify line numbers at build time; they are from `88a3957a`. Versions:
 tokio 1.53.1, tokio-util 0.7.18, hyper 1.10.1, axum 0.8.9.
 
-### 2.1 The four `ReaderStream::new` sites, and the two that already size
+### 2.1 Before M1, four readers used the default and two were already sized
 
 | Site | Function | Reader | Body |
 |---|---|---|---|
@@ -141,13 +144,13 @@ pub(crate) const MEDIA_BODY_READ_BUFFER: usize = 256 * 1024;
 ```
 
 The four constructors become `ReaderStream::with_capacity(reader,
-MEDIA_BODY_READ_BUFFER)`. `offline.rs` and `internal_media.rs` may adopt the
-constant in the same PR (their literal is the same value) or stay; no
-behaviour changes either way.
+MEDIA_BODY_READ_BUFFER)`. M1 also adopts the constant in `offline.rs` and
+`internal_media.rs`; their value was already 256 KiB, so this removes two
+duplicate spellings without changing their behaviour.
 
 The slow-read threshold (§2.2 item 7): the honest comparison is bytes per
 second, not seconds per read. Change the guard in `note_read` to normalise:
-`elapsed > SEGMENT_WAIT_EVENT_MIN && bytes as f64 / elapsed.as_secs_f64() <
+`elapsed >= SEGMENT_WAIT_EVENT_MIN && bytes as f64 / elapsed.as_secs_f64() <
 SEGMENT_STALL_BYTES_PER_SECOND` with `SEGMENT_STALL_BYTES_PER_SECOND = 1 MiB/s`
 (a 4 KiB read taking 250 ms is 16 KiB/s; a 256 KiB read taking 250 ms is
 1 MiB/s and healthy on a NAS). Without this the warning would fire on
@@ -157,8 +160,9 @@ number.
 
 ### 3.2 M2 — batch the acknowledgement, keep what it proves
 
-Later PR, its own tests. The change is in the pump loop only: instead of
-one `DrivenLocalChunk` per read, accumulate reads into a batch of at most
+Later milestone in this PR, with its own tests. The change is in the pump
+loop only: instead of one `DrivenLocalChunk` per read, accumulate reads into
+a batch of at most
 `MEDIA_BODY_ACK_BATCH_BYTES = 1 MiB` (or until `reader.next()` would block —
 use `poll_next` with `Poll::Pending` as the batch boundary, never a timer),
 send the batch as one chunk, and wait for one ack. Then:
@@ -224,38 +228,53 @@ done
 # concurrent: 8 viewers, resident memory of plurxd sampled at 1 Hz
 PID=$(pidof plurxd)
 ( while sleep 1; do awk '/VmRSS/{print systime(), $2}' /proc/$PID/status; done ) &
+sampler=$!
+pids=()
 for v in $(seq 8); do
   curl -s -o /dev/null -H "Authorization: Bearer $TOKEN" \
     "$BASE/api/v1/files/$FILE/direct" &
-done; wait; kill %1
-# HLS segments, tail latency: 200 sequential segment GETs on a copy session
-SESSION=$(scripts/bench run --only 4k-hdr10 --token "$TOKEN" --print-session)
+  pids+=("$!")
+done
+for curl_pid in "${pids[@]}"; do wait "$curl_pid"; done
+kill "$sampler"; wait "$sampler" || true
+# HLS segments: create one session and measure 200 successful local GETs.
+SESSION=$(curl -fsS -X POST \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"playback_id\":\"s02-buffer-bench\",\"request_id\":\"s02-$(date +%s)\",\"height\":2160,\"start\":0}" \
+  "$BASE/api/v1/files/$FILE/hls/sessions" | jq -r .session_id)
+mapfile -t segments < <(curl -fsS "$BASE/api/v1/hls/$SESSION/index.m3u8" |
+  awk '/^[^#].*\.(ts|m4s)$/{print}')
+test "${#segments[@]}" -gt 0
 for n in $(seq 0 199); do
-  curl -s -o /dev/null -w '%{time_total}\n' \
-    "$BASE/hls/$SESSION/seg$(printf %05d $n).ts"
+  segment="${segments[$((n % ${#segments[@]}))]}"
+  curl -fsS -o /dev/null -w '%{time_total}\n' \
+    "$BASE/api/v1/hls/$SESSION/$segment"
 done | sort -n | awk '{a[NR]=$1} END{print "p50",a[int(NR*.5)],"p95",a[int(NR*.95)],"p99",a[int(NR*.99)]}'
+curl -fsS -X DELETE "$BASE/api/v1/hls/$SESSION" >/dev/null
 ```
 
-(`--print-session` does not exist in `scripts/bench` today; add it, or
-read the session id from the `Activity` page — say which in the PR.) Also
-record `tokio` blocking-pool activity: `plurx_tokio_blocking_threads` if the
-runtime metrics are exposed on `/metrics`, otherwise `ps -o nlwp -p $PID`
-peak during the concurrent run.
+The API call is deliberate: `scripts/bench run` deletes its session on exit,
+so a `--print-session` switch would need new lifecycle ownership rather than
+the nominal twenty-line output change. The 45-second fixture also has fewer
+than 200 segment names, so the loop samples 200 successful responses over its
+real playlist instead of timing 404s after the fixture ends. Also record
+blocking-pool activity with `ps -o nlwp -p $PID` peak during the concurrent
+run; the shipped build does not enable Tokio's unstable runtime metrics.
 
 Report in the PR body, before/after: single-viewer MB/s (3 runs each),
 peak VmRSS with 8 viewers, HLS p50/p95/p99, peak thread count. The
 acceptance is not a target number — it is that the three are reported and
 that p99 and peak RSS did not get worse.
 
-Acceptance: `cargo test -p plurxd serve_file_range driven_local_body
-note_read` green; `make unit` green; the four numbers in the PR body.
+Acceptance: run the four focused commands in §6, then `make unit`; record the
+four lab4 measurement groups in the PR body.
 
 ### 5.2 M2 — acknowledgement batching
 
-Separate PR after M1 has been on media1 for a week with no
-`segment_delivery` regressions in the telemetry (§6). Code: §3.2. Tests,
-all against `driven_local_body` + a pump built from a `Cursor` reader so
-they run in `make unit` without files:
+Same plan PR, after the M1 candidate has been exercised on media1 for a week
+with no `segment_delivery` regressions in the telemetry (§6). Code: §3.2.
+Tests all run against `driven_local_body` plus a pump built from a `Cursor`
+reader, so they run in `make unit` without files:
 
 | Test | Asserts |
 |---|---|
@@ -271,9 +290,15 @@ lab4 with HLS p99 not worse than M1's.
 
 ## 6. Verification and rollout
 
-- Focused: `cargo test -p plurxd serve_file_range driven_local_body note_read`
-  (M1); the six M2 tests by name.
-- Lane: `make unit` on both PRs.
+- Focused M1: `cargo test -p plurxd --bin plurxd direct_range`, then the
+  `driven_local_body`, `segment_storage_stall_signal_is_normalized_by_read_size`
+  and `segment_delivery_counts_reads_and_names_incomplete_storage` filters as
+  separate commands. Cargo accepts one name filter per invocation, so these
+  are deliberately not presented as one invalid command. Run the six M2 tests
+  by name when that milestone becomes eligible.
+- Lane: `make unit` before promoting the one plan PR. The implementation
+  session did not run it while P-01 was repairing that lane; this is pending
+  evidence, not an implied pass.
 - Fleet evidence after M1 deploy: the existing `segment_delivery_*` telemetry
   rows (`transcode.rs:8884` `emit`) already classify cuts
   (`storage_unexpected_eof`, `transport_stall`, `transport_lifetime`). GPT
@@ -282,35 +307,36 @@ lab4 with HLS p99 not worse than M1's.
   days before and after the deploy timestamp; also `journalctl -u plurxd |
   grep -c 'stalled on storage'` for both windows. Report both tables." A
   rise in `transport_stall` or in the stall warning is the rollback signal.
-- Rollout: one draft PR per milestone under the fast lane. No setting and
-  no gate: the buffer size is a constant with its reason; making it
-  operator-tunable would be a knob without a reading to set it by. No
-  recipe identity, cache digest or schema is touched.
+- Rollout: one draft PR owns the whole plan; milestones remain separate
+  commits and execution-log rows. No setting and no gate: the buffer size is
+  a constant with its reason; making it operator-tunable would be a knob
+  without a reading to set it by. No recipe identity, cache digest or schema
+  is touched.
 - Rollback: revert; nothing persists.
 
-## 7. Open questions
+## 7. Decisions and pending evidence
 
-1. The concurrent-memory bound in §2.1 (≈1 MiB per body) is an upper bound
-   from the four buffers in flight; the measured figure decides whether
-   256 KiB or 128 KiB is the right constant for a node whose ceiling is
-   the blocked-GET cap (`plurx_vod_blocked_get_cap` on `/metrics`) plus
-   direct plays. The protocol reports it; the PR picks.
-2. Should `SEGMENT_STALL_BYTES_PER_SECOND` be 1 MiB/s? It is the rate at
-   which a 2 s 4K segment (≈20 MB) takes 20 s to read — well past the
-   30 s no-progress deadline's spirit. A lower number hides real stalls; a
-   higher one warns on healthy NAS reads. Measure on media1's NAS mount.
-3. `scripts/bench --print-session` or an Activity-page read: which does the
-   PR use? Adding the flag is ~20 lines of Python and makes the protocol
-   scriptable for M2's re-run.
-4. Whether tokio runtime metrics (`tokio_unstable`) are compiled in decides
-   whether blocking-pool hops can be counted directly or only inferred from
-   thread count. Check `RUSTFLAGS` in the Dockerfile before the M1 run.
+1. **Use 256 KiB provisionally.** It matches the two pre-existing file-backed
+   paths and reduces the default read count by 64×. The concurrent-memory
+   measurement still decides whether this PR keeps 256 KiB or reduces it to
+   128 KiB before M1 is accepted.
+2. **Use 1 MiB/s for the slow-read rate.** At that rate a roughly 20 MiB 4K
+   segment already takes 20 seconds to read, close to the 30-second no-progress
+   budget. The boundary test makes the intended classification explicit;
+   media1 measurements can still justify an adjustment before M2.
+3. **Create the measurement session through the existing API.** A
+   `scripts/bench --print-session` option that leaves a session alive would
+   introduce a second lifecycle owner. The explicit POST/DELETE pair above is
+   reproducible and keeps the benchmark helper out of this transport change.
+4. **Use process thread count, not unavailable runtime metrics.** Neither the
+   Dockerfiles nor the build configuration enable `tokio_unstable`, so the M1
+   protocol records `ps -o nlwp -p $PID` peak.
 
 ---
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per milestone (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
@@ -318,4 +344,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | implementation commit / [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Shared 256 KiB capacity at all six file-backed readers; rate-normalized the slow-read signal. Pinned 1.97.1 check and six focused regressions passed. Needs: lab4 before/after throughput, peak RSS/thread count, HLS p50/p95/p99, and the repaired fast-lane `make unit` evidence. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | pending in [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Needs: M1 candidate deployed on media1 for one week with no `segment_delivery` regression, then the §5.1 lab4 protocol re-run. No acknowledgement-batching code has been written. |

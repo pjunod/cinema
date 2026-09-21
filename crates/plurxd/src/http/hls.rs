@@ -39,9 +39,9 @@ use crate::media_sessions::{
     unix_ms, worker_session_request_is_valid, DurableRouteResolution, RelayHeaders, RelayRequest,
     RelayResource, ReleaseAdmission, ReleaseSettlement, RemoteAbortRequest, RemotePrepareRequest,
     RemoteStartRequest, RemoteStartResponse, ACTIVATION_STORE_DEADLINE, LEASE_TTL_MS,
-    MAX_ADMITTED_MEDIA_BODY_LIFETIME, MEDIA_BODY_NO_PROGRESS_TIMEOUT, OWNER_ASSIGNMENT_DEADLINE,
-    PREPARED_SUCCESSOR_PLAN_NOTE, REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE,
-    TERMINAL_PROJECTION_SAFETY_WINDOW,
+    MAX_ADMITTED_MEDIA_BODY_LIFETIME, MEDIA_BODY_NO_PROGRESS_TIMEOUT, MEDIA_BODY_READ_BUFFER,
+    OWNER_ASSIGNMENT_DEADLINE, PREPARED_SUCCESSOR_PLAN_NOTE, REMOTE_ACTIVATION_CONFIRMATION_WINDOW,
+    START_DEADLINE, TERMINAL_PROJECTION_SAFETY_WINDOW,
 };
 use crate::state::AppState;
 use crate::transcode::{ClusterReplacementGuard, PlaylistError};
@@ -13467,7 +13467,10 @@ async fn vod_segment_response_before(
     // this function, and the session registry lock is long released by the
     // time it runs.
     let delivery = std::sync::Arc::clone(&ready.delivery);
-    let reader = tokio_util::io::ReaderStream::new(tokio::io::AsyncReadExt::take(ready.file, len));
+    let reader = tokio_util::io::ReaderStream::with_capacity(
+        tokio::io::AsyncReadExt::take(ready.file, len),
+        MEDIA_BODY_READ_BUFFER,
+    );
     let body_deadline = tokio::time::Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;
     let (sender, receiver) =
         tokio::sync::mpsc::channel::<DrivenLocalChunk>(LOCAL_MEDIA_BODY_CHANNEL_CAPACITY);
@@ -14083,7 +14086,10 @@ async fn segment_local_before(
     // unlinked-but-open file.
     let mut authorization = authorization;
     authorization.pin_scratch_object(total_len);
-    let reader = tokio_util::io::ReaderStream::new(opened.file.take(opened_len));
+    let reader = tokio_util::io::ReaderStream::with_capacity(
+        opened.file.take(opened_len),
+        MEDIA_BODY_READ_BUFFER,
+    );
     let mut delivery = opened.delivery;
     delivery.expect_at_most(opened_len);
     let body_deadline = tokio::time::Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;
