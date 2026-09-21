@@ -408,6 +408,7 @@ mod tests {
             index,
             codec: "aac".into(),
             channels: Some(2),
+            sample_rate: None,
             language: Some(lang.into()),
             title: None,
             default,
