@@ -4,6 +4,7 @@
 //! environment, bounded output and wall time, and one owner that kills and
 //! reaps the complete process group when the future is cancelled.
 
+use std::ffi::OsStr;
 use std::io;
 use std::process::ExitStatus;
 use std::time::Duration;
@@ -83,12 +84,16 @@ impl Drop for OwnedChild {
     }
 }
 
-pub async fn output(
-    program: &str,
-    args: &[&str],
+pub async fn output<P, A>(
+    program: P,
+    args: &[A],
     wall_time: Duration,
     max_output_bytes: usize,
-) -> io::Result<Output> {
+) -> io::Result<Output>
+where
+    P: AsRef<OsStr>,
+    A: AsRef<OsStr>,
+{
     let mut command = Command::new(program);
     command
         .args(args)

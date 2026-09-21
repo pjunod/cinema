@@ -1,6 +1,7 @@
 # Process output capture and scan-probe bounds — one child-process contract for every short-lived helper
 
-**Status:** ready for review · **Executes:** §2.1, C12 (§3.3.1), §5.1 items 1
+**Status:** implementation in draft PR
+[#396](http://192.168.4.7:3000/noirr/plurx/pulls/396) · **Executes:** §2.1, C12 (§3.3.1), §5.1 items 1
 and 15 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -13,8 +14,10 @@ attests its engine before every spawn) and
 (the supervised producer paths this document leaves alone). Read §2 before
 touching `process_control.rs`: the helper's callers were written against
 `tokio::process::Command::output` semantics and the fix is to restore those
-semantics, not to invent new ones. Work §5 in order; M1 and M2 are one PR,
-M3 is a second, M4 is a fleet step with no code. If a step seems to require
+semantics, not to invent new ones. Work §5 in order. The 2026-09-20 execution
+ruling groups M1-M3 in one PR because the primitive move and its first bounded
+consumer are one reviewable contract; M4 remains a post-merge fleet step with
+no code. If a step seems to require
 changing what any caller *reads* from the output, or adding an output bound
 to `output_job_owned`, stop and flag it — those are separate contracts (§4).
 
@@ -342,7 +345,7 @@ cancellation).
 
 ### 5.1 M1 — the helper pipes both streams, with a portable child test
 
-One PR with M2. Change §3.1. Add `#[cfg(test)] mod tests` to
+One PR with M2 and M3 under the 2026-09-20 execution ruling. Change §3.1. Add `#[cfg(test)] mod tests` to
 `process_control.rs` with a child that is **the test binary itself**:
 
 ```rust
@@ -412,7 +415,7 @@ green on a host with ffmpeg; `make unit` green.
 
 ### 5.3 M3 — the scan probe through the shared primitive
 
-Second PR. Commit 1: the `git mv` of §3.3 with re-exports, no behaviour
+The final code milestone in the same PR. Commit 1: the `git mv` of §3.3 with re-exports, no behaviour
 change; `cargo check --workspace --all-targets` and `make unit` unchanged.
 Commit 2: `probe()` through `plurx_core::process::bounded::output`, the
 `Transient` variant, the three caller arms.
@@ -472,9 +475,10 @@ Acceptance: the three observations, recorded in the PR's status note.
   repo's toolchain, run `cargo test -p plurxd process_control` and paste
   the output." If none is available, the PR says so; the compile check and
   the Linux run are the evidence.
-- Rollout: two draft PRs into `main` under the fast lane, M1+M2 first. M3
-  after, because it moves a module M1 tests live next to. No setting, no
-  gate, no schema. Rollback is a revert; nothing persists.
+- Rollout: one draft PR into `main` under the fast lane. The commits preserve
+  the original review boundaries: M1+M2 first, then the behaviour-preserving
+  module move, then the bounded scan consumer. No setting, no gate, no
+  schema. Rollback is a revert; nothing persists.
 - Metrics: none added by M1/M2. M3 adds one counter to `/metrics`, rendered
   beside the scan counters:
   `plurx_scan_probe_outcomes_total{outcome="ok"|"failed"|"transient"|"parse"}`
@@ -511,6 +515,30 @@ Acceptance: the three observations, recorded in the PR's status note.
    cost of a second abstraction. The move is proposed because it is a
    `git mv` and the review asked for one primitive, not two layers.
 
+### Execution rulings — conservative scope for PR #396
+
+The user delegated the decisions this plan originally reserved for Paul. The
+2026-09-20 executing session made these rulings:
+
+1. **Keep the drop-path acceptance at no surviving pid within 2 s.** Joining
+   a cancelled scan task in `state.rs` would widen this process-boundary repair
+   into lease orchestration. The shared owner sends the kill on drop and the
+   portable regression proves the observable no-orphan contract.
+2. **Keep the scan deadline at 60 s and do not add a setting or gate.** It is
+   a hang ceiling for cold NAS reads; `/metrics` now makes false transients
+   measurable without turning correctness on or off.
+3. **Leave the startup-probe timeout and dead `pipeprobe` stdout variants to
+   S-05.** Changing them here would violate the behaviour-restoration boundary.
+4. **Group M1-M3 in draft PR #396.** The original two-PR split would make the
+   moved primitive temporarily review without its first bounded scan consumer;
+   the preserved commit boundaries provide the same review isolation in one
+   PR.
+5. **Run M4 only after merge and deployment.** Its acceptance reads live media
+   sessions and journals after the Ansible restart. A branch artifact is not
+   that deployed image, and deploying an unmerged review branch to media1 and
+   lab1-lab6 is not safe evidence. Use the exact GPT prompt in §5.4 after the
+   merged image is deployed, then append the three observations here.
+
 ---
 
 ## Execution log
@@ -523,4 +551,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/s01_builder | M1-M3 | [#396](http://192.168.4.7:3000/noirr/plurx/pulls/396) | Implemented in one draft PR: output capture restored; bounded process ownership moved to `plurx-core`; scan probes have 60 s / 16 MiB bounds, typed retryable failure and four fixed-label metrics. Portable process/probe regressions, generated ffmpeg proofs, pinned 1.97.1 checks and Windows test compilation are recorded in the PR. Broad `make unit` remains intentionally deferred until adversarial review. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#396](http://192.168.4.7:3000/noirr/plurx/pulls/396) | needs: merged image deployed by Ansible to media1 and lab1-lab6, then the three observations in §5.4. Branch-artifact deployment was rejected as unsafe fleet evidence. |
