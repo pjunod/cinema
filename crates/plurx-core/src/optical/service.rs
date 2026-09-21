@@ -250,3 +250,111 @@ where
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::optical::{OpticalDriveState, OpticalFormat, OpticalTitleLocator};
+    use crate::store::{OpticalStore, SqliteStore};
+    use crate::testfixtures::optical::{
+        optical_drive_fixture, optical_folder_fixture, FakeOpticalEvent, FakeOpticalHost,
+    };
+
+    #[tokio::test]
+    async fn optical_fake_host_drives_inspection_and_exclusive_playback_lease() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let host = Arc::new(FakeOpticalHost::default());
+        host.push_inspection_for_observed_generation(OpticalFormat::Dvd);
+        let folder = optical_folder_fixture(OpticalFormat::Dvd, "unused-generation");
+        let mount = folder.root;
+        let service = OpticalService::new(
+            "node-a",
+            vec![optical_drive_fixture("drive-a", mount.clone())],
+            store.clone(),
+            host.clone(),
+            std::time::Duration::from_secs(5),
+        );
+
+        let ready = service
+            .inspect_insertion("drive-a", 100)
+            .await
+            .expect("fixture inspection");
+        let OpticalDriveState::Ready {
+            media_generation,
+            disc_id,
+        } = ready.state
+        else {
+            panic!("fixture drive did not become ready")
+        };
+        let title = store
+            .optical_title(&disc_id, "title-1")
+            .await
+            .expect("title read")
+            .expect("stored title");
+
+        let input = ResolvedInput::Dvd {
+            path: mount,
+            title_number: 1,
+            angle: 1,
+        };
+        host.push_resolution(Ok(input.clone()));
+        let lease = service
+            .claim_playback_title(
+                "drive-a",
+                &media_generation,
+                &disc_id,
+                &title,
+                1,
+                "session-a",
+            )
+            .expect("first playback lease");
+        assert_eq!(lease.input, input);
+
+        let busy = match service.claim_playback(
+            "drive-a",
+            &media_generation,
+            &disc_id,
+            "title-1",
+            "session-b",
+        ) {
+            Ok(_) => panic!("a second reader must be refused"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            busy,
+            OpticalServiceError::Lifecycle(OpticalLifecycleError::Busy)
+        ));
+        drop(lease);
+
+        host.push_resolution(Ok(ResolvedInput::Dvd {
+            path: input.path().to_path_buf(),
+            title_number: 1,
+            angle: 1,
+        }));
+        let successor = service
+            .claim_playback_title(
+                "drive-a",
+                &media_generation,
+                &disc_id,
+                &title,
+                1,
+                "session-c",
+            )
+            .expect("released drive can be claimed again");
+        drop(successor);
+
+        let events = host.events();
+        assert!(matches!(
+            events.first(),
+            Some(FakeOpticalEvent::Inspect { drive_id, .. }) if drive_id == "drive-a"
+        ));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, FakeOpticalEvent::Resolve { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(title.locator, OpticalTitleLocator::Dvd { title_number: 1 });
+    }
+}

@@ -19,6 +19,8 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub mod optical;
+
 pub fn ffmpeg() -> String {
     std::env::var("PLURX_FFMPEG")
         .ok()
