@@ -1,6 +1,6 @@
 # Encoded VOD hold and release — stop the encoder instead of killing it, and give it up when someone is waiting
 
-**Status:** ready for review · **Executes:** §2.6, F-stream-6 (the hold
+**Status:** implementation claimed; controlled M0/M4 fleet traces pending · **Executes:** §2.6, F-stream-6 (the hold
 half), assessment correction 5, §5.1 item 8 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -492,4 +492,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M0 | [#412](http://192.168.4.7:3000/noirr/plurx/pulls/412) | needs: run §5.0's controlled 30-minute transcode and subtitle-burn plays. Read-only SSH observation on the media host at 2026-09-21 05:53 UTC found deployed build `v0.3.0-3052-g882862e88`, a container started at 04:18:48 UTC, zero `spawned a producer generation` records since that start, zero retained journal matches over seven days, and no pre-M3 generation metric. No playback was initiated and no before-count was inferred from the empty interval. |
