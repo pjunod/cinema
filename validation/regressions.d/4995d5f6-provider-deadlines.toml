@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["4995d5f6"]
+points = ["metadata.enrichment"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained metadata regressions drive bounded provider response bodies, hanging and trickling responses, retry-budget refusal, fixed-cardinality outcome metrics, and unchanged fast 404 handling; the Rust gates also compile both production enrichment loops with their per-item deadlines."
