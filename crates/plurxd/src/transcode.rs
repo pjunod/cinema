@@ -2394,7 +2394,7 @@ fn spawn_ffmpeg_pipe(
                 grammar,
                 |line| log_ffmpeg_stderr(&sid, "copy", line),
                 |line| {
-                    if is_progress_line(line) {
+                    if plurx_core::transcode::progress::is_progress_line(line) {
                         progress_observer.apply_line(line);
                         true
                     } else {
@@ -2424,29 +2424,6 @@ fn spawn_ffmpeg_pipe(
         },
         stdout,
     ))
-}
-
-/// Is this stderr line one of FFmpeg's `-progress` blocks rather than a log
-/// message? Match only the closed protocol key set so diagnostics containing
-/// `=` remain visible.
-fn is_progress_line(line: &str) -> bool {
-    let Some((key, _)) = line.split_once('=') else {
-        return false;
-    };
-    matches!(
-        key,
-        "frame"
-            | "fps"
-            | "bitrate"
-            | "total_size"
-            | "out_time_us"
-            | "out_time_ms"
-            | "out_time"
-            | "dup_frames"
-            | "drop_frames"
-            | "speed"
-            | "progress"
-    ) || (key.starts_with("stream_") && key.ends_with("_q"))
 }
 
 /// Remove the (empty/partial) HLS output so a restarted ffmpeg starts clean.

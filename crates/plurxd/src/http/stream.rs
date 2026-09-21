@@ -3317,7 +3317,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some((progress, generation)) = &telemetry {
-                if is_progress_line(&line) {
+                if plurx_core::transcode::progress::is_progress_line(&line) {
                     crate::transcode::apply_progress_line(progress, *generation, &line);
                     continue;
                 }
@@ -3417,22 +3417,6 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
             .expect("a signed integer is a valid HTTP header value"),
     );
     Ok(response)
-}
-
-/// Is this stderr line one of FFmpeg's `-progress` blocks rather than a
-/// diagnostic? M2 replaces this permissive legacy rule with the shared closed
-/// key set after M1 has preserved the spawn behavior independently.
-fn is_progress_line(line: &str) -> bool {
-    match line.split_once('=') {
-        Some((key, _)) => {
-            let key = key.trim();
-            !key.is_empty()
-                && key
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        }
-        None => false,
-    }
 }
 
 #[cfg(test)]
@@ -4396,7 +4380,10 @@ mod tests {
             "progress=continue",
             "bitrate=N/A",
         ] {
-            assert!(is_progress_line(line), "progress: {line}");
+            assert!(
+                plurx_core::transcode::progress::is_progress_line(line),
+                "progress: {line}"
+            );
         }
         for line in [
             "[matroska @ 0x55f4] Could not find codec parameters",
@@ -4406,8 +4393,13 @@ mod tests {
             // An ffmpeg message that happens to contain '=' is still prose:
             // the key side has spaces and capitals, which progress keys never do.
             "[out#0/mp4 @ 0x1] Output file is empty, nothing was encoded",
+            "filter_units=remove_types=32-34",
+            "some_future_key=1",
         ] {
-            assert!(!is_progress_line(line), "prose: {line}");
+            assert!(
+                !plurx_core::transcode::progress::is_progress_line(line),
+                "prose: {line}"
+            );
         }
     }
 
