@@ -40,17 +40,18 @@ fn title_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpticalTitle> {
     let locator_json: String = row.get(2)?;
     let locator: OpticalTitleLocator = serde_json::from_str(&locator_json)
         .map_err(|error| invalid_column(format!("invalid optical locator: {error}")))?;
-    let match_kind: Option<String> = row.get(7)?;
-    let facts_json: String = row.get(3)?;
+    let match_kind: Option<String> = row.get(8)?;
+    let facts_json: String = row.get(4)?;
     Ok(OpticalTitle {
         disc_id: row.get(0)?,
         title_id: row.get(1)?,
         locator,
+        angles: row.get(3)?,
         facts: serde_json::from_str(&facts_json)
             .map_err(|error| invalid_column(format!("invalid optical media facts: {error}")))?,
-        chapters_json: row.get(4)?,
-        duration_ms: row.get(5)?,
-        matched_item_id: row.get(6)?,
+        chapters_json: row.get(5)?,
+        duration_ms: row.get(6)?,
+        matched_item_id: row.get(7)?,
         match_kind: match_kind
             .map(|kind| {
                 OpticalMatchKind::parse(&kind)
@@ -77,7 +78,7 @@ fn progress_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpticalProgres
 
 const DISC_COLUMNS: &str = "disc_id, fingerprint_version, fingerprint_evidence_json, format, \
     volume_label, display_title, metadata_json, created_at_ms, updated_at_ms";
-const TITLE_COLUMNS: &str = "disc_id, title_id, locator_json, facts_json, chapters_json, \
+const TITLE_COLUMNS: &str = "disc_id, title_id, locator_json, angles, facts_json, chapters_json, \
     duration_ms, matched_item_id, match_kind";
 const PROGRESS_COLUMNS: &str = "user_id, disc_id, title_id, angle, position_ms, duration_ms, \
     watched, audio_selection_json, subtitle_selection_json, updated_at_ms";
@@ -127,11 +128,12 @@ impl OpticalStore for SqliteStore {
                     .map_err(|error| StoreError::Database(error.to_string()))?;
                 transaction.execute(
                     "INSERT INTO optical_titles
-                         (disc_id, title_id, locator_json, facts_json, chapters_json,
+                         (disc_id, title_id, locator_json, angles, facts_json, chapters_json,
                           duration_ms, matched_item_id, match_kind)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                      ON CONFLICT(disc_id, title_id) DO UPDATE SET
                          locator_json = excluded.locator_json,
+                         angles = excluded.angles,
                          facts_json = excluded.facts_json,
                          chapters_json = excluded.chapters_json,
                          duration_ms = excluded.duration_ms",
@@ -139,6 +141,7 @@ impl OpticalStore for SqliteStore {
                         title.disc_id,
                         title.title_id,
                         locator_json,
+                        title.angles,
                         facts_json,
                         title.chapters_json,
                         title.duration_ms,
@@ -428,6 +431,7 @@ mod tests {
                 disc_id: disc_id.to_owned(),
                 title_id: title_id.to_owned(),
                 locator: OpticalTitleLocator::Dvd { title_number: 1 },
+                angles: 1,
                 facts: crate::playback::PlaybackMediaFacts {
                     container: Some("mpeg".to_owned()),
                     video_codec: Some("mpeg2video".to_owned()),

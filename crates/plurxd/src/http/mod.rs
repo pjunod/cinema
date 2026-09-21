@@ -33,6 +33,7 @@ pub(crate) mod library_channels;
 mod live_tv;
 mod network;
 mod offline;
+mod optical;
 pub(crate) mod peer_transport;
 mod pgs_overlay;
 mod photos;
@@ -167,6 +168,7 @@ pub fn router(state: AppState) -> Router {
         .merge(library_channels::collection_router())
         .nest("/library-channels", library_channels::router())
         .nest("/dvr", dvr::router())
+        .nest("/optical", optical::router())
         .route("/live-tv/readiness", get(live_tv::readiness))
         .route("/live-tv/channels", get(live_tv::channels))
         .route("/live-tv/guide", get(live_tv::guide_document))

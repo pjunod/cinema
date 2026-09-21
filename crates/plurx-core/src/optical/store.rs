@@ -19,6 +19,7 @@ CREATE TABLE optical_titles (
     disc_id TEXT NOT NULL,
     title_id TEXT NOT NULL,
     locator_json TEXT NOT NULL,
+    angles INTEGER NOT NULL CHECK (angles >= 1),
     facts_json TEXT NOT NULL,
     chapters_json TEXT NOT NULL,
     duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
@@ -103,6 +104,7 @@ pub struct OpticalTitle {
     pub disc_id: String,
     pub title_id: String,
     pub locator: OpticalTitleLocator,
+    pub angles: u32,
     pub facts: PlaybackMediaFacts,
     pub chapters_json: String,
     pub duration_ms: Option<i64>,
@@ -183,6 +185,9 @@ pub(crate) fn validate_inspection_write(value: &OpticalInspection) -> Result<(),
             return Err("title disc id differs from inspection disc id".into());
         }
         validate_optical_id("title id", &title.title_id)?;
+        if title.angles == 0 {
+            return Err("optical title must report at least one angle".into());
+        }
         if title.duration_ms.is_some_and(|duration| duration < 0) {
             return Err("title duration must be nonnegative".into());
         }

@@ -222,6 +222,7 @@ pub fn inspection_to_store(
                 disc_id: disc_id.clone(),
                 title_id: title.title_id.clone(),
                 locator: title.locator,
+                angles: title.angles,
                 facts: title.facts.clone(),
                 chapters_json,
                 duration_ms,
