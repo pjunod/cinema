@@ -19897,6 +19897,25 @@ mod tests {
     }
 
     #[test]
+    fn rolling_publication_budget_media_renewal_does_not_refresh_demand_age() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let control = request();
+        actor
+            .control_at(started + Duration::from_secs(1), owned_control(&control))
+            .expect("demand accepted");
+        assert!(actor.commit_media_at(started + Duration::from_secs(10), "segment", 0, None, None,));
+        let snapshot = actor.snapshot_at(started + Duration::from_secs(20));
+        assert_eq!(snapshot.idle_for, Duration::from_secs(10));
+        assert_eq!(
+            snapshot.demand_observation_age,
+            Some(Duration::from_secs(19)),
+            "media keeps the lease live without inventing a fresh playhead"
+        );
+    }
+
+    #[test]
     fn rolling_publication_budget_actor_fences_demand_identity_and_protected_start() {
         let started = Instant::now();
         let mut actor =
@@ -19953,6 +19972,34 @@ mod tests {
         );
         assert!(actor
             .observe_publication_at(started + Duration::from_secs(4), candidate(2, 11, 80_000),));
+
+        let mut third = second;
+        third.sequence = 3;
+        third.position_ms = 200_000;
+        third.buffered_from_ms = Some(200_000);
+        third.buffered_through_ms = 208_000;
+        actor
+            .control_at(started + Duration::from_secs(5), owned_control(&third))
+            .expect("nonzero-origin demand");
+        assert!(actor.observe_publication_at(
+            started + Duration::from_secs(5),
+            RollingPublicationObservation {
+                producer_attempt: attempt,
+                publication_commit: true,
+                demand_sequence: Some(3),
+                produced_segment: Some(12),
+                produced_end_ms: Some(180_000),
+                playlist_ready: true,
+                published_segment: Some(12),
+                published_end_ms: Some(180_000),
+                published_first_segment: Some(6),
+                published_start_ms: Some(60_000),
+                media_origin_ms: 100_000,
+                next_media_sequence: 13,
+                resolved_fetched_segment: None,
+                resolved_fetched_end_ms: None,
+            }
+        ));
     }
 
     fn producer_progress(

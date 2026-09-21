@@ -7353,6 +7353,14 @@ impl Session {
                 })
             });
             let Some(selected) = floor else {
+                if budget.demand_sequence.is_some()
+                    && index
+                        .segs
+                        .iter()
+                        .any(|segment| segment.index >= first_new_segment)
+                {
+                    return Err("rolling_window_budget_exhausted: next completed segment exceeds the active publication safety floor".to_owned());
+                }
                 return Ok(());
             };
             selected.index
@@ -34024,6 +34032,95 @@ pub(crate) mod tests {
             assert_eq!(clock.budget_anchor_sequence, Some((step + 1) as u64));
             previous_frontier = served.end_ms;
         }
+    }
+
+    #[tokio::test]
+    async fn rolling_publication_budget_one_point_two_x_writer_sustains_one_x_for_thirty_minutes() {
+        let directory = crate::test_tempdir().expect("publication capacity");
+        let session = test_session(directory.path().to_path_buf());
+        let started = Instant::now();
+
+        for step in 0..=112_i64 {
+            let elapsed_ms = step.saturating_mul(16_000);
+            accept_rolling_publication_demand(
+                &session,
+                u64::try_from(step + 1).expect("sequence"),
+                elapsed_ms,
+                1.0,
+                crate::playback_control::PlaybackDemand::Active,
+                crate::playback_control::RenderState::Rendering,
+            )
+            .await;
+            let produced_end_ms = 48_000_i64
+                .saturating_add(((elapsed_ms as f64) * 1.2).round().min(i64::MAX as f64) as i64);
+            let segment_count = usize::try_from(produced_end_ms / 6_000).expect("segment count");
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&vec![6.0; segment_count], false),
+            )
+            .await
+            .expect("writer playlist");
+            session
+                .publication_cycle_at(
+                    "rolling_publication_budget_capacity",
+                    started + Duration::from_millis(u64::try_from(elapsed_ms).expect("elapsed")),
+                )
+                .await
+                .expect("sustainable producer remains live");
+            let clock = session.publication.lock().await;
+            let served = clock.served.as_ref().expect("served snapshot");
+            assert!(
+                served.end_ms.saturating_sub(elapsed_ms)
+                    <= rolling_initial_runway_ms(1.0) + ROLLING_SEGMENT_MAX_MS,
+                "bounded lead at step {step}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_publication_budget_low_rate_retires_before_the_window_can_skip() {
+        let directory = crate::test_tempdir().expect("low-rate budget");
+        let session = test_session(directory.path().to_path_buf());
+        let started = Instant::now();
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[16.0; 32], false),
+        )
+        .await
+        .expect("writer playlist");
+
+        let mut exhausted_at = None;
+        for step in 0..=12_i64 {
+            let elapsed_ms = step.saturating_mul(16_000);
+            let position_ms = step.saturating_mul(4_000);
+            accept_rolling_publication_demand(
+                &session,
+                u64::try_from(step + 1).expect("sequence"),
+                position_ms,
+                0.25,
+                crate::playback_control::PlaybackDemand::Active,
+                crate::playback_control::RenderState::Rendering,
+            )
+            .await;
+            if let Err(reason) = session
+                .publication_cycle_at(
+                    "rolling_publication_budget_low_rate",
+                    started + Duration::from_millis(u64::try_from(elapsed_ms).expect("elapsed")),
+                )
+                .await
+            {
+                assert!(
+                    reason.starts_with("rolling_window_budget_exhausted:"),
+                    "{reason}"
+                );
+                exhausted_at = Some(elapsed_ms);
+                break;
+            }
+        }
+        assert!(
+            exhausted_at.is_some_and(|elapsed_ms| elapsed_ms <= 180_000),
+            "an unsustainable low rate must recover before it can prune past playback"
+        );
     }
 
     #[tokio::test]
