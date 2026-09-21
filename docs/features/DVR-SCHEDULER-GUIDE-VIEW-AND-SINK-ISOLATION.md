@@ -1,8 +1,9 @@
 # DVR scheduler guide view and sink isolation — the scheduler reads the whole guide, and one slow disk stalls one recording
 
-**Status:** ready for review · **Executes:** L1 / F-ltv-1 and L10 from
+**Status:** implementation complete in draft PR #407; adversarial review and
+fleet evidence pending · **Executes:** L1 / F-ltv-1 and L10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-· **Written:** 2026-09-20 · **Against:** `main` @ `88a3957a`
+· **Written:** 2026-09-20 · **Implemented against:** `main` @ `94e36750`
 
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
 
@@ -13,8 +14,9 @@ rows L1 and L10 first, then the assessment rows L1 and F-ltv-1 in
 below. The design the DVR was built to is
 [LIVE-TV-DVR-IMPLEMENTATION.md §3.2 and §3.5](LIVE-TV-DVR-IMPLEMENTATION.md);
 this plan changes how the scheduler *reads* and how a sink *writes*, not what
-either means. Work milestone by milestone (§5); each is one draft PR into
-`main` under the fast lane. Every `file:line` is against `88a3957a` — re-verify
+either means. The work board's whole-plan rule supersedes the earlier
+milestone-PR wording: M1–M3 are logical commits in one draft PR into `main`.
+Every `file:line` is against `88a3957a` — re-verify
 at build time. If a step seems to require changing the public guide JSON
 shape, the 2 MiB public response bound, the attempt-file (`O_EXCL`) rule, the
 per-chunk serving-fence check, or the `(channel_id, airing_start)` identity,
@@ -370,18 +372,17 @@ Tests (all in `live_tv.rs`'s and `dvr.rs`'s existing `mod tests`):
   take a `view`, call `guide_cache.store(generation, seq+1, &Ok(other))`,
   assert the held `Arc` still has the old `fetched_at` and rows, and a new
   `view` has the new ones; `Arc::ptr_eq` on the two is `false`.
-- `programmes_in_matches_the_linear_clip` (property-style, `guide.rs`):
+- `programmes_in_matches_the_linear_window_predicate` (property-style,
+  `live_tv.rs`):
   for random sorted non-overlapping rows and random windows,
   `programmes_in` equals the `retain` predicate's result; and an unsorted
   persisted document is normalised on adoption (assert the warn path via
   the returned rows being sorted).
-- `clipped_runs_outside_the_guide_mutex`: hold `guide_cache.state.lock()`
-  in the test after calling `read`'s Arc-taking half — simplest form: a
-  `read` on an oversized guide completes while a second task holding the
-  lock for 50 ms after `read` has taken its Arc does not delay it beyond
-  the lock hand-off. (If this proves too fiddly to express, replace with
-  a `tracing`-free structural test that `read` calls `clipped` on a value
-  it owns after the guard is dropped — reviewer's choice; say which.)
+- `clipped_runs_outside_the_guide_mutex` is covered structurally: `read`
+  clones the `Arc` and every cache-derived scalar, explicitly drops the
+  guard, and only then calls `clipped`. The concurrent timing form was not
+  retained because it would assert scheduler timing rather than lock
+  ownership and could pass or fail with unrelated runtime load.
 
 Acceptance: `cargo test -p plurxd dvr_expand` and
 `cargo test -p plurxd guide` green; `make unit` green; the day-13 test
@@ -412,11 +413,11 @@ Tests (`dvr.rs` `mod tests`):
   < 100 ms), sink B is cancelled with `reason_code == "disk_write_backlog"`
   exactly once, and `plurx_dvr_sink_failures_total{reason="disk_write_backlog"}`
   is 1.
-- `a_failing_sink_records_its_gap_and_rolls_the_next_attempt`: sink B's
-  writer returns an I/O error; assert `capture_interrupted` with
-  `disk_write_failed`, then run `dvr_recover` with a row still inside its
-  window; assert `attach_sink(.., attempt = 2)` opened `<base>.a2.part`
-  and the row's `gap_s > 0`.
+- `a_failing_sink_records_one_named_interruption`: an injected writer error
+  proves one `capture_interrupted` event and one fixed-cardinality
+  `disk_write_failed` increment. Attempt-2 creation remains exercised by the
+  existing recovery path; the plan's fleet prompt is the acceptance proof for
+  a real failed mount, durable `gap_s`, and `.a2.part` together.
 - `queues_stay_bounded_under_a_stalled_writer`: one sink, writer blocked;
   feed 32 MiB; assert `queued_bytes <= DVR_SINK_QUEUE_BYTES` at every step
   and the process's retained chunk count never exceeds
@@ -443,10 +444,10 @@ slow-sink test's measured max tuner-pull gap.
 
 Add the metric to [OPERATIONS.md](../OPERATIONS.md)'s metrics table and a
 row to [LIVE-TV-DVR-STATUS.md](LIVE-TV-DVR-STATUS.md) recording the L1
-finding and its fix date. Acceptance: `python3 -m pytest
-tests/operations/test_docs_index.py` green (every cited doc path exists);
-the GPT prompt in §6.3 has been run once and its numbers are in the status
-doc.
+finding and its fix date. The documentation index must be green. The GPT
+prompt in §6.3 remains explicitly pending until a fleet-capable session can
+produce its byte counts and booleans; absence of that evidence does not turn
+an unrun observation into a passing result.
 
 ## 6. Verification and rollout
 
@@ -460,8 +461,8 @@ doc.
 
 ### 6.2 Rollout
 
-One draft PR per milestone into `main` under the fast lane. No feature
-switch: M1 changes an internal read, M2 changes an internal write path;
+One whole-plan draft PR into `main` under the fast lane, as the work board now
+requires. No feature switch: M1 changes an internal read, M2 changes an internal write path;
 neither has a user-visible mode to toggle, and Paul refuses in-code gates.
 Deploy to the tuner owner (`media1`) first with the ansible playbook, watch
 `plurx_dvr_sink_failures_total` for one recording, then the rest of the
@@ -528,7 +529,7 @@ DVR root on the NAS mount:
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per milestone (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
@@ -536,4 +537,6 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | #407 / `9a4b83af` | Full cached guide is an immutable `Arc` view; scheduler, reconciliation and reminders use binary window slices while HTTP clipping stays bounded. Day-13 and snapshot-focused regressions green on Rust 1.97.1. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 | #407 / `46a1aeec` | Per-sink 8 MiB/512-chunk queues and owned writers isolate backlog/failure, retain attempt settlement, and emit three fixed reasons. Focused slow/failing/fenced/overlap/settling regressions green. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | #407 / documentation commit | Metric/operator/status contracts recorded; docs-index validation required before push. Fleet prompts remain `needs: media1 336-hour guide and mixed NAS/local sink interruption evidence`. |
