@@ -899,24 +899,34 @@ impl LiveTvManager {
             if live.contains(&row.id) {
                 continue;
             }
-            let interruption = DvrEventInput {
-                // Stable across retries: an owner that could not recover on
-                // this tick must not add the same interruption every 15 s.
-                event_id: format!("worker-lost:{}:{}", row.id, row.attempt),
-                kind: "capture_interrupted".to_owned(),
-                occurred_at_ms: now.saturating_mul(1_000),
-                attempt: Some(row.attempt),
-                actor_user_id: None,
-                reason_code: Some("worker_lost".to_owned()),
-                facts_json: serde_json::json!({}).to_string(),
-                actionable: true,
-            };
-            if let Err(error) = self
-                .store
-                .append_dvr_observation_event(&row.id, &self.node_id, row.attempt, &interruption)
-                .await
+            if self
+                .sink_interruption_reason(&row.id, row.attempt)
+                .is_none()
             {
-                tracing::warn!(recording = %row.id, %error, "could not persist worker-loss event");
+                let interruption = DvrEventInput {
+                    // Stable across retries: an owner that could not recover on
+                    // this tick must not add the same interruption every 15 s.
+                    event_id: format!("worker-lost:{}:{}", row.id, row.attempt),
+                    kind: "capture_interrupted".to_owned(),
+                    occurred_at_ms: now.saturating_mul(1_000),
+                    attempt: Some(row.attempt),
+                    actor_user_id: None,
+                    reason_code: Some("worker_lost".to_owned()),
+                    facts_json: serde_json::json!({}).to_string(),
+                    actionable: true,
+                };
+                if let Err(error) = self
+                    .store
+                    .append_dvr_observation_event(
+                        &row.id,
+                        &self.node_id,
+                        row.attempt,
+                        &interruption,
+                    )
+                    .await
+                {
+                    tracing::warn!(recording = %row.id, %error, "could not persist worker-loss event");
+                }
             }
             if let Err(error) = self
                 .store
@@ -1236,7 +1246,7 @@ impl LiveTvManager {
             // codec is the one thing a stopped recording would otherwise lack
             // that a completed one has.
             let facts = self.transport_source_facts(&row.channel_id);
-            self.begin_finishing(&row.id);
+            self.begin_finishing(&row.id, row.attempt);
             if let Err(error) = self.drain_dvr_observation_events().await {
                 tracing::warn!(recording = %row.id, %error, "could not persist finishing event");
                 self.store
@@ -1244,7 +1254,7 @@ impl LiveTvManager {
                     .await
                     .map_err(store_error)?;
             }
-            if self.stop_sink(&row.id).await == SinkStopResult::Settling {
+            if self.stop_sink(&row.id, row.attempt).await == SinkStopResult::Settling {
                 tracing::warn!(
                     recording = %row.id,
                     "capture file is still settling; stop will finish on the next DVR tick"
@@ -1409,7 +1419,7 @@ impl LiveTvManager {
                     recording = %row.id,
                     "the recording changed under its own start; closing the capture"
                 );
-                let _ = self.stop_sink(&row.id).await;
+                let _ = self.stop_sink(&row.id, 1).await;
                 self.close_finished_transports().await;
                 continue;
             }
@@ -1463,7 +1473,7 @@ impl LiveTvManager {
             // writes have not reached the kernel, and the concatenation below
             // would then copy a short part and unlink it — losing exactly the
             // end of every recording that finished normally.
-            self.begin_finishing(&row.id);
+            self.begin_finishing(&row.id, row.attempt);
             if let Err(error) = self.drain_dvr_observation_events().await {
                 tracing::warn!(recording = %row.id, %error, "could not persist finishing event");
                 self.store
@@ -1471,7 +1481,7 @@ impl LiveTvManager {
                     .await
                     .map_err(store_error)?;
             }
-            if self.stop_sink(&row.id).await == SinkStopResult::Settling {
+            if self.stop_sink(&row.id, row.attempt).await == SinkStopResult::Settling {
                 tracing::warn!(
                     recording = %row.id,
                     "capture file is still settling; assembly waits for the next DVR tick"
@@ -1757,11 +1767,11 @@ impl LiveTvManager {
         Ok(())
     }
 
-    /// Cancel one recording's sink. The transport lives on while any other
-    /// sink still wants bytes — stopping one of two recordings on a channel
-    /// frees no tuner, and pretending otherwise is what would make the
-    /// capacity dialog lie.
-    async fn stop_sink(&self, recording_id: &str) -> SinkStopResult {
+    /// Cancel every writer for one recording through the row's exact attempt.
+    /// The transport lives on while any other recording still wants bytes —
+    /// stopping one of two recordings on a channel frees no tuner, and
+    /// pretending otherwise is what would make the capacity dialog lie.
+    async fn stop_sink(&self, recording_id: &str, attempt: i64) -> SinkStopResult {
         let transports = {
             let registry = self
                 .registry
@@ -1769,25 +1779,44 @@ impl LiveTvManager {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             registry.transports.values().cloned().collect::<Vec<_>>()
         };
-        for transport in transports {
-            let sinks = transport
-                .sinks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            for sink in sinks {
-                if sink.recording_id == recording_id {
-                    return settle_sink(&sink).await;
-                }
-            }
+        let sinks = transports
+            .iter()
+            .flat_map(|transport| {
+                transport
+                    .sinks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })
+            .filter(|sink| sink.recording_id == recording_id)
+            .collect::<Vec<_>>();
+        if sinks.iter().any(|sink| sink.attempt > attempt) {
+            // The row this finalizer read is stale: recovery has already
+            // attached a later attempt. Do not cancel that writer and, more
+            // importantly, do not let the caller assemble/unlink its part as
+            // though the older row snapshot were authoritative.
+            return SinkStopResult::Settling;
         }
-        SinkStopResult::NotFound
+        if sinks.is_empty() {
+            return SinkStopResult::NotFound;
+        }
+        let mut settling = false;
+        for sink in sinks {
+            // Assembly reads every part through the row's current attempt, so
+            // every matching writer through that attempt must be joined first.
+            settling |= settle_sink(&sink).await == SinkStopResult::Settling;
+        }
+        if settling {
+            SinkStopResult::Settling
+        } else {
+            SinkStopResult::Settled
+        }
     }
 
     /// Publish the closure phase before removing a sink from the write fanout.
     /// Its event is drained before file assembly starts, while the observation
     /// remains in the registry until the terminal row is committed.
-    fn begin_finishing(&self, recording_id: &str) -> bool {
+    fn begin_finishing(&self, recording_id: &str, attempt: i64) -> bool {
         let transports = {
             let registry = self
                 .registry
@@ -1795,23 +1824,29 @@ impl LiveTvManager {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             registry.transports.values().cloned().collect::<Vec<_>>()
         };
-        for transport in transports {
-            let sinks = transport
-                .sinks
+        let sinks = transports
+            .iter()
+            .flat_map(|transport| {
+                transport
+                    .sinks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })
+            .filter(|sink| sink.recording_id == recording_id)
+            .collect::<Vec<_>>();
+        if sinks.iter().any(|sink| sink.attempt > attempt) {
+            return false;
+        }
+        let mut found = false;
+        for sink in sinks.into_iter().filter(|sink| sink.attempt == attempt) {
+            sink.observation
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            for sink in sinks {
-                if sink.recording_id == recording_id {
-                    sink.observation
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .begin_finishing(unix_seconds().saturating_mul(1_000));
-                    return true;
-                }
-            }
+                .begin_finishing(unix_seconds().saturating_mul(1_000));
+            found = true;
         }
-        false
+        found
     }
 
     fn live_recording_ids(&self) -> HashSet<String> {
@@ -1829,6 +1864,35 @@ impl LiveTvManager {
                     .map(|sink| sink.recording_id.clone())
             })
             .collect()
+    }
+
+    /// A cancelled sink can still explain why the worker disappeared. The
+    /// observation remains on the attempt after its durable event drains, so
+    /// recovery can preserve the disk/backlog reason instead of appending a
+    /// second actionable `worker_lost` diagnosis for the same interruption.
+    fn sink_interruption_reason(&self, recording_id: &str, attempt: i64) -> Option<String> {
+        let transports = {
+            let registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.transports.values().cloned().collect::<Vec<_>>()
+        };
+        transports.into_iter().find_map(|transport| {
+            transport
+                .sinks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .find(|sink| sink.recording_id == recording_id && sink.attempt == attempt)
+                .and_then(|sink| {
+                    sink.observation
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .reason_code
+                        .clone()
+                })
+        })
     }
 
     async fn close_finished_transports(&self) {
@@ -2479,7 +2543,18 @@ async fn reminder_tick(
     manager: &Arc<LiveTvManager>,
     events: &super::webhook::DvrEventSink,
 ) -> Result<(), LiveTvError> {
-    let now = unix_seconds();
+    reminder_tick_at(manager, events, unix_seconds()).await
+}
+
+/// The reminder pass with an explicit clock. Production supplies wall time;
+/// the oversized-guide regression supplies the guide's deterministic epoch so
+/// it can prove the late programme survives reconciliation rather than merely
+/// testing whatever happens to fall within fourteen days of the test run.
+async fn reminder_tick_at(
+    manager: &Arc<LiveTvManager>,
+    events: &super::webhook::DvrEventSink,
+    now: i64,
+) -> Result<(), LiveTvError> {
     let fired = manager
         .store
         .transition_dvr_reminders(now, now.saturating_mul(1000))
@@ -2891,6 +2966,70 @@ mod tests {
         assert_eq!(row.state, DvrState::Scheduled);
     }
 
+    #[tokio::test]
+    async fn a_late_reminder_is_not_moved_when_only_the_full_guide_contains_it() {
+        let (manager, live_tv, _dvr, now, target_start, _root) =
+            oversized_scheduler_fixture().await;
+        use plurx_core::store::keys;
+        manager
+            .store
+            .put_settings(&[
+                (keys::LIVE_TV_ENABLED, "1"),
+                (keys::LIVE_TV_OWNER_NODE_ID, "node-a"),
+                (keys::LIVE_TV_GUIDE_SOURCE, "hdhomerun"),
+                (keys::LIVE_TV_GUIDE_HOURS, "336"),
+                (keys::LIVE_TV_CONFIG_GENERATION, "7"),
+            ])
+            .await
+            .expect("configure the reminder guide consumer");
+        let owner = manager
+            .store
+            .list_dvr_rules()
+            .await
+            .expect("read fixture rule")
+            .into_iter()
+            .next()
+            .expect("fixture rule owner")
+            .owner_user_id;
+        let reminder = plurx_core::dvr::DvrReminder {
+            id: "late-reminder".to_owned(),
+            user_id: owner,
+            channel_id: "63.1".to_owned(),
+            guide_number: "63.1".to_owned(),
+            airing_start: target_start,
+            airing_end: target_start + 1_800,
+            title: "late programme the public clip drops".to_owned(),
+            lead_s: 0,
+            state: plurx_core::dvr::DvrReminderState::Armed,
+            fired_at_ms: None,
+            acked_at_ms: None,
+            created_at_ms: now.saturating_mul(1_000),
+            updated_at_ms: now.saturating_mul(1_000),
+        };
+        assert!(manager
+            .store
+            .put_dvr_reminder(&reminder)
+            .await
+            .expect("store late reminder"));
+
+        let (events, _queue) = super::super::webhook::channel();
+        reminder_tick_at(&manager, &events, now)
+            .await
+            .expect("reconcile reminder against full guide");
+
+        let rows = manager
+            .store
+            .list_dvr_reminders(owner, None)
+            .await
+            .expect("read reconciled reminder");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, plurx_core::dvr::DvrReminderState::Armed);
+        assert_eq!(
+            live_tv.generation, 7,
+            "fixture and persisted cache generation agree"
+        );
+    }
+
     #[derive(Clone, Default)]
     struct MemoryWriter {
         bytes: Arc<std::sync::Mutex<Vec<u8>>>,
@@ -2988,20 +3127,31 @@ mod tests {
         delivered: Arc<AtomicU64>,
         metrics: Arc<LiveTvMetrics>,
     ) -> Arc<DvrSink> {
+        test_sink_attempt_at(id, 1, base, writer, delivered, metrics)
+    }
+
+    fn test_sink_attempt_at(
+        id: &str,
+        attempt: i64,
+        base: PathBuf,
+        writer: Box<dyn SinkWriter>,
+        delivered: Arc<AtomicU64>,
+        metrics: Arc<LiveTvMetrics>,
+    ) -> Arc<DvrSink> {
         let now = unix_seconds();
         let sink = Arc::new(DvrSink {
             recording_id: id.to_owned(),
             channel_id: "7.1".to_owned(),
             airing_start: now,
             title: id.to_owned(),
-            attempt: 1,
+            attempt,
             window: (now - 60, now + 60),
             base,
             writer: std::sync::Mutex::new(None),
             writer_task: std::sync::Mutex::new(None),
             bytes: AtomicU64::new(0),
             prior_attempt_bytes: None,
-            observation: std::sync::Mutex::new(DvrSinkObservation::new(1)),
+            observation: std::sync::Mutex::new(DvrSinkObservation::new(attempt)),
             metrics,
             cancel: CancellationToken::new(),
         });
@@ -3208,6 +3358,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_preserves_one_durable_sink_failure_without_worker_lost() {
+        let (manager, live_tv, dvr, now, target_start, _root) = oversized_scheduler_fixture().await;
+        manager
+            .dvr_expand(&live_tv, &dvr, now)
+            .await
+            .expect("materialize recovery row");
+        let row = manager
+            .store
+            .get_dvr_recording_for_airing("63.1", target_start)
+            .await
+            .expect("read recovery row")
+            .expect("recovery row");
+        assert!(manager
+            .transition(
+                &row.id,
+                &[DvrState::Scheduled],
+                DvrState::Recording,
+                Some("test capture started"),
+                DvrStatePatch::Started {
+                    attempt: 1,
+                    tuner_owner_node_id: manager.node_id.clone(),
+                    started_at_ms: now.saturating_mul(1_000),
+                    late_start_s: 0,
+                    path: "/unused/recovery.ts".to_owned(),
+                },
+                None,
+            )
+            .await
+            .expect("claim recovery row"));
+
+        let metrics = Arc::new(LiveTvMetrics::default());
+        let delivered = Arc::new(AtomicU64::new(0));
+        let failing = test_sink_attempt_at(
+            &row.id,
+            1,
+            PathBuf::from(format!("/unused/{}", row.id)),
+            Box::new(FailingWriter),
+            Arc::clone(&delivered),
+            Arc::clone(&metrics),
+        );
+        let sibling = test_sink(
+            "sibling-keeps-transport",
+            Box::new(MemoryWriter::default()),
+            Arc::clone(&delivered),
+            Arc::clone(&metrics),
+        );
+        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let transport = test_transport(
+            vec![Arc::clone(&failing), Arc::clone(&sibling)],
+            delivered,
+            serving.admit().expect("serving generation"),
+        );
+        manager
+            .registry
+            .lock()
+            .expect("registry")
+            .transports
+            .insert("7.1".to_owned(), Arc::clone(&transport));
+        let _ = pump_tuner_fanout(
+            tuner_input(
+                vec![
+                    bytes::Bytes::from_static(b"first"),
+                    bytes::Bytes::from_static(b"second"),
+                    bytes::Bytes::from_static(b"third"),
+                ],
+                Arc::new(std::sync::Mutex::new(Vec::new())),
+            ),
+            serving,
+            transport,
+        )
+        .await;
+        assert!(failing.cancel.is_cancelled());
+
+        manager
+            .drain_dvr_observation_events()
+            .await
+            .expect("persist precise sink failure");
+        let (events, _queue) = super::super::webhook::channel();
+        manager
+            .dvr_recover(&live_tv, &dvr, &events, live_tv.generation, now)
+            .await
+            .expect("recover failed sink");
+
+        let history = manager
+            .store
+            .list_dvr_events(&row.id, None, None, 100)
+            .await
+            .expect("read recovery history");
+        let interruptions = history
+            .rows
+            .iter()
+            .filter(|event| event.kind == "capture_interrupted")
+            .collect::<Vec<_>>();
+        assert_eq!(interruptions.len(), 1);
+        assert_eq!(
+            interruptions[0].reason_code.as_deref(),
+            Some("disk_write_failed")
+        );
+        assert!(metrics
+            .dvr_sink_failures_prometheus()
+            .contains("reason=\"disk_write_failed\"} 1"));
+        assert_eq!(settle_sink(&failing).await, SinkStopResult::Settled);
+        assert_eq!(settle_sink(&sibling).await, SinkStopResult::Settled);
+    }
+
+    #[tokio::test]
     async fn two_overlapping_recordings_get_identical_bytes_in_their_overlap() {
         let metrics = Arc::new(LiveTvMetrics::default());
         let delivered = Arc::new(AtomicU64::new(0));
@@ -3345,6 +3601,115 @@ mod tests {
 
         drop(reader);
         assert_eq!(settle_sink(&sink).await, SinkStopResult::Settled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn finalization_fences_a_later_retry_and_joins_every_attempt_before_assembly() {
+        let (manager, _live_tv, _dvr, _now, _target_start, root) =
+            oversized_scheduler_fixture().await;
+        let base = root.path().join("retried-recording");
+        tokio::fs::write(attempt_path(&base, 1), b"attempt-one")
+            .await
+            .expect("first attempt fixture");
+        tokio::fs::write(attempt_path(&base, 2), b"attempt-two")
+            .await
+            .expect("second attempt fixture");
+        let delivered = Arc::new(AtomicU64::new(0));
+        let metrics = Arc::new(LiveTvMetrics::default());
+        let first = test_sink_attempt_at(
+            "retried",
+            1,
+            base.clone(),
+            Box::new(MemoryWriter::default()),
+            Arc::clone(&delivered),
+            Arc::clone(&metrics),
+        );
+        assert_eq!(settle_sink(&first).await, SinkStopResult::Settled);
+        let sibling = test_sink(
+            "sibling",
+            Box::new(MemoryWriter::default()),
+            Arc::clone(&delivered),
+            Arc::clone(&metrics),
+        );
+        let (blocked_writer, blocked_reader) = tokio::io::duplex(1);
+        let second = test_sink_attempt_at(
+            "retried",
+            2,
+            base.clone(),
+            Box::new(blocked_writer),
+            Arc::clone(&delivered),
+            metrics,
+        );
+        let queue = second
+            .writer
+            .lock()
+            .expect("second writer queue")
+            .as_ref()
+            .expect("active second writer")
+            .clone();
+        assert!(reserve_sink_queue_bytes(&queue.queued_bytes, 64 * 1024));
+        queue
+            .tx
+            .try_send(bytes::Bytes::from(vec![0_u8; 64 * 1024]))
+            .expect("queue blocked retry write");
+        tokio::task::yield_now().await;
+        let transport = test_transport(
+            vec![
+                Arc::clone(&first),
+                Arc::clone(&sibling),
+                Arc::clone(&second),
+            ],
+            delivered,
+            crate::serving_fence::ServingAuthority::always_ready()
+                .admit()
+                .expect("serving generation"),
+        );
+        manager
+            .registry
+            .lock()
+            .expect("registry")
+            .transports
+            .insert("7.1".to_owned(), transport);
+
+        assert!(!manager.begin_finishing("retried", 1));
+        assert_eq!(
+            manager.stop_sink("retried", 1).await,
+            SinkStopResult::Settling,
+            "a stale row may neither cancel nor assemble the later attempt"
+        );
+        assert!(!second.cancel.is_cancelled());
+        assert!(!final_path(&base).exists());
+
+        assert!(manager.begin_finishing("retried", 2));
+        assert_eq!(
+            manager.stop_sink("retried", 2).await,
+            SinkStopResult::Settling,
+            "the current attempt stays unassemblable while its writer lives"
+        );
+        assert!(attempt_path(&base, 1).exists());
+        assert!(attempt_path(&base, 2).exists());
+        assert!(!final_path(&base).exists());
+
+        drop(blocked_reader);
+        assert_eq!(
+            manager.stop_sink("retried", 2).await,
+            SinkStopResult::Settled
+        );
+        assert_eq!(
+            concatenate_attempts(&base, 2)
+                .await
+                .expect("assemble settled attempts"),
+            b"attempt-oneattempt-two".len() as u64
+        );
+        assert_eq!(
+            tokio::fs::read(final_path(&base))
+                .await
+                .expect("final recording"),
+            b"attempt-oneattempt-two"
+        );
+        assert!(!attempt_path(&base, 1).exists());
+        assert!(!attempt_path(&base, 2).exists());
+        assert_eq!(settle_sink(&sibling).await, SinkStopResult::Settled);
     }
 
     #[test]
