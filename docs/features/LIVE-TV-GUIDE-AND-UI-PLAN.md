@@ -1,6 +1,6 @@
 # Live TV guide and UI — a real channel list, a real grid, and a player that follows you
 
-**Status:** built baseline; native TV presentation rules superseded by
+**Status:** open — built baseline; native TV presentation rules superseded by
 [LIVE-TV-NATIVE-LAYOUTS-STATUS.md](LIVE-TV-NATIVE-LAYOUTS-STATUS.md) · **Executes:** the layout decision of 2026-09-07
 (list view + grid view with a switch; HDHomeRun guide first, XMLTV when
 configured; web, Apple and Android) · **Written:** 2026-09-07 ·
