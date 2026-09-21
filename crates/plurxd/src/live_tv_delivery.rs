@@ -691,6 +691,16 @@ pub(crate) fn resolve_live_delivery(
         ));
     }
 
+    let deinterlace = source.interlaced() && video_action == LiveTrackAction::Encode;
+    let output_frame_rate = source.frame_rate.and_then(|rate| {
+        if deinterlace {
+            rate.num
+                .checked_mul(2)
+                .map(|num| LiveRational { num, den: rate.den })
+        } else {
+            Some(rate)
+        }
+    });
     Ok(LiveDeliveryPlan {
         source: source.clone(),
         output: LiveDeliveryOutput {
@@ -702,7 +712,7 @@ pub(crate) fn resolve_live_delivery(
             bit_depth: (video_action == LiveTrackAction::Copy)
                 .then_some(source.bit_depth)
                 .flatten(),
-            frame_rate: source.frame_rate,
+            frame_rate: output_frame_rate,
             hdr: (video_action == LiveTrackAction::Copy)
                 .then_some(source.hdr.clone())
                 .flatten(),
@@ -712,7 +722,7 @@ pub(crate) fn resolve_live_delivery(
         audio_action,
         packaging,
         reasons,
-        deinterlace: source.interlaced() && video_action == LiveTrackAction::Encode,
+        deinterlace,
         max_bitrate_bps,
     })
 }
@@ -739,6 +749,61 @@ mod tests {
             audio_channels: Some(6),
             ..LiveSourceFacts::default()
         }
+    }
+
+    #[test]
+    fn deinterlaced_output_reports_field_rate_for_display_matching() {
+        let mut interlaced = source();
+        interlaced.field_order = Some("tt".into());
+        interlaced.frame_rate = Some(LiveRational {
+            num: 30000,
+            den: 1001,
+        });
+        let mut playback = request("ac3");
+        playback.caps = serde_json::json!({
+            "v": 2,
+            "video": [{"codec":"h264","profiles":[],"max_height":2160,"present":[]}],
+            "audio": ["aac"],
+            "containers": ["mpegts"],
+            "transports": ["hls"]
+        });
+        playback.hls_formats = vec![LiveHlsFormat {
+            container: "mpegts".into(),
+            video: "h264".into(),
+            audio: "aac".into(),
+        }];
+        playback.video_limits = vec![LiveVideoLimit {
+            codec: "h264".into(),
+            profile: None,
+            max_width: 3840,
+            max_height: 2160,
+            max_frame_rate: LiveRational { num: 60, den: 1 },
+            interlaced: false,
+        }];
+        playback.audio_limits = vec![LiveAudioLimit {
+            codec: "aac".into(),
+            max_channels: 2,
+        }];
+        let plan = resolve_live_delivery(
+            &interlaced,
+            Some(&playback),
+            &LiveQualityPolicy::default(),
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: true,
+            },
+        )
+        .expect("interlaced input is converted");
+
+        assert!(plan.deinterlace);
+        assert_eq!(
+            plan.output.frame_rate,
+            Some(LiveRational {
+                num: 60000,
+                den: 1001,
+            }),
+        );
     }
 
     fn request(audio: &str) -> LivePlaybackRequest {

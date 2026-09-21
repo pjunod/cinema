@@ -2,6 +2,7 @@
 
 package tv.plurx.app.livetv
 
+import android.app.Activity
 import android.content.Context
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -19,6 +20,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import tv.plurx.app.player.playbackLoadControl
+import tv.plurx.app.player.DisplayModeMatcher
+import tv.plurx.app.player.PlaybackClientLog
+import tv.plurx.app.player.postPlaybackClientLog
+import tv.plurx.app.player.logDisplayModeResult
 
 data class LiveTvPlayerState(
     val channels: List<LiveTvChannel> = emptyList(),
@@ -50,6 +55,9 @@ class LiveTvPlayer private constructor(context: Context) {
     private var heartbeat: Job? = null
     private var guideRefresh: Job? = null
     private var channelChange: Job? = null
+    private var displayModeActivity: Activity? = null
+    private var displayModeMatcher: DisplayModeMatcher? = null
+    private var displayModeOwner: Long? = null
     /**
      * Set by the screen while, and only while, the activity is genuinely in
      * picture-in-picture — the one case where the video is still on screen and
@@ -153,7 +161,7 @@ class LiveTvPlayer private constructor(context: Context) {
      * "rejoin the session the viewer left" the same thing as "tune it" rather
      * than a second, thinner playback path that drifts.
      */
-    private fun attach(
+    private suspend fun attach(
         channel: LiveTvChannel,
         started: LiveTvStarted,
         mine: Long,
@@ -161,6 +169,30 @@ class LiveTvPlayer private constructor(context: Context) {
         lease: LiveTvLease,
         compatibilityRetry: Boolean,
     ) {
+        val delivery = started.delivery
+        val outputIsProgressive = delivery?.deinterlace == true ||
+            delivery?.source?.field_order?.lowercase() in setOf("progressive", "unknown")
+        val rate = delivery?.output?.frame_rate
+            ?.takeIf { outputIsProgressive && it.num > 0 && it.den > 0 }
+            ?.let { it.num.toDouble() / it.den.toDouble() }
+        val matcher = displayModeMatcher
+        val owner = displayModeOwner
+        if (!compatibilityRetry && matcher != null && owner != null) {
+            val result = matcher.match(owner, rate, tv.plurx.app.data.Session.displayModeMatch)
+            logDisplayModeResult(result)
+            postPlaybackClientLog(
+                scope,
+                PlaybackClientLog(
+                    level = "info",
+                    event = "playback_display_mode",
+                    message = "Android Live TV display-mode decision",
+                    method = "live",
+                    detail = result.detail(),
+                    ua = "Android Media3",
+                    sessionId = started.session_id,
+                ),
+            )
+        }
         val output = ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(api.mediaClient)))
             .setLoadControl(playbackLoadControl(context, live = true))
@@ -326,9 +358,33 @@ class LiveTvPlayer private constructor(context: Context) {
     fun stop(clearProfile: Boolean = false) {
         stopWithMessage("Live TV stopped. Select a channel to resume.", clearProfile)
     }
+
+    /** Bind only while this activity owns the Live TV surface. */
+    fun bindDisplayMode(activity: Activity) {
+        if (displayModeActivity === activity && displayModeMatcher != null) return
+        displayModeOwner?.let { owner -> displayModeMatcher?.reset(owner) }
+        displayModeActivity = activity
+        displayModeMatcher = DisplayModeMatcher(activity)
+        displayModeOwner = displayModeMatcher?.claimOwner()
+    }
+
+    private fun resetDisplayModeForNextStart() {
+        val matcher = displayModeMatcher ?: return
+        displayModeOwner?.let(matcher::reset)
+        displayModeOwner = matcher.claimOwner()
+    }
+
+    fun unbindDisplayMode(activity: Activity) {
+        if (displayModeActivity !== activity) return
+        displayModeOwner?.let { owner -> displayModeMatcher?.reset(owner) }
+        displayModeOwner = null
+        displayModeMatcher = null
+        displayModeActivity = null
+    }
     private fun stopWithMessage(message: String, clearProfile: Boolean = false) {
         val mine = ++serial
         detach()
+        resetDisplayModeForNextStart()
         mutableState.value = mutableState.value.copy(
             busy = false, playing = false, message = message,
             // A released tuner is not "Watching". Carrying `watching` forward

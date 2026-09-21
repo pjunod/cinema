@@ -1592,6 +1592,9 @@ pub mod keys {
     /// Opt-in web Auto controller. Missing and every value other than `"1"`
     /// are off, leaving the server's initial Auto choice in place.
     pub const PLAYBACK_AUTO_ABR: &str = "playback.auto_abr";
+    /// Opt-in Android TV refresh-rate matching. Missing and every value other
+    /// than `"1"` are off; readiness observations are advisory only.
+    pub const PLAYBACK_DISPLAY_MODE_MATCH: &str = "playback.display_mode_match";
     /// Last successful bounded telemetry-prune pass, in unix seconds.
     pub const JOB_LAST_TELEMETRY_PRUNE: &str = "jobs.last_telemetry_prune";
     pub const TELEMETRY_RETAIN_DEFAULT_DAYS: i64 = 30;

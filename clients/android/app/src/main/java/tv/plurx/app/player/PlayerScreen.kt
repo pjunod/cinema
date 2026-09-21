@@ -738,6 +738,7 @@ private fun PlayerContent(
     val canUsePip = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
         context.packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
     val scope = rememberCoroutineScope()
+    val displayModeMatcher = remember(activity) { activity?.let(::DisplayModeMatcher) }
     val preferences by vm.preferences.collectAsStateWithLifecycle()
     val controller = remember(plan) {
         // The decision and its session body must describe the same quality,
@@ -752,6 +753,8 @@ private fun PlayerContent(
             playbackIntent,
             vm,
             scope,
+            displayModeMatcher = displayModeMatcher,
+            displayModeMatchEnabled = Session.displayModeMatch,
             initialAudioOffsetMs = audioOffsetMs,
             retainedAudio = retainedAudio,
             retainedSubtitle = retainedSubtitle,

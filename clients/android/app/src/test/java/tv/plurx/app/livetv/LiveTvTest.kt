@@ -324,6 +324,11 @@ class LiveTvTest {
         assertEquals("0", configuration.getValue("live_tv_max_output_height").jsonPrimitive.content)
         val enabled = LiveTvSettingsChange.Enabled(true).body(20)
         assertEquals(setOf("live_tv_config_generation", "live_tv_enabled"), enabled.keys)
+        val displayMode = LiveTvSettingsChange.DisplayModeMatch(true).body(20)
+        assertEquals(
+            setOf("live_tv_config_generation", "playback_display_mode_match"),
+            displayMode.keys,
+        )
         val recovery = LiveTvSettingsChange.FencedOwner("owner-original", 18).body(21)
         assertEquals(setOf("live_tv_config_generation", "live_tv_fenced_owner"), recovery.keys)
         val tuple = recovery.getValue("live_tv_fenced_owner").jsonObject
@@ -334,7 +339,7 @@ class LiveTvTest {
 
     @Test fun actualSnakeCaseSettingsContractPreservesOldOwnerTuple() {
         val settings = Net.json.decodeFromString<LiveTvSettings>("""{
-            "live_tv_enabled":false,"live_tv_device_ipv4":"10.42.4.20",
+            "live_tv_enabled":false,"playback_display_mode_match":true,"live_tv_device_ipv4":"10.42.4.20",
             "live_tv_owner_node_id":"next","live_tv_max_sessions":2,"live_tv_output_height":720,
             "live_tv_config_generation":23,"live_tv_transition_from_owner_node_id":"original",
             "live_tv_transition_drain_before":21,"unrelated_secret":"ignored"
@@ -342,6 +347,7 @@ class LiveTvTest {
         assertEquals("original", settings.live_tv_transition_from_owner_node_id)
         assertEquals(21L, settings.live_tv_transition_drain_before)
         assertEquals(23L, settings.live_tv_config_generation)
+        assertTrue(settings.playback_display_mode_match)
     }
 
     @Test fun playlistStaysAtOriginalOriginAndDoesNotCarryAccountToken() {

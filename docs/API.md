@@ -317,7 +317,8 @@ stranger should not read. The cluster's other ingress origins are therefore
 Fields: `name`, `version` (bare semver, which is what clients compare), `build`
 (git description), `built_at`, `instance_id`, `node_id`,
 `cluster_advertisement`, `uptime_seconds`, `setup_required`, `android_app`,
-`playback_auto_abr`.
+`playback_auto_abr`, `display_mode_match` (the replicated Android-TV cadence
+switch; missing storage is `false`).
 
 ### 4.2 `POST /api/v1/setup`
 
