@@ -49,6 +49,10 @@ impl ResolvedInput {
         }
     }
 
+    pub fn is_file(&self) -> bool {
+        matches!(self, Self::File { .. })
+    }
+
     pub fn validate(&self) -> Result<(), InputBuildError> {
         let (path, selection, angle) = match self {
             Self::File { path } => {

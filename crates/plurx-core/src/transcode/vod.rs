@@ -131,7 +131,7 @@ pub fn vod_pipe_args(
         .max(0) as u64
         / VOD_AAC_FRAME_SAMPLES
         * VOD_AAC_FRAME_SAMPLES;
-    let audio_seek = audio_seek_samples as f64 / f64::from(VOD_AUDIO_RATE);
+    let mut audio_seek = audio_seek_samples as f64 / f64::from(VOD_AUDIO_RATE);
     let mut input = execution.clone();
     // Decode a short preroll. Positive correction needs earlier audio;
     // negative correction is an absolute trim, not repeated per-seek silence.
@@ -149,7 +149,15 @@ pub fn vod_pipe_args(
     // each restart before its sample-clock correction sees the frame.
     args.splice(0..0, ["-copyts".to_owned(), "-noaccurate_seek".to_owned()]);
     let has_audio = media.input_has_audio;
-    if has_audio {
+    let reopen_audio = has_audio && execution.source_input.is_file();
+    if has_audio && !reopen_audio {
+        // A managed physical title owns one reader. Reopening it for audio
+        // would create a competing demux cursor under the same drive lease.
+        // The common preroll already starts early enough for the AAC anchor,
+        // so trim the audio from input zero on that exact source clock.
+        audio_seek = input.start_seconds;
+    }
+    if reopen_audio {
         let before_map = args
             .iter()
             .position(|arg| arg == "-map")
@@ -232,7 +240,7 @@ pub fn vod_pipe_args(
         {
             graph.replace(
                 &format!("[0:s:{}]", burn.subtitle_index),
-                &format!("[{}:s:0]", if has_audio { 2 } else { 1 }),
+                &format!("[{}:s:0]", if reopen_audio { 2 } else { 1 }),
             )
         } else {
             graph
@@ -385,7 +393,13 @@ mod tests {
             crate::transcode::Pacing::unpaced(),
             ".",
         )
-        .expect("execution");
+        .expect("execution")
+        .with_source_input(crate::optical::ResolvedInput::Dvd {
+            path: "/media/Disc One".into(),
+            title_number: 3,
+            angle: 2,
+        })
+        .expect("managed input");
         let args = vod_pipe_args(
             &plan,
             &execution,
@@ -402,6 +416,17 @@ mod tests {
             args.iter().position(|arg| arg == "-map_chapters")
                 < args.iter().position(|arg| arg == "pipe:1")
         );
+        assert!(args.windows(8).any(|window| window
+            == [
+                "-f",
+                "dvdvideo",
+                "-title",
+                "3",
+                "-angle",
+                "2",
+                "-i",
+                "/media/Disc One"
+            ]));
     }
 
     #[test]
