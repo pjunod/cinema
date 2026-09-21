@@ -1,6 +1,6 @@
 # Android Dolby Vision — bounded delivery repair
 
-**Status:** implementation complete; promotion retry after runner OOM · **Base:** `15324dd9` ·
+**Status:** open — implementation complete; promotion retry after runner OOM · **Base:** `15324dd9` ·
 **Updated:** 2026-09-20 UTC · **Delivery PR:** `#381` · **Executes:** the Fable-reviewed
 [root cause and proposed fix](ANDROID-DV-CONVERSION-RCA-AND-FIX.md).
 

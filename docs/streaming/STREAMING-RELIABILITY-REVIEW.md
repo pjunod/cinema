@@ -1,5 +1,7 @@
 # Streaming reliability review — keep the stream alive while its future changes
 
+**Status:** done · **Reconciled:** 2026-09-20
+
 **Reviewed:** 2026-09-04 · **Baseline:** `48615baf` · **Verdict:** the
 film-addressed VOD direction is correct, but the shipped system does not yet
 meet its no-freeze or transparent-change contracts.
