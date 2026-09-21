@@ -138,7 +138,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 | C-06 | [TELEMETRY-BACKPRESSURE](../server/TELEMETRY-BACKPRESSURE.md) | C15 | month | unclaimed | | | | 2026-09-20 | Four logical milestone commits in one plan PR; M1 first |
 | C-07 | [PLEX-FACADE-PAGING](../server/PLEX-FACADE-PAGING.md) | C4, C9 | month | unclaimed | | | | 2026-09-20 | M0 census decides whether to build; `files_for_items` does not exist yet; C9 is measure-only |
 | C-08 | [OBSERVABILITY-BASELINE](../server/OBSERVABILITY-BASELINE.md) | C10, §4.9 | month | unclaimed | | | | 2026-09-20 | M1–M4 parallel; M5 needs M1; there is no access log today at all |
-| L-01 | [DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION](../features/DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md) | L1, L10 | week (L1) / month (L10) | unclaimed | | | | 2026-09-20 | |
+| L-01 | [DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION](../features/DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md) | L1, L10 | week (L1) / month (L10) | claimed | gpt-5.6-sol | agent:/root/s01_builder | `plan/L-01` | 2026-09-20 | Whole-plan implementation claimed; draft PR opening before code. |
 | L-02 | [LIVE-TV-SESSION-FENCE-PEER-TRANSPORT-AND-START](../features/LIVE-TV-SESSION-FENCE-PEER-TRANSPORT-AND-START.md) | L2, L3, L6, L9 | week (L3) / month | unclaimed | | | | 2026-09-20 | Fence grace bound is Paul's call |
 | L-03 | [LIVE-TV-SHARED-TRANSPORT](../features/LIVE-TV-SHARED-TRANSPORT.md) | L4, Q9 (captions) | quarter | unclaimed | | | | 2026-09-20 | Design + caption audit |
 | W-01 | [WEB-PLAYER-RECOVERY-AND-LOCAL-SEEK](../clients/WEB-PLAYER-RECOVERY-AND-LOCAL-SEEK.md) | Q10, W3, W7 | week (worker, reporter) / month (seek) | unclaimed | | | | 2026-09-20 | |
