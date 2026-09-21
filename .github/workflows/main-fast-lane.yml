@@ -7,9 +7,6 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
-  # Temporary P-01 M1 instrumentation; removed after the named measurement
-  # runs are recorded in docs/ci/RUST-TEST-EXECUTION-POLICY.md.
-  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,61 +21,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  measure_p01:
-    name: cold Rust lane measurement
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    timeout-minutes: 45
-    steps:
-      - name: Check out the measurement candidate
-        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Install the pinned Rust toolchain
-        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
-        with:
-          components: rustfmt, clippy
-      - name: Install the pinned FFmpeg
-        uses: ./.github/actions/ffmpeg
-        with:
-          major: "6"
-      - name: Restore the measurement Cargo cache
-        id: cargo-cache
-        uses: ./.github/actions/cargo-cache
-        with:
-          lane: p01-measure
-      - name: Prune the cold compilation tree
-        run: cargo clean
-      - name: Record the runner identity
-        run: |
-          echo "P01_RUNNER_HOST=$(hostname -s)"
-          rustc --version
-          ffmpeg -version | sed -n '1p'
-      - name: Compile every Rust target without executing tests
-        run: |
-          started=$(date +%s)
-          make effort-rust-check
-          make hiqlite-vendor-clippy
-          echo "P01_TIMING compile_seconds=$(($(date +%s)-started))"
-      - name: Measure workspace Clippy
-        run: |
-          started=$(date +%s)
-          make lint
-          echo "P01_TIMING lint_seconds=$(($(date +%s)-started))"
-      - name: Measure the unit lane
-        run: |
-          started=$(date +%s)
-          make unit
-          echo "P01_TIMING unit_seconds=$(($(date +%s)-started))"
-      - name: Enforce persistent Cargo bounds
-        if: always() && steps.cargo-cache.outputs.local == 'true'
-        continue-on-error: true
-        uses: ./.github/actions/cargo-cache-finalize
-        with:
-          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
-          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
-          last-used: ${{ steps.cargo-cache.outputs.last-used }}
-
   scope:
     name: fast-lane validation scope
     # Draft is the whole gate. A draft allocates no jobs, so a PR opened early
