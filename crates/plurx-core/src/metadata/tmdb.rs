@@ -5,7 +5,13 @@
 //! for unit testing without a network.
 
 use serde_json::Value;
+use std::time::{Duration, Instant};
 
+use super::{
+    bounded_json_response, provider_client, provider_outcome, record_provider_request,
+    request_error, Provider, ProviderOutcome, PROVIDER_CALL_BUDGET, PROVIDER_CONNECT_TIMEOUT,
+    PROVIDER_READ_TIMEOUT, PROVIDER_TOTAL_TIMEOUT,
+};
 use crate::error::MetadataError;
 
 const API_BASE: &str = "https://api.themoviedb.org/3";
@@ -18,11 +24,11 @@ const IMAGE_BASE: &str = "https://image.tmdb.org/t/p";
 const MAX_ATTEMPTS: u32 = 3;
 /// First backoff step, doubling thereafter. Short enough that a scan does not
 /// visibly stall on one blip.
-const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
 /// Ceiling on an honoured `Retry-After`. A server asking for an hour is
 /// telling us to come back later, not to keep a scan open for one — the
 /// artwork retry job is what comes back later.
-const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(30);
+const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
 
 /// A resolved provider match for a movie or show.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -137,10 +143,15 @@ impl TmdbClient {
     pub fn new(api_key: impl Into<String>) -> Self {
         TmdbClient {
             api_key: api_key.into(),
-            http: reqwest::Client::builder()
-                .user_agent(concat!("plurx/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .unwrap_or_default(),
+            http: provider_client(
+                Provider::Tmdb,
+                reqwest::Client::builder()
+                    .user_agent(concat!("plurx/", env!("CARGO_PKG_VERSION")))
+                    .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+                    .read_timeout(PROVIDER_READ_TIMEOUT)
+                    .timeout(PROVIDER_TOTAL_TIMEOUT)
+                    .redirect(reqwest::redirect::Policy::limited(3)),
+            ),
             base: API_BASE.to_owned(),
             image_base: IMAGE_BASE.to_owned(),
             genres: [
@@ -163,7 +174,7 @@ impl TmdbClient {
 
     async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value, MetadataError> {
         let url = format!("{}{path}", self.base);
-        let resp = self
+        let response = self
             .send_with_retry(|| {
                 let mut req = self
                     .http
@@ -174,10 +185,23 @@ impl TmdbClient {
                 }
                 req
             })
-            .await?;
-        resp.json()
-            .await
-            .map_err(|e| MetadataError::Parse(e.to_string()))
+            .await;
+        let result = match response {
+            Ok(response) => match bounded_json_response(response).await {
+                Ok(bytes) => serde_json::from_slice(&bytes)
+                    .map_err(|error| MetadataError::Parse(error.to_string())),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        record_provider_request(
+            Provider::Tmdb,
+            result
+                .as_ref()
+                .map(|_| ProviderOutcome::Ok)
+                .unwrap_or_else(provider_outcome),
+        );
+        result
     }
 
     /// Send a request, retrying the failures that are about TMDB's mood
@@ -193,9 +217,19 @@ impl TmdbClient {
         &self,
         build: impl Fn() -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, MetadataError> {
+        let started = Instant::now();
         let mut delay = RETRY_BASE_DELAY;
         for attempt in 1..=MAX_ATTEMPTS {
-            let resp = build().send().await;
+            let remaining = PROVIDER_CALL_BUDGET.saturating_sub(started.elapsed());
+            if remaining < PROVIDER_CONNECT_TIMEOUT {
+                return Err(MetadataError::Timeout(
+                    "provider call retry budget exhausted".to_owned(),
+                ));
+            }
+            let resp = build()
+                .timeout(remaining.min(PROVIDER_TOTAL_TIMEOUT))
+                .send()
+                .await;
             let last = attempt == MAX_ATTEMPTS;
             match resp {
                 Ok(resp) if resp.status().is_success() => return Ok(resp),
@@ -207,6 +241,9 @@ impl TmdbClient {
                     // TMDB says when it will talk again; guessing over the top
                     // of that is how a client earns a longer ban.
                     let wait = retry_after(resp.headers()).unwrap_or(delay);
+                    if !retry_wait_fits(wait, started.elapsed()) {
+                        return Err(MetadataError::Status(status.as_u16()));
+                    }
                     tracing::debug!(
                         status = status.as_u16(),
                         attempt,
@@ -218,9 +255,13 @@ impl TmdbClient {
                 // A connection that never completed is the same kind of
                 // transient as a 503, and the request was never served, so
                 // repeating it cannot double anything.
-                Err(e) if last => return Err(MetadataError::Http(e.to_string())),
+                Err(e) if last => return Err(request_error(e)),
                 Err(e) => {
                     tracing::debug!(error = %e, attempt, "tmdb request failed; retrying");
+                    let remaining = PROVIDER_CALL_BUDGET.saturating_sub(started.elapsed());
+                    if delay >= remaining {
+                        return Err(request_error(e));
+                    }
                     tokio::time::sleep(delay).await;
                 }
             }
@@ -476,8 +517,18 @@ impl TmdbClient {
         // Same retry as the API calls, and needed more: the image CDN is hit
         // once per poster and once per backdrop, so it absorbs the bulk of a
         // scan's requests and is where a rate limit lands first.
-        let resp = self.send_with_retry(|| self.http.get(&url)).await?;
-        super::bounded_artwork_response(resp).await
+        let result = match self.send_with_retry(|| self.http.get(&url)).await {
+            Ok(response) => super::bounded_artwork_response(response).await,
+            Err(error) => Err(error),
+        };
+        record_provider_request(
+            Provider::Tmdb,
+            result
+                .as_ref()
+                .map(|_| ProviderOutcome::Ok)
+                .unwrap_or_else(provider_outcome),
+        );
+        result
     }
 }
 
@@ -499,7 +550,7 @@ fn retryable(status: u16) -> bool {
 /// `Retry-After` as a duration, capped. Only the delta-seconds form is read:
 /// the HTTP-date form is legal but TMDB does not send it, and a date needs a
 /// clock comparison to mean anything.
-fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     let secs: u64 = headers
         .get(reqwest::header::RETRY_AFTER)?
         .to_str()
@@ -507,7 +558,11 @@ fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Durati
         .trim()
         .parse()
         .ok()?;
-    Some(std::time::Duration::from_secs(secs).min(RETRY_AFTER_CAP))
+    Some(Duration::from_secs(secs).min(RETRY_AFTER_CAP))
+}
+
+fn retry_wait_fits(wait: Duration, elapsed: Duration) -> bool {
+    wait < PROVIDER_CALL_BUDGET.saturating_sub(elapsed)
 }
 
 fn year_of(value: &Value, date_field: &str) -> Option<i32> {
@@ -893,6 +948,31 @@ mod tests {
         assert!(c.download_image("/x.jpg", "w500").await.is_err());
     }
 
+    #[tokio::test]
+    async fn an_oversized_json_body_is_refused_without_parsing_it() {
+        use axum::routing::get;
+
+        let body = std::sync::Arc::new(vec![
+            b' ';
+            crate::metadata::PROVIDER_JSON_MAX_BYTES as usize + 1
+        ]);
+        let app = axum::Router::new().route(
+            "/search/movie",
+            get(move || {
+                let body = std::sync::Arc::clone(&body);
+                async move { body.as_ref().clone() }
+            }),
+        );
+        let base = serve(app).await;
+        let client = TmdbClient::new("k").with_base(&base, &base);
+
+        assert!(matches!(
+            client.find_movie("oversized", None).await,
+            Err(MetadataError::BodyBound(limit))
+                if limit == crate::metadata::PROVIDER_JSON_MAX_BYTES
+        ));
+    }
+
     #[test]
     fn only_rate_limits_and_server_faults_are_worth_repeating() {
         assert!(retryable(429));
@@ -921,6 +1001,72 @@ mod tests {
             HeaderValue::from_static("Wed, 21 Oct 2015 07:28:00 GMT"),
         );
         assert_eq!(retry_after(&headers), None);
+    }
+
+    #[test]
+    fn retry_after_beyond_the_remaining_budget_ends_the_call() {
+        assert!(retry_wait_fits(RETRY_AFTER_CAP, Duration::from_secs(29)));
+        assert!(!retry_wait_fits(RETRY_AFTER_CAP, Duration::from_secs(30)));
+    }
+
+    #[tokio::test]
+    async fn a_hanging_search_ends_with_a_timeout_error_inside_the_budget() {
+        use axum::routing::get;
+
+        let base = serve(axum::Router::new().route(
+            "/search/movie",
+            get(|| async { std::future::pending::<String>().await }),
+        ))
+        .await;
+        let mut client = TmdbClient::new("k").with_base(&base, &base);
+        client.http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(50))
+            .read_timeout(Duration::from_millis(50))
+            .timeout(Duration::from_millis(50))
+            .build()
+            .expect("short-timeout client");
+        let started = Instant::now();
+
+        assert!(matches!(
+            client.find_movie("hang", None).await,
+            Err(MetadataError::Timeout(_))
+        ));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn a_trickling_body_is_cut_by_the_read_timeout() {
+        use axum::body::{Body, Bytes};
+        use axum::response::Response;
+        use axum::routing::get;
+        use std::convert::Infallible;
+
+        let app = axum::Router::new().route(
+            "/search/movie",
+            get(|| async {
+                let stream = futures_util::stream::unfold(0_u8, |part| async move {
+                    if part >= 2 {
+                        return None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    Some((Ok::<_, Infallible>(Bytes::from_static(b"{")), part + 1))
+                });
+                Response::new(Body::from_stream(stream))
+            }),
+        );
+        let base = serve(app).await;
+        let mut client = TmdbClient::new("k").with_base(&base, &base);
+        client.http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(1))
+            .read_timeout(Duration::from_millis(50))
+            .timeout(Duration::from_secs(1))
+            .build()
+            .expect("short-read client");
+
+        assert!(matches!(
+            client.find_movie("trickle", None).await,
+            Err(MetadataError::Timeout(_))
+        ));
     }
 
     /// A rate limit partway through a scan used to cost every remaining item

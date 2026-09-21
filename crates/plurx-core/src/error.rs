@@ -88,6 +88,12 @@ pub enum MetadataError {
     #[error("http error: {0}")]
     Http(String),
 
+    #[error("provider request timed out: {0}")]
+    Timeout(String),
+
+    #[error("provider response exceeded its body limit of {0} bytes")]
+    BodyBound(u64),
+
     #[error("provider returned status {0}")]
     Status(u16),
 

@@ -23,7 +23,9 @@ use std::os::fd::{FromRawFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
@@ -33,6 +35,185 @@ pub use tmdb::TmdbClient;
 
 use crate::domain::{ArtworkAttempt, ItemKind, MetadataPatch};
 use crate::store::{ArtworkRepairFence, PublicationStore, Store};
+
+pub(crate) const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const PROVIDER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const PROVIDER_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const PROVIDER_CALL_BUDGET: Duration = Duration::from_secs(60);
+pub(crate) const ITEM_ENRICH_DEADLINE: Duration = Duration::from_secs(120);
+pub(crate) const PROVIDER_JSON_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub(crate) enum Provider {
+    Tmdb,
+    AniList,
+}
+
+impl Provider {
+    const ALL: [Self; 2] = [Self::Tmdb, Self::AniList];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Tmdb => 0,
+            Self::AniList => 1,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Tmdb => "tmdb",
+            Self::AniList => "anilist",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProviderOutcome {
+    Ok,
+    Status,
+    Timeout,
+    BodyBound,
+    Error,
+}
+
+impl ProviderOutcome {
+    const ALL: [Self; 5] = [
+        Self::Ok,
+        Self::Status,
+        Self::Timeout,
+        Self::BodyBound,
+        Self::Error,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Ok => 0,
+            Self::Status => 1,
+            Self::Timeout => 2,
+            Self::BodyBound => 3,
+            Self::Error => 4,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Status => "status",
+            Self::Timeout => "timeout",
+            Self::BodyBound => "body_bound",
+            Self::Error => "error",
+        }
+    }
+}
+
+static PROVIDER_REQUESTS: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+static ENRICH_ITEM_DEADLINES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+static CLIENT_BUILD_WARNING_LOGGED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn record_provider_request(provider: Provider, outcome: ProviderOutcome) {
+    PROVIDER_REQUESTS[provider.index() * ProviderOutcome::ALL.len() + outcome.index()]
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_item_deadline(provider: Provider) {
+    ENRICH_ITEM_DEADLINES[provider.index()].fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn provider_outcome(error: &crate::error::MetadataError) -> ProviderOutcome {
+    match error {
+        crate::error::MetadataError::Status(_) => ProviderOutcome::Status,
+        crate::error::MetadataError::Timeout(_) => ProviderOutcome::Timeout,
+        crate::error::MetadataError::BodyBound(_) => ProviderOutcome::BodyBound,
+        crate::error::MetadataError::Http(_)
+        | crate::error::MetadataError::Parse(_)
+        | crate::error::MetadataError::NotConfigured => ProviderOutcome::Error,
+    }
+}
+
+pub(crate) fn provider_client(
+    provider: Provider,
+    builder: reqwest::ClientBuilder,
+) -> reqwest::Client {
+    builder.build().unwrap_or_else(|error| {
+        if !CLIENT_BUILD_WARNING_LOGGED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                provider = provider.label(),
+                error = %error,
+                "provider client could not apply deadlines; using the default client"
+            );
+        }
+        reqwest::Client::new()
+    })
+}
+
+pub(crate) fn request_error(error: reqwest::Error) -> crate::error::MetadataError {
+    if error.is_timeout() {
+        crate::error::MetadataError::Timeout(error.to_string())
+    } else {
+        crate::error::MetadataError::Http(error.to_string())
+    }
+}
+
+pub(crate) async fn bounded_json_response(
+    response: reqwest::Response,
+) -> Result<Vec<u8>, crate::error::MetadataError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > PROVIDER_JSON_MAX_BYTES)
+    {
+        return Err(crate::error::MetadataError::BodyBound(
+            PROVIDER_JSON_MAX_BYTES,
+        ));
+    }
+    let mut body = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(request_error)?;
+        if bytes.len().saturating_add(chunk.len()) > PROVIDER_JSON_MAX_BYTES as usize {
+            return Err(crate::error::MetadataError::BodyBound(
+                PROVIDER_JSON_MAX_BYTES,
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// Render fixed-cardinality metadata-provider request and item-deadline metrics.
+pub fn prometheus_provider_requests() -> String {
+    use std::fmt::Write;
+
+    let mut out = String::from(
+        "# HELP plurx_provider_requests_total Metadata-provider calls by bounded outcome.\n\
+         # TYPE plurx_provider_requests_total counter\n",
+    );
+    for provider in Provider::ALL {
+        for outcome in ProviderOutcome::ALL {
+            let count = PROVIDER_REQUESTS
+                [provider.index() * ProviderOutcome::ALL.len() + outcome.index()]
+            .load(Ordering::Relaxed);
+            let _ = writeln!(
+                out,
+                "plurx_provider_requests_total{{provider=\"{}\",outcome=\"{}\"}} {count}",
+                provider.label(),
+                outcome.label()
+            );
+        }
+    }
+    out.push_str(
+        "# HELP plurx_enrich_item_deadlines_total Enrichment items stopped by their total deadline.\n\
+         # TYPE plurx_enrich_item_deadlines_total counter\n",
+    );
+    for provider in Provider::ALL {
+        let count = ENRICH_ITEM_DEADLINES[provider.index()].load(Ordering::Relaxed);
+        let _ = writeln!(
+            out,
+            "plurx_enrich_item_deadlines_total{{provider=\"{}\"}} {count}",
+            provider.label()
+        );
+    }
+    out
+}
 
 /// Poster width bucket — small enough to be snappy in a grid, sharp on TV.
 const POSTER_SIZE: &str = "w500";
@@ -83,18 +264,14 @@ pub(crate) async fn bounded_artwork_response(
         .content_length()
         .is_some_and(|length| length > MAX_ARTWORK_BYTES)
     {
-        return Err(crate::error::MetadataError::Http(format!(
-            "artwork exceeds {MAX_ARTWORK_BYTES} bytes"
-        )));
+        return Err(crate::error::MetadataError::BodyBound(MAX_ARTWORK_BYTES));
     }
     let mut body = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = body.next().await {
-        let chunk = chunk.map_err(|error| crate::error::MetadataError::Http(error.to_string()))?;
+        let chunk = chunk.map_err(request_error)?;
         if bytes.len().saturating_add(chunk.len()) > MAX_ARTWORK_BYTES as usize {
-            return Err(crate::error::MetadataError::Http(format!(
-                "artwork exceeds {MAX_ARTWORK_BYTES} bytes"
-            )));
+            return Err(crate::error::MetadataError::BodyBound(MAX_ARTWORK_BYTES));
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -627,194 +804,214 @@ async fn enrich_library_for_targets_inner(
     };
 
     for item in items {
-        let route_only = repairs.is_some_and(|ids| !ids.contains(&item.id));
-        if route_only {
-            if item.kind == ItemKind::Show {
-                // An enriched parent already has the provider identity needed
-                // to reach its seasons. Avoid even the show-details request:
-                // the ancestor is a route, not a refresh target.
-                let show_tmdb_id = if let Some(id) = item.tmdb_id {
-                    Some(id)
-                } else {
-                    let known = known_id(tmdb, &item).await;
-                    match show_lookup(tmdb, &item, known).await {
-                        Ok(Some(m)) => {
-                            // The ancestor is route-only, but the identity we
-                            // just resolved is durable routing state. Keeping
-                            // it avoids paying for (and risking) the same title
-                            // search on every child retry without refreshing
-                            // any of the healthy show metadata.
-                            let tmdb_id = m.tmdb_id;
-                            if repair_fence.is_none() {
-                                apply(
-                                    store,
-                                    item.id,
-                                    MetadataPatch {
-                                        tmdb_id: Some(tmdb_id),
-                                        ..Default::default()
-                                    },
-                                    &mut report,
-                                    None,
-                                )
-                                .await;
+        let deadline_title = match item.year {
+            Some(year) => format!("{} ({year})", item.title),
+            None => item.title.clone(),
+        };
+        let item_work = async {
+            let route_only = repairs.is_some_and(|ids| !ids.contains(&item.id));
+            if route_only {
+                if item.kind == ItemKind::Show {
+                    // An enriched parent already has the provider identity needed
+                    // to reach its seasons. Avoid even the show-details request:
+                    // the ancestor is a route, not a refresh target.
+                    let show_tmdb_id = if let Some(id) = item.tmdb_id {
+                        Some(id)
+                    } else {
+                        let known = known_id(tmdb, &item).await;
+                        match show_lookup(tmdb, &item, known).await {
+                            Ok(Some(m)) => {
+                                // The ancestor is route-only, but the identity we
+                                // just resolved is durable routing state. Keeping
+                                // it avoids paying for (and risking) the same title
+                                // search on every child retry without refreshing
+                                // any of the healthy show metadata.
+                                let tmdb_id = m.tmdb_id;
+                                if repair_fence.is_none() {
+                                    apply(
+                                        store,
+                                        item.id,
+                                        MetadataPatch {
+                                            tmdb_id: Some(tmdb_id),
+                                            ..Default::default()
+                                        },
+                                        &mut report,
+                                        None,
+                                    )
+                                    .await;
+                                }
+                                Some(tmdb_id)
                             }
-                            Some(tmdb_id)
+                            Ok(None) => {
+                                report.unmatched += 1;
+                                None
+                            }
+                            Err(e) => {
+                                tracing::error!(title = %item.title, error = %e, "show route lookup failed");
+                                report.errors += 1;
+                                report.note(format!(
+                                    "`{}`: show route lookup failed: {e}",
+                                    item.title
+                                ));
+                                None
+                            }
                         }
-                        Ok(None) => {
-                            report.unmatched += 1;
-                            None
-                        }
-                        Err(e) => {
-                            tracing::error!(title = %item.title, error = %e, "show route lookup failed");
-                            report.errors += 1;
-                            report.note(format!("`{}`: show route lookup failed: {e}", item.title));
-                            None
-                        }
+                    };
+                    if let Some(show_tmdb_id) = show_tmdb_id {
+                        enrich_episodes(
+                            store,
+                            tmdb,
+                            artwork_dir,
+                            item.id,
+                            show_tmdb_id,
+                            repairs,
+                            &mut report,
+                            repair_fence,
+                        )
+                        .await;
                     }
-                };
-                if let Some(show_tmdb_id) = show_tmdb_id {
-                    enrich_episodes(
-                        store,
-                        tmdb,
-                        artwork_dir,
-                        item.id,
-                        show_tmdb_id,
-                        repairs,
-                        &mut report,
-                        repair_fence,
-                    )
-                    .await;
                 }
+                return;
             }
-            continue;
-        }
 
-        // An id, if one is already known, before any search. This is the
-        // whole point: `"Heat (1995) Directors Cut Remux"` is a title a
-        // search can get wrong, and a wrong match does not stay local — it
-        // propagates into Trakt sync, which matches on TMDB id. When the
-        // caller told us the id, guessing is strictly worse than obeying.
-        let known = known_id(tmdb, &item).await;
-        match item.kind {
-            ItemKind::Movie => match movie_lookup(tmdb, &item, known).await {
-                Ok(Some(m)) => {
-                    let poster = cache_image(
-                        store,
-                        tmdb,
-                        artwork_dir,
-                        item.id,
-                        "poster",
-                        m.poster_path.as_deref(),
-                        POSTER_SIZE,
-                    )
-                    .await;
-                    let backdrop = cache_image(
-                        store,
-                        tmdb,
-                        artwork_dir,
-                        item.id,
-                        "backdrop",
-                        m.backdrop_path.as_deref(),
-                        BACKDROP_SIZE,
-                    )
-                    .await;
-                    let patch = MetadataPatch {
-                        title: Some(m.title),
-                        year: m.year,
-                        overview: m.overview,
-                        tmdb_id: Some(m.tmdb_id),
-                        imdb_id: m.imdb_id,
-                        air_date: m.air_date,
-                        runtime_ms: m.runtime_ms,
-                        // `enriched: true` is still right — the provider DID
-                        // answer, and the title and ids it gave are worth
-                        // keeping. What used to be wrong was that this was the
-                        // only thing recorded: a poster that failed to download
-                        // left no trace at all, so the item read as finished.
-                        // `artwork` is that trace.
-                        artwork: poster.attempt.clone(),
-                        poster_path: poster.file,
-                        backdrop_path: backdrop.file,
-                        // Free: the details call this lookup already made
-                        // carries them. No branch, no second request.
-                        genres: genre_patch(m.genres),
-                        enriched: true,
-                        ..Default::default()
-                    };
-                    if apply(store, item.id, patch, &mut report, repair_fence).await {
-                        report.matched += 1;
+            // An id, if one is already known, before any search. This is the
+            // whole point: `"Heat (1995) Directors Cut Remux"` is a title a
+            // search can get wrong, and a wrong match does not stay local — it
+            // propagates into Trakt sync, which matches on TMDB id. When the
+            // caller told us the id, guessing is strictly worse than obeying.
+            let known = known_id(tmdb, &item).await;
+            match item.kind {
+                ItemKind::Movie => match movie_lookup(tmdb, &item, known).await {
+                    Ok(Some(m)) => {
+                        let poster = cache_image(
+                            store,
+                            tmdb,
+                            artwork_dir,
+                            item.id,
+                            "poster",
+                            m.poster_path.as_deref(),
+                            POSTER_SIZE,
+                        )
+                        .await;
+                        let backdrop = cache_image(
+                            store,
+                            tmdb,
+                            artwork_dir,
+                            item.id,
+                            "backdrop",
+                            m.backdrop_path.as_deref(),
+                            BACKDROP_SIZE,
+                        )
+                        .await;
+                        let patch = MetadataPatch {
+                            title: Some(m.title),
+                            year: m.year,
+                            overview: m.overview,
+                            tmdb_id: Some(m.tmdb_id),
+                            imdb_id: m.imdb_id,
+                            air_date: m.air_date,
+                            runtime_ms: m.runtime_ms,
+                            // `enriched: true` is still right — the provider DID
+                            // answer, and the title and ids it gave are worth
+                            // keeping. What used to be wrong was that this was the
+                            // only thing recorded: a poster that failed to download
+                            // left no trace at all, so the item read as finished.
+                            // `artwork` is that trace.
+                            artwork: poster.attempt.clone(),
+                            poster_path: poster.file,
+                            backdrop_path: backdrop.file,
+                            // Free: the details call this lookup already made
+                            // carries them. No branch, no second request.
+                            genres: genre_patch(m.genres),
+                            enriched: true,
+                            ..Default::default()
+                        };
+                        if apply(store, item.id, patch, &mut report, repair_fence).await {
+                            report.matched += 1;
+                        }
                     }
-                }
-                Ok(None) => report.unmatched += 1,
-                Err(e) => {
-                    tracing::error!(title = %item.title, error = %e, "movie lookup failed");
-                    report.errors += 1;
-                    report.note(format!("`{}`: movie lookup failed: {e}", item.title));
-                }
-            },
-            ItemKind::Show => match show_lookup(tmdb, &item, known).await {
-                Ok(Some(m)) => {
-                    let show_tmdb_id = m.tmdb_id;
-                    let poster = cache_image(
-                        store,
-                        tmdb,
-                        artwork_dir,
-                        item.id,
-                        "poster",
-                        m.poster_path.as_deref(),
-                        POSTER_SIZE,
-                    )
-                    .await;
-                    let backdrop = cache_image(
-                        store,
-                        tmdb,
-                        artwork_dir,
-                        item.id,
-                        "backdrop",
-                        m.backdrop_path.as_deref(),
-                        BACKDROP_SIZE,
-                    )
-                    .await;
-                    let patch = MetadataPatch {
-                        title: Some(m.title),
-                        year: m.year,
-                        overview: m.overview,
-                        tmdb_id: Some(m.tmdb_id),
-                        air_date: m.air_date,
-                        artwork: poster.attempt.clone(),
-                        poster_path: poster.file,
-                        backdrop_path: backdrop.file,
-                        // A show matched by id got these from its details
-                        // body; one matched by search got them from the
-                        // once-per-run genre vocabulary. Either way this is
-                        // the only place either lands.
-                        genres: genre_patch(m.genres),
-                        enriched: true,
-                        ..Default::default()
-                    };
-                    if apply(store, item.id, patch, &mut report, repair_fence).await {
-                        report.matched += 1;
+                    Ok(None) => report.unmatched += 1,
+                    Err(e) => {
+                        tracing::error!(title = %item.title, error = %e, "movie lookup failed");
+                        report.errors += 1;
+                        report.note(format!("`{}`: movie lookup failed: {e}", item.title));
                     }
-                    enrich_episodes(
-                        store,
-                        tmdb,
-                        artwork_dir,
-                        item.id,
-                        show_tmdb_id,
-                        repairs,
-                        &mut report,
-                        repair_fence,
-                    )
-                    .await;
-                }
-                Ok(None) => report.unmatched += 1,
-                Err(e) => {
-                    tracing::error!(title = %item.title, error = %e, "show lookup failed");
-                    report.errors += 1;
-                    report.note(format!("`{}`: show lookup failed: {e}", item.title));
-                }
-            },
-            _ => {}
+                },
+                ItemKind::Show => match show_lookup(tmdb, &item, known).await {
+                    Ok(Some(m)) => {
+                        let show_tmdb_id = m.tmdb_id;
+                        let poster = cache_image(
+                            store,
+                            tmdb,
+                            artwork_dir,
+                            item.id,
+                            "poster",
+                            m.poster_path.as_deref(),
+                            POSTER_SIZE,
+                        )
+                        .await;
+                        let backdrop = cache_image(
+                            store,
+                            tmdb,
+                            artwork_dir,
+                            item.id,
+                            "backdrop",
+                            m.backdrop_path.as_deref(),
+                            BACKDROP_SIZE,
+                        )
+                        .await;
+                        let patch = MetadataPatch {
+                            title: Some(m.title),
+                            year: m.year,
+                            overview: m.overview,
+                            tmdb_id: Some(m.tmdb_id),
+                            air_date: m.air_date,
+                            artwork: poster.attempt.clone(),
+                            poster_path: poster.file,
+                            backdrop_path: backdrop.file,
+                            // A show matched by id got these from its details
+                            // body; one matched by search got them from the
+                            // once-per-run genre vocabulary. Either way this is
+                            // the only place either lands.
+                            genres: genre_patch(m.genres),
+                            enriched: true,
+                            ..Default::default()
+                        };
+                        if apply(store, item.id, patch, &mut report, repair_fence).await {
+                            report.matched += 1;
+                        }
+                        enrich_episodes(
+                            store,
+                            tmdb,
+                            artwork_dir,
+                            item.id,
+                            show_tmdb_id,
+                            repairs,
+                            &mut report,
+                            repair_fence,
+                        )
+                        .await;
+                    }
+                    Ok(None) => report.unmatched += 1,
+                    Err(e) => {
+                        tracing::error!(title = %item.title, error = %e, "show lookup failed");
+                        report.errors += 1;
+                        report.note(format!("`{}`: show lookup failed: {e}", item.title));
+                    }
+                },
+                _ => {}
+            }
+        };
+        if tokio::time::timeout(ITEM_ENRICH_DEADLINE, item_work)
+            .await
+            .is_err()
+        {
+            record_item_deadline(Provider::Tmdb);
+            report.errors += 1;
+            tracing::error!(title = %deadline_title, "tmdb item enrichment deadline exceeded");
+            report.note(format!(
+                "enrichment deadline exceeded for `{deadline_title}`; will retry on the next scan"
+            ));
         }
     }
 
@@ -969,52 +1166,69 @@ async fn enrich_anime_library_inner(
         if item.kind != ItemKind::Show {
             continue;
         }
-        match client.find_anime(&item.title).await {
-            Ok(Some(m)) => {
-                let poster = download_url(
-                    store,
-                    client,
-                    artwork_dir,
-                    item.id,
-                    "poster",
-                    m.cover_url.as_deref(),
-                )
-                .await;
-                let backdrop = download_url(
-                    store,
-                    client,
-                    artwork_dir,
-                    item.id,
-                    "backdrop",
-                    m.banner_url.as_deref(),
-                )
-                .await;
-                let patch = MetadataPatch {
-                    title: Some(m.title),
-                    year: m.year,
-                    overview: m.overview,
-                    artwork: poster.attempt.clone(),
-                    poster_path: poster.file,
-                    backdrop_path: backdrop.file,
-                    // AniList's own vocabulary, and free — `genres` is one
-                    // more field on the search query that already runs.
-                    genres: genre_patch(m.genres),
-                    // AniList never yields a TMDB id, so before `metadata_at`
-                    // existed an anime show was re-matched on every single
-                    // scan — the id-is-the-marker rule had no id to read.
-                    enriched: true,
-                    ..Default::default()
-                };
-                if apply(store, item.id, patch, &mut report, repair_fence).await {
-                    report.matched += 1;
+        let deadline_title = match item.year {
+            Some(year) => format!("{} ({year})", item.title),
+            None => item.title.clone(),
+        };
+        let item_work = async {
+            match client.find_anime(&item.title).await {
+                Ok(Some(m)) => {
+                    let poster = download_url(
+                        store,
+                        client,
+                        artwork_dir,
+                        item.id,
+                        "poster",
+                        m.cover_url.as_deref(),
+                    )
+                    .await;
+                    let backdrop = download_url(
+                        store,
+                        client,
+                        artwork_dir,
+                        item.id,
+                        "backdrop",
+                        m.banner_url.as_deref(),
+                    )
+                    .await;
+                    let patch = MetadataPatch {
+                        title: Some(m.title),
+                        year: m.year,
+                        overview: m.overview,
+                        artwork: poster.attempt.clone(),
+                        poster_path: poster.file,
+                        backdrop_path: backdrop.file,
+                        // AniList's own vocabulary, and free — `genres` is one
+                        // more field on the search query that already runs.
+                        genres: genre_patch(m.genres),
+                        // AniList never yields a TMDB id, so before `metadata_at`
+                        // existed an anime show was re-matched on every single
+                        // scan — the id-is-the-marker rule had no id to read.
+                        enriched: true,
+                        ..Default::default()
+                    };
+                    if apply(store, item.id, patch, &mut report, repair_fence).await {
+                        report.matched += 1;
+                    }
+                }
+                Ok(None) => report.unmatched += 1,
+                Err(e) => {
+                    tracing::error!(title = %item.title, error = %e, "anilist lookup failed");
+                    report.errors += 1;
+                    report.note(format!("`{}`: anilist lookup failed: {e}", item.title));
                 }
             }
-            Ok(None) => report.unmatched += 1,
-            Err(e) => {
-                tracing::error!(title = %item.title, error = %e, "anilist lookup failed");
-                report.errors += 1;
-                report.note(format!("`{}`: anilist lookup failed: {e}", item.title));
-            }
+        };
+        if tokio::time::timeout(ITEM_ENRICH_DEADLINE, item_work)
+            .await
+            .is_err()
+        {
+            record_item_deadline(Provider::AniList);
+            report.errors += 1;
+            tracing::error!(title = %deadline_title, "anilist item enrichment deadline exceeded");
+            report.note(format!(
+                "enrichment deadline exceeded for `{deadline_title}`; will retry on the next scan"
+            ));
         }
     }
     tracing::info!(
@@ -1371,6 +1585,17 @@ mod tests {
     fn television_hero_art_keeps_source_resolution() {
         assert_eq!(BACKDROP_SIZE, "original");
         assert_eq!(STILL_SIZE, "original");
+    }
+
+    #[test]
+    fn provider_metrics_expose_only_the_fixed_contract_labels() {
+        let metrics = prometheus_provider_requests();
+        for provider in ["tmdb", "anilist"] {
+            for outcome in ["ok", "status", "timeout", "body_bound", "error"] {
+                assert!(metrics.contains(&format!("provider=\"{provider}\",outcome=\"{outcome}\"")));
+            }
+            assert!(metrics.contains(&format!("provider=\"{provider}\"}}")));
+        }
     }
 
     async fn serve(app: axum::Router) -> String {
