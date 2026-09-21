@@ -103,6 +103,23 @@ class CatalogCase(unittest.TestCase):
 
         self.assertEqual(cluster_auth.timeout_seconds, 3600)
 
+    def test_every_store_slice_selects_the_replicated_lane(self):
+        """A new backend slice cannot silently skip its parity contract."""
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        store = ROOT / "crates/plurx-core/src/store"
+        paths = sorted(store.glob("hiqlite_*.rs")) + sorted(
+            (store / "sqlite").glob("*.rs")
+        )
+
+        self.assertGreater(len(paths), 0)
+        for path in paths:
+            relative = path.relative_to(ROOT).as_posix()
+            with self.subTest(path=relative):
+                self.assertTrue(
+                    scope_for_paths(catalog, (relative,))["cluster_auth"],
+                    f"{relative} must run the three-voter Store contract",
+                )
+
     def test_gitignore_changes_select_the_validation_framework(self):
         catalog = load_catalog(ROOT / "validation/points.toml")
         selection = select_points(catalog, (".gitignore",))
