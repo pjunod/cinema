@@ -50,7 +50,8 @@ function fixture({readyState = "complete", fetchImpl = null} = {}) {
     console,
   };
   context.window = context;
-  context.addEventListener = (name, callback) => listeners.set(name, callback);
+  context.addEventListener = (name, callback, options) =>
+    listeners.set(name, {callback, options});
   vm.runInNewContext(SOURCE, context, {filename: "core/errors.js"});
   return {
     context,
@@ -58,7 +59,8 @@ function fixture({readyState = "complete", fetchImpl = null} = {}) {
     requests,
     timers,
     reporter: context.PlurxErrorReporter,
-    dispatch(name, event) { listeners.get(name)(event); },
+    dispatch(name, event) { listeners.get(name).callback(event); },
+    listener(name) { return listeners.get(name); },
     advance(ms) { now += ms; },
   };
 }
@@ -130,15 +132,18 @@ test("the boot sentinel distinguishes slow, crashed and timed-out bootstrap", ()
   assert.equal(timeoutBanner.children[0].textContent, "Reload");
 
   const crashed = fixture();
+  assert.equal(crashed.listener("error").options, true,
+    "resource failures are observable only from the capture phase");
   crashed.dispatch("error", {
-    message: "cards failed",
-    filename: "/assets/core/cards.js?v=one",
-    lineno: 1,
+    target: {src: "/assets/core/cards.js?v=one"},
   });
   crashed.reporter.setAuth("opaque-token", "Chrome");
   assert.equal(crashed.reporter.checkBoot(5_000), "crashed");
   assert.match(crashed.document.getElementById("boot-sentinel").textContent, /core\/cards\.js/);
-  const events = crashed.requests.map(([, options]) => JSON.parse(options.body).event);
+  const reports = crashed.requests.map(([, options]) => JSON.parse(options.body));
+  assert.equal(reports[0].src, "/assets/core/cards.js");
+  assert.equal(reports[0].message, "resource failed to load");
+  const events = reports.map((body) => body.event);
   assert.deepEqual(events, ["client_error", "boot_sentinel"]);
 
   crashed.reporter.markReady();

@@ -75,11 +75,18 @@ function createEarlyErrorReporter({
     reporting = true;
     try {
       const reason = kind === "unhandledrejection" ? event.reason : event.error;
+      const target = event.target || event.srcElement;
+      const resourceSrc = target && (
+        target.currentSrc || target.src || target.href ||
+        (typeof target.getAttribute === "function" &&
+          (target.getAttribute("src") || target.getAttribute("href"))) || ""
+      );
       const message = redact(
-        event.message || (reason && reason.message) || reason || kind,
+        event.message || (reason && reason.message) || reason ||
+          (resourceSrc ? "resource failed to load" : kind),
         EARLY_ERROR_MESSAGE_MAX,
       );
-      const src = redact(event.filename || event.src || "", EARLY_ERROR_MESSAGE_MAX);
+      const src = redact(event.filename || event.src || resourceSrc || "", EARLY_ERROR_MESSAGE_MAX);
       const line = Number(event.lineno || event.line || 0) || null;
       const col = Number(event.colno || event.col || 0) || null;
       const stack = redact(reason && reason.stack || event.stack || "", EARLY_ERROR_STACK_MAX);
@@ -172,7 +179,9 @@ function createEarlyErrorReporter({
   }
 
   document.documentElement.dataset.boot = "loading";
-  window.addEventListener("error", (event) => capture("error", event));
+  // Script and stylesheet load failures do not bubble. Capture them here,
+  // before a missing sidecar can turn into a less useful dependent throw.
+  window.addEventListener("error", (event) => capture("error", event), true);
   window.addEventListener("unhandledrejection", (event) => capture("unhandledrejection", event));
   schedule(() => checkBoot(5_000), 5_000);
   schedule(() => checkBoot(20_000), 20_000);

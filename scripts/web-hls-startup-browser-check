@@ -107,6 +107,14 @@ class Handler(BaseHTTPRequestHandler):
         route = self.path.split("?", 1)[0]
         if route == "/":
             return self.reply(200, (WEB / "index.html").read_bytes(), "text/html; charset=utf-8")
+        if route == "/missing-resource":
+            body = b"""<!doctype html><html><head>
+<script src=\"/assets/core/errors.js\"></script>
+<script src=\"/assets/core/cards.js?force-missing=1\"></script>
+</head><body></body></html>"""
+            return self.reply(200, body, "text/html; charset=utf-8")
+        if route == "/assets/core/cards.js" and "force-missing=1" in self.path:
+            return self.reply(404, b"missing", "text/plain")
         # Whatever the shell asks for, from wherever it lives. Hand-listing the
         # assets here meant a new one silently 404'd and the page it broke
         # looked like a playback bug.
@@ -267,6 +275,33 @@ def run_case(browser, server, *, block_worker):
     return result
 
 
+def run_missing_resource_case(browser, server):
+    """A real non-bubbling script error must name the missing sidecar."""
+    with server.lock:
+        server.client_logs = []
+    page = browser.new_page()
+    try:
+        page.goto(
+            f"http://127.0.0.1:{server.server_port}/missing-resource",
+            wait_until="load",
+        )
+        phase = page.evaluate("""() => {
+          PlurxErrorReporter.setAuth('browser-check', 'Chrome');
+          return PlurxErrorReporter.checkBoot(5000);
+        }""")
+        page.wait_for_function(
+            "() => document.getElementById('boot-sentinel')?.textContent.includes('core/cards.js')",
+            timeout=5_000,
+        )
+        page.wait_for_timeout(250)
+        banner = page.locator("#boot-sentinel").inner_text()
+        with server.lock:
+            logs = list(server.client_logs)
+    finally:
+        page.close()
+    return {"phase": phase, "banner": banner, "client_logs": logs}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--browser", default=None)
@@ -291,6 +326,7 @@ def main():
                 )
                 worker = run_case(browser, server, block_worker=False)
                 fallback = run_case(browser, server, block_worker=True)
+                missing = run_missing_resource_case(browser, server)
                 browser.close()
         finally:
             server.shutdown()
@@ -317,9 +353,23 @@ def main():
         print("FAIL  worker-blocked run did not exercise hls.js inline fallback")
         print(fallback_log)
         return 1
+    missing_logs = [
+        event for event in missing["client_logs"]
+        if event.get("event") in ("client_error", "boot_sentinel")
+    ]
+    if (missing["phase"] != "crashed"
+            or "core/cards.js" not in missing["banner"]
+            or [event.get("event") for event in missing_logs]
+                != ["client_error", "boot_sentinel"]
+            or not all(str(event.get("src", "")).endswith("/assets/core/cards.js")
+                       for event in missing_logs)):
+        print("FAIL  reporter: missing sidecar was not named by the banner and both reports")
+        print(json.dumps(missing, indent=2))
+        return 1
     print(f"PASS  worker: started; first_frame_ms={worker['first_frame_ms']:.0f}")
     print(f"PASS  worker: fallback-inline; first_frame_ms={fallback['first_frame_ms']:.0f}")
     print("PASS  seek: +10 s stayed local; seek_local logged; session_creates=0")
+    print("PASS  reporter: missing core/cards.js named by banner and both reports")
     print(f"      fixture sha256: {fixture_hash}; hls.js: {result['hlsVersion']}")
     print(f"      browser: {result['browser']}")
     return 0
