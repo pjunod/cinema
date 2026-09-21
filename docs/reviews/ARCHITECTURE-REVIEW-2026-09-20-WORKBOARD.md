@@ -121,7 +121,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 | S-11 | [CODEC-AND-GPU-QUALIFICATION](../streaming/CODEC-AND-GPU-QUALIFICATION.md) | Q12, Q6, Q8 | quarter | unclaimed | | | | 2026-09-20 | M0 encoder inventory on /metrics decides whether NVENC/VideoToolbox milestones exist |
 | S-12 | [VOD-BFRAMES-TIMELINE-DESIGN](../streaming/VOD-BFRAMES-TIMELINE-DESIGN.md) | Q2 | design | unclaimed | | | | 2026-09-20 | Design only; `vodgen.rs:399` refuses nonzero CTO today |
 | S-13 | [DECODE-FACTS-GATE-AND-FALLBACK](../streaming/DECODE-FACTS-GATE-AND-FALLBACK.md) | C13 | month | unclaimed | | | | 2026-09-20 | Measure before optimising |
-| S-14 | [TRANSCODE-DECOMPOSITION-PLAN](../streaming/TRANSCODE-DECOMPOSITION-PLAN.md) | §4.1, §4.2, §4.9 | quarter | unclaimed | | | | 2026-09-20 | Behaviour-preserving moves first; registry unification separate |
+| S-14 | [TRANSCODE-DECOMPOSITION-PLAN](../streaming/TRANSCODE-DECOMPOSITION-PLAN.md) | §4.1, §4.2, §4.9 | quarter | claimed | gpt-5.6-sol | agent:/root/c02_builder | `plan/S-14` | 2026-09-21 | One-plan/one-PR execution; behaviour-preserving moves first and registry unification remains a separate evaluation. |
 | K-01 | [CLUSTER-BACKUP-AND-RESTORE](../cluster/CLUSTER-BACKUP-AND-RESTORE.md) | §2.3, S4 | month | unclaimed | | | | 2026-09-20 | The procedure is the deliverable |
 | K-02 | [RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT](../cluster/RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT.md) | S2, S5 | month | unclaimed | | | | 2026-09-20 | M0 measurement on each voter |
 | K-03 | [REPLICATED-WRITE-RATE-HYGIENE](../cluster/REPLICATED-WRITE-RATE-HYGIENE.md) | S3 | week | unclaimed | | | | 2026-09-20 | Keep the atomic claim |
