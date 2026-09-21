@@ -1,6 +1,6 @@
 # Decode-fact gate and fallback — measure the lane, then classify what falls out of it
 
-**Status:** ready for review · **Executes:** C13 (§3.3.2) from
+**Status:** implementation blocked on fleet evidence · **Executes:** C13 (§3.3.2) from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md),
 with the assessment's correction 14 (F-stream-9 / F-stream-16: the
 complete probe identity stays in the key; the final source check is not
@@ -527,4 +527,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | claim | pending | Claimed `plan/S-13` for one whole-plan draft PR. Rust 1.97.1 compiler loop established; M3/M4 remain closed until M0 fleet evidence opens them. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | claim | [#424](http://192.168.4.7:3000/noirr/plurx/pulls/424) | Claimed `plan/S-13` for one whole-plan draft PR. Rust 1.97.1 compiler loop established; M3/M4 remain closed until M0 fleet evidence opens them. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M0 | [#424](http://192.168.4.7:3000/noirr/plurx/pulls/424) / `a4682e5d` | Added fixed-cardinality phase histograms and lookup counters to `/metrics`; the real miss-then-hit fixture asserts every phase and result. Focused test, Rust 1.97.1 check, format and Clippy are green. Needs: deploy this exact branch artifact on media1 and run the §6 production-static-binary cold/warm measurement; no p50/p95 or binary size was inferred locally. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | [#424](http://192.168.4.7:3000/noirr/plurx/pulls/424) / `8432e9bc` | Every `DecodeFactError` maps exhaustively to a bounded reason, severity and counter. `ProbeChanged` warns once per process, while existing catalogue fallback disposition remains unchanged. Focused classification test is green. Needs: the lab2 deliberate ffprobe-change log/counter observation. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 | [#424](http://192.168.4.7:3000/noirr/plurx/pulls/424) / `8432e9bc` | `SourceChanged` alone now refuses the held plan with the rescan instruction and increments `refused_source_changed`; a deterministic real held-source mutation regression is green, together with the existing post-probe source fence and cancellation cleanup regressions. The VOD caller preserves `vod_decoder_plan_refused`; the pretranscode path propagates the actionable failure into its existing retry lifecycle. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3-M4 | [#424](http://192.168.4.7:3000/noirr/plurx/pulls/424) | Not opened. M3 requires M0's media1 result to exceed the 10% threshold; M4 additionally requires M3 and remaining hit gate wait above target. Source-only unit timings are not a substitute. |
