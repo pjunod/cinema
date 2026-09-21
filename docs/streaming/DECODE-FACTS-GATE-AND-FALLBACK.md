@@ -388,7 +388,10 @@ not built.
 
 ## 5. Milestones
 
-One draft PR per milestone into `main` under the fast lane.
+One whole-plan draft PR into `main` under the fast lane. Milestones are
+logical commits in that PR, following the work board's canonical rule. M3 and
+M4 remain conditional on the fleet measurements named below; a source-only
+session must not infer those results from unit timings.
 
 ### 5.1 M0 — instrumentation
 
@@ -524,4 +527,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | claim | pending | Claimed `plan/S-13` for one whole-plan draft PR. Rust 1.97.1 compiler loop established; M3/M4 remain closed until M0 fleet evidence opens them. |
