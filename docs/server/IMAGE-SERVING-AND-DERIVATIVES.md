@@ -1,6 +1,6 @@
 # Image serving and derivatives — verify once, remember the proof, serve the size the grid asked for
 
-**Status:** implementation in progress · **Executes:** C6 / F-core-7 from
+**Status:** blocked on fleet and device evidence · **Executes:** C6 / F-core-7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (assessment rows C6, F-core-7 and correction 9 in
 [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md))
@@ -257,9 +257,10 @@ ffmpeg -nostdin -hide_banner -loglevel error -y
        -f image2 <tmp>
 ```
 
-Run through `bounded_command_output_with_limits` made `pub(crate)`
-(C12's plan shares it further; this plan only widens visibility), with
-`DERIVATIVE_TIMEOUT = 5 s`, a 1 MiB stdout/stderr bound,
+Run through the existing job-owned `BoundedDiagnosticChild` with its bounded
+file-output path rather than widening the private probe helper. The child has
+`DERIVATIVE_TIMEOUT = 5 s`, a 15 MiB media-output bound and an 8 KiB
+diagnostic tail,
 `configure_ffmpeg_runtime` applied (so `XDG_CACHE_HOME` and the Windows job
 object hold — the drift §4.1 of the review names is not repeated here),
 writing to a temp file in `derived/` and `rename`ing into place. Output
@@ -472,3 +473,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Claimed `plan/C-03` from `main` @ `9deb58a2`; M1-M2 remain pending. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Identity-bound digest cache, separate local-byte/peer-fetch permits, authenticated 304, strong ETag and bounded metrics implemented; `cargo test -p plurxd http::images -- --test-threads=1` passed 25 tests. Lab and device observations remain pending. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Closed `size` buckets, digest-keyed derivatives, two-child/timeout/output bounds, single-flight, original fallback, conservative orphan cleanup, DTO readiness and fixed-cardinality metrics implemented. The existing job-owned bounded-file child was used instead of widening the probe-only output helper. Focused image tests pass; §6.2-§6.4 fleet, browser and device observations remain pending. |

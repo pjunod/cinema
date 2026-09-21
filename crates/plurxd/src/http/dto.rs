@@ -27,6 +27,10 @@ fn image_url(filename: &Option<String>, revision: i64) -> Option<String> {
         .map(|f| format!("/api/v1/images/{f}?v={revision}"))
 }
 
+fn poster_sizes(filename: &Option<String>) -> Option<[&'static str; 3]> {
+    filename.as_ref().map(|_| ["w300", "w500", "w780"])
+}
+
 const JS_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
 
 fn js_id_text_is_redundant(value: &str) -> bool {
@@ -136,6 +140,8 @@ pub struct ItemDto {
     pub tmdb_id: Option<i64>,
     pub imdb_id: Option<String>,
     pub poster: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poster_sizes: Option<[&'static str; 3]>,
     pub backdrop: Option<String>,
     /// Best (max) file height for the item, e.g. 2160 / 1080 / 720. Populated
     /// on library grids and playable season children so compact cards can show
@@ -231,6 +237,7 @@ impl From<WatchRollup> for RollupDto {
 
 impl From<Item> for ItemDto {
     fn from(item: Item) -> Self {
+        let poster_sizes = poster_sizes(&item.poster_path);
         ItemDto {
             id: item.id,
             id_text: item.id.to_string(),
@@ -256,6 +263,7 @@ impl From<Item> for ItemDto {
             tmdb_id: item.tmdb_id,
             imdb_id: item.imdb_id,
             poster: image_url(&item.poster_path, item.updated_at),
+            poster_sizes,
             backdrop: image_url(&item.backdrop_path, item.updated_at),
             resolution: None,
             media: None,
@@ -671,6 +679,8 @@ mod audiobook_tests {
         );
         assert_ne!(before, after, "changed artwork must get a fresh cache key");
         assert_eq!(image_url(&None, 1_785_733_260), None);
+        assert_eq!(poster_sizes(&filename), Some(["w300", "w500", "w780"]));
+        assert_eq!(poster_sizes(&None), None);
     }
 
     #[test]
