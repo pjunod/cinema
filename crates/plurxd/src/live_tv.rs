@@ -2925,7 +2925,7 @@ impl LiveTvManager {
             refresh_error: None,
             ffmpeg_graph_ready: false,
             ffmpeg_graph_message:
-                "Run the Developer readiness check to test the live-TV FFmpeg graph".to_owned(),
+                "Run the Live TV readiness check to test the live-TV FFmpeg graph".to_owned(),
             // 3 = client-supplied request ids and the /live-tv/starts/*
             // recovery routes. An ingress intersects this with its own list.
             start_protocols: vec![1, 2, 3],
@@ -5001,7 +5001,7 @@ fn validate_start_config(
     config.validate_static()?;
     if !config.enabled {
         return Err(LiveTvError::Disabled(
-            "Live TV is disabled in Settings → Developer".into(),
+            "Live TV is disabled in Settings → Live TV".into(),
         ));
     }
     if config.owner_node_id != local_node_id
@@ -5018,7 +5018,7 @@ fn validate_start_config(
     }
     if !config.admission_ready() {
         return Err(LiveTvError::OwnerUnavailable(
-            "the prior tuner owner has not acknowledged cleanup; use Developer recovery only after physically stopping it"
+            "the prior tuner owner has not acknowledged cleanup; use Live TV recovery only after physically stopping it"
                 .into(),
         ));
     }
