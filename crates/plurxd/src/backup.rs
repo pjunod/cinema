@@ -145,14 +145,24 @@ impl BackupManager {
                         .min(i64::MAX as u64) as i64,
                     Ordering::Relaxed,
                 );
-                let keep = self
-                    .store
-                    .get_setting(keys::BACKUP_KEEP)
-                    .await?
-                    .and_then(|value| value.trim().parse::<usize>().ok())
-                    .filter(|keep| *keep > 0)
-                    .unwrap_or(14);
-                prune_artifacts(&destination, keep)?;
+                let keep = match self.store.get_setting(keys::BACKUP_KEEP).await {
+                    Ok(value) => value
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .filter(|keep| *keep > 0)
+                        .unwrap_or(14),
+                    Err(error) => {
+                        // The archive is already durably published. Retention
+                        // lookup cannot turn that success into a retry that
+                        // emits a duplicate artefact.
+                        tracing::warn!(error = %error, "backup retention setting read failed");
+                        14
+                    }
+                };
+                if let Err(error) = prune_artifacts(&destination, keep) {
+                    // Same boundary as above: pruning is maintenance after a
+                    // successful publish, not part of publication itself.
+                    tracing::warn!(error = %error, "backup retention prune failed");
+                }
                 Ok(Some((path, manifest)))
             }
             Err(error) => {
@@ -294,14 +304,58 @@ impl BackupManager {
                 continue;
             }
             let day = (now / 86_400).min(i64::MAX as u64) as i64;
-            if self.last_schedule_day.swap(day, Ordering::AcqRel) == day {
+            if !schedule_day_is_pending(&self.last_schedule_day, day) {
                 continue;
             }
-            if let Err(error) = self.build(Some(Path::new(destination.trim()))).await {
-                tracing::warn!(error = %error, "scheduled portable backup failed");
+            let scheduled_minute = now / 60;
+            loop {
+                match self.build(Some(Path::new(destination.trim()))).await {
+                    Ok(Some(_)) => {
+                        record_schedule_success(&self.last_schedule_day, day);
+                        break;
+                    }
+                    // Another voter owns the lease. It alone decides whether
+                    // this tick succeeded; retrying behind a successful owner
+                    // would publish a duplicate artefact.
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "scheduled portable backup failed");
+                    }
+                }
+
+                // A transient winner failure must not spend the UTC day. Give
+                // this same owner another chance while the configured minute
+                // is still open; the cluster lease continues to serialize all
+                // voters. A crash remains fenced by the 90-second lease.
+                let retry_now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if retry_now / 60 != scheduled_minute {
+                    break;
+                }
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                }
+                let after_sleep = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if after_sleep / 60 != scheduled_minute {
+                    break;
+                }
             }
         }
     }
+}
+
+fn schedule_day_is_pending(last_schedule_day: &AtomicI64, day: i64) -> bool {
+    last_schedule_day.load(Ordering::Acquire) != day
+}
+
+fn record_schedule_success(last_schedule_day: &AtomicI64, day: i64) {
+    last_schedule_day.store(day, Ordering::Release);
 }
 
 pub(crate) fn parse_schedule_minute(value: &str) -> Option<u64> {
@@ -374,11 +428,68 @@ pub(crate) async fn create(
 mod tests {
     use super::*;
 
+    use plurx_core::cluster::coordination::{StoreCoordinator, UnclusteredJobAuthority};
+    use plurx_core::cluster::membership::ClusterRole;
+    use plurx_core::store::SqliteStore;
+
+    use crate::job_lease::{acquire_cluster_job, AdmittedRoleJobAuthority};
+
     #[test]
     fn schedule_is_one_strict_utc_minute() {
         assert_eq!(parse_schedule_minute("02:30"), Some(150));
         assert_eq!(parse_schedule_minute("23:59"), Some(1_439));
         assert_eq!(parse_schedule_minute("24:00"), None);
         assert_eq!(parse_schedule_minute("2:30:00"), None);
+    }
+
+    #[test]
+    fn failed_schedule_attempt_keeps_the_day_retriable_until_success() {
+        let fence = AtomicI64::new(-1);
+        let day = 42;
+
+        assert!(schedule_day_is_pending(&fence, day));
+        // Failure and lease-skipped outcomes deliberately do not mutate the
+        // fence. Only publication calls record_schedule_success.
+        assert!(schedule_day_is_pending(&fence, day));
+        record_schedule_success(&fence, day);
+        assert!(!schedule_day_is_pending(&fence, day));
+        assert!(schedule_day_is_pending(&fence, day + 1));
+    }
+
+    #[tokio::test]
+    async fn backup_ticks_are_one_voter_only_and_a_learner_never_claims() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("lease store"));
+        let first = StoreCoordinator::new(Arc::clone(&store), "backup-node-a".to_owned())
+            .expect("first coordinator");
+        let second = StoreCoordinator::new(Arc::clone(&store), "backup-node-b".to_owned())
+            .expect("second coordinator");
+        let voter = UnclusteredJobAuthority;
+
+        let (first_claim, second_claim) = tokio::join!(
+            acquire_cluster_job(&first, &voter, BACKUP_RESOURCE.to_owned()),
+            acquire_cluster_job(&second, &voter, BACKUP_RESOURCE.to_owned())
+        );
+        let first_claim = first_claim.expect("first tick");
+        let second_claim = second_claim.expect("second tick");
+        assert_eq!(
+            usize::from(first_claim.is_some()) + usize::from(second_claim.is_some()),
+            1,
+            "simultaneous voter ticks must admit exactly one builder"
+        );
+        if let Some(lease) = first_claim {
+            lease.release().await.expect("release first lease");
+        }
+        if let Some(lease) = second_claim {
+            lease.release().await.expect("release second lease");
+        }
+
+        let learner = AdmittedRoleJobAuthority::new(ClusterRole::Learner);
+        let learner_claim = acquire_cluster_job(&first, &learner, BACKUP_RESOURCE.to_owned())
+            .await
+            .expect("learner refusal");
+        assert!(
+            learner_claim.is_none(),
+            "a learner claimed the backup lease"
+        );
     }
 }
