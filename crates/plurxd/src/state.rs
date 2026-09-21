@@ -9982,6 +9982,45 @@ mod tests {
         ));
     }
 
+    /// Provider work runs in the lease owner's task, while renewal runs in the
+    /// independent task owned by `ActiveJobLease`. A provider future that does
+    /// not wake therefore cannot silently let another node take the scan.
+    #[tokio::test]
+    async fn a_hung_provider_does_not_stop_scan_lease_renewal() {
+        let store: Arc<dyn Store> =
+            Arc::new(SqliteStore::open_in_memory().expect("hung provider store"));
+        let first =
+            StoreCoordinator::new(Arc::clone(&store), "provider-owner").expect("coordinator");
+        let successor =
+            StoreCoordinator::new(Arc::clone(&store), "provider-successor").expect("successor");
+        let lease = match first
+            .acquire("scan:library:1", Duration::from_secs(1))
+            .await
+            .expect("first acquire")
+        {
+            LeaseClaim::Acquired(lease) => lease,
+            held => panic!("first owner must acquire, got {held:?}"),
+        };
+        let active = ActiveJobLease::start_with_policy(
+            first,
+            lease,
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+        )
+        .expect("valid test lease policy");
+
+        tokio::time::sleep(Duration::from_millis(1_150)).await;
+        assert!(matches!(
+            successor
+                .acquire("scan:library:1", Duration::from_secs(1))
+                .await
+                .expect("successor acquire"),
+            LeaseClaim::Held { .. }
+        ));
+
+        active.release().await.expect("release renewed lease");
+    }
+
     #[tokio::test]
     async fn empty_pretranscode_queue_rate_limits_local_cache_maintenance() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("empty queue store"));

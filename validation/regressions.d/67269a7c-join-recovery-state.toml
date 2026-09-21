@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["67269a7c"]
+points = ["persistence.upgrades", "cluster.membership"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = "The retained replicated-cluster migration regression reserves a real join token to a staged node, expires the reservation, repeats redemption for the same identity, admits the node, and repeats finalization twice. Together with the accepted-request-withheld-response regression, it proves ambiguous transport outcomes recover through persisted token and node state rather than a source-text assertion."
