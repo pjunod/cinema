@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["659fb637"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The correction and its evidence landed together in `crates/plurx-core/src/transcode/mod.rs`. `AUDIO_SAMPLE_RATE` was already the one rate the audio resolution reasoned about, but the two ffmpeg argument builders that actually produce rolling output never emitted it: `hls_args_inner` and the audio-converting arm of `copy_input_args` wrote `-c:a aac` with a channel count and a bitrate and no `-ar`, so ffmpeg inherited whatever rate the source carried and a 44.1 kHz title produced rolling segments at a rate nothing downstream had agreed to. Both now push `-ar` with `crate::playback::audio::AUDIO_SAMPLE_RATE`. `every_lossy_rolling_audio_output_is_fixed_at_forty_eight_khz` landed in the same commit and pins all three arms rather than only the one that was wrong: the software rolling encode must render `-c:a aac -ac 2 -b:a 160k -ar 48000`, the copy path that converts audio must render `-c:a aac -b:a 256k -ar 48000`, and the true stream-copy path must contain no `-ar 48000` at all, because a copy may not rewrite the source it is copying. Removing either `-ar` push fails one of the first two assertions; adding one to the copy arm fails the third. It is a `plurx-core` unit test, which `rust-gate` runs through `make rust-check` and `rust-gate-ci` through `make ci-rust-gate`."

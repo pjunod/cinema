@@ -1125,9 +1125,18 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v63: mirror typed retry disposition and diagnostics in the standalone
     // node-local refusal store.
     crate::store::fragindex::FRAGMENT_INDEX_TYPED_OUTCOMES_SCHEMA,
-    // v64: publication-time proof consumed by metadata-only detail status.
+    // v64: selected-video field order retained as a catalogue fact. Existing
+    // rows remain null until the bounded stored-probe backfill considers them.
+    super::FILES_FIELD_ORDER_COLUMN,
+    // v65: retained source luminance facts for deterministic CPU tone maps.
+    // S-07 drafted this as v64; S-08's field-order column reached main first,
+    // so the luminance batch appends after it.
+    super::FILES_LUMINANCE_COLUMNS_BATCH,
+    // v66: publication-time proof consumed by metadata-only detail status.
     // Legacy rows default to unverified and are revalidated in bounded,
-    // node-local pages; the packed payload never enters Raft.
+    // node-local pages; the packed payload never enters Raft. C-05 drafted
+    // this as v64; the field-order and luminance columns reached main first,
+    // so the validation column appends after them.
     crate::store::fragindex::FRAGMENT_INDEXES_VALIDATION_COLUMN,
 ];
 
@@ -1224,7 +1233,8 @@ const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container,
      subtitle_streams, scanned_at, hdr_format, audio_offset_ms, \
      (probe_json IS NOT NULL), \
      dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, \
-     video_codec_tag";
+     video_codec_tag, field_order, \
+     max_cll, max_fall, mastering_max_luminance, luminance_source";
 
 fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
     let path: String = row.get(2)?;
@@ -1240,6 +1250,7 @@ fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
         container: row.get(6)?,
         video_codec: row.get(7)?,
         video_codec_tag: row.get(25)?,
+        field_order: row.get(26)?,
         video_profile: row.get(8)?,
         width: row.get(9)?,
         height: row.get(10)?,
@@ -1261,6 +1272,10 @@ fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
             el_present: row.get::<_, Option<i64>>(23)?.map(|value| value != 0),
             rpu_present: row.get::<_, Option<i64>>(24)?.map(|value| value != 0),
         },
+        max_cll: row.get(27)?,
+        max_fall: row.get(28)?,
+        mastering_max_luminance: row.get(29)?,
+        luminance_source: row.get(30)?,
     })
 }
 
@@ -2534,8 +2549,18 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
+        // 63 -> 64 for v64, `FILES_FIELD_ORDER_COLUMN`: one additive
+        // `ALTER TABLE files ADD COLUMN field_order` appended by the interlace
+        // work, covered by `v64_adds_field_order_to_the_existing_files_table`
+        // below. 64 -> 65 for v65, `FILES_LUMINANCE_COLUMNS_BATCH`: the four
+        // additive `files` luminance columns the tone-map work drafted as v64
+        // and which append after the field-order column now that it reached
+        // main first. 65 -> 66 for v66, `FRAGMENT_INDEXES_VALIDATION_COLUMN`:
+        // the node-local publication proof C-05 drafted as v64, appended after
+        // both of those for the same reason they reached main first. No
+        // earlier entry moved; the list stays append-only.
         assert_eq!(
-            version, 64,
+            version, 66,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2574,6 +2599,23 @@ mod tests {
                  so nothing has to read a profile number back out of a display \
                  label: {files}"
             );
+        }
+        assert_eq!(
+            super::super::FILES_LUMINANCE_COLUMNS
+                .iter()
+                .map(|statement| format!("{statement};"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            super::super::FILES_LUMINANCE_COLUMNS_BATCH.trim(),
+            "the per-statement and batch spellings of the luminance migration have drifted"
+        );
+        for column in [
+            "max_cll",
+            "max_fall",
+            "mastering_max_luminance",
+            "luminance_source",
+        ] {
+            assert!(files.contains(column), "v64 carries {column}: {files}");
         }
         let fragment_indexes: String = conn
             .query_row(
@@ -4228,5 +4270,36 @@ mod tests {
             .expect("terminal identity index"),
             1
         );
+    }
+
+    #[test]
+    fn v64_adds_field_order_to_the_existing_files_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(63) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.pragma_update(None, "user_version", 63)
+                .expect("v63 marker");
+        }
+
+        SqliteStore::open(&db).expect("migrate v63 to current");
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        let columns = conn
+            .prepare("PRAGMA table_info(files)")
+            .expect("prepare files columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("read files columns")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect files columns");
+        assert!(columns.iter().any(|column| column == "field_order"));
     }
 }
