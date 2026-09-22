@@ -53,6 +53,31 @@ const MATERIALIZE_ITEM_PAGE: i64 = 256;
 const CONTENT_ORPHAN_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 const ORPHAN_SCAN_LIMIT: usize = 10_000;
 const ORPHAN_REMOVE_LIMIT: usize = 256;
+/// The shortest verified-source digest prefix every source family can supply.
+///
+/// Derivative *names* carry the first 32 hex characters of the source digest,
+/// but `{item}-{kind}-c{16hex}` sources — every backdrop — publish only
+/// sixteen. Comparing 32 against 16 matches nothing, so the orphan sweep
+/// narrows both sides to what both families have. Sixteen hex characters is
+/// 64 bits: a collision retains a dead derivative, which costs disk, and can
+/// never delete a live one, because a derivative's prefix is by construction
+/// the digest of the source it was made from.
+const DERIVATIVE_PREFIX_MATCH: usize = 16;
+/// Node-local derivative store, a child of the served artwork root.
+const DERIVED_DIR: &str = "derived";
+/// Originals and derivatives are both immutable under their own URL: an
+/// original filename is content-addressed or carries `?v={updated_at}`, and a
+/// derivative key is the verified source digest.
+const ARTWORK_CACHE_CONTROL: &str = "private, max-age=604800, immutable";
+/// A fallback answers a `?size=` URL with the original bytes, which is not the
+/// resource that URL names. `immutable` would freeze that substitution in every
+/// client cache for a week, and a cold grid load falls back on nearly every
+/// request — two ffmpeg slots behind a 500 ms admission wait — so the
+/// derivative would be generated on the server and then never asked for again.
+/// `max-age=0, must-revalidate` keeps the substitution to this one response:
+/// the `ETag` is the original's digest, so the next request either revalidates
+/// to the same original or collects the derivative that now exists.
+const FALLBACK_CACHE_CONTROL: &str = "private, max-age=0, must-revalidate";
 
 /// Shared process-wide bounds for on-demand and background peer fetches.
 ///
@@ -69,6 +94,11 @@ pub(crate) struct ArtworkCoordinator {
     derive_permits: Arc<Semaphore>,
     #[cfg(test)]
     hashes: AtomicU64,
+    /// Committed derivative generations. A single-flight test needs to count
+    /// the ffmpeg runs that actually produced a file, which no metric label
+    /// distinguishes from the ones a concurrent request waited for.
+    #[cfg(test)]
+    derivations: AtomicU64,
 }
 
 impl ArtworkCoordinator {
@@ -82,6 +112,8 @@ impl ArtworkCoordinator {
             derive_permits: Arc::new(Semaphore::new(DERIVATIVE_CONCURRENCY)),
             #[cfg(test)]
             hashes: AtomicU64::new(0),
+            #[cfg(test)]
+            derivations: AtomicU64::new(0),
         })
     }
 
@@ -325,7 +357,25 @@ pub async fn serve_peer(
     if !verified {
         return Err(ApiError::Unauthorized);
     }
-    if query.size.is_some() {
+    serve_verified_peer_artwork(&state, safe_name, query.size.as_deref(), &headers).await
+}
+
+/// Everything the peer route does once its proof has been checked.
+///
+/// Split out so the refusal below is reachable without a live replicated
+/// membership: `verify_artwork_peer_auth` needs a consistent cluster read, so
+/// no unit test can get past the extractor above, and the rule that peers never
+/// serve derivatives would otherwise have no test at all.
+async fn serve_verified_peer_artwork(
+    state: &AppState,
+    safe_name: &str,
+    size: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    // Peers replicate originals and derive locally. Serving a bucket here would
+    // let one node's resize become another node's source of record, and the
+    // puller authenticates bytes against the original's name.
+    if size.is_some() {
         return Err(ApiError::BadRequest(
             "cluster artwork does not serve derivatives".into(),
         ));
@@ -334,7 +384,7 @@ pub async fn serve_peer(
         &state.artwork_fetch,
         &state.artwork_dir,
         safe_name,
-        &headers,
+        headers,
         ArtworkRoute::Peer,
     )
     .await
@@ -407,6 +457,7 @@ async fn serve_cluster_artwork_with_headers(
     Ok(admitted_artwork_response(
         &state.artwork_dir.join(safe_name),
         bytes,
+        ARTWORK_CACHE_CONTROL,
         &[],
     ))
 }
@@ -419,6 +470,50 @@ async fn serve_derivative(
 ) -> Result<Response, ApiError> {
     let safe_name = safe_artwork_name(filename)?;
     let source_path = state.artwork_dir.join(safe_name);
+
+    // Warm path (plan objective 3, "no bytes read, no permit taken"). The
+    // derived key is the source's *verified* digest, and M1 already holds that
+    // against the source's file identity — so one `open` plus `fstat` names the
+    // derivative without reading the source at all. Resolving it here is what
+    // makes a `?size=` hit cheaper than the original it shrinks: reading the
+    // source first meant a warm `?size=w300` on a 4 MiB backdrop did 4 MiB of
+    // I/O, allocated a 4 MiB buffer and drew 4 MiB of the 64 MiB byte budget
+    // to answer with ~20 KiB, or with a 304 and no body at all.
+    if let Some(opened) = open_local_artwork(source_path.clone()).await {
+        if let Some(digest) = state
+            .artwork_fetch
+            .verified_digest(safe_name, opened.identity)
+            .await
+        {
+            if let Some(derived_name) = derivative_filename(digest, size, safe_name) {
+                match serve_local_artwork(
+                    &state.artwork_fetch,
+                    &state.artwork_dir.join(DERIVED_DIR),
+                    &derived_name,
+                    headers,
+                    ArtworkRoute::User,
+                )
+                .await
+                {
+                    Ok(response) => {
+                        record_derivative(size, DerivativeOutcome::Served);
+                        return Ok(with_response_header(response, header::VARY, "Accept"));
+                    }
+                    // The byte budget just refused a derivative-sized read.
+                    // Falling through to the original would ask it for many
+                    // times more, which is the amplification the budget exists
+                    // to stop, so refuse with the same 503 the original route
+                    // would give.
+                    Err(error) if is_artwork_capacity_error(&error) => {
+                        record_request(ArtworkRoute::User, ArtworkOutcome::Capacity);
+                        return Err(error);
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+
     let source =
         match read_verified_local_artwork(&state.artwork_fetch, source_path.clone(), safe_name)
             .await
@@ -466,11 +561,16 @@ async fn serve_derivative(
         };
 
     if should_serve_original(size, safe_name, &source.bytes) {
+        // Not a fallback: the source is already no wider than the bucket, so
+        // these bytes are the permanently correct answer for this URL and keep
+        // the immutable validator. Only a substitution forced by load or a
+        // failed resize revalidates (see `derivative_fallback`).
         record_request(ArtworkRoute::User, ArtworkOutcome::Hit);
         record_derivative(size, DerivativeOutcome::Served);
         return Ok(admitted_artwork_response(
             &source_path,
             source,
+            ARTWORK_CACHE_CONTROL,
             &[("vary", "Accept")],
         ));
     }
@@ -529,13 +629,21 @@ async fn serve_derivative(
         return Ok(derivative_fallback(&source_path, source, size));
     };
 
+    // A generation must be fenced against the identity of the file whose bytes
+    // produced `derived_name`. Peer-materialized bytes have no local read
+    // behind them, so serve them once and let the next request — which reads
+    // the file this one just installed — derive.
+    let Some(source_identity) = source.identity else {
+        return Ok(derivative_fallback(&source_path, source, size));
+    };
+
     if let Err(error) = generate_derivative(
         &state.artwork_fetch,
         DerivativeJob {
-            artwork_dir: &state.artwork_dir,
+            runtime_cache: &state.runtime_cache_dir,
             source_path: &source_path,
             source_name: safe_name,
-            source_digest: source.digest,
+            source_identity,
             derived_dir: &derived_dir,
             derived_name: &derived_name,
             size,
@@ -574,6 +682,7 @@ fn derivative_fallback(
     admitted_artwork_response(
         source_path,
         source,
+        FALLBACK_CACHE_CONTROL,
         &[("vary", "Accept"), ("x-plurx-artwork", "original-fallback")],
     )
 }
@@ -589,6 +698,15 @@ fn with_response_header(
     response
 }
 
+/// `{source}-{bucket}-{digest32}.{ext}`.
+///
+/// The digest is what makes the key correct — a source whose bytes change mints
+/// a new one and nothing is ever served under a stale key. The *source
+/// filename* is what makes cleanup correct: it lets the orphan sweep ask "is
+/// this derivative's own source still referenced?" per derivative, instead of
+/// needing every referenced source's digest resolved before it may delete
+/// anything. `source` has already passed `safe_artwork_name`, so it contributes
+/// no path separator.
 fn derivative_filename(digest: [u8; 32], size: ArtworkSize, source: &str) -> Option<String> {
     let extension = FsPath::new(source)
         .extension()?
@@ -600,15 +718,14 @@ fn derivative_filename(digest: [u8; 32], size: ArtworkSize, source: &str) -> Opt
         _ => return None,
     };
     Some(format!(
-        "{}-{}.{}",
-        &hex::encode(digest)[..32],
+        "{source}-{}-{}.{extension}",
         size.label(),
-        extension
+        &hex::encode(digest)[..32],
     ))
 }
 
 async fn ensure_derived_dir(artwork_dir: &FsPath) -> Result<std::path::PathBuf, std::io::Error> {
-    let path = artwork_dir.join("derived");
+    let path = artwork_dir.join(DERIVED_DIR);
     match tokio::fs::create_dir(&path).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -625,10 +742,13 @@ async fn ensure_derived_dir(artwork_dir: &FsPath) -> Result<std::path::PathBuf, 
 
 #[derive(Clone, Copy)]
 struct DerivativeJob<'a> {
-    artwork_dir: &'a FsPath,
+    /// Disposable ffmpeg bookkeeping. Never the served artwork root: that one
+    /// is enumerated by the orphan walker, and library-created cache entries
+    /// do not belong inside it.
+    runtime_cache: &'a FsPath,
     source_path: &'a FsPath,
     source_name: &'a str,
-    source_digest: [u8; 32],
+    source_identity: ArtworkFileIdentity,
     derived_dir: &'a FsPath,
     derived_name: &'a str,
     size: ArtworkSize,
@@ -647,10 +767,10 @@ async fn generate_derivative_with_bin(
     ffmpeg_bin: &str,
 ) -> Result<(), String> {
     let DerivativeJob {
-        artwork_dir,
+        runtime_cache,
         source_path,
         source_name,
-        source_digest,
+        source_identity,
         derived_dir,
         derived_name,
         size,
@@ -667,23 +787,14 @@ async fn generate_derivative_with_bin(
     };
     let temporary = format!(".{derived_name}.{}.tmp", uuid::Uuid::new_v4().simple());
     let temporary_path = derived_dir.join(&temporary);
-    let mut command = tokio::process::Command::new(ffmpeg_bin);
-    command.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"]);
-    command.arg(source_path);
-    command.args([
-        "-vf",
-        &format!(
-            "scale='min({},iw)':-2:flags=lanczos",
-            size.width().expect("derivative width")
-        ),
-        "-frames:v",
-        "1",
-    ]);
-    if matches!(extension, "jpg" | "jpeg") {
-        command.args(["-q:v", "3"]);
-    }
-    command.args(["-f", "image2pipe", "-vcodec", codec, "pipe:1"]);
-    crate::transcode::configure_ffmpeg_runtime(&mut command, artwork_dir);
+    let mut command = derivative_command(
+        ffmpeg_bin,
+        source_path,
+        runtime_cache,
+        size,
+        extension,
+        codec,
+    );
     let child = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(&mut command)
         .map_err(|error| error.to_string())?;
     let generated = tokio::time::timeout(
@@ -705,17 +816,25 @@ async fn generate_derivative_with_bin(
         return Err(error);
     }
 
-    let source_still_matches = match read_verified_local_artwork(
-        coordinator,
-        source_path.to_path_buf(),
-        source_name,
-    )
-    .await
-    {
-        LocalArtworkRead::Verified(bytes) => bytes.digest == source_digest,
-        _ => false,
+    // Fence the rename against the identity of the file whose bytes named this
+    // derivative — not against a second read of it. The caller still holds its
+    // admitted read, so a re-read would draw the byte budget twice for one
+    // file, and a `Capacity` refusal from that second read is indistinguishable
+    // from a real change: it discarded a correct derivative, logged a false
+    // diagnosis, and left the next request to spend another five seconds of
+    // ffmpeg on the same work. One `open` plus `fstat` is enough, because M1's
+    // identity is exactly what any replacement moves — `install_artwork` writes
+    // temp+rename so a new inode, and an in-place write moves ctime. A source
+    // that has gone away counts as changed.
+    let source_unchanged = match open_local_artwork(source_path.to_path_buf()).await {
+        Some(opened) => opened.identity == source_identity,
+        None => false,
     };
-    if !source_still_matches {
+    if !source_unchanged {
+        tracing::debug!(
+            filename = source_name,
+            "artwork source replaced during derivative generation"
+        );
         remove_derivative_temporary(&temporary_path).await;
         return Err("source changed during derivative generation".to_owned());
     }
@@ -723,8 +842,42 @@ async fn generate_derivative_with_bin(
         remove_derivative_temporary(&temporary_path).await;
         return Err(error.to_string());
     }
+    // The key is new by construction, but a regenerated key that a sweep had
+    // reclaimed must not be answered from the entry its old inode left behind.
     coordinator.forget(derived_name).await;
+    #[cfg(test)]
+    coordinator.derivations.fetch_add(1, Ordering::SeqCst);
     Ok(())
+}
+
+/// The resize child, built separately so a test can read back the runtime it
+/// will be given without spawning one.
+fn derivative_command(
+    ffmpeg_bin: &str,
+    source_path: &FsPath,
+    runtime_cache: &FsPath,
+    size: ArtworkSize,
+    extension: &str,
+    codec: &str,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(ffmpeg_bin);
+    command.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"]);
+    command.arg(source_path);
+    command.args([
+        "-vf",
+        &format!(
+            "scale='min({},iw)':-2:flags=lanczos",
+            size.width().expect("derivative width")
+        ),
+        "-frames:v",
+        "1",
+    ]);
+    if matches!(extension, "jpg" | "jpeg") {
+        command.args(["-q:v", "3"]);
+    }
+    command.args(["-f", "image2pipe", "-vcodec", codec, "pipe:1"]);
+    crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
+    command
 }
 
 async fn remove_derivative_temporary(path: &FsPath) {
@@ -991,6 +1144,7 @@ where
     Ok(Some(AdmittedArtworkBytes {
         bytes,
         digest,
+        identity: None,
         _permit: permit,
     }))
 }
@@ -1011,7 +1165,12 @@ async fn serve_local_artwork(
     match read_verified_local_artwork(coordinator, path.clone(), filename).await {
         LocalArtworkRead::Verified(bytes) => {
             record_request(route, ArtworkOutcome::Hit);
-            Ok(admitted_artwork_response(&path, bytes, &[]))
+            Ok(admitted_artwork_response(
+                &path,
+                bytes,
+                ARTWORK_CACHE_CONTROL,
+                &[],
+            ))
         }
         LocalArtworkRead::Corrupt(identity) => {
             coordinator.forget(filename).await;
@@ -1103,6 +1262,7 @@ async fn read_verified_local_artwork(
     LocalArtworkRead::Verified(AdmittedArtworkBytes {
         bytes,
         digest,
+        identity: Some(identity),
         _permit: permit,
     })
 }
@@ -1239,6 +1399,11 @@ fn safe_artwork_name(filename: &str) -> Result<&str, ApiError> {
 struct AdmittedArtworkBytes {
     bytes: Vec<u8>,
     digest: [u8; 32],
+    /// The identity of the local file these bytes were read from, when they
+    /// came from one. `None` for a peer response that has just been
+    /// materialized: there is no local read behind it, so nothing here may be
+    /// used to fence work against the file on disk.
+    identity: Option<ArtworkFileIdentity>,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -1251,22 +1416,30 @@ impl AsRef<[u8]> for AdmittedArtworkBytes {
 fn admitted_artwork_response(
     path: &FsPath,
     bytes: AdmittedArtworkBytes,
+    cache_control: &'static str,
     extra_headers: &[(&'static str, &'static str)],
 ) -> Response {
     let digest = bytes.digest;
-    artwork_response_bytes(path, bytes::Bytes::from_owner(bytes), digest, extra_headers)
+    artwork_response_bytes(
+        path,
+        bytes::Bytes::from_owner(bytes),
+        digest,
+        cache_control,
+        extra_headers,
+    )
 }
 
 #[cfg(test)]
 fn artwork_response(path: &FsPath, bytes: Vec<u8>) -> Response {
     let digest = Sha256::digest(&bytes).into();
-    artwork_response_bytes(path, bytes.into(), digest, &[])
+    artwork_response_bytes(path, bytes.into(), digest, ARTWORK_CACHE_CONTROL, &[])
 }
 
 fn artwork_response_bytes(
     path: &FsPath,
     bytes: bytes::Bytes,
     digest: [u8; 32],
+    cache_control: &'static str,
     extra_headers: &[(&'static str, &'static str)],
 ) -> Response {
     let mime = mime_guess::from_path(path)
@@ -1276,10 +1449,7 @@ fn artwork_response_bytes(
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, mime),
-            (
-                header::CACHE_CONTROL,
-                "private, max-age=604800, immutable".to_owned(),
-            ),
+            (header::CACHE_CONTROL, cache_control.to_owned()),
         ],
         bytes,
     )
@@ -1302,7 +1472,7 @@ fn not_modified_artwork_response(digest: [u8; 32]) -> Response {
     let mut response = StatusCode::NOT_MODIFIED.into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("private, max-age=604800, immutable"),
+        HeaderValue::from_static(ARTWORK_CACHE_CONTROL),
     );
     response.headers_mut().insert(
         header::ETAG,
@@ -1945,16 +2115,51 @@ async fn sweep_content_orphans(state: &AppState, walker: &mut ArtworkOrphanWalke
     removed + sweep_derived_orphans(state).await
 }
 
-fn derivative_source_prefix(filename: &str) -> Option<&str> {
+/// A derivative filename decomposed back into the facts the sweep needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DerivativeName<'a> {
+    /// The source artwork filename this derivative was made from.
+    source: &'a str,
+    /// The first 32 hex characters of the source digest at generation time.
+    prefix: &'a str,
+}
+
+fn parse_derivative_name(filename: &str) -> Option<DerivativeName<'_>> {
     let (stem, extension) = filename.rsplit_once('.')?;
     if !matches!(extension, "jpg" | "jpeg" | "png" | "webp") {
         return None;
     }
-    let (prefix, bucket) = stem.rsplit_once('-')?;
-    (prefix.len() == 32
+    let (stem, prefix) = stem.rsplit_once('-')?;
+    if prefix.len() != 32 || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let (source, bucket) = stem.rsplit_once('-')?;
+    if !matches!(bucket, "w300" | "w500" | "w780") {
+        return None;
+    }
+    // A derivative always names a plain child of the artwork root.
+    (!source.is_empty() && !source.contains('/') && !source.contains('\\'))
+        .then_some(DerivativeName { source, prefix })
+}
+
+/// The pre-review derivative layout, `{digest32}-{bucket}.{ext}`, which carried
+/// no source filename. Nothing in the current code writes one, and nothing
+/// would ever match one to a source again, so a node that ran an earlier build
+/// of this branch would keep them forever. Recognise the shape so the sweep can
+/// reclaim them once past the grace.
+fn superseded_derivative_name(filename: &str) -> bool {
+    let Some((stem, extension)) = filename.rsplit_once('.') else {
+        return false;
+    };
+    if !matches!(extension, "jpg" | "jpeg" | "png" | "webp") {
+        return false;
+    }
+    let Some((prefix, bucket)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    prefix.len() == 32
         && prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && matches!(bucket, "w300" | "w500" | "w780"))
-    .then_some(prefix)
+        && matches!(bucket, "w300" | "w500" | "w780")
 }
 
 async fn sweep_derived_orphans(state: &AppState) -> usize {
@@ -1962,32 +2167,33 @@ async fn sweep_derived_orphans(state: &AppState) -> usize {
         return 0;
     };
     let cached = state.artwork_fetch.verified_snapshot().await;
-    let mut live = BTreeSet::new();
-    let mut has_unverified_legacy = false;
+    // Per-source retention, as the plan specifies. Each referenced source maps
+    // to the digest prefix its live bytes have *if that is knowable*: from the
+    // filename for the two content-addressed families, from the M1 verified
+    // cache for a legacy name, and `None` for a legacy name nothing has
+    // verified since boot. `None` retains that one source's derivatives and
+    // says nothing about any other source — previously a single such filename
+    // returned early and disabled the whole sweep for the life of the process,
+    // which on a library holding one `{item}-poster.jpg` is every pass after
+    // every restart.
+    let mut referenced = BTreeMap::<String, Option<String>>::new();
     for reference in artwork_references(items) {
-        match content_addressed_artwork_digest(&reference.filename) {
-            Some(ArtworkContentDigest::Prefix16(prefix)) => {
-                live.insert(prefix.to_ascii_lowercase());
-            }
+        let prefix = match content_addressed_artwork_digest(&reference.filename) {
+            // Sixteen hex characters is all this family publishes, so the
+            // comparison narrows to sixteen for every family. Comparing the
+            // name's sixteen against a derivative's thirty-two matched nothing
+            // and swept every live backdrop derivative once past the grace.
+            Some(ArtworkContentDigest::Prefix16(prefix)) => Some(prefix.to_ascii_lowercase()),
             Some(ArtworkContentDigest::Full64(digest)) => {
-                live.insert(digest[..32].to_ascii_lowercase());
+                Some(digest[..DERIVATIVE_PREFIX_MATCH].to_ascii_lowercase())
             }
-            None => match cached.get(&reference.filename) {
-                Some(digest) => {
-                    live.insert(hex::encode(digest)[..32].to_owned());
-                }
-                None => has_unverified_legacy = true,
-            },
-        }
+            None => cached
+                .get(&reference.filename)
+                .map(|digest| hex::encode(digest)[..DERIVATIVE_PREFIX_MATCH].to_owned()),
+        };
+        referenced.insert(reference.filename, prefix);
     }
-    // A legacy filename carries no source digest. Until every referenced
-    // legacy source has entered the verified cache there is no safe way to
-    // distinguish its derivative from an orphan, so retain the uncertain
-    // files. Re-deriving is cheap; deleting a live grid cache blindly is not.
-    if has_unverified_legacy {
-        return 0;
-    }
-    let derived_dir = state.artwork_dir.join("derived");
+    let derived_dir = state.artwork_dir.join(DERIVED_DIR);
     let Ok(mut entries) = tokio::fs::read_dir(&derived_dir).await else {
         return 0;
     };
@@ -2003,10 +2209,7 @@ async fn sweep_derived_orphans(state: &AppState) -> usize {
         let Some(filename) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        let Some(prefix) = derivative_source_prefix(&filename) else {
-            continue;
-        };
-        if live.contains(&prefix.to_ascii_lowercase()) {
+        if !derived_entry_is_reclaimable(&filename, &referenced) {
             continue;
         }
         let Ok(metadata) = tokio::fs::symlink_metadata(entry.path()).await else {
@@ -2028,6 +2231,46 @@ async fn sweep_derived_orphans(state: &AppState) -> usize {
         }
     }
     removed
+}
+
+/// Whether one entry of `derived/` may be reclaimed once it is past the grace.
+///
+/// `referenced` maps every source filename the catalogue still points at to the
+/// first [`DERIVATIVE_PREFIX_MATCH`] hex characters of its live digest, or to
+/// `None` when that digest is not yet known on this node.
+fn derived_entry_is_reclaimable(
+    filename: &str,
+    referenced: &BTreeMap<String, Option<String>>,
+) -> bool {
+    // An interrupted generation — SIGKILL, panic, deploy restart — leaves its
+    // `.{derived_name}.{uuid}.tmp` behind. `sweep_content_orphans` walks only
+    // the artwork root and never descends here, so nothing else would ever
+    // remove one, and each costs up to `MAX_ARTWORK_BYTES`.
+    if temporary_artwork_orphan_name(filename) {
+        return true;
+    }
+    if superseded_derivative_name(filename) {
+        return true;
+    }
+    let Some(derivative) = parse_derivative_name(filename) else {
+        // Not something this node writes. Leave it alone rather than delete a
+        // file whose purpose is unknown.
+        return false;
+    };
+    match referenced.get(derivative.source) {
+        // The source itself is gone from the catalogue, so every derivative of
+        // it is dead regardless of any digest.
+        None => true,
+        // The source is referenced but nothing has verified its bytes since
+        // boot. Keeping a dead derivative costs disk; deleting a live one costs
+        // a re-derive on a grid that is asking for it now.
+        Some(None) => false,
+        // The source is referenced and its live digest is known: this
+        // derivative is dead exactly when it was made from other bytes.
+        Some(Some(live)) => {
+            !derivative.prefix[..DERIVATIVE_PREFIX_MATCH].eq_ignore_ascii_case(live)
+        }
+    }
 }
 
 /// How much of a reconciliation pass this node may run.
@@ -2694,18 +2937,62 @@ mod tests {
 
     #[test]
     fn derivative_key_is_the_verified_source_digest() {
+        // Both sides of every assertion here are written out, not derived from
+        // the same expression as the value under test: an assertion that
+        // recomputes `[..32]` from `hex::encode(first)` holds whatever prefix
+        // width the code actually uses, and so could not have caught the
+        // sweep's 16-against-32 comparison.
         let first: [u8; 32] = Sha256::digest(b"first legacy bytes").into();
         let second: [u8; 32] = Sha256::digest(b"second legacy bytes").into();
         let first_key =
             derivative_filename(first, ArtworkSize::W500, "84-poster.jpg").expect("first key");
         let second_key =
             derivative_filename(second, ArtworkSize::W500, "84-poster.jpg").expect("second key");
-        assert_ne!(first_key, second_key);
-        assert!(first_key.ends_with("-w500.jpg"));
         assert_eq!(
-            derivative_source_prefix(&first_key),
-            Some(&hex::encode(first)[..32])
+            first_key, "84-poster.jpg-w500-107457d3b119e162368e875adc2c8cf3.jpg",
+            "the key names its source and the first 32 hex characters of the source digest"
         );
+        assert_eq!(
+            second_key,
+            "84-poster.jpg-w500-9343c668c053f08a3e30c21aa418332f.jpg"
+        );
+        assert_ne!(first_key, second_key, "changed source bytes mint a new key");
+
+        let parsed = parse_derivative_name(&first_key).expect("parse");
+        assert_eq!(parsed.source, "84-poster.jpg");
+        assert_eq!(parsed.prefix, "107457d3b119e162368e875adc2c8cf3");
+        // The comparison width the sweep uses has to be one a `-c{16hex}`
+        // source can supply.
+        assert_eq!(DERIVATIVE_PREFIX_MATCH, 16);
+        assert_eq!(
+            &parsed.prefix[..DERIVATIVE_PREFIX_MATCH],
+            "107457d3b119e162"
+        );
+
+        // A `{item}-{kind}-c{16hex}` source publishes exactly the sixteen
+        // characters the sweep compares, and a derivative of it round-trips.
+        let backdrop = format!("84-backdrop-c{}.jpg", "107457d3b119e162");
+        let backdrop_key =
+            derivative_filename(first, ArtworkSize::W780, &backdrop).expect("backdrop key");
+        let parsed = parse_derivative_name(&backdrop_key).expect("parse backdrop");
+        assert_eq!(parsed.source, backdrop);
+        assert_eq!(
+            &parsed.prefix[..DERIVATIVE_PREFIX_MATCH],
+            "107457d3b119e162"
+        );
+
+        assert_eq!(parse_derivative_name("84-poster.jpg"), None);
+        assert_eq!(
+            parse_derivative_name(&format!(
+                "84-poster.jpg-w999-{}.jpg",
+                "107457d3b119e162368e875adc2c8cf3"
+            )),
+            None
+        );
+        assert!(superseded_derivative_name(
+            "107457d3b119e162368e875adc2c8cf3-w300.jpg"
+        ));
+        assert!(!superseded_derivative_name(&first_key));
     }
 
     #[cfg(unix)]
@@ -2725,13 +3012,17 @@ mod tests {
         let digest: [u8; 32] = Sha256::digest(source).into();
         let derived_name =
             derivative_filename(digest, ArtworkSize::W300, source_name).expect("derivative name");
+        let source_identity = open_local_artwork(source_path.clone())
+            .await
+            .expect("source identity")
+            .identity;
         generate_derivative_with_bin(
             &coordinator,
             DerivativeJob {
-                artwork_dir: directory.path(),
+                runtime_cache: directory.path(),
                 source_path: &source_path,
                 source_name,
-                source_digest: digest,
+                source_identity,
                 derived_dir: &derived_dir,
                 derived_name: &derived_name,
                 size: ArtworkSize::W300,
@@ -2788,13 +3079,17 @@ mod tests {
             .expect("derived directory");
         let derived_name =
             derivative_filename(digest, ArtworkSize::W300, source_name).expect("derivative name");
+        let source_identity = open_local_artwork(source_path.clone())
+            .await
+            .expect("source identity")
+            .identity;
         generate_derivative(
             &coordinator,
             DerivativeJob {
-                artwork_dir: directory.path(),
+                runtime_cache: directory.path(),
                 source_path: &source_path,
                 source_name,
-                source_digest: digest,
+                source_identity,
                 derived_dir: &derived_dir,
                 derived_name: &derived_name,
                 size: ArtworkSize::W300,
@@ -3259,6 +3554,617 @@ mod tests {
             bytes
         );
         server.abort();
+    }
+
+    // ---- M2 derivative route ------------------------------------------------
+    // `serve_derivative` needs a real `AppState`: the store behind the orphan
+    // sweep, the artwork root, and the dedicated runtime cache the child runs
+    // against.
+    fn derivative_state() -> AppState {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let base = crate::test_temp_path(format!("plurx-derived-{}", uuid::Uuid::new_v4()));
+        let dirs = crate::state::Dirs {
+            artwork: base.join("artwork"),
+            transcode: base.join("transcode"),
+            cache: base.join("cache"),
+            subs: base.join("subs"),
+            runtime_cache: base.join("runtime"),
+            renditions: base.join("renditions"),
+        };
+        std::fs::create_dir_all(&dirs.artwork).expect("artwork directory");
+        AppState::new(
+            "test".into(),
+            Arc::new(store),
+            dirs,
+            "test-node".into(),
+            Default::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        )
+    }
+
+    /// One real image, written by the shipped ffmpeg, as the plan's §5.2
+    /// "generated fixtures only" requires.
+    fn write_test_image(path: &FsPath, source: &str, extra: &[&str]) {
+        let mut command = std::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+        command.args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            source,
+        ]);
+        command.args(extra);
+        command.args(["-y"]).arg(path);
+        let status = command.status().expect("fixture ffmpeg");
+        assert!(status.success(), "fixture ffmpeg failed for {source}");
+    }
+
+    async fn response_body(response: Response) -> Vec<u8> {
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body")
+            .to_vec()
+    }
+
+    fn header_value(response: &Response, name: &str) -> Option<String> {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    }
+
+    #[tokio::test]
+    async fn a_failed_ffmpeg_serves_the_original() {
+        // Bytes no decoder will accept, so the real child exits non-zero and
+        // the handler takes its fallback path.
+        let state = derivative_state();
+        let source_name = "84-poster.jpg";
+        let original = b"\xff\xd8\xff not actually a JPEG".to_vec();
+        tokio::fs::write(state.artwork_dir.join(source_name), &original)
+            .await
+            .expect("source");
+
+        let response = serve_derivative(&state, source_name, &HeaderMap::new(), ArtworkSize::W300)
+            .await
+            .expect("a failed resize must not break the grid");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header_value(&response, "x-plurx-artwork").as_deref(),
+            Some("original-fallback")
+        );
+        // The heart of it: these are the *original* bytes under a `?size=`
+        // URL. Caching them as `immutable` for a week would make every cold
+        // grid load poison its own cache with the full-size image and never
+        // ask for the derivative that generation will eventually produce.
+        assert_eq!(
+            header_value(&response, "cache-control").as_deref(),
+            Some("private, max-age=0, must-revalidate"),
+            "a substituted original must revalidate, not be frozen for a week"
+        );
+        assert_eq!(response_body(response).await, original);
+        assert!(!state
+            .artwork_dir
+            .join(DERIVED_DIR)
+            .join("84-poster.jpg-w300")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn derivatives_are_single_flight() {
+        let state = derivative_state();
+        let source_name = "84-backdrop.png";
+        let source_path = state.artwork_dir.join(source_name);
+        write_test_image(&source_path, "testsrc2=size=1280x720", &["-frames:v", "1"]);
+
+        let headers = HeaderMap::new();
+        let requests =
+            (0..10).map(|_| serve_derivative(&state, source_name, &headers, ArtworkSize::W300));
+        let responses = futures_util::future::join_all(requests).await;
+        for response in responses {
+            let response = response.expect("derivative");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                header_value(&response, "x-plurx-artwork"),
+                None,
+                "ten concurrent first requests must not fall back"
+            );
+        }
+        assert_eq!(
+            state.artwork_fetch.derivations.load(Ordering::SeqCst),
+            1,
+            "the keyed single-flight must collapse concurrent misses into one ffmpeg run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_warm_derivative_hit_does_not_read_the_source() {
+        let state = derivative_state();
+        let source_name = "84-backdrop.png";
+        let source_path = state.artwork_dir.join(source_name);
+        write_test_image(&source_path, "testsrc2=size=1920x1080", &["-frames:v", "1"]);
+        let source_kib = tokio::fs::metadata(&source_path)
+            .await
+            .expect("source metadata")
+            .len()
+            .div_ceil(1024);
+
+        // Warm the derivative and both verified-digest entries.
+        let first = serve_derivative(&state, source_name, &HeaderMap::new(), ArtworkSize::W300)
+            .await
+            .expect("first request generates");
+        assert_eq!(first.status(), StatusCode::OK);
+        let etag = header_value(&first, "etag").expect("derivative ETag");
+        let derived_len = response_body(first).await.len() as u64;
+        assert!(
+            derived_len.div_ceil(1024) < source_kib,
+            "the fixture must shrink, or this test proves nothing"
+        );
+
+        // Leave exactly one KiB less budget than the source needs. Anything
+        // that reads the original now is refused; the derivative still fits.
+        let held = state
+            .artwork_fetch
+            .local_permit((LOCAL_READ_BUDGET_KIB as u64 - (source_kib - 1)) * 1024)
+            .await
+            .expect("squeeze the byte budget");
+        assert!(
+            state
+                .artwork_fetch
+                .local_permit(source_kib * 1024)
+                .await
+                .is_none(),
+            "the remaining budget must be too small for the original"
+        );
+
+        let warm = serve_derivative(&state, source_name, &HeaderMap::new(), ArtworkSize::W300)
+            .await
+            .expect("a warm derivative must not need the original's byte budget");
+        assert_eq!(warm.status(), StatusCode::OK);
+        assert_eq!(response_body(warm).await.len() as u64, derived_len);
+
+        // Plan objective 3 on the route M2 exists for: a validator match costs
+        // no read and no permit.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, etag.parse().expect("validator"));
+        let not_modified = serve_derivative(&state, source_name, &headers, ArtworkSize::W300)
+            .await
+            .expect("conditional derivative request");
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            header_value(&not_modified, "etag").as_deref(),
+            Some(etag.as_str())
+        );
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn peer_route_refuses_size() {
+        let state = derivative_state();
+        let source_name = "84-poster.jpg";
+        let original = b"\xff\xd8\xff peer original".to_vec();
+        tokio::fs::write(state.artwork_dir.join(source_name), &original)
+            .await
+            .expect("source");
+
+        let refused =
+            serve_verified_peer_artwork(&state, source_name, Some("w300"), &HeaderMap::new())
+                .await
+                .expect_err("peers replicate originals and derive locally");
+        assert!(
+            matches!(refused, ApiError::BadRequest(_)),
+            "a bucket on the cluster route is a 400, not a silent original"
+        );
+
+        let served = serve_verified_peer_artwork(&state, source_name, None, &HeaderMap::new())
+            .await
+            .expect("the peer route still serves originals");
+        assert_eq!(served.status(), StatusCode::OK);
+        assert_eq!(response_body(served).await, original);
+        assert!(
+            !state.artwork_dir.join(DERIVED_DIR).exists(),
+            "the peer route must not create a derivative store"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_animated_gif_yields_one_png_frame() {
+        let state = derivative_state();
+        let source_name = "84-poster.gif";
+        let source_path = state.artwork_dir.join(source_name);
+        write_test_image(
+            &source_path,
+            "testsrc2=size=640x360:rate=10",
+            &["-frames:v", "20"],
+        );
+        let source_identity = open_local_artwork(source_path.clone())
+            .await
+            .expect("source identity")
+            .identity;
+        let digest: [u8; 32] =
+            Sha256::digest(tokio::fs::read(&source_path).await.expect("gif")).into();
+        let derived_name =
+            derivative_filename(digest, ArtworkSize::W300, source_name).expect("derived name");
+        assert!(
+            derived_name.ends_with(".png"),
+            "an animated source must not stay a GIF: {derived_name}"
+        );
+        let derived_dir = ensure_derived_dir(&state.artwork_dir)
+            .await
+            .expect("derived directory");
+        generate_derivative(
+            &state.artwork_fetch,
+            DerivativeJob {
+                runtime_cache: &state.runtime_cache_dir,
+                source_path: &source_path,
+                source_name,
+                source_identity,
+                derived_dir: &derived_dir,
+                derived_name: &derived_name,
+                size: ArtworkSize::W300,
+            },
+        )
+        .await
+        .expect("generate from an animated GIF");
+        let derived = tokio::fs::read(derived_dir.join(&derived_name))
+            .await
+            .expect("derived bytes");
+        assert_eq!(&derived[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(image_dimensions(&derived_name, &derived), Some((300, 168)));
+    }
+
+    #[tokio::test]
+    async fn an_alpha_png_stays_png() {
+        let state = derivative_state();
+        let source_name = "84-poster.png";
+        let source_path = state.artwork_dir.join(source_name);
+        write_test_image(
+            &source_path,
+            "color=c=red@0.5:s=640x360",
+            &["-frames:v", "1", "-pix_fmt", "rgba"],
+        );
+        let source = tokio::fs::read(&source_path).await.expect("source");
+        // IHDR colour type 6 is truecolour with alpha; the fixture must have
+        // one or the assertion below proves nothing.
+        assert_eq!(source[25], 6, "the fixture source must carry alpha");
+        let source_identity = open_local_artwork(source_path.clone())
+            .await
+            .expect("source identity")
+            .identity;
+        let digest: [u8; 32] = Sha256::digest(&source).into();
+        let derived_name =
+            derivative_filename(digest, ArtworkSize::W500, source_name).expect("derived name");
+        assert!(derived_name.ends_with(".png"));
+        let derived_dir = ensure_derived_dir(&state.artwork_dir)
+            .await
+            .expect("derived directory");
+        generate_derivative(
+            &state.artwork_fetch,
+            DerivativeJob {
+                runtime_cache: &state.runtime_cache_dir,
+                source_path: &source_path,
+                source_name,
+                source_identity,
+                derived_dir: &derived_dir,
+                derived_name: &derived_name,
+                size: ArtworkSize::W500,
+            },
+        )
+        .await
+        .expect("generate from an alpha PNG");
+        let derived = tokio::fs::read(derived_dir.join(&derived_name))
+            .await
+            .expect("derived bytes");
+        assert_eq!(&derived[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(
+            derived[25], 6,
+            "an alpha source must keep its alpha channel, or the grid gains black corners"
+        );
+        assert_eq!(image_dimensions(&derived_name, &derived), Some((500, 282)));
+    }
+
+    #[tokio::test]
+    async fn a_source_replaced_during_generation_is_not_committed() {
+        let state = derivative_state();
+        let source_name = "84-poster.png";
+        let source_path = state.artwork_dir.join(source_name);
+        write_test_image(&source_path, "color=c=red:s=640x360", &["-frames:v", "1"]);
+        let stale_identity = open_local_artwork(source_path.clone())
+            .await
+            .expect("identity")
+            .identity;
+        let derived_dir = ensure_derived_dir(&state.artwork_dir)
+            .await
+            .expect("derived directory");
+        let derived_name =
+            derivative_filename([7_u8; 32], ArtworkSize::W300, source_name).expect("derived name");
+        // Replace the source with a *decodable* image through the same
+        // temp+rename install path a repair uses. Undecodable bytes would stop
+        // the child on their own and prove nothing about the fence; these let
+        // ffmpeg succeed, so only the identity check can refuse the rename.
+        let replacement = state.artwork_dir.join("replacement.png");
+        write_test_image(
+            &replacement,
+            "color=c=yellow:s=800x450",
+            &["-frames:v", "1"],
+        );
+        let replacement_bytes = tokio::fs::read(&replacement).await.expect("replacement");
+        plurx_core::metadata::write_artwork_atomically(&source_path, &replacement_bytes)
+            .await
+            .expect("replace source");
+        generate_derivative(
+            &state.artwork_fetch,
+            DerivativeJob {
+                runtime_cache: &state.runtime_cache_dir,
+                source_path: &source_path,
+                source_name,
+                source_identity: stale_identity,
+                derived_dir: &derived_dir,
+                derived_name: &derived_name,
+                size: ArtworkSize::W300,
+            },
+        )
+        .await
+        .expect_err("a replaced source must not commit a derivative under the old key");
+        assert!(!derived_dir.join(&derived_name).exists());
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_byte_budget_does_not_look_like_a_changed_source() {
+        let state = derivative_state();
+        let source_name = "84-poster.png";
+        let source_path = state.artwork_dir.join(source_name);
+        write_test_image(&source_path, "color=c=blue:s=640x360", &["-frames:v", "1"]);
+        let source_identity = open_local_artwork(source_path.clone())
+            .await
+            .expect("identity")
+            .identity;
+        let digest: [u8; 32] =
+            Sha256::digest(tokio::fs::read(&source_path).await.expect("src")).into();
+        let derived_dir = ensure_derived_dir(&state.artwork_dir)
+            .await
+            .expect("derived directory");
+        let derived_name =
+            derivative_filename(digest, ArtworkSize::W300, source_name).expect("derived name");
+
+        // Every local byte permit is spoken for, exactly as sixteen concurrent
+        // backdrop requests would leave it. The post-generation fence must not
+        // read the source of truth a second time here: the caller already holds
+        // the admitted read that produced this key, and a refusal from a second
+        // read is not evidence that anything changed.
+        let held = state
+            .artwork_fetch
+            .local_permit(LOCAL_READ_BUDGET_KIB as u64 * 1024)
+            .await
+            .expect("hold the whole byte budget");
+        generate_derivative(
+            &state.artwork_fetch,
+            DerivativeJob {
+                runtime_cache: &state.runtime_cache_dir,
+                source_path: &source_path,
+                source_name,
+                source_identity,
+                derived_dir: &derived_dir,
+                derived_name: &derived_name,
+                size: ArtworkSize::W300,
+            },
+        )
+        .await
+        .expect("a saturated byte budget must not discard a correct derivative");
+        assert!(
+            derived_dir.join(&derived_name).is_file(),
+            "the generation must commit and make forward progress"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn the_derivative_child_caches_in_the_runtime_cache_not_the_artwork_root() {
+        // `XDG_CACHE_HOME` decides where libraries loaded by ffmpeg write their
+        // bookkeeping. Pointed at the served artwork root it puts
+        // library-created files inside the directory `sweep_content_orphans`
+        // enumerates every pass; `state.rs` keeps `runtime_cache` separate
+        // precisely so scratch cleanup cannot reach another managed root.
+        let artwork = FsPath::new("/var/lib/plurx/artwork");
+        let runtime_cache = FsPath::new("/var/lib/plurx/runtime");
+        let command = derivative_command(
+            "ffmpeg",
+            &artwork.join("84-poster.jpg"),
+            runtime_cache,
+            ArtworkSize::W300,
+            "jpg",
+            "mjpeg",
+        );
+        let cache_home = command
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new("XDG_CACHE_HOME"))
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from)
+            .expect("the child is given a cache home");
+        assert_eq!(cache_home, runtime_cache);
+        assert_ne!(cache_home, artwork);
+    }
+
+    #[tokio::test]
+    async fn the_derivative_child_leaves_nothing_in_the_served_artwork_root() {
+        // `XDG_CACHE_HOME` must be the dedicated runtime cache, never the
+        // directory `sweep_content_orphans` enumerates every pass.
+        let state = derivative_state();
+        let source_name = "84-poster.png";
+        let source_path = state.artwork_dir.join(source_name);
+        write_test_image(&source_path, "color=c=green:s=640x360", &["-frames:v", "1"]);
+        let response = serve_derivative(&state, source_name, &HeaderMap::new(), ArtworkSize::W300)
+            .await
+            .expect("derivative");
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+        let entries = std::fs::read_dir(&state.artwork_dir)
+            .expect("artwork entries")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            entries,
+            BTreeSet::from([source_name.to_owned(), DERIVED_DIR.to_owned()]),
+            "nothing but the source and the derivative store belongs in the artwork root"
+        );
+    }
+
+    async fn age_past_the_orphan_grace(path: &FsPath) {
+        let old = std::time::SystemTime::now()
+            .checked_sub(CONTENT_ORPHAN_GRACE + Duration::from_secs(60))
+            .expect("aged timestamp");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open candidate")
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .expect("age candidate");
+    }
+
+    #[tokio::test]
+    async fn orphaned_derivatives_are_swept_after_grace() {
+        let state = derivative_state();
+        let library = state
+            .store
+            .create_library(&plurx_core::domain::NewLibrary {
+                name: "Films".into(),
+                kind: plurx_core::domain::LibraryKind::Movies,
+                paths: vec!["/films".into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let mut item_ids = Vec::new();
+        for title in ["Live backdrop", "Unverified legacy", "Verified legacy"] {
+            item_ids.push(
+                state
+                    .store
+                    .insert_item(&plurx_core::domain::NewItem {
+                        library_id: library.id,
+                        kind: plurx_core::domain::ItemKind::Movie,
+                        parent_id: None,
+                        title: title.into(),
+                        year: Some(2024),
+                        season_number: None,
+                        episode_number: None,
+                    })
+                    .await
+                    .expect("item"),
+            );
+        }
+
+        // A content-addressed backdrop: the family that publishes only sixteen
+        // hex characters, and the one every TV hero uses.
+        let backdrop_bytes = b"live backdrop bytes";
+        let backdrop_digest: [u8; 32] = Sha256::digest(backdrop_bytes).into();
+        let backdrop = format!(
+            "{}-backdrop-c{}.jpg",
+            item_ids[0],
+            &hex::encode(backdrop_digest)[..16]
+        );
+        // A legacy source nothing has verified since boot.
+        let unverified = format!("{}-poster.jpg", item_ids[1]);
+        // A legacy source whose bytes have been verified, and whose derivative
+        // was made from a *previous* generation of those bytes.
+        let verified = format!("{}-poster.jpg", item_ids[2]);
+        let verified_bytes = b"current legacy poster bytes";
+        let verified_digest: [u8; 32] = Sha256::digest(verified_bytes).into();
+
+        for (item_id, poster, backdrop_path) in [
+            (item_ids[0], None, Some(backdrop.clone())),
+            (item_ids[1], Some(unverified.clone()), None),
+            (item_ids[2], Some(verified.clone()), None),
+        ] {
+            state
+                .store
+                .apply_metadata(
+                    item_id,
+                    &plurx_core::domain::MetadataPatch {
+                        poster_path: poster,
+                        backdrop_path,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("patch");
+        }
+
+        tokio::fs::write(state.artwork_dir.join(&verified), verified_bytes)
+            .await
+            .expect("verified source");
+        let identity = open_local_artwork(state.artwork_dir.join(&verified))
+            .await
+            .expect("identity")
+            .identity;
+        state
+            .artwork_fetch
+            .remember(&verified, identity, verified_digest)
+            .await;
+
+        let derived_dir = ensure_derived_dir(&state.artwork_dir)
+            .await
+            .expect("derived directory");
+        let live_backdrop = derivative_filename(backdrop_digest, ArtworkSize::W780, &backdrop)
+            .expect("backdrop derivative");
+        let live_unverified = derivative_filename([1_u8; 32], ArtworkSize::W300, &unverified)
+            .expect("unverified derivative");
+        let live_verified = derivative_filename(verified_digest, ArtworkSize::W500, &verified)
+            .expect("verified derivative");
+        let stale_verified = derivative_filename([2_u8; 32], ArtworkSize::W500, &verified)
+            .expect("stale derivative");
+        let unreferenced = derivative_filename([3_u8; 32], ArtworkSize::W300, "999-poster.jpg")
+            .expect("unreferenced derivative");
+        let stranded_temporary = format!(".{live_backdrop}.{}.tmp", uuid::Uuid::new_v4().simple());
+        let superseded = format!("{}-w300.jpg", "4".repeat(32));
+
+        let kept = [&live_backdrop, &live_unverified, &live_verified];
+        let removed = [
+            &stale_verified,
+            &unreferenced,
+            &stranded_temporary,
+            &superseded,
+        ];
+        for name in kept.iter().chain(removed.iter()) {
+            let path = derived_dir.join(name.as_str());
+            tokio::fs::write(&path, b"derived bytes")
+                .await
+                .expect("derivative");
+            age_past_the_orphan_grace(&path).await;
+        }
+
+        assert_eq!(
+            sweep_derived_orphans(&state).await,
+            removed.len(),
+            "exactly the dead derivatives are reclaimed"
+        );
+        for name in kept {
+            assert!(
+                derived_dir.join(name.as_str()).is_file(),
+                "a live derivative was swept: {name}"
+            );
+        }
+        for name in removed {
+            assert!(
+                !derived_dir.join(name.as_str()).exists(),
+                "a dead entry survived: {name}"
+            );
+        }
+
+        // Nothing is removed before the grace, and a fresh derivative of a
+        // source with no verified digest is not an orphan either.
+        let fresh = derivative_filename([5_u8; 32], ArtworkSize::W300, &unverified)
+            .expect("fresh derivative");
+        tokio::fs::write(derived_dir.join(&fresh), b"fresh")
+            .await
+            .expect("fresh derivative");
+        assert_eq!(sweep_derived_orphans(&state).await, 0);
+        assert!(derived_dir.join(&fresh).is_file());
     }
 }
 
