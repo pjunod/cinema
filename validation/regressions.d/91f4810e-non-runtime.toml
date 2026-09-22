@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["91f4810e"]
+reason = "Documentation only: this commit edits one row of docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md to move K-01 from unclaimed to claimed and record the model, session, branch and date. The audit reads it as corrective because the row's note contains the word restore. It changes no runtime code, no client, and no validation behavior."
+ignore = true
