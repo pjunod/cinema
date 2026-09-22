@@ -2532,10 +2532,15 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 326 -> 327 with S-08: the added `.status()` belongs to the `#[cfg(test)]`
 # fixture renderer in `decode_facts.rs`, which is awaited to completion before
 # the test that built it proceeds.
+# 332 -> 333 with K-04: the added `.status()` reads the `Response` an Axum
+# `oneshot` returned in `metrics_route_attribution_renders_fixed_labels_and_
+# scoped_store_counts`, which drives one in-process request through the
+# attribution middleware. It is an HTTP status read, not a command launch,
+# and the test owns no process and no producer.
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 332
+expected_occurrences = 333
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
