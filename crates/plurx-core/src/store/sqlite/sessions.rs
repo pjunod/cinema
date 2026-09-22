@@ -3525,9 +3525,9 @@ impl MediaSessionStore for SqliteStore {
                    LEFT JOIN media_sessions session
                      ON session.incarnation_id = pointer.current_incarnation_id
                   WHERE session.incarnation_id IS NULL OR session.state != 'active'
-                     OR session.lease_expires_at_ms <= ?3
-                  ORDER BY pointer.updated_at_ms, pointer.rowid LIMIT ?2)",
-                params![now_ms, MAINTENANCE_BATCH, retire_before],
+                     OR session.lease_expires_at_ms <= ?2
+                  ORDER BY pointer.updated_at_ms, pointer.rowid LIMIT ?1)",
+                params![MAINTENANCE_BATCH, retire_before],
             )?;
             // The ledger's own reaper, and the reason the preparation deadline
             // can be a single clock. The retirement above already ended any

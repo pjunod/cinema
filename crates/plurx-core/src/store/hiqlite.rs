@@ -61,7 +61,8 @@ use crate::error::StoreError;
 // offline package claims; v35-v40 add library channels, DVR, subject matching,
 // DVR event history, and the source video sample-entry fact; v41 adds typed
 // content-analysis diagnostics, fixed retry deadlines, identity-aware request
-// indexes, and durable repair receipts. Every additive step is applied through Raft before
+// indexes, and durable repair receipts; v43 retains source luminance facts.
+// Every additive step is applied through Raft before
 // the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
@@ -99,7 +100,11 @@ const DVR_EVENT_SCHEMA_VERSION: i64 = 39;
 const VIDEO_CODEC_TAG_SCHEMA_VERSION: i64 = 40;
 const CLASSIFICATION_SCHEMA_VERSION: i64 = 41;
 const CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION: i64 = 42;
-pub const AUTH_SCHEMA_VERSION: i64 = CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION;
+const FIELD_ORDER_SCHEMA_VERSION: i64 = 43;
+// S-07 drafted the luminance columns as v43; S-08's field-order column reached
+// main first, so the luminance step appends after it.
+const LUMINANCE_SCHEMA_VERSION: i64 = 44;
+pub const AUTH_SCHEMA_VERSION: i64 = LUMINANCE_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -141,6 +146,8 @@ const DVR_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERS
 const DVR_EVENT_SCHEMA_MIGRATION_SOURCE: i64 = SUBJECT_SCHEMA_VERSION;
 const VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE: i64 = DVR_EVENT_SCHEMA_VERSION;
 const CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE: i64 = CLASSIFICATION_SCHEMA_VERSION;
+const FIELD_ORDER_SCHEMA_MIGRATION_SOURCE: i64 = CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION;
+const LUMINANCE_SCHEMA_MIGRATION_SOURCE: i64 = FIELD_ORDER_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -739,6 +746,7 @@ impl StoreOperationMetrics {
 
 static STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
     LazyLock::new(StoreOperationMetrics::default);
+static STORE_VALIDATION_REFUSALS: AtomicU64 = AtomicU64::new(0);
 
 // The named P2f runner needs a production-equivalent control arm without
 // maintaining or rebuilding a historical binary. This switch exists only in
@@ -1009,7 +1017,19 @@ where
 /// SQLite mode leaves these series at zero. Rendering reads only atomics and
 /// cannot execute or wait on the Store operation it describes.
 pub fn prometheus_store_operations() -> String {
-    STORE_OPERATION_METRICS.render()
+    use std::fmt::Write;
+
+    let mut out = STORE_OPERATION_METRICS.render();
+    out.push_str(
+        "# HELP plurx_store_validation_refusals_total Replicated statements refused before store I/O.\n\
+         # TYPE plurx_store_validation_refusals_total counter\n",
+    );
+    let _ = writeln!(
+        out,
+        "plurx_store_validation_refusals_total {}",
+        STORE_VALIDATION_REFUSALS.load(Ordering::Relaxed)
+    );
+    out
 }
 
 /// The only application-facing path to hiqlite. Keeping the timeout at this
@@ -2531,6 +2551,46 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(FIELD_ORDER_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (super::FILES_FIELD_ORDER_COLUMN, params!()),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    FIELD_ORDER_SCHEMA_VERSION,
+                                    now,
+                                    FIELD_ORDER_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(FIELD_ORDER_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(LUMINANCE_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::FILES_LUMINANCE_COLUMNS
+                        .iter()
+                        .map(|sql| ((*sql).to_owned(), params!()))
+                        .collect::<Vec<_>>();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            LUMINANCE_SCHEMA_VERSION,
+                            now,
+                            LUMINANCE_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(LUMINANCE_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -3099,6 +3159,13 @@ impl crate::store::FragmentIndexStore for HiqliteAuthStore {
         self.telemetry
             .fragment_index(file_id, identity.clone())
             .await
+    }
+
+    async fn validate_fragment_index_page(
+        &self,
+        limit: u32,
+    ) -> Result<crate::store::FragmentIndexValidationBackfill, StoreError> {
+        self.telemetry.validate_fragment_index_page(limit).await
     }
 
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
@@ -4138,10 +4205,18 @@ impl Clock for SystemClock {
 }
 
 pub(super) fn validate_sql(sql: &str) -> Result<(), StoreError> {
-    ReplicatedSql::new(sql)
+    validate_sql_with_refusal_counter(sql, &STORE_VALIDATION_REFUSALS)
+}
+
+fn validate_sql_with_refusal_counter(sql: &str, refusals: &AtomicU64) -> Result<(), StoreError> {
+    let result = ReplicatedSql::new(sql)
         .map(|_| ())
-        .map_err(|error| StoreError::Database(error.to_string()))?;
-    validate_parameter_order(sql)
+        .map_err(|error| StoreError::Database(error.to_string()))
+        .and_then(|()| validate_parameter_order(sql));
+    if result.is_err() {
+        StoreOperationMetrics::saturating_add(refusals, 1);
+    }
+    result
 }
 
 /// hiqlite binds parameters with rusqlite's numeric parameter index. SQLite
@@ -4320,7 +4395,9 @@ fn schema_migration_action(
         | DVR_EVENT_SCHEMA_MIGRATION_SOURCE
         | VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE
         | VIDEO_CODEC_TAG_SCHEMA_VERSION
-        | CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE => {
+        | CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE
+        | FIELD_ORDER_SCHEMA_MIGRATION_SOURCE
+        | LUMINANCE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -5827,6 +5904,26 @@ mod tests {
             .expect_err("bracket quote cannot hide misordered placeholders");
     }
 
+    #[test]
+    fn validation_refusals_are_counted_once_before_io() {
+        let refusals = AtomicU64::new(0);
+        validate_sql_with_refusal_counter("SELECT $1", &refusals)
+            .expect("a valid statement is accepted");
+        assert_eq!(refusals.load(Ordering::Relaxed), 0);
+
+        validate_sql_with_refusal_counter("SELECT $2, $1", &refusals)
+            .expect_err("an out-of-order statement is refused");
+        assert_eq!(refusals.load(Ordering::Relaxed), 1);
+
+        validate_sql_with_refusal_counter("SELECT ?1", &refusals)
+            .expect_err("an unsupported placeholder is refused");
+        assert_eq!(refusals.load(Ordering::Relaxed), 2);
+
+        let exposition = prometheus_store_operations();
+        assert!(exposition.contains("# TYPE plurx_store_validation_refusals_total counter"));
+        assert!(exposition.contains("plurx_store_validation_refusals_total "));
+    }
+
     /// The binary that shipped before P6: it implements exactly protocol 4.
     const PREVIOUS_RELEASE: ClusterCompatibility = ClusterCompatibility {
         schema_version: AUTH_SCHEMA_VERSION,
@@ -6244,9 +6341,27 @@ mod tests {
             "v41 must advance exactly one step to the content-analysis repair schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 37,
+            FIELD_ORDER_SCHEMA_MIGRATION_SOURCE, CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION,
+            "the field-order migration must start from the exact v42 shape"
+        );
+        assert_eq!(
+            FIELD_ORDER_SCHEMA_MIGRATION_SOURCE + 1,
+            FIELD_ORDER_SCHEMA_VERSION,
+            "v42 must advance exactly one step to the field-order schema"
+        );
+        assert_eq!(
+            LUMINANCE_SCHEMA_MIGRATION_SOURCE, FIELD_ORDER_SCHEMA_VERSION,
+            "the luminance migration must start from the exact v43 shape"
+        );
+        assert_eq!(
+            LUMINANCE_SCHEMA_MIGRATION_SOURCE + 1,
+            LUMINANCE_SCHEMA_VERSION,
+            "v43 must advance exactly one step to the luminance schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 39,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v42 step"
+            "this implementation contains every additive v5→v44 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

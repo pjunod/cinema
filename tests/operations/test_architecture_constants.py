@@ -71,7 +71,9 @@ class ArchitectureConstantCase(unittest.TestCase):
             "tests/web/shell-source.js",
         ):
             self.assertIn(path, failure)
-        self.assertIn('must say "sixty-six"', failure)
+        # W-01 adds `web/core/errors.js`, so `WEB_ASSETS` is sixty-six at HEAD
+        # and the duplicated row above makes the synthetic read sixty-seven.
+        self.assertIn('must say "sixty-seven"', failure)
 
 
 if __name__ == "__main__":

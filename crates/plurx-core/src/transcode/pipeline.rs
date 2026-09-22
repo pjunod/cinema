@@ -25,6 +25,7 @@
 //! and only then lets a node use a graph (PERF-PLAN §5).
 
 use super::{Encoder, OutputGrade};
+use crate::domain::ScanType;
 
 /// The video path for one session, from decoded frames to the encoder's input.
 ///
@@ -497,6 +498,30 @@ impl Pipeline {
         }
     }
 
+    /// Session routing with the source scan contract included. Hardware
+    /// deinterlace is not admitted until a graph is qualified independently,
+    /// so known interlaced input uses the CPU filter chain.
+    pub fn for_session_with_scan(
+        proven: Pipeline,
+        encoder: Encoder,
+        hdr_format: Option<&str>,
+        heavy: bool,
+        burns_text_subtitles: bool,
+        scan_type: ScanType,
+    ) -> Pipeline {
+        match Pipeline::declined_with_scan(
+            proven,
+            encoder,
+            hdr_format,
+            heavy,
+            burns_text_subtitles,
+            scan_type,
+        ) {
+            Some(_) => Pipeline::Cpu,
+            None => proven,
+        }
+    }
+
     /// Why this session is not getting the graph the node proved, in words.
     ///
     /// `None` when it is getting it — or when there was nothing to decline,
@@ -541,6 +566,28 @@ impl Pipeline {
         None
     }
 
+    pub fn declined_with_scan(
+        proven: Pipeline,
+        encoder: Encoder,
+        hdr_format: Option<&str>,
+        heavy: bool,
+        burns_text_subtitles: bool,
+        scan_type: ScanType,
+    ) -> Option<&'static str> {
+        if matches!(scan_type, ScanType::Interlaced(_))
+            && matches!(
+                proven,
+                Pipeline::VppQsv
+                    | Pipeline::TonemapVaapi
+                    | Pipeline::Libplacebo
+                    | Pipeline::TonemapOpencl
+            )
+        {
+            return Some("interlaced source — hardware deinterlace has not passed qualification");
+        }
+        Self::declined(proven, encoder, hdr_format, heavy, burns_text_subtitles)
+    }
+
     /// The next thing to try when this pipeline fails at runtime.
     ///
     /// One step, and it goes straight to the CPU chain rather than down the
@@ -572,6 +619,7 @@ impl Pipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::FieldOrder;
 
     #[test]
     fn names_round_trip_and_are_unique() {
@@ -1036,6 +1084,44 @@ mod tests {
         assert_eq!(
             Pipeline::declined(Pipeline::Cpu, Encoder::Software, None, false, false),
             None
+        );
+    }
+
+    #[test]
+    fn interlaced_sources_decline_unqualified_gpu_filter_graphs() {
+        let scan_type = ScanType::Interlaced(FieldOrder::Tff);
+        let why = Pipeline::declined_with_scan(
+            Pipeline::VppQsv,
+            Encoder::Qsv,
+            Some("hdr10"),
+            true,
+            false,
+            scan_type,
+        )
+        .expect("interlaced graph is declined");
+        assert!(why.contains("hardware deinterlace"), "{why}");
+        assert_eq!(
+            Pipeline::for_session_with_scan(
+                Pipeline::VppQsv,
+                Encoder::Qsv,
+                Some("hdr10"),
+                true,
+                false,
+                scan_type,
+            ),
+            Pipeline::Cpu
+        );
+        assert_eq!(
+            Pipeline::for_session_with_scan(
+                Pipeline::VppQsv,
+                Encoder::Qsv,
+                Some("hdr10"),
+                true,
+                false,
+                ScanType::Unknown,
+            ),
+            Pipeline::VppQsv,
+            "unknown input must not opt into a destructive filter"
         );
     }
 
