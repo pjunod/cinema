@@ -19240,8 +19240,7 @@ impl TranscodeManager {
                 // reads workers before this registry, so it observes either the
                 // predecessor process or this settlement protection while the
                 // successor remains make-before-break provisional.
-                _predecessor_settlement: predecessor_session_id
-                    .map(SessionSettlementGuard::begin),
+                _predecessor_settlement: predecessor_session_id.map(SessionSettlementGuard::begin),
             });
         }
         Err(replacement_wait_error(
@@ -47138,7 +47137,10 @@ pub(crate) mod tests {
                 .await
             {
                 Ok(_) => panic!("attempt {attempt} reclaimed a healthy start's player"),
-                Err(error) => assert!(is_replacement_wait_error(&error), "attempt {attempt}: {error}"),
+                Err(error) => assert!(
+                    is_replacement_wait_error(&error),
+                    "attempt {attempt}: {error}"
+                ),
             }
         }
         drop(building);
