@@ -175,6 +175,10 @@ pub struct Caps {
     pub vcodec: Option<String>,
     /// Audio codecs, e.g. `aac,ac3,eac3,opus,flac`.
     pub acodec: Option<String>,
+    /// Current output-route channel ceiling for the legacy flat capability
+    /// shape. Omission preserves the codec-only behavior older clients use.
+    #[serde(default, deserialize_with = "deserialize_audio_channels")]
+    pub achannels: Option<u8>,
     /// Containers playable via `<video src>` (never mkv), e.g. `mp4,webm`.
     pub container: Option<String>,
     /// Max height to direct-play (omit = uncapped; a decodable 4K stream
@@ -237,6 +241,20 @@ pub struct Caps {
     pub caps_v2: Option<playback::DeviceCaps>,
 }
 
+fn deserialize_audio_channels<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let value = Option::<u8>::deserialize(deserializer)?;
+    match value {
+        Some(value @ 1..=16) => Ok(Some(value)),
+        Some(_) => Err(D::Error::custom("achannels must be between 1 and 16")),
+        None => Ok(None),
+    }
+}
+
 fn csv(s: &Option<String>) -> Vec<String> {
     s.as_deref()
         .map(|v| {
@@ -264,7 +282,10 @@ fn codec_max_heights(s: &Option<String>) -> std::collections::HashMap<String, i6
 impl Caps {
     /// True when the client reported real capabilities (vs. only a named profile).
     fn has_caps(&self) -> bool {
-        self.vcodec.is_some() || self.acodec.is_some() || self.container.is_some()
+        self.vcodec.is_some()
+            || self.acodec.is_some()
+            || self.achannels.is_some()
+            || self.container.is_some()
     }
 
     /// The effective device profile: a runtime-probed one when caps were
@@ -317,6 +338,7 @@ impl Caps {
                 containers,
                 video_codecs: vcodec,
                 audio_codecs: acodec,
+                max_audio_channels: self.achannels,
                 max_height: self.maxheight,
                 codec_max_heights: codec_max_heights(&self.vmaxheight),
                 hdr: self.hdr == Some(1),
@@ -2010,6 +2032,13 @@ pub struct DecisionBody {
 /// Validate the additive packaging claim before any caller can fall through
 /// to a legacy trust path or allocate playback work.
 pub(crate) fn validate_device_caps(caps: &playback::DeviceCaps) -> Result<(), ApiError> {
+    if let Err(message) = caps.validate_audio_sinks() {
+        return Err(ApiError::typed(
+            StatusCode::BAD_REQUEST,
+            "invalid_capabilities",
+            message,
+        ));
+    }
     if let Err(message) = caps.validate_progressive_hevc_sample_entries() {
         return Err(ApiError::typed(
             StatusCode::BAD_REQUEST,
@@ -2122,7 +2151,8 @@ pub async fn decision(
     let container_audio_streams = file.audio_streams.clone();
     set_selected_audio_default(&mut file.audio_streams, selected_audio);
     let node = decision_render_caps(render_caps(&state).await, q.caps_v2.as_ref());
-    let mut decision = q.decide(&file, &node, crate::media_sessions::unix_ms());
+    let decision_now_ms = crate::media_sessions::unix_ms();
+    let mut decision = q.decide(&file, &node, decision_now_ms);
     // The grade of the plan **with no subtitle burn**. Read here, before
     // `apply_selected_subtitle` can rewrite it, because both users below are
     // asking what adding a burn would cost — and a plan that is already SDR
@@ -2179,6 +2209,12 @@ pub async fn decision(
         requested_audio,
         container_default_audio,
     );
+    // Subtitle burn and an explicit non-default track can change the method
+    // after the pure decision ran. Resolve audio again against that final
+    // method. The legacy bool intentionally keeps its old compatibility
+    // meaning until M2 moves every create path to the richer contract.
+    decision.delivered_audio =
+        playback::resolve_audio_for_method(&file, &q.profile(decision_now_ms), decision.method);
     let probe_json = state.store.get_file_probe_json(id).await?;
     let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
@@ -2593,6 +2629,7 @@ impl StreamQuery {
             vcodec: self.vcodec.clone(),
             vmaxheight: self.vmaxheight.clone(),
             acodec: self.acodec.clone(),
+            achannels: None,
             container: self.container.clone(),
             maxheight: self.maxheight,
             hdr: self.hdr,
@@ -3210,9 +3247,9 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         if let Some(af) = plurx_core::transcode::audio_offset_filter(audio_offset_ms) {
             cmd.arg("-af").arg(af);
         }
-        cmd.args(["-c:a", "aac", "-ac", "2", "-b:a", "256k"]);
+        cmd.args(progressive_audio_args(true));
     } else {
-        cmd.args(["-c:a", "copy"]);
+        cmd.args(progressive_audio_args(false));
     }
     // Fragmented MP4 so it streams without a seekable output.
     // `-avoid_negative_ts make_zero` normalizes the first timestamp to zero: a
@@ -3402,6 +3439,14 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     Ok(response)
 }
 
+fn progressive_audio_args(transcode_audio: bool) -> &'static [&'static str] {
+    if transcode_audio {
+        &["-c:a", "aac", "-ac", "2", "-b:a", "256k", "-ar", "48000"]
+    } else {
+        &["-c:a", "copy"]
+    }
+}
+
 /// Is this stderr line one of ffmpeg's `-progress` blocks rather than a
 /// diagnostic? Progress is strictly `lower_snake_key=value`; ffmpeg's own
 /// messages are prose and normally carry a `[component @ 0x…]` prefix, so the
@@ -3422,6 +3467,31 @@ fn is_progress_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flat_audio_channel_claim_is_bounded_at_the_request_boundary() {
+        for value in ["0", "17", "255"] {
+            assert!(
+                serde_urlencoded::from_str::<Caps>(&format!("achannels={value}")).is_err(),
+                "achannels={value} must not reach capability translation"
+            );
+        }
+        assert_eq!(
+            serde_urlencoded::from_str::<Caps>("achannels=16")
+                .expect("the documented ceiling is valid")
+                .achannels,
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn progressive_aac_conversion_is_pinned_to_forty_eight_khz() {
+        assert_eq!(
+            progressive_audio_args(true),
+            ["-c:a", "aac", "-ac", "2", "-b:a", "256k", "-ar", "48000"]
+        );
+        assert_eq!(progressive_audio_args(false), ["-c:a", "copy"]);
+    }
 
     /// A fixed clock for every test that builds a device profile.
     ///
@@ -3471,7 +3541,8 @@ mod tests {
     /// `Query` extractor uses.
     #[test]
     fn the_legacy_query_and_the_v2_document_build_the_same_profile() {
-        const CAPS_Q: &str = "vcodec=hevc,h264&hdr=1&dv=1&dvprofile=5,8&dvhls=1\
+        const CAPS_Q: &str = "vcodec=hevc,h264&acodec=aac,eac3&achannels=6\
+                              &hdr=1&dv=1&dvprofile=5,8&dvhls=1\
                               &hdr10t=1&maxheight=2160";
 
         let legacy: Caps = serde_urlencoded::from_str(CAPS_Q).expect("CAPS_Q decodes as Caps");
@@ -3488,7 +3559,11 @@ mod tests {
                   { "codec": "h264", "present": ["sdr"] }
                 ],
                 "containers": [],
-                "audio": [],
+                "audio": ["aac", "eac3"],
+                "audio_sinks": [
+                  { "codec": "aac", "max_channels": 6 },
+                  { "codec": "eac3", "max_channels": 6 }
+                ],
                 "dv_transport": "hls",
                 "display": { "hdr": true, "dolby_vision": true },
                 "max_height": 2160
@@ -3520,6 +3595,8 @@ mod tests {
         );
         assert!(from_query.remux_dolby_vision, "dvhls=1");
         assert_eq!(from_query.max_height, Some(2160));
+        assert_eq!(from_query.max_audio_channels.get("aac"), Some(&6));
+        assert_eq!(from_query.max_audio_channels.get("eac3"), Some(&6));
         assert_eq!(
             from_query
                 .presents
@@ -3611,6 +3688,28 @@ mod tests {
             profile.presents["hevc"].contains(&playback::Transfer::Unknown),
             "the unknown curve is carried and grades nothing"
         );
+    }
+
+    #[test]
+    fn ambiguous_audio_sink_claims_are_refused_before_they_can_steer_playback() {
+        let caps = playback::DeviceCaps {
+            audio_sinks: vec![
+                playback::AudioSink {
+                    codec: "eac3".into(),
+                    max_channels: 6,
+                    passthrough: true,
+                    sample_rates_hz: vec![48_000],
+                },
+                playback::AudioSink {
+                    codec: "EAC3".into(),
+                    max_channels: 2,
+                    passthrough: false,
+                    sample_rates_hz: vec![48_000],
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(validate_device_caps(&caps).is_err());
     }
 
     /// The one legacy claim that is deliberately unspellable in v2.
@@ -4003,6 +4102,12 @@ mod tests {
             method,
             reasons: Vec::new(),
             transcode_audio: true,
+            delivered_audio: playback::resolve_audio(
+                None,
+                playback::default_profile(),
+                playback::AudioRoute::RollingHls,
+                0,
+            ),
             preserve_dolby_vision: true,
             container: "mp4",
             delivered_dynamic_range: "dolby_vision",
@@ -4060,6 +4165,11 @@ mod tests {
         }
 
         let converted = body(planned(playback::PlaybackMethod::Remux));
+        assert_eq!(
+            converted.pointer("/delivered_audio/action/kind"),
+            Some(&serde_json::json!("none")),
+            "the independently resolved audio contract is flattened beside the verdict: {converted}"
+        );
         assert_eq!(
             converted.get("delivered_dolby_vision_profile"),
             Some(&serde_json::json!(8)),
@@ -4222,6 +4332,7 @@ mod tests {
             index,
             codec: "eac3".into(),
             channels: Some(6),
+            sample_rate: Some(48_000),
             language: Some(language.into()),
             title: None,
             default,
@@ -4270,6 +4381,7 @@ mod tests {
                     index: 0,
                     codec: "eac3".into(),
                     channels: Some(8),
+                    sample_rate: Some(48_000),
                     language: Some("fra".into()),
                     title: Some("French E-AC-3".into()),
                     default: true,
@@ -4278,6 +4390,7 @@ mod tests {
                     index: 3,
                     codec: "truehd".into(),
                     channels: Some(8),
+                    sample_rate: Some(48_000),
                     language: Some("eng".into()),
                     title: Some("English TrueHD Atmos".into()),
                     default: false,
