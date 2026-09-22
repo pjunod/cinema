@@ -2534,8 +2534,12 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
+        // 63 -> 64 for v64, `FILES_FIELD_ORDER_COLUMN`: one additive
+        // `ALTER TABLE files ADD COLUMN field_order` appended by the interlace
+        // work, covered by `v64_adds_field_order_to_the_existing_files_table`
+        // below. No earlier entry moved; the list stays append-only.
         assert_eq!(
-            version, 63,
+            version, 64,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

@@ -1319,6 +1319,7 @@ mod tests {
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_diagnostic_json;
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_retry_deadline_ms;
                  ALTER TABLE analysis_requests DROP COLUMN video_identity;
+                 ALTER TABLE files DROP COLUMN field_order;
                  ALTER TABLE files DROP COLUMN video_codec_tag;
                  PRAGMA user_version = 43;",
             )
@@ -1409,7 +1410,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 19] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 20] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1436,6 +1437,10 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS media_classifications",
             "CREATE TABLE analysis_index_repairs",
             "ADD COLUMN typed_code",
+            // v64's field order. Like `video_codec_tag` it is an additive
+            // `files` column, so both fixtures drop it or the replay meets its
+            // own column and fails with `duplicate column name`.
+            "ADD COLUMN field_order",
         ];
 
         assert!(
