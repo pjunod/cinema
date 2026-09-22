@@ -2095,7 +2095,14 @@ final class PlayerController: ObservableObject {
     private var statusTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?
     private let audioSessionObserver = PlaybackAudioSessionObserver()
-    @Published private(set) var systemPaused = false
+    /// Interruption state, deliberately NOT `@Published`. Every transition is
+    /// already announced through the one surface as `present(.systemPaused(_))`,
+    /// and nothing outside this controller observes the flag — the only reads
+    /// are here and they are plain conditionals. Publishing it would make the
+    /// player carry a second surface for a fact the first one already states,
+    /// which is exactly what the pinned published-field inventory in
+    /// `tests/operations/test_playback_surface_fence.py` exists to refuse.
+    private(set) var systemPaused = false
     /// Feeds the SURFACE section of the Playback debug ledger and the
     /// `surface_*` client-log events. Fed from the presenter's log entries,
     /// which is the only half of a fault's life the presenter can know.
