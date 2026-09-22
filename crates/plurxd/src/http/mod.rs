@@ -7036,6 +7036,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_log_accepts_error_reports_with_bounded_stack() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({
+                    "level": "error",
+                    "event": "client_error",
+                    "detail": "error",
+                    "message": "load failed",
+                    "src": "/assets/core/cards.js",
+                    "line": 17,
+                    "col": 9,
+                    "stack": "x".repeat(3_000)
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
     async fn client_telemetry_updates_the_matching_network_prior() {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
@@ -11052,6 +11077,7 @@ mod tests {
                         index: 0,
                         codec: "truehd".into(),
                         channels: Some(8),
+                        sample_rate: None,
                         language: Some("eng".into()),
                         default: true,
                         ..Default::default()
@@ -11099,6 +11125,7 @@ mod tests {
                         index: 0,
                         codec: "aac".into(),
                         channels: Some(2),
+                        sample_rate: None,
                         language: Some("eng".into()),
                         default: true,
                         ..Default::default()
@@ -15007,6 +15034,7 @@ mod tests {
                         index: 0,
                         codec: "truehd".into(),
                         channels: Some(8),
+                        sample_rate: Some(48_000),
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -15034,6 +15062,7 @@ mod tests {
                         index: 0,
                         codec: "aac".into(),
                         channels: Some(2),
+                        sample_rate: Some(48_000),
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -15228,6 +15257,7 @@ mod tests {
                         index: 0,
                         codec: "aac".into(),
                         channels: Some(2),
+                        sample_rate: Some(48_000),
                         language: None,
                         title: None,
                         default: true,

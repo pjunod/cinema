@@ -388,6 +388,10 @@ pub struct AudioStream {
     pub index: i64,
     pub codec: String,
     pub channels: Option<i64>,
+    /// Source sample rate reported by ffprobe. Older catalog rows omit it;
+    /// absence is not proof that a route can reproduce the stream unchanged.
+    #[serde(default)]
+    pub sample_rate: Option<i64>,
     pub language: Option<String>,
     pub title: Option<String>,
     pub default: bool,

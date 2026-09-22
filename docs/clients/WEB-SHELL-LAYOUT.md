@@ -1,4 +1,4 @@
-# Web shell layout — where the app's sixty-five files are, and what each one holds
+# Web shell layout — where the app's sixty-six files are, and what each one holds
 
 **Status:** live · **Describes:** `crates/plurxd/src/web/` as served ·
 **Split:** 2026-09-19, executing
@@ -132,69 +132,70 @@ had to be edited.
 |---|---|---|---|
 | 1 | [`app.css`](../../crates/plurxd/src/web/app.css) | The whole stylesheet, fonts and all — the `<style>` block verbatim. Cascade order is load-bearing, so it is not split. | 17–3225 |
 | 2 | [`core/theme.js`](../../crates/plurxd/src/web/core/theme.js) | `THEMES`, `FAVICONS`, `applyTheme`, `POSTER_SIZES`, the `LAYOUTS` registry, `surfaceClass`, `layoutId`, `applyLayout`, `APP_NAME`. | 3228–3445 |
-| 3 | [`hls.min.js`](../../crates/plurxd/src/web/hls.min.js) | Vendored hls.js runtime for transcode playback; first body row and deliberately skipped by source-graph analysis. | Vendored dependency. |
-| 4 | [`core/app.js`](../../crates/plurxd/src/web/core/app.js) | `API`, `TOKEN`, `ME`, the `PlaybackPolicy`/`ReaderCore`/`LibraryChannelCore` aliases, and the native-reader handoff. | 3466–3507 |
-| 5 | [`core/api.js`](../../crates/plurxd/src/web/core/api.js) | `api()`, request ids, the 401 path, `toast`. | 3508–3636 |
-| 6 | [`player/measurements.js`](../../crates/plurxd/src/web/player/measurements.js) | Stall, hitch and TTFF measurement, and the formatters (`esc`, `fmtDur`, `fmtSize`). | 3637–4329 |
-| 7 | [`core/auth.js`](../../crates/plurxd/src/web/core/auth.js) | Sign-in, sign-out, `boot`, session recovery. | 4330–4466 |
-| 8 | [`core/keyboard-reach.js`](../../crates/plurxd/src/web/core/keyboard-reach.js) | Enter/Space activation for click-only cards — the `nav-keyboard-adapter` fence region. | 4467–4525 |
-| 9 | [`core/chrome.js`](../../crates/plurxd/src/web/core/chrome.js) | The app frame: header, nav, the shared shell chrome. | 4526–4560 |
-| 10 | [`core/theme-menu.js`](../../crates/plurxd/src/web/core/theme-menu.js) | The per-user theme and appearance menu, the account menu, and the connection-QR dialog. | 4561–4706 |
-| 11 | [`core/activity-indicator.js`](../../crates/plurxd/src/web/core/activity-indicator.js) | The global in-flight indicator. | 4707–4742 |
-| 12 | [`core/cards.js`](../../crates/plurxd/src/web/core/cards.js) | `card`, `grid`, `artHtml`, `fmtDate` — the shared item cards every page paints. | 4743–4845 |
-| 13 | [`core/lightbox.js`](../../crates/plurxd/src/web/core/lightbox.js) | The photo lightbox and its own Escape / previous / next keys. | 4846–4915 |
-| 14 | [`pages/home-helpers.js`](../../crates/plurxd/src/web/pages/home-helpers.js) | The get-the-app install prompt, `comingCard`, and Home's grouping helpers. | 4916–5026 |
-| 15 | [`pages/home.js`](../../crates/plurxd/src/web/pages/home.js) | `buildHomeSections` and `viewHome` — the page-model seam. | 5027–5134 |
-| 16 | [`layouts/renderers.js`](../../crates/plurxd/src/web/layouts/renderers.js) | `classicChrome`, the layout resolution helpers, and the classic renderers. | 5135–5372 (less 5140–5147) |
-| 17 | [`layouts/header.js`](../../crates/plurxd/src/web/layouts/header.js) | The page header: back control and breadcrumb trail. | 5373–5392 |
-| 18 | [`layouts/library-grids.js`](../../crates/plurxd/src/web/layouts/library-grids.js) | `classicLibraryShell`, `classicLibraryItems`, `classicLibraryCount` — the one incremental route. | 5393–5657 |
-| 19 | [`detail/helpers.js`](../../crates/plurxd/src/web/detail/helpers.js) | Detail-screen helpers, and the four inlined Material icon paths. | 5658–5697 |
-| 20 | [`detail/dynamic-range.js`](../../crates/plurxd/src/web/detail/dynamic-range.js) | Source vs delivered vs rendered HDR/DV, and the badges that say which. | 5698–5859 |
-| 21 | [`detail/track-facts.js`](../../crates/plurxd/src/web/detail/track-facts.js) | `codecLabel`, `premiumAudio`, `fmtChannels` — the shared track vocabulary. | 5860–6005 |
-| 22 | [`detail/preplay-selection.js`](../../crates/plurxd/src/web/detail/preplay-selection.js) | Pre-play audio and subtitle selection, and `classicItemBody`. | 6006–6744 |
-| 23 | [`detail/edit.js`](../../crates/plurxd/src/web/detail/edit.js) | Editing metadata and home libraries (admin), including the tag-chip field. | 6745–6854 |
-| 24 | [`player/player.js`](../../crates/plurxd/src/web/player/player.js) | `PLAYER`, opening and closing a stream, the play/pause transport core. | 6855–7714 |
-| 25 | [`player/session.js`](../../crates/plurxd/src/web/player/session.js) | Session lifecycle: start, keepalive, teardown. | 7715–7949 |
-| 26 | [`player/prepared-replacement.js`](../../crates/plurxd/src/web/player/prepared-replacement.js) | The prepared successor: staging, commit, rollback. | 7950–8531 |
-| 27 | [`player/prepared-switch-measurement.js`](../../crates/plurxd/src/web/player/prepared-switch-measurement.js) | M3's measurement of the prepared switch — windows, silence gaps, samplers. | 8532–9156 |
-| 28 | [`player/directed-change.js`](../../crates/plurxd/src/web/player/directed-change.js) | A directed selection change: quality, audio or subtitle chosen by the viewer. | 9157–9855 |
-| 29 | [`player/decode-tiers.js`](../../crates/plurxd/src/web/player/decode-tiers.js) | Runtime playback capabilities and the HEVC decode tiers; builds `PLAY_CAPS` at load. | 9856–11667 |
-| 30 | [`player/decode-margin.js`](../../crates/plurxd/src/web/player/decode-margin.js) | Decode margin: whether this machine can keep up with what it asked for. | 11668–12190 |
-| 31 | [`player/stall-diagnosis.js`](../../crates/plurxd/src/web/player/stall-diagnosis.js) | Stall self-diagnosis — why it stopped, and what to offer. | 12191–12758 |
-| 32 | [`player/surface.js`](../../crates/plurxd/src/web/player/surface.js) | The playback surface: one presenter, one render. The `playback-surface-render` fence region. | 12759–13072 |
-| 33 | [`player/projection-chrome.js`](../../crates/plurxd/src/web/player/projection-chrome.js) | Projection chrome, skip intro/credits, and the title info panel. | 13073–13178 |
-| 34 | [`player/transport.js`](../../crates/plurxd/src/web/player/transport.js) | The custom transport: scrubber, times, seeking, and the `player-input-adapter` region's key handling. | 13179–13954 |
-| 35 | [`player/autoplay-next.js`](../../crates/plurxd/src/web/player/autoplay-next.js) | Autoplay next episode (per browser, default on). | 13955–14185 |
-| 36 | [`player/menus.js`](../../crates/plurxd/src/web/player/menus.js) | Audio-language, subtitle and quality-override menus. | 14186–14439 |
-| 37 | [`player/audio-sync.js`](../../crates/plurxd/src/web/player/audio-sync.js) | The A/V offset control, and the subtitle track plumbing it shares. | 14440–14685 |
-| 38 | [`player/stats.js`](../../crates/plurxd/src/web/player/stats.js) | The playback stats overlay, `STATS_ROWS`, and the generated `PLAYBACK_INFO_FIELDS` embed. | 14686–15427 |
-| 39 | [`player/watch-presentation.js`](../../crates/plurxd/src/web/player/watch-presentation.js) | Watch-and-browse presentation and browser interaction; retains the existing media owner. | **Relocated.** New watch-and-browse module. |
-| 40 | [`detail/watch-browser.js`](../../crates/plurxd/src/web/detail/watch-browser.js) | Watch-and-browse presentation and browser interaction; retains the existing media owner. | **Relocated.** New watch-and-browse module. |
-| 41 | [`pages/activity.js`](../../crates/plurxd/src/web/pages/activity.js) | The Activity page shell and its poll — twenty lines, and the smallest row there is. | 15428–15447 |
-| 42 | [`pages/analysis.js`](../../crates/plurxd/src/web/pages/analysis.js) | Analysis status: the queue, its failures, and what to do about them. | 15448–16149 |
-| 43 | [`pages/activity-stream.js`](../../crates/plurxd/src/web/pages/activity-stream.js) | Now playing: the Stream cell — state pill, meter strip, details disclosure. | 16150–16560 |
-| 44 | [`pages/settings.js`](../../crates/plurxd/src/web/pages/settings.js) | The Settings frame: `SETTINGS_MANIFEST`, `SETTINGS_ENDPOINTS`, tab routing. | 16561–16838 |
-| 45 | [`pages/settings-panels.js`](../../crates/plurxd/src/web/pages/settings-panels.js) | Shared panel machinery, Metadata/search, Maintenance/Windows, Analysis and Playback. | 16839–17349 |
-| 46 | [`pages/live-tv.js`](../../crates/plurxd/src/web/pages/live-tv.js) | `LIVE_TV`, `viewLiveTv`, the guide, the grid, the popover, and the `live-tv-input-adapter` region. | 17350–18465 |
-| 47 | [`pages/live-tv-dvr.js`](../../crates/plurxd/src/web/pages/live-tv-dvr.js) | Recording from the Live TV page. | 18466–18751 |
-| 48 | [`pages/recordings.js`](../../crates/plurxd/src/web/pages/recordings.js) | The Recordings page: what is scheduled, what recorded, and what failed. | 18752–18983 |
-| 49 | [`pages/dvr-reminders.js`](../../crates/plurxd/src/web/pages/dvr-reminders.js) | The due-reminder overlay and its polling. | 18984–19064 |
-| 50 | [`pages/live-tv-controls.js`](../../crates/plurxd/src/web/pages/live-tv-controls.js) | Tuning, stopping, pause/mute/fullscreen, and the visibilitychange stop. | 19065–19342 |
-| 51 | [`pages/settings-developer.js`](../../crates/plurxd/src/web/pages/settings-developer.js) | Experimental Developer cards, `developerPanel`, and shared advisory readiness helpers. | 19343–19799 |
-| 52 | [`pages/settings-live-tv.js`](../../crates/plurxd/src/web/pages/settings-live-tv.js) | `LIVE_TV_GUIDE_DRAFT`, guide, tuner, recording and library-channel cards, `liveTvPanel`. | 19800–20020 |
-| 53 | [`pages/settings-system.js`](../../crates/plurxd/src/web/pages/settings-system.js) | The users panel, build/storage/replication facts, `systemPanel`. | 20021–20238 |
-| 54 | [`pages/cluster.js`](../../crates/plurxd/src/web/pages/cluster.js) | Cluster membership: the node cards and what each one is claiming. | 20239–20557 |
-| 55 | [`pages/cluster-operations.js`](../../crates/plurxd/src/web/pages/cluster-operations.js) | The operations rail and its preconditions. | 20558–20762 |
-| 56 | [`pages/cluster-database.js`](../../crates/plurxd/src/web/pages/cluster-database.js) | The replicated database ledger, and remembering what is folded. | 20763–20859 |
-| 57 | [`pages/cluster-troubleshooting.js`](../../crates/plurxd/src/web/pages/cluster-troubleshooting.js) | Cluster troubleshooting: what is wrong, and the one thing to try. | 20860–21468 |
-| 58 | [`pages/settings-playback.js`](../../crates/plurxd/src/web/pages/settings-playback.js) | Playback defaults, recovery and protocol cards, Trakt, and settings save handlers. | 21469–21740 |
-| 59 | [`pages/users-admin.js`](../../crates/plurxd/src/web/pages/users-admin.js) | The admin users route. Non-contiguous with `pages/settings-system.js`'s users panel. | 21741–21787 |
-| 60 | [`layouts/catalog.js`](../../crates/plurxd/src/web/layouts/catalog.js) | The catalog layout: sidebar, phone library sheet, chrome, Home, G2b item detail, and `LAYOUTS.catalog`. | 21788–22457 |
-| 61 | [`layouts/register-classic.js`](../../crates/plurxd/src/web/layouts/register-classic.js) | **Relocated.** The eight lines registering `LAYOUTS.classic.chrome` and `.views`. See §1.3. | 5140–5147 |
-| 62 | [`layouts/theater.js`](../../crates/plurxd/src/web/layouts/theater.js) | The theater layout, `LAYOUTS.theater`, and the load-time `applyLayout()` that paints the first frame. | 22458–22996 |
-| 63 | [`pages/reader.js`](../../crates/plurxd/src/web/pages/reader.js) | The EPUB reader page — glue over the `reader.js` sidecar, which did not move. | 22997–23326 |
-| 64 | [`pages/library-channels-page.js`](../../crates/plurxd/src/web/pages/library-channels-page.js) | The Library channels page — glue over the `library-channels.js` sidecar, which did not move. | 23327–23783 |
-| 65 | [`router.js`](../../crates/plurxd/src/web/router.js) | `PAGE_TIMER`, `setPageTimer`, `render`, and the `hashchange` and boot statements that start the app. | 23784–23898 |
+| 3 | [`core/errors.js`](../../crates/plurxd/src/web/core/errors.js) | The dependency-free global error reporter and bootstrap sentinel, loaded before every body sidecar so their initialization failures remain observable. | **Relocated.** New early reporter row. |
+| 4 | [`hls.min.js`](../../crates/plurxd/src/web/hls.min.js) | Vendored hls.js runtime for transcode playback; first body row and deliberately skipped by source-graph analysis. | Vendored dependency. |
+| 5 | [`core/app.js`](../../crates/plurxd/src/web/core/app.js) | `API`, `TOKEN`, `ME`, the `PlaybackPolicy`/`ReaderCore`/`LibraryChannelCore` aliases, and the native-reader handoff. | 3466–3507 |
+| 6 | [`core/api.js`](../../crates/plurxd/src/web/core/api.js) | `api()`, request ids, the 401 path, `toast`. | 3508–3636 |
+| 7 | [`player/measurements.js`](../../crates/plurxd/src/web/player/measurements.js) | Stall, hitch and TTFF measurement, and the formatters (`esc`, `fmtDur`, `fmtSize`). | 3637–4329 |
+| 8 | [`core/auth.js`](../../crates/plurxd/src/web/core/auth.js) | Sign-in, sign-out, `boot`, session recovery. | 4330–4466 |
+| 9 | [`core/keyboard-reach.js`](../../crates/plurxd/src/web/core/keyboard-reach.js) | Enter/Space activation for click-only cards — the `nav-keyboard-adapter` fence region. | 4467–4525 |
+| 10 | [`core/chrome.js`](../../crates/plurxd/src/web/core/chrome.js) | The app frame: header, nav, the shared shell chrome. | 4526–4560 |
+| 11 | [`core/theme-menu.js`](../../crates/plurxd/src/web/core/theme-menu.js) | The per-user theme and appearance menu, the account menu, and the connection-QR dialog. | 4561–4706 |
+| 12 | [`core/activity-indicator.js`](../../crates/plurxd/src/web/core/activity-indicator.js) | The global in-flight indicator. | 4707–4742 |
+| 13 | [`core/cards.js`](../../crates/plurxd/src/web/core/cards.js) | `card`, `grid`, `artHtml`, `fmtDate` — the shared item cards every page paints. | 4743–4845 |
+| 14 | [`core/lightbox.js`](../../crates/plurxd/src/web/core/lightbox.js) | The photo lightbox and its own Escape / previous / next keys. | 4846–4915 |
+| 15 | [`pages/home-helpers.js`](../../crates/plurxd/src/web/pages/home-helpers.js) | The get-the-app install prompt, `comingCard`, and Home's grouping helpers. | 4916–5026 |
+| 16 | [`pages/home.js`](../../crates/plurxd/src/web/pages/home.js) | `buildHomeSections` and `viewHome` — the page-model seam. | 5027–5134 |
+| 17 | [`layouts/renderers.js`](../../crates/plurxd/src/web/layouts/renderers.js) | `classicChrome`, the layout resolution helpers, and the classic renderers. | 5135–5372 (less 5140–5147) |
+| 18 | [`layouts/header.js`](../../crates/plurxd/src/web/layouts/header.js) | The page header: back control and breadcrumb trail. | 5373–5392 |
+| 19 | [`layouts/library-grids.js`](../../crates/plurxd/src/web/layouts/library-grids.js) | `classicLibraryShell`, `classicLibraryItems`, `classicLibraryCount` — the one incremental route. | 5393–5657 |
+| 20 | [`detail/helpers.js`](../../crates/plurxd/src/web/detail/helpers.js) | Detail-screen helpers, and the four inlined Material icon paths. | 5658–5697 |
+| 21 | [`detail/dynamic-range.js`](../../crates/plurxd/src/web/detail/dynamic-range.js) | Source vs delivered vs rendered HDR/DV, and the badges that say which. | 5698–5859 |
+| 22 | [`detail/track-facts.js`](../../crates/plurxd/src/web/detail/track-facts.js) | `codecLabel`, `premiumAudio`, `fmtChannels` — the shared track vocabulary. | 5860–6005 |
+| 23 | [`detail/preplay-selection.js`](../../crates/plurxd/src/web/detail/preplay-selection.js) | Pre-play audio and subtitle selection, and `classicItemBody`. | 6006–6744 |
+| 24 | [`detail/edit.js`](../../crates/plurxd/src/web/detail/edit.js) | Editing metadata and home libraries (admin), including the tag-chip field. | 6745–6854 |
+| 25 | [`player/player.js`](../../crates/plurxd/src/web/player/player.js) | `PLAYER`, opening and closing a stream, the play/pause transport core. | 6855–7714 |
+| 26 | [`player/session.js`](../../crates/plurxd/src/web/player/session.js) | Session lifecycle: start, keepalive, teardown. | 7715–7949 |
+| 27 | [`player/prepared-replacement.js`](../../crates/plurxd/src/web/player/prepared-replacement.js) | The prepared successor: staging, commit, rollback. | 7950–8531 |
+| 28 | [`player/prepared-switch-measurement.js`](../../crates/plurxd/src/web/player/prepared-switch-measurement.js) | M3's measurement of the prepared switch — windows, silence gaps, samplers. | 8532–9156 |
+| 29 | [`player/directed-change.js`](../../crates/plurxd/src/web/player/directed-change.js) | A directed selection change: quality, audio or subtitle chosen by the viewer. | 9157–9855 |
+| 30 | [`player/decode-tiers.js`](../../crates/plurxd/src/web/player/decode-tiers.js) | Runtime playback capabilities and the HEVC decode tiers; builds `PLAY_CAPS` at load. | 9856–11667 |
+| 31 | [`player/decode-margin.js`](../../crates/plurxd/src/web/player/decode-margin.js) | Decode margin: whether this machine can keep up with what it asked for. | 11668–12190 |
+| 32 | [`player/stall-diagnosis.js`](../../crates/plurxd/src/web/player/stall-diagnosis.js) | Stall self-diagnosis — why it stopped, and what to offer. | 12191–12758 |
+| 33 | [`player/surface.js`](../../crates/plurxd/src/web/player/surface.js) | The playback surface: one presenter, one render. The `playback-surface-render` fence region. | 12759–13072 |
+| 34 | [`player/projection-chrome.js`](../../crates/plurxd/src/web/player/projection-chrome.js) | Projection chrome, skip intro/credits, and the title info panel. | 13073–13178 |
+| 35 | [`player/transport.js`](../../crates/plurxd/src/web/player/transport.js) | The custom transport: scrubber, times, seeking, and the `player-input-adapter` region's key handling. | 13179–13954 |
+| 36 | [`player/autoplay-next.js`](../../crates/plurxd/src/web/player/autoplay-next.js) | Autoplay next episode (per browser, default on). | 13955–14185 |
+| 37 | [`player/menus.js`](../../crates/plurxd/src/web/player/menus.js) | Audio-language, subtitle and quality-override menus. | 14186–14439 |
+| 38 | [`player/audio-sync.js`](../../crates/plurxd/src/web/player/audio-sync.js) | The A/V offset control, and the subtitle track plumbing it shares. | 14440–14685 |
+| 39 | [`player/stats.js`](../../crates/plurxd/src/web/player/stats.js) | The playback stats overlay, `STATS_ROWS`, and the generated `PLAYBACK_INFO_FIELDS` embed. | 14686–15427 |
+| 40 | [`player/watch-presentation.js`](../../crates/plurxd/src/web/player/watch-presentation.js) | Watch-and-browse presentation and browser interaction; retains the existing media owner. | **Relocated.** New watch-and-browse module. |
+| 41 | [`detail/watch-browser.js`](../../crates/plurxd/src/web/detail/watch-browser.js) | Watch-and-browse presentation and browser interaction; retains the existing media owner. | **Relocated.** New watch-and-browse module. |
+| 42 | [`pages/activity.js`](../../crates/plurxd/src/web/pages/activity.js) | The Activity page shell and its poll — twenty lines, and the smallest row there is. | 15428–15447 |
+| 43 | [`pages/analysis.js`](../../crates/plurxd/src/web/pages/analysis.js) | Analysis status: the queue, its failures, and what to do about them. | 15448–16149 |
+| 44 | [`pages/activity-stream.js`](../../crates/plurxd/src/web/pages/activity-stream.js) | Now playing: the Stream cell — state pill, meter strip, details disclosure. | 16150–16560 |
+| 45 | [`pages/settings.js`](../../crates/plurxd/src/web/pages/settings.js) | The Settings frame: `SETTINGS_MANIFEST`, `SETTINGS_ENDPOINTS`, tab routing. | 16561–16838 |
+| 46 | [`pages/settings-panels.js`](../../crates/plurxd/src/web/pages/settings-panels.js) | Shared panel machinery, Metadata/search, Maintenance/Windows, Analysis and Playback. | 16839–17349 |
+| 47 | [`pages/live-tv.js`](../../crates/plurxd/src/web/pages/live-tv.js) | `LIVE_TV`, `viewLiveTv`, the guide, the grid, the popover, and the `live-tv-input-adapter` region. | 17350–18465 |
+| 48 | [`pages/live-tv-dvr.js`](../../crates/plurxd/src/web/pages/live-tv-dvr.js) | Recording from the Live TV page. | 18466–18751 |
+| 49 | [`pages/recordings.js`](../../crates/plurxd/src/web/pages/recordings.js) | The Recordings page: what is scheduled, what recorded, and what failed. | 18752–18983 |
+| 50 | [`pages/dvr-reminders.js`](../../crates/plurxd/src/web/pages/dvr-reminders.js) | The due-reminder overlay and its polling. | 18984–19064 |
+| 51 | [`pages/live-tv-controls.js`](../../crates/plurxd/src/web/pages/live-tv-controls.js) | Tuning, stopping, pause/mute/fullscreen, and the visibilitychange stop. | 19065–19342 |
+| 52 | [`pages/settings-developer.js`](../../crates/plurxd/src/web/pages/settings-developer.js) | Experimental Developer cards, `developerPanel`, and shared advisory readiness helpers. | 19343–19799 |
+| 53 | [`pages/settings-live-tv.js`](../../crates/plurxd/src/web/pages/settings-live-tv.js) | `LIVE_TV_GUIDE_DRAFT`, guide, tuner, recording and library-channel cards, `liveTvPanel`. | 19800–20020 |
+| 54 | [`pages/settings-system.js`](../../crates/plurxd/src/web/pages/settings-system.js) | The users panel, build/storage/replication facts, `systemPanel`. | 20021–20238 |
+| 55 | [`pages/cluster.js`](../../crates/plurxd/src/web/pages/cluster.js) | Cluster membership: the node cards and what each one is claiming. | 20239–20557 |
+| 56 | [`pages/cluster-operations.js`](../../crates/plurxd/src/web/pages/cluster-operations.js) | The operations rail and its preconditions. | 20558–20762 |
+| 57 | [`pages/cluster-database.js`](../../crates/plurxd/src/web/pages/cluster-database.js) | The replicated database ledger, and remembering what is folded. | 20763–20859 |
+| 58 | [`pages/cluster-troubleshooting.js`](../../crates/plurxd/src/web/pages/cluster-troubleshooting.js) | Cluster troubleshooting: what is wrong, and the one thing to try. | 20860–21468 |
+| 59 | [`pages/settings-playback.js`](../../crates/plurxd/src/web/pages/settings-playback.js) | Playback defaults, recovery and protocol cards, Trakt, and settings save handlers. | 21469–21740 |
+| 60 | [`pages/users-admin.js`](../../crates/plurxd/src/web/pages/users-admin.js) | The admin users route. Non-contiguous with `pages/settings-system.js`'s users panel. | 21741–21787 |
+| 61 | [`layouts/catalog.js`](../../crates/plurxd/src/web/layouts/catalog.js) | The catalog layout: sidebar, phone library sheet, chrome, Home, G2b item detail, and `LAYOUTS.catalog`. | 21788–22457 |
+| 62 | [`layouts/register-classic.js`](../../crates/plurxd/src/web/layouts/register-classic.js) | **Relocated.** The eight lines registering `LAYOUTS.classic.chrome` and `.views`. See §1.3. | 5140–5147 |
+| 63 | [`layouts/theater.js`](../../crates/plurxd/src/web/layouts/theater.js) | The theater layout, `LAYOUTS.theater`, and the load-time `applyLayout()` that paints the first frame. | 22458–22996 |
+| 64 | [`pages/reader.js`](../../crates/plurxd/src/web/pages/reader.js) | The EPUB reader page — glue over the `reader.js` sidecar, which did not move. | 22997–23326 |
+| 65 | [`pages/library-channels-page.js`](../../crates/plurxd/src/web/pages/library-channels-page.js) | The Library channels page — glue over the `library-channels.js` sidecar, which did not move. | 23327–23783 |
+| 66 | [`router.js`](../../crates/plurxd/src/web/router.js) | `PAGE_TIMER`, `setPageTimer`, `render`, and the `hashchange` and boot statements that start the app. | 23784–23898 |
 
 ## 3. Adding a file
 

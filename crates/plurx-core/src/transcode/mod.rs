@@ -1665,6 +1665,8 @@ fn hls_args_inner(
     args.push(opts.audio_channels.to_string());
     args.push("-b:a".into());
     args.push(format!("{}k", opts.audio_bitrate_kbps));
+    args.push("-ar".into());
+    args.push(crate::playback::audio::AUDIO_SAMPLE_RATE.to_string());
 
     // Start the MPEG-TS timeline at zero.
     //
@@ -2054,6 +2056,8 @@ fn copy_input_args(
         } else {
             args.push("256k".into());
         }
+        args.push("-ar".into());
+        args.push(crate::playback::audio::AUDIO_SAMPLE_RATE.to_string());
     } else {
         args.push("-c:a".into());
         args.push("copy".into());
@@ -2927,6 +2931,9 @@ mod tests {
                 "2",
                 "-b:a",
                 "160k",
+                // S-09 M2 pins every lossy rolling audio output at 48 kHz.
+                "-ar",
+                "48000",
                 "-muxdelay",
                 "0",
                 "-muxpreload",
@@ -3376,6 +3383,53 @@ mod tests {
         assert!(joined.contains("-map 0:v:0?"));
         assert!(joined.contains("-map 0:a:0?"));
         assert!(joined.contains("-c:a aac"));
+    }
+
+    #[test]
+    fn every_lossy_rolling_audio_output_is_fixed_at_forty_eight_khz() {
+        let media = file(None);
+        let encoded = hls_args(
+            &media,
+            Encoder::Software,
+            &TranscodeOptions::default(),
+            Pacing::unpaced(),
+            "/tmp/encoded",
+        )
+        .join(" ");
+        assert!(
+            encoded.contains("-c:a aac -ac 2 -b:a 160k -ar 48000"),
+            "{encoded}"
+        );
+
+        let converted_copy = hls_copy_args(
+            &media,
+            0.0,
+            None,
+            true,
+            Pacing::unpaced(),
+            false,
+            "/tmp/copy",
+        )
+        .join(" ");
+        assert!(
+            converted_copy.contains("-c:a aac -b:a 256k -ar 48000"),
+            "{converted_copy}"
+        );
+
+        let copied = hls_copy_args(
+            &media,
+            0.0,
+            None,
+            false,
+            Pacing::unpaced(),
+            false,
+            "/tmp/copy",
+        )
+        .join(" ");
+        assert!(
+            !copied.contains("-ar 48000"),
+            "copy must not rewrite source audio: {copied}"
+        );
     }
 
     #[test]
