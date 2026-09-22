@@ -197,6 +197,13 @@ pub(crate) async fn acquire_revocation_operation(&self)
 }
 ```
 
+**Correction (2026-09-22, review #3378 P2).** The sketch above holds
+`_waiting` for the operation's whole lifetime, which spends one of the eight
+permits on the caller that is no longer waiting and leaves a queue seven
+deep. The implementation drops the permit as soon as the mutex is acquired —
+the mutex is the single active slot — so the depth is the eight waiters this
+section promises. Nothing else in the sketch changed.
+
 Both failures still map to `propagation_error()` — the 503 code and the
 client behaviour on it are unchanged; what changes is how often it
 happens. The three call sites (`:253, 266, 277`) become `.await`s. The
@@ -502,3 +509,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | `1373f1202`: bounded pair/address backoff, trusted-proxy boundary, fixed metrics, and advisory-only System notice. Seven focused throttle/proxy tests passed. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | `b87ce2554`: bounded prefix-only inventory and uniquely matched fenced revoke on SQLite/Hiqlite, self/admin routes, docs, and cluster-auth validation ownership. Focused Store and real-router regressions passed. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 decision | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | Retain non-expiring tokens until all clients have tested refresh/re-login recovery. M3 inventory and explicit revocation are the compensating control; no expiry schema, sweep, setting, or feature gate was added. |
+| 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Sole-review fixes | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | Merged `origin/main` (`fec4d1a77`) and addressed both findings of review #3378. P1: `MAX_DEVICE_LABEL_BYTES = 256` refused at `/auth/login` with an explicit 8 KiB route body limit, capped at both Store writes, and capped in SQL plus on a character boundary where the inventory is projected, so a pre-bound row is truncated rather than dropped. P2: the queue permit is released once the operation mutex is held, so the depth is the eight waiters the contract states rather than seven, and the plan's missing end-to-end concurrency proof landed — two queued sign-outs both succeed, and a sign-out that waits out the admission window is refused having changed nothing. §3.1's `RevocationAdmission` sketch is superseded on the `_waiting` field only; `begin`, `finish`, `arm_ambiguity`, guard drop and every timing constant are unchanged. |

@@ -267,6 +267,8 @@ const USER_METHODS: &[&str] = &[
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
+    "list_tokens_for_user",
+    "delete_token_by_prefix_for_user",
 ];
 const LIBRARY_METHODS: &[&str] = &[
     "create_library",
@@ -16440,7 +16442,16 @@ fn contract_inventory_matches_every_store_method() {
     // `validate_fragment_index_page`, a bounded node-local pass over legacy
     // rows. It is named in `FRAGMENT_INDEX_METHODS` above; no new trait and no
     // new supertrait of `Store`, so nothing above this call had to change.
-    assert_eq!(declared.len(), 380, "review the Store method count");
+    //
+    // 380 -> 382 for the two `UserStore` methods C-04's M3 adds,
+    // `list_tokens_for_user` and `delete_token_by_prefix_for_user`. The first
+    // is a bounded read that projects eight hex characters of each digest and
+    // a byte-bounded device label, never a whole token hash; the second
+    // deletes the one row a prefix uniquely matches, under the cache-admin
+    // claim, refusing an ambiguous prefix. Both are named in `USER_METHODS`
+    // above, both exist on SQLite and hiqlite, and neither adds a trait or a
+    // supertrait of `Store`.
+    assert_eq!(declared.len(), 382, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
