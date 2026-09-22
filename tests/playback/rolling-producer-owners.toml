@@ -1660,10 +1660,23 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # writes the validation marker. It owns no producer and no process, and its
 # only timer is the shared 30-second tick recorded in the time-constructor
 # row below.
+# 547 -> 548 with C-03: the branch's artwork read path splits into
+# `open_local_artwork` — the `open` plus `fstat` that names a file's identity
+# without reading it — and `read_verified_local_artwork`, each with its own
+# `tokio::task::spawn_blocking`, replacing the single closure in
+# `read_bounded_local_artwork` (which remains, for the materialization recheck
+# that has no coordinator). Both are awaited by the caller that opened them and
+# neither detaches: the read closure returns the bytes and their digest into the
+# response, and the identity closure returns one `std::fs::File` plus five
+# integers. Neither owns a producer, a process or a timer. The identity closure
+# is the one the review's fifth finding required: the derivative route and the
+# post-generation fence both resolve a source's identity through it instead of
+# reading and admitting the whole original, so adding it removes byte-budget
+# draws rather than adding any.
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 547
+expected_occurrences = 548
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2152,10 +2165,20 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # in the loop added to the task-spawn row above. It is a pacing interval for a
 # node-local backfill, not a deadline, a lease or a producer's clock, and
 # nothing reads it but that loop.
+# 841 -> 843 with C-03: the two additions are admission bounds, not new clocks.
+# `local_permit` wraps `acquire_many_owned` on the 64 MiB local byte budget in a
+# `tokio::time::timeout` of `LOCAL_READ_ADMISSION_WAIT` (250 ms) and
+# `derive_permit` wraps the two-slot derivative semaphore in one of
+# `DERIVATIVE_ADMISSION_WAIT` (500 ms); both turn a queue into the pre-existing
+# 503 rather than an unbounded wait. The `DERIVATIVE_TIMEOUT` bound around the
+# resize child and the retry sleep in `remove_derivative_temporary` replace
+# timers the same lines already had in the branch's earlier shape, so they are
+# not net additions. No timer here is a producer's clock or a lease: nothing
+# reads any of them but the admission site that opened it.
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 841
+expected_occurrences = 843
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2287,10 +2310,22 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # source descriptor, and one `#[cfg(test)]` `std::process::Command` that renders
 # the interlaced fixture. The idet child is `kill_on_drop`, bounded by the
 # caller's deadline and reaped on every exit path.
+# 132 -> 135 with C-03: one shipped and two `#[cfg(test)]`. The shipped one is
+# `derivative_command`, which builds the single `?size=` resize child —
+# `kill_on_drop` through `BoundedDiagnosticChild::spawn_piped_output`, bounded
+# to `DERIVATIVE_TIMEOUT` (5 s) and `MAX_ARTWORK_BYTES` (15 MiB) of media output
+# with an 8 KiB diagnostic tail, at most `DERIVATIVE_CONCURRENCY` (2) at a time,
+# and given the dedicated `runtime_cache` as its `XDG_CACHE_HOME` rather than the
+# served artwork root. It was extracted out of `generate_derivative_with_bin` so
+# that runtime can be asserted without spawning; the extraction moved a
+# construction site, it did not add one. The two test sites are fixture
+# renderers — `write_test_image` and the pre-existing `ffmpeg_derivative_is_
+# bounded_and_preserves_the_original` fixture — which run `ffmpeg -f lavfi` to
+# disk and are waited to completion before the test that built them proceeds.
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 132
+expected_occurrences = 135
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2537,10 +2572,19 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # scoped_store_counts`, which drives one in-process request through the
 # attribution middleware. It is an HTTP status read, not a command launch,
 # and the test owns no process and no producer.
+# 333 -> 342 with C-03: nine of the ten added matches are HTTP status reads,
+# not command launches. Eight are `Response::status()` assertions in the new
+# `serve_derivative` tests (fallback, single-flight, warm hit and its 304, the
+# peer route, and the artwork-root cleanliness check) and one is the
+# `.status()` on the `std::process::Command` inside `write_test_image`, which
+# is the fixture renderer counted in the command-construction row above and is
+# awaited before its test proceeds. The pattern cannot tell an `http::Response`
+# apart from a `Command`; none of these nine owns a producer or a process, and
+# the one real launch is a bounded fixture that exits before the test continues.
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 333
+expected_occurrences = 342
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
