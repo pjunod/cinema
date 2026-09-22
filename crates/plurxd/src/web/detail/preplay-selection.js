@@ -624,7 +624,7 @@ function classicItemBody(p){
   // wants a different poster than the one that landed has no other way to ask
   // for it short of refreshing the whole library.
   const artBtn = ME&&ME.is_admin
-    ? ` <button class="ghost sm" title="Re-fetch this item's poster and backdrop" aria-label="Refresh artwork" onclick="refreshArtwork(${it.id},this)">⟳ Refresh artwork</button>`
+    ? ` <button class="ghost sm" title="Re-fetch this item's poster and backdrop" aria-label="Refresh artwork" onclick="refreshArtwork('${exactWireId(it)}',this)">⟳ Refresh artwork</button>`
     : '';
 
   // Breadcrumb trail: Home / <list you came from> / Show / Season / …, every
@@ -740,4 +740,3 @@ function classicItemBody(p){
         ${body}</div>
     </div></div>`;
 }
-

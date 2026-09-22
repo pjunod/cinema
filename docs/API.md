@@ -317,7 +317,8 @@ stranger should not read. The cluster's other ingress origins are therefore
 Fields: `name`, `version` (bare semver, which is what clients compare), `build`
 (git description), `built_at`, `instance_id`, `node_id`,
 `cluster_advertisement`, `uptime_seconds`, `setup_required`, `android_app`,
-`playback_auto_abr`.
+`playback_auto_abr`, `display_mode_match` (the replicated Android-TV cadence
+switch; missing storage is `false`).
 
 ### 4.2 `POST /api/v1/setup`
 
@@ -837,6 +838,12 @@ Everything in §7–§11 is under `/api/v1`.
        ▼                                                ▼
    plays as-is                          POST /files/{id}/hls/sessions  →  §9
 ```
+
+`source.frame_rate`, when present, is the first playable video stream's exact
+ffprobe rational (`avg_frame_rate` preferred, `r_frame_rate` fallback), such
+as `24000/1001`. Keeping the rational lets native clients select a display
+mode before decoder preparation without rounding 23.976 and 24 into the same
+cadence.
 
 | Method | Path | Auth | What it does |
 |---|---|---|---|
