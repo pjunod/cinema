@@ -468,6 +468,10 @@ pub struct SourceSummary {
     /// Overall bitrate in bits/sec, if the container reported one.
     pub bitrate: Option<i64>,
     pub duration_ms: Option<i64>,
+    /// First playable video stream cadence, preserving ffprobe's rational so
+    /// clients can distinguish 24000/1001 from 24/1 before they prepare.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_rate: Option<String>,
 }
 
 /// A skippable region of the timeline (opening titles, end credits). Derived
@@ -827,7 +831,35 @@ fn decision_render_caps(
     )
 }
 
-fn source_summary(file: &MediaFile) -> SourceSummary {
+fn source_frame_rate(probe_json: Option<&str>) -> Option<String> {
+    fn valid_fraction(raw: &str) -> bool {
+        let Some((numerator, denominator)) = raw.trim().split_once('/') else {
+            return false;
+        };
+        let Ok(numerator) = numerator.parse::<f64>() else {
+            return false;
+        };
+        let Ok(denominator) = denominator.parse::<f64>() else {
+            return false;
+        };
+        numerator.is_finite() && numerator > 0.0 && denominator.is_finite() && denominator > 0.0
+    }
+
+    let probe: serde_json::Value = serde_json::from_str(probe_json?).ok()?;
+    probe.get("streams")?.as_array()?.iter().find_map(|stream| {
+        (stream.get("codec_type")?.as_str()? == "video")
+            .then(|| {
+                ["avg_frame_rate", "r_frame_rate"]
+                    .into_iter()
+                    .filter_map(|key| stream.get(key)?.as_str())
+                    .find(|rate| valid_fraction(rate))
+                    .map(|rate| rate.trim().to_owned())
+            })
+            .flatten()
+    })
+}
+
+fn source_summary(file: &MediaFile, probe_json: Option<&str>) -> SourceSummary {
     SourceSummary {
         container: file.container.clone(),
         video_codec: file.video_codec.clone(),
@@ -841,6 +873,7 @@ fn source_summary(file: &MediaFile) -> SourceSummary {
         dv_el_present: file.dolby_vision.el_present,
         bitrate: file.bitrate,
         duration_ms: file.duration_ms,
+        frame_rate: source_frame_rate(probe_json),
     }
 }
 
@@ -2320,7 +2353,7 @@ pub async fn decision(
     Ok(Json(DecisionResponse {
         file_id: id,
         vod_indexed,
-        source: source_summary(&file),
+        source: source_summary(&file, probe_json.as_deref()),
         decision,
         play_url,
         delivery,
@@ -3521,6 +3554,29 @@ mod tests {
     /// re-test window.
     const NOW_MS: i64 = 1_756_400_000_000;
 
+    #[test]
+    fn decision_source_frame_rate_preserves_probe_rational_and_absence() {
+        let average = r#"{"streams":[
+            {"codec_type":"audio","avg_frame_rate":"0/0"},
+            {"codec_type":"video","avg_frame_rate":"24000/1001","r_frame_rate":"24/1"}
+        ]}"#;
+        let fallback = r#"{"streams":[
+            {"codec_type":"video","avg_frame_rate":"0/0","r_frame_rate":"30000/1001"}
+        ]}"#;
+        let absent = r#"{"streams":[{"codec_type":"video"}]}"#;
+
+        assert_eq!(
+            source_frame_rate(Some(average)).as_deref(),
+            Some("24000/1001")
+        );
+        assert_eq!(
+            source_frame_rate(Some(fallback)).as_deref(),
+            Some("30000/1001")
+        );
+        assert_eq!(source_frame_rate(Some(absent)), None);
+        assert_eq!(source_frame_rate(None), None);
+    }
+
     fn hevc_file(hdr: Option<&str>) -> MediaFile {
         MediaFile {
             id: 42,
@@ -4175,6 +4231,7 @@ mod tests {
                     dv_el_present: None,
                     bitrate: None,
                     duration_ms: None,
+                    frame_rate: None,
                 },
                 audio: Vec::new(),
                 subtitles: Vec::new(),

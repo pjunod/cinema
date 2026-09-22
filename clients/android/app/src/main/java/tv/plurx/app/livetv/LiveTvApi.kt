@@ -258,11 +258,16 @@ data class LiveTvResumeAnswer(val outcome: String, val session: LiveTvStarted? =
     val hdr: String? = null,
     val audio_channels: Int,
 )
+@Serializable data class LiveTvDeliverySource(
+    val field_order: String? = null,
+)
 @Serializable data class LiveTvDelivery(
     val output: LiveTvDeliveryOutput,
     val video_action: String,
     val audio_action: String,
     val packaging: String,
+    val source: LiveTvDeliverySource? = null,
+    val deinterlace: Boolean = false,
 )
 
 @Serializable
@@ -293,6 +298,7 @@ data class LiveTvStatus(
 
 @Serializable
 data class LiveTvSettings(
+    val playback_display_mode_match: Boolean = false,
     val library_channels_enabled: Boolean = false,
     val dvr_enabled: Boolean = false,
     val dvr_root: String = "",
@@ -423,10 +429,17 @@ sealed interface LiveTvSettingsChange {
     data class Enabled(val enabled: Boolean) : LiveTvSettingsChange
     data class LibraryChannelsEnabled(val enabled: Boolean) : LiveTvSettingsChange
     data class DvrEnabled(val enabled: Boolean) : LiveTvSettingsChange
+    data class DisplayModeMatch(val enabled: Boolean) : LiveTvSettingsChange
     data class FencedOwner(val owner: String, val cutoff: Long) : LiveTvSettingsChange
 
     fun body(generation: Long): JsonObject = buildJsonObject {
-        put("live_tv_config_generation", generation)
+        // The display-mode preference is an ordinary playback setting, not
+        // part of the replicated Live TV owner tuple. Sending the tuple's CAS
+        // with it is rejected by the server and would falsely make this
+        // advisory switch depend on unrelated tuner configuration churn.
+        if (this@LiveTvSettingsChange !is DisplayModeMatch) {
+            put("live_tv_config_generation", generation)
+        }
         when (val change = this@LiveTvSettingsChange) {
             is Configure -> {
                 put("live_tv_device_ipv4", change.ipv4)
@@ -438,6 +451,7 @@ sealed interface LiveTvSettingsChange {
             is Enabled -> put("live_tv_enabled", change.enabled)
             is LibraryChannelsEnabled -> put("library_channels_enabled", change.enabled)
             is DvrEnabled -> put("dvr_enabled", change.enabled)
+            is DisplayModeMatch -> put("playback_display_mode_match", change.enabled)
             is FencedOwner -> putJsonObject("live_tv_fenced_owner") {
                 put("owner_node_id", change.owner)
                 put("drain_before_generation", change.cutoff)

@@ -735,6 +735,14 @@ pub(crate) fn resolve_live_delivery(
     }
 
     let deinterlace = source.interlaced() && video_action == LiveTrackAction::Encode;
+    // Two cadences, and they are not the same number. `plan.source.frame_rate`
+    // stays exactly as the source reported it — that is what a television
+    // client reads when it picks a display mode. `output.frame_rate` is what
+    // this encode will actually emit, so it has to agree with the bwdif mode
+    // the filter chain builds from `policy.deinterlace_output`: `send_field`
+    // emits one frame per field (doubled), `send_frame` one per frame pair
+    // (unchanged). Declaring the field rate for a `send_frame` chain would
+    // also mis-pick the client video limit chosen from it just below.
     let output_frame_rate =
         if deinterlace && policy.deinterlace_output == LiveDeinterlaceOutput::Field {
             source.frame_rate.and_then(doubled_rate)
@@ -842,6 +850,100 @@ mod tests {
             audio_channels: Some(6),
             ..LiveSourceFacts::default()
         }
+    }
+
+    /// D-01 hands a television the cadence to switch its panel to, so the plan
+    /// has to carry both numbers at once: the source cadence it reports, and
+    /// the cadence this encode will emit. They differ whenever bwdif runs in
+    /// `send_field`, so neither one may be derived from the other at the
+    /// reader.
+    #[test]
+    fn deinterlaced_output_reports_field_rate_for_display_matching() {
+        let mut interlaced = source();
+        interlaced.field_order = Some("tt".into());
+        interlaced.frame_rate = Some(LiveRational {
+            num: 30000,
+            den: 1001,
+        });
+        let mut playback = request("ac3");
+        playback.caps = serde_json::json!({
+            "v": 2,
+            "video": [{"codec":"h264","profiles":[],"max_height":2160,"present":[]}],
+            "audio": ["aac"],
+            "containers": ["mpegts"],
+            "transports": ["hls"]
+        });
+        playback.hls_formats = vec![LiveHlsFormat {
+            container: "mpegts".into(),
+            video: "h264".into(),
+            audio: "aac".into(),
+        }];
+        playback.video_limits = vec![LiveVideoLimit {
+            codec: "h264".into(),
+            profile: None,
+            max_width: 3840,
+            max_height: 2160,
+            max_frame_rate: LiveRational { num: 60, den: 1 },
+            interlaced: false,
+        }];
+        playback.audio_limits = vec![LiveAudioLimit {
+            codec: "aac".into(),
+            max_channels: 2,
+        }];
+        let plan = resolve_live_delivery(
+            &interlaced,
+            Some(&playback),
+            &LiveQualityPolicy::default(),
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: true,
+            },
+        )
+        .expect("interlaced input is converted");
+
+        assert!(plan.deinterlace);
+        assert_eq!(
+            plan.output.frame_rate,
+            Some(LiveRational {
+                num: 60000,
+                den: 1001,
+            }),
+        );
+        // The source cadence is reported unchanged beside it.
+        assert_eq!(
+            plan.source.frame_rate,
+            Some(LiveRational {
+                num: 30000,
+                den: 1001,
+            }),
+        );
+
+        // Under `send_frame` the encode emits the source cadence, and the plan
+        // still reports the same source cadence beside it.
+        let frame = resolve_live_delivery(
+            &interlaced,
+            Some(&playback),
+            &LiveQualityPolicy {
+                deinterlace_output: LiveDeinterlaceOutput::Frame,
+                ..LiveQualityPolicy::default()
+            },
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: true,
+            },
+        )
+        .expect("interlaced input is converted");
+        assert!(frame.deinterlace);
+        assert_eq!(
+            frame.output.frame_rate,
+            Some(LiveRational {
+                num: 30000,
+                den: 1001,
+            }),
+        );
+        assert_eq!(frame.source.frame_rate, frame.output.frame_rate);
     }
 
     fn request(audio: &str) -> LivePlaybackRequest {

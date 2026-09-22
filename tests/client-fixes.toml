@@ -2232,6 +2232,18 @@ test = "tests/web/reader.test.js"
 test_anchor = "artwork refresh retains opaque 64-bit item identifiers in every detail layout"
 
 [[fixes]]
+# The display handshake is allowed to suspend, so a delayed tune could build a
+# player for a channel or window that had already been superseded. This helper
+# is the one ownership recheck every Live TV tune passes through before any
+# player is constructed, and it releases the exact session it started.
+id = "android.live-tv-delayed-display-match-ownership"
+commits = ["5494c9f4"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"
+source_anchor = "if (mine == currentSerial() && ownerIsCurrent()) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
+test_anchor = "fun delayedDisplayMatchCannotOutliveChannelOrWindowOwnership()"
+
+[[fixes]]
 # Both clients now read an explicit tone-map peak and the provenance of that
 # number. The 1,000-nit `default` is a policy value, not something read off
 # the file, and the playback-info note has to say which one it is showing.

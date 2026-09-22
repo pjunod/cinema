@@ -4816,6 +4816,37 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT, "{mixed_enable}");
     }
 
+    #[tokio::test]
+    async fn android_display_mode_checkbox_saves_without_live_tv_generation() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+
+        for enabled in [true, false] {
+            // Exact Android checkbox body: this ordinary playback preference
+            // deliberately carries no Live TV tuple generation.
+            let (status, saved) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"playback_display_mode_match": enabled}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{saved}");
+            assert_eq!(saved["playback_display_mode_match"], json!(enabled));
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_MODE_MATCH)
+                    .await
+                    .expect("setting")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+        }
+    }
+
     /// Readiness is advisory (2026-09-07). Structural invariants still refuse:
     /// an enable with no address is a 400 above, and a stale generation is a
     /// 409. But "the tuner did not answer just now" is a thing the operator is
@@ -5791,6 +5822,10 @@ mod tests {
             ids,
             vec![
                 "windows_server",
+                // D-01 adds the Android TV display-mode card. Its one row is
+                // advisory and reports `unobservable` on a node with no
+                // display-mode telemetry; the enable switch stays available.
+                "android_display_mode_match",
                 "library_channels",
                 "library_channel_subject_matching",
                 "embedded_semantic_search",
