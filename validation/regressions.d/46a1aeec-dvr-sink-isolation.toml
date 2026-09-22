@@ -1,0 +1,53 @@
+version = 1
+
+[[coverage]]
+commits = ["46a1aeec"]
+points = ["live.dvr", "live-tv.integration"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+The isolation change and its evidence landed together in \
+`crates/plurxd/src/live_tv/dvr.rs`. Every sink used to hold its own \
+`tokio::fs::File` inside the write fan-out, so `pump_tuner_fanout` wrote each \
+recording inline: one destination that blocked -- a stalled disk, a full \
+volume, a failing write -- held the shared tuner read loop and with it every \
+sibling recording on the same transport. The commit gives each sink a bounded \
+queue (`DVR_SINK_QUEUE_BYTES`, `DVR_SINK_QUEUE_CHUNKS`) and an owned writer \
+task that is the sole owner of the file, and it names the failure reasons \
+instead of letting them reach the tuner. \
+`a_slow_sink_never_delays_the_tuner_reader_or_its_sibling` drives 160 chunks \
+of 64 KiB through a fan-out whose second sink is a `tokio::io::duplex(1)` that \
+is never drained, and asserts the pump finishes in under a second, that the \
+largest gap between two tuner pulls stays under 100 ms, that the stalled \
+sink's queued bytes never exceed the bound, and that only the stalled sink is \
+cancelled and only it carries `disk_write_backlog`; putting the write back \
+inline makes the reader wait on that destination and both timing assertions \
+fail. `a_failing_sink_records_one_named_interruption` asserts that a writer \
+that always errors leaves `pump_tuner_fanout` returning `Ok` and produces \
+exactly one `capture_interrupted` event with `disk_write_failed` -- without \
+the per-attempt latch in `DvrSinkObservation::interrupted` a sink-local disk \
+failure either becomes a tuner failure or appends one actionable event per \
+chunk. `two_overlapping_recordings_get_identical_bytes_in_their_overlap` \
+pins that two recordings on one tuner still receive byte-identical content \
+once their writers settle, which is the fact asynchronous delivery could \
+quietly break. `a_fenced_transport_cancels_every_sink_before_exiting` drops \
+serving readiness mid-stream and asserts both sinks are cancelled and both \
+files stay empty, so an owner that lost authority cannot have its detached \
+writer tasks keep draining queued bytes to disk. \
+`stop_waits_for_the_writer_and_never_concatenates_an_unsettled_attempt` \
+leaves one chunk queued behind a blocked writer and asserts `settle_sink` \
+answers `Settling`, the attempt part survives and no final file appears; \
+removing the settlement wait lets assembly concatenate and unlink a part \
+whose writes have not reached the file. `queue_byte_reservations_never_exceed \
+_the_bound` pins `reserve_sink_queue_bytes` saturating at exactly the bound \
+and refusing afterwards. `live-tv.integration` is claimed for the metrics \
+surface the same commit added in `crates/plurxd/src/live_tv.rs`: \
+`plurx_dvr_sink_failures_total` is three fixed reason counters with no \
+recording id in any label, and the two sink-failure tests above assert on \
+`dvr_sink_failures_prometheus` output. The commit also adds the focused \
+full-guide rows `the_scheduler_sees_an_airing_the_public_clip_drops` and \
+`already_scheduled_late_rows_survive_reconciliation_of_an_oversized_guide`, \
+which prove the scheduler expands and reconciles from the immutable full \
+guide view rather than the size-clipped public one. All of these are \
+`crates/plurxd` unit tests, run by `make rust-check` under `rust-gate` and by \
+`make ci-rust-gate` under `rust-gate-ci`.
+"""

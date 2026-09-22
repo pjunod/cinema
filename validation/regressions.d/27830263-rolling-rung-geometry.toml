@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["27830263"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The correction and its evidence landed together in `crates/plurxd/src/transcode.rs`. `FrozenHlsPresentation::new` froze the source row unchanged, so a rolling `SessionKind::Transcode { height }` sealed the source geometry into its master declaration and a 720 rung off a 4K title advertised `RESOLUTION=3840x2160`. The constructor now reshapes width and height together through `plurx_core::transcode::output_size` for transcode sessions only. `a_rolling_transcode_freezes_the_rung_geometry` builds a 720 rung on the 3840x2160 `profile5_file` and requires the frozen file to read 1280x720, so restoring the unchanged row makes it fail under `cargo test -p plurxd`, which `rust-gate` and `rust-gate-ci` both run. The three tests beside it pin the edges the reshape must not cross rather than the defect itself: `a_rolling_transcode_of_an_unprobed_source_freezes_no_geometry` requires an unprobed source to keep declaring nothing instead of inheriting the rung's height, `a_rolling_transcode_never_upscales_its_declaration` requires a 640x360 source asked for 1080 to stay 640x360, and `a_copy_session_keeps_the_source_geometry` requires `SessionKind::Copy` to be left alone. Each of those three fails against a reshape that invents geometry, upscales, or reaches past transcode sessions."

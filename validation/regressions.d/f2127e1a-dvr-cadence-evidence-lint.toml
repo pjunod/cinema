@@ -1,0 +1,22 @@
+version = 1
+
+[[coverage]]
+commits = ["f2127e1a"]
+points = ["live.dvr"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+This commit changes no production code: the whole diff is inside the test \
+module of `crates/plurxd/src/live_tv/dvr.rs`, in the cadence assertion of \
+`a_slow_sink_never_delays_the_tuner_reader_or_its_sibling`. That test reads \
+its pull timings out of a `std::sync::Mutex` and then awaits \
+`settle_sink(&fast)` and `settle_sink(&slow)`; as first written the guard was \
+held across those awaits and only dropped afterwards. `clippy::await_holding \
+_lock` fires on exactly that shape, and `make lint` runs \
+`cargo clippy --workspace --all-targets -- -D warnings`, so the warning is an \
+error in the gate. Scoping the guard to a block that ends before the awaits \
+keeps the measurement identical -- the same `max_gap` over the same samples, \
+still asserted under 100 ms -- while letting the sink-isolation evidence \
+compile clean. Restoring the held guard makes the Clippy stage of \
+`make rust-check` (`rust-gate`) and of `make ci-rust-gate` (`rust-gate-ci`) \
+fail before any test runs.
+"""

@@ -38,6 +38,11 @@ use crate::titlestore::{Manifest, ReaderWindow};
 /// the number so the M7 comparison is not confounded by a retune.
 pub const AHEAD_HORIZON_SECONDS: u32 = 180;
 
+/// Once stopped for [`Hold::Ahead`], resume only after the lead has drained
+/// to this low-water mark. This turns per-segment stop/resume churn into a
+/// useful burst while preserving the original 180-second entry line.
+pub const AHEAD_RESUME_SECONDS: u32 = 90;
+
 /// Beyond this, restarting the pipeline at the demanded boundary beats letting
 /// it read forward. Under it, a copy pipe running at several times realtime
 /// closes the gap faster than a process can start.
@@ -175,6 +180,10 @@ pub struct Position {
     /// 2 s, and a horizon expressed in segments would mean two different
     /// things on the two paths.
     pub seconds_per_segment: f64,
+    /// The rendition is latched in an ahead hold. This is deliberately not
+    /// [`WorkingSet::held`]: an ahead stop must not lower the disk-pressure
+    /// entry line, and the latch survives a process yielded to a live waiter.
+    pub ahead_held: bool,
     /// The node's working set, across every rendition — not this one's.
     ///
     /// A producer inside its ahead horizon can still be the one filling the
@@ -278,6 +287,7 @@ pub fn decide(
         return Action::Idle;
     };
     let horizon = position.horizon_segments(AHEAD_HORIZON_SECONDS);
+    let resume = position.horizon_segments(AHEAD_RESUME_SECONDS);
     let reposition = position.horizon_segments(REPOSITION_GAP_SECONDS);
 
     // Owed right now: the segments open requests are waiting on and the store
@@ -375,14 +385,31 @@ pub fn decide(
         // on how far past the furthest demand the producer has already run —
         // and not at all on the working set, which this producer is not adding
         // to.
-        return stop(position.produced_through, furthest, horizon);
+        return stop(
+            position.produced_through,
+            furthest,
+            horizon,
+            resume,
+            position.ahead_held,
+        );
     };
 
     // A gap beyond the ahead horizon is not owed yet — that is what the
     // horizon means. Suspend rather than run to the end of a two-hour film for
     // a reader who has watched four minutes.
-    if gap > furthest.saturating_add(horizon) {
-        return stop(position.produced_through, furthest, horizon);
+    if gap > furthest.saturating_add(horizon)
+        || (position.ahead_held
+            && position
+                .produced_through
+                .is_some_and(|through| through > furthest.saturating_add(resume)))
+    {
+        return stop(
+            position.produced_through,
+            furthest,
+            horizon,
+            resume,
+            position.ahead_held,
+        );
     }
 
     // There is real ahead-fill to do and no room to do it in. Nobody is
@@ -464,12 +491,23 @@ fn serve_blocked(manifest: &Manifest, owed: &[u32], position: Position, repositi
 
 /// Suspend if the producer has run past the ahead horizon, idle if it simply
 /// has nothing to do.
-fn stop(produced_through: Option<u32>, furthest: u32, horizon: u32) -> Action {
+fn stop(
+    produced_through: Option<u32>,
+    furthest: u32,
+    horizon: u32,
+    resume: u32,
+    ahead_held: bool,
+) -> Action {
     match produced_through {
-        Some(through) if through >= furthest.saturating_add(horizon) => Action::Suspend {
-            produced_through: through,
-            reason: Hold::Ahead { horizon },
-        },
+        Some(through)
+            if through >= furthest.saturating_add(horizon)
+                || (ahead_held && through > furthest.saturating_add(resume)) =>
+        {
+            Action::Suspend {
+                produced_through: through,
+                reason: Hold::Ahead { horizon },
+            }
+        }
         _ => Action::Idle,
     }
 }
@@ -524,6 +562,7 @@ mod tests {
             // themselves.
             positioned_at: through.map(|_| 0),
             seconds_per_segment: 7.0,
+            ahead_held: false,
             working_set: WorkingSet::default(),
         }
     }
@@ -693,6 +732,117 @@ mod tests {
             }
             other => panic!("expected suspension, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_producer_stopped_for_ahead_does_not_resume_one_segment_later() {
+        let mut manifest = manifest(80);
+        for index in 0..=25 {
+            manifest.materialize(index, 1_000, 0);
+        }
+        assert!(matches!(
+            decide(
+                &manifest,
+                &[demand(0)],
+                Position {
+                    ahead_held: true,
+                    ..position(Some(25))
+                },
+                &[]
+            ),
+            Action::Suspend {
+                reason: Hold::Ahead { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_producer_stopped_for_ahead_resumes_at_the_low_water_mark() {
+        let mut manifest = manifest(80);
+        for index in 0..=13 {
+            manifest.materialize(index, 1_000, 0);
+        }
+        assert_eq!(
+            decide(
+                &manifest,
+                &[demand(0)],
+                Position {
+                    ahead_held: true,
+                    ..position(Some(13))
+                },
+                &[]
+            ),
+            Action::Produce { next: 14 }
+        );
+    }
+
+    #[test]
+    fn the_first_stop_is_still_at_the_horizon() {
+        let mut manifest = manifest(80);
+        for index in 0..=25 {
+            manifest.materialize(index, 1_000, 0);
+        }
+        assert_eq!(
+            decide(&manifest, &[demand(0)], position(Some(25)), &[]),
+            Action::Produce { next: 26 }
+        );
+        manifest.materialize(26, 1_000, 0);
+        assert!(matches!(
+            decide(&manifest, &[demand(0)], position(Some(26)), &[]),
+            Action::Suspend {
+                reason: Hold::Ahead { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_blocked_request_ignores_the_low_water_mark() {
+        let mut manifest = manifest(80);
+        for index in 0..=25 {
+            manifest.materialize(index, 1_000, 0);
+        }
+        manifest.evict(1);
+        assert_eq!(
+            decide(
+                &manifest,
+                &[waiting(1)],
+                Position {
+                    ahead_held: true,
+                    ..position(Some(25))
+                },
+                &[]
+            ),
+            Action::Reposition { to: 1 }
+        );
+    }
+
+    #[test]
+    fn ahead_held_does_not_lower_the_working_set_line() {
+        let manifest = manifest(80);
+        let position = Position {
+            ahead_held: true,
+            ..under_pressure(None, 7_500, 10_000, false)
+        };
+        assert_eq!(
+            decide(&manifest, &[demand(0)], position, &[]),
+            Action::Produce { next: 0 }
+        );
+    }
+
+    #[test]
+    fn the_resume_line_is_seconds_not_segments() {
+        let short = Position {
+            seconds_per_segment: 2.0,
+            ..position(None)
+        };
+        let long = Position {
+            seconds_per_segment: 7.0,
+            ..position(None)
+        };
+        assert_eq!(short.horizon_segments(AHEAD_RESUME_SECONDS), 45);
+        assert_eq!(long.horizon_segments(AHEAD_RESUME_SECONDS), 13);
     }
 
     #[test]
@@ -1089,12 +1239,14 @@ mod tests {
             produced_through: Some(0),
             positioned_at: Some(0),
             seconds_per_segment: 2.0,
+            ahead_held: false,
             working_set: WorkingSet::default(),
         };
         let long = Position {
             produced_through: Some(0),
             positioned_at: Some(0),
             seconds_per_segment: 7.0,
+            ahead_held: false,
             working_set: WorkingSet::default(),
         };
         assert_eq!(short.horizon_segments(AHEAD_HORIZON_SECONDS), 90);
@@ -1109,6 +1261,7 @@ mod tests {
             produced_through: Some(0),
             positioned_at: Some(0),
             seconds_per_segment: 0.0,
+            ahead_held: false,
             working_set: WorkingSet::default(),
         };
         assert!(broken.horizon_segments(AHEAD_HORIZON_SECONDS) >= 1);

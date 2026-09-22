@@ -189,8 +189,8 @@ function clusterNodeOperationsHtml(n,ops){
     : `<span style="color:var(--bad)">Unavailable</span>`;
   const snapshotText=snap.available
     ? snap.last_build_outcome
-      ? `build ${esc(snap.last_build_outcome)} ${snap.last_build_unix_ms?esc(fmtAgo(Math.floor(snap.last_build_unix_ms/1000))):"at unknown time"}`
-      : `builds ${esc(String(snap.build_ok_count))} ok · ${esc(String(snap.build_error_count))} errors`
+      ? `build ${esc(snap.last_build_outcome)} ${snap.last_build_unix_ms?esc(fmtAgo(Math.floor(snap.last_build_unix_ms/1000))):"at unknown time"} · DB ${snap.db_bytes===null||snap.db_bytes===undefined?"unknown":esc(fmtBytes(snap.db_bytes)||"0 B")}`
+      : `builds ${esc(String(snap.build_ok_count))} ok · ${esc(String(snap.build_error_count))} errors · DB ${snap.db_bytes===null||snap.db_bytes===undefined?"unknown":esc(fmtBytes(snap.db_bytes)||"0 B")}`
     : `<span style="color:var(--bad)">Unavailable</span>`;
   const mediaText=`${esc(String(media.local_active_sessions||0))} session${Number(media.local_active_sessions||0)===1?"":"s"} · ${media.drained?"drained":"draining"}`;
   const lastError=wal&&wal.last_error?wal.last_error.message:"None";
@@ -210,6 +210,7 @@ function clusterNodeOperationsHtml(n,ops){
         <dt>Last WAL sync</dt><dd>${wal&&wal.last_sync_unix_ms?esc(fmtAgo(Math.floor(wal.last_sync_unix_ms/1000))):"unknown"}</dd>
         <dt>Last WAL error</dt><dd>${esc(lastError)}</dd><dt>Last recovery</dt><dd>${esc(recovery)}</dd>
         <dt>Snapshot outcomes</dt><dd>build ${esc(String(snap.build_ok_count||0))} ok / ${esc(String(snap.build_error_count||0))} error; install ${esc(String(snap.install_ok_count||0))} ok / ${esc(String(snap.install_error_count||0))} error</dd>
+        <dt>State-machine database</dt><dd>${snap.db_bytes===null||snap.db_bytes===undefined?"unknown":esc(fmtBytes(snap.db_bytes)||"0 B")}</dd>
         <dt>Last snapshot install</dt><dd>${snap.last_install_outcome?`${esc(snap.last_install_outcome)} ${snap.last_install_unix_ms?esc(fmtAgo(Math.floor(snap.last_install_unix_ms/1000))):"at unknown time"}`:"none observed"}</dd>
         <dt>Bounded-read recovery evidence</dt><dd>${transportText}</dd>
         <dt>Direct play</dt><dd>Unknown here — drain proxy connections separately.</dd></dl></details>

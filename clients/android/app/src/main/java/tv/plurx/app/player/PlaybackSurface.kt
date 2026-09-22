@@ -321,6 +321,7 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
             "media_owner_transition",
             "vod_index_pending",
             "vod_engine_unattested",
+            "transcode_capacity_pending",
         ),
         retryable = true,
     ),

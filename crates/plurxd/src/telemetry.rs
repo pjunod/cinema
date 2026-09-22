@@ -32,6 +32,7 @@ const ENCODERS: [&str; 8] = [
 ];
 const MARKER_ACTIONS: [&str; 4] = ["offer", "manual_skip", "automatic_skip", "undo_seek_back"];
 const MARKER_PREWARM_RESULTS: [&str; 2] = ["hit", "miss"];
+const TONE_MAP_PEAK_SOURCES: [&str; 3] = ["cll", "mdcv", "default"];
 const QUEUE: usize = 1_024;
 const TERMINAL_RESERVE: usize = 128;
 const BATCH: usize = 64;
@@ -229,6 +230,7 @@ struct PlaybackMetrics {
     sessions: [AtomicU64; ENCODERS.len() + 1],
     marker_actions: [AtomicU64; MARKER_ACTIONS.len()],
     marker_prewarm: [AtomicU64; MARKER_PREWARM_RESULTS.len()],
+    tone_map_peaks: [AtomicU64; TONE_MAP_PEAK_SOURCES.len()],
 }
 
 impl PlaybackMetrics {
@@ -246,6 +248,7 @@ impl PlaybackMetrics {
             sessions: [const { AtomicU64::new(0) }; ENCODERS.len() + 1],
             marker_actions: [const { AtomicU64::new(0) }; MARKER_ACTIONS.len()],
             marker_prewarm: [const { AtomicU64::new(0) }; MARKER_PREWARM_RESULTS.len()],
+            tone_map_peaks: [const { AtomicU64::new(0) }; TONE_MAP_PEAK_SOURCES.len()],
         }
     }
 
@@ -434,6 +437,14 @@ impl PlaybackMetrics {
             &MARKER_PREWARM_RESULTS,
             &self.marker_prewarm,
         );
+        render_counters(
+            &mut out,
+            "plurx_tone_map_peak_total",
+            "CPU tone-map recipes captured by source-luminance provenance.",
+            "source",
+            &TONE_MAP_PEAK_SOURCES,
+            &self.tone_map_peaks,
+        );
         let hits = self.marker_prewarm[0].load(Ordering::Relaxed);
         let total = hits.saturating_add(self.marker_prewarm[1].load(Ordering::Relaxed));
         // Publish the ratio only once a hit has been observed.
@@ -502,6 +513,15 @@ fn render_counters<const N: usize>(
 }
 
 static METRICS: LazyLock<PlaybackMetrics> = LazyLock::new(PlaybackMetrics::new);
+
+pub(crate) fn record_tone_map_peak(source: plurx_core::transcode::ToneMapPeakSource) {
+    let index = match source {
+        plurx_core::transcode::ToneMapPeakSource::Cll => 0,
+        plurx_core::transcode::ToneMapPeakSource::Mdcv => 1,
+        plurx_core::transcode::ToneMapPeakSource::Default => 2,
+    };
+    METRICS.tone_map_peaks[index].fetch_add(1, Ordering::Relaxed);
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NetworkIdentity {
