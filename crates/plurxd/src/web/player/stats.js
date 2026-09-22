@@ -475,6 +475,26 @@ async function reportProgress(fileId, ended, attachedOwner){
   if(p.libraryChannel)return;
   const video=document.getElementById("video");
   const posMs=Math.round((p.bookOffset||0)+((p.offset||0)+ (video.currentTime||0))*1000);
+  // A zero beat needs a witness; a beat with a position in it does not.
+  //
+  // When a session never publishes a playlist the element sits at readyState 0
+  // with currentTime 0 — and on a VOD or direct timeline `offset` is 0 as well,
+  // so the whole reported position is 0. The server takes it, and the resume
+  // point the viewer earned is gone: every later open starts at the beginning,
+  // for good. Measured on a production node on 2026-09-22, one unplayable
+  // 26-second startup fires five or six of these. The offset routes escaped it
+  // only by accident, because their `offset` carries the position — so the
+  // condition is about the number being reported, not about the route, and a
+  // predecessor's real playhead still reaches the server at close.
+  //
+  // The witness is the CURRENT attachment having reached a timeline, not the
+  // player having played at some point. A stall retry and a quality reopen both
+  // reuse the player object while putting the element back to zero, and both
+  // reset `offset` to 0 on the way, so evidence carried across an attachment
+  // would wave exactly those through — the same bug, one button press later.
+  const attachment=p.mediaAttachment||null;
+  if(attachment&&video&&video.readyState>=1) p.timelineAttachment=attachment;
+  if(posMs<=0&&(!attachment||p.timelineAttachment!==attachment)) return;
   // The file's probed duration is the truth. Only direct play's own
   // video.duration is the whole file: a progressive remux's grows as ffmpeg
   // writes, and an offset HLS stream's covers the tail alone. Reporting either
