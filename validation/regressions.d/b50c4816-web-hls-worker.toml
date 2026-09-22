@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b50c4816"]
+points = ["web.experience", "playback.pipeline"]
+checks = ["web-static"]
+reason = "Both hls.js constructions in the shipped player — `attachHls` in `crates/plurxd/src/web/player/player.js` and `preparedHlsAttach` in `crates/plurxd/src/web/player/prepared-replacement.js` — passed `enableWorker:false`, so demuxing ran on the main thread on every attachment. Deleting those two lines is the entire production change, and its evidence is `scripts/web-hls-startup-browser-check`, which `make web-check` runs as part of `web-static`. The script now drives the shipped page twice against the same delayed-manifest fixture: once as served, and once with the document response rewritten through a CDP `Fetch` interception that replaces the shell's Content-Security-Policy with `worker-src 'none'`. It then requires the first run's console log to contain hls.js's own `injecting Web Worker` line and not its `fallback to inline` line, the second run's log to contain `fallback to inline`, and both runs to reach the requested position after the nine-request manifest ladder. Putting `enableWorker:false` back makes the first of those two console assertions fail, because no worker is ever injected in either run. This is browser evidence rather than a source-level assertion in Node: the script prints SKIP and exits 0 where Playwright or Chromium is absent, so it proves the worker only on a runner that has them."

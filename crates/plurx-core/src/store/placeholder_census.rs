@@ -820,10 +820,30 @@ fn is_sqlite_candidate(text: &str) -> bool {
 /// Current number of SQLite statement variants whose binding list is built in
 /// another statement or dynamically. This is measured by the census and may
 /// only fall unless a reviewer accepts a new non-local binding shape.
-// `sqlite/users.rs::list_tokens_for_user` prepares once and binds in a later
-// `query_map`, so its arity cannot be paired syntactically even though the
-// numbered placeholder itself is still covered by this census.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 91;
+///
+/// 90 -> 91 for exactly one reviewed site: the `SELECT` prepared by
+/// `files_missing_field_order` in `sqlite/media.rs`, whose `?1`/`?2` are bound
+/// by the `query_map` on the next statement, so no local `params!` sits beside
+/// the literal for the census to count. Two placeholders, two values. It is
+/// the same shape `files_missing_video_codec_tag` immediately above it already
+/// contributes, and the census was re-measured site by site against
+/// `origin/main`: that one literal is the entire difference between the two
+/// sets, so nothing else changed binding shape in this merge.
+///
+/// 91 -> 92 for exactly one more reviewed site of that same shape: the
+/// `SELECT` prepared by `files_missing_luminance` in `sqlite/media.rs`, whose
+/// `?1`/`?2` are bound by the `query_map` on the next statement. The census
+/// was re-measured against the merged tree and that one literal is the whole
+/// difference; the luminance `UPDATE` beside it binds locally and is checked.
+///
+/// 92 -> 93 on this branch for one more site of that same shape:
+/// `list_tokens_for_user` in `sqlite/users.rs` prepares the device-inventory
+/// `SELECT` once and binds `?1`/`?2` in the `query_map` on the next statement,
+/// so its arity cannot be paired syntactically even though the numbered
+/// placeholders themselves are still covered by this census. The two entries
+/// main contributed (field order, luminance) and this one are the whole
+/// difference between the pre-merge sets; no other literal changed shape.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 93;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

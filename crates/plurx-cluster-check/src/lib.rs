@@ -9392,7 +9392,11 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
             bail!(message);
         }
     };
-    let replication = ReplicationMonitor::replicated(client.clone());
+    let replication = ReplicationMonitor::replicated(
+        client.clone(),
+        launch.root.join(format!("node-{}", launch.node_id)),
+        "auth.db",
+    );
     let (passive_shutdown, passive_shutdown_signal) = tokio::sync::oneshot::channel();
     tokio::spawn(replication.clone().passive_metrics_loop(async move {
         let _ = passive_shutdown_signal.await;

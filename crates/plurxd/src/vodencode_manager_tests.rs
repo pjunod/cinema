@@ -41,7 +41,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
-        request_id: None,
+        request_id: Some("qualification-vod".into()),
         previous_session_id: None,
         reopen_reason: None,
         presentation: Presentation::Vod,
@@ -50,10 +50,39 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         kind: SessionKind::Transcode { height: 240 },
         ..reopen_request(file_id, "encoded-manager", "unused", "unused")
     };
+    let missing = SessionRequest {
+        file_id: i64::MAX,
+        request_id: Some("qualification-vod-missing".into()),
+        ..req.clone()
+    };
+    assert!(manager.create_session(&missing, "test").await.is_err());
+    assert_eq!(
+        manager.codec_qualification_encoder_count(Encoder::Software, OutputGrade::Sdr),
+        0,
+        "a VOD create that failed before reader attachment was counted"
+    );
+    assert_eq!(manager.codec_qualification_pipeline_count(Pipeline::Cpu), 0);
     let start = manager
         .create_session(&req, "test")
         .await
         .expect("public encoded create");
+    assert_eq!(
+        manager.codec_qualification_encoder_count(Encoder::Software, OutputGrade::Sdr),
+        1,
+        "one attached encoded-VOD reader must count once"
+    );
+    assert_eq!(manager.codec_qualification_pipeline_count(Pipeline::Cpu), 1);
+    let replay = manager
+        .create_session(&req, "test")
+        .await
+        .expect("idempotent encoded create");
+    assert_eq!(replay.session_id, start.session_id);
+    assert_eq!(
+        manager.codec_qualification_encoder_count(Encoder::Software, OutputGrade::Sdr),
+        1,
+        "an idempotent VOD replay must not count a second start"
+    );
+    assert_eq!(manager.codec_qualification_pipeline_count(Pipeline::Cpu), 1);
     assert_eq!(start.target_height, 240);
     assert_eq!(start.kind, SessionKind::Transcode { height: 240 });
     assert_eq!(start.encoder, Encoder::Software.label());

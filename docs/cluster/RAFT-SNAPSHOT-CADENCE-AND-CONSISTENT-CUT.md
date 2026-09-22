@@ -1,6 +1,7 @@
 # Raft snapshot cadence and the consistent cut — measure, then move the copy off the writer without moving the cut
 
-**Status:** ready for review · **Executes:** S2, S5, F-sc-2, F-sc-5 from
+**Status:** in progress — M0 instrumentation implemented; fleet readout blocked
+· **Executes:** S2, S5, F-sc-2, F-sc-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -392,4 +393,23 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0 instrumentation | [#427](http://192.168.4.7:3000/noirr/plurx/pulls/427) | Four fixed-label filesystem gauges are sampled by the existing passive local-Raft tick without Store or network access; direct node status and the Cluster page carry the database byte count. Rust 1.97.1 compiled `plurx-core`, `plurxd`, and `plurx-cluster-check`; the focused filesystem, Prometheus, and web contracts passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0 fleet readout | [#427](http://192.168.4.7:3000/noirr/plurx/pulls/427) | Blocked, not estimated: this execution host could not resolve the plan's `media1`/`lab1`–`lab3` aliases; SSH to the documented current addresses for media1, lab3, lab4, and lab6 timed out, and the configured `billy` jump host could not reach their HTTP listeners. No voter was restarted. M1, M3, and therefore M2 remain unchanged until every current voter supplies the 24-hour B/E/S/W readout and an authorized follower restart supplies A. |
+
+### Current execution boundary
+
+The implementation deliberately stops inside M0. The deployed fleet does not
+yet run the new size gauges, and this session has no network path to collect
+the allowed `du -b` fallback or the 24-hour histogram and index history. A
+follower restart is also an operational mutation, not implied by permission to
+perform read-only fleet inspection. Consequently there is no evidence-backed
+`logs_until_snapshot` value, no measured storage floor, and no safe basis for
+changing the writer/copy path.
+
+Resume from a host with fleet access by first resolving the committed voter
+set, then run the prompt in §5.1 against every voter over the same 24-hour
+window. Perform one prepared follower restart only with explicit operational
+authorization and record the applied-index catch-up rate. Put B, E, S, W, A,
+the voter roster, timestamps, and raw query or command receipts on this PR
+before beginning M1. This is an evidence dependency, not an invitation to use
+the stale host list or the appendix's proposed threshold.

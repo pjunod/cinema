@@ -547,7 +547,7 @@ function catalogItemBody(p){
   // Admin affordances. px-admin is the hook the TV surface hides them with —
   // see the television block in styles.css and NOTES §5.
   const artBtn = ME&&ME.is_admin
-    ? ` <button class="ghost sm px-admin" title="Re-fetch this item's poster and backdrop" aria-label="Refresh artwork" onclick="refreshArtwork(${it.id},this)">⟳ Refresh artwork</button>`
+    ? ` <button class="ghost sm px-admin" title="Re-fetch this item's poster and backdrop" aria-label="Refresh artwork" onclick="refreshArtwork('${exactWireId(it)}',this)">⟳ Refresh artwork</button>`
     : '';
   const editBtn = editable
     ? ` <button class="ghost sm px-admin" title="Edit details" aria-label="Edit details" onclick='openEdit(${esc(JSON.stringify(it))})'>✎ Edit</button>`
@@ -668,4 +668,3 @@ LAYOUTS.catalog.views.item = catalogItemBody;
 LAYOUTS.catalog.views.library = {shell:catalogLibraryShell};
 LAYOUTS.catalog.stickyFloor = catalogStickyFloor;
 LAYOUTS.catalog.libsChanged = catalogLibsChanged;
-

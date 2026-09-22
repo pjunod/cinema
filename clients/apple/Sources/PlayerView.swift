@@ -2073,6 +2073,20 @@ struct PlayerView: View {
         return "\(long) — \(note)"
     }
 
+    static func toneMapPeakSummary(_ status: PlaybackSessionStatus?) -> String? {
+        guard let nits = status?.toneMapPeakNits, nits > 0,
+              let rawSource = status?.toneMapPeakSource?.lowercased() else { return nil }
+        let provenance: String
+        switch rawSource {
+        case "cll": provenance = "source MaxCLL"
+        case "mdcv": provenance = "source mastering metadata"
+        case "default": provenance = "policy default"
+        default: return nil
+        }
+        let value = NumberFormatter.localizedString(from: NSNumber(value: nits), number: .decimal)
+        return "Tone-map peak \(value) nits · \(provenance)"
+    }
+
     static func playbackFacts(
         source: SourceSummary?,
         audio: AudioTrack?,
@@ -2998,7 +3012,7 @@ struct PlaybackStatsView: View {
                 displayHDR: Caps.displayIsHDR,
                 reasons: controller.decision?.reasons
             ) else { return nil }
-            return ContractFieldValue(value: range)
+            return ContractFieldValue(value: range, note: PlayerView.toneMapPeakSummary(status))
         case "decode_audio":
             return nil
         case "source_read":

@@ -58,6 +58,14 @@ function playbackInfoMarkup(mode,rows,healthWord,healthStatus){
 function playbackInfoHelp(id){
   return ({stream_format:"Stream or manifest metadata; not a player picture measurement.",device_audio:"Speaker or HDMI output only when reported; never inferred from track metadata.",decode_resolution:"Attached player measurement; never inferred from source size.",source_resolution:"Original file metadata.",decode_audio:"Selected stream track; not the device's audio output.",client_loaded:"Contiguous media loaded ahead on this device.",server_ready:"Complete media ahead on the server; separate from the device buffer.",delivery_rate:"Server-completed responses; not confirmed client receipt.",observed_rate:"Player estimate during transfers; bursty by design.",stream_rate:"Stream bitrate; not connection speed.",delivered:"Bytes in server-completed responses, not proof of playback.",stalls:"Player interruptions for this playback, excluding intentional pauses.",status:"Server work state; separate from whether the picture is playing.",status_age:"Age of the most recent server response.",production_actual:"Encoder progress ahead of demand; not loaded video.",production_target:"Pacing policy, not a measurement.",http_wait:"Server responses waiting for publication; not player stalls."})[id]||"";
 }
+function statsToneMapPeak(health){
+  if(!health||!Number.isFinite(Number(health.tone_map_peak_nits))||!health.tone_map_peak_source)return null;
+  const nits=Math.round(Number(health.tone_map_peak_nits));
+  if(nits<=0)return null;
+  const source=String(health.tone_map_peak_source).toLowerCase();
+  const provenance=source==="cll"?"source MaxCLL":source==="mdcv"?"source mastering metadata":source==="default"?"policy default":null;
+  return provenance?`Tone-map peak ${nits.toLocaleString("en-US")} nits · ${provenance}`:null;
+}
 function patchPlaybackInfoRows(body,mode,rows,healthWord,healthStatus){
   const schema=`${mode}:`+rows.map(row=>`${row.id}:${row.placement}`).join("|");
   if(body.dataset.statsSchema!==schema){
@@ -328,6 +336,7 @@ function playbackStatsTelemetry(){
     av_offset:`${p.aoffset||0} ms`,av_offset_note:p.declared&&p.declared!==(p.aoffset||0)?`container ${p.declared>0?"+":""}${p.declared} ms`:null,
     decode_resolution:v&&v.videoWidth>0&&v.videoHeight>0?`${v.videoWidth}×${v.videoHeight}`:"Not reported",
     dynamic_range:range?range.panel:null,dynamic_range_mini:range?range.text:null,
+    dynamic_range_note:statsToneMapPeak(h),
     stream_format:level?[level.width>0&&level.height>0?`${level.width}×${level.height}`:null,level.videoCodec].filter(Boolean).join(" · ")||"Not reported":"Not reported",
     device_audio:"Not reported",decode_audio:null,
     frames,frames_tone:droppedCount==null?"muted":droppedCount===0?"good":droppedCount<3?"warn":"bad",
@@ -466,6 +475,26 @@ async function reportProgress(fileId, ended, attachedOwner){
   if(p.libraryChannel)return;
   const video=document.getElementById("video");
   const posMs=Math.round((p.bookOffset||0)+((p.offset||0)+ (video.currentTime||0))*1000);
+  // A zero beat needs a witness; a beat with a position in it does not.
+  //
+  // When a session never publishes a playlist the element sits at readyState 0
+  // with currentTime 0 — and on a VOD or direct timeline `offset` is 0 as well,
+  // so the whole reported position is 0. The server takes it, and the resume
+  // point the viewer earned is gone: every later open starts at the beginning,
+  // for good. Measured on a production node on 2026-09-22, one unplayable
+  // 26-second startup fires five or six of these. The offset routes escaped it
+  // only by accident, because their `offset` carries the position — so the
+  // condition is about the number being reported, not about the route, and a
+  // predecessor's real playhead still reaches the server at close.
+  //
+  // The witness is the CURRENT attachment having reached a timeline, not the
+  // player having played at some point. A stall retry and a quality reopen both
+  // reuse the player object while putting the element back to zero, and both
+  // reset `offset` to 0 on the way, so evidence carried across an attachment
+  // would wave exactly those through — the same bug, one button press later.
+  const attachment=p.mediaAttachment||null;
+  if(attachment&&video&&video.readyState>=1) p.timelineAttachment=attachment;
+  if(posMs<=0&&(!attachment||p.timelineAttachment!==attachment)) return;
   // The file's probed duration is the truth. Only direct play's own
   // video.duration is the whole file: a progressive remux's grows as ffmpeg
   // writes, and an offset HLS stream's covers the tail alone. Reporting either
@@ -761,4 +790,3 @@ document.getElementById("player").addEventListener("focusin",e=>{
 // player-input-adapter:end
 // map fileId → itemId, filled by viewItem so progress posts to the right item
 const ITEM_FOR_FILE={};
-

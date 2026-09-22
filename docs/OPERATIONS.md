@@ -4466,6 +4466,7 @@ curl -s $HOST/metrics | grep plurx_live_tv
 | `plurx_live_tv_starts_total{outcome="created"\|"recovered"\|"failed"}` | a climbing `failed` with a flat `created` is the shape of a device problem |
 | `plurx_live_tv_session_ends_total{reason="terminal"}` | sessions that ended in a terminal state |
 | `plurx_live_tv_relay_bytes_total` | bytes a non-owner served by relaying from the owner |
+| `plurx_dvr_sink_failures_total{reason="disk_write_failed"\|"disk_write_timeout"\|"disk_write_backlog"}` | capture attempts ended by one sink's disk path; a rising counter does not mean the shared tuner transport failed |
 
 Sessions and starts are **per process**. On a cluster, the owner's numbers are
 the tuner's truth and a relaying node's `relay_bytes` is how much it carried.

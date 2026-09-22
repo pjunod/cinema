@@ -31,6 +31,7 @@ mod prodexec;
 mod prodrun;
 mod prodsched;
 mod produce;
+mod producer_spawn;
 mod progress;
 mod progressive;
 mod reader_formats;
@@ -2287,6 +2288,13 @@ fn spawn_background_loops(
             .root_readability_loop(std::sync::Arc::clone(&state.store)),
     );
     tokio::spawn(std::sync::Arc::clone(&state.shared_cache).run(background_shutdown.clone()));
+    // Fragment indexes are node-local for both storage backends. Validate one
+    // bounded page here on every node; cluster leadership is neither required
+    // nor sufficient to cover another node's sidecar.
+    tokio::spawn(
+        std::sync::Arc::clone(&state.jobs)
+            .fragment_index_validation_loop(background_shutdown.clone()),
+    );
     tokio::spawn(crate::media_sessions::lease_loop(state.clone()));
     tokio::spawn(crate::media_sessions::takeover_loop(state.clone()));
     tokio::spawn(crate::media_sessions::maintenance_loop(state.clone()));
