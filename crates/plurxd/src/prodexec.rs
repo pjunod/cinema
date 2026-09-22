@@ -146,6 +146,32 @@ pub enum Termination {
     /// Held on a bound that only another rendition can clear, so the codec
     /// session it is sitting on has no scheduled end.
     IndefiniteHold,
+    /// A clearing hold would keep the process, but a live start is waiting for
+    /// the encoder permit it owns. Kill and reap before returning capacity.
+    YieldToWaiter,
+}
+
+/// Shared-pool contention observed once by the driver for this decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Contention {
+    pub live_waiting: bool,
+    pub holds_permit: bool,
+}
+
+/// Let a stopped or about-to-stop encoder return its permit to a live waiter.
+/// All other operations already move the producer and remain untouched.
+pub fn yield_step(producer: Producer, step: Step, contention: Contention) -> Step {
+    if !contention.holds_permit || !contention.live_waiting {
+        return step;
+    }
+    match (producer, step) {
+        (Producer::Running { .. }, Step::Stop) | (Producer::Stopped { .. }, Step::Nothing) => {
+            Step::Terminate {
+                why: Termination::YieldToWaiter,
+            }
+        }
+        _ => step,
+    }
 }
 
 /// Which holds are worth keeping a process — and a codec session — for.
@@ -370,6 +396,132 @@ mod tests {
             ),
             Step::Stop
         );
+    }
+
+    fn contention(live_waiting: bool, holds_permit: bool) -> Contention {
+        Contention {
+            live_waiting,
+            holds_permit,
+        }
+    }
+
+    #[test]
+    fn a_stopped_encoder_yields_when_a_live_start_is_waiting() {
+        assert_eq!(
+            yield_step(stopped(40, ahead()), Step::Nothing, contention(true, true)),
+            Step::Terminate {
+                why: Termination::YieldToWaiter
+            }
+        );
+    }
+
+    #[test]
+    fn an_encoder_about_to_stop_yields_instead() {
+        assert_eq!(
+            yield_step(running(40), Step::Stop, contention(true, true)),
+            Step::Terminate {
+                why: Termination::YieldToWaiter
+            }
+        );
+    }
+
+    #[test]
+    fn a_copy_producer_never_yields() {
+        for (producer, step) in [
+            (running(40), Step::Stop),
+            (stopped(40, ahead()), Step::Nothing),
+        ] {
+            assert_eq!(yield_step(producer, step, contention(true, false)), step);
+        }
+    }
+
+    #[test]
+    fn nobody_waiting_means_no_yield() {
+        for (producer, step) in [
+            (running(40), Step::Stop),
+            (stopped(40, ahead()), Step::Nothing),
+        ] {
+            assert_eq!(yield_step(producer, step, contention(false, true)), step);
+        }
+    }
+
+    #[test]
+    fn a_yield_never_replaces_a_move() {
+        for (producer, step) in [
+            (stopped(40, ahead()), Step::Resume),
+            (stopped(40, ahead()), Step::Restart { at: 12 }),
+            (running(40), Step::Nothing),
+            (running(40), Step::MakeRoom { wanted: 1_000 }),
+        ] {
+            assert_eq!(yield_step(producer, step, contention(true, true)), step);
+        }
+    }
+
+    #[test]
+    fn a_second_viewer_arriving_after_the_first_stopped_gets_the_permit() {
+        let stopped = after(running(40), Step::Stop);
+        let yielded = yield_step(stopped, Step::Nothing, contention(true, true));
+        assert_eq!(
+            yielded,
+            Step::Terminate {
+                why: Termination::YieldToWaiter
+            }
+        );
+        let absent = after(stopped, yielded);
+        let still_ahead = Action::Suspend {
+            produced_through: 40,
+            reason: ahead(),
+        };
+        assert_eq!(next_step(absent, still_ahead), Step::Nothing);
+    }
+
+    #[test]
+    fn a_yielded_producer_re_admits_only_when_its_reader_needs_it() {
+        let absent = Producer::Absent {
+            produced_through: Some(40),
+        };
+        assert_eq!(
+            next_step(
+                absent,
+                Action::Suspend {
+                    produced_through: 40,
+                    reason: ahead(),
+                }
+            ),
+            Step::Nothing
+        );
+        assert_eq!(
+            next_step(absent, Action::Produce { next: 41 }),
+            Step::Start { at: 41 }
+        );
+    }
+
+    #[test]
+    fn a_blocked_request_outranks_the_latch_for_a_yielded_producer() {
+        let absent = Producer::Absent {
+            produced_through: Some(40),
+        };
+        assert_eq!(
+            next_step(absent, Action::Reposition { to: 12 }),
+            Step::Start { at: 12 }
+        );
+    }
+
+    #[test]
+    fn every_yield_step_is_a_fixed_point_when_repeated() {
+        for producer in [running(40), stopped(40, ahead())] {
+            let base = match producer {
+                Producer::Running { .. } => Step::Stop,
+                Producer::Stopped { .. } => Step::Nothing,
+                Producer::Absent { .. } => unreachable!(),
+            };
+            let first = yield_step(producer, base, contention(true, true));
+            let settled = after(producer, first);
+            assert_eq!(
+                yield_step(settled, Step::Nothing, contention(true, true)),
+                Step::Nothing
+            );
+        }
     }
 
     #[test]

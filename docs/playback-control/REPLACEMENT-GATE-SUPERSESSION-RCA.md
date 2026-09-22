@@ -1,5 +1,7 @@
 # Abandoned replacements held their player's key — RCA and fix
 
+**Status:** built — the supersedable gate landed on `main` in PR #437 · **Written:** 2026-09-21
+
 **Reported** 2026-09-21 ~18:50 ET, Android client on the TCL tablet, playing
 *Bad Boys: Ride or Die* (file 5208). The player showed
 
