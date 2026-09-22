@@ -1,17 +1,18 @@
 use plurx_core::domain::{
     AudioStream, ContinuationDecodeRestriction, DecodeRestrictionError, DolbyVisionFacts,
-    MediaFile, CONTINUATION_DECODE_RESTRICTION_VERSION,
+    FieldOrder, MediaFile, ScanType, CONTINUATION_DECODE_RESTRICTION_VERSION,
 };
 use plurx_core::transcode::{
     hls_args, resolve_transcode, ArtifactQualification, AttemptRestrictions, CapabilityStatus,
     DecodeBackend, DecodeCacheIdentity, DecodeCapabilities, DecodeCapability,
     DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence, DecodeFacts,
     DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
-    DecodeSurfaceContract, DiagnosticLogging, EffectiveRateControl, Encoder, FrameDomain,
-    FrameRateProvenance, OutputGrade, Pacing, Pipeline, PipelineDigest, PlanError,
-    PlanSourceBinding, Recipe, SoftwareDecoder, StreamSelectionProvenance, SubtitleBurn,
-    SubtitleRendering, ToneMap, TranscodeExecution, TranscodeMediaOptions, TranscodeOptions,
-    TranscodeRequest, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, UNQUALIFIED_ARTIFACT_NAMESPACE,
+    DecodeSurfaceContract, Deinterlace, DiagnosticLogging, EffectiveRateControl, Encoder,
+    FrameDomain, FrameRateProvenance, InterlaceVerdict, OutputGrade, Pacing, Pipeline,
+    PipelineDigest, PlanError, PlanSourceBinding, Recipe, SoftwareDecoder,
+    StreamSelectionProvenance, SubtitleBurn, SubtitleRendering, ToneMap, TranscodeExecution,
+    TranscodeMediaOptions, TranscodeOptions, TranscodeRequest, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE,
+    UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -83,6 +84,8 @@ fn options(pipeline: Pipeline) -> TranscodeMediaOptions {
         audio_offset_ms: 0,
         input_has_audio: true,
         tone_map: ToneMap::Zscale,
+        tone_map_peak_nits: 1000,
+        tone_map_peak_source: plurx_core::transcode::ToneMapPeakSource::Default,
         pipeline,
         subtitle_burn: None,
         cache_identity: DecodeCacheIdentity::from_media_file(&execution_file(
@@ -271,12 +274,17 @@ fn execution_file(path: &str) -> MediaFile {
         container: Some("mkv".to_owned()),
         video_codec: Some("h264".to_owned()),
         video_codec_tag: None,
+        field_order: None,
         video_profile: Some("high".to_owned()),
         width: Some(1920),
         height: Some(1080),
         bit_depth: Some(8),
         hdr: None,
         hdr_format: None,
+        max_cll: None,
+        max_fall: None,
+        mastering_max_luminance: None,
+        luminance_source: None,
         dolby_vision: DolbyVisionFacts::default(),
         bitrate: Some(8_000_000),
         audio_streams: vec![AudioStream {
@@ -764,6 +772,97 @@ fn the_selected_stream_binds_into_the_facts_digest_and_the_descriptor_does_not()
         DecodeFacts::from_ffprobe_json_at(&json, identity('d'), 2).expect("changed descriptor");
     assert_ne!(first.facts_digest(), other_stream.facts_digest());
     assert_eq!(first.facts_digest(), other_source.facts_digest());
+}
+
+#[test]
+fn source_luminance_binds_into_the_facts_digest() {
+    let document = |max_content| {
+        json!({"streams": [{
+            "index": 0, "codec_type": "video", "codec_name": "hevc",
+            "width": 3840, "height": 2160, "pix_fmt": "yuv420p10le",
+            "avg_frame_rate": "24/1", "r_frame_rate": "24/1",
+            "color_transfer": "smpte2084", "disposition": {"attached_pic": 0},
+            "side_data_list": [{
+                "side_data_type": "Content light level metadata",
+                "max_content": max_content, "max_average": 400
+            }]
+        }]})
+    };
+    let low =
+        DecodeFacts::from_ffprobe_json(&document(json!(1000)), identity('c')).expect("low peak");
+    let high =
+        DecodeFacts::from_ffprobe_json(&document(json!(4000)), identity('c')).expect("high peak");
+    assert_eq!(low.max_cll(), Some(1000));
+    assert_ne!(low.facts_digest(), high.facts_digest());
+
+    let mut catalog_file = execution_file("/fixture/hdr.mkv");
+    catalog_file.hdr = Some("hdr10".to_owned());
+    catalog_file.max_cll = Some(4000);
+    catalog_file.luminance_source = Some("frame".to_owned());
+    let catalog = DecodeCatalogMetadata::from_media_file(&catalog_file).expect("catalog");
+    let from_catalog = DecodeFacts::from_ffprobe_json_with_catalog(
+        &document(serde_json::Value::Null),
+        identity('c'),
+        &catalog,
+    )
+    .expect("catalog luminance fills selective probe omission");
+    assert_eq!(from_catalog.max_cll(), Some(4000));
+}
+
+#[test]
+fn field_order_is_typed_conservatively_and_binds_into_the_facts_digest() {
+    let mut progressive = video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "30000/1001",
+        "30000/1001",
+        None,
+    );
+    progressive["field_order"] = json!("progressive");
+    let progressive = facts(progressive);
+    assert_eq!(progressive.scan_type(), ScanType::Progressive);
+
+    let mut interlaced = video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "30000/1001",
+        "30000/1001",
+        None,
+    );
+    interlaced["field_order"] = json!("tt");
+    let interlaced = facts(interlaced);
+    assert_eq!(
+        interlaced.scan_type(),
+        ScanType::Interlaced(FieldOrder::Tff)
+    );
+    assert_ne!(progressive.facts_digest(), interlaced.facts_digest());
+    let overruled = interlaced
+        .clone()
+        .with_interlace_verdict(InterlaceVerdict::FlagOverruled);
+    assert_eq!(overruled.scan_type(), ScanType::Progressive);
+    assert_ne!(overruled.facts_digest(), interlaced.facts_digest());
+
+    let mut future = video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "30000/1001",
+        "30000/1001",
+        None,
+    );
+    future["field_order"] = json!("future-order");
+    assert_eq!(facts(future).scan_type(), ScanType::Unknown);
 }
 
 /// The failure this guards against does not look like a bug. Two producers
@@ -1989,6 +2088,73 @@ fn planned_command_uses_actual_decoder_and_absolute_video_stream() {
 }
 
 #[test]
+fn descriptor_luminance_refines_the_filter_not_only_the_facts_digest() {
+    let mut stream = video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        Some("smpte2084"),
+    );
+    stream["side_data_list"] = json!([{
+        "side_data_type": "Content light level metadata",
+        "max_content": 4000,
+        "max_average": 1000
+    }]);
+    let input = facts(stream);
+    let file = execution_file("/fixture/source.mkv");
+    let options = execution_options();
+    let media = TranscodeMediaOptions::from_options_with_facts(&file, &options, &input);
+    assert_eq!(media.tone_map_peak_nits, 4000);
+    assert_eq!(media.tone_map_peak_source.name(), "cll");
+
+    let plan = resolve_with_options(
+        Encoder::Software,
+        media,
+        &input,
+        &software_capabilities("h264", "h264"),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("descriptor facts resolve");
+    let execution =
+        TranscodeExecution::from_options(&file, &options, Pacing::unpaced(), "/fixture/out")
+            .expect("valid execution");
+    let args = hls_args(&plan, &execution);
+    let filter = args
+        .windows(2)
+        .find(|pair| pair[0] == "-vf")
+        .map(|pair| pair[1].as_str())
+        .expect("video filter");
+    assert!(filter.contains("peak=40"), "{filter}");
+}
+
+#[test]
+fn absent_descriptor_luminance_keeps_the_catalog_peak() {
+    let input = facts(video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        Some("smpte2084"),
+    ));
+    let mut file = execution_file("/fixture/source.mkv");
+    file.max_cll = Some(2000);
+    file.luminance_source = Some("stream".to_owned());
+
+    let media = TranscodeMediaOptions::from_options_with_facts(&file, &execution_options(), &input);
+    assert_eq!(media.tone_map_peak_nits, 2000);
+    assert_eq!(media.tone_map_peak_source.name(), "cll");
+}
+
+#[test]
 fn plan_digest_and_command_are_stable_after_environment_mutation() {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = ENV_LOCK.lock().expect("environment lock");
@@ -2062,6 +2228,60 @@ fn plan_digest_and_command_are_stable_after_environment_mutation() {
     assert_eq!(after_args, before_args);
     assert_eq!(plan.plan_digest(), before_digest);
     assert_eq!(after_recipe, before_recipe);
+}
+
+#[test]
+fn resolved_interlace_decision_drives_command_and_plan_identity() {
+    let source = video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "30000/1001",
+        "30000/1001",
+        Some("bt709"),
+    );
+    let mut interlaced_source = source.clone();
+    interlaced_source["field_order"] = json!("tt");
+    let interlaced = facts(interlaced_source);
+    let interlaced_plan = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &interlaced,
+        &software_capabilities("h264", "h264"),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("interlaced plan");
+    assert_eq!(interlaced_plan.deinterlace(), Deinterlace::BwdifSendFrame);
+
+    let progressive = facts(source);
+    let progressive_plan = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &progressive,
+        &software_capabilities("h264", "h264"),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("progressive plan");
+    assert_eq!(progressive_plan.deinterlace(), Deinterlace::None);
+    assert_ne!(
+        interlaced_plan.plan_digest(),
+        progressive_plan.plan_digest()
+    );
+
+    let execution = TranscodeExecution::from_options(
+        &execution_file("/fixture/interlaced.mkv"),
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("valid execution");
+    let joined = hls_args(&interlaced_plan, &execution).join(" ");
+    let bwdif = joined.find("bwdif=mode=send_frame").expect("bwdif");
+    let scale = joined.find("scale=").expect("scale");
+    assert!(bwdif < scale, "{joined}");
 }
 
 #[test]

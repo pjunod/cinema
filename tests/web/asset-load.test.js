@@ -298,7 +298,9 @@ function load(order) {
     if (file.endsWith(".css")) continue;
     run(file, fs.readFileSync(path.join(WEB, file), "utf8"));
   }
-  run(shell.rows.head[0], shell.headScript);
+  for (const file of shell.rows.head) {
+    run(file, shell.files.find((f) => f.path === file).source);
+  }
   for (const file of order) {
     run(file, shell.files.find((f) => f.path === file).source);
   }

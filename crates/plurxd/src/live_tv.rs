@@ -22,8 +22,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::live_tv_delivery::{
-    LiveDeliveryPlan, LiveExecutionSupport, LivePackaging, LivePlaybackRequest, LiveQualityPolicy,
-    LiveSourceFacts, LiveTrackAction,
+    LiveDeinterlaceOutput, LiveDeliveryPlan, LiveExecutionSupport, LivePackaging,
+    LivePlaybackRequest, LiveQualityPolicy, LiveSourceFacts, LiveTrackAction,
 };
 use crate::state::SystemInfo;
 
@@ -52,6 +52,7 @@ pub(crate) const DRAIN_PATH: &str = "/_internal/v1/live-tv/drain";
 pub(crate) const GUIDE_PATH: &str = "/_internal/v1/live-tv/guide";
 pub(crate) const MAX_INTERNAL_BODY_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
+const _: () = assert!(MAX_SNAPSHOT_BYTES == guide::MAX_GUIDE_RESPONSE_BYTES);
 const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_CHANNELS: usize = 512;
 const MAX_GUIDE_NUMBER_BYTES: usize = 32;
@@ -207,6 +208,7 @@ pub(crate) struct LiveTvConfig {
     pub(crate) max_output_height: u16,
     /// Compatibility profile for old clients and old owners only.
     pub(crate) output_height: u16,
+    pub(crate) deinterlace_output: LiveDeinterlaceOutput,
     pub(crate) generation: i64,
     /// Empty/zero means no pending handoff. The original owner and cutoff
     /// survive disabled configuration edits until cleanup is confirmed.
@@ -273,6 +275,9 @@ impl LiveTvConfig {
             output_height: setting(keys::LIVE_TV_OUTPUT_HEIGHT)
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(720),
+            deinterlace_output: setting(keys::LIVE_TV_DEINTERLACE_OUTPUT)
+                .and_then(LiveDeinterlaceOutput::parse)
+                .unwrap_or_default(),
             generation: setting(keys::LIVE_TV_CONFIG_GENERATION)
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0),
@@ -1664,6 +1669,9 @@ pub(crate) struct LiveTvMetrics {
     /// stalled refresh loop reports staleness instead of a frozen number.
     guide_refreshes: StdMutex<BTreeMap<(&'static str, &'static str), u64>>,
     guide: StdMutex<Option<(tokio::time::Instant, Duration, usize)>>,
+    /// Fixed-cardinality DVR sink failure reasons. A per-sink writer records
+    /// exactly once when its attempt ends; recording ids never become labels.
+    dvr_sink_failures: [AtomicU64; 3],
 }
 
 #[derive(Default)]
@@ -1692,6 +1700,29 @@ impl LiveTvMetrics {
 
     fn observe_stray_eviction(&self) {
         self.stray_evictions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn observe_dvr_sink_failure(&self, reason: &'static str) {
+        let index = match reason {
+            "disk_write_failed" => 0,
+            "disk_write_timeout" => 1,
+            "disk_write_backlog" => 2,
+            _ => return,
+        };
+        self.dvr_sink_failures[index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn dvr_sink_failures_prometheus(&self) -> String {
+        format!(
+            "# HELP plurx_dvr_sink_failures_total DVR capture attempts ended by a sink-local write failure.\n\
+             # TYPE plurx_dvr_sink_failures_total counter\n\
+             plurx_dvr_sink_failures_total{{reason=\"disk_write_failed\"}} {}\n\
+             plurx_dvr_sink_failures_total{{reason=\"disk_write_timeout\"}} {}\n\
+             plurx_dvr_sink_failures_total{{reason=\"disk_write_backlog\"}} {}\n",
+            self.dvr_sink_failures[0].load(Ordering::Acquire),
+            self.dvr_sink_failures[1].load(Ordering::Acquire),
+            self.dvr_sink_failures[2].load(Ordering::Acquire),
+        )
     }
 
     /// One line per reason, and a zero line when nothing has ended yet so the
@@ -2032,7 +2063,16 @@ struct CachedGuide {
     /// rather than silently reporting as fresh.
     age_offset: Duration,
     fetched_at: i64,
-    guide: LiveTvGuide,
+    guide: Arc<LiveTvGuide>,
+}
+
+/// One immutable owner-side guide snapshot. Refresh replaces the cached
+/// `Arc`; a scheduler tick that already cloned it keeps a consistent view.
+pub(crate) struct GuideView {
+    pub(crate) guide: Arc<LiveTvGuide>,
+    pub(crate) fetched_at: i64,
+    pub(crate) age: Duration,
+    pub(crate) freshness: GuideFreshness,
 }
 
 impl CachedGuide {
@@ -2119,7 +2159,7 @@ impl GuideCache {
                 return None;
             }
         };
-        let persisted: PersistedGuide = match serde_json::from_slice(&bytes) {
+        let mut persisted: PersistedGuide = match serde_json::from_slice(&bytes) {
             Ok(persisted) => persisted,
             Err(error) => {
                 tracing::warn!(
@@ -2137,6 +2177,12 @@ impl GuideCache {
                 "ignoring a persisted programme guide written by another version"
             );
             return None;
+        }
+        if guide::normalise_guide_programmes(&mut persisted.guide) {
+            tracing::warn!(
+                path = %path.display(),
+                "normalised unsorted programmes in the persisted guide cache"
+            );
         }
         // Clamped: a clock step at boot must not discard a good copy, and must
         // not make one look like it came from the future.
@@ -2162,7 +2208,7 @@ impl GuideCache {
             observed,
             age_offset,
             fetched_at: persisted.fetched_at,
-            guide: persisted.guide,
+            guide: Arc::new(persisted.guide),
         })
     }
 
@@ -2177,7 +2223,7 @@ impl GuideCache {
             version: PERSISTED_GUIDE_VERSION,
             generation: cached.generation,
             fetched_at: cached.fetched_at,
-            guide: cached.guide.clone(),
+            guide: (*cached.guide).clone(),
         };
         let gate = Arc::clone(&self.persist_gate);
         let discard_epoch = Arc::clone(&self.discard_epoch);
@@ -2303,24 +2349,28 @@ impl GuideCache {
             return guide;
         };
         let age = cached.age_at(now);
-        let mut guide = cached.guide.clipped(&window);
+        let cached_guide = Arc::clone(&cached.guide);
+        let fetched_at = cached.fetched_at;
+        let refresh_error = state.error_for(config.generation);
+        let next_refresh_at = state.next_refresh_at;
+        drop(state);
+        let mut guide = cached_guide.clipped(&window);
         guide.age_seconds = age.as_secs();
-        guide.fetched_at = Some(cached.fetched_at);
+        guide.fetched_at = Some(fetched_at);
         guide.freshness = if age <= guide::GUIDE_REFRESH_INTERVAL {
             GuideFreshness::Fresh
         } else {
             GuideFreshness::Stale
         };
-        guide.refresh_error = state.error_for(config.generation);
-        guide.next_refresh_at = state.next_refresh_at;
+        guide.refresh_error = refresh_error;
+        guide.next_refresh_at = next_refresh_at;
         guide
     }
 
-    /// The owner's own copy, unclipped and without the serving dressing — what
-    /// the DVR scheduler matches rules against, and what an incremental
-    /// refresh extends rather than refetching. `None` when nothing usable is
-    /// cached for this generation.
-    async fn owner_copy(&self, generation: i64) -> Option<LiveTvGuide> {
+    /// The owner's full cached guide for this generation, never response-
+    /// clipped and shared by reference. A refresh swaps the `Arc` rather than
+    /// mutating a snapshot already held by a scheduler tick.
+    async fn view(&self, generation: i64) -> Option<GuideView> {
         let state = self.state.lock().await;
         let now = tokio::time::Instant::now();
         state
@@ -2328,7 +2378,29 @@ impl GuideCache {
             .as_ref()
             .filter(|cached| cached.generation == generation)
             .filter(|cached| cached.age_at(now) <= guide::GUIDE_STALE_TTL)
-            .map(|cached| cached.guide.clone())
+            .map(|cached| {
+                let age = cached.age_at(now);
+                GuideView {
+                    guide: Arc::clone(&cached.guide),
+                    fetched_at: cached.fetched_at,
+                    age,
+                    freshness: if age <= guide::GUIDE_REFRESH_INTERVAL {
+                        GuideFreshness::Fresh
+                    } else {
+                        GuideFreshness::Stale
+                    },
+                }
+            })
+    }
+
+    /// The owner's own copy, unclipped and without the serving dressing — what
+    /// the DVR scheduler matches rules against, and what an incremental
+    /// refresh extends rather than refetching. `None` when nothing usable is
+    /// cached for this generation.
+    async fn owner_copy(&self, generation: i64) -> Option<LiveTvGuide> {
+        self.view(generation)
+            .await
+            .map(|view| (*view.guide).clone())
     }
 
     /// A completed refresh. A failure keeps the previous cache and records the
@@ -2347,12 +2419,19 @@ impl GuideCache {
             state.published_sequence = sequence;
             match result {
                 Ok(guide) => {
+                    let mut guide = guide.clone();
+                    if guide::normalise_guide_programmes(&mut guide) {
+                        tracing::warn!(
+                            generation,
+                            "normalised unsorted programmes before caching the guide"
+                        );
+                    }
                     let cached = CachedGuide {
                         generation,
                         observed: tokio::time::Instant::now(),
                         age_offset: Duration::ZERO,
                         fetched_at: unix_seconds(),
-                        guide: guide.clone(),
+                        guide: Arc::new(guide),
                     };
                     state.cached = Some(cached.clone());
                     state.last_error = None;
@@ -4016,6 +4095,24 @@ impl LiveTvManager {
         self.guide_cache.read(config, window).await
     }
 
+    /// The owner's immutable full guide for internal scheduling. This never
+    /// fetches and never applies an HTTP response byte cap.
+    pub(crate) async fn local_guide_view(&self, config: &LiveTvConfig) -> Option<GuideView> {
+        if config.owner_node_id != self.node_id || config.guide_source == GuideSource::Off {
+            return None;
+        }
+        let view = self.guide_cache.view(config.generation).await;
+        if let Some(view) = view.as_ref() {
+            tracing::trace!(
+                fetched_at = view.fetched_at,
+                age_seconds = view.age.as_secs(),
+                freshness = ?view.freshness,
+                "using the full owner-side guide view"
+            );
+        }
+        view
+    }
+
     /// Run one refresh now. Manual and background work share one admission
     /// slot, so a click cannot overlap the loop and publish an older result.
     pub(crate) async fn refresh_guide(
@@ -4787,6 +4884,7 @@ impl LiveTvMetrics {
             self.relay_bytes.load(Ordering::Acquire),
         ) + &self.session_ends_prometheus()
             + &self.guide_prometheus()
+            + &self.dvr_sink_failures_prometheus()
     }
 }
 
@@ -5259,12 +5357,14 @@ async fn run_live_session_inner(
         LiveQualityPolicy {
             max_height: (config.max_output_height > 0).then_some(config.max_output_height),
             max_bitrate_bps: None,
+            deinterlace_output: config.deinterlace_output,
         }
     } else {
         // Mixed-version starts keep the exact old H.264/AAC height profile.
         LiveQualityPolicy {
             max_height: Some(config.output_height),
             max_bitrate_bps: None,
+            deinterlace_output: config.deinterlace_output,
         }
     };
     let delivery = crate::live_tv_delivery::resolve_live_delivery(
@@ -6039,7 +6139,7 @@ fn live_ffmpeg_command_for_input(
                     .height
                     .unwrap_or(plan.delivery.output.height),
                 plan.delivery.output.height,
-                plan.delivery.deinterlace,
+                plan.delivery.deinterlace_output,
             );
             command.args(["-vf", &filter]);
             command.args([
@@ -6147,9 +6247,16 @@ fn live_video_bitrate_kbps(plan: &LiveDeliveryPlan) -> u32 {
         721..=1080 => 8_000,
         _ => 20_000,
     };
-    let frame_scaled = plan.source.frame_rate.map_or(base, |rate| {
-        let fps = u64::from(rate.num) / u64::from(rate.den).max(1);
-        base.saturating_mul(fps.clamp(24, 60)) / 30
+    let frame_scaled = plan.output.frame_rate.map_or(base, |rate| {
+        let numerator = u64::from(rate.num);
+        let denominator = u64::from(rate.den).max(1);
+        if numerator < denominator.saturating_mul(24) {
+            base.saturating_mul(24) / 30
+        } else if numerator > denominator.saturating_mul(60) {
+            base.saturating_mul(60) / 30
+        } else {
+            base.saturating_mul(numerator) / denominator.saturating_mul(30).max(1)
+        }
     });
     let bounded = plan
         .max_bitrate_bps
@@ -6161,11 +6268,14 @@ fn live_video_filter(
     encoder: Encoder,
     source_height: u16,
     output_height: u16,
-    deinterlace: bool,
+    deinterlace: Option<LiveDeinterlaceOutput>,
 ) -> String {
     let mut filters = Vec::new();
-    if deinterlace {
-        filters.push("bwdif=mode=send_field:parity=auto:deint=interlaced".to_owned());
+    if let Some(output) = deinterlace {
+        filters.push(format!(
+            "bwdif=mode=send_{}:parity=auto:deint=interlaced",
+            output.as_str()
+        ));
     }
     if output_height < source_height {
         filters.push(format!("scale=-2:{output_height}"));
@@ -7491,6 +7601,7 @@ fn graph_probe_delivery(height: u16) -> LiveDeliveryPlan {
             explanation: "exercise the encoded live path".into(),
         }],
         deinterlace: false,
+        deinterlace_output: None,
         max_bitrate_bps: None,
     }
 }
@@ -7622,6 +7733,7 @@ mod tests {
                 explanation: "exercise the encoded live path".into(),
             }],
             deinterlace: false,
+            deinterlace_output: None,
             max_bitrate_bps: None,
         }
     }
@@ -8612,9 +8724,38 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
 
     #[test]
     fn live_filter_deinterlaces_interlaced_frames_only() {
-        let filter = live_video_filter(Encoder::Software, 1080, 720, true);
+        let filter = live_video_filter(
+            Encoder::Software,
+            1080,
+            720,
+            Some(LiveDeinterlaceOutput::Field),
+        );
         assert!(filter.contains("bwdif=mode=send_field:parity=auto:deint=interlaced"));
         assert!(filter.ends_with("scale=-2:720,format=yuv420p"));
+        let frame = live_video_filter(
+            Encoder::Software,
+            1080,
+            720,
+            Some(LiveDeinterlaceOutput::Frame),
+        );
+        assert!(frame.contains("bwdif=mode=send_frame:parity=auto:deint=interlaced"));
+    }
+
+    #[test]
+    fn live_bitrate_uses_reported_output_cadence_and_respects_the_cap() {
+        let mut plan = test_encode_delivery(1080);
+        plan.output.frame_rate = Some(crate::live_tv_delivery::LiveRational {
+            num: 60_000,
+            den: 1_001,
+        });
+        assert_eq!(live_video_bitrate_kbps(&plan), 15_984);
+        plan.output.frame_rate = Some(crate::live_tv_delivery::LiveRational {
+            num: 30_000,
+            den: 1_001,
+        });
+        assert_eq!(live_video_bitrate_kbps(&plan), 7_992);
+        plan.max_bitrate_bps = Some(6_000_000);
+        assert_eq!(live_video_bitrate_kbps(&plan), 6_000);
     }
 
     #[tokio::test]
@@ -9582,7 +9723,7 @@ Output #0, hls, to 'index.m3u8':
     #[test]
     fn the_live_chain_delivers_eight_bit_to_an_eight_bit_profile() {
         for encoder in [Encoder::Software, Encoder::Nvenc] {
-            let filter = live_video_filter(encoder, 1080, 720, false);
+            let filter = live_video_filter(encoder, 1080, 720, None);
             assert!(
                 filter.ends_with(",format=yuv420p"),
                 "{encoder:?} pins an 8-bit profile and gets whatever the \
@@ -9590,7 +9731,7 @@ Output #0, hls, to 'index.m3u8':
             );
         }
         for encoder in [Encoder::Vaapi, Encoder::Qsv] {
-            let filter = live_video_filter(encoder, 1080, 720, false);
+            let filter = live_video_filter(encoder, 1080, 720, None);
             let suffix = encoder
                 .filter_suffix()
                 .expect("a hardware upload path pins its own format");
@@ -10983,6 +11124,71 @@ Output #0, hls, to 'index.m3u8':
             .collect::<Vec<_>>();
         assert_eq!(spans, vec![(1800, 3600), (3600, 5400)]);
         assert_eq!(clipped.window.start, 1800);
+    }
+
+    #[test]
+    fn programmes_in_matches_the_linear_window_predicate() {
+        let guide = guide_with(1, 48, 8);
+        let channel = &guide.channels[0];
+        for start in (-900..=90_000).step_by(733) {
+            let window = GuideWindow {
+                start,
+                end: start + 7_777,
+            };
+            let expected = channel
+                .programmes
+                .iter()
+                .filter(|programme| programme.end > window.start && programme.start < window.end)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(channel.programmes_in(&window), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refresh_replaces_the_guide_arc_without_changing_a_held_view() {
+        let cache = GuideCache::default();
+        let mut first = guide_with(1, 2, 8);
+        first.channels[0].programmes[0].title = "old snapshot".to_owned();
+        cache.store(4, 1, &Ok(first)).await;
+        let held = cache.view(4).await.expect("first guide view");
+
+        let mut replacement = guide_with(1, 2, 8);
+        replacement.channels[0].programmes[0].title = "new snapshot".to_owned();
+        cache.store(4, 2, &Ok(replacement)).await;
+        let current = cache.view(4).await.expect("replacement guide view");
+
+        assert!(!Arc::ptr_eq(&held.guide, &current.guide));
+        assert_eq!(held.guide.channels[0].programmes[0].title, "old snapshot");
+        assert_eq!(
+            current.guide.channels[0].programmes[0].title,
+            "new snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn guide_adoption_repairs_unsorted_programmes_before_binary_search() {
+        let cache = GuideCache::default();
+        let mut guide = guide_with(1, 3, 8);
+        guide.channels[0].programmes.swap(0, 2);
+        cache.store(4, 1, &Ok(guide)).await;
+
+        let view = cache.view(4).await.expect("normalised guide");
+        let starts = view.guide.channels[0]
+            .programmes
+            .iter()
+            .map(|programme| programme.start)
+            .collect::<Vec<_>>();
+        assert_eq!(starts, vec![0, 1800, 3600]);
+        assert_eq!(
+            view.guide.channels[0]
+                .programmes_in(&GuideWindow {
+                    start: 1700,
+                    end: 3700,
+                })
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]

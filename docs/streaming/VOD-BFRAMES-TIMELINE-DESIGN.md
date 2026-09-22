@@ -1,6 +1,7 @@
 # Encoded VOD B-frames — a timeline-contract design, not a flag
 
-**Status:** ready for review · **Executes:** Q2 / F-stream-2 (design item,
+**Status:** design contract complete; production remains no-reorder pending
+fleet and device evidence · **Executes:** Q2 / F-stream-2 (design item,
 M–L) from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 §0, §3.1, §5.3 and the assessment's correction 2 · **Written:** 2026-09-20
@@ -13,7 +14,8 @@ document proposes to revisit, §"Timing decisions" item 5) and
 [SEGMENTER-PLAN.md](SEGMENTER-PLAN.md) §4.2 (the cut-cleanliness rule the
 fragment classifier implements). Read §2 first: it is the contract as the
 tree enforces it today, and every option in §3 is judged against it. Work
-§5 in order; §5.1 is measurement and produces no product change. If a step
+the design milestones in §5 in order; §5.4 records the later evidence
+boundary. If a step
 appears to require deleting or loosening the landing check in
 [`vodgen.rs`](../../crates/plurxd/src/vodgen.rs) rather than replacing it
 with a check that proves the same property another way, stop and flag it —
@@ -28,16 +30,24 @@ identity and engine currency; the frame-grid check is
 The revision-3 text already says so; this document plans against
 `vodgen.rs`.
 
-## 1. Objective
+## 1. Objective and decision
 
 Decide whether encoded VOD may emit reordered pictures (B-frames), and if so
 under what timeline contract, such that every property the current
 `-bf 0` rule buys is still proven by a validator rather than assumed from
-encoder flags. The deliverable of the design phase is a measured number and
-a yes/no; the deliverable of the build phase, if "yes", is a new validator,
-a new recipe, and device proofs. No efficiency figure is credited until it
-is measured on this pipeline (§5.1) — the appendix's 10–20 % was withdrawn
-by §0 of the review as unmeasured here.
+encoder flags. This design phase settles the box and timeline contract and
+provides an executable oracle. It does not change a Rust validator, an
+encoder recipe, a setting, or production behaviour.
+
+**Decision:** Option C remains the deployed recipe. Option A is the only
+admissible reordered design if later evidence justifies a build: signed
+version-1 `trun` composition offsets, the presentation-grid validator in
+§3.4 landing before any reordered recipe, and qualification per encoder
+family and client. Option B is rejected. No efficiency figure is credited
+until it is measured on this pipeline — the appendix's 10–20 % was withdrawn
+by §0 of the review as unmeasured here. Therefore the current nonzero-CTO
+refusal stays deployed while the measurement, compatibility and device rows
+in §5 remain blocked.
 
 ## 2. Contract today
 
@@ -101,6 +111,13 @@ The four arguments that carry the timeline contract, and what each buys:
 | `-avoid_negative_ts disabled` | ffmpeg does not rebase timestamps at the muxer input | `-copyts` film time reaches the muxer unchanged; the runner does the rebasing |
 
 ### 2.2 The landing check refuses any composition offset
+
+Before fragment validation, the encoded landing path already refuses a served
+init whose selected video-track timescale differs from
+`generation.plan.timescale`
+([`vodgen.rs:503-514`](../../crates/plurxd/src/vodgen.rs)). That existing gate
+must remain exact; the design oracle now carries the same fact so it cannot
+silently compare track ticks with plan ticks from another clock.
 
 [`crates/plurxd/src/vodgen.rs:376-406`](../../crates/plurxd/src/vodgen.rs):
 
@@ -169,8 +186,13 @@ pub struct Sample {
 ```
 
 and `parse_trun` ([`fmp4.rs:3117-3123`](../../crates/plurx-core/src/fmp4.rs))
-reads a version-1 `trun`'s offset as `raw as i32 as i64`. So the parser is
-not the obstacle. `classify` ([`fmp4.rs:3180-3232`](../../crates/plurx-core/src/fmp4.rs))
+reads a version-1 `trun`'s offset as `raw as i32 as i64`. The resolved CTO is
+therefore available, but the parser intentionally discards the raw `trun`
+version and sample-composition-time-offset-present flag. `Track.timescale` is
+available; structural video-track `edts`/`elst` presence is not represented by
+`Init`. Those representation limits define the parser work required before a
+runtime validator can claim the whole contract below. `classify`
+([`fmp4.rs:3180-3232`](../../crates/plurx-core/src/fmp4.rs))
 returns `CleanIdr` for H.264 NAL 5 and HEVC NAL 19/20 *without* looking at
 the sample timeline; only HEVC CRA/BLA (16–18, 21) consults
 `has_leading_picture` ([`fmp4.rs:3271-3285`](../../crates/plurx-core/src/fmp4.rs)),
@@ -227,7 +249,7 @@ VOD-ENCODING.md, "Timing decisions and their costs", item 5:
 > boundary remain correct.
 
 This document is that "later quality improvement" being designed. The
-sentence names the three proofs; §3.4 adds two the review found
+sentence names the three proofs; §3.6 adds two the review found
 (restart splices and prepared handoff) and one the parser found (init
 identity depends on SPS VUI fields reorder changes).
 
@@ -277,7 +299,7 @@ ffmpeg's mov muxer has two ways to write this:
   delete it.
 
 The muxer arithmetic above is from reading ffmpeg's `movenc` behaviour, not
-from a run on this pipeline. §5.1 makes it a fixture (`ffprobe
+from a run on this pipeline. §5.4 B0 makes it a parser-backed fixture (`ffprobe
 -show_packets` plus this repo's `fmp4::parse`) before anything depends on
 it, on both the CI ffmpeg 6 and the shipped jellyfin-ffmpeg 8.
 
@@ -302,7 +324,7 @@ it, on both the CI ffmpeg 6 and the shipped jellyfin-ffmpeg 8.
    of the generation's start entry or its remaining frame count (`-t`,
    `trim=end_frame`) — otherwise generation 2 fails `MuxerDrift`. Expected
    true for x264/x265 (they derive the values from `bframes`/`b-pyramid`
-   settings); to be *proven* per family (§3.4).
+   settings); to be *proven* per family (§3.6).
 4. **Restart splices.** A generation starting at entry `k` encodes from
    the entry's first frame (the `trim` prefix); its first fragment is the
    IDR of entry `k` with `tfdt = 0` and, under version-1 offsets, `cto = 0`
@@ -333,7 +355,7 @@ Not touched: `-force_key_frames`, `-g`, `-keyint_min`, `-sc_threshold 0`,
 ### 3.3 Options
 
 **Option A — version-1 offsets with a presentation-grid validator
-(recommended for evaluation).** Add `+negative_cts_offsets` to the
+(the only admissible reordered candidate).** Add `+negative_cts_offsets` to the
 `-movflags` string and `-bf N` per family, and replace conjunct (4) in
 `validate_encoded_fragment` with three checks over the sample list:
 
@@ -363,28 +385,129 @@ time" — subtitle windows, control positions, marker prewarm, the audio
 lattice — would need the same shift applied. It moves the contract into
 every caller instead of one validator.
 
-**Option C — keep no-reorder.** Zero risk, known cost. Correct if §5.1
+**Option C — keep no-reorder.** Zero risk, known cost. Correct if §5.4 B0
 measures a gain the fleet does not need at its bitrates, or if any family's
-proofs in §3.4 fail and the gain is not worth carrying two recipes.
+proofs in §3.6 fail and the gain is not worth carrying two recipes.
 
-The decision between A and C is made in §5.2 from §5.1's numbers, with
-Paul; it is not made in this document.
+This document makes the architectural decision: Option A is the sole shape
+that may be evaluated and Option B must not be built. It does not make the
+deployment decision. Option C remains deployed until B0's measured numbers,
+family proofs and consumer evidence justify a per-family change with Paul.
 
-### 3.4 Proof obligations (for Option A)
+### 3.4 Normative fragmented-MP4 and timeline contract
+
+The abstract fixture
+[`tests/playback/vod-bframes-timeline-cases.json`](../../tests/playback/vod-bframes-timeline-cases.json)
+and its executable judge
+[`tests/operations/test_vod_bframes_timeline_design.py`](../../tests/operations/test_vod_bframes_timeline_design.py)
+are the design oracle. They deliberately do not call production code: this
+PR must be able to prove the proposed contract without making the proposal
+live. A future implementation must port the same checks into
+`validate_encoded_fragment` and then exercise them with parser-produced
+fragments.
+
+The candidate producer's box contract is:
+
+1. The selected video track's `mdhd` timescale equals
+   `generation.plan.timescale`. All plan starts, durations, resolved sample
+   durations, DTS values and PTS values below are in that one unit. A mismatch
+   is a typed refusal; the validator never compares numerically equal ticks
+   from different clocks.
+2. `tfdt` owns decode time. Its resolved unsigned base-media-decode-time,
+   whether encoded as version 0 or 1, equals the planned entry start relative
+   to the generation origin. It is never shifted to hide reorder delay.
+3. `trun` owns composition time. Any fragment with a nonzero composition
+   offset uses version 1 and the sample-composition-time-offset-present flag;
+   each on-wire offset is a signed 32-bit `pts - dts`. Today's all-zero output
+   may remain version 0. No `ctts` or per-generation init state is introduced.
+   This raw wire-shape rule is proved at B0 by direct box inspection. It is not
+   a runtime-validator claim while `Sample`/`Run` retain only the resolved CTO
+   and discard the raw `trun` version and presence flag.
+4. `tfhd` and `trex` defaults remain legal. The validator operates on the
+   parser's resolved sample durations, regardless of which box supplied each
+   value. Every resolved video-sample duration must equal
+   `Encoding.grid.denominator`; the output may not define its own grid.
+5. `-use_editlist 0` remains. The selected video track must structurally lack
+   `edts`/`elst`, so no presentation shift may repair a fragment after the
+   fact. `moof`/`traf` are self-contained against the recipe's immutable
+   `moov`. Because current `Init` does not expose this fact, B2 must first add
+   parser-retained edit-list state and parser-produced positive and negative
+   tests; absence may not be inferred from argv.
+6. All arithmetic is checked after widening to a signed type able to represent
+   `u64 + u32 + i32` (an `i128` in the proposed Rust implementation). Overflow,
+   a negative PTS, or a value outside the planned interval is a typed landing
+   refusal, never a wrap or clamp.
+
+For sample `i`, with `D_i` its resolved duration and `C_i` its resolved CTO:
+
+```text
+dts_i = tfdt + Σ(j < i) D_j
+pts_i = dts_i + C_i
+```
+
+The fragment is accepted only when the video-track timescale equals the plan
+timescale, the selected video track has no edit list, the existing
+clean-random-access check passes, `tfdt == planned_start`, every
+`D_i == frame_ticks`, the entry duration is divisible by `frame_ticks`, the
+sample count is exactly that quotient, the decode duration equals the entry
+duration, and the sorted PTS multiset is exactly:
+
+```text
+planned_start, planned_start + frame_ticks, …, planned_end - frame_ticks
+```
+
+This single exact-multiset comparison proves interval start and end, rejects
+leading pictures, and rejects duplicated or missing presentation slots. The
+implementation should retain named refusal reasons for the individual
+preconditions and interval diagnostics; a generic boolean would make a fleet
+regression needlessly opaque. The 12-case fixture includes the current
+zero-CTO form, a valid `I0 P3 B1 B2` version-1 form, unsigned shifted offsets,
+a leading picture, a duplicate slot, a missing slot, a wrong `tfdt`, a
+nonuniform duration, a non-clean first sample, an out-of-range signed CTO, a
+mismatched track/plan timescale and a forbidden edit list. Its runtime-shaped
+`judge` consumes only parser-retained resolved facts. Its separate
+`judge_candidate_wire_shape` checks the raw `trun` version/range portion of B0
+producer evidence and is deliberately not represented as something today's
+runtime parser can enforce. B0's real-box inspection must additionally assert
+the composition-offset-present flag; the data-only fixture does not pretend to
+be a box parser.
+
+### 3.5 Compatibility decision
+
+ISO BMFF legality is necessary, not sufficient. A producer or consumer row is
+qualified only by the named observation; unknown is a refusal to enable that
+family, not evidence inherited from another family.
+
+| Surface | Candidate representation | Evidence required before enablement | State at this design boundary |
+|---|---|---|---|
+| CI ffmpeg 6, x264/x265 | version-1 `trun`, signed CTO, no edit list | parse every fragment, independently decode every entry, compare init across entry 0/mid/last starts | blocked: fixture encode not run |
+| media1 jellyfin-ffmpeg 8, x264/x265/QSV families actually selected | same; fixed reorder depth per recipe | same fixture plus family inventory, restart splice and init-digest evidence | blocked: read-only fleet run not made |
+| Web hls.js/MSE | consume cold mid-film entry and both directions of prepared handoff | P4/P7 device protocol, including first two seconds in presentation order | blocked: device evidence |
+| Safari native HLS and tvOS | consume version-1 CTO without edit-list compensation | P4/P7 device protocol | blocked: device evidence |
+| Android Media3 | consume version-1 CTO without edit-list compensation | P4/P7 device protocol | blocked: device evidence |
+| Any unobserved encoder or client | none | its own producer/parser/device row | refused by default |
+
+The eventual control, if one is justified, is advisory-only in Settings →
+Developer: it may show the readiness rows and select a qualified recipe, but
+readiness information never gates unrelated playback. The selected value and
+family must enter recipe identity. Until a row is qualified its family remains
+at `-bf 0`; there is no global reorder default and no feature gate.
+
+### 3.6 Proof obligations (for Option A)
 
 Each is a test or a device observation, named in §6. None is satisfied by
 "the argument string is valid".
 
 | # | Obligation | Proven by |
 |---|---|---|
-| P1 | Random access at every entry: each segment decodes standalone from the served init; first VCL is IDR; presentation interval and grid per §3.3 (a)–(c) | validator table test + real-ffmpeg fixture decode of every entry independently (`ffmpeg -i init+seg -f framemd5`) |
+| P1 | Random access at every entry: each segment decodes standalone from the served init; first VCL is IDR; selected video-track timescale equals the plan, it has no edit list, and presentation interval/grid obey §3.4 | validator table test + real-ffmpeg fixture decode of every entry independently (`ffmpeg -i init+seg -f framemd5`) |
 | P2 | Init identity across generations: `MuxerDrift` never fires for generations started at entries 0, 1, mid-film, last | extend `encoded_vod_ntsc_gets_decode_after_forward_and_backward_restarts` (`vodencode_tests.rs:1090`) and `encoded_vod_manual_audio_correction_keeps_restart_init_stable` (`:1614`) to the reorder recipe |
 | P3 | Restart splice: entry `k−1` from generation A followed by entry `k` from generation B decodes with no dropped/duplicated presentation slot | the same restart tests, asserting decoded frame count and `framemd5` continuity across the splice |
 | P4 | Prepared handoff: a viewer switched from a no-reorder rendition to a reorder rendition (and back) at a segment boundary sees no gap on web (hls.js/MSE), Apple (native HLS), Android (Media3) | device runs (§6.3 GPT prompt); the server side is unchanged because each rendition has its own init and playlist |
 | P5 | Audio lattice unchanged: `place_encoded_audio` accepts every generation; A/V offset at entry boundaries measured ≤ 1 audio frame | `encoded_vod_two_hour_audio_restart_budget` (`:1102`) run against the reorder recipe |
 | P6 | Per family: x264 (SDR), x265 and `hevc_qsv` (HDR10 Main10), `h264_qsv`; NVENC/VAAPI/VideoToolbox only if a fleet node uses them (review §8 open question) | fixture matrix per family on the node that runs it |
 | P7 | The three clients plus Safari native HLS decode version-1 `trun` offsets correctly at a cold start on a mid-film segment (not entry 0) | device runs (§6.3) |
-| P8 | Fallback is typed: a family whose first fragment fails conjunct (2) or (a)–(c) ends the generation `landing_failed` and the rendition is not published | existing `a_refusal_after_the_landing_fails_the_generation` (`vodgen.rs:988`) with a reorder fixture |
+| P8 | Fallback is typed: a family whose first fragment fails the timescale, no-edit-list, decode-anchor, duration or exact-presentation-grid checks in §3.4 ends the generation `landing_failed` and the rendition is not published | existing `a_refusal_after_the_landing_fails_the_generation` (`vodgen.rs:988`) with a reorder fixture |
 
 ## 4. Guardrails (non-goals)
 
@@ -398,7 +521,7 @@ Each is a test or a device observation, named in §6. None is satisfied by
 3. **Do not add an edit list.** `-use_editlist 0` stays; an `elst` is a
    per-generation object and would change the immutable init (§2.1).
 4. **Do not credit an efficiency number that was not measured on this
-   pipeline** (review §0). §5.1 produces the number; the PR body quotes it
+   pipeline** (review §0). §5.4 B0 produces the number; its evidence quotes it
    with the corpus, encoder, and VMAF model.
 5. **Do not treat NAL type as proof of no leading pictures for IDR types.**
    The presentation check is the proof; `classify` stays as the fast
@@ -409,7 +532,7 @@ Each is a test or a device observation, named in §6. None is satisfied by
 7. **Do not gate with an in-code feature flag.** If a switch is needed
    during qualification it is a replicated setting surfaced in Settings →
    Developer with an advisory (never blocking) readiness list, and its
-   value enters the recipe identity (§5.3).
+   value enters the recipe identity (§3.5).
 8. **Do not bundle** with Q1 (rate control), Q3 (tone-map), Q5 (audio) or
    Q7 (master playlist). Each has its own oracle (review §7.3).
 
@@ -418,103 +541,110 @@ flag-only remedy" → §3.1 explains why the flag alone fails and §3.3
 replaces the check rather than the flag; "prove restart splices" → P3;
 "Closed GOP alone is not the whole timeline contract" → §2.1 table names
 all four arguments and §3.2 what each still does; "efficiency figures are
-not evidence from the deployed pipeline" → §5.1 measures on the shipped
+not evidence from the deployed pipeline" → §5.4 B0 measures on the shipped
 ffmpeg with the repo's corpus before any decision.
 
-## 5. Milestones
+## 5. Milestones and build boundary
 
-One draft PR per milestone into `main` under the fast lane. §5.1 and §5.2
-change no product code.
+S-12 is one design PR. Its milestones are logical commits and log rows in
+this PR; no milestone gets a separate PR. Product implementation, fleet
+measurement and device qualification are explicitly outside this design-only
+boundary.
 
-### 5.1 M0 — measure, and pin the muxer arithmetic as a fixture
+### 5.1 D0 — verify the deployed refusal
 
-1. `scripts/bench rate-control` on the existing corpus
-   (`scripts/perf2-rate-control-smoke-corpus.json`) plus two additions —
-   an animation clip and a grain-heavy clip generated with `lavfi`
-   (public-mirror naming: *Harbor Lights*, *Night Tide*) — encoding each
-   through `vod_pipe_args` as shipped and through the same args with
-   `-bf 2 -movflags …+negative_cts_offsets` (x264 `veryfast`, then the
-   family the node has). Report bitrate at equal VMAF and VMAF at equal
-   bitrate, per family, with the model named.
-2. A fixture test (ignored by default, like the `vodencode-restart-check`
-   targets) that runs ffmpeg with the reorder args on a 10 s synthetic
-   source and asserts, using `fmp4::parse`: version-1 `trun`; first
-   sample `dts = cto = 0`; per-fragment `tfdt = k·F·d`; presentation grid
-   per §3.3 (a)–(c); and the same on a `-ss`-started run at entry 3. Run
-   on CI's ffmpeg 6 *and* recorded from a media1 run on jellyfin-ffmpeg 8
-   in the PR body — the review notes CI has never run ffmpeg 8.
+Read the live parser, recipe and publication path. Record that
+`validate_encoded_fragment` accepts only `sample.cto == 0`, that the parser
+already resolves signed version-1 offsets, and that `Encoding::identity`
+hashes the effective argv. Do not edit Rust.
 
-Acceptance: `cargo test -p plurxd vodgen::tests::reorder_muxer_fixture --
---ignored` passes on both ffmpeg builds, and the PR body carries the
-bitrate/VMAF table. No product code changes.
+Acceptance: the cited source still says those three things, and the workboard
+and PR say that production remains no-reorder.
 
-### 5.2 M1 — decide
+### 5.2 D1 — select the only admissible box and timeline design
 
-A one-page addendum to VOD-ENCODING.md item 5 recording M0's numbers and
-the decision (A or C) with Paul's name and the date. If C, this document's
-status becomes "decided: keep no-reorder" and M2–M4 do not run.
+Choose Option A as the sole reordered candidate and reject Option B. Keep
+Option C deployed. Specify the resolved `tfdt`/`trun`/`tfhd`/`trex` ownership,
+signed range and checked arithmetic, the immutable no-edit-list rule, exact
+presentation multiset, random-access condition, family boundary, recipe
+identity and advisory-only control semantics.
 
-Acceptance: VOD-ENCODING.md item 5 links the decision; `make
-operations-check` (which runs `tests/operations/test_docs_index.py`)
-passes.
+Acceptance: §3.4 is unambiguous enough to implement without choosing a second
+timeline policy, and §3.5 treats every unknown compatibility row as refused.
 
-### 5.3 M2 — the validator first, under the old recipe
+### 5.3 D2 — make the design executable
 
-Replace conjunct (4) with §3.3 (a)–(c) in `validate_encoded_fragment`
-while the recipe still emits `-bf 0`. Under `cto == 0` the new checks are
-implied by the old ones, so this is behaviour-preserving for shipped
-output and lets the check age on the fleet before the recipe changes.
-Table tests: synthetic fragments with version-0/1 offsets, a leading
-picture, a duplicated pts, a missing slot, an off-by-one start; and the
-existing landing tests unchanged.
+Keep the data-only fixture at
+`tests/playback/vod-bframes-timeline-cases.json` and the independent judge at
+`tests/operations/test_vod_bframes_timeline_design.py`. The v2 fixture covers
+valid zero-offset and signed-reordered fragments plus every fail-closed case
+listed in §3.4, including mismatched track/plan timescales and a selected
+video-track edit list. The runtime-shaped judge uses only resolved facts that
+the intended validator can receive. The separate wire-shape judge records the
+raw version-1/range portion of the producer requirement for B0 without
+pretending current `Sample`/`Run` retain it. B0 separately inspects the real
+box flag. This is a design oracle, not a substitute for a parser-produced Rust
+test.
 
-Acceptance: `cargo test -p plurxd vodgen::` green; `make unit` green; a
-week of fleet `journalctl -u plurxd | grep landing_failed` shows no new
-refusals attributable to the check (the refusal text names the failing
-letter, `(a)`, `(b)` or `(c)`).
+Acceptance: the focused Python test passes and would fail if the valid reorder
+case were rejected or any declared adversarial case were accepted.
 
-### 5.4 M3 — the recipe, behind a replicated setting that enters identity
+### 5.4 D3 — record the honest stop
 
-Add `playback.vod_reorder_frames` (replicated setting; `0` = today's
-recipe; `1..=3` = `-bf N` plus `+negative_cts_offsets`), read at recipe
-capture in `vodencode.rs` and therefore hashed into `Encoding::identity`.
-Surface it in Settings → Developer with an advisory readiness list whose
-rows are P1–P8's status; nothing reads readiness to refuse. Per family:
-x264 `-bf N`; x265 `-bf N` with `--no-open-gop` already implied by
-`+cgop`; `h264_qsv`/`hevc_qsv` `-bf N`; other families keep `-bf 0` until
-P6 is run on a node that has them. P1, P2, P3, P5, P8 run as tests in this
-PR against the setting at `2`.
+Mark S-12 blocked on the named producer, quality and device evidence. The PR
+contains no Rust, setting, feature gate, recipe or default change. Record the
+following build order for a future implementation only; it must be revalidated
+against then-current source and delivered under the repository's then-current
+one-plan/one-PR protocol:
 
-Acceptance: `make vodencode-restart-check` green with the setting at `2`;
-`cargo test -p plurxd vodencode_tests:: -- --ignored` green; the fixture
-from M0 asserts identical init digests for generations at entries 0, 3
-and last.
+1. **B0 — measure and capture real boxes.** Run `scripts/bench rate-control`
+   on the existing corpus plus animation and grain-heavy clips, report bitrate
+   at equal VMAF and VMAF at equal bitrate per family/model, and produce
+   parser-backed fragments on CI ffmpeg 6 and media1 jellyfin-ffmpeg 8. Inspect
+   the raw boxes to assert nonzero CTO output uses `trun` version 1 with the
+   sample-composition-time-offset-present flag and signed-i32 values; separately
+   assert exact PTS grid, track/plan timescale equality, absence of video
+   `edts`/`elst`, independent entry decode and generation-stable init digests.
+2. **B1 — deployment decision.** Record B0's numbers and Paul's dated A-or-C
+   decision in VOD-ENCODING.md. If C wins, stop.
+3. **B2 — parser state, then validator.** While the recipe remains `-bf 0`,
+   first extend `Init`/the selected video-track representation to retain
+   structural `edts`/`elst` presence, with parser-produced positive and
+   negative tests. Preserve and directly test the existing exact
+   track/plan-timescale landing gate, then port the remaining
+   runtime-enforceable §3.4 checks into `validate_encoded_fragment`: no edit
+   list, decode anchor/duration and the resolved presentation grid, each with
+   a named refusal. Do not claim enforcement of raw `trun` version or flag
+   unless a later parser change explicitly retains them. Observe fleet
+   refusals before changing output.
+4. **B3 — qualified recipes only.** For each family proven by P1–P3, P5, P6
+   and P8, add signed-offset reorder args and an identity-bearing control. Any
+   Developer surface is advisory-only and shows readiness; it never gates
+   unrelated playback. Unqualified families stay at `-bf 0`.
+5. **B4 — consumers and default.** Run P4/P7 on web, Safari, tvOS and Android.
+   Only qualified family/client combinations may change default. Keep a
+   bounded-outcome metric with labels drawn from fixed enums, then record the
+   observation and rollback evidence.
 
-### 5.5 M4 — device proofs and default
-
-Run §6.3 on the three clients and Safari. If all pass, change the default
-of `playback.vod_reorder_frames` to the qualified value for the qualified
-families and record the fleet number: `plurx_vod_generations_total`
-(new counter, labels `outcome ∈ {published, landing_failed, init_drift,
-engine_changed}`, `reorder ∈ {"0","1","2","3"}`) read off `/metrics` on
-media1 over one week with `landing_failed{reorder!="0"}` at zero.
-
-Acceptance: the counter exists on `/metrics` on every node after deploy
-and the week's reading is in the PR body that flips the default.
+Acceptance: the board names the external evidence instead of claiming it, and
+the execution log distinguishes completed design from blocked build work.
 
 ## 6. Verification and rollout
 
-### 6.1 Fast lane
+### 6.1 Design lane for this PR
 
-- `make unit` (workspace, excludes `plurx-cluster-check`).
-- Focused: `cargo test -p plurxd vodgen::tests`, `cargo test -p plurxd
-  vodserve::tests::encoded_vod -- --ignored --test-threads=1`, the two
-  `vodencode-restart-check` targets.
-- `cargo test -p plurx-core fmp4::` for the parser table tests.
+- `python3 -m unittest tests.operations.test_vod_bframes_timeline_design -v`
+- `python3 -m unittest tests.operations.test_docs_index -v`
+- `python3 -m json.tool tests/playback/vod-bframes-timeline-cases.json`
+- `git diff --check`
+
+There is no Rust edit, so this PR does not establish a compiler loop or spend
+a workspace unit run. The Rust and real-ffmpeg commands named by P1–P8 belong
+to B0–B4 and run only after the deployment decision authorizes a build.
 
 ### 6.2 Only a node can prove
 
-The ffmpeg 8 fixture run (M0.2) and the per-family encodes (P6) run on
+The ffmpeg 8 fixture run (B0) and the per-family encodes (P6) run on
 media1 (QSV) and, if Paul wants the NVENC/VAAPI/VideoToolbox rows, on
 whichever lab node or Mac has the device. Record `ffmpeg -version` in the
 PR body.
@@ -546,10 +676,12 @@ report both tables side by side. Do not report the badge as evidence of
 picture correctness; report what the screen did.
 ```
 
-### 6.4 Rollback
+### 6.4 Eventual rollback, if B3 is built
 
-Set `playback.vod_reorder_frames=0`. New sessions get the old recipe key;
-running renditions keep theirs until they end. No migration either way.
+The future implementation must make zero reorder the rollback value. New
+sessions then get the old recipe key; running renditions keep theirs until
+they end. No migration is allowed either way. This describes acceptance for
+B3; the setting does not exist in this design PR.
 
 ## 7. Open questions
 
@@ -560,16 +692,17 @@ running renditions keep theirs until they end. No migration either way.
    to be read in the vendored source before the device run, not assumed.
 3. Whether `hevc_qsv` keeps a fixed reorder depth for a fixed `-bf` on the
    media1 driver, or adapts it (which would fail conjunct (2) on the first
-   fragment by design). M0's fixture on media1 answers it.
+   fragment by design). B0's fixture on media1 answers it.
 4. Whether the gain at the fleet's actual bitrates (Q1's rate-control
    work may move them) justifies carrying the reorder recipe per family.
-   M1 decides with M0's table in hand.
+   B1 decides with B0's table in hand.
 
 ---
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per logical milestone in the single plan PR
+(see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
@@ -577,4 +710,6 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#423](http://192.168.4.7:3000/noirr/plurx/pulls/423) | Claimed design-only S-12 from `6063b37c`; verified current `validate_encoded_fragment` rejects any nonzero CTO before publication. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | D0–D3 | [#423](http://192.168.4.7:3000/noirr/plurx/pulls/423) · `868fd806` | Selected C as deployed and A as the sole future candidate; specified box ownership, exact checked presentation grid, compatibility matrix and B0–B4 boundary; added 10-case executable oracle. Green: `python3 -m unittest tests.operations.test_vod_bframes_timeline_design -v`; `python3 -m unittest tests.operations.test_docs_index -v`; `python3 -m json.tool tests/playback/vod-bframes-timeline-cases.json`; `git diff --check`. No Rust changed, so no compiler or broad unit run. Needs: ffmpeg 6/8 boxes and quality, family/init/restart evidence, Paul's deployment decision, and web/Safari/tvOS/Android observations. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Sole-review disposition | [#423 comment 3322](http://192.168.4.7:3000/noirr/plurx/pulls/423#issuecomment-3322) · `625a6ed8` | Accepted P1. The v2 oracle now refuses track/plan-timescale mismatch and a selected video-track edit list, with 12 declared cases plus direct mutation checks. The contract now distinguishes parser-retained resolved CTO/timescale facts from raw `trun` version/flag B0 evidence, and B2 starts by retaining structural `edts`/`elst` state. Green: `python3 -m unittest tests.operations.test_vod_bframes_timeline_design -v` (5/5); `python3 -m unittest tests.operations.test_docs_index -v` (4/4); `python3 -m json.tool tests/playback/vod-bframes-timeline-cases.json`; `git diff --check`. No Rust or production behaviour changed; Option C remains deployed and the same fleet/device evidence remains blocked. |

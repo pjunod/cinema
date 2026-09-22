@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["60b2faa9"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "Progressive remux in `crates/plurxd/src/http/stream.rs` carried its own permissive classifier that treated every `lower_snake=value` stderr line as an FFmpeg `-progress` record, so a bare bitstream-filter diagnostic such as `filter_units=remove_types=32-34` was consumed as telemetry and never reached the `remux ffmpeg` warning, while rolling copy in `crates/plurxd/src/transcode.rs` already used the closed key set. The commit moves that closed set into `plurx_core::transcode::progress::is_progress_line` and points both consumers at it, and its evidence landed with it: the new `crates/plurx-core/src/transcode/progress.rs` test `strict_progress_keys_do_not_swallow_diagnostics` pins the twelve keys the deployed media1 probe actually emits as progress and pins `filter_units=remove_types=32-34`, an `[AVBSFContext]` option-not-found line, `[out#0/mp4 …] Output file is empty`, `Conversion failed!`, a speculative `some_future_key=1` and the empty line as diagnostics; the same commit extends `http::stream::tests::progress_blocks_are_distinguishable_from_ffmpegs_prose` with the `filter_units` and `some_future_key` cases so the remux path is held to that set and not merely to the shared helper's existence. Restoring the permissive rule makes both of those assertions report the two `=`-bearing diagnostics as progress and the tests fail under `cargo test --workspace`, which `rust-gate` runs through `make rust-check`."
