@@ -333,7 +333,10 @@ emits. Here it cannot.
 ### 3.4 Separate warm-hit admission from cold collection — only after §3.3
 
 Today a hit waits on `probe_gate` behind a miss's whole collection (up
-to the 2 s budget, which is then spent). After §3.3 a hit does one
+to the `DECODE_PLAN_PROBE_BUDGET`, which is then spent; that budget is
+10 s on main since S-08 bound its descriptor-based `idet` verification to
+it, so the wait this section removes is five times the one it was written
+against). After §3.3 a hit does one
 `F_GET_SEALS`, two `fstat`s (or a tuple compare), one source `fstat` and a
 map read — no child, no hash — so the guarantee `probe_gate` exists for
 ("cannot fan out unbounded hashing or child processes") no longer needs

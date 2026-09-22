@@ -324,6 +324,26 @@ pub fn pipe_with_distinct_hevc_sample_entries(kind: &str) -> Vec<u8> {
     expanded
 }
 
+/// Add a second, byte-identical AVC sample description to a parsed init.
+pub fn duplicate_avc_sample_entry(init: &mut crate::fmp4::Init) {
+    crate::fmp4::duplicate_avc_sample_entry_for_fixture(init);
+}
+
+/// Give the second AVC description a distinct RFC 6381 triplet.
+pub fn replace_second_avc_triplet(
+    init: &mut crate::fmp4::Init,
+    profile: u8,
+    compatibility: u8,
+    level: u8,
+) {
+    crate::fmp4::replace_second_avc_triplet_for_fixture(init, profile, compatibility, level);
+}
+
+/// Replace every AVC sample-entry fourcc while preserving its avcC.
+pub fn replace_avc_sample_entry(init: &mut crate::fmp4::Init, sample_entry: [u8; 4]) {
+    crate::fmp4::replace_avc_sample_entry_for_fixture(init, sample_entry);
+}
+
 /// Where [`pipe`] caches its output, for tests that hand the path to ffprobe.
 pub fn pipe_path(kind: &str) -> PathBuf {
     // Keep the cache key tied to the authored timeline. Older fixture files

@@ -60,6 +60,35 @@ pub(crate) struct EncodePermit {
 }
 
 impl Encoding {
+    #[cfg(test)]
+    pub(crate) async fn clone_with_admissions_for_test(
+        &self,
+        admissions: Admissions,
+    ) -> Arc<Encoding> {
+        Arc::new(Encoding {
+            source_object_version: self.source_object_version.clone(),
+            plan: self.plan.clone(),
+            resources: self.resources,
+            options: self.options.clone(),
+            grid: self.grid,
+            subtitle: self.subtitle.clone(),
+            subtitle_digest: self.subtitle_digest.clone(),
+            ffmpeg_build: self.ffmpeg_build.clone(),
+            executable: crate::ffmpeg::EncodedExecutable::capture()
+                .await
+                .expect("test encoder executable remains available"),
+            engine: self.engine.clone(),
+            admissions,
+            store: Arc::clone(&self.store),
+            speculative: std::sync::atomic::AtomicBool::new(
+                self.speculative.load(std::sync::atomic::Ordering::Acquire),
+            ),
+            queued: Mutex::new(None),
+            policy_retry: std::sync::atomic::AtomicBool::new(false),
+            admission_pause: Mutex::new(None),
+        })
+    }
+
     pub(crate) fn mark_speculative(&self) {
         self.speculative
             .store(true, std::sync::atomic::Ordering::Release);
@@ -158,8 +187,14 @@ impl Encoding {
     }
 
     pub fn is_waiting(&self) -> bool {
-        self.policy_retry.load(std::sync::atomic::Ordering::Relaxed)
-            || self.queued.lock().expect("VOD encoder admission").is_some()
+        self.policy_retry.load(std::sync::atomic::Ordering::Relaxed) || self.has_live_wait()
+    }
+
+    /// Whether this exact rendition has registered a foreground pool waiter.
+    /// Kept separate from policy retry so only a real capacity wait wakes
+    /// other renditions to consider yielding their permit.
+    pub fn has_live_wait(&self) -> bool {
+        self.queued.lock().expect("VOD encoder admission").is_some()
     }
 
     pub fn args(&self, file: &MediaFile, start_seconds: f64, duration_seconds: f64) -> Vec<String> {

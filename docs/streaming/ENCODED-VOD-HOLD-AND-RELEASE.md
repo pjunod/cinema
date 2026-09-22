@@ -1,6 +1,6 @@
 # Encoded VOD hold and release — stop the encoder instead of killing it, and give it up when someone is waiting
 
-**Status:** ready for review · **Executes:** §2.6, F-stream-6 (the hold
+**Status:** M1-M3 implemented; controlled M0/M4 fleet traces pending · **Executes:** §2.6, F-stream-6 (the hold
 half), assessment correction 5, §5.1 item 8 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -388,11 +388,13 @@ Acceptance: `cargo test -p plurxd prodexec` green; `make unit` green.
 
 ### 5.3 M3 — `vodserve` wiring, with the two-rendition contention test
 
-Code: §3.3. Tests in `vodserve.rs`'s existing harness (`driver_pass` is
-already driven directly at `:14021-14032`), with the hardware limit set to 1
-and a fake child that the slot can signal (the harness's existing
-`attach_owned` path; a `LiveWait` is obtained from the fixture's
-`Encoding::admissions`):
+Code: §3.3. Tests use `vodserve.rs`'s existing fake-child and
+`attach_owned` harness with the hardware limit set to 1. The mechanism-level
+cases may drive `driver_pass` directly. The rolling-live, yielded low-water,
+and TTL acceptance cases must instead own and settle a real `spawn_driver`
+task; the rolling-live case observes the armed and fired
+`STOPPED_ENCODER_POLL` without sending a rendition kick. A `LiveWait` comes
+from the fixture's `Encoding::admissions`:
 
 | Test | Asserts |
 |---|---|
@@ -444,8 +446,9 @@ no `T`-state ffmpeg older than `SESSION_IDLE_TTL` with no reader; no
   model because nothing counted it; after this, the M0/M4 journal grep has a
   counter it can be checked against, and `yield_to_waiter` staying at zero
   on a busy node is the signal that the wake path is broken.
-- Rollout: three draft PRs under the fast lane, M1 → M2 → M3, each with
-  its tests; M3 depends on M1 and M2 merged. No setting, no schema, no
+- Rollout: one whole-plan draft PR under the fast lane, with logical M1 → M2
+  → M3 commits and execution-log rows. The work-board protocol and the
+  delegated whole-plan assignment supersede the older three-PR wording. No setting, no schema, no
   recipe-identity change (the recipe is captured before any of this and is
   not read by the scheduler). Rollback is a revert of M3; M1/M2 are pure
   functions whose new behaviour only reaches a process through M3.
@@ -492,4 +495,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M0 | [#412](http://192.168.4.7:3000/noirr/plurx/pulls/412) | needs: run §5.0's controlled 30-minute transcode and subtitle-burn plays. Read-only SSH observation on the media host at 2026-09-21 05:53 UTC found deployed build `v0.3.0-3052-g882862e88`, a container started at 04:18:48 UTC, zero `spawned a producer generation` records since that start, zero retained journal matches over seven days, and no pre-M3 generation metric. No playback was initiated and no before-count was inferred from the empty interval. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | [#412](http://192.168.4.7:3000/noirr/plurx/pulls/412) | done: added the rendition-owned ahead-hold input and 90-second low-water decision, separate from working-set hysteresis; all 33 focused `prodsched` tests pass on pinned Rust 1.97.1. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 | [#412](http://192.168.4.7:3000/noirr/plurx/pulls/412) | done: added the pure contention table and explicit `YieldToWaiter` termination; all 29 focused `prodexec` tests pass on pinned Rust 1.97.1, including no-yield, no-double-operation, fairness and fixed-point cases. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | [#412](http://192.168.4.7:3000/noirr/plurx/pulls/412) | done: wired the rendition latch, VOD registration wake, rolling-live poll, success-only transition updates, and closed-label generation/termination counters. Production callers that register a live wait use the five-second `QUEUE_WAIT`; VOD admission retries at 250 ms and its one-second policy-read bound registers no capacity waiter, so the conservative one-second stopped-encoder poll remains below every live admission deadline. Sole adversarial review [#3230](http://192.168.4.7:3000/noirr/plurx/pulls/412#issuecomment-3230) was disposed by executable real-`spawn_driver` coverage: the no-kick rolling waiter yields only after `STOPPED_ENCODER_POLL`, the yielded rendition cannot reach admission above low-water but does at the boundary, and session-TTL maintenance detaches the last reader, reaps the stopped child, and permits a full bundle reacquisition. All three tasks are explicitly settled. Focused scheduler/executor, named M3 and restart-continuity checks pass on pinned Rust 1.97.1. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#412](http://192.168.4.7:3000/noirr/plurx/pulls/412) | needs: after merge/deploy, run §5.4's two controlled 30-minute plays, 60-second `ps` sampling, generation/termination metric capture, idle-age check and live-timeout journal check. No deployment or playback was performed from this source-only author session. |

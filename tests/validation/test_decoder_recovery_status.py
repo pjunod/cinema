@@ -347,9 +347,14 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertNotIn("Working tree after `0dcbcdf2`", self.status)
 
     def test_m2_working_tree_binds_arguments_and_identity_to_one_plan(self) -> None:
+        # S-08 feeds the frozen file deinterlace decision into `plan_digest`,
+        # which moved the serialization contract to revision 2, and S-07 feeds
+        # the tone-map peak and its provenance, which moves it to 3 on the
+        # promotion merge that carries both. The assertion pins the revision the
+        # tree actually ships, not the one M2 shipped with.
         self.assertRegex(
             self.core_decode,
-            r"(?m)^pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 1;$",
+            r"(?m)^pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 3;$",
         )
         self.assertRegex(
             self.core_decode,
@@ -358,7 +363,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
         self.assertRegex(
             self.core_recipe,
-            r"(?m)^pub const CACHE_RECIPE_VERSION: i64 = 3;$",
+            r"(?m)^pub const CACHE_RECIPE_VERSION: i64 = 4;$",
         )
         digest_body = self.core_decode.split("pub fn plan_digest", 1)[1].split(
             "pub fn artifact_namespace", 1

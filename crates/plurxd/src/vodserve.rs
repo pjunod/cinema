@@ -55,14 +55,14 @@ use tokio::sync::{Mutex, Notify, Semaphore};
 
 use crate::copyseg::sanitize_stale_dolby_brand;
 use crate::ffmpeg::ffmpeg_bin;
-use crate::prodexec::{next_step, Producer, Step, Termination};
+use crate::prodexec::{next_step, yield_step, Contention, Producer, Step, Termination};
 use crate::prodrun::{Performed, ProducerSlot};
 use crate::prodsched::{decide, Action, Demand, Position, WorkingSet, AHEAD_HORIZON_SECONDS};
 use crate::renditiondir::{InitIdentity, InitRefused, RenditionDir, INIT_NAME};
 use crate::titlestore::{Budgets, Manifest, ReaderWindow, SegState};
 use crate::transcode::{session_log_id, SessionKind, SessionRequest};
 use crate::vodgen::{self, Failure, Generation, Outcome};
-use crate::waitpool::{WaitKey, WaitOutcome, WaitPool};
+use crate::waitpool::{VodProducerKind, VodProducerTermination, WaitKey, WaitOutcome, WaitPool};
 
 /// Sliding idle TTL for a session (plan §2.5's dormant reap, scoped to this
 /// in-memory registry): a session none of whose authorized GETs have arrived
@@ -70,6 +70,10 @@ use crate::waitpool::{WaitKey, WaitOutcome, WaitPool};
 /// idle-reaped session is the one kind that may come back, and the durable
 /// route machinery outside this module answers for it.
 const SESSION_IDLE_TTL: Duration = Duration::from_secs(300);
+
+/// Rolling live starts cannot notify the VOD registry. Recheck stopped
+/// encoders within their five-second admission budget so they can yield.
+const STOPPED_ENCODER_POLL: Duration = Duration::from_secs(1);
 
 /// How long a rendition with no attached sessions is kept warm before an
 /// un-admitted one is purged. Admitted renditions are the completed cache and
@@ -408,6 +412,10 @@ pub struct VodSessionInfo {
     pub file_id: i64,
     pub target_height: i64,
     pub encoder: &'static str,
+    /// Explicit CPU tone-map peak and its source, absent for copy and GPU
+    /// renditions. `default` is policy provenance, not source metadata.
+    pub tone_map_peak_nits: Option<u32>,
+    pub tone_map_peak_source: Option<&'static str>,
     pub playlist_shape: &'static str,
     pub producer_state: &'static str,
     pub producer_hold: Option<&'static str>,
@@ -1399,11 +1407,20 @@ struct Rendition {
     /// own decision and cleared by the first pass that decides anything else,
     /// so it cannot outlive the condition.
     capacity_hold: StdMutex<Option<crate::prodsched::Hold>>,
+    /// Survives a yielded process so it cannot re-admit one segment after
+    /// giving its permit to a live waiter.
+    ahead_hold: AtomicBool,
     /// Woken when `init.mp4` lands, for GETs waiting on the identity.
     init_notify: Notify,
     /// The driver's kick: wait registration, segment GETs, attach/detach,
     /// maintain ticks.
     wake: Notify,
+    /// Deterministic observation point for tests that must prove the driver's
+    /// stopped-encoder poll, rather than a direct `driver_pass`, caused work.
+    #[cfg(test)]
+    stopped_poll_armed: Notify,
+    #[cfg(test)]
+    stopped_poll_fired: Notify,
     /// Bumped whenever the driver kills or replaces the producer, so a
     /// generation that ends can tell "I died on my own" from "I was told to".
     gen_epoch: AtomicU64,
@@ -1574,6 +1591,7 @@ impl Drop for TerminalCleanupGuard {
 /// dropping a resurrection/build cannot drop the only process owner.
 struct HeadChildOwner {
     child: Option<tokio::process::Child>,
+    child_job: Option<crate::process_control::ChildJob>,
     permit: Option<crate::vodencode::EncodePermit>,
     #[cfg(test)]
     reap_pause: Option<Arc<tokio::sync::Barrier>>,
@@ -1583,6 +1601,20 @@ impl HeadChildOwner {
     fn new(child: tokio::process::Child) -> Self {
         Self {
             child: Some(child),
+            child_job: None,
+            permit: None,
+            #[cfg(test)]
+            reap_pause: None,
+        }
+    }
+
+    fn new_job_owned(
+        child: tokio::process::Child,
+        child_job: crate::process_control::ChildJob,
+    ) -> Self {
+        Self {
+            child: Some(child),
+            child_job: Some(child_job),
             permit: None,
             #[cfg(test)]
             reap_pause: None,
@@ -1596,6 +1628,7 @@ impl HeadChildOwner {
     ) -> Self {
         Self {
             child: Some(child),
+            child_job: None,
             permit: None,
             reap_pause: Some(reap_pause),
         }
@@ -1603,18 +1636,20 @@ impl HeadChildOwner {
 
     fn begin_reap(&mut self) -> Option<tokio::task::JoinHandle<()>> {
         let mut child = self.child.take()?;
+        let child_job = self.child_job.take();
         let permit = self.permit.take();
         let _ = child.start_kill();
         #[cfg(test)]
         let reap_pause = self.reap_pause.take();
         Some(tokio::spawn(async move {
+            let _child_job = child_job;
+            let _permit = permit;
             #[cfg(test)]
             if let Some(pause) = reap_pause {
                 pause.wait().await;
                 pause.wait().await;
             }
             let _ = child.wait().await;
-            drop(permit);
         }))
     }
 
@@ -2077,6 +2112,7 @@ where
 /// per-rendition driver and generation tasks can be `'static`.
 struct Shared {
     base: PathBuf,
+    runtime_cache: PathBuf,
     store: Arc<dyn Store>,
     /// Startup-discovered obsolete encoded generations. The directory remains
     /// present until its exact plan row is deleted, so cancellation or Store
@@ -2205,7 +2241,11 @@ impl VodServe {
 
     /// `base` is the renditions root directory (created lazily).
     pub fn new(base: PathBuf, store: Arc<dyn Store>) -> Arc<VodServe> {
-        Self::new_configured(base, store, None, None, None)
+        let runtime_cache = base
+            .parent()
+            .unwrap_or(base.as_path())
+            .join(".runtime-cache");
+        Self::new_configured(base, runtime_cache, store, None, None, None)
     }
 
     /// Publish a producer-less VOD attachment for HTTP response-finalization
@@ -2289,8 +2329,13 @@ impl VodServe {
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
             capacity_hold: StdMutex::new(None),
+            ahead_hold: AtomicBool::new(false),
             init_notify: Notify::new(),
             wake: Notify::new(),
+            #[cfg(test)]
+            stopped_poll_armed: Notify::new(),
+            #[cfg(test)]
+            stopped_poll_fired: Notify::new(),
             gen_epoch: AtomicU64::new(0),
             last_child_pid: AtomicU32::new(0),
             dormant_since: StdMutex::new(None),
@@ -2377,6 +2422,7 @@ impl VodServe {
         attached
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new_cluster(
         base: PathBuf,
         store: Arc<dyn Store>,
@@ -2384,8 +2430,31 @@ impl VodServe {
         cluster_index_root: PathBuf,
         membership: Option<plurx_core::cluster::membership::MembershipManager>,
     ) -> Arc<VodServe> {
+        let runtime_cache = cluster_index_root
+            .parent()
+            .unwrap_or(cluster_index_root.as_path())
+            .to_owned();
+        Self::new_cluster_with_runtime(
+            base,
+            runtime_cache,
+            store,
+            node_id,
+            cluster_index_root,
+            membership,
+        )
+    }
+
+    pub(crate) fn new_cluster_with_runtime(
+        base: PathBuf,
+        runtime_cache: PathBuf,
+        store: Arc<dyn Store>,
+        node_id: String,
+        cluster_index_root: PathBuf,
+        membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    ) -> Arc<VodServe> {
         Self::new_configured(
             base,
+            runtime_cache,
             store,
             Some(node_id),
             Some(cluster_index_root),
@@ -2395,6 +2464,7 @@ impl VodServe {
 
     fn new_configured(
         base: PathBuf,
+        runtime_cache: PathBuf,
         store: Arc<dyn Store>,
         cluster_node_id: Option<String>,
         cluster_index_root: Option<PathBuf>,
@@ -2410,6 +2480,7 @@ impl VodServe {
         Arc::new(VodServe {
             shared: Arc::new(Shared {
                 base,
+                runtime_cache,
                 store,
                 obsolete_encoded_generations: Mutex::new(VecDeque::from(
                     obsolete_encoded_generations,
@@ -4100,6 +4171,22 @@ impl VodServe {
                 file_id: rendition.recipe.file.id,
                 target_height,
                 encoder: "vod",
+                tone_map_peak_nits: rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .filter(|encoding| {
+                        encoding.plan.options().tone_map == plurx_core::transcode::ToneMap::Zscale
+                    })
+                    .map(|encoding| encoding.plan.options().tone_map_peak_nits),
+                tone_map_peak_source: rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .filter(|encoding| {
+                        encoding.plan.options().tone_map == plurx_core::transcode::ToneMap::Zscale
+                    })
+                    .map(|encoding| encoding.plan.options().tone_map_peak_source.name()),
                 playlist_shape: "vod",
                 producer_state,
                 producer_hold,
@@ -5652,7 +5739,7 @@ impl Shared {
             if adopted_bytes > 0 {
                 self.working_set.fetch_add(adopted_bytes, Relaxed);
             }
-            spawn_driver(Arc::clone(self), Arc::clone(&rendition));
+            let _driver = spawn_driver(Arc::clone(self), Arc::clone(&rendition));
         }
         #[cfg(test)]
         if installed {
@@ -5839,6 +5926,7 @@ impl Shared {
                             &source,
                             &identity,
                             &self.head_regeneration_slots,
+                            &self.runtime_cache,
                         )
                         .await
                         {
@@ -5952,8 +6040,13 @@ impl Shared {
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
             capacity_hold: StdMutex::new(None),
+            ahead_hold: AtomicBool::new(false),
             init_notify: Notify::new(),
             wake: Notify::new(),
+            #[cfg(test)]
+            stopped_poll_armed: Notify::new(),
+            #[cfg(test)]
+            stopped_poll_fired: Notify::new(),
             gen_epoch: AtomicU64::new(0),
             last_child_pid: AtomicU32::new(0),
             // Creation can be cancelled after the rendition is installed but
@@ -6104,15 +6197,14 @@ impl Shared {
                 pause.wait().await;
                 pause.wait().await;
             }
-            let _ = rendition
-                .slot
-                .perform(
-                    Step::Terminate {
-                        why: Termination::Idle,
-                    },
-                    || {},
-                )
-                .await;
+            let _ = perform_driver_step(
+                &shared,
+                &rendition,
+                Step::Terminate {
+                    why: Termination::Idle,
+                },
+            )
+            .await;
             shared.pool.close(&rendition.key);
             {
                 let mut manifest = rendition.manifest.lock().await;
@@ -6169,21 +6261,35 @@ impl Shared {
 // the producer driver
 // ---------------------------------------------------------------------------
 
-fn spawn_driver(shared: Arc<Shared>, rendition: Arc<Rendition>) {
+fn spawn_driver(shared: Arc<Shared>, rendition: Arc<Rendition>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            if rendition
+            let encoded_waiting = rendition
                 .recipe
                 .encoding
                 .as_ref()
-                .is_some_and(|encoding| encoding.is_waiting())
-            {
+                .is_some_and(|encoding| encoding.is_waiting());
+            let stopped_encoder = rendition.recipe.encoding.is_some()
+                && matches!(rendition.slot.belief().await, Producer::Stopped { .. });
+            if encoded_waiting || stopped_encoder {
                 // One owned driver, not one retry task per GET. Pool releases
-                // outside VOD cannot notify this registry, so queued foreground
-                // work also rechecks within a bounded admission interval.
+                // outside VOD cannot notify this registry. A queued rendition
+                // retries admission quickly; a stopped encoder polls slowly
+                // enough to yield inside the live start's five-second budget.
+                let poll = if encoded_waiting {
+                    Duration::from_millis(250)
+                } else {
+                    #[cfg(test)]
+                    rendition.stopped_poll_armed.notify_one();
+                    STOPPED_ENCODER_POLL
+                };
                 tokio::select! {
                     _ = rendition.wake.notified() => {},
-                    _ = tokio::time::sleep(Duration::from_millis(250)) => {},
+                    _ = tokio::time::sleep(poll) => {},
+                }
+                #[cfg(test)]
+                if stopped_encoder && !encoded_waiting {
+                    rendition.stopped_poll_fired.notify_one();
                 }
             } else {
                 rendition.wake.notified().await;
@@ -6193,20 +6299,19 @@ fn spawn_driver(shared: Arc<Shared>, rendition: Arc<Rendition>) {
                     encoding.cancel_wait();
                 }
                 rendition.gen_epoch.fetch_add(1, Relaxed);
-                let _ = rendition
-                    .slot
-                    .perform(
-                        Step::Terminate {
-                            why: Termination::Idle,
-                        },
-                        || {},
-                    )
-                    .await;
+                let _ = perform_driver_step(
+                    &shared,
+                    &rendition,
+                    Step::Terminate {
+                        why: Termination::Idle,
+                    },
+                )
+                .await;
                 break;
             }
             driver_pass(&shared, &rendition).await;
         }
-    });
+    })
 }
 
 /// Reclaim what a rendition that has already failed is still holding.
@@ -6239,7 +6344,7 @@ fn spawn_driver(shared: Arc<Shared>, rendition: Arc<Rendition>) {
 /// `Termination::Idle` is the existing spelling for "reclaim it"; `after` reads
 /// nothing from the `why` and no wire carries it, so this is not a claim that a
 /// failed rendition is idle.
-async fn retire_failed_rendition(rendition: &Arc<Rendition>) {
+async fn retire_failed_rendition(shared: &Shared, rendition: &Arc<Rendition>) {
     *rendition.capacity_hold.lock().expect("capacity hold") = None;
     if matches!(rendition.slot.belief().await, Producer::Absent { .. }) {
         return;
@@ -6247,15 +6352,67 @@ async fn retire_failed_rendition(rendition: &Arc<Rendition>) {
     // Ignored exactly as the dormant purge and generation-end terminations
     // ignore it: a slot that lost its child between the belief read and here
     // is the outcome this asked for.
-    let _ = rendition
-        .slot
-        .perform(
-            Step::Terminate {
-                why: Termination::Idle,
-            },
-            || {},
-        )
-        .await;
+    let _ = perform_driver_step(
+        shared,
+        rendition,
+        Step::Terminate {
+            why: Termination::Idle,
+        },
+    )
+    .await;
+}
+
+fn record_performed_step(shared: &Shared, rendition: &Rendition, step: Step) {
+    match step {
+        Step::Stop => rendition.ahead_hold.store(true, Release),
+        Step::Resume | Step::Start { .. } | Step::Restart { .. } => {
+            rendition.ahead_hold.store(false, Release);
+        }
+        Step::Terminate {
+            why: Termination::YieldToWaiter,
+        } => rendition.ahead_hold.store(true, Release),
+        _ => {}
+    }
+    let why = match step {
+        Step::Terminate {
+            why: Termination::Idle,
+        } => Some(VodProducerTermination::Idle),
+        Step::Terminate {
+            why: Termination::IndefiniteHold,
+        } => Some(VodProducerTermination::IndefiniteHold),
+        Step::Terminate {
+            why: Termination::YieldToWaiter,
+        } => Some(VodProducerTermination::YieldToWaiter),
+        Step::Restart { .. } => Some(VodProducerTermination::Restart),
+        _ => None,
+    };
+    if let Some(why) = why {
+        shared.pool.metrics_handle().count_producer_termination(why);
+    }
+}
+
+fn notify_new_vod_live_wait(
+    shared: &Arc<Shared>,
+    encoding: &crate::vodencode::Encoding,
+    was_waiting: bool,
+    admitted: bool,
+) {
+    if !admitted && !was_waiting && encoding.has_live_wait() {
+        // Registration is node-wide news: a stopped encoded rendition may be
+        // holding exactly this permit. Policy-read retries are deliberately
+        // excluded because they registered no capacity waiter.
+        shared.kick_all();
+    }
+}
+
+async fn perform_driver_step(
+    shared: &Shared,
+    rendition: &Rendition,
+    step: Step,
+) -> std::io::Result<Performed> {
+    let performed = rendition.slot.perform(step, || {}).await?;
+    record_performed_step(shared, rendition, step);
+    Ok(performed)
 }
 
 /// One pass: demand → decide → step → carry it out.
@@ -6274,7 +6431,7 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             }
             rendition.gen_epoch.fetch_add(1, Relaxed);
             clear_marker_prewarm_dispatch(rendition);
-            retire_failed_rendition(rendition).await;
+            retire_failed_rendition(shared, rendition).await;
             return;
         }
         let belief = rendition.slot.belief().await;
@@ -6296,10 +6453,18 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             produced_through: belief.produced_through(),
             positioned_at: belief.positioned_at(),
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: rendition.ahead_hold.load(Acquire),
             working_set: WorkingSet {
                 used_bytes: shared.working_set.load(Relaxed),
                 budget_bytes: rendition.working_set_budget,
-                held: matches!(belief, Producer::Stopped { .. }),
+                held: matches!(
+                    belief,
+                    Producer::Stopped {
+                        reason: crate::prodsched::Hold::WorkingSetFull { .. }
+                            | crate::prodsched::Hold::NoRoom { .. },
+                        ..
+                    }
+                ),
             },
         };
         let decision =
@@ -6319,16 +6484,17 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             &decision,
             next_step(belief, decision.action),
         );
-        let step = if rendition.recipe.encoding.is_some() && matches!(step, Step::Stop) {
-            // A full ahead window is no reason to reserve scarce encoder
-            // capacity while another viewer waits. Encoded restarts reproduce
-            // the same video grid and audio phase, so release instead of SIGSTOP.
-            Step::Terminate {
-                why: Termination::IndefiniteHold,
-            }
-        } else {
-            step
-        };
+        let contention = rendition.recipe.encoding.as_ref().map_or(
+            Contention {
+                live_waiting: false,
+                holds_permit: false,
+            },
+            |encoding| Contention {
+                live_waiting: encoding.admissions.live_is_waiting(),
+                holds_permit: true,
+            },
+        );
+        let step = yield_step(belief, step, contention);
         if matches!(step, Step::Start { .. } | Step::Restart { .. }) && prepared_permit.is_none() {
             if let Some(encoding) = &rendition.recipe.encoding {
                 // The old child may own this pool's only permit. Retire it before
@@ -6340,12 +6506,17 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
                 }
                 drop(manifest);
                 if matches!(step, Step::Restart { .. }) {
-                    if let Err(error) = rendition.slot.perform(step, || {}).await {
-                        tracing::warn!(rendition = %rendition.key, "retiring encoder before admission: {error}");
-                        return;
+                    match perform_driver_step(shared, rendition, step).await {
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(rendition = %rendition.key, "retiring encoder before admission: {error}");
+                            return;
+                        }
                     }
                 }
+                let was_waiting = encoding.has_live_wait();
                 prepared_permit = encoding.try_permit().await;
+                notify_new_vod_live_wait(shared, encoding, was_waiting, prepared_permit.is_some());
                 if prepared_permit.is_none() {
                     return;
                 }
@@ -6362,8 +6533,11 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             let terminate = Step::Terminate {
                 why: Termination::IndefiniteHold,
             };
-            if let Err(error) = rendition.slot.perform(terminate, || {}).await {
-                tracing::debug!(rendition = %rendition.key, "retiring prewarm producer: {error}");
+            match perform_driver_step(shared, rendition, terminate).await {
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(rendition = %rendition.key, "retiring prewarm producer: {error}");
+                }
             }
             rendition.kick();
             return;
@@ -6379,21 +6553,27 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             Step::Stop | Step::Resume => {
                 // TODO(m3-wire): session progress clock — the manager's motion
                 // clock replaces this no-op touch when it attaches.
-                if let Err(error) = rendition.slot.perform(step, || {}).await {
-                    clear_marker_prewarm_dispatch(rendition);
-                    tracing::warn!(rendition = %rendition.key, "performing {step:?}: {error}");
+                match perform_driver_step(shared, rendition, step).await {
+                    Ok(_) => {}
+                    Err(error) => {
+                        clear_marker_prewarm_dispatch(rendition);
+                        tracing::warn!(rendition = %rendition.key, "performing {step:?}: {error}");
+                    }
                 }
             }
             Step::Terminate { .. } => {
                 rendition.gen_epoch.fetch_add(1, Relaxed);
-                if let Err(error) = rendition.slot.perform(step, || {}).await {
-                    tracing::debug!(rendition = %rendition.key, "performing {step:?}: {error}");
+                match perform_driver_step(shared, rendition, step).await {
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::debug!(rendition = %rendition.key, "performing {step:?}: {error}");
+                    }
                 }
             }
             Step::Start { .. } | Step::Restart { .. } => {
                 rendition.gen_epoch.fetch_add(1, Relaxed);
                 drop(manifest);
-                match rendition.slot.perform(step, || {}).await {
+                match perform_driver_step(shared, rendition, step).await {
                     Ok(Performed::NeedsSpawn { at }) => {
                         spawn_generation(shared, rendition, at, prepared_permit.take()).await;
                     }
@@ -6431,17 +6611,19 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
                             // leaving it running would immediately exceed the
                             // same bound that the zero-progress sweep proved.
                             rendition.gen_epoch.fetch_add(1, Relaxed);
-                            if let Err(error) = rendition
-                                .slot
-                                .perform(
-                                    Step::Terminate {
-                                        why: Termination::IndefiniteHold,
-                                    },
-                                    || {},
-                                )
-                                .await
+                            match perform_driver_step(
+                                shared,
+                                rendition,
+                                Step::Terminate {
+                                    why: Termination::IndefiniteHold,
+                                },
+                            )
+                            .await
                             {
-                                tracing::warn!(rendition = %rendition.key, "terminating producer after a zero-progress capacity sweep: {error}");
+                                Ok(_) => {}
+                                Err(error) => {
+                                    tracing::warn!(rendition = %rendition.key, "terminating producer after a zero-progress capacity sweep: {error}");
+                                }
                             }
                         }
                     }
@@ -6781,24 +6963,32 @@ async fn spawn_generation(
     // One ffmpeg, converting or not. The conversion happens on the far side of
     // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
     // process writes — so the producer is the producer it always was.
-    let (mut child, stdout, stderr) = {
+    let (mut child, child_job, stdout, stderr) = {
         let args = recipe_pipe_args(recipe, start_seconds, attested);
-        let mut command = tokio::process::Command::new(recipe_program(recipe));
-        attach_recipe_descriptors(
-            &mut command,
-            rendition.source.as_ref(),
-            audio_source.as_ref(),
-            recipe,
+        #[cfg(unix)]
+        let descriptors = crate::producer_spawn::Descriptors::from_files(
+            rendition.source.as_ref().map(|source| &source.handle),
+            audio_source.as_ref().map(|audio| &audio.handle),
+            recipe
+                .encoding
+                .as_ref()
+                .and_then(|encoding| encoding.subtitle.as_deref()),
+            false,
         );
-        let mut child = match command
-            .args(&args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-        {
-            Ok(child) => child,
+        #[cfg(windows)]
+        let descriptors = crate::producer_spawn::Descriptors::default();
+        let program = recipe_program(recipe);
+        let spawned = match crate::producer_spawn::spawn(
+            &program,
+            &args,
+            crate::producer_spawn::SpawnOptions {
+                runtime_cache: &shared.runtime_cache,
+                progress: crate::producer_spawn::Progress::None,
+                descriptors,
+                env: &[],
+            },
+        ) {
+            Ok(spawned) => spawned,
             Err(error) => {
                 let cause = format!("spawning the producer: {error}");
                 record_failure(
@@ -6810,18 +7000,12 @@ async fn spawn_generation(
                 return;
             }
         };
-        let Some(stdout) = child.stdout.take() else {
-            let _ = child.kill().await;
-            record_failure(
-                shared,
-                rendition,
-                crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
-                "the producer started without a stdout".to_string(),
-            );
-            return;
-        };
-        let stderr = child.stderr.take().expect("piped producer stderr");
-        (child, stdout, stderr)
+        (
+            spawned.child,
+            spawned.child_job,
+            spawned.stdout,
+            spawned.stderr,
+        )
     };
     // The rendition can be closed between the spawn above and the attach
     // below (a purge committing on the maintain task). Attaching would leave
@@ -6844,12 +7028,20 @@ async fn spawn_generation(
         .store(child.id().unwrap_or(0), Relaxed);
     rendition
         .slot
-        .attach_owned(
+        .attach_job_owned(
             child,
+            child_job,
             at,
             permit.map(|permit| Box::new(permit) as Box<dyn Send>),
         )
         .await;
+    shared.pool.metrics_handle().count_producer_generation(
+        if rendition.recipe.encoding.is_some() {
+            VodProducerKind::Encoded
+        } else {
+            VodProducerKind::Copy
+        },
+    );
     let epoch = rendition.gen_epoch.load(Relaxed);
     let shared = Arc::clone(shared);
     let rendition = Arc::clone(rendition);
@@ -6936,27 +7128,6 @@ async fn reopen_encoded_audio(
         }
     }
     Ok(None)
-}
-
-fn attach_recipe_descriptors(
-    command: &mut tokio::process::Command,
-    source: Option<&crate::fragment_index_cluster::SourceFence>,
-    audio: Option<&crate::fragment_index_cluster::SourceFence>,
-    recipe: &Recipe,
-) {
-    let subtitle = recipe
-        .encoding
-        .as_ref()
-        .and_then(|encoding| encoding.subtitle.as_deref());
-    let files = [
-        source.map(|source| (&source.handle, 3)),
-        audio.map(|audio| (&audio.handle, 4)),
-        subtitle.map(|subtitle| (subtitle, 5)),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    crate::ffmpeg::inherit_file_descriptors(command, &files);
 }
 
 /// Whether this rendition's producers read the source through the attested
@@ -7206,15 +7377,14 @@ async fn on_generation_end(
         Acquire,
     );
     // Reap the child so the belief goes honestly absent, keeping its progress.
-    let _ = rendition
-        .slot
-        .perform(
-            Step::Terminate {
-                why: Termination::Idle,
-            },
-            || {},
-        )
-        .await;
+    let _ = perform_driver_step(
+        shared,
+        rendition,
+        Step::Terminate {
+            why: Termination::Idle,
+        },
+    )
+    .await;
     match outcome {
         Outcome::Failed(Failure::InitDrift(cause)) => {
             on_init_drift(shared, rendition, cause).await;
@@ -7854,6 +8024,7 @@ async fn regenerate_init_head(
     source: &crate::fragment_index_cluster::SourceFence,
     identity: &InitIdentity,
     slots: &Arc<Semaphore>,
+    runtime_cache: &Path,
 ) -> Result<Init, HeadRegenerationError> {
     let _permit = Arc::clone(slots)
         .try_acquire_owned()
@@ -7879,33 +8050,36 @@ async fn regenerate_init_head(
     let audio_source = reopen_encoded_audio(Some(source), recipe)
         .await
         .map_err(HeadRegenerationError::Failed)?;
-    let mut command = tokio::process::Command::new(recipe_program(recipe));
-    attach_recipe_descriptors(&mut command, Some(source), audio_source.as_ref(), recipe);
-    let mut child = command
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| {
-            HeadRegenerationError::Failed(format!("spawning the head regeneration: {error}"))
-        })?;
-    let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill().await;
-        return Err(HeadRegenerationError::Failed(
-            "the head regeneration started without a stdout".to_owned(),
-        ));
-    };
-    let mut owner = HeadChildOwner::new(child);
+    #[cfg(unix)]
+    let descriptors = crate::producer_spawn::Descriptors::from_files(
+        Some(&source.handle),
+        audio_source.as_ref().map(|audio| &audio.handle),
+        recipe
+            .encoding
+            .as_ref()
+            .and_then(|encoding| encoding.subtitle.as_deref()),
+        false,
+    );
+    #[cfg(windows)]
+    let descriptors = crate::producer_spawn::Descriptors::default();
+    let program = recipe_program(recipe);
+    let spawned = crate::producer_spawn::spawn(
+        &program,
+        &args,
+        crate::producer_spawn::SpawnOptions {
+            runtime_cache,
+            progress: crate::producer_spawn::Progress::None,
+            descriptors,
+            env: &[],
+        },
+    )
+    .map_err(|error| {
+        HeadRegenerationError::Failed(format!("spawning the head regeneration: {error}"))
+    })?;
+    let mut owner = HeadChildOwner::new_job_owned(spawned.child, spawned.child_job);
     owner.permit = permit;
-    let stderr = owner
-        .child
-        .as_mut()
-        .expect("owned head producer")
-        .stderr
-        .take()
-        .expect("piped head stderr");
+    let stdout = spawned.stdout;
+    let stderr = spawned.stderr;
     let (muxer, diagnostic) = tokio::join!(
         read_regenerated_head_before(
             owner,
@@ -8507,12 +8681,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main".into()),
             width: Some(640),
             height: Some(360),
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(1_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -8872,8 +9051,13 @@ mod tests {
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
             capacity_hold: StdMutex::new(None),
+            ahead_hold: AtomicBool::new(false),
             init_notify: Notify::new(),
             wake: Notify::new(),
+            #[cfg(test)]
+            stopped_poll_armed: Notify::new(),
+            #[cfg(test)]
+            stopped_poll_fired: Notify::new(),
             gen_epoch: AtomicU64::new(0),
             last_child_pid: AtomicU32::new(0),
             dormant_since: StdMutex::new(None),
@@ -9003,6 +9187,7 @@ mod tests {
             produced_through: None,
             positioned_at: None,
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false,
             working_set: WorkingSet::default(),
         };
         assert_eq!(
@@ -9043,6 +9228,7 @@ mod tests {
             produced_through: Some(foreground_end),
             positioned_at: Some(0),
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false,
             working_set: WorkingSet {
                 used_bytes: 2,
                 budget_bytes: 1,
@@ -13648,6 +13834,7 @@ mod tests {
             produced_through: None,
             positioned_at: None,
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false,
             working_set: WorkingSet::default(),
         };
         let readers = rendition.readers.lock().await;
@@ -13915,6 +14102,7 @@ mod tests {
             produced_through: None,
             positioned_at: Some(45),
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false,
             working_set: WorkingSet::default(),
         };
         assert_eq!(
@@ -14001,6 +14189,7 @@ mod tests {
             produced_through: Some(45),
             positioned_at: Some(45),
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false,
             working_set: WorkingSet::default(),
         };
         assert_eq!(
@@ -14067,6 +14256,559 @@ mod tests {
             assert!(rendition.wake.notified().now_or_never().is_none());
         }
         drop(pending);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_ahead_producer_is_stopped_not_killed() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("fake producer");
+        rendition.slot.attach(child, 0).await;
+
+        perform_driver_step(&serve.shared, &rendition, Step::Stop)
+            .await
+            .expect("ahead stop");
+
+        assert!(matches!(
+            rendition.slot.belief().await,
+            Producer::Stopped {
+                reason: crate::prodsched::Hold::Ahead { .. },
+                ..
+            }
+        ));
+        assert!(rendition.ahead_hold.load(Acquire));
+        perform_driver_step(
+            &serve.shared,
+            &rendition,
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+        )
+        .await
+        .expect("cleanup fake producer");
+    }
+
+    #[cfg(unix)]
+    async fn encoded_driver_fixture(
+        base: &Path,
+    ) -> (
+        Arc<VodServe>,
+        Arc<Rendition>,
+        Arc<crate::vodencode::Encoding>,
+        Arc<crate::vodencode::Encoding>,
+    ) {
+        let serve = bare_serve(base);
+        let (file, encoding_a) = encoded_fixture(base).await;
+        let encoding_b = encoding_a
+            .clone_with_admissions_for_test(encoding_a.admissions.clone())
+            .await;
+        encoding_a
+            .store
+            .put_setting(
+                plurx_core::store::keys::SW_POOL_THREADS,
+                &encoding_a.resources.cpu_threads.max(1).to_string(),
+            )
+            .await
+            .expect("one-encoder software budget");
+        let permit = encoding_a.try_permit().await.expect("encoder permit");
+        let mut rendition = synthetic_rendition(base).await;
+        let mutable = Arc::get_mut(&mut rendition).expect("unshared rendition");
+        mutable.recipe.file = file;
+        mutable.recipe.encoding = Some(Arc::clone(&encoding_a));
+        let horizon = ((f64::from(AHEAD_HORIZON_SECONDS) / rendition.seconds_per_segment).ceil()
+            as u32)
+            .max(1);
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            for index in 0..=horizon {
+                manifest.materialize(index, 1_000, 0);
+            }
+        }
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("fake encoded producer");
+        rendition
+            .slot
+            .attach_owned(child, 0, Some(Box::new(permit)))
+            .await;
+        rendition.slot.produced(horizon).await;
+        serve
+            .shared
+            .renditions
+            .lock()
+            .await
+            .insert(rendition.key.clone(), Arc::clone(&rendition));
+        (serve, rendition, encoding_a, encoding_b)
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_belief(
+        rendition: &Rendition,
+        expected: impl Fn(Producer) -> bool,
+        description: &str,
+    ) {
+        for _ in 0..200 {
+            if expected(rendition.slot.belief().await) {
+                return;
+            }
+            // Tokio time is paused in the poll/TTL tests. Give the real OS
+            // child reap a small wall-clock scheduling window without moving
+            // the deterministic runtime clock a second time.
+            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(5)))
+                .await
+                .expect("wall-clock belief wait");
+        }
+        panic!(
+            "timed out waiting for {description}; belief is {:?}",
+            rendition.slot.belief().await
+        );
+    }
+
+    #[cfg(unix)]
+    async fn close_test_driver(rendition: &Rendition, driver: tokio::task::JoinHandle<()>) {
+        rendition.closed.store(true, Release);
+        rendition.kick();
+        driver.await.expect("test driver exits");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_encoded_producer_past_the_horizon_is_stopped_not_killed() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let (_, encoding) = encoded_fixture(base.path()).await;
+        let permit = encoding.try_permit().await.expect("encoder permit");
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition)
+            .expect("unshared rendition")
+            .recipe
+            .encoding = Some(Arc::clone(&encoding));
+        rendition.attach_reader("viewer", 0).await;
+        let horizon = ((f64::from(AHEAD_HORIZON_SECONDS) / rendition.seconds_per_segment).ceil()
+            as u32)
+            .max(1);
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            for index in 0..=horizon {
+                manifest.materialize(index, 1_000, 0);
+            }
+        }
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("fake encoded producer");
+        rendition
+            .slot
+            .attach_owned(child, 0, Some(Box::new(permit)))
+            .await;
+        rendition.slot.produced(horizon).await;
+
+        driver_pass(&serve.shared, &rendition).await;
+
+        assert!(matches!(
+            rendition.slot.belief().await,
+            Producer::Stopped { .. }
+        ));
+        assert!(rendition.ahead_hold.load(Acquire));
+        perform_driver_step(
+            &serve.shared,
+            &rendition,
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+        )
+        .await
+        .expect("cleanup fake producer");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_rolling_live_start_also_releases_a_stopped_encoder() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let (serve, rendition, encoding, contender) = encoded_driver_fixture(base.path()).await;
+        rendition.attach_reader("viewer", 0).await;
+        tokio::time::pause();
+        let driver = spawn_driver(Arc::clone(&serve.shared), Arc::clone(&rendition));
+        rendition.kick();
+        wait_for_belief(
+            &rendition,
+            |belief| matches!(belief, Producer::Stopped { .. }),
+            "the real driver to stop at the ahead horizon",
+        )
+        .await;
+
+        let waiting = encoding.admissions.wait_for_slot();
+        assert!(encoding.admissions.live_is_waiting());
+        // Wait until the real driver has armed its stopped-encoder timer
+        // before moving the paused Tokio clock. There is deliberately no
+        // rendition kick here: a rolling-live waiter is outside the VOD
+        // registry, so the poll is the only wake source.
+        rendition.stopped_poll_armed.notified().await;
+        tokio::time::advance(STOPPED_ENCODER_POLL - Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(rendition.slot.belief().await, Producer::Stopped { .. }),
+            "a rolling-live waiter sends no VOD registry kick"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        rendition.stopped_poll_fired.notified().await;
+        wait_for_belief(
+            &rendition,
+            |belief| matches!(belief, Producer::Absent { .. }),
+            "the stopped-encoder poll to yield the child",
+        )
+        .await;
+
+        assert!(rendition.ahead_hold.load(Acquire));
+        let contender_permit = contender
+            .try_permit()
+            .await
+            .expect("the rolling-live contender takes the reaped child's permit");
+        assert!(serve
+            .shared
+            .pool
+            .metrics_handle()
+            .prometheus()
+            .contains("plurx_vod_producer_terminations_total{why=\"yield_to_waiter\"} 1"));
+        drop(contender_permit);
+        drop(waiting);
+        close_test_driver(&rendition, driver).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_yielded_encoder_does_not_take_the_permit_back_while_still_ahead() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let (serve, rendition, encoding, _) = encoded_driver_fixture(base.path()).await;
+        rendition.attach_reader("viewer", 0).await;
+        tokio::time::pause();
+        let driver = spawn_driver(Arc::clone(&serve.shared), Arc::clone(&rendition));
+        rendition.kick();
+        wait_for_belief(
+            &rendition,
+            |belief| matches!(belief, Producer::Stopped { .. }),
+            "the real driver to stop at the ahead horizon",
+        )
+        .await;
+        let waiting = encoding.admissions.wait_for_slot();
+        assert!(encoding.admissions.live_is_waiting());
+        rendition.stopped_poll_armed.notified().await;
+        tokio::time::advance(STOPPED_ENCODER_POLL).await;
+        rendition.stopped_poll_fired.notified().await;
+        wait_for_belief(
+            &rendition,
+            |belief| matches!(belief, Producer::Absent { .. }),
+            "the real driver to yield the stopped child",
+        )
+        .await;
+        drop(waiting);
+
+        let through = rendition
+            .slot
+            .belief()
+            .await
+            .produced_through()
+            .expect("yield preserves progress");
+        let resume = ((f64::from(crate::prodsched::AHEAD_RESUME_SECONDS)
+            / rendition.seconds_per_segment)
+            .ceil() as u32)
+            .max(1);
+        let before_low_water = through.saturating_sub(resume).saturating_sub(1);
+        rendition
+            .readers
+            .lock()
+            .await
+            .get_mut("viewer")
+            .expect("reader")
+            .frontier = before_low_water;
+
+        // If this pass incorrectly asks for admission, the production test
+        // seam rendezvous with `try_permit` and makes the defect observable
+        // before a real ffmpeg can spawn.
+        let admission = Arc::new(tokio::sync::Barrier::new(2));
+        *encoding
+            .admission_pause
+            .lock()
+            .expect("admission test seam") = Some(Arc::clone(&admission));
+        let observer = Arc::clone(&admission);
+        let mut admission_reached = tokio::spawn(async move { observer.wait().await });
+        rendition.kick();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !admission_reached.is_finished(),
+            "the rendition must not re-admit above the low-water line"
+        );
+        assert!(matches!(
+            rendition.slot.belief().await,
+            Producer::Absent { .. }
+        ));
+
+        rendition
+            .readers
+            .lock()
+            .await
+            .get_mut("viewer")
+            .expect("reader")
+            .frontier = through.saturating_sub(resume);
+        rendition.kick();
+        tokio::time::timeout(Duration::from_secs(1), &mut admission_reached)
+            .await
+            .expect("low-water crossing reaches admission")
+            .expect("admission observer");
+
+        // Close before releasing the second rendezvous: the assertion is the
+        // attempted re-admission at the exact boundary, not a real encoder
+        // generation beyond this lifecycle test's scope.
+        rendition.closed.store(true, Release);
+        admission.wait().await;
+        rendition.kick();
+        driver.await.expect("test driver exits");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_idle_stopped_encoder_is_reclaimed_after_the_session_ttl() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let (serve, rendition, encoding, _) = encoded_driver_fixture(base.path()).await;
+        tokio::time::pause();
+        insert_control_session(
+            &serve,
+            "idle-encoded",
+            Arc::clone(&rendition),
+            Instant::now() - SESSION_IDLE_TTL - Duration::from_secs(1),
+        )
+        .await;
+        let driver = spawn_driver(Arc::clone(&serve.shared), Arc::clone(&rendition));
+        rendition.kick();
+        wait_for_belief(
+            &rendition,
+            |belief| matches!(belief, Producer::Stopped { .. }),
+            "the real driver to stop at the ahead horizon",
+        )
+        .await;
+        let budget = encoding.resources.cpu_threads.max(1);
+        assert!(
+            encoding
+                .admissions
+                .try_admit_bundle(
+                    crate::admission::DEFAULT_MAX_HW_SESSIONS,
+                    budget,
+                    &encoding.resources,
+                    crate::admission::Priority::Live,
+                )
+                .is_none(),
+            "the stopped child retains its full permit before TTL reap"
+        );
+
+        rendition.stopped_poll_armed.notified().await;
+        // Maintenance observes the real wall-clock session TTL, detaches the
+        // reader and wakes the already-armed stopped-encoder driver wait.
+        serve.maintain().await;
+        rendition.stopped_poll_fired.notified().await;
+        assert!(!serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .contains_key("idle-encoded"));
+        assert!(rendition.readers.lock().await.is_empty());
+        wait_for_belief(
+            &rendition,
+            |belief| matches!(belief, Producer::Absent { .. }),
+            "TTL detach to wake the driver and reap the stopped child",
+        )
+        .await;
+
+        let reclaimed = encoding
+            .admissions
+            .try_admit_bundle(
+                crate::admission::DEFAULT_MAX_HW_SESSIONS,
+                budget,
+                &encoding.resources,
+                crate::admission::Priority::Live,
+            )
+            .expect("TTL reap releases the complete encoder permit");
+        drop(reclaimed);
+        assert!(serve
+            .shared
+            .pool
+            .metrics_handle()
+            .prometheus()
+            .contains("plurx_vod_producer_terminations_total{why=\"idle\"} 1"));
+        close_test_driver(&rendition, driver).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_second_rendition_arriving_takes_the_stopped_producers_permit() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let (_, encoding_a) = encoded_fixture(base.path()).await;
+        let encoding_b = encoding_a
+            .clone_with_admissions_for_test(encoding_a.admissions.clone())
+            .await;
+        encoding_a
+            .store
+            .put_setting(
+                plurx_core::store::keys::SW_POOL_THREADS,
+                &encoding_a.resources.cpu_threads.max(1).to_string(),
+            )
+            .await
+            .expect("one-encoder software budget");
+        let permit_a = encoding_a.try_permit().await.expect("first permit");
+        let mut rendition_a = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition_a)
+            .expect("unshared rendition")
+            .recipe
+            .encoding = Some(Arc::clone(&encoding_a));
+        rendition_a.attach_reader("viewer-a", 0).await;
+        let horizon = ((f64::from(AHEAD_HORIZON_SECONDS) / rendition_a.seconds_per_segment).ceil()
+            as u32)
+            .max(1);
+        {
+            let mut manifest = rendition_a.manifest.lock().await;
+            for index in 0..=horizon {
+                manifest.materialize(index, 1_000, 0);
+            }
+        }
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("fake encoded producer");
+        rendition_a
+            .slot
+            .attach_owned(child, 0, Some(Box::new(permit_a)))
+            .await;
+        rendition_a.slot.produced(horizon).await;
+        driver_pass(&serve.shared, &rendition_a).await;
+        assert!(matches!(
+            rendition_a.slot.belief().await,
+            Producer::Stopped { .. }
+        ));
+        serve
+            .shared
+            .renditions
+            .lock()
+            .await
+            .insert(rendition_a.key.clone(), Arc::clone(&rendition_a));
+
+        let was_waiting = encoding_b.has_live_wait();
+        let refused = encoding_b.try_permit().await;
+        assert!(refused.is_none());
+        notify_new_vod_live_wait(&serve.shared, &encoding_b, was_waiting, false);
+        tokio::time::timeout(Duration::from_secs(1), rendition_a.wake.notified())
+            .await
+            .expect("VOD registration kicks stopped renditions");
+        driver_pass(&serve.shared, &rendition_a).await;
+
+        assert!(matches!(
+            rendition_a.slot.belief().await,
+            Producer::Absent { .. }
+        ));
+        let permit_b = encoding_b
+            .try_permit()
+            .await
+            .expect("second rendition takes yielded permit");
+        drop(permit_b);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capacity_hold_status_stays_none_across_a_yield() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("fake producer");
+        rendition.slot.attach(child, 0).await;
+        perform_driver_step(&serve.shared, &rendition, Step::Stop)
+            .await
+            .expect("ahead stop");
+        perform_driver_step(
+            &serve.shared,
+            &rendition,
+            Step::Terminate {
+                why: Termination::YieldToWaiter,
+            },
+        )
+        .await
+        .expect("yield");
+        assert!(rendition
+            .capacity_hold
+            .lock()
+            .expect("capacity hold")
+            .is_none());
+        assert!(rendition.ahead_hold.load(Acquire));
+        assert!(matches!(
+            rendition.slot.belief().await,
+            Producer::Absent { .. }
+        ));
+        let metrics = serve.shared.pool.metrics_handle().prometheus();
+        assert!(
+            metrics.contains("plurx_vod_producer_terminations_total{why=\"yield_to_waiter\"} 1")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_ahead_latch_follows_the_performed_step() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+
+        rendition.ahead_hold.store(true, Release);
+        assert!(perform_driver_step(&serve.shared, &rendition, Step::Resume)
+            .await
+            .is_err());
+        assert!(
+            rendition.ahead_hold.load(Acquire),
+            "a failed signal does not move the latch"
+        );
+
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("fake producer");
+        rendition.slot.attach(child, 0).await;
+        perform_driver_step(&serve.shared, &rendition, Step::Stop)
+            .await
+            .expect("stop");
+        assert!(rendition.ahead_hold.load(Acquire));
+        perform_driver_step(&serve.shared, &rendition, Step::Resume)
+            .await
+            .expect("resume");
+        assert!(!rendition.ahead_hold.load(Acquire));
+        perform_driver_step(&serve.shared, &rendition, Step::Restart { at: 12 })
+            .await
+            .expect("restart termination");
+        assert!(!rendition.ahead_hold.load(Acquire));
+    }
+
+    #[test]
+    fn stopped_encoder_poll_fits_every_live_admission_deadline() {
+        assert!(STOPPED_ENCODER_POLL < crate::admission::QUEUE_WAIT);
+        assert_eq!(crate::admission::QUEUE_WAIT, Duration::from_secs(5));
     }
 
     #[tokio::test]
