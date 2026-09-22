@@ -4836,6 +4836,17 @@ fn render_passive_raft_metrics(
     if let Some(snapshot) = view.snapshot_metrics {
         render_snapshot_metrics(&mut out, snapshot);
     }
+    if let Some(bytes) = view.state_machine_bytes {
+        out.push_str(&format!(
+            "# HELP plurx_raft_state_machine_bytes Bytes occupied by each fixed local Raft state-machine component.\n\
+             # TYPE plurx_raft_state_machine_bytes gauge\n\
+             plurx_raft_state_machine_bytes{{file=\"db\"}} {}\n\
+             plurx_raft_state_machine_bytes{{file=\"wal\"}} {}\n\
+             plurx_raft_state_machine_bytes{{file=\"snapshots\"}} {}\n\
+             plurx_raft_state_machine_bytes{{file=\"logs\"}} {}\n",
+            bytes.db, bytes.wal, bytes.snapshots, bytes.logs,
+        ));
+    }
     out
 }
 
@@ -5097,6 +5108,7 @@ pub(crate) async fn metrics(
         super::internal_activity::prometheus_cluster_activity(),
         super::prometheus_handler_deadlines(),
         super::prometheus_http_store_attribution(),
+        crate::state::fragment_index_validation_prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus();
@@ -5793,6 +5805,12 @@ mod tests {
                 last_build: None,
                 last_install: None,
             }),
+            state_machine_bytes: Some(plurx_core::cluster::migration::status::StateMachineBytes {
+                db: 10,
+                wal: 20,
+                snapshots: 30,
+                logs: 40,
+            }),
         });
 
         assert!(rendered.contains("plurx_raft_metric_sample_valid{source=\"local\"} 1"));
@@ -5820,6 +5838,10 @@ mod tests {
         assert!(rendered.contains(
             "plurx_raft_snapshot_seconds_sum{operation=\"build\",outcome=\"ok\"} 1.250000000"
         ));
+        assert!(rendered.contains("plurx_raft_state_machine_bytes{file=\"db\"} 10"));
+        assert!(rendered.contains("plurx_raft_state_machine_bytes{file=\"wal\"} 20"));
+        assert!(rendered.contains("plurx_raft_state_machine_bytes{file=\"snapshots\"} 30"));
+        assert!(rendered.contains("plurx_raft_state_machine_bytes{file=\"logs\"} 40"));
         assert!(!rendered.contains("node_id"));
         assert!(!rendered.contains("leader_id"));
 
@@ -5852,6 +5874,7 @@ mod tests {
                 watermark_local_reads_supported: true,
                 watermark_errors: 1,
                 snapshot_metrics: None,
+                state_machine_bytes: None,
             }
         });
         assert!(stale.contains("plurx_raft_metric_sample_valid{source=\"watermark\"} 0"));
@@ -5873,6 +5896,7 @@ mod tests {
             watermark_local_reads_supported: false,
             watermark_errors: 0,
             snapshot_metrics: None,
+            state_machine_bytes: None,
         });
         assert!(absent.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
         assert!(!absent.contains("plurx_raft_metric_sample_age_seconds"));

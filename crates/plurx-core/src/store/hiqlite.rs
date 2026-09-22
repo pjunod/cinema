@@ -3186,6 +3186,13 @@ impl crate::store::FragmentIndexStore for HiqliteAuthStore {
             .await
     }
 
+    async fn validate_fragment_index_page(
+        &self,
+        limit: u32,
+    ) -> Result<crate::store::FragmentIndexValidationBackfill, StoreError> {
+        self.telemetry.validate_fragment_index_page(limit).await
+    }
+
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
         self.telemetry.forget_fragment_index(file_id).await
     }

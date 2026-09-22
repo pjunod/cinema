@@ -4782,6 +4782,14 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 /// where a repositioned producer landed. One node's answer governing another
 /// node's bytes would put a viewer in the wrong part of the film with nothing
 /// to report it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FragmentIndexValidationBackfill {
+    pub validated: u64,
+    pub refused: u64,
+    pub gone: u64,
+    pub remaining: u64,
+}
+
 #[async_trait]
 pub trait FragmentIndexStore: Send + Sync + 'static {
     /// Store or replace one file's index.
@@ -4801,6 +4809,13 @@ pub trait FragmentIndexStore: Send + Sync + 'static {
         file_id: i64,
         identity: &crate::segplan::SourceIdentity,
     ) -> Result<Option<crate::segplan::FragmentIndex>, StoreError>;
+
+    /// Validate one bounded page of legacy rows in this node's local store.
+    /// The pass marks structural refusals but never deletes an index.
+    async fn validate_fragment_index_page(
+        &self,
+        limit: u32,
+    ) -> Result<FragmentIndexValidationBackfill, StoreError>;
 
     /// Drop one file's index. `true` when a row was there.
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError>;
