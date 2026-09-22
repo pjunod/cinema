@@ -103,6 +103,7 @@ printf '%s\\t%s\\n' "$FIXTURE_USED_KB" "$1"
 # has to be the thing that tells them apart.
 DOCKER = """#!/bin/sh
 if [ "$1" = ps ]; then
+  [ -z "${FIXTURE_DOCKER_PS_HANG:-}" ] || sleep "$FIXTURE_DOCKER_PS_HANG"
   [ "${FIXTURE_DOCKER_PS_STATUS:-0}" = 0 ] || exit "$FIXTURE_DOCKER_PS_STATUS"
   pattern=.
   for argument do
@@ -170,6 +171,7 @@ class JanitorContractCase(unittest.TestCase):
                 "PLURX_JANITOR_STATE_DIR": str(self.state),
                 "PLURX_JANITOR_CGROUP_ROOT": str(self.cgroup),
                 "PLURX_JANITOR_STOP_TIMEOUT": "5",
+                "PLURX_JANITOR_DOCKER": str(self.bin / "docker"),
                 "FIXTURE_UNIT": UNIT,
                 "FIXTURE_UNIT2": "",
                 "FIXTURE_CONFIG": str(self.config),
@@ -181,6 +183,7 @@ class JanitorContractCase(unittest.TestCase):
                 "FIXTURE_DOCKER_LOG": str(fixture / "docker.log"),
                 "FIXTURE_DOCKER_PS": "",
                 "FIXTURE_DOCKER_PS_STATUS": "0",
+                "FIXTURE_DOCKER_PS_HANG": "",
                 "FIXTURE_DOCKER_FS_KB": "",
                 "FIXTURE_DOCKER_AVAIL_KB": "",
                 "FIXTURE_FS_KB": str(78 * 1024 * 1024),
@@ -352,9 +355,15 @@ class JanitorContractCase(unittest.TestCase):
         Reading it as "cannot tell, assume busy" would retire the janitor on
         every host that runs its jobs on the host executor -- the shape it was
         written for, and the one the cgroup check already covers exactly.
+
+        The absent Docker is named rather than unlinked from the fixture bin.
+        That bin is *prepended* to the inherited PATH, so deleting the fake
+        would find a real `docker` on any machine that has one and this case
+        would silently exercise the live daemon instead of the branch it
+        claims -- passing or failing on a property of the machine.
         """
         self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
-        (self.bin / "docker").unlink()
+        self.environment["PLURX_JANITOR_DOCKER"] = str(self.bin / "no-such-docker")
 
         result = self.run_janitor()
 
@@ -362,6 +371,48 @@ class JanitorContractCase(unittest.TestCase):
         self.assertEqual(self.systemctl_calls(), ["stop", UNIT, "start", UNIT])
         self.assertFalse(self.cache.exists())
         self.assertEqual(self.last_run()["reset"], 1)
+
+    def test_a_docker_that_never_answers_costs_one_pass_and_not_the_janitor(self):
+        """A hung `docker ps` must not hang the janitor.
+
+        The unit is `Type=oneshot` with `TimeoutStartUSec=infinity`, so systemd
+        would neither kill a wedged run nor start the next one: the disk this
+        exists to protect fills while the janitor still looks installed. The
+        query is bounded, and a timeout reads as busy exactly like an error.
+        """
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["FIXTURE_DOCKER_PS_HANG"] = "30"
+        self.environment["PLURX_JANITOR_DOCKER_QUERY_TIMEOUT"] = "1"
+
+        started = time.monotonic()
+        result = self.run_janitor()
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(elapsed, 20, "the janitor waited on a hung docker ps")
+        self.assertEqual(self.systemctl_calls(), [])
+        self.assertTrue((self.cache / "bolt.db").is_file())
+        self.assertEqual(self.last_run()["reset"], 0)
+
+    def test_a_containerised_job_also_holds_the_docker_prune(self):
+        """The prune deletes host-wide, so it needs the guard too.
+
+        `docker container prune -f` removes containers in `Created` state, and
+        `act` goes create -> start, so a prune landing in that window destroys
+        the container the guard exists to protect -- one `docker ps` without
+        `-a` cannot even see.
+        """
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["FIXTURE_DOCKER_ROOT"] = str(self.runner_root)
+        self.environment["FIXTURE_DOCKER_PS"] = (
+            "FORGEJO-ACTIONS-TASK-10846_WORKFLOW-x_JOB-fast-Rust-gate"
+        )
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("leaving Docker for the next pass", result.stdout)
+        self.assertFalse(self.last_run()["docker_pruned"])
 
     def test_a_runner_that_will_not_stop_is_never_left_stopped(self):
         self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)

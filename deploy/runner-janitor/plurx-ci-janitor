@@ -50,6 +50,17 @@ BUILD_CACHE_AGE=${PLURX_JANITOR_BUILD_CACHE_AGE:-168h}
 STATE_DIR=${PLURX_JANITOR_STATE_DIR:-/var/lib/plurx-ci-janitor}
 # Overridable only so the contract test can build a cgroup tree it owns.
 CGROUP_ROOT=${PLURX_JANITOR_CGROUP_ROOT:-/sys/fs/cgroup}
+# Same reason. The fixture prepends its own bin to PATH, so removing a fake
+# `docker` from it does not hide a real one installed on the machine running
+# the suite -- the no-docker case has to be expressible by name, not by PATH.
+DOCKER=${PLURX_JANITOR_DOCKER:-docker}
+# A wedged daemon must cost one pass, not the janitor. `docker ps` against an
+# unresponsive socket blocks indefinitely, and this unit is `Type=oneshot` with
+# `TimeoutStartUSec=infinity`, so systemd would neither kill the hung run nor
+# start the next one: the disk this exists to protect would fill with the
+# janitor apparently still installed. Bounded, a hang reads as busy and the
+# pass carries on, exactly like a daemon that answers with an error.
+DOCKER_QUERY_TIMEOUT=${PLURX_JANITOR_DOCKER_QUERY_TIMEOUT:-10}
 dry_run=false
 
 say() { printf 'plurx-ci-janitor: %s\n' "$*"; }
@@ -191,7 +202,7 @@ unit_is_idle() {
 }
 
 # And the half the cgroup cannot see, which on this fleet is the larger half.
-# Lanes in `.github/workflows/` declare `container: ubuntu:26.04`, so the job
+# Lanes in `.github/workflows/` declare `container: ubuntu:24.04`, so the job
 # is a Docker container: its processes live under Docker's cgroup and never
 # under the runner unit's, and `unit_is_idle` reads a daemon sitting alone
 # while a twenty-minute `cargo test` is in flight. That read cost four jobs
@@ -222,9 +233,14 @@ unit_is_idle() {
 # exactly as it was before this existed.
 containerised_job_running() {
   local names
-  command -v docker >/dev/null 2>&1 || return 1
-  names=$(docker ps --filter 'name=ACTIONS-TASK-' --format '{{.Names}}' 2>/dev/null) ||
-    return 0
+  command -v "$DOCKER" >/dev/null 2>&1 || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    names=$(timeout "$DOCKER_QUERY_TIMEOUT" "$DOCKER" ps \
+      --filter 'name=ACTIONS-TASK-' --format '{{.Names}}' 2>/dev/null) || return 0
+  else
+    names=$("$DOCKER" ps --filter 'name=ACTIONS-TASK-' --format '{{.Names}}' 2>/dev/null) ||
+      return 0
+  fi
   [ -n "$names" ]
 }
 
@@ -380,8 +396,16 @@ done < <(systemctl list-units --type=service --no-legend --all 'forgejo-runner*'
 # taken here — pruning it wholesale would throw away exactly the state the
 # packaging lane keeps warm on purpose.
 docker_pruned=false
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  root=$(docker info --format '{{.DockerRootDir}}')
+# The prune deletes across the whole host, so it needs the guard at least as
+# much as a cache reset does. `docker container prune -f` removes containers
+# in `Created` state, and `act` goes create -> start, so a prune landing in
+# that window destroys the very container the guard exists to protect --
+# and `docker ps` without `-a` cannot see it. Skipping the prune while any
+# job is in flight costs one hourly pass; not skipping it costs someone's job.
+if containerised_job_running; then
+  say 'a containerised job is running on this host; leaving Docker for the next pass'
+elif command -v "$DOCKER" >/dev/null 2>&1 && "$DOCKER" info >/dev/null 2>&1; then
+  root=$("$DOCKER" info --format '{{.DockerRootDir}}')
   if [ -d "$root" ]; then
     floor_kb=$(floor_kb_for "$root")
     # Docker is usually on its own filesystem, and a demand dropped there was
@@ -397,9 +421,9 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         say "would prune Docker: $((available_kb / 1024 / 1024))G free, reserve $((floor_kb / 1024 / 1024))G"
       else
         say "pruning Docker: $((available_kb / 1024 / 1024))G free, reserve $((floor_kb / 1024 / 1024))G"
-        docker container prune -f >/dev/null || true
-        docker image prune -af --filter "until=$IMAGE_AGE" >/dev/null || true
-        docker builder prune -f --filter "until=$BUILD_CACHE_AGE" >/dev/null || true
+        "$DOCKER" container prune -f >/dev/null || true
+        "$DOCKER" image prune -af --filter "until=$IMAGE_AGE" >/dev/null || true
+        "$DOCKER" builder prune -f --filter "until=$BUILD_CACHE_AGE" >/dev/null || true
         docker_pruned=true
         after_kb=$(available_kb_for "$root")
         reclaimed_kb=$((reclaimed_kb + after_kb - available_kb))
