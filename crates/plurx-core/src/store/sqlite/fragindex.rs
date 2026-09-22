@@ -30,6 +30,14 @@ impl FragmentIndexStore for SqliteStore {
             .await
     }
 
+    async fn validate_fragment_index_page(
+        &self,
+        limit: u32,
+    ) -> Result<crate::store::FragmentIndexValidationBackfill, StoreError> {
+        self.with_conn(move |conn| crate::store::fragindex::validate_page(conn, limit))
+            .await
+    }
+
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
         self.with_conn(move |conn| crate::store::fragindex::forget(conn, file_id))
             .await

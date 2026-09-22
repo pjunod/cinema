@@ -405,6 +405,13 @@ paths = [
   "Cargo.lock",
   "Cargo.toml",
   "crates/plurx-core/Cargo.toml",
+  # The K-05 catalogue fixture generator. It opens a database through
+  # `SqliteStore::open` so production owns the schema, then populates and
+  # censuses the core media model's durable rows — libraries, items, files,
+  # probes, users and watch state — for query-plan evidence. A migration that
+  # adds a newly-required column breaks it, so it belongs with the model whose
+  # persistence it reproduces.
+  "crates/plurx-core/examples/catalogue_fixture.rs",
   "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,testfixtures}.rs",
   "crates/plurx-core/src/content_analysis.rs",
   "crates/plurx-core/src/store/mod.rs",
@@ -700,7 +707,7 @@ paths = [
   "crates/plurx-core/tests/decoder_selection.rs",
   "crates/plurx-pgs/**",
   "fuzz/**",
-  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,progressive,renditiondir,scratch_ledger,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
+  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,scratch_ledger,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
   "crates/plurxd/src/manifest_cache.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/http/internal_media_sessions.rs",

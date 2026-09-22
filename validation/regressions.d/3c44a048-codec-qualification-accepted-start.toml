@@ -1,0 +1,64 @@
+version = 1
+
+[[coverage]]
+commits = ["3c44a048"]
+points = ["playback.pipeline", "live-tv.integration"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+The correction and its evidence landed together in `crates/plurxd`. The \
+preceding commit `17dfebc4` counted a Live TV encoding start inline inside \
+`run_live_session_inner` (`crates/plurxd/src/live_tv.rs`), at the first \
+publishable scratch inventory, guarded only by that worker invocation's local \
+`published` flag; nothing on the session itself remembered that the accepted \
+start had already been inventoried, so the count point was a property of one \
+worker run rather than of the session. This commit moves it to \
+`LiveTvSession::record_codec_qualification_publication`, whose \
+`codec_qualification_counted` `AtomicBool` `compare_exchange` admits exactly \
+one publication per session, and keeps the rule that only an encoding route \
+counts: `admission` is `None` on a copy/remux route, and Live TV refuses \
+routes that need a tone-map graph, so it contributes an encoder family with \
+`OutputGrade::Sdr` and no pipeline label. It also rewrote both `# HELP` lines \
+in `CodecQualificationMetrics` (`crates/plurxd/src/transcode.rs`) from \
+"Successfully started encoding sessions" -- which reads as first media \
+publication -- to "Accepted encoding starts after their serving owner is \
+registered", and added that the counters are process-local and need a \
+reset-aware `increase()` or proven uninterrupted uptime, because the S-11 \
+plan's one-week fleet reading had been specified as a direct final scrape of \
+a counter that a container restart sets back to zero. \
+`live_tv_qualification_counts_the_first_encoded_publication_once` \
+(`crates/plurxd/src/live_tv.rs`) is the test for the latch: it calls \
+`record_codec_qualification_publication` twice on a session with no \
+admission and asserts the software/SDR encoder counter is still 0, then \
+takes a real `admit_live_tv(1080, "h264", None, 720, Duration::ZERO)` \
+admission on a second session, calls the same method twice, and asserts the \
+counter is exactly 1. Putting the un-latched `if let Some(admission)` \
+increment back makes the second call count again and that assertion reads 2. \
+Three further tests pin the boundaries the commit did not move but now \
+claims in the exported HELP text, each through the `#[cfg(test)]` accessors \
+`codec_qualification_encoder_count` and `codec_qualification_pipeline_count`. \
+`a_post_admission_start_failure_returns_every_permit` \
+(`crates/plurxd/src/transcode.rs`) asserts the software/SDR counter is 0 \
+before a rolling start and still 0, with `Pipeline::Cpu` at 0, after a start \
+that fails after admission but before manager registration. \
+`a_retry_that_keeps_its_encoder_keeps_its_slot_and_pays_for_its_decode` (same \
+file) asserts the NVENC/SDR counter is 0 before and exactly 1 after one \
+hardware start that reaches registration, with `Pipeline::Cpu` at 1. \
+`encoded_vod_manager_create_resolves_real_recipe_and_served_codecs` \
+(`crates/plurxd/src/vodencode_manager_tests.rs`) asserts a \
+`create_session` for `file_id: i64::MAX` errors and leaves both counters at \
+0, that the first successful encoded create takes software/SDR and \
+`Pipeline::Cpu` to 1, and that replaying the same `request_id` returns the \
+same `session_id` while both stay at 1. Moving any of those \
+`record_codec_qualification_session` calls off its accepted-start boundary -- \
+to admission, into a failure path, or past the VOD idempotency \
+short-circuit -- makes one of those exact counts wrong. The rewritten HELP \
+strings themselves are compiled but not asserted: the rendering test in \
+`transcode.rs` pins only the `plurx_encoder_sessions_total{...}` sample \
+lines, so a future edit to the HELP prose would not be caught by these \
+checks. All four tests are `crates/plurxd` unit tests, run by `make \
+rust-check` under `rust-gate` and by `make ci-rust-gate` under \
+`rust-gate-ci`. Two of them need the real toolchain rather than a stub: the \
+hardware rolling test opens with `require_ffmpeg`, which panics rather than \
+skips when no ffmpeg is present, and the encoded-VOD test probes a real \
+`plurx_core::testfixtures::source("h264")` before it creates anything.
+"""

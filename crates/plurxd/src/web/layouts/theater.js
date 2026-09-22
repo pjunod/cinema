@@ -338,7 +338,7 @@ function theaterItemBody(p){
   // Admin affordances. .th-admin is the hook the television surface hides them
   // with (styles.css) — you do not reanalyze a file with a remote.
   const artBtn = ME&&ME.is_admin
-    ? ` <button class="ghost sm th-admin" title="Re-fetch this item's poster and backdrop" aria-label="Refresh artwork" onclick="refreshArtwork(${it.id},this)">⟳ Refresh artwork</button>`
+    ? ` <button class="ghost sm th-admin" title="Re-fetch this item's poster and backdrop" aria-label="Refresh artwork" onclick="refreshArtwork('${exactWireId(it)}',this)">⟳ Refresh artwork</button>`
     : '';
   // `p.editable` — the model's answer, not a re-test of admin + library kind.
   const editBtn = p.editable
@@ -537,4 +537,3 @@ LAYOUTS.theater={name:"Theater", surfaces:["desktop","mobile","tv"],
 // ui-baseline's REGISTRY_JS both read LAYOUTS, but only the <head> copy runs
 // before first paint.
 applyLayout();
-

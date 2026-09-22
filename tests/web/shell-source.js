@@ -4,7 +4,7 @@
 //
 // Why this exists: until 2026-09 `crates/plurxd/src/web/index.html` was one
 // 23,901-line file and twenty-two tests sliced functions straight out of it by
-// name. `docs/clients/WEB-SHELL-SPLIT-PLAN.md` cut it into sixty-five assets, so
+// name. `docs/clients/WEB-SHELL-SPLIT-PLAN.md` cut it into sixty-six assets, so
 // the string those tests want is no longer a file — it is the concatenation of
 // the shell's body rows in served order. This is the one place that knows how
 // to build it, so a new file joins every slicing test the moment it is served.
@@ -62,8 +62,8 @@ function shellSource() {
   if (styles.length !== 1) {
     throw new Error(`shell-source: expected one stylesheet row, got ${styles.join(", ")}`);
   }
-  if (headScripts.length !== 1) {
-    throw new Error(`shell-source: expected one <head> script row, got ${headScripts.join(", ")}`);
+  if (headScripts.length < 1) {
+    throw new Error("shell-source: expected at least one <head> script row");
   }
 
   const files = [...styles, ...headScripts, ...bodyScripts]
@@ -73,7 +73,7 @@ function shellSource() {
   return {
     html,
     css: sourceOf(styles[0]),
-    headScript: sourceOf(headScripts[0]),
+    headScript: headScripts.map(sourceOf).join(""),
     // The exact string the pre-split tests used to read out of index.html.
     // Rows carry their own `"use strict";` prologue; concatenated, each one is
     // a no-op expression statement between two files, which is harmless inside
@@ -87,7 +87,7 @@ function shellSource() {
     // here precedes everything after it whatever the shell says, so compare
     // `rows` positions instead.
     get everything() {
-      return [html, sourceOf(styles[0]), sourceOf(headScripts[0]),
+      return [html, sourceOf(styles[0]), ...headScripts.map(sourceOf),
         ...bodyScripts.map(sourceOf)].join("\n");
     },
     rows: {style: styles, head: headScripts, body: bodyScripts, sidecars},
