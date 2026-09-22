@@ -96,6 +96,8 @@ def web_body_script() -> str:
 WEB_SETTINGS_TEST = ROOT / "tests/web/settings-sections.test.js"
 DAEMON_MAIN = ROOT / "crates/plurxd/src/main.rs"
 HTTP_HLS = ROOT / "crates/plurxd/src/http/hls.rs"
+DAEMON_TRANSCODE_TESTS = ROOT / "crates/plurxd/src/transcode/tests"
+HTTP_HLS_TESTS = ROOT / "crates/plurxd/src/http/hls/tests"
 SESSIONS_SQLITE = ROOT / "crates/plurx-core/src/store/sqlite/sessions.rs"
 SESSIONS_HIQLITE = ROOT / "crates/plurx-core/src/store/hiqlite_sessions.rs"
 M0_QUALIFIED_HEAD = "59d0a4d1"
@@ -107,6 +109,20 @@ M1_REPAIR_HEAD = "07c8f905"
 
 def normalized(text: str) -> str:
     return " ".join(text.split())
+
+
+def module_tests(directory: Path) -> str:
+    """Every test source a `<module>/tests.rs` include tree carries.
+
+    S-14 moved these modules' inline `#[cfg(test)] mod tests` bodies out of
+    their parent file and into per-file include chunks, so a named test now
+    lives beside its parent instead of inside it. Reading the whole directory
+    keeps a test-anchor assertion independent of which chunk the test is in.
+    """
+
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(directory.rglob("*.rs"))
+    )
 
 
 class DecoderRecoveryStatusContract(unittest.TestCase):
@@ -1011,26 +1027,28 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # host no contract covers both arms refuse.
         self.assertIn(
             "fn a_manifest_is_written_off_the_queue_only_where_a_receipt_is_enforced",
-            daemon,
+            module_tests(DAEMON_TRANSCODE_TESTS),
         )
         self.assertIn(
             "an unqualified row records no digest, so nothing that keys on one changes",
-            daemon,
+            module_tests(DAEMON_TRANSCODE_TESTS),
         )
         # The qualified arm keys on a counter, not on the outcome: the refusal
         # quarantines the generation and takes the manifest with it, so every
         # on-disk observation afterwards is identical to the one a build
         # without this milestone would leave.
         self.assertIn(
-            "the qualified identity publishes a manifest off the queue", daemon
+            "the qualified identity publishes a manifest off the queue",
+            module_tests(DAEMON_TRANSCODE_TESTS),
         )
         self.assertIn(
-            "the unqualified identity publishes none off the queue", daemon
+            "the unqualified identity publishes none off the queue",
+            module_tests(DAEMON_TRANSCODE_TESTS),
         )
         self.assertIn("fn test_manifests_published(&self) -> usize", daemon)
         self.assertIn(
             "fn the_generation_identity_is_the_final_directory_and_survives_a_fence",
-            daemon,
+            module_tests(DAEMON_TRANSCODE_TESTS),
         )
         # A derived generation id is checked where it is derived. Publication
         # rejects a bad one too, but as an ordinary retryable production error
@@ -1266,7 +1284,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn("pub fn with_diagnostic_policy(", daemon)
         self.assertIn(
             "fn the_published_identity_is_the_request_this_node_can_honour_and_moves_its_cache_keys",
-            daemon,
+            module_tests(DAEMON_TRANSCODE_TESTS),
         )
         # And the direct setter stays test-only: every test of the enforcement
         # behind this control runs on a host no contract covers.
@@ -1399,7 +1417,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn("The checks below are advisory only", web)
         self.assertIn("Recovery remains available when explicitly enabled", web)
         self.assertIn("Only some selectable decode paths", daemon)
-        self.assertIn("missing measurements or contracts", daemon)
+        self.assertIn(
+            "missing measurements or contracts",
+            module_tests(DAEMON_TRANSCODE_TESTS),
+        )
         self.assertNotIn(
             "!delivered.enforces_receipt() || !alternate.enforces_receipt()",
             daemon,
@@ -1541,7 +1562,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # UUID when there is no predecessor, which is the whole point of it.
         # A new play would have given the live session one budget and the
         # durable row another.
-        production, _, _ = hls.partition("\nmod tests {")
+        # S-14 moved hls.rs's `mod tests` into `http/hls/tests/`, so the
+        # file itself is now exactly the production text this counts.
+        production = hls
         self.assertEqual(
             production.count("recovery_epoch_for(activation_predecessor.as_ref())"),
             1,
@@ -1558,12 +1581,13 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
         self.assertIn(
             "fn one_start_mints_one_recovery_epoch_for_both_the_session_and_the_row",
-            hls,
+            module_tests(HTTP_HLS_TESTS),
         )
         # And the claim about what the epoch buys is the one that holds.
         self.assertIn("It does not\n/// bound a client that varies", hls)
         self.assertIn(
-            "fn a_new_play_mints_a_budget_and_every_continuation_inherits_one", hls
+            "fn a_new_play_mints_a_budget_and_every_continuation_inherits_one",
+            module_tests(HTTP_HLS_TESTS),
         )
 
         # A successor reads its predecessor's epoch rather than being handed

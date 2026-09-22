@@ -109,14 +109,14 @@ test_anchor = "preferred_truehd_audio_is_transcoded_for_android_hdr_remux"
 id = "server.apple-high-tier-master"
 source = "crates/plurxd/src/http/hls.rs"
 source_anchor = "fn should_serve_high_tier_media_playlist("
-test = "crates/plurxd/src/http/hls.rs"
+test = "crates/plurxd/src/http/hls/tests/chunk_06.rs"
 test_anchor = "high_tier_hevc_without_native_subtitles_uses_the_media_playlist"
 
 [[decisions]]
 id = "server.apple-high-tier-init"
 source = "crates/plurxd/src/http/hls.rs"
 source_anchor = "fn normalize_high_tier_hevc_init("
-test = "crates/plurxd/src/http/hls.rs"
+test = "crates/plurxd/src/http/hls/tests/chunk_06.rs"
 test_anchor = "high_tier_hdr_init_is_relabelled_for_apple_hls"
 
 [[decisions]]
@@ -151,7 +151,7 @@ test_anchor = "hls_create_refuses_hdr_downgrades_and_preserves_an_existing_sdr_p
 id = "server.subtitle-segment-not-ready"
 source = "crates/plurxd/src/http/hls.rs"
 source_anchor = "async fn await_window_publication<"
-test = "crates/plurxd/src/http/hls.rs"
+test = "crates/plurxd/src/http/hls/tests/chunk_02.rs"
 test_anchor = "a_subtitle_segment_waits_out_a_live_window_and_no_longer"
 
 [[decisions]]
@@ -165,21 +165,21 @@ test_anchor = "pgs_overlay_contract_is_authenticated_typed_and_immutable"
 id = "server.session-kind"
 source = "crates/plurxd/src/transcode.rs"
 source_anchor = "pub async fn create_session("
-test = "crates/plurxd/src/transcode.rs"
+test = "crates/plurxd/src/transcode/tests/chunk_07.rs"
 test_anchor = "manager_reads_prefs_and_runs_session_lifecycle"
 
 [[decisions]]
 id = "server.live-playlist-window"
-source = "crates/plurxd/src/transcode.rs"
+source = "crates/plurxd/src/transcode/rolling/segment_index.rs"
 source_anchor = "fn served_live_playlist("
-test = "crates/plurxd/src/transcode.rs"
+test = "crates/plurxd/src/transcode/tests/chunk_05.rs"
 test_anchor = "retention_keeps_a_reload_margin_above_the_observed_fetch_lead"
 
 [[decisions]]
 id = "server.auto-rung"
 source = "crates/plurxd/src/transcode.rs"
 source_anchor = "pub async fn auto_height("
-test = "crates/plurxd/src/transcode.rs"
+test = "crates/plurxd/src/transcode/tests/chunk_02.rs"
 test_anchor = "hardware_auto_preserves_a_four_k_av1_sdr_source"
 
 [[decisions]]
