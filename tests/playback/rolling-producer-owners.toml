@@ -1617,12 +1617,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # the worker hands `close_transport` to a sibling task and drops that handle;
 # the sibling only settles the writers and collects the worker. Neither owns a
 # media producer, child process, or replacement policy.
+# and +2 from S-03's encoded hold-and-release driver coverage in
+# `vodserve.rs`: one `tokio::spawn` parks a rendezvous observer on the
+# `admission_pause` barrier, and one `tokio::task::spawn_blocking` gives a real
+# child reap a wall-clock window while the Tokio clock is paused. Both live
+# inside `mod tests`, both are awaited before their test returns, and neither
+# owns a shipped producer, timer, or process.
 # 534 -> 536 with S-08: `state.rs` spawns the one leased field-order backfill
 # beside the existing catalogue backfills -- it walks a node-local cursor and
 # writes a column, owning no producer, process or timer -- and `decode_facts.rs`
 # spawns one `#[cfg(test)]` actor in the idet cancellation fixture, which is
 # awaited inside the test that created it.
-expected_occurrences = 538
+# The count above each contribution below is stated against that branch's
+# own base. This row's value is the whole merged tree re-measured after the
+# promotion merge, so it is the sum, not either branch's number.
+expected_occurrences = 540
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1689,7 +1698,12 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # is kill-on-drop, and is explicitly killed and reaped on timeout.
 # 47 -> 41: seven direct child spawns now enter `spawn_job_owned`; the one new
 # service checkpoint thread accounts for the net reduction of six.
-expected_occurrences = 42
+# 42 -> 48 with S-03's encoded hold-and-release harness: six fake-child
+# launches in `vodserve.rs`'s test module, each a sleeping `sleep` child the
+# slot signals in place of an encoder. Every one is attached through
+# `attach_owned` and reaped by the test's own driver settle or an explicit
+# `Step::Terminate`; the wiring added no shipped launch site.
+expected_occurrences = 48
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2060,6 +2074,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +1 for K-07's test-only zero-duration timeout: it deterministically exercises
 # the outer-deadline arm of the Store result observer, is awaited immediately,
 # and owns no task, process, producer, or replacement policy.
+# 828 -> 833 on the promotion merge, +2 from L-01's per-sink DVR writers:
 # 828 -> 834 on the promotion merge, +2 from L-01's per-sink DVR writers:
 # `tokio::time::timeout(TUNER_READ_TIMEOUT, close)` bounds the writer loop's
 # final flush and `sync_all`, and one
@@ -2068,11 +2083,19 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # its attempt part. Each bounds exactly one owned task, and the timed-out arm
 # puts the handle back for the next DVR tick rather than abandoning it;
 # neither starts a producer, process, or replacement policy.
+# 828 -> 831 with S-03: three test-only timers in `vodserve.rs`. Two bounded
+# and +3 from S-03: three test-only timers in `vodserve.rs`. Two bounded
+# admission rendezvous, and one `std::thread::sleep` inside a `spawn_blocking`
+# belief wait lets a real child reap land without moving the paused runtime
+# clock a second time. None repeats, and none owns a producer or process.
 # 828 -> 832 with S-08: one `tokio::time::timeout` bounds the idet verification
 # pass in `decode_facts.rs` against the caller's remaining budget, and three are
 # `#[cfg(test)]` bounds in the cancellation fixture beside it. None of them owns
 # a producer; the idet bound is the caller's deadline, not a new one.
-expected_occurrences = 834
+# The count above each contribution below is stated against that branch's
+# own base. This row's value is the whole merged tree re-measured after the
+# promotion merge, so it is the sum, not either branch's number.
+expected_occurrences = 837
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2186,12 +2209,18 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +1 is the Android-DV mux regression's test-only FFmpeg command. It copies a
 # short generated HEVC fixture to a temporary MP4, is collected synchronously
 # with `.output()`, owns no rolling producer, and cannot ship in the server.
+# 127 -> 133: the same six S-03 fake children, counted at construction. They
+# are `sleep` processes built only under `cfg(test)`; the shipped encoded-VOD
+# path still builds its command in exactly the two places it did before.
 # 127 -> 129 with S-08: `decode_facts.rs` builds one `tokio::process::Command`
 # for the bounded idet pass through the startup-snapshotted FFprobe and the held
 # source descriptor, and one `#[cfg(test)]` `std::process::Command` that renders
 # the interlaced fixture. The idet child is `kill_on_drop`, bounded by the
 # caller's deadline and reaped on every exit path.
-expected_occurrences = 129
+# The count above each contribution below is stated against that branch's
+# own base. This row's value is the whole merged tree re-measured after the
+# promotion merge, so it is the sum, not either branch's number.
+expected_occurrences = 135
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2421,10 +2450,15 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 325 -> 324 after replacing dummy deadline responses with the production
 # authenticated logout route. Every retained `.status()` is an in-process HTTP
 # response inspection, not a command launch.
+# 326 -> 332: the launch half of the same six S-03 test children. The
+# hold-and-release wiring added no shipped launch site.
 # 326 -> 327 with S-08: the added `.status()` belongs to the `#[cfg(test)]`
 # fixture renderer in `decode_facts.rs`, which is awaited to completion before
 # the test that built it proceeds.
-expected_occurrences = 327
+# The count above each contribution below is stated against that branch's
+# own base. This row's value is the whole merged tree re-measured after the
+# promotion merge, so it is the sum, not either branch's number.
+expected_occurrences = 333
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -2515,10 +2549,17 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +4 are the packet probe's awaited completion, explicit timeout reap, and the
 # publication retirement ticket wait. Only the first three concern a process;
 # all retain their owner until the wait settles.
+# 374 -> 376 with S-03's low-water re-admission regression: both additions are
+# `tokio::sync::Barrier` waits on the test's admission rendezvous, not child
+# waits. The test releases its barrier arm before returning, and the driver
+# task it owns is closed and joined.
 # 374 -> 375 with S-08: the added `child.wait()` reaps the bounded idet child in
 # `decode_facts.rs` on the ordinary completion path; cancellation and the
 # deadline reach the same reap through its kill-on-drop guard.
-expected_occurrences = 375
+# The count above each contribution below is stated against that branch's
+# own base. This row's value is the whole merged tree re-measured after the
+# promotion merge, so it is the sum, not either branch's number.
+expected_occurrences = 377
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -2608,10 +2649,16 @@ pattern = "kill_on_drop\\s*\\("
 # running helper; production child ownership is unchanged.
 # +1 is the bounded selected-video packet probe's cancellation backstop; normal
 # completion and timeout still explicitly reap the child.
+# 77 -> 83: the six S-03 test children are all built kill-on-drop, so a test
+# that panics mid-lifecycle cannot leave a `sleep` behind. The shipped
+# producer paths are unchanged.
 # 77 -> 78 with S-08: the bounded idet child in `decode_facts.rs`. Cancellation,
 # the caller's deadline and an early return all drop it, so no verification pass
 # can outlive the decode-facts call that asked for it.
-expected_occurrences = 78
+# The count above each contribution below is stated against that branch's
+# own base. This row's value is the whole merged tree re-measured after the
+# promotion merge, so it is the sum, not either branch's number.
+expected_occurrences = 84
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
