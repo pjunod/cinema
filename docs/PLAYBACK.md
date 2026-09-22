@@ -1570,7 +1570,7 @@ explicit enable choice.
   internal index retains duration-only history for native subtitle timing;
   seeking outside the retained window still opens a fresh session at that
   film position.
-- **Apple seeks route by the advertised window first.** The served playlist's
+- **Apple and web seek by the advertised window first.** The served playlist's
   seekable span — everything published and not yet pruned — is a real
   random-access surface, and AVPlayer seeks inside it instantly. The Apple
   client (`PlayerController.seekRoute`) maps a film-time target through the
@@ -1583,9 +1583,13 @@ explicit enable choice.
   replacement is in flight the predecessor item's failures are ignored:
   supersession has already deleted its playlist, so its dying fetches 404 by
   design, and reacting to them raced a second open against the first (the
-  successor's own status is re-checked once the change lands). Web and
-  Android still reopen for every non-VOD seek; adopting the same window
-  routing there is open work.
+  successor's own status is re-checked once the change lands). The web player
+  also keeps rolling HLS targets local when they are in its buffered ranges or
+  in the published range at least one playlist target duration behind the
+  edge; progressive remux uses buffered ranges only. A local seek that neither
+  emits `seeked` nor gains target coverage within three seconds reopens once at
+  the same film target. Android still reopens for every non-VOD seek; adopting
+  the same window routing there is open work.
 - **Auto adapts by restarting one encode, not by running a multivariant
   ladder.** The web controller consumes the server ladder and changes the one
   active transcode when bandwidth, runway, or classified supply stalls demand

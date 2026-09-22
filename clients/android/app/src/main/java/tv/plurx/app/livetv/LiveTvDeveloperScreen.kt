@@ -61,6 +61,7 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
 
     fun apply(settings: LiveTvSettings) {
         saved = settings
+        Session.displayModeMatch = settings.playback_display_mode_match
         ipv4 = settings.live_tv_device_ipv4
         owner = settings.live_tv_owner_node_id
         sessions = settings.live_tv_max_sessions
@@ -111,6 +112,23 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
         TextButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus)) { Text("Back") }
         Text("Developer", style = MaterialTheme.typography.headlineMedium)
         saved?.let { settings ->
+            Text("Android TV display cadence · advisory enablement", style = MaterialTheme.typography.titleLarge)
+            Text("Requests only a same-resolution refresh rate matching the delivered cadence. A physical television and HDMI sink must verify the result; the observations below never disable or override the switch.")
+            Row {
+                Checkbox(
+                    checked = settings.playback_display_mode_match,
+                    onCheckedChange = { write(LiveTvSettingsChange.DisplayModeMatch(it)) },
+                    enabled = !busy,
+                    modifier = Modifier.tvFocusRing(),
+                )
+                Text("Match television refresh rate", Modifier.padding(top = 12.dp))
+            }
+            developerReadiness?.items?.firstOrNull { it.id == "android_display_mode_match" }
+                ?.requirements?.forEach { requirement ->
+                    Text("${when (requirement.status) { "met" -> "Met"; "unmet" -> "Needs attention"; else -> "Not observable" }}: ${requirement.title}")
+                    Text(requirement.evidence, style = MaterialTheme.typography.bodySmall)
+                } ?: Text("Readiness is unavailable. That does not gate the enable switch.")
+
             Text("Library channels · advisory enablement", style = MaterialTheme.typography.titleLarge)
             Text("Schedules use already-probed local movies and episodes. These facts explain whether the server looks ready; they never disable or override the explicit switch.")
             Row {

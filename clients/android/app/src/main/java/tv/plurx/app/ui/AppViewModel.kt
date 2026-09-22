@@ -202,6 +202,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             if (recovered != null) {
                                 bindOrigin(recovered.origin, saved.token)
                                 serverName = recovered.info.name
+                                Session.displayModeMatch = recovered.info.display_mode_match
                                 settings.saveServerIdentity(
                                     recovered.origin,
                                     recovered.info.instance_id,
@@ -440,6 +441,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun changeServer() {
         OfflineBooks.interruptProfile(serverInstanceId, currentUserId)
         Session.token = null
+        Session.displayModeMatch = false
         currentUser = null
         currentUserId = null
         serverInstanceId = null
@@ -856,6 +858,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         api = candidate
         serverName = info.name
         serverInstanceId = info.instance_id
+        Session.displayModeMatch = info.display_mode_match
         settings.saveOrigin(normalized, info.instance_id)
         _phase.value = Phase.NeedLogin
     }
@@ -900,6 +903,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val info = catchingUnlessCancelled { api().server() }.getOrNull() ?: return
         serverName = info.name
         serverInstanceId = info.instance_id
+        Session.displayModeMatch = info.display_mode_match
         settings.saveServerIdentity(origin, info.instance_id)
         refreshClusterIngress()
     }
