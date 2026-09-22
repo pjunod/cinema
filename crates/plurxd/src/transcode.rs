@@ -95,6 +95,7 @@ const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unava
 /// bound `idet` verification for flagged sources. The elapsed time is added
 /// back to the production deadline so observing costs the encode nothing.
 const DECODE_PLAN_PROBE_BUDGET: Duration = Duration::from_secs(10);
+static PROBE_CHANGED_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
 /// How long a mixed recovery waits for the CPU it newly needs.
 ///
@@ -275,6 +276,26 @@ pub(crate) fn vod_refusal(error: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((code, message))
+}
+
+#[derive(Clone, Copy)]
+enum BoundPlanCaller {
+    Pretranscode,
+    Vod,
+}
+
+impl BoundPlanCaller {
+    fn finish(
+        self,
+        result: Result<ResolvedTranscode, String>,
+    ) -> Result<ResolvedTranscode, String> {
+        match self {
+            Self::Pretranscode => result,
+            Self::Vod => {
+                result.map_err(|error| vod_refusal_error("vod_decoder_plan_refused", error))
+            }
+        }
+    }
 }
 
 /// What "Auto" resolves to — see [`TranscodeManager::auto_height`].
@@ -13884,6 +13905,7 @@ pub struct TranscodeManager {
 pub(crate) struct TranscodeMetrics {
     active_sessions: Arc<AtomicUsize>,
     active_cache: crate::cachekeep::ActiveCacheMetrics,
+    decode_facts: Arc<crate::decode_facts::DecodeFactMetrics>,
     caps: EncoderCaps,
     codec_qualification: Arc<CodecQualificationMetrics>,
 }
@@ -14044,6 +14066,10 @@ impl TranscodeMetrics {
             self.active_sessions.load(Relaxed),
             self.active_cache.active_entries(),
         )
+    }
+
+    pub(crate) fn decode_facts_prometheus(&self) -> String {
+        self.decode_facts.prometheus()
     }
 
     pub(crate) fn codec_qualification_prometheus(&self) -> String {
@@ -14548,6 +14574,7 @@ impl TranscodeManager {
         TranscodeMetrics {
             active_sessions: Arc::clone(&self.active_session_count),
             active_cache: self.cache_readers.metrics(),
+            decode_facts: self.decode_facts.metrics_handle(),
             caps: self.caps.clone(),
             codec_qualification: Arc::clone(&self.codec_qualification),
         }
@@ -15304,18 +15331,20 @@ impl TranscodeManager {
         deadline: Instant,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<ResolvedTranscode, String> {
-        self.resolve_held_movie_plan(
-            file,
-            options,
-            encoder,
-            crate::decode_facts::DecodeFactSource::new(
-                Arc::clone(&source.handle),
-                Arc::clone(&source.offset_gate),
-            ),
-            deadline,
-            cancelled,
+        BoundPlanCaller::Pretranscode.finish(
+            self.resolve_held_movie_plan(
+                file,
+                options,
+                encoder,
+                crate::decode_facts::DecodeFactSource::new(
+                    Arc::clone(&source.handle),
+                    Arc::clone(&source.offset_gate),
+                ),
+                deadline,
+                cancelled,
+            )
+            .await,
         )
-        .await
     }
 
     /// Resolve decoder facts through the exact source description the caller
@@ -15352,6 +15381,17 @@ impl TranscodeManager {
                 cancelled,
             )
             .await;
+        self.resolve_held_movie_plan_facts(file, options, encoder, facts)
+            .await
+    }
+
+    async fn resolve_held_movie_plan_facts(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        facts: Result<plurx_core::transcode::DecodeFacts, crate::decode_facts::DecodeFactError>,
+    ) -> Result<ResolvedTranscode, String> {
         match facts {
             Ok(facts) => self.resolve_movie_plan_with_facts(
                 file,
@@ -15366,8 +15406,57 @@ impl TranscodeManager {
             // use; the plan records `CatalogRow` so nothing downstream can
             // mistake it for a descriptor-bound measurement.
             Err(error) => {
+                use crate::decode_facts::DecodePlanFallbackReason;
+
+                let reason = error.fallback_reason();
+                self.decode_facts.metrics().record_fallback(reason);
+                match reason {
+                    DecodePlanFallbackReason::Deadline | DecodePlanFallbackReason::Cancelled => {}
+                    DecodePlanFallbackReason::ProbeChanged => {
+                        if PROBE_CHANGED_WARNING_EMITTED
+                            .compare_exchange(false, true, AcqRel, Acquire)
+                            .is_ok()
+                        {
+                            tracing::warn!(
+                                file_id = file.id,
+                                reason = reason.label(),
+                                "the configured ffprobe changed on disk after startup; bound facts are refused until plurxd restarts"
+                            );
+                        }
+                    }
+                    DecodePlanFallbackReason::RefusedSourceChanged => {
+                        tracing::warn!(
+                            file_id = file.id,
+                            reason = reason.label(),
+                            %error,
+                            "bound decoder planning refused changed source facts"
+                        );
+                        return Err(
+                            "the held source changed during decoder probing; rescan before playback"
+                                .to_owned(),
+                        );
+                    }
+                    DecodePlanFallbackReason::ProbeFailed
+                    | DecodePlanFallbackReason::IdentityIo => {
+                        tracing::warn!(
+                            file_id = file.id,
+                            reason = reason.label(),
+                            %error,
+                            "bound decoder planning fell back to stored probe facts"
+                        );
+                    }
+                    DecodePlanFallbackReason::Invariant => {
+                        tracing::error!(
+                            file_id = file.id,
+                            reason = reason.label(),
+                            %error,
+                            "bound decoder planning invariant failed; using stored probe facts"
+                        );
+                    }
+                }
                 tracing::debug!(
                     file_id = file.id,
+                    reason = reason.label(),
                     %error,
                     "bound decoder planning fell back to stored probe facts"
                 );
@@ -19788,8 +19877,8 @@ impl TranscodeManager {
                 format!("the held source could not be retained for decoder planning: {error}"),
             )
         })?;
-        let plan = self
-            .resolve_held_movie_plan(
+        let plan = BoundPlanCaller::Vod.finish(
+            self.resolve_held_movie_plan(
                 file,
                 &options,
                 encoder,
@@ -19800,8 +19889,8 @@ impl TranscodeManager {
                 Instant::now() + DECODE_PLAN_PROBE_BUDGET,
                 None,
             )
-            .await
-            .map_err(|error| vod_refusal_error("vod_decoder_plan_refused", error))?;
+            .await,
+        )?;
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
             return Err(vod_refusal_error(
@@ -29310,6 +29399,208 @@ pub(crate) mod tests {
         );
         assert!(rendered
             .contains("plurx_tone_map_pipeline_sessions_total{pipeline=\"dovi_passthrough\"} 1\n"));
+    }
+
+    #[tokio::test]
+    async fn held_plan_fallback_reasons() {
+        use crate::decode_facts::{DecodeFactError, DecodePlanFallbackReason};
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::PlanSourceBinding;
+
+        let cases = vec![
+            (
+                DecodeFactError::Deadline,
+                DecodePlanFallbackReason::Deadline,
+            ),
+            (
+                DecodeFactError::Cancelled,
+                DecodePlanFallbackReason::Cancelled,
+            ),
+            (
+                DecodeFactError::ProbeChanged,
+                DecodePlanFallbackReason::ProbeChanged,
+            ),
+            (
+                DecodeFactError::Spawn("spawn".into()),
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::MissingPipe,
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::Read("read".into()),
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::OversizedOutput,
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::Failed(Some(1), "failed".into()),
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::InvalidJson("json".into()),
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::InvalidFacts("facts".into()),
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::ProbeIdentity("identity".into()),
+                DecodePlanFallbackReason::IdentityIo,
+            ),
+            (
+                DecodeFactError::SourceMetadata("metadata".into()),
+                DecodePlanFallbackReason::IdentityIo,
+            ),
+            (
+                DecodeFactError::CacheInvariant,
+                DecodePlanFallbackReason::Invariant,
+            ),
+        ];
+        #[cfg(not(target_os = "linux"))]
+        let cases = cases
+            .into_iter()
+            .chain(std::iter::once((
+                DecodeFactError::UnsupportedPlatform,
+                DecodePlanFallbackReason::Invariant,
+            )))
+            .collect::<Vec<_>>();
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("get file")
+            .expect("media file");
+        for (error, expected) in cases {
+            assert_eq!(error.fallback_reason(), expected, "{error}");
+            let (manager, _work, _cache) = cached_manager(&store);
+            let options = manager.options_for_tone_map(
+                Encoder::Software,
+                &file,
+                720,
+                0.0,
+                None,
+                None,
+                Some(1),
+                ToneMap::None,
+                OutputGrade::Sdr,
+            );
+            let plan = manager
+                .resolve_held_movie_plan_facts(&file, &options, Encoder::Software, Err(error))
+                .await
+                .expect("every non-source-change failure keeps the catalog fallback");
+            assert_eq!(plan.source_binding(), PlanSourceBinding::CatalogRow);
+            assert!(
+                manager
+                    .decode_facts
+                    .metrics()
+                    .prometheus()
+                    .contains(&format!(
+                        "plurx_decode_plan_fallbacks_total{{reason=\"{}\"}} 1",
+                        expected.label()
+                    )),
+                "the real fallback disposition records {}",
+                expected.label()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn source_change_refuses_bound_plan() {
+        use plurx_core::store::SqliteStore;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let source_path = media.path().join("source-change.mkv");
+        std::fs::write(&source_path, b"source before probe").expect("source fixture");
+        let file_id = seed_real_file(&store, &source_path).await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("get file")
+            .expect("media file");
+
+        let probe_path = media.path().join("ffprobe-source-change");
+        std::fs::write(
+            &probe_path,
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then printf '%s\\n' 'ffprobe version source-change'; exit 0; fi\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\",\"profile\":\"High\",\"pix_fmt\":\"yuv420p\",\"width\":160,\"height\":120,\"avg_frame_rate\":\"24/1\",\"r_frame_rate\":\"24/1\",\"color_transfer\":\"bt709\",\"disposition\":{\"attached_pic\":0}}]}'\n",
+        )
+        .expect("probe fixture");
+        let mut permissions = std::fs::metadata(&probe_path)
+            .expect("probe metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&probe_path, permissions).expect("executable probe");
+        let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
+            probe_path.to_str().expect("probe path"),
+        )
+        .await
+        .expect("probe identity");
+        let (manager, _work, _cache) = cached_manager(&store);
+        let manager = manager
+            .with_decode_probe(Some(probe))
+            .with_decode_source_final_identity_delay(Duration::from_millis(250));
+        let options = manager.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            120,
+            0.0,
+            None,
+            None,
+            Some(1),
+            ToneMap::None,
+            OutputGrade::Sdr,
+        );
+        let mutation_path = source_path.clone();
+        let mutation = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            std::fs::write(mutation_path, b"source changed after collection")
+                .expect("mutate source");
+        });
+        let result = manager
+            .resolve_held_movie_plan(
+                &file,
+                &options,
+                Encoder::Software,
+                crate::decode_facts::DecodeFactSource::new(
+                    Arc::new(std::fs::File::open(&source_path).expect("open held source")),
+                    Arc::new(tokio::sync::Semaphore::new(1)),
+                ),
+                Instant::now() + Duration::from_secs(2),
+                None,
+            )
+            .await;
+        mutation.await.expect("source mutation");
+        assert_eq!(
+            result,
+            Err("the held source changed during decoder probing; rescan before playback".into())
+        );
+        let reason = "the held source changed during decoder probing; rescan before playback";
+        let vod_error = BoundPlanCaller::Vod
+            .finish(Err(reason.to_owned()))
+            .expect_err("VOD must preserve the typed decoder-plan refusal");
+        assert_eq!(
+            vod_refusal(&vod_error),
+            Some(("vod_decoder_plan_refused", reason))
+        );
+        assert_eq!(
+            BoundPlanCaller::Pretranscode.finish(Err(reason.to_owned())),
+            Err(reason.to_owned()),
+            "the pretranscode job must receive the actionable failure for retry/settlement"
+        );
+        assert!(manager
+            .decode_facts
+            .metrics()
+            .prometheus()
+            .contains("plurx_decode_plan_fallbacks_total{reason=\"refused_source_changed\"} 1"));
     }
 
     #[tokio::test]
