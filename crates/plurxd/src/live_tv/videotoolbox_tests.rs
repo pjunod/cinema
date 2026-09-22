@@ -165,6 +165,7 @@ async fn live_tv_videotoolbox_atsc1_publishes_decodable_segments() {
             &LiveQualityPolicy {
                 max_height: Some(target_height),
                 max_bitrate_bps: None,
+                ..LiveQualityPolicy::default()
             },
             &LiveExecutionSupport {
                 video_encode: true,

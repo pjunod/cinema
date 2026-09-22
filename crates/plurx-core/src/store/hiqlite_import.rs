@@ -519,6 +519,7 @@ const TABLES: &[TablePlan] = &[
             "dv_el_present",
             "dv_rpu_present",
             "video_codec_tag",
+            "field_order",
         ],
         order_by: "id",
         minimum_schema: 5,
@@ -2523,6 +2524,10 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 // stored probe JSON crosses with the row and the destination's
                 // bounded backfill recovers a valid tag afterward.
                 "NULL".to_owned()
+            } else if table.name == "files" && *column == "field_order" && schema_version < 64 {
+                // The stored probe document crosses with every legacy row;
+                // the destination's fenced bounded job recovers the token.
+                "NULL".to_owned()
             } else if table.name == "cluster_fragment_index_jobs"
                 && *column == "attempt_errors"
                 && schema_version < 46
@@ -2870,13 +2875,13 @@ mod tests {
         let v37 = value_projection(table, 37, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
         assert!(
-            v37.ends_with("hdr_format, audio_offset_ms, NULL, NULL, NULL, NULL, NULL, NULL"),
+            v37.ends_with("hdr_format, audio_offset_ms, NULL, NULL, NULL, NULL, NULL, NULL, NULL"),
             "{v37}"
         );
         assert!(
             current.ends_with(
                 "hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, \
-                 dv_el_present, dv_rpu_present, video_codec_tag"
+                 dv_el_present, dv_rpu_present, video_codec_tag, field_order"
             ),
             "{current}"
         );
@@ -2892,10 +2897,26 @@ mod tests {
         let v59 = value_projection(table, 59, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
         assert!(
-            v59.ends_with("dv_el_present, dv_rpu_present, NULL"),
+            v59.ends_with("dv_el_present, dv_rpu_present, NULL, NULL"),
             "{v59}"
         );
-        assert!(current.ends_with("dv_el_present, dv_rpu_present, video_codec_tag"));
+        assert!(current.ends_with("dv_el_present, dv_rpu_present, video_codec_tag, field_order"));
+    }
+
+    #[test]
+    fn pre_v64_file_projection_supplies_null_field_order() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "files")
+            .copied()
+            .expect("files table plan");
+        let v63 = value_projection(table, 63, false);
+        let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
+        assert!(
+            v63.ends_with("dv_rpu_present, video_codec_tag, NULL"),
+            "{v63}"
+        );
+        assert!(current.ends_with("dv_rpu_present, video_codec_tag, field_order"));
     }
 
     /// Every import plan must name the migration that actually creates its

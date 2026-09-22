@@ -1662,7 +1662,7 @@ async fn build_with_args(
     let identity = identity_for(file, video);
 
     let mut command = tokio::process::Command::new(ffmpeg_bin());
-    crate::transcode::configure_ffmpeg_runtime(&mut command, runtime_cache);
+    crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
     #[cfg(unix)]
     if let Some(source_fd) = source_fd {
         unsafe {
@@ -2120,6 +2120,7 @@ mod tests {
             container: Some("matroska".to_owned()),
             video_codec: Some("h264".to_owned()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("High".to_owned()),
             width: Some(160),
             height: Some(90),
@@ -2176,6 +2177,7 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),

@@ -12,8 +12,8 @@ use super::{
     directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
     normalized_directory, ArtworkInventoryItem, ArtworkRepairFence, IdentityRepairBlocker,
     IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot, IdentityRepairWatch,
-    MediaStore, MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome,
-    WatchStore, IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX,
+    MediaStore, MissingFieldOrder, MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus,
+    SeriesHintOutcome, WatchStore, IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX,
     IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN,
     IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
 };
@@ -33,7 +33,7 @@ const ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, yea
      book_metadata_source";
 
 pub(super) const IDENTITY_REPAIR_ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, year, overview, tmdb_id, imdb_id, season_number, episode_number, air_date, runtime_ms, poster_path, backdrop_path, added_at, updated_at, recorded_at, tags, nfo_seeded_at, metadata_at, artwork_attempted_at, artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source";
-pub(super) const IDENTITY_REPAIR_FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, video_codec_tag";
+pub(super) const IDENTITY_REPAIR_FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, video_codec_tag, field_order";
 
 fn item_cols(alias: &str) -> String {
     ITEM_COLS
@@ -436,7 +436,7 @@ const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container,
      video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, \
      subtitle_streams, scanned_at, hdr_format, audio_offset_ms, \
      dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, \
-     (probe_json IS NOT NULL) AS probed, video_codec_tag";
+     (probe_json IS NOT NULL) AS probed, video_codec_tag, field_order";
 
 struct FileRow {
     id: i64,
@@ -465,6 +465,7 @@ struct FileRow {
     dv_rpu_present: Option<i64>,
     probed: i64,
     video_codec_tag: Option<String>,
+    field_order: Option<String>,
 }
 
 impl From<&mut Row<'_>> for FileRow {
@@ -496,6 +497,7 @@ impl From<&mut Row<'_>> for FileRow {
             dv_rpu_present: row.get("dv_rpu_present"),
             probed: row.get("probed"),
             video_codec_tag: row.get("video_codec_tag"),
+            field_order: row.get("field_order"),
         }
     }
 }
@@ -514,6 +516,7 @@ impl TryFrom<FileRow> for MediaFile {
             container: row.container,
             video_codec: row.video_codec,
             video_codec_tag: row.video_codec_tag,
+            field_order: row.field_order,
             video_profile: row.video_profile,
             width: row.width,
             height: row.height,
@@ -2789,9 +2792,9 @@ impl MediaStore for HiqliteAuthStore {
                     video_profile, width, height, bit_depth, hdr, bitrate, \
                     audio_streams, subtitle_streams, probe_json, hdr_format, scanned_at, \
                     dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, \
-                    video_codec_tag) \
+                    video_codec_tag, field_order) \
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, \
-                           $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24) \
+                           $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25) \
                    ON CONFLICT(path) DO UPDATE SET \
                      item_id = excluded.item_id, size = excluded.size, mtime = excluded.mtime, \
                      duration_ms = excluded.duration_ms, container = excluded.container, \
@@ -2806,6 +2809,7 @@ impl MediaStore for HiqliteAuthStore {
                      dv_el_present = excluded.dv_el_present, \
                      dv_rpu_present = excluded.dv_rpu_present, \
                      video_codec_tag = excluded.video_codec_tag, \
+                     field_order = excluded.field_order, \
                      scanned_at = excluded.scanned_at RETURNING id";
         validate_sql(sql)?;
         let row = self
@@ -2836,7 +2840,8 @@ impl MediaStore for HiqliteAuthStore {
                     probe.dolby_vision.bl_compat_id,
                     probe.dolby_vision.el_present.map(i64::from),
                     probe.dolby_vision.rpu_present.map(i64::from),
-                    probe.video_codec_tag.as_deref()
+                    probe.video_codec_tag.as_deref(),
+                    probe.field_order.as_deref()
                 ),
             )
             .await
@@ -3109,6 +3114,76 @@ impl MediaStore for HiqliteAuthStore {
                     AND probe_json = $6 AND video_codec_tag IS NULL",
                 params!(
                     video_codec_tag,
+                    candidate.id,
+                    candidate.path.as_str(),
+                    candidate.size,
+                    candidate.mtime,
+                    candidate.probe_json.as_str()
+                ),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(changed == 1)
+    }
+
+    async fn files_missing_field_order(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingFieldOrder>, StoreError> {
+        #[derive(Debug)]
+        struct MissingRow {
+            id: i64,
+            path: String,
+            size: i64,
+            mtime: i64,
+            probe_json: String,
+        }
+        impl From<&mut Row<'_>> for MissingRow {
+            fn from(row: &mut Row<'_>) -> Self {
+                Self {
+                    id: row.get("id"),
+                    path: row.get("path"),
+                    size: row.get("size"),
+                    mtime: row.get("mtime"),
+                    probe_json: row.get("probe_json"),
+                }
+            }
+        }
+        Ok(self
+            .client()
+            .query_consistent_map::<MissingRow, _>(
+                "SELECT id, path, size, mtime, probe_json FROM files \
+                  WHERE field_order IS NULL AND probe_json IS NOT NULL AND id > $1 \
+                  ORDER BY id LIMIT $2",
+                params!(after_id, limit.max(0)),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| MissingFieldOrder {
+                id: row.id,
+                path: row.path,
+                size: row.size,
+                mtime: row.mtime,
+                probe_json: row.probe_json,
+            })
+            .collect())
+    }
+
+    async fn set_file_field_order(
+        &self,
+        candidate: &MissingFieldOrder,
+        field_order: &str,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .client()
+            .execute(
+                "UPDATE files SET field_order = $1 \
+                  WHERE id = $2 AND path = $3 AND size = $4 AND mtime = $5 \
+                    AND probe_json = $6 AND field_order IS NULL",
+                params!(
+                    field_order,
                     candidate.id,
                     candidate.path.as_str(),
                     candidate.size,

@@ -338,6 +338,10 @@ pub struct FileDto {
     pub duration_ms: Option<i64>,
     pub container: Option<String>,
     pub video_codec: Option<String>,
+    /// FFprobe field-order token for the selected video stream. Read-only;
+    /// clients must not infer that every non-progressive token is trustworthy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field_order: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
@@ -564,6 +568,7 @@ impl FileDto {
             duration_ms: f.duration_ms,
             container: f.container,
             video_codec: f.video_codec,
+            field_order: f.field_order,
             video_profile: f.video_profile,
             width: f.width,
             height: f.height,

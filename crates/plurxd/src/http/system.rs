@@ -1592,6 +1592,7 @@ pub struct SettingsDto {
     pub live_tv_max_sessions: u8,
     pub live_tv_output_height: u16,
     pub live_tv_max_output_height: u16,
+    pub live_tv_deinterlace_output: String,
     pub live_tv_config_generation: i64,
     pub live_tv_transition_from_owner_node_id: String,
     pub live_tv_transition_drain_before: i64,
@@ -1998,6 +1999,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         live_tv_max_sessions: live_tv.max_sessions,
         live_tv_output_height: live_tv.output_height,
         live_tv_max_output_height: live_tv.max_output_height,
+        live_tv_deinterlace_output: live_tv.deinterlace_output.as_str().to_owned(),
         live_tv_config_generation: live_tv.generation,
         live_tv_transition_from_owner_node_id: live_tv.transition_from_owner_node_id,
         live_tv_transition_drain_before: live_tv.transition_drain_before,
@@ -2241,6 +2243,10 @@ pub struct UpdateSettings {
     /// Advisory quality ceiling for subsequent tunes. Zero preserves source
     /// resolution whenever the client can accept it.
     pub live_tv_max_output_height: Option<u16>,
+    /// Advisory output cadence for the software Live TV deinterlacer. This is
+    /// deliberately outside the tuner generation tuple and remains editable
+    /// while Live TV is enabled.
+    pub live_tv_deinterlace_output: Option<String>,
     pub live_tv_config_generation: Option<i64>,
     /// Programme-guide selection. Information settings, not tuner settings:
     /// they ride the same generation CAS but stay editable while Live TV is
@@ -2451,6 +2457,7 @@ impl UpdateSettings {
             || self.analysis_backoff_max_secs.is_some()
             || self.subtitle_window_secs.is_some()
             || self.subtitle_not_ready_503.is_some()
+            || self.live_tv_deinterlace_output.is_some()
             || self.default_audio_lang.is_some()
             || self.default_sub_lang.is_some()
             || self.sub_mode.is_some()
@@ -2648,6 +2655,7 @@ pub async fn update_settings(
             max_output_height: req
                 .live_tv_max_output_height
                 .unwrap_or(current.max_output_height),
+            deinterlace_output: current.deinterlace_output,
             guide_source,
             xmltv_url,
             guide_hours: req.live_tv_guide_hours.unwrap_or(current.guide_hours),
@@ -2713,6 +2721,16 @@ pub async fn update_settings(
     } else {
         None
     };
+
+    let live_tv_deinterlace_output = req
+        .live_tv_deinterlace_output
+        .as_deref()
+        .map(|value| {
+            crate::live_tv_delivery::LiveDeinterlaceOutput::parse(value).ok_or_else(|| {
+                ApiError::BadRequest("live_tv_deinterlace_output must be 'field' or 'frame'".into())
+            })
+        })
+        .transpose()?;
 
     if req
         .dv_disk_convert_parallel
@@ -3428,6 +3446,12 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::DV_CONVERT, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(output) = live_tv_deinterlace_output {
+        state
+            .store
+            .put_setting(keys::LIVE_TV_DEINTERLACE_OUTPUT, output.as_str())
             .await?;
     }
     if let Some(on) = req.vod_index_cluster_cache {
@@ -5107,7 +5131,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}",
+        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
@@ -5121,6 +5145,7 @@ pub(crate) async fn metrics(
         // two comparisons this server can make. Zero is the number that says
         // every scan in this library was written by the build serving it.
         probe_reporter_metrics = crate::ffmpeg::reporter_drift_prometheus(),
+        interlace_metrics = crate::decode_facts::interlace_prometheus(),
         // Node-wide statics, so this reads no lock a live segment GET can
         // hold and no `VodServe` handle that a cluster boot may have replaced.
         blocked_get_metrics = state.blocked_gets.prometheus(),

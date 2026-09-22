@@ -820,7 +820,16 @@ fn is_sqlite_candidate(text: &str) -> bool {
 /// Current number of SQLite statement variants whose binding list is built in
 /// another statement or dynamically. This is measured by the census and may
 /// only fall unless a reviewer accepts a new non-local binding shape.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 90;
+///
+/// 90 -> 91 for exactly one reviewed site: the `SELECT` prepared by
+/// `files_missing_field_order` in `sqlite/media.rs`, whose `?1`/`?2` are bound
+/// by the `query_map` on the next statement, so no local `params!` sits beside
+/// the literal for the census to count. Two placeholders, two values. It is
+/// the same shape `files_missing_video_codec_tag` immediately above it already
+/// contributes, and the census was re-measured site by site against
+/// `origin/main`: that one literal is the entire difference between the two
+/// sets, so nothing else changed binding shape in this merge.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 91;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
