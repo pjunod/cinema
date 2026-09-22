@@ -1,8 +1,82 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-20 · Kept current by the working agent in the same
+**Updated:** 2026-09-22 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Resume stopped working on every client — reproduced, half fixed
+
+`PR #438`, branch `fix/resume-progress-zero-clobber`, **merged, NOT deployed**.
+RCA: [docs/streaming/RESUME-ROLLING-PUBLICATION-RCA.md](docs/streaming/RESUME-ROLLING-PUBLICATION-RCA.md).
+
+Reported 2026-09-22: "resume doesn't work for anything. it all just starts at
+the beginning now. It's been that way at least a day or two." Apple TV, iOS and
+web; the item page offers "Resume 13:04" and playback begins at zero.
+
+The watch state and the clients are innocent. The position is stored, the API
+returns it, the Resume affordance is drawn from it, the play request carries it
+and ffmpeg is given the seek. What breaks is the **rolling live-HLS recovery
+path**, taken whenever a file's cluster fragment index is still pending
+(`vod_index_pending`); a file with a complete index is served the whole title
+and resumes correctly. 4151 of 6201 files are indexed, and the backfill that
+`637ec781` unblocked on 09-19 keeps moving files across that boundary — which
+is why this arrived everywhere at once on the reported date.
+
+Localised from the shipped web client with the node instrumented. The server
+publishes a valid, growing playlist; the client fetches it and **never requests
+`init.mp4` or a single segment**, because hls.js's MediaSource is created,
+assigned to the element, and never reaches `open` — no SourceBuffer, stream
+controller IDLE, then the startup deadline and a server-side retirement. The
+`retired while waiting for scratch capacity` line that this chases is a fence
+raised after the session is already dead, not a budget refusal; the reservation
+is 315.8 MiB against an 8 GiB ledger and the subsystem is offset-blind.
+
+What #438 fixes is the ratchet, not the startup: while the player waits,
+`reportProgress` posts position 0 every five seconds over the saved resume
+point — eight of them in one reproduction — so a single failed startup destroys
+the resume position permanently. A zero beat now needs a witness, the current
+attachment having reached a timeline; a positioned beat needs none, which keeps
+a predecessor's close-time save intact.
+
+Still open: why the MediaSource never opens (the evidence points at
+`attachHls`'s internal pause reaching `handlePlaybackTransportEvent` as a
+viewer pause and stopping hls startup, and wants one reproduction with a real
+click); the inverted grant-wait deadline at `copyseg.rs:348`, which applies the
+bound to the session that *has* published; retirement fencing the writers it
+then waits for, which loses the final segment and `ENDLIST` of every killed
+copy session and misreports every retirement as a capacity problem; and 30
+titles carrying `watched = 1` below the threshold, which suppresses their
+resume outright.
+
+## An abandoned replacement held its player's key — reported, diagnosed, fixed
+
+`PR #437`, branch `fix/replacement-gate-supersession`, **merged, NOT deployed**.
+
+Reported from the Android client on the TCL tablet, 2026-09-21 ~18:50 ET,
+playing *Bad Boys: Ride or Die*: `transcode capacity is temporarily
+unavailable: another replacement for this player is still being committed`,
+over a Retry button that could not clear it.
+
+**Orphaned**, not a commit in flight. On m6 the cluster replacement gate for
+that player was held by the detached cleanup of a request that had answered
+the viewer 503 six seconds earlier, and nothing in the tree ages, expires or
+force-releases that registry. What wedged the hold inside the start was a
+402-second subtitle sidecar extraction awaited under the gate with no timeout.
+Node evidence, anchors and the mechanism:
+[docs/playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md](docs/playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md).
+
+A key is now reclaimed only from a hold that can be proved not to need it —
+one that has declared itself abandoned, or one past a 120 s ceiling — never on
+the cooperative window, because the work under this gate routinely takes tens
+of seconds and the client's retry ladder re-posts into it. The refusal itself
+became a typed, `Retry-After`-carrying 503 (`transcode_capacity_pending`) so
+the ladder all three clients already carry waits it out instead of showing a
+terminal overlay quoting an internal sentence.
+
+Still open, all in the RCA's §4: `ensure_burn_file` is still awaited under the
+gate unbounded; `Drop for StartedSessionGuard` still releases only after a full
+retirement rather than after the fence; and a hold wedged before it registers
+anything still has nothing to fence. Neither client half has run on hardware.
 
 ## Implementation plans for the architecture review, and one work board for every vendor
 

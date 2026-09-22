@@ -154,6 +154,21 @@ pub(crate) struct LiveTvGuideChannel {
     pub(crate) programmes: Vec<LiveTvProgramme>,
 }
 
+impl LiveTvGuideChannel {
+    /// Programmes touching `[start, end)`. Every guide adoption path keeps
+    /// these rows sorted and non-overlapping, so both bounds are binary
+    /// searches rather than a clone-and-retain over the whole horizon.
+    pub(crate) fn programmes_in(&self, window: &GuideWindow) -> &[LiveTvProgramme] {
+        let first = self
+            .programmes
+            .partition_point(|programme| programme.end <= window.start);
+        let last = self
+            .programmes
+            .partition_point(|programme| programme.start < window.end);
+        &self.programmes[first..last.max(first)]
+    }
+}
+
 /// The public guide document, and also exactly what one node relays to
 /// another. There is no separate internal shape: relaying the owner's public
 /// answer verbatim is what keeps the credential on the owner.
@@ -202,15 +217,6 @@ impl LiveTvGuide {
         }
     }
 
-    /// The document, but only when it actually carries a lineup.
-    ///
-    /// An `unavailable` guide and a guide whose channels all happen to be
-    /// empty are the same thing to any caller asking "is this programme still
-    /// listed?" — and the answer there has to be "I cannot tell", never "no".
-    pub(crate) fn into_some_if_populated(self) -> Option<Self> {
-        (!self.channels.is_empty()).then_some(self)
-    }
-
     pub(crate) fn total_programmes(&self) -> usize {
         self.channels.iter().map(|c| c.programmes.len()).sum()
     }
@@ -223,9 +229,7 @@ impl LiveTvGuide {
         let mut out = self.clone();
         out.window = window.clone();
         for channel in &mut out.channels {
-            channel
-                .programmes
-                .retain(|p| p.end > window.start && p.start < window.end);
+            channel.programmes = channel.programmes_in(window).to_vec();
         }
         // Drop by measured bytes, not one row per re-serialisation. A large
         // lineup carries tens of thousands of rows, and re-encoding the whole
@@ -267,6 +271,24 @@ impl LiveTvGuide {
         }
         out
     }
+}
+
+/// Repair a cached document whose rows are not sorted and non-overlapping.
+/// Returns whether any channel changed so the adoption path can name the
+/// cache repair in the log without rejecting otherwise usable guide data.
+pub(crate) fn normalise_guide_programmes(guide: &mut LiveTvGuide) -> bool {
+    let mut changed = false;
+    for channel in &mut guide.channels {
+        if channel
+            .programmes
+            .windows(2)
+            .any(|rows| rows[1].start < rows[0].end)
+        {
+            channel.programmes = normalise_programmes(std::mem::take(&mut channel.programmes));
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Normalisation applied to every source, because both of them are untrusted

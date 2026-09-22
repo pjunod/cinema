@@ -120,7 +120,7 @@ value class SubtitleChoice(val index: Long?)
  * pos), which is what gets scrobbled.
  */
 @UnstableApi
-class Controller(
+class Controller internal constructor(
     private val context: Context,
     builtPlayer: BuiltPlayer,
     private val plan: PlanLike,
@@ -129,6 +129,8 @@ class Controller(
     private val playbackIntent: PlaybackIntent,
     private val vm: AppViewModel,
     private val scope: CoroutineScope,
+    private val displayModeMatcher: DisplayModeMatcher? = null,
+    private val displayModeMatchEnabled: Boolean = false,
     initialAudioOffsetMs: Long = 0,
     retainedAudio: Long? = null,
     retainedSubtitle: SubtitleChoice? = null,
@@ -595,6 +597,19 @@ class Controller(
      */
     private val playbackControl = PlaybackControlSession(scope)
     private val playbackControlBootstrapFence = PlaybackControlBootstrapFence()
+    private val displayModeOwner = displayModeMatcher?.claimOwner()
+    private var displayModeStartRequested = false
+    private var lateDisplayModeRequested = false
+
+    private fun reportDisplayMode(result: DisplayModeMatchResult) {
+        logDisplayModeResult(result)
+        playbackTelemetry.report(
+            event = "playback_display_mode",
+            level = "info",
+            message = "Android display-mode decision",
+            detail = result.detail(),
+        )
+    }
 
     /**
      * When the player began buffering, or null while it is not. The protocol
@@ -877,6 +892,21 @@ class Controller(
             applyTextSelection()
             applyAudioSelection()
             completeRecipeExecution()
+            if (plan.sourceFrameRate == null && !lateDisplayModeRequested) {
+                val lateFps = player.videoFormat?.frameRate?.toDouble()?.takeIf {
+                    it.isFinite() && it > 0.0
+                }
+                val matcher = displayModeMatcher
+                val owner = displayModeOwner
+                if (lateFps != null && matcher != null && owner != null) {
+                    lateDisplayModeRequested = true
+                    scope.launch {
+                        reportDisplayMode(
+                            matcher.match(owner, lateFps, displayModeMatchEnabled, late = true),
+                        )
+                    }
+                }
+            }
         }
 
         override fun onPositionDiscontinuity(
@@ -1069,7 +1099,20 @@ class Controller(
         observedAtMs: Long = monotonicNowMs(),
     ) {
         val position = ms.coerceAtLeast(0)
-        restartAt(position, reason, observedAtMs)
+        if (displayModeStartRequested) return
+        displayModeStartRequested = true
+        val matcher = displayModeMatcher
+        val owner = displayModeOwner
+        if (matcher == null || owner == null) {
+            restartAt(position, reason, observedAtMs)
+            return
+        }
+        scope.launch {
+            val result = matcher.match(owner, plan.sourceFrameRate, displayModeMatchEnabled)
+            if (!playbackControlBootstrapFence.isActive()) return@launch
+            reportDisplayMode(result)
+            restartAt(position, reason, observedAtMs)
+        }
     }
 
     fun realPosition(): Long {
@@ -1424,6 +1467,7 @@ class Controller(
     fun release() {
         if (!playbackControlBootstrapFence.isActive()) return
         playbackControlBootstrapFence.release()
+        displayModeOwner?.let { owner -> displayModeMatcher?.reset(owner) }
         seekJob?.cancel()
         stallWatchdogJob.cancel()
         targetPresentationWatchdogJob.cancel()
@@ -3937,6 +3981,9 @@ interface PlanLike {
      * at the server's Auto rung (§3.2).
      */
     val sourceHeight: Int?
+
+    /** Source cadence from `/decision`, available before Media3 prepares. */
+    val sourceFrameRate: Double? get() = null
 
     /** `delivery.aac`: a copy session must re-encode the audio. */
     val aac: Boolean

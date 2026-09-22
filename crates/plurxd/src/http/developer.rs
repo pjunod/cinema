@@ -31,6 +31,7 @@
 
 use axum::{extract::State, Json};
 use plurx_core::cluster::membership::MembershipError;
+use plurx_core::domain::{PlaybackEvent, PlaybackEventQuery};
 use serde::Serialize;
 
 use super::error::ApiError;
@@ -167,6 +168,22 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         true,
     );
+    let display_mode_match_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::PLAYBACK_DISPLAY_MODE_MATCH)
+            .map(String::as_str),
+        false,
+    );
+    let display_mode_events = state
+        .store
+        .playback_events(&PlaybackEventQuery {
+            since_ms: Some(
+                crate::media_sessions::unix_ms().saturating_sub(7 * 24 * 60 * 60 * 1_000),
+            ),
+            event: Some("playback_display_mode".into()),
+            limit: 2_000,
+        })
+        .await?;
 
     Ok(Json(DeveloperReadiness {
         items: vec![
@@ -175,6 +192,7 @@ pub(crate) async fn readiness(
                 settings.get(plurx_core::store::keys::BACKUP_DESTINATION),
             ),
             windows_server(&state, convert_on),
+            android_display_mode_match(display_mode_match_on, &display_mode_events),
             library_channels(&state, library_channels_on).await,
             channel_subjects(plurx_core::store::stored_switch(
                 settings
@@ -260,6 +278,35 @@ fn cluster_backup(state: &AppState, destination: Option<&String>) -> DeveloperEn
                 },
             },
         ],
+    }
+}
+
+fn android_display_mode_match(enabled: bool, events: &[PlaybackEvent]) -> DeveloperEnableItem {
+    let matched = events.iter().any(|event| {
+        event
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("outcome=matched"))
+    });
+    let latest = events.first().and_then(|event| event.detail.as_deref());
+    DeveloperEnableItem {
+        id: "android_display_mode_match",
+        title: "Android TV display-mode matching",
+        enabled: Some(enabled),
+        setting: Some("playback_display_mode_match"),
+        requirements: vec![DeveloperRequirement {
+            id: "recent_matched_switch",
+            title: "A television reported a matched switch on this node in the last 7 days",
+            status: if matched {
+                RequirementStatus::Met
+            } else {
+                RequirementStatus::Unobservable
+            },
+            evidence: latest.map_or_else(
+                || "No display-mode telemetry is retained for this node in the last 7 days. This is advisory; the enable switch remains available.".into(),
+                |detail| format!("Latest bounded playback_display_mode detail: {detail}. This observation is advisory and never blocks enablement."),
+            ),
+        }],
     }
 }
 
@@ -1461,4 +1508,33 @@ fn channel_subjects(enabled: bool) -> DeveloperEnableItem {
         DeveloperRequirement{id:"metadata",title:"Metadata coverage",status:if observed.metadata_total>0{RequirementStatus::Met}else{RequirementStatus::Unobservable},evidence:format!("Last observed scope: {} titles, {} missing item overviews, {} truncated inputs. Sparse metadata can remain uncertain.",observed.metadata_total,observed.missing_overviews,observed.truncated)},
         DeveloperRequirement{id:"batch",title:"Recent batch outcome and queued work",status:if observed.error.is_some(){RequirementStatus::Unmet}else{RequirementStatus::Unobservable},evidence:format!("{}; queued work observed: {}. Only new rule evaluations pause when disabled; saves, cached decisions and published playback remain available.",observed.error.unwrap_or_else(||"No recent error recorded".into()),observed.pending>0)},
     ]}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn android_display_mode_readiness_is_advisory_and_observation_based() {
+        let absent = android_display_mode_match(true, &[]);
+        assert_eq!(absent.setting, Some("playback_display_mode_match"));
+        assert!(absent.enabled == Some(true));
+        assert!(matches!(
+            absent.requirements[0].status,
+            RequirementStatus::Unobservable
+        ));
+
+        let matched = android_display_mode_match(
+            false,
+            &[PlaybackEvent {
+                detail: Some("outcome=matched source_fps=23.976".into()),
+                ..PlaybackEvent::default()
+            }],
+        );
+        assert!(matched.enabled == Some(false));
+        assert!(matches!(
+            matched.requirements[0].status,
+            RequirementStatus::Met
+        ));
+    }
 }

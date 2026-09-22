@@ -3744,6 +3744,19 @@ test("playback-info row builders follow the shared web field list in fixture ord
   }
 });
 
+test("playback info labels tone-map peak provenance without calling policy source truth", () => {
+  const summarize = new Function(`${shippedSource("statsToneMapPeak")}\nreturn statsToneMapPeak;`)();
+  assert.equal(
+    summarize({tone_map_peak_nits: 4000, tone_map_peak_source: "cll"}),
+    "Tone-map peak 4,000 nits · source MaxCLL",
+  );
+  assert.equal(
+    summarize({tone_map_peak_nits: 1000, tone_map_peak_source: "default"}),
+    "Tone-map peak 1,000 nits · policy default",
+  );
+  assert.equal(summarize({tone_map_peak_nits: 1000}), null);
+});
+
 // A section in the shared field list that no column renders is a row nobody
 // can read: the SURFACE section is the ledger half of the surface contract's
 // attributability (§5), and it had to be added to a hand-written column list
@@ -6025,6 +6038,47 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
     /\.\s*seekToDefaultPosition\s*\(/,
     "seekToDefaultPosition is a live-edge policy the contract forbids",
   );
+});
+
+test("hls.js media recovery is fenced by the shared attach and item budgets", () => {
+  const decide = (overrides = {}) => policy.hlsMediaFatalAction({
+    type: "mediaError",
+    details: "fragParsingError",
+    sourceBufferName: null,
+    retryUsed: 0,
+    itemRecoveries: 0,
+    recoveredAtMs: null,
+    nowMs: 10_000,
+    ...overrides,
+  });
+  assert.equal(decide({ details: "bufferIncompatibleCodecsError" }), "fallback");
+  assert.equal(decide({ details: "bufferAddCodecError" }), "fallback");
+  assert.equal(decide(), "recover");
+  assert.equal(decide({ itemRecoveries: 1, recoveredAtMs: 9_000 }), "fallback");
+  assert.equal(decide({
+    details: "bufferAppendError",
+    sourceBufferName: "audio",
+    itemRecoveries: 1,
+    recoveredAtMs: 5_000,
+  }), "swap_audio");
+  assert.equal(decide({
+    details: "bufferAppendError",
+    sourceBufferName: "video",
+    itemRecoveries: 1,
+    recoveredAtMs: 5_000,
+  }), "fallback");
+  assert.equal(decide({ retryUsed: 1 }), "fallback");
+  assert.equal(decide({ itemRecoveries: 2 }), "fallback");
+  assert.equal(decide({ type: "networkError" }), "none");
+
+  const attach = shippedSource("attachHls");
+  const recovery = attach.indexOf("PlaybackPolicy.hlsMediaFatalAction");
+  const terminal = attach.indexOf('notifyPlaybackControl("failed"', recovery);
+  assert.ok(recovery >= 0, "the shipped fatal handler must ask the recovery policy");
+  assert.ok(terminal > recovery,
+    "decoder rescue must run before the attempt is reported terminal");
+  assert.match(attach, /sourceBufferName:d\.sourceBufferName\|\|null/,
+    "the vendored hls.js 1.6.16 payload names its SourceBuffer explicitly");
 });
 
 test("web HLS startup has one bounded manifest policy and terminal precedence", () => {

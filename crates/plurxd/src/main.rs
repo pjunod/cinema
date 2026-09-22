@@ -32,6 +32,7 @@ mod prodexec;
 mod prodrun;
 mod prodsched;
 mod produce;
+mod producer_spawn;
 mod progress;
 mod progressive;
 mod reader_formats;

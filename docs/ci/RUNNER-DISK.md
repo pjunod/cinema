@@ -245,18 +245,66 @@ the other promises the next job an entry it cannot download. The cost is a cold
 cache for the next few jobs, and nothing in that directory is not reproducible.
 
 **Four invariants, each with a test.** It never resets a runner that is
-working — idleness is "the unit's cgroup holds nothing but the daemon" on Linux
-and "the daemon has no child processes, and `_work` has been quiet for two
-minutes" on macOS, a local answer either way that needs no API token. It never
-leaves a runner stopped: the restart is on a `RETURN` trap for a failed stop,
-and a failed *delete* is caught rather than allowed to abort the shell — `set
--e` would exit before the restart, and a `RETURN` trap does not run on shell
-exit, which is how an `EBUSY` on a leftover mount would have taken a runner out
-of the fleet with nothing left to bring it back. It refuses any `cache.dir`
+working — idleness is "the unit's cgroup holds nothing but the daemon, and no
+Forgejo job container is running on this host" on Linux and "the daemon has no
+child processes, and `_work` has been quiet for two minutes" on macOS, a local
+answer either way that needs no API token. It never leaves a runner stopped:
+the restart is on a `RETURN` trap for a failed stop, and a failed *delete* is
+caught rather than allowed to abort the shell — `set -e` would exit before the
+restart, and a `RETURN` trap does not run on shell exit, which is how an
+`EBUSY` on a leftover mount would have taken a runner out of the fleet with
+nothing left to bring it back. It refuses any `cache.dir`
 that is not a runner root ending in `cache` and holding `bolt.db` or a blob
 tree — the delete is a whole directory, so the path check *is* the safety
 argument. **And its reserve is never below what a job is refused for not
 having**, which is the invariant that was missing; see below.
+
+**The cgroup is only half of "working", and it is the half that misses.** A
+lane that declares `container:` — which is most of the Cargo lanes — runs
+under Docker's cgroup, not the runner unit's, so the unit holds the daemon and
+nothing else while a twenty-minute `cargo test` is in flight. Read on its own,
+the cgroup calls that runner idle, and `systemctl stop` has nothing to wait
+for, so the 30-minute graceful drain never engages: the container is cancelled
+mid-step and the job ends in `context canceled` with no compile error and no
+test result anywhere in the log. That is what happened on 2026-09-21, at
+22:05:47Z and again at 23:05:57Z — two passes of the hourly timer, four jobs
+across two unrelated pull requests, and again at 03:09:40Z the next morning —
+always the same host, because a reset candidate is a runner on a host that is
+short, and that one always is.
+
+Worth being exact about *why* it is always the same host, because the obvious
+reading is wrong. Its caches are not large: on 2026-09-22 every runner there
+held a cache of a few tens of kilobytes. What selects them is the second half
+of the health test — the filesystem reserve. The 20 % rule on a 517 GiB volume
+asks for 103 GiB, the host had 95 GiB free, so `available_kb >= floor_kb` is
+false for every runner on it, every hour. Twenty-four consecutive passes read
+`5 over budget, 5 reset, 0G reclaimed`: a hundred and twenty stop / `rm -rf` /
+start cycles a day that free nothing, and before this guard existed each one
+of them was a chance to kill a job. Making the janitor see jobs stops the
+damage; it does not stop the loop, and the loop deserves its own change.
+
+So the janitor also asks Docker. `act` names every container it creates for a
+task `FORGEJO-ACTIONS-TASK-<id>_WORKFLOW-…` (`GITEA-ACTIONS-TASK-` on the
+older runners), and that name is the only mark those containers carry — they
+get no labels — so `docker ps --filter name=ACTIONS-TASK-` is the whole
+signal, answered on the host with no API token. It is host-wide, not per-unit:
+a task id is all the container carries and nothing local maps it back to the
+runner that claimed it, so any job container on the host makes every runner on
+it busy. Uncertainty counts as busy too — a Docker that will not answer says
+nothing about what is running. A host with no `docker` at all is not
+uncertainty: it can run no containers, and the cgroup check is the whole
+answer there, as it always was — and the query is bounded, because a daemon
+that never answers would otherwise hang the pass outright: the unit is
+`Type=oneshot` with `TimeoutStartUSec=infinity`, so systemd would neither kill
+the wedged run nor start the next one, and the disk would fill with the
+janitor still apparently installed. A timeout reads as busy, like any other
+answer it cannot get.
+
+The same question gates the Docker prune, which deletes across the whole host
+rather than inside one runner's cache. `docker container prune -f` removes
+containers in `Created` state, and `act` goes create then start, so a prune
+landing in that window destroys the very container the guard exists to
+protect — one `docker ps` without `-a` cannot even see.
 
 **What it reports.** Every pass writes a line per runner to the journal and a
 record to `/var/lib/plurx-ci-janitor/last-run.json`:
