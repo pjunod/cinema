@@ -8437,6 +8437,26 @@ final class AppleClientTests: XCTestCase {
         ))
     }
 
+    func testToneMapPeakSummaryKeepsPolicyDistinctFromSourceTruth() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let measured = try decoder.decode(PlaybackSessionStatus.self, from: Data(#"""
+        {"id":"s1","tone_map_peak_nits":4000,"tone_map_peak_source":"cll"}
+        """#.utf8))
+        XCTAssertEqual(
+            PlayerView.toneMapPeakSummary(measured),
+            "Tone-map peak 4,000 nits · source MaxCLL"
+        )
+
+        let assumed = try decoder.decode(PlaybackSessionStatus.self, from: Data(#"""
+        {"id":"s2","tone_map_peak_nits":1000,"tone_map_peak_source":"default"}
+        """#.utf8))
+        XCTAssertEqual(
+            PlayerView.toneMapPeakSummary(assumed),
+            "Tone-map peak 1,000 nits · policy default"
+        )
+    }
+
     /// Source grades collapse to the server's own vocabulary so that a source
     /// and `delivered_dynamic_range` compare by string equality. Files probed
     /// before `hdr` existed carry only the rich label, so both fields are read.

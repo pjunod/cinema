@@ -1,6 +1,6 @@
 # Scan and enrichment hygiene — walk off the runtime, deadlines on every provider call
 
-**Status:** adversarial findings addressed; draft waiting on P-01 #401's shared fast-lane repair · **Executes:** C3 / F-core-3 and C5 / F-core-6
+**Status:** M1-M3 implementation merged; post-merge fleet evidence pending · **Executes:** C3 / F-core-3 and C5 / F-core-6
 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (assessment rows C3, F-core-3, C5, F-core-6 in

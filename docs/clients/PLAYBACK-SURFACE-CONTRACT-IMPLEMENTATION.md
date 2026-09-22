@@ -169,7 +169,7 @@ drift.
     {"id": "vod_subtitle_burn_unavailable","context": "start",   "class": "stopped"},
     {"id": "vod_disabled",                 "context": "start",   "class": "stopped"},
     {"id": "create_503_not_yet",           "context": "start",   "class": "preparing",
-     "codes": ["startup_timeout", "media_owner_transition", "vod_index_pending", "vod_engine_unattested"],
+     "codes": ["startup_timeout", "media_owner_transition", "vod_index_pending", "vod_engine_unattested", "transcode_capacity_pending"],
      "retryable": true},
     {"id": "change_failed",                "context": "change",  "class": "refused",
      "actions": ["retry"]},

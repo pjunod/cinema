@@ -17,6 +17,7 @@ data class Server(
     val name: String? = null,
     val version: String? = null,
     val instance_id: String? = null,
+    val display_mode_match: Boolean = false,
 )
 
 @Serializable
@@ -546,6 +547,8 @@ data class SourceSummary(
     val hdr_format: String? = null,
     val bitrate: Long? = null,
     val duration_ms: Long? = null,
+    /** ffprobe rational, e.g. `24000/1001`; kept exact on the wire. */
+    val frame_rate: String? = null,
 )
 
 /**
@@ -689,6 +692,9 @@ data class PlaybackSessionStatus(
     val file_id: Long? = null,
     val target_height: Long? = null,
     val encoder: String? = null,
+    /** Explicit CPU tone-map input; `default` is policy, not source truth. */
+    val tone_map_peak_nits: Long? = null,
+    val tone_map_peak_source: String? = null,
     val speed: Double? = null,
     val recent_speed: Double? = null,
     val out_time_ms: Long? = null,

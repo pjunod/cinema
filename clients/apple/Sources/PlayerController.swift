@@ -1563,6 +1563,7 @@ enum PlaybackCreateRetry {
         "media_owner_transition",
         "vod_index_pending",
         "vod_engine_unattested",
+        "transcode_capacity_pending",
     ]
 
     enum Step: Equatable {

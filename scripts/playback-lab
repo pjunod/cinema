@@ -1449,7 +1449,12 @@ async function api(baseUrl, route, { token, method = "GET", body, timeout = 30_0
     try { value = parseApiJson(text); } catch (_) { value = text; }
   }
   if (!response.ok) {
-    const message = value && typeof value === "object" ? value.error : text;
+    // Both envelopes: `{error}` is the legacy body several routes still use,
+    // `{code, message}` the typed one session create now answers the
+    // replacement wait with. Reading only the first turned those into a bare
+    // status with no sentence.
+    const message =
+      value && typeof value === "object" ? value.error || value.message : text;
     throw new Error(`${method} ${route} -> ${response.status}${message ? `: ${message}` : ""}`);
   }
   return value;

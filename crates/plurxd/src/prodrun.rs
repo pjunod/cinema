@@ -60,6 +60,9 @@ pub struct ProducerSlot {
 
 struct Inner {
     child: Option<Child>,
+    /// Windows descendant ownership follows the exact child through reap.
+    /// On Unix this is a zero-sized proof that the shared spawn path was used.
+    child_job: Option<crate::process_control::ChildJob>,
     /// Capacity follows the exact child, not its pipe reader or epoch.
     resources: Option<Box<dyn Send>>,
     belief: Producer,
@@ -69,11 +72,13 @@ impl Drop for Inner {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
+            let child_job = self.child_job.take();
             let resources = self.resources.take();
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn(async move {
+                    let _child_job = child_job;
+                    let _resources = resources;
                     let _ = child.wait().await;
-                    drop(resources);
                 });
             }
         }
@@ -99,6 +104,7 @@ impl ProducerSlot {
         ProducerSlot {
             inner: Mutex::new(Inner {
                 child: None,
+                child_job: None,
                 resources: None,
                 belief: Producer::Absent {
                     produced_through: None,
@@ -112,6 +118,11 @@ impl ProducerSlot {
         self.inner.lock().await.belief
     }
 
+    #[cfg(test)]
+    async fn owns_child_job(&self) -> bool {
+        self.inner.lock().await.child_job.is_some()
+    }
+
     /// Attach a freshly spawned child positioned at `at` — the caller's half
     /// of a [`Performed::NeedsSpawn`]. Records the belief via [`after`], as
     /// the successful completion of the `Start` this spawn is.
@@ -121,13 +132,37 @@ impl ProducerSlot {
     }
 
     /// Retain admission through confirmed termination, including slot drop.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn attach_owned(&self, child: Child, at: u32, resources: Option<Box<dyn Send>>) {
+        self.attach_resources(child, None, at, resources).await;
+    }
+
+    /// Attach a child together with its descendant-lifetime guard.
+    pub async fn attach_job_owned(
+        &self,
+        child: Child,
+        child_job: crate::process_control::ChildJob,
+        at: u32,
+        resources: Option<Box<dyn Send>>,
+    ) {
+        self.attach_resources(child, Some(child_job), at, resources)
+            .await;
+    }
+
+    async fn attach_resources(
+        &self,
+        child: Child,
+        child_job: Option<crate::process_control::ChildJob>,
+        at: u32,
+        resources: Option<Box<dyn Send>>,
+    ) {
         let mut inner = self.inner.lock().await;
         debug_assert!(
             inner.child.is_none(),
             "attach expects the empty slot NeedsSpawn left behind"
         );
         inner.child = Some(child);
+        inner.child_job = child_job;
         inner.resources = resources;
         inner.belief = after(inner.belief, Step::Start { at });
     }
@@ -226,6 +261,7 @@ impl ProducerSlot {
                 // `wait`, and SIGKILL still works on a stopped process.
                 child.kill().await?;
                 inner.child = None;
+                inner.child_job = None;
                 inner.resources = None;
                 inner.belief = after(inner.belief, step);
                 Ok(Performed::Done)
@@ -235,6 +271,7 @@ impl ProducerSlot {
                 if let Some(child) = inner.child.as_mut() {
                     child.kill().await?;
                     inner.child = None;
+                    inner.child_job = None;
                     inner.resources = None;
                 }
                 // This layer performs only the terminate half of a restart;
@@ -282,6 +319,24 @@ fn no_child() -> io::Error {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[tokio::test]
+    async fn a_vod_generation_carries_a_child_job_until_reap() {
+        let slot = super::ProducerSlot::new();
+        let child = sleeper();
+        let child_job = crate::process_control::ChildJob::attach(&child).expect("child job");
+        slot.attach_job_owned(child, child_job, 0, None).await;
+        assert!(slot.owns_child_job().await);
+        slot.perform(
+            super::Step::Terminate {
+                why: super::Termination::Idle,
+            },
+            || {},
+        )
+        .await
+        .expect("reap exact producer");
+        assert!(!slot.owns_child_job().await);
+    }
+
     #[tokio::test]
     async fn encoded_capacity_is_released_only_after_slot_reap() {
         let admissions = crate::admission::Admissions::new();

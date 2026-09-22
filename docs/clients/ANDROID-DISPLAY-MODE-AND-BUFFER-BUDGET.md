@@ -1,6 +1,6 @@
 # Android display-mode matching and buffer budget — implementation plan
 
-**Status:** ready for review · **Executes:** §2.9 / D1 / F-android-1 /
+**Status:** implementation complete through M3; M0/M4/M5 pending physical-device evidence · **Executes:** §2.9 / D1 / F-android-1 /
 F-android-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -125,6 +125,22 @@ a non-deferrable event at 20 s, startup deadline 30 s. At 80 Mb/s, 16 MiB is
 the buffer's duration starves the renderer; whether that reaches 8 s depends
 on the network, not the buffer alone — LIKELY on high-bitrate remuxes over
 Wi-Fi, unmeasured (review §2.9).
+
+#### Measurement status — 2026-09-21
+
+No Lenovo, Google TV, or Shield ADB session was available to the executing
+session. None of M0's memory, PSS, delivered-bitrate, stall, or supported-mode
+columns has therefore been observed. M4 remains deliberately unimplemented:
+choosing `INCUMBENT_SHARE`, an image-cache allowance, or a successor reserve
+without those readings would repeat the unmeasured 48 MiB-floor error this
+plan was written to prevent. The existing buffer formula and every
+`PlaybackLoadControlTest` assertion remain unchanged.
+
+The conservative implementation decision was to complete the independently
+safe cadence work (M1–M3), including advisory-only enablement, while leaving
+the measurement-dependent allocation change out of the branch. The Developer
+switch always remains operable; its seven-day matched-switch observation is
+status, not a gate.
 
 ### 2.4 Where the frame rate lives
 
@@ -501,4 +517,10 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M0 | [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | needs: run §5.1's ADB measurement prompt on Lenovo, Google TV, and Shield; no device values were inferred. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | `009b9068` / [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | `/decision` now preserves the exact source rational and Android parses it before prepare. Pinned Rust 1.97.1 focused regression and Android compile/`FrameRateTest` pass. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 | `8b44b5d8` / [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | Pure same-resolution cadence policy plus fractional/nominal/resolution/current-mode JVM cases pass. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | `e4622cee` / [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | Finite and progressive/deinterlaced Live TV match before prepare with a 2 s bound; prepared successors do not switch while staged; release/stop resets; late Media3 fallback, bounded telemetry, replicated switch, and advisory Developer status are wired. Focused Rust setting/readiness/live-cadence regressions and Android compile/policy/settings tests pass. Physical HDMI outcomes remain unobserved. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 review fix | [#409 comment #3199](http://192.168.4.7:3000/noirr/plurx/pulls/409#issuecomment-3199) | A post-wait channel/window ownership fence and exact-session cleanup prevent delayed Live TV display matching from resurrecting or releasing the wrong tune. The advisory display-mode checkbox now uses the server's ordinary one-key settings shape rather than the unrelated Live TV generation CAS. Deterministic coroutine/lease regressions and the real server save regression pass. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | blocked by M0: no role-based allocation or `largeHeap` request was guessed; current sizing and instrumented behavior remain intact. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | needs: run both §6 physical-device prompts after M0/M4; no display, HDR, black-frame, PSS, or OOM result is claimed. |

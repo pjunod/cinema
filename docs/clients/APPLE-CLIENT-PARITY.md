@@ -11,7 +11,7 @@ The implementation history, deployment evidence, and resolved copied-Dolby-
 Vision investigation are recorded in
 [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
-> Status (2026-09-15): source is v0.3.0, Apple build 174. Timer-only
+> Status (2026-09-15): source is v0.3.0, Apple build 175. Timer-only
 > presentation stalls stay explicitly unknown and use one bounded same-recipe
 > repair without a legacy quality-reduction ticket. The repair preserves the
 > selected quality, HDR, tracks, offset, film position and pause intent; actual
@@ -35,7 +35,7 @@ Vision investigation are recorded in
 > gates.
 
 **Display matching and audio-session implementation (2026-09-20).** Apple
-build 174 restores the `AVPlayerLayer` behavior that `AVPlayerViewController`
+build 175 restores the `AVPlayerLayer` behavior that `AVPlayerViewController`
 normally supplies: the finite and Live TV players now apply the committed
 asset's preferred display criteria to the active tvOS window when the viewer's
 Match Content setting permits it, and clear the criteria on every teardown.

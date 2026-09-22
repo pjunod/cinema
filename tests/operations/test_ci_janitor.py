@@ -8,6 +8,13 @@ the three things that must hold are that it never resets a runner that is
 working, that it always brings a runner it stopped back, and that it does
 nothing at all while the cache is inside its budget.
 
+"Working" has to include a job the unit's cgroup cannot see. Lanes that
+declare `container:` run under Docker's cgroup rather than the runner's, so a
+runner in the middle of one looks exactly like an idle one from systemd; on
+2026-09-21 four jobs across two unrelated pull requests were stopped in the
+same second, twice, an hour apart. Idleness is therefore the cgroup *and* the
+absence of a Forgejo job container on the host.
+
 A fourth was added on 2026-09-08, after `gha-lab4-general-01` refused two jobs
 in a row while this janitor reported it healthy: **the reserve it keeps has to
 be at least the free space a job is refused for not having.** The preflight
@@ -87,7 +94,24 @@ printf '%s\\t%s\\n' "$FIXTURE_USED_KB" "$1"
 
 # Absent by default: `docker info` fails, so the Docker block is skipped
 # entirely. A test that wants it sets FIXTURE_DOCKER_ROOT.
+#
+# `ps` is answered before that gate, because it is asked by the idle check
+# rather than by the Docker block: a fake that answered "docker is not here"
+# to it would turn every reset test into a test of the unavailable branch.
+# It applies the `name=` filter itself against FIXTURE_DOCKER_PS, so a test
+# can put a container on the host that is not a job container and the filter
+# has to be the thing that tells them apart.
 DOCKER = """#!/bin/sh
+if [ "$1" = ps ]; then
+  [ -z "${FIXTURE_DOCKER_PS_HANG:-}" ] || sleep "$FIXTURE_DOCKER_PS_HANG"
+  [ "${FIXTURE_DOCKER_PS_STATUS:-0}" = 0 ] || exit "$FIXTURE_DOCKER_PS_STATUS"
+  pattern=.
+  for argument do
+    case "$argument" in name=*) pattern=${argument#name=} ;; esac
+  done
+  printf '%s\\n' "$FIXTURE_DOCKER_PS" | grep -e "$pattern" || true
+  exit 0
+fi
 [ -n "$FIXTURE_DOCKER_ROOT" ] || exit 1
 case "$1 $2" in
   "info --format") printf '%s\\n' "$FIXTURE_DOCKER_ROOT"; exit 0 ;;
@@ -147,6 +171,7 @@ class JanitorContractCase(unittest.TestCase):
                 "PLURX_JANITOR_STATE_DIR": str(self.state),
                 "PLURX_JANITOR_CGROUP_ROOT": str(self.cgroup),
                 "PLURX_JANITOR_STOP_TIMEOUT": "5",
+                "PLURX_JANITOR_DOCKER": str(self.bin / "docker"),
                 "FIXTURE_UNIT": UNIT,
                 "FIXTURE_UNIT2": "",
                 "FIXTURE_CONFIG": str(self.config),
@@ -156,6 +181,9 @@ class JanitorContractCase(unittest.TestCase):
                 "FIXTURE_STOP_STATUS": "0",
                 "FIXTURE_DOCKER_ROOT": "",
                 "FIXTURE_DOCKER_LOG": str(fixture / "docker.log"),
+                "FIXTURE_DOCKER_PS": "",
+                "FIXTURE_DOCKER_PS_STATUS": "0",
+                "FIXTURE_DOCKER_PS_HANG": "",
                 "FIXTURE_DOCKER_FS_KB": "",
                 "FIXTURE_DOCKER_AVAIL_KB": "",
                 "FIXTURE_FS_KB": str(78 * 1024 * 1024),
@@ -261,6 +289,130 @@ class JanitorContractCase(unittest.TestCase):
         self.assertEqual(self.last_run()["over_budget"], 1)
         self.assertEqual(self.last_run()["reset"], 0)
         self.assertEqual(self.last_run()["reclaimed_gb"], 0)
+
+    def test_a_runner_with_a_job_container_keeps_its_cache(self):
+        """The cgroup says idle and the job is running anyway.
+
+        Lanes declaring `container:` run under Docker's cgroup, not the unit's,
+        so on 2026-09-21 this fixture -- one daemon pid, nothing else -- was
+        the live state of a runner twenty minutes into a `cargo test`, and it
+        was stopped. Four jobs across two pull requests died in the same second
+        at 22:05:47Z and again at 23:05:57Z.
+        """
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["FIXTURE_DOCKER_PS"] = (
+            "FORGEJO-ACTIONS-TASK-8821_WORKFLOW-0f3a_JOB-rust_test"
+        )
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("containerised job is running on this host", result.stdout)
+        self.assertEqual(self.systemctl_calls(), [])
+        self.assertTrue((self.cache / "bolt.db").is_file())
+        # Over budget and deliberately not acted on, same as the cgroup case.
+        self.assertEqual(self.last_run()["over_budget"], 1)
+        self.assertEqual(self.last_run()["reset"], 0)
+
+    def test_a_docker_that_will_not_answer_is_read_as_busy(self):
+        """A daemon that is down or a socket that is refused says nothing.
+
+        And the safe reading of nothing is that something is running: a
+        skipped reset costs disk, a wrong one costs whoever pushed the branch.
+        """
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["FIXTURE_DOCKER_PS_STATUS"] = "1"
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("containerised job is running on this host", result.stdout)
+        self.assertEqual(self.systemctl_calls(), [])
+        self.assertTrue((self.cache / "bolt.db").is_file())
+        self.assertEqual(self.last_run()["reset"], 0)
+
+    def test_a_container_that_is_no_job_does_not_hold_the_cache(self):
+        """Otherwise the runner hosts that also serve something never reset.
+
+        media1 carries a hundred and thirty-one images and runs containers of
+        its own, so "any container at all" would have read as permanently busy
+        on the fullest host in the fleet. The task-name filter is what tells
+        a job container from a neighbour.
+        """
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["FIXTURE_DOCKER_PS"] = "plurxd-media1"
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.systemctl_calls(), ["stop", UNIT, "start", UNIT])
+        self.assertFalse(self.cache.exists())
+        self.assertEqual(self.last_run()["reset"], 1)
+
+    def test_a_host_with_no_docker_is_not_a_host_that_cannot_answer(self):
+        """No Docker means no containers, which is an answer, not a gap.
+
+        Reading it as "cannot tell, assume busy" would retire the janitor on
+        every host that runs its jobs on the host executor -- the shape it was
+        written for, and the one the cgroup check already covers exactly.
+
+        The absent Docker is named rather than unlinked from the fixture bin.
+        That bin is *prepended* to the inherited PATH, so deleting the fake
+        would find a real `docker` on any machine that has one and this case
+        would silently exercise the live daemon instead of the branch it
+        claims -- passing or failing on a property of the machine.
+        """
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["PLURX_JANITOR_DOCKER"] = str(self.bin / "no-such-docker")
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.systemctl_calls(), ["stop", UNIT, "start", UNIT])
+        self.assertFalse(self.cache.exists())
+        self.assertEqual(self.last_run()["reset"], 1)
+
+    def test_a_docker_that_never_answers_costs_one_pass_and_not_the_janitor(self):
+        """A hung `docker ps` must not hang the janitor.
+
+        The unit is `Type=oneshot` with `TimeoutStartUSec=infinity`, so systemd
+        would neither kill a wedged run nor start the next one: the disk this
+        exists to protect fills while the janitor still looks installed. The
+        query is bounded, and a timeout reads as busy exactly like an error.
+        """
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["FIXTURE_DOCKER_PS_HANG"] = "30"
+        self.environment["PLURX_JANITOR_DOCKER_QUERY_TIMEOUT"] = "1"
+
+        started = time.monotonic()
+        result = self.run_janitor()
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(elapsed, 20, "the janitor waited on a hung docker ps")
+        self.assertEqual(self.systemctl_calls(), [])
+        self.assertTrue((self.cache / "bolt.db").is_file())
+        self.assertEqual(self.last_run()["reset"], 0)
+
+    def test_a_containerised_job_also_holds_the_docker_prune(self):
+        """The prune deletes host-wide, so it needs the guard too.
+
+        `docker container prune -f` removes containers in `Created` state, and
+        `act` goes create -> start, so a prune landing in that window destroys
+        the container the guard exists to protect -- one `docker ps` without
+        `-a` cannot even see.
+        """
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["FIXTURE_DOCKER_ROOT"] = str(self.runner_root)
+        self.environment["FIXTURE_DOCKER_PS"] = (
+            "FORGEJO-ACTIONS-TASK-10846_WORKFLOW-x_JOB-fast-Rust-gate"
+        )
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("leaving Docker for the next pass", result.stdout)
+        self.assertFalse(self.last_run()["docker_pruned"])
 
     def test_a_runner_that_will_not_stop_is_never_left_stopped(self):
         self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)

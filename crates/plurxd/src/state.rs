@@ -719,6 +719,13 @@ pub struct AppState {
     pub started_at: Instant,
 }
 
+fn stored_luminance(probe_json: &str) -> plurx_core::domain::ProbeResult {
+    serde_json::from_str::<serde_json::Value>(probe_json)
+        .ok()
+        .map(|document| plurx_core::scan::probe::parse_probe_json(&document))
+        .unwrap_or_default()
+}
+
 impl AppState {
     /// Whether PGS subtitle tracks are served through the `pgs-v1` overlay.
     ///
@@ -3031,16 +3038,27 @@ impl JobManager {
                         )
                         .await?;
                     if !loss.is_cancelled() {
-                        let _ = self
-                            .store
-                            .put_setting(&cursor_key, &library_id.to_string())
-                            .await;
+                        // Best-effort cursor: a failed write repeats bounded
+                        // discovery work; it does not skip a library.
+                        crate::store_result::observe(
+                            crate::store_result::Operation::ResetDvQueueCursorAfterLoss,
+                            crate::store_result::Discard::BestEffort,
+                            self.store
+                                .put_setting(&cursor_key, &library_id.to_string())
+                                .await,
+                        );
                     }
                     batch
                 }
             } else {
                 if cursor != 0 {
-                    let _ = self.store.put_setting(&cursor_key, "0").await;
+                    // Best-effort cursor reset: the next tick safely repeats
+                    // the empty inventory pass if persistence is unavailable.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::ResetDvQueueCursorAfterEmptyPage,
+                        crate::store_result::Discard::BestEffort,
+                        self.store.put_setting(&cursor_key, "0").await,
+                    );
                 }
                 DvConversionQueueBatch::default()
             };
@@ -3100,7 +3118,13 @@ impl JobManager {
         };
         if candidates.is_empty() {
             if cursor != 0 {
-                let _ = self.store.put_setting(&cursor_key, "0").await;
+                // Best-effort cursor reset: repeating the exhausted scan is
+                // bounded and cannot omit conversion candidates.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ResetDvQueueCursorAfterExhaustion,
+                    crate::store_result::Discard::BestEffort,
+                    self.store.put_setting(&cursor_key, "0").await,
+                );
             }
             return;
         }
@@ -3180,10 +3204,15 @@ impl JobManager {
             });
         }
         if last_examined != cursor {
-            let _ = self
-                .store
-                .put_setting(&cursor_key, &last_examined.to_string())
-                .await;
+            // Best-effort cursor advance: failure repeats examined candidates
+            // instead of skipping work, while job claims prevent duplication.
+            crate::store_result::observe(
+                crate::store_result::Operation::AdvanceDvQueueCursor,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .put_setting(&cursor_key, &last_examined.to_string())
+                    .await,
+            );
         }
         while let Some(result) = workers.join_next().await {
             if let Err(error) = result {
@@ -3227,7 +3256,13 @@ impl JobManager {
         }
         let Some(file_id) = candidate else {
             if cursor != 0 {
-                let _ = self.store.put_setting(&cursor_key, "0").await;
+                // Best-effort recovery cursor reset: a failed reset only
+                // repeats the bounded recovery inventory on the next tick.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ResetDvRecoveryCursor,
+                    crate::store_result::Discard::BestEffort,
+                    self.store.put_setting(&cursor_key, "0").await,
+                );
             }
             return;
         };
@@ -3344,7 +3379,13 @@ impl JobManager {
         }
         let Some(guard) = candidates.into_iter().next() else {
             if !cursor.is_empty() {
-                let _ = self.store.put_setting(&cursor_key, "").await;
+                // Best-effort guard cursor reset: failed persistence repeats
+                // a bounded scan and cannot lose a recovery guard.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ResetDvGuardCursor,
+                    crate::store_result::Discard::BestEffort,
+                    self.store.put_setting(&cursor_key, "").await,
+                );
             }
             return;
         };
@@ -5634,6 +5675,14 @@ impl JobManager {
             let state = Arc::clone(self);
             tokio::spawn(async move { state.backfill_video_codec_tags().await });
         }
+        {
+            let state = Arc::clone(self);
+            tokio::spawn(async move { state.backfill_field_order().await });
+        }
+        {
+            let state = Arc::clone(self);
+            tokio::spawn(async move { state.backfill_luminance_facts().await });
+        }
         Ok(())
     }
 
@@ -6393,6 +6442,217 @@ impl JobManager {
         );
     }
 
+    /// Recover the selected playable video's field-order token from retained
+    /// probe JSON without reopening any media.
+    ///
+    /// Rows whose old probe did not report the key receive the explicit
+    /// `unknown` value. That distinguishes a completed backfill from work not
+    /// yet reached and preserves the normal scan as the only path that can
+    /// improve the fact later.
+    fn field_order_from_stored_probe(probe_json: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(probe_json)
+            .ok()
+            .map(|value| plurx_core::scan::probe::parse_probe_json(&value))
+            .and_then(|probe| probe.field_order)
+            .unwrap_or_else(|| "unknown".to_owned())
+    }
+
+    async fn backfill_field_order(self: Arc<Self>) {
+        const BACKFILL_PER_TICK: i64 = 256;
+
+        match self
+            .store
+            .get_setting(keys::JOB_FIELD_ORDER_BACKFILL_DONE)
+            .await
+        {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "reading the field-order backfill stamp");
+                return;
+            }
+        }
+        let lease = match self.acquire_job("catalogue:field-order".to_owned()).await {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "field-order backfill lease failed");
+                return;
+            }
+        };
+        let _lease = lease;
+        let cursor_key = self.local_job_key(keys::JOB_FIELD_ORDER_BACKFILL_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let pending = match self
+            .store
+            .files_missing_field_order(cursor, BACKFILL_PER_TICK)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the field-order backfill");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            if let Err(error) = self
+                .store
+                .put_setting(keys::JOB_FIELD_ORDER_BACKFILL_DONE, "1")
+                .await
+            {
+                tracing::warn!(%error, "stamping the field-order backfill as complete");
+            } else {
+                tracing::info!("field-order backfill: complete");
+            }
+            return;
+        }
+
+        let mut updated = 0usize;
+        let mut fenced = 0usize;
+        let mut walked = cursor;
+        for candidate in pending {
+            walked = walked.max(candidate.id);
+            let recovered = Self::field_order_from_stored_probe(&candidate.probe_json);
+            match self
+                .store
+                .set_file_field_order(&candidate, &recovered)
+                .await
+            {
+                Ok(true) => updated += 1,
+                Ok(false) => fenced += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        file_id = candidate.id,
+                        %error,
+                        "writing a backfilled field order"
+                    );
+                    walked = walked.min(candidate.id.saturating_sub(1));
+                    break;
+                }
+            }
+        }
+        if walked > cursor {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &walked.to_string())
+                .await
+            {
+                tracing::warn!(%error, "advancing the field-order backfill cursor");
+            }
+        }
+        tracing::info!(
+            updated,
+            fenced,
+            cursor = walked,
+            "field-order backfill: considered stored probe rows"
+        );
+    }
+
+    /// Classify existing HDR rows from their retained stream document. This
+    /// never opens media: SEI-only rows are stamped `none` and the next normal
+    /// scan/decode probe may upgrade them from a bounded first-frame read.
+    async fn backfill_luminance_facts(self: Arc<Self>) {
+        const BACKFILL_PER_TICK: i64 = 256;
+        if !matches!(
+            self.store
+                .get_setting(keys::JOB_LUMINANCE_BACKFILL_DONE)
+                .await,
+            Ok(None)
+        ) {
+            return;
+        }
+        let Ok(Some(_lease)) = self.acquire_job("catalogue:luminance".to_owned()).await else {
+            return;
+        };
+        let cursor_key = self.local_job_key(keys::JOB_LUMINANCE_BACKFILL_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let pending = match self
+            .store
+            .files_missing_luminance(cursor, BACKFILL_PER_TICK)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the luminance backfill");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            match self
+                .store
+                .put_setting(keys::JOB_LUMINANCE_BACKFILL_DONE, "1")
+                .await
+            {
+                Ok(()) => tracing::info!("luminance backfill: complete"),
+                Err(error) => tracing::warn!(%error, "stamping the luminance backfill complete"),
+            }
+            return;
+        }
+        let mut walked = cursor;
+        let mut updated = 0usize;
+        let mut fenced = 0usize;
+        for candidate in pending {
+            walked = walked.max(candidate.id);
+            let recovered = stored_luminance(&candidate.probe_json);
+            let source = if recovered.max_cll.is_some()
+                || recovered.max_fall.is_some()
+                || recovered.mastering_max_luminance.is_some()
+            {
+                "stream"
+            } else {
+                "none"
+            };
+            match self
+                .store
+                .set_file_luminance(
+                    &candidate,
+                    recovered.max_cll,
+                    recovered.max_fall,
+                    recovered.mastering_max_luminance,
+                    source,
+                )
+                .await
+            {
+                Ok(true) => updated += 1,
+                Ok(false) => fenced += 1,
+                Err(error) => {
+                    tracing::warn!(file_id = candidate.id, %error, "writing backfilled luminance facts");
+                    walked = walked.min(candidate.id.saturating_sub(1));
+                    break;
+                }
+            }
+        }
+        if walked > cursor {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &walked.to_string())
+                .await
+            {
+                tracing::warn!(%error, "advancing the luminance backfill cursor");
+            }
+        }
+        tracing::info!(
+            updated,
+            fenced,
+            cursor = walked,
+            "luminance backfill: considered stored probe rows"
+        );
+    }
+
     async fn build_fragment_indexes(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         if self.indexing.swap(true, Ordering::Relaxed) {
             return;
@@ -7066,15 +7326,20 @@ impl JobManager {
                             .await
                         {
                             Ok(true) => {
-                                let _ = self
-                                    .store
-                                    .record_analysis_request_phase(
-                                        &request,
-                                        "retry_wait",
-                                        Some(code),
-                                        now,
-                                    )
-                                    .await;
+                                // Best effort: the retry transition already
+                                // committed; this row is diagnostic history.
+                                crate::store_result::observe(
+                                    crate::store_result::Operation::RecordAnalysisRetryWaitPhase,
+                                    crate::store_result::Discard::BestEffort,
+                                    self.store
+                                        .record_analysis_request_phase(
+                                            &request,
+                                            "retry_wait",
+                                            Some(code),
+                                            now,
+                                        )
+                                        .await,
+                                );
                             }
                             Ok(false) => {}
                             Err(error) => tracing::warn!(
@@ -7097,15 +7362,20 @@ impl JobManager {
                             .await
                         {
                             Ok(true) => {
-                                let _ = self
-                                    .store
-                                    .record_analysis_request_phase(
-                                        &request,
-                                        "failed",
-                                        Some(code),
-                                        now,
-                                    )
-                                    .await;
+                                // Best effort: the failed terminal state is
+                                // durable already; this row explains it.
+                                crate::store_result::observe(
+                                    crate::store_result::Operation::RecordAnalysisFailedPhase,
+                                    crate::store_result::Discard::BestEffort,
+                                    self.store
+                                        .record_analysis_request_phase(
+                                            &request,
+                                            "failed",
+                                            Some(code),
+                                            now,
+                                        )
+                                        .await,
+                                );
                             }
                             Ok(false) => {}
                             Err(error) => tracing::warn!(
@@ -7209,7 +7479,13 @@ impl JobManager {
                         }
                     };
                     if let Ok(json) = serde_json::to_string(&chapters) {
-                        let _ = self.store.merge_file_probe_chapters(file.id, &json).await;
+                        // Lost work: these discovered chapters are otherwise
+                        // discarded when this analysis attempt completes.
+                        crate::store_result::observe(
+                            crate::store_result::Operation::MergeProbeChapters,
+                            crate::store_result::Discard::LostWork,
+                            self.store.merge_file_probe_chapters(file.id, &json).await,
+                        );
                     }
                     chapters
                 }
@@ -7257,10 +7533,15 @@ impl JobManager {
             }
             self.analysis_metrics
                 .publication("skip_markers", request.force_rebuild);
-            let _ = self
-                .store
-                .record_analysis_request_phase(request, "published", None, clock_ms())
-                .await;
+            // Best-effort diagnostic: publication is already committed; a
+            // missing phase row must not undo the durable result.
+            crate::store_result::observe(
+                crate::store_result::Operation::RecordPublishedAnalysisPhase,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .record_analysis_request_phase(request, "published", None, clock_ms())
+                    .await,
+            );
             return Ok(());
         }
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
@@ -7507,7 +7788,13 @@ impl JobManager {
                 charge_attempt: false,
             });
         }
-        let _ = self.store.settle_analysis_requests(now).await;
+        // Best-effort maintenance: unsettled requests remain durable and the
+        // next queue pass retries the same bounded settlement.
+        crate::store_result::observe(
+            crate::store_result::Operation::SettleAnalysisAfterQueueAdmission,
+            crate::store_result::Discard::BestEffort,
+            self.store.settle_analysis_requests(now).await,
+        );
         Ok(())
     }
 
@@ -8065,10 +8352,15 @@ impl JobManager {
                 return false;
             }
         };
-        let _ = self
-            .store
-            .record_fragment_index_source(&attested.observation)
-            .await;
+        // Lost work: this fresh source attestation is required for another
+        // node to use the index being built from it.
+        crate::store_result::observe(
+            crate::store_result::Operation::RecordFragmentIndexSource,
+            crate::store_result::Discard::LostWork,
+            self.store
+                .record_fragment_index_source(&attested.observation)
+                .await,
+        );
         // The job names one pipeline by digest; this node offers one identity
         // per copy pipeline the file can be asked for. Claim the job only if
         // one of them still produces the bytes the job was queued for — a job
@@ -8147,7 +8439,13 @@ impl JobManager {
                 .await
             {
                 Ok(true) => {
-                    let _ = self.store.settle_analysis_requests(now).await;
+                    // Best-effort maintenance: hydration is already durable
+                    // and the next pass retries settlement of pending requests.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::SettleAnalysisAfterHydration,
+                        crate::store_result::Discard::BestEffort,
+                        self.store.settle_analysis_requests(now).await,
+                    );
                     tracing::info!(
                         cache_key = %job.cache_key,
                         built_by = %published.built_by_node_id,
@@ -9098,6 +9396,39 @@ mod tests {
     use plurx_core::domain::{
         DolbyVisionFacts, ItemEdit, ItemKind, NewItem, NewLibrary, PlaybackEventQuery, ProbeResult,
     };
+
+    #[test]
+    fn field_order_backfill_recovers_selected_video_and_marks_missing_or_invalid_unknown() {
+        let stored = r#"{
+            "streams": [
+                {"codec_type":"video","codec_name":"mjpeg","field_order":"progressive","disposition":{"attached_pic":1}},
+                {"codec_type":"video","codec_name":"mpeg2video","field_order":"tt"}
+            ]
+        }"#;
+        assert_eq!(JobManager::field_order_from_stored_probe(stored), "tt");
+        assert_eq!(
+            JobManager::field_order_from_stored_probe(
+                r#"{"streams":[{"codec_type":"video","codec_name":"h264"}]}"#
+            ),
+            "unknown"
+        );
+        assert_eq!(
+            JobManager::field_order_from_stored_probe("not-json"),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn luminance_backfill_reads_stream_facts_without_opening_media() {
+        let recovered = stored_luminance(
+            r#"{"streams":[{"codec_type":"video","color_transfer":"smpte2084","side_data_list":[{"side_data_type":"Content light level metadata","max_content":4000,"max_average":1000},{"side_data_type":"Mastering display metadata","max_luminance":"40000000/10000"}]}]}"#,
+        );
+        assert_eq!(recovered.max_cll, Some(4000));
+        assert_eq!(recovered.max_fall, Some(1000));
+        assert_eq!(recovered.mastering_max_luminance, Some(4000));
+        assert_eq!(recovered.luminance_source.as_deref(), Some("stream"));
+        assert_eq!(stored_luminance("not json").luminance_source, None);
+    }
 
     #[tokio::test]
     async fn playback_preparation_is_durable_exact_and_independent_of_discovery() {

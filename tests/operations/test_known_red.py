@@ -41,7 +41,10 @@ class KnownRedContractTest(unittest.TestCase):
     def test_every_checked_in_entry_is_current_and_ignored(self):
         ignored = ignored_tests(ROOT)
         # S-01 adds two reasoned ffmpeg fixture ignores to the P-01 baseline.
-        self.assertEqual(len(ignored), 13)
+        # S-08 adds two more of the same shape: the deinterlace argv fixture
+        # matrix and the descriptor-bound idet pass, each of which needs the
+        # shipped ffmpeg or ffprobe named in its own ignore reason.
+        self.assertEqual(len(ignored), 15)
         self.assertTrue(all(item.reason for item in ignored))
         self.assertTrue(all(item.path in item.identity for item in ignored))
         self.assertTrue(all(item.cargo_name in item.identity for item in ignored))

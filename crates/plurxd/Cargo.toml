@@ -95,6 +95,9 @@ uuid = { workspace = true }
 # watchdog's suites run in virtual time instead of sleeping out real grace
 # windows. Dev-only: the shipped binary never compiles with it.
 tokio = { workspace = true, features = ["test-util"] }
+# The discarded-Store-result regression parses production Rust syntax instead
+# of guessing from receiver spelling or a bounded source suffix.
+syn = { version = "2", features = ["full", "visit"] }
 
 [lints]
 workspace = true
