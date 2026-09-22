@@ -420,7 +420,10 @@ enum PlaybackSurfaceContract {
             "create_503_not_yet",
             .start,
             .preparing,
-            codes: ["startup_timeout", "media_owner_transition", "vod_index_pending", "vod_engine_unattested"],
+            codes: [
+                "startup_timeout", "media_owner_transition", "vod_index_pending",
+                "vod_engine_unattested", "transcode_capacity_pending",
+            ],
             retryable: true
         ),
         // The commonest `preparing` surface there is: a staged start with no

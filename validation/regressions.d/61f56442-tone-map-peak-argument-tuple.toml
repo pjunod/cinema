@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["61f56442"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "Threading the tone-map peak and its provenance through `video_filters_for_contract` as two separate parameters left that function with eight arguments, one past Clippy's `too_many_arguments` threshold. `make lint` runs `cargo clippy --workspace --all-targets -- -D warnings` inside both `rust-gate` and `rust-gate-ci`, so the eight-parameter form fails those two gates on its own; this commit passes the pair as a single `(u32, ToneMapPeakSource)` argument at all three call sites rather than adding an `allow`. The filter output is unchanged, and the test that says so is the one `c74d452c` added in the same module: `the_cpu_tone_map_names_peak_provenance_in_its_recipe` still requires `peak=40`, `peak=20` and `peak=10` for the MaxCLL, mastering-display and policy-default sources, so reading the wrong tuple element into `peak = tone_map_peak.0` makes it fail under the workspace `cargo test` that both gates run."

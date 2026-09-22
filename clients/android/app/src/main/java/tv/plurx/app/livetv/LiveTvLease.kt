@@ -391,6 +391,22 @@ internal class LiveTvLease(
         return scope.async { mutex.withLock { releaseCurrent() } }
     }
 
+    /**
+     * Release only the session an overtaken attach actually started.
+     *
+     * A newer channel may already have replaced [target] by the time a
+     * delayed display-mode wait resumes. Ordinary [stop] would then release
+     * the newer channel. Identity-checking under the lease mutex makes stale
+     * cleanup exact without invalidating a newer start generation.
+     */
+    fun stopIfCurrent(target: LiveTvStarted): Deferred<Boolean> = scope.async {
+        mutex.withLock {
+            if (current !== target) return@withLock false
+            releaseCurrent()
+            true
+        }
+    }
+
     /** Called from the five-second heartbeat. Almost never touches the disk. */
     fun touchHint() { if (current != null) hints.touch(now()) }
 

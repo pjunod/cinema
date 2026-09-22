@@ -39,7 +39,7 @@ use super::{ResolvedTranscode, SEGMENT_SECONDS};
 /// express — a different hash construction, a corrected serialisation, a fixed
 /// bug in what the fields *mean*. Every old entry misses; nothing is served
 /// wrongly while a deploy rolls out.
-pub const CACHE_RECIPE_VERSION: i64 = 3;
+pub const CACHE_RECIPE_VERSION: i64 = 4;
 
 /// Everything about *how this server encodes* that changes the output bytes.
 ///
@@ -123,6 +123,18 @@ impl Recipe<'_> {
             "aaction",
             if self.audio_copied { b"copy" } else { b"aac" },
         );
+        // Every lossy audio path is now explicitly pinned to 48 kHz. Keep
+        // that byte-changing decision visible in the identity, rather than
+        // relying only on a version bump whose reason is easy to lose.
+        field(
+            &mut h,
+            "arate",
+            if self.audio_copied {
+                b"source"
+            } else {
+                b"48000"
+            },
+        );
 
         // Deliberately NOT in the key: `start_seconds`. A cached asset is the
         // whole title; where a viewer joins it is a seek, not a different
@@ -175,12 +187,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: None,
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(10),
             hdr: Some("hdr10".into()),
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(60_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -447,8 +464,8 @@ mod tests {
         assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    /// Version 3 binds the complete validated decode/render/encode plan and
-    /// deliberately invalidates every pre-plan recipe. Pin its exact bytes so
+    /// Version 4 binds the fixed 48 kHz lossy-audio output decision and
+    /// deliberately invalidates every recipe that predated that rule. Pin its exact bytes so
     /// future namespace changes remain explicit fleet-wide decisions.
     ///
     /// The value cannot be checked against v2's golden: v3 is not v2 with a
@@ -461,19 +478,42 @@ mod tests {
     /// that were forking the key on how a file was measured rather than on
     /// what would be produced from it.
     ///
-    /// So this fixture cannot prove v3 was composed correctly — it was
+    /// So this fixture cannot prove v4 was composed correctly — it was
     /// regenerated from the implementation, and a mistake made in the same
     /// commit would be pinned along with everything else. What it does is make
     /// the next change explicit: nothing may move this value without saying
     /// why. The composition itself is proven by the field-by-field mutation
-    /// table above, which is where a missing field is actually caught. v3 has
-    /// never been published, so nothing on disk has moved.
+    /// table above, which is where a missing field is actually caught.
+    ///
+    /// Re-measured twice since it was published, and here is the whole reason.
+    /// The published `845ecea3…` was taken at `RESOLVED_TRANSCODE_PLAN_VERSION
+    /// = 1`. The interlace work carries the source's `field_order` into
+    /// `FactsDigest`, which is inside `plan_digest`, and bumps that
+    /// serialization contract to 2 exactly as its own doc comment requires —
+    /// so the `plan` field of this key is a different string for the same
+    /// fixture, by design, and every v1 entry misses rather than being served
+    /// under a name that no longer describes it. That move published
+    /// `c8f935af…`. The `arate` field beside `aaction`, which pins lossy audio
+    /// to 48 kHz, entered the digest in the same commit that published
+    /// `845ecea3…`, so it is already inside that value and contributed
+    /// nothing to that move.
+    ///
+    /// `d42efd6b…` is the promotion merge that brings the tone-map work
+    /// alongside the interlace work. Its `tone_map_peak` pair — the peak in
+    /// nits and its provenance — is fed into `plan_digest` beside
+    /// `deinterlace`, and the serialization contract goes to 3 for the reason
+    /// its own constant states: 2 is already published and already means
+    /// something else. So the `plan` field is a different string again, for
+    /// the same fixture, by design. Nothing else that feeds the hash changed:
+    /// `CACHE_RECIPE_VERSION` is still 4, `PipelineDigest` still feeds only the
+    /// ffmpeg build, muxer and segment policy, and `plan_namespace` is
+    /// unchanged.
     #[test]
-    fn planned_v3_recipe_hash_is_a_golden_fixture() {
+    fn planned_v4_recipe_hash_is_a_golden_fixture() {
         let (d, f, o) = (digest(), media(), TranscodeOptions::default());
         assert_eq!(
             hash_of(&d, &f, &o, Encoder::Software, false),
-            "82b1fd5b9c96d0e0201ef5f56606cc0d677996c67907d1d46bef870996e526cb"
+            "d42efd6bd1f7bd3c769b498f32d0f5ebcb0892e2d52957663c670d53503405de"
         );
     }
 

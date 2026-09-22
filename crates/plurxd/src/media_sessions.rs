@@ -545,6 +545,12 @@ impl TakeoverWorkerGuard {
 
     fn spawn_teardown(&mut self, reason: &'static str) -> Option<tokio::task::JoinHandle<()>> {
         let replacement = self.replacement.take()?;
+        // From here this hold is a teardown, not a start. Nothing is waiting on
+        // it, and what it is about to await — `stop_session_until` moves the
+        // guard into an inner task whose `stop_session` is unbounded — is
+        // exactly the shape that wedged a player before. A later open may
+        // reclaim the key instead of queueing behind it.
+        replacement.mark_abandoned();
         let manager = Arc::clone(&self.manager);
         let session_id = self.local_session_id.clone();
         let settlement = self.settlement.take();
@@ -4937,6 +4943,10 @@ async fn supervise_takeover_settlement(
         .transcode
         .acquire_cluster_takeover_replacement(&request, original.user_id, creation_deadline)
         .await?;
+    // The takeover id is predetermined, so it can be fenced from the moment the
+    // gate is held — including by a later open that has to reclaim the key
+    // because this supervisor never finished.
+    replacement.publish_fenceable(&provisional_id);
     let worker = TakeoverWorkerGuard::new(
         Arc::clone(&state.transcode),
         provisional_id.clone(),

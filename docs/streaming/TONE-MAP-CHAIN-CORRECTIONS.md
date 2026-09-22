@@ -1,6 +1,6 @@
 # Tone-map chain corrections — an explicit peak, primaries before the curve, dither
 
-**Status:** ready for review · **Executes:** Q3 / F-stream-3 from
+**Status:** M0–M1 complete; M2 source complete but image evidence pending; M3 post-deploy fleet evidence pending · **Executes:** Q3 / F-stream-3 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -11,8 +11,9 @@ Read the review's §3.1 row Q3, the assessment's Q3 and F-stream-3 rows
 and the module header of
 [`pipeprobe.rs`](../../crates/plurxd/src/pipeprobe.rs) — the CPU chain this
 plan edits is the *reference* every GPU graph is judged against at boot, so
-a change here moves the yardstick. Work M0 → M3 in order; each milestone is
-one draft PR into `main` under the fast lane. Every `file:line` was read at
+a change here moves the yardstick. Work M0 → M3 in order in the one draft PR
+named on the board; milestones are logical commits and execution-log rows,
+not separate PRs. Every `file:line` was read at
 `88a3957a` and is marked **re-verify at build time**. If a step seems to
 require changing a GPU graph's operator (`bt.2390` in libplacebo,
 `tonemap=1` in vpp_qsv, `hable` in tonemap_opencl), stop and flag it: those
@@ -36,6 +37,14 @@ and only when a source's MaxCLL is not 1,000 and the side data does not
 reach the filter. The plan below still makes the peak explicit — an implicit
 default that happens to be right is not a contract — but the severity and
 the acceptance criteria are written against what actually happens.
+
+**M0 correction, 2026-09-21:** media1's shipped daemon uses
+`/usr/lib/jellyfin-ffmpeg/ffmpeg` 8.1.2-Jellyfin. Both QSV and VA-API retain
+MDCV/CLL across `hwdownload`, but the next `zscale=…:t=linear` removes those
+two side-data records. `tonemap` therefore computes `peak=10` for no-CLL,
+MaxCLL-1000 and MaxCLL-4000 inputs on hardware and software decode alike.
+The explicit peak is corrective for the shipped chain; hardware download is
+not the point that loses the facts.
 
 ## 1. Objective
 
@@ -192,7 +201,40 @@ M0's result decides how much of M1/M2 is corrective and how much is
 contractual. The plan proceeds either way, because an inferred peak is not a
 contract even when it infers correctly.
 
+The 2026-09-21 media1 result makes M1/M2 corrective. The shipped binary,
+QSV and VA-API graphs all ran inside the active `plurxd` container. Temporary
+fixtures were removed after the reading.
+
+| fixture | decode | metadata after download | computed peak | final-frame YAVG |
+|---|---|---|---:|---:|
+| no CLL/MDCV | QSV | colour tags; no luminance records | 10 | 143.617 |
+| no CLL/MDCV | software | not applicable | 10 | 143.617 |
+| MaxCLL 1,000 / MaxFALL 400 | QSV | MDCV + CLL retained | 10 | 128.011 |
+| MaxCLL 1,000 / MaxFALL 400 | software | not applicable | 10 | 128.011 |
+| MaxCLL 4,000 / MaxFALL 1,000 | QSV | MDCV + CLL retained | 10 | 143.617 |
+| MaxCLL 4,000 / MaxFALL 1,000 | software | not applicable | 10 | 143.617 |
+| no CLL/MDCV | VA-API | colour tags; no luminance records | 10 | 143.617 |
+| MaxCLL 1,000 / MaxFALL 400 | VA-API | MDCV + CLL retained | 10 | 128.011 |
+| MaxCLL 4,000 / MaxFALL 1,000 | VA-API | MDCV + CLL retained | 10 | 143.617 |
+
+The equal hardware/software values compare the same fixture and chain; the
+different 1,000-nit fixture YAVG is content, not a decode-path delta. A stage
+probe retained MDCV/CLL after `scale`, lost both at the linearising `zscale`,
+then reported only the unrelated unregistered SEI record. Deleting side data
+explicitly still produced `peak=10`; forcing the post-zscale frame tag back to
+PQ produced `peak=100`, matching FFmpeg's documented fallback.
+
 ### 3.2 M1 — peak luminance facts at scan
+
+**Implemented 2026-09-21.** SQLite v64 and replicated schema v43 add the
+four nullable columns below. Current scans read stream side data and, for a
+PQ/HLG stream with no luminance record, make one process-group-owned,
+30-second/256-KiB first-playable-frame probe. The retained document remains
+the primary probe document; the additional frame observation is stored only
+in typed columns. The bounded backfill reads retained JSON in pages of 256,
+never opens media, and fences each write by id/path/size/mtime/probe JSON.
+The held decode probe, catalog digest, facts digest and cache schema version
+all carry the same facts. `FileDto` exposes them read-only.
 
 New nullable columns on `files`: `max_cll INTEGER` (cd/m², from
 `max_content`), `max_fall INTEGER`, `mastering_max_luminance INTEGER`
@@ -231,8 +273,9 @@ Backfill without a rescan: a bounded job modelled on
 luminance_source IS NULL`, 256 per tick, fenced by path/size/mtime/
 `probe_json`. It recovers stream-level values from `probe_json` at no I/O
 cost and marks `luminance_source = 'none'` when the stored document lacks
-them — it does **not** open media. SEI-only files are then picked up by
-the next ordinary rescan of that file, or by the decode-fact route below.
+them — it does **not** open media. SEI-only files are picked up by the next
+ordinary rescan of that file. The held decode-fact route below is stream-only
+and cannot replace that bounded frame probe.
 
 Decode facts: add `stream_side_data=max_content,max_average,max_luminance`
 to the `-show_entries` list at `decode_facts.rs:3343`; `DecodeFacts` gains
@@ -241,9 +284,20 @@ to the `-show_entries` list at `decode_facts.rs:3343`; `DecodeFacts` gains
 a `PROBE_SCHEMA_VERSION` constant to it so a cached document from the old
 argument list is never read as "no luminance". The in-memory LRU
 (`MAX_CACHE_ENTRIES = 256`) empties on deploy anyway; the constant is for
-the persisted attestation F-stream-9 is designing.
+the persisted attestation F-stream-9 is designing. When those stream-level
+facts are newer than the catalog row, plan resolution prefers them and uses
+them in the actual `peak=` filter value as well as the facts digest. Legacy
+SEI-only metadata remains an ordinary-scan recovery case; this plan does not
+claim the held probe reads frame side data.
 
 ### 3.3 M2 — the chain
+
+**Source implemented; required image evidence remains pending.** The CPU recipe now chooses CLL,
+then mastering maximum luminance, then the documented 1,000-nit policy
+default. Peak value and `cll`/`mdcv`/`default` provenance enter the plan
+digest, session log and fixed-cardinality metric. The boot probe's CPU
+reference moved with the production chain; no GPU operator or qualification
+tolerance changed.
 
 ```text
 scale=-2:'min({h},ih)',
@@ -277,7 +331,10 @@ format=yuv420p
 Identity: the plan digest gains `tone_map_peak` (the number and its
 provenance: `cll` | `mdcv` | `default`), and the filter string changes for
 every `ToneMap::Zscale` session, so every CPU-tone-mapped recipe key moves.
-`CACHE_RECIPE_VERSION` stays 3; invalidation is by mismatch. Encoded-VOD
+`RESOLVED_TRANSCODE_PLAN_VERSION` is 3 because the plan digest gained fields
+and ordering semantics. It was drafted here as 2; S-08's `deinterlace` field
+reached main first and published 2, so this work takes the next revision. `CACHE_RECIPE_VERSION` stays 3; invalidation is by
+the changed plan digest. Encoded-VOD
 renditions on the CPU chain get new keys; existing renditions are untouched.
 The tone-map field already in the digest (`decode.rs:2098-2106`) is
 unchanged.
@@ -358,9 +415,11 @@ YAVG). Also read the boot probe's own fixture: `ffprobe -show_frames
 -read_intervals '%+#1' -show_entries frame_side_data=side_data_type
 <data_dir>/pipeprobe/*.mkv` (path re-verified from `pipeprobe::fixture`).
 
-Acceptance: a filled table in the M0 PR body (docs-only PR), each cell an
+Acceptance: a filled table in the plan and whole-plan PR body, each cell an
 observation, plus the same three readings from this document's §2.2 re-run
-on the shipped build. The M2 default is confirmed or corrected from it.
+on the shipped build. The table above satisfies this on media1: the M2
+default remains `peak=10`, while explicit MaxCLL/MDCV input is confirmed as
+corrective because the linearising zscale drops those records.
 
 ### 5.2 M1 — luminance facts
 
@@ -416,6 +475,26 @@ Acceptance: the PR carries the stills, the level counts (after > before on
 the ramp), `psnr` numbers, the cost delta, and `cargo test -p plurx-core
 transcode` green.
 
+The generated narrow 10-bit ramp was compared inside media1's shipped
+FFmpeg 8.1.2-Jellyfin, without deploying branch code. The production-before
+chain produced YMIN/YAVG/YMAX `100/110.981/122`; the corrected chain produced
+`93/103.320/114`. Before/after PSNR was `26.920256` average and SSIM was
+`0.996295` on the first broad-gradient reading; the deterministic narrow ramp
+measured PSNR `32.167303` and SSIM `0.996437`. The corrected ramp without
+dither carried 20 distinct 8-bit luma levels; error diffusion carried 21.
+One-second/24-frame wall readings were 0.479 s before, 0.510 s corrected
+without dither and 0.488 s corrected with dither. That single bounded sample
+puts the complete corrected chain at +1.9% versus before and dither at -4.3%
+versus the otherwise identical corrected graph; the negative delta is timer
+noise, not a speed claim. All temporary fixtures and raw frames were removed
+by the command trap.
+
+This is useful source-level and bounded generated-fixture evidence, but it
+does **not** complete M2 acceptance. The required lab4 captures, all three
+10/50/90 percent frames and histograms, and the named Harbor Lights real-title
+comparison have not been run. M2 remains pending until those artifacts and
+readings are attached; none are inferred from the generated-ramp sample.
+
 ### 5.4 M3 — boot-probe re-qualification
 
 Deploy M2 to media1 only; capture `GET /api/v1/system` `pipeline` report
@@ -452,7 +531,8 @@ served it.
 - Settings: none new. The 1,000-nit default is code policy, printed as such.
 - Rollout: M0 (docs) → M1 (schema, both backends, coordinated deploy as
   every schema change is) → M2 (media1 first, then fleet) → M3 verdict
-  record. One PR each.
+  record. One implementation PR owns M0–M3; post-merge-only evidence returns
+  through the board's evidence-doc procedure.
 - Rollback for M2: revert the filter string; recipe keys return to their
   previous values.
 
@@ -470,6 +550,13 @@ served it.
    order: it is deliberately out of scope; note it if the M2 stills show
    hue shifts that gamut-before-curve does not remove.
 
+Execution decisions: HLG receives the same explicit source-fact/default peak
+contract; a `none` observation is retried only when a normal scan produces a
+new probe document; and `desat=0` remains unchanged. These choices preserve
+FFmpeg's 1,000-nit HLG reference, avoid repeatedly decoding an unchanged file
+during the JSON-only backfill, and keep curve/desaturation policy outside this
+correction.
+
 ---
 
 ## Execution log
@@ -482,4 +569,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / this commit | On media1's shipped FFmpeg 8.1.2-Jellyfin, QSV and VA-API retained MDCV/CLL through hardware download; the linearising zscale dropped both. Hardware and software produced the same effective peak and YAVG per fixture. MaxCLL 4,000 still reached tonemap as `peak=10`, so M1/M2 are corrective. Temporary fixtures were removed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / this commit | Added bounded stream/frame luminance collection, SQLite v64 and replicated v43 storage, exact-snapshot backfill, decode/cache identity and read-only DTO fields. Parser/facts/schema/store-contract regressions pass, including the actual Hiqlite contract path. The review follow-up makes Dolby Vision with a PQ/HLG selected base layer eligible for frame luminance recovery; legacy SEI-only recovery remains explicitly owned by ordinary scan rather than the stream-only held probe. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 (source complete; evidence pending) | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / this commit | Added explicit peak/provenance, gamut-before-curve, final error-diffusion dither, log/metric/recipe identity and matching boot-probe reference. Held stream facts now refine the actual filter; the plan digest version is 2; playback-info exposes peak value and provenance. On the generated narrow ramp, dither increased distinct 8-bit luma levels 20→21; corrected wall time was 0.488 s versus 0.479 s before (+1.9%). Temporary media was removed. Required lab4, 10/50/90 and Harbor Lights still/histogram evidence remains pending, so M2 is not accepted. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / pending | Needs the merged/coordinated schema build deployed to media1 and before/after `/api/v1/system` pipeline verdicts. The named real-title image protocol remains an M2 prerequisite; Apple TV/Chrome post-deploy playback and selected-pipeline observations remain M3. No branch build was deployed from this draft. |

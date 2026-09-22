@@ -106,6 +106,9 @@ function browserLabel(){
   if(/safari\//i.test(ua) && /version\//i.test(ua)) return "Safari";
   return "browser";
 }
+function refreshClientErrorReporterAuth(){
+  if(window.PlurxErrorReporter) window.PlurxErrorReporter.setAuth(TOKEN,browserLabel());
+}
 // Forward a client-side playback problem to the server so it lands in
 // Settings → Logs. Fire-and-forget: a browser that rejects a stream produces no
 // server log on its own (nothing ran server-side to fail), so without this the
@@ -128,3 +131,4 @@ function clientLog(ev){
       body:JSON.stringify(body)}).catch(()=>{});
   }catch(e){}
 }
+refreshClientErrorReporterAuth();

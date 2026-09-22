@@ -45,6 +45,25 @@ use crate::schedule::{due_jobs, DueJob, GlobalSchedule};
 use crate::trakt::TraktManager;
 use crate::transcode::{PretranscodeFence, PretranscodeProduceOutcome, TranscodeManager};
 
+const FRAGMENT_INDEX_VALIDATION_PAGE: u32 = 64;
+const FRAGMENT_INDEX_VALIDATION_INTERVAL: Duration = Duration::from_secs(30);
+static FRAGMENT_INDEX_VALIDATED: AtomicU64 = AtomicU64::new(0);
+static FRAGMENT_INDEX_REFUSED: AtomicU64 = AtomicU64::new(0);
+static FRAGMENT_INDEX_GONE: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn fragment_index_validation_prometheus() -> String {
+    format!(
+        "# HELP plurx_index_validation_backfill_total Legacy fragment-index validation attempts by result.\n\
+         # TYPE plurx_index_validation_backfill_total counter\n\
+         plurx_index_validation_backfill_total{{result=\"validated\"}} {}\n\
+         plurx_index_validation_backfill_total{{result=\"refused\"}} {}\n\
+         plurx_index_validation_backfill_total{{result=\"gone\"}} {}\n",
+        FRAGMENT_INDEX_VALIDATED.load(Ordering::Relaxed),
+        FRAGMENT_INDEX_REFUSED.load(Ordering::Relaxed),
+        FRAGMENT_INDEX_GONE.load(Ordering::Relaxed),
+    )
+}
+
 /// Environment facts collected once at startup, shown on the settings page.
 /// Everything here is admin-facing diagnostics — paths, tool versions,
 /// detected hardware — not runtime state.
@@ -717,6 +736,13 @@ pub struct AppState {
     #[cfg(test)]
     pub(crate) cache_revocation_test_barrier: Option<Arc<tokio::sync::Barrier>>,
     pub started_at: Instant,
+}
+
+fn stored_luminance(probe_json: &str) -> plurx_core::domain::ProbeResult {
+    serde_json::from_str::<serde_json::Value>(probe_json)
+        .ok()
+        .map(|document| plurx_core::scan::probe::parse_probe_json(&document))
+        .unwrap_or_default()
 }
 
 impl AppState {
@@ -2762,6 +2788,46 @@ impl Drop for ActivePretranscodeJob {
 }
 
 impl JobManager {
+    /// Revalidate one bounded node-local page every interval. This deliberately
+    /// does not take cluster job authority: both SQLite and hiqlite route the
+    /// index rows through this process's local database, never through Raft.
+    pub(crate) async fn fragment_index_validation_loop(
+        self: Arc<Self>,
+        shutdown: CancellationToken,
+    ) {
+        let mut ticker = tokio::time::interval(FRAGMENT_INDEX_VALIDATION_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
+            match self
+                .store
+                .validate_fragment_index_page(FRAGMENT_INDEX_VALIDATION_PAGE)
+                .await
+            {
+                Ok(report) => {
+                    FRAGMENT_INDEX_VALIDATED.fetch_add(report.validated, Ordering::Relaxed);
+                    FRAGMENT_INDEX_REFUSED.fetch_add(report.refused, Ordering::Relaxed);
+                    FRAGMENT_INDEX_GONE.fetch_add(report.gone, Ordering::Relaxed);
+                    if report.validated != 0 || report.refused != 0 || report.gone != 0 {
+                        tracing::info!(
+                            validated = report.validated,
+                            refused = report.refused,
+                            gone = report.gone,
+                            remaining = report.remaining,
+                            "validated a node-local fragment-index page"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "node-local fragment-index validation failed");
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     fn new(store: Arc<dyn Store>, artwork_dir: PathBuf) -> Self {
         Self::new_with_scan_prune_percent(
@@ -5668,6 +5734,14 @@ impl JobManager {
             let state = Arc::clone(self);
             tokio::spawn(async move { state.backfill_video_codec_tags().await });
         }
+        {
+            let state = Arc::clone(self);
+            tokio::spawn(async move { state.backfill_field_order().await });
+        }
+        {
+            let state = Arc::clone(self);
+            tokio::spawn(async move { state.backfill_luminance_facts().await });
+        }
         Ok(())
     }
 
@@ -6424,6 +6498,217 @@ impl JobManager {
             fenced,
             cursor = walked,
             "video codec tag backfill: considered stored probe rows"
+        );
+    }
+
+    /// Recover the selected playable video's field-order token from retained
+    /// probe JSON without reopening any media.
+    ///
+    /// Rows whose old probe did not report the key receive the explicit
+    /// `unknown` value. That distinguishes a completed backfill from work not
+    /// yet reached and preserves the normal scan as the only path that can
+    /// improve the fact later.
+    fn field_order_from_stored_probe(probe_json: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(probe_json)
+            .ok()
+            .map(|value| plurx_core::scan::probe::parse_probe_json(&value))
+            .and_then(|probe| probe.field_order)
+            .unwrap_or_else(|| "unknown".to_owned())
+    }
+
+    async fn backfill_field_order(self: Arc<Self>) {
+        const BACKFILL_PER_TICK: i64 = 256;
+
+        match self
+            .store
+            .get_setting(keys::JOB_FIELD_ORDER_BACKFILL_DONE)
+            .await
+        {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "reading the field-order backfill stamp");
+                return;
+            }
+        }
+        let lease = match self.acquire_job("catalogue:field-order".to_owned()).await {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "field-order backfill lease failed");
+                return;
+            }
+        };
+        let _lease = lease;
+        let cursor_key = self.local_job_key(keys::JOB_FIELD_ORDER_BACKFILL_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let pending = match self
+            .store
+            .files_missing_field_order(cursor, BACKFILL_PER_TICK)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the field-order backfill");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            if let Err(error) = self
+                .store
+                .put_setting(keys::JOB_FIELD_ORDER_BACKFILL_DONE, "1")
+                .await
+            {
+                tracing::warn!(%error, "stamping the field-order backfill as complete");
+            } else {
+                tracing::info!("field-order backfill: complete");
+            }
+            return;
+        }
+
+        let mut updated = 0usize;
+        let mut fenced = 0usize;
+        let mut walked = cursor;
+        for candidate in pending {
+            walked = walked.max(candidate.id);
+            let recovered = Self::field_order_from_stored_probe(&candidate.probe_json);
+            match self
+                .store
+                .set_file_field_order(&candidate, &recovered)
+                .await
+            {
+                Ok(true) => updated += 1,
+                Ok(false) => fenced += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        file_id = candidate.id,
+                        %error,
+                        "writing a backfilled field order"
+                    );
+                    walked = walked.min(candidate.id.saturating_sub(1));
+                    break;
+                }
+            }
+        }
+        if walked > cursor {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &walked.to_string())
+                .await
+            {
+                tracing::warn!(%error, "advancing the field-order backfill cursor");
+            }
+        }
+        tracing::info!(
+            updated,
+            fenced,
+            cursor = walked,
+            "field-order backfill: considered stored probe rows"
+        );
+    }
+
+    /// Classify existing HDR rows from their retained stream document. This
+    /// never opens media: SEI-only rows are stamped `none` and the next normal
+    /// scan/decode probe may upgrade them from a bounded first-frame read.
+    async fn backfill_luminance_facts(self: Arc<Self>) {
+        const BACKFILL_PER_TICK: i64 = 256;
+        if !matches!(
+            self.store
+                .get_setting(keys::JOB_LUMINANCE_BACKFILL_DONE)
+                .await,
+            Ok(None)
+        ) {
+            return;
+        }
+        let Ok(Some(_lease)) = self.acquire_job("catalogue:luminance".to_owned()).await else {
+            return;
+        };
+        let cursor_key = self.local_job_key(keys::JOB_LUMINANCE_BACKFILL_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let pending = match self
+            .store
+            .files_missing_luminance(cursor, BACKFILL_PER_TICK)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the luminance backfill");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            match self
+                .store
+                .put_setting(keys::JOB_LUMINANCE_BACKFILL_DONE, "1")
+                .await
+            {
+                Ok(()) => tracing::info!("luminance backfill: complete"),
+                Err(error) => tracing::warn!(%error, "stamping the luminance backfill complete"),
+            }
+            return;
+        }
+        let mut walked = cursor;
+        let mut updated = 0usize;
+        let mut fenced = 0usize;
+        for candidate in pending {
+            walked = walked.max(candidate.id);
+            let recovered = stored_luminance(&candidate.probe_json);
+            let source = if recovered.max_cll.is_some()
+                || recovered.max_fall.is_some()
+                || recovered.mastering_max_luminance.is_some()
+            {
+                "stream"
+            } else {
+                "none"
+            };
+            match self
+                .store
+                .set_file_luminance(
+                    &candidate,
+                    recovered.max_cll,
+                    recovered.max_fall,
+                    recovered.mastering_max_luminance,
+                    source,
+                )
+                .await
+            {
+                Ok(true) => updated += 1,
+                Ok(false) => fenced += 1,
+                Err(error) => {
+                    tracing::warn!(file_id = candidate.id, %error, "writing backfilled luminance facts");
+                    walked = walked.min(candidate.id.saturating_sub(1));
+                    break;
+                }
+            }
+        }
+        if walked > cursor {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &walked.to_string())
+                .await
+            {
+                tracing::warn!(%error, "advancing the luminance backfill cursor");
+            }
+        }
+        tracing::info!(
+            updated,
+            fenced,
+            cursor = walked,
+            "luminance backfill: considered stored probe rows"
         );
     }
 
@@ -9170,6 +9455,39 @@ mod tests {
     use plurx_core::domain::{
         DolbyVisionFacts, ItemEdit, ItemKind, NewItem, NewLibrary, PlaybackEventQuery, ProbeResult,
     };
+
+    #[test]
+    fn field_order_backfill_recovers_selected_video_and_marks_missing_or_invalid_unknown() {
+        let stored = r#"{
+            "streams": [
+                {"codec_type":"video","codec_name":"mjpeg","field_order":"progressive","disposition":{"attached_pic":1}},
+                {"codec_type":"video","codec_name":"mpeg2video","field_order":"tt"}
+            ]
+        }"#;
+        assert_eq!(JobManager::field_order_from_stored_probe(stored), "tt");
+        assert_eq!(
+            JobManager::field_order_from_stored_probe(
+                r#"{"streams":[{"codec_type":"video","codec_name":"h264"}]}"#
+            ),
+            "unknown"
+        );
+        assert_eq!(
+            JobManager::field_order_from_stored_probe("not-json"),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn luminance_backfill_reads_stream_facts_without_opening_media() {
+        let recovered = stored_luminance(
+            r#"{"streams":[{"codec_type":"video","color_transfer":"smpte2084","side_data_list":[{"side_data_type":"Content light level metadata","max_content":4000,"max_average":1000},{"side_data_type":"Mastering display metadata","max_luminance":"40000000/10000"}]}]}"#,
+        );
+        assert_eq!(recovered.max_cll, Some(4000));
+        assert_eq!(recovered.max_fall, Some(1000));
+        assert_eq!(recovered.mastering_max_luminance, Some(4000));
+        assert_eq!(recovered.luminance_source.as_deref(), Some("stream"));
+        assert_eq!(stored_luminance("not json").luminance_source, None);
+    }
 
     #[tokio::test]
     async fn playback_preparation_is_durable_exact_and_independent_of_discovery() {

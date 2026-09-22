@@ -1178,9 +1178,9 @@ fn upsert_file(
             video_profile, width, height, bit_depth, hdr, bitrate,
             audio_streams, subtitle_streams, probe_json, hdr_format, scanned_at,
             dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present,
-            video_codec_tag)
+            video_codec_tag, field_order)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                 ?14, ?15, ?16, ?17, unixepoch(), ?18, ?19, ?20, ?21, ?22, ?23)
+                 ?14, ?15, ?16, ?17, unixepoch(), ?18, ?19, ?20, ?21, ?22, ?23, ?24)
          ON CONFLICT(path) DO UPDATE SET
              item_id = excluded.item_id, size = excluded.size, mtime = excluded.mtime,
              duration_ms = excluded.duration_ms, container = excluded.container,
@@ -1195,6 +1195,7 @@ fn upsert_file(
              dv_el_present = excluded.dv_el_present,
              dv_rpu_present = excluded.dv_rpu_present,
              video_codec_tag = excluded.video_codec_tag,
+             field_order = excluded.field_order,
              scanned_at = unixepoch()
          RETURNING id",
         params![
@@ -1221,6 +1222,7 @@ fn upsert_file(
             probe.dolby_vision.el_present.map(i64::from),
             probe.dolby_vision.rpu_present.map(i64::from),
             probe.video_codec_tag,
+            probe.field_order,
         ],
         |row| row.get(0),
     )?)

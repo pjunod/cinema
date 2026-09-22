@@ -308,6 +308,7 @@ function operationStatus(membership, { safe = true, unreachable = false } = {}) 
             },
             snapshot: {
               available: true,
+              db_bytes: 2097152,
               build_ok_count: 9,
               build_error_count: 0,
               install_ok_count: 2,
@@ -2844,7 +2845,7 @@ test("the replicated database is its own section with the store's own readings",
   assert.match(html, /<dt>Term<\/dt><dd class="num">81<\/dd>/);
   assert.match(html, /<dt>Apply lag<\/dt><dd class="num">0 entries<\/dd>/);
   assert.match(html, /<dt>Protocol<\/dt><dd class="num">5–6<\/dd>/);
-  assert.match(html, /<dt>Snapshots<\/dt><dd class="num">build 9 ok \/ 0 error · install 2 ok \/ 0 error<\/dd>/);
+  assert.match(html, /<dt>Snapshots<\/dt><dd class="num">build 9 ok \/ 0 error · install 2 ok \/ 0 error · DB 2\.1 MB<\/dd>/);
   // The watermark and the applied index have to come from one sample or their
   // difference is not a lag, so both are the direct status's, not the
   // membership projection's separately-fetched index.
