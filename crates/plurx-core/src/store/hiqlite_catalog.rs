@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS files (
     dv_el_present    INTEGER,
     dv_rpu_present   INTEGER,
     video_codec_tag  TEXT,
+    field_order      TEXT,
     max_cll          INTEGER,
     max_fall         INTEGER,
     mastering_max_luminance INTEGER,
@@ -264,8 +265,9 @@ async fn authoritative_dump(client: &TimedClient) -> Result<CatalogTruthDump, St
                     video_codec, video_profile, width, height, bit_depth, hdr, bitrate, \
                     audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, \
                     audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, \
-                    dv_el_present, dv_rpu_present, video_codec_tag, max_cll, max_fall, \
-                    mastering_max_luminance, luminance_source) AS value \
+                    dv_el_present, dv_rpu_present, video_codec_tag, field_order, \
+                    max_cll, max_fall, mastering_max_luminance, luminance_source) \
+                    AS value \
              FROM files ORDER BY id",
         )
         .await?,

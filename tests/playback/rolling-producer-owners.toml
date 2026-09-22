@@ -1638,6 +1638,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
+# 534 -> 536 with S-08: `state.rs` spawns the one leased field-order backfill
+# beside the existing catalogue backfills -- it walks a node-local cursor and
+# writes a column, owning no producer, process or timer -- and `decode_facts.rs`
+# spawns one `#[cfg(test)]` actor in the idet cancellation fixture, which is
+# awaited inside the test that created it.
+# The count above each contribution below is stated against that branch's
+# own base. This row's value is the whole merged tree re-measured after the
+# promotion merge, so it is the sum, not either branch's number.
 # and +1 from S-07's luminance backfill. `run_due_jobs` spawns
 # `backfill_luminance_facts` from the same per-tick block as the Dolby Vision
 # facts and video codec tag backfills beside it, in the same shape: a
@@ -1647,7 +1655,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 544
+expected_occurrences = 546
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2105,6 +2113,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # the outer-deadline arm of the Store result observer, is awaited immediately,
 # and owns no task, process, producer, or replacement policy.
 # 828 -> 833 on the promotion merge, +2 from L-01's per-sink DVR writers:
+# 828 -> 834 on the promotion merge, +2 from L-01's per-sink DVR writers:
 # `tokio::time::timeout(TUNER_READ_TIMEOUT, close)` bounds the writer loop's
 # final flush and `sync_all`, and one
 # `tokio::time::timeout(super::SESSION_DRAIN_TIMEOUT, &mut task)` in
@@ -2126,7 +2135,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 836
+# 828 -> 832 with S-08: one `tokio::time::timeout` bounds the idet verification
+# pass in `decode_facts.rs` against the caller's remaining budget, and three are
+# `#[cfg(test)]` bounds in the cancellation fixture beside it. None of them owns
+# a producer; the idet bound is the caller's deadline, not a new one.
+# The count above each contribution below is stated against that branch's
+# own base. This row's value is the whole merged tree re-measured after the
+# promotion merge, so it is the sum, not either branch's number.
+expected_occurrences = 840
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2253,7 +2269,15 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 130
+# 127 -> 129 with S-08: `decode_facts.rs` builds one `tokio::process::Command`
+# for the bounded idet pass through the startup-snapshotted FFprobe and the held
+# source descriptor, and one `#[cfg(test)]` `std::process::Command` that renders
+# the interlaced fixture. The idet child is `kill_on_drop`, bounded by the
+# caller's deadline and reaped on every exit path.
+# The count above each contribution below is stated against that branch's
+# own base. This row's value is the whole merged tree re-measured after the
+# promotion merge, so it is the sum, not either branch's number.
+expected_occurrences = 132
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2492,7 +2516,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 331
+# 326 -> 327 with S-08: the added `.status()` belongs to the `#[cfg(test)]`
+# fixture renderer in `decode_facts.rs`, which is awaited to completion before
+# the test that built it proceeds.
+# The count above each contribution below is stated against that branch's
+# own base. This row's value is the whole merged tree re-measured after the
+# promotion merge, so it is the sum, not either branch's number.
+expected_occurrences = 332
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -2598,7 +2628,13 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 378
+# 374 -> 375 with S-08: the added `child.wait()` reaps the bounded idet child in
+# `decode_facts.rs` on the ordinary completion path; cancellation and the
+# deadline reach the same reap through its kill-on-drop guard.
+# The count above each contribution below is stated against that branch's
+# own base. This row's value is the whole merged tree re-measured after the
+# promotion merge, so it is the sum, not either branch's number.
+expected_occurrences = 379
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -2704,7 +2740,13 @@ pattern = "kill_on_drop\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 80
+# 77 -> 78 with S-08: the bounded idet child in `decode_facts.rs`. Cancellation,
+# the caller's deadline and an early return all drop it, so no verification pass
+# can outlive the decode-facts call that asked for it.
+# The count above each contribution below is stated against that branch's
+# own base. This row's value is the whole merged tree re-measured after the
+# promotion merge, so it is the sum, not either branch's number.
+expected_occurrences = 81
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

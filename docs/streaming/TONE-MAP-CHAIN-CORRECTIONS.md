@@ -331,8 +331,9 @@ format=yuv420p
 Identity: the plan digest gains `tone_map_peak` (the number and its
 provenance: `cll` | `mdcv` | `default`), and the filter string changes for
 every `ToneMap::Zscale` session, so every CPU-tone-mapped recipe key moves.
-`RESOLVED_TRANSCODE_PLAN_VERSION` is 2 because the plan digest gained fields
-and ordering semantics. `CACHE_RECIPE_VERSION` stays 3; invalidation is by
+`RESOLVED_TRANSCODE_PLAN_VERSION` is 3 because the plan digest gained fields
+and ordering semantics. It was drafted here as 2; S-08's `deinterlace` field
+reached main first and published 2, so this work takes the next revision. `CACHE_RECIPE_VERSION` stays 3; invalidation is by
 the changed plan digest. Encoded-VOD
 renditions on the CPU chain get new keys; existing renditions are untouched.
 The tone-map field already in the digest (`decode.rs:2098-2106`) is

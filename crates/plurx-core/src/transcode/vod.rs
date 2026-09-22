@@ -321,6 +321,7 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main".into()),
             width: Some(640),
             height: Some(360),

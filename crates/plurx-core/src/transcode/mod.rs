@@ -28,11 +28,11 @@ pub use decode::{
     CapabilityStatus, DecodeBackend, DecodeCacheIdentity, DecodeCapabilities, DecodeCapability,
     DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence, DecodeFacts,
     DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
-    DecodeSurfaceContract, DynamicRangeClass, FrameDomain, FrameRate, FrameRateProvenance,
-    OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract, Rational, ResolvedDecode,
-    ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance, SubtitleRendering,
-    ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest,
-    HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
+    DecodeSurfaceContract, Deinterlace, DynamicRangeClass, FrameDomain, FrameRate,
+    FrameRateProvenance, InterlaceVerdict, OutputWidthRule, PlanError, PlanSourceBinding,
+    PresentationContract, Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder,
+    StreamSelectionProvenance, SubtitleRendering, ToneMapPeakSource, TranscodeMediaOptions,
+    TranscodeRequest, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use encoder::{
@@ -966,9 +966,10 @@ fn bitmap_overlay_for_size(
     ))
 }
 
-/// Build the video filter chain: scale (never upscale) → tone-map (if the
-/// source is HDR) → subtitle burn-in. Returns `None` when no filtering is
-/// needed (rare for transcode, but keeps the caller simple).
+/// Build the video filter chain: deinterlace (when required) → scale
+/// (never upscale) → tone-map (if the source is HDR) → subtitle burn-in.
+/// Returns `None` when no filtering is needed (rare for transcode, but keeps
+/// the caller simple).
 fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str) -> String {
     let (peak_nits, peak_source) = source.max_cll.map_or_else(
         || {
@@ -988,6 +989,9 @@ fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str)
         source.hdr.as_deref(),
         source.hdr.is_some(),
         routing_hdr(source),
+        Deinterlace::for_scan_type(crate::domain::ScanType::from_field_order(
+            source.field_order.as_deref(),
+        )),
         (peak_nits, peak_source),
         opts,
         source_path,
@@ -999,6 +1003,7 @@ fn video_filters_for_contract(
     input_dynamic_range: Option<&str>,
     input_is_hdr: bool,
     routing_dynamic_range: Option<&str>,
+    deinterlace: Deinterlace,
     tone_map_peak: (u32, ToneMapPeakSource),
     opts: &TranscodeOptions,
     source_path: &str,
@@ -1019,11 +1024,27 @@ fn video_filters_for_contract(
     // Always give GPU scalers the same explicit even, no-upscale dimensions
     // the CPU path promises. `w=-1` can resolve to an odd NV12 width.
     let gpu_size = output_size;
-    if let Some(gpu) = opts.pipeline.filters(
+    if let Some(mut gpu) = opts.pipeline.filters(
         gpu_size.map(|(w, _)| w),
         gpu_size.map_or(opts.target_height, |(_, h)| h),
         input_dynamic_range,
     ) {
+        // The Dolby Vision and HDR10 software renderers own their entire
+        // colour graph, so they do not fall through to the generic CPU chain
+        // below. Insert bwdif immediately before their scale step: Dolby
+        // Vision still reshapes before resizing, while every special graph
+        // actually applies the deinterlace decision carried by the plan.
+        if deinterlace == Deinterlace::BwdifSendFrame
+            && matches!(
+                opts.pipeline,
+                Pipeline::DoviTonemapx | Pipeline::DoviPassthrough | Pipeline::Hdr10Passthrough
+            )
+        {
+            let scale = gpu
+                .find("scale=")
+                .expect("special software renderers always contain a scale step");
+            gpu.insert_str(scale, "bwdif=mode=send_frame:parity=auto:deint=interlaced,");
+        }
         if (bitmap_burn || text_burn)
             && matches!(opts.pipeline, Pipeline::VppQsv | Pipeline::TonemapVaapi)
         {
@@ -1035,6 +1056,10 @@ fn video_filters_for_contract(
             chain.push(gpu);
         }
         return with_subtitles(chain, opts, source_path);
+    }
+
+    if deinterlace == Deinterlace::BwdifSendFrame {
+        chain.push("bwdif=mode=send_frame:parity=auto:deint=interlaced".to_owned());
     }
 
     // Downscale to target height, keep aspect, even dims, never upscale.
@@ -1578,6 +1603,7 @@ fn hls_args_inner(
                 plan.input_hdr_format(),
                 plan.input_is_hdr(),
                 plan.routing_dynamic_range(),
+                plan.deinterlace(),
                 (
                     plan.options().tone_map_peak_nits,
                     plan.options().tone_map_peak_source,
@@ -2357,6 +2383,7 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),
@@ -2442,6 +2469,16 @@ mod tests {
 
     /// M0 migration fixture: M1 and M2 may change only the cases whose policy
     /// change is named in the decoder plan. Every other token stays stable.
+    ///
+    /// Re-measured once on the promotion merge, for exactly one named policy
+    /// change: S-07's CPU tone-map correction. The three heavy HDR cases moved
+    /// from `tonemap=...:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv` to
+    /// `zscale=p=bt709,tonemap=...:desat=0:peak=10,zscale=t=bt709:m=bt709:\
+    /// r=tv:dither=error_diffusion` — gamut conversion before the tone map,
+    /// the explicit peak in hundreds of nits, and error-diffusion dithering on
+    /// the way back to 8-bit. Every other token in every case is unchanged,
+    /// including S-08's field-order routing, whose sources here are
+    /// progressive and therefore name no deinterlace filter.
     #[test]
     fn decoder_selection_m0_argument_baseline_is_stable() {
         let mut light_h264 = file(None);
@@ -2862,6 +2899,96 @@ mod tests {
         let joined = args.join(" ");
         assert!(joined.contains("tonemap=tonemap=hable"));
         assert!(joined.contains("zscale"));
+    }
+
+    #[test]
+    fn interlaced_file_uses_send_frame_bwdif_before_scale() {
+        let mut source = file(None);
+        source.field_order = Some("tt".into());
+        let joined = hls_args(
+            &source,
+            Encoder::Software,
+            &TranscodeOptions::default(),
+            Pacing::unpaced(),
+            "/tmp/s",
+        )
+        .join(" ");
+        let bwdif = joined
+            .find("bwdif=mode=send_frame:parity=auto:deint=interlaced")
+            .expect("bwdif filter");
+        let scale = joined.find("scale=").expect("scale filter");
+        assert!(bwdif < scale, "deinterlace must precede scale: {joined}");
+
+        source.field_order = Some("progressive".into());
+        let joined = hls_args(
+            &source,
+            Encoder::Software,
+            &TranscodeOptions::default(),
+            Pacing::unpaced(),
+            "/tmp/s",
+        )
+        .join(" ");
+        assert!(!joined.contains("bwdif="), "{joined}");
+    }
+
+    #[test]
+    fn interlaced_special_renderers_apply_bwdif_without_breaking_dolby_vision_order() {
+        for (pipeline, hdr) in [
+            (Pipeline::DoviTonemapx, "dolby_vision"),
+            (Pipeline::DoviPassthrough, "dolby_vision"),
+            (Pipeline::Hdr10Passthrough, "hdr10"),
+        ] {
+            let mut source = file(Some(hdr));
+            source.field_order = Some("tt".into());
+            let joined = hls_args(
+                &source,
+                Encoder::Software,
+                &TranscodeOptions {
+                    pipeline,
+                    ..TranscodeOptions::default()
+                },
+                Pacing::unpaced(),
+                "/tmp/s",
+            )
+            .join(" ");
+            let bwdif = joined
+                .find("bwdif=mode=send_frame:parity=auto:deint=interlaced")
+                .unwrap_or_else(|| panic!("{pipeline:?} omitted bwdif: {joined}"));
+            let scale = joined
+                .find("scale=")
+                .unwrap_or_else(|| panic!("{pipeline:?} omitted scale: {joined}"));
+            assert!(bwdif < scale, "{pipeline:?} scaled before bwdif: {joined}");
+            assert_eq!(
+                joined.matches("bwdif=").count(),
+                1,
+                "{pipeline:?}: {joined}"
+            );
+            if matches!(pipeline, Pipeline::DoviTonemapx | Pipeline::DoviPassthrough) {
+                let reshape = joined
+                    .find("tonemapx=")
+                    .unwrap_or_else(|| panic!("{pipeline:?} omitted reshape: {joined}"));
+                assert!(
+                    reshape < bwdif,
+                    "{pipeline:?} must reshape Dolby Vision before deinterlacing: {joined}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs the shipped ffmpeg; run with PLURX_FFMPEG set"]
+    fn shipped_ffmpeg_deinterlace_fixture_matrix() {
+        let ffmpeg = std::env::var("PLURX_FFMPEG").expect("PLURX_FFMPEG is required");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let status = std::process::Command::new("bash")
+            .arg(root.join("tests/playback/interlace-fixtures.sh"))
+            .env("PLURX_FFMPEG", ffmpeg)
+            .status()
+            .expect("run interlace fixture matrix");
+        assert!(status.success(), "interlace fixture matrix failed");
     }
 
     #[test]
@@ -4266,6 +4393,7 @@ mod index_pipe_tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),

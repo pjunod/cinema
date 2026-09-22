@@ -1315,13 +1315,13 @@ impl FencedPublicationStore for HiqliteAuthStore {
                     video_profile, width, height, bit_depth, hdr, bitrate,
                     audio_streams, subtitle_streams, probe_json, hdr_format, scanned_at,
                     dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present,
-                    video_codec_tag, max_cll, max_fall, mastering_max_luminance,
-                    luminance_source)
+                    video_codec_tag, field_order, max_cll, max_fall,
+                    mastering_max_luminance, luminance_source)
                    SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
                         $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-                        $25, $26, $27, $28 WHERE EXISTS (
-                   SELECT 1 FROM job_leases WHERE resource = $29 AND owner_node_id = $30
-                     AND fence = $31 AND revision = $32 AND expires_at_ms = $33)
+                        $25, $26, $27, $28, $29 WHERE EXISTS (
+                   SELECT 1 FROM job_leases WHERE resource = $30 AND owner_node_id = $31
+                     AND fence = $32 AND revision = $33 AND expires_at_ms = $34)
                  ON CONFLICT(path) DO UPDATE SET
                    item_id = excluded.item_id, size = excluded.size, mtime = excluded.mtime,
                    duration_ms = excluded.duration_ms, container = excluded.container,
@@ -1336,6 +1336,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
                    dv_el_present = excluded.dv_el_present,
                    dv_rpu_present = excluded.dv_rpu_present,
                    video_codec_tag = excluded.video_codec_tag,
+                   field_order = excluded.field_order,
                    max_cll = excluded.max_cll, max_fall = excluded.max_fall,
                    mastering_max_luminance = excluded.mastering_max_luminance,
                    luminance_source = excluded.luminance_source,
@@ -1366,6 +1367,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
                     probe.dolby_vision.el_present.map(i64::from),
                     probe.dolby_vision.rpu_present.map(i64::from),
                     probe.video_codec_tag.as_deref(),
+                    probe.field_order.as_deref(),
                     probe.max_cll,
                     probe.max_fall,
                     probe.mastering_max_luminance,

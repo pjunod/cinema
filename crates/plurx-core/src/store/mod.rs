@@ -151,6 +151,12 @@ ALTER TABLE files ADD COLUMN dv_rpu_present INTEGER;";
 /// explicitly unknown until the bounded stored-probe backfill reaches them.
 const FILES_VIDEO_CODEC_TAG_COLUMN: &str = "ALTER TABLE files ADD COLUMN video_codec_tag TEXT;";
 
+/// The selected playable video's field-order token.
+///
+/// Nullable with no default so the bounded stored-probe backfill can
+/// distinguish rows it has not considered from rows it resolved to the
+/// explicit `unknown` token.
+const FILES_FIELD_ORDER_COLUMN: &str = "ALTER TABLE files ADD COLUMN field_order TEXT;";
 /// Source luminance facts used by the CPU tone-map recipe. Nullable values
 /// distinguish unknown rows from a completed probe whose `luminance_source`
 /// is `none`.
@@ -841,6 +847,19 @@ pub struct MissingVideoCodecTag {
     pub probe_json: String,
 }
 
+/// One exact stored-probe snapshot eligible for the field-order backfill.
+///
+/// The source identity fields fence the update against a concurrent rescan in
+/// exactly the same way as [`MissingVideoCodecTag`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MissingFieldOrder {
+    pub id: i64,
+    pub path: String,
+    pub size: i64,
+    pub mtime: i64,
+    pub probe_json: String,
+}
+
 /// Result of applying an externally supplied series identifier to one show.
 /// The operation is deliberately narrower than general metadata updates: a
 /// known, different provider ID is diagnostic evidence, never permission to
@@ -1496,6 +1515,9 @@ pub mod keys {
     /// legacy output height remains separate for mixed-version sessions.
     pub const LIVE_TV_MAX_OUTPUT_HEIGHT: &str = "live_tv.max_output_height";
     pub const LIVE_TV_OUTPUT_HEIGHT: &str = "live_tv.output_height";
+    /// Operator-selected deinterlace cadence. This is an advisory Developer
+    /// choice, not part of the tuner ownership/generation tuple.
+    pub const LIVE_TV_DEINTERLACE_OUTPUT: &str = "live_tv.deinterlace_output";
     pub const LIVE_TV_CONFIG_GENERATION: &str = "live_tv.config_generation";
     /// Persisted owner-handoff safety barrier. These are internal state, not
     /// operator-editable settings: a replacement owner admits only after the
@@ -1870,6 +1892,11 @@ pub mod keys {
     pub const JOB_VIDEO_CODEC_TAG_BACKFILL_DONE: &str = "jobs.video_codec_tag_backfilled";
     /// Node-local strictly-after cursor for the bounded sample-entry walk.
     pub const JOB_VIDEO_CODEC_TAG_BACKFILL_CURSOR: &str = "jobs.video_codec_tag_backfill_cursor";
+    /// Set after the bounded stored-probe walk has assigned every pre-column
+    /// file either its reporter token or the explicit `unknown` value.
+    pub const JOB_FIELD_ORDER_BACKFILL_DONE: &str = "jobs.field_order_backfilled";
+    /// Node-local strictly-after cursor for the field-order backfill.
+    pub const JOB_FIELD_ORDER_BACKFILL_CURSOR: &str = "jobs.field_order_backfill_cursor";
     pub const JOB_LUMINANCE_BACKFILL_DONE: &str = "jobs.luminance_backfilled";
     pub const JOB_LUMINANCE_BACKFILL_CURSOR: &str = "jobs.luminance_backfill_cursor";
     /// Per-library permanent Profile 7 conversion policy, encoded as a JSON
@@ -2836,6 +2863,20 @@ pub trait MediaStore: Send + Sync + 'static {
         &self,
         candidate: &MissingVideoCodecTag,
         video_codec_tag: &str,
+    ) -> Result<bool, StoreError>;
+    /// Rows whose retained probe document can populate the additive field
+    /// order column, strictly after `after_id` and bounded.
+    async fn files_missing_field_order(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingFieldOrder>, StoreError>;
+    /// Write the recovered token only while every source and probe identity
+    /// field still matches the snapshot returned above.
+    async fn set_file_field_order(
+        &self,
+        candidate: &MissingFieldOrder,
+        field_order: &str,
     ) -> Result<bool, StoreError>;
     /// HDR rows whose additive luminance columns have not been classified.
     /// The same identity projection as the codec-tag backfill keeps the

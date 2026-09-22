@@ -187,6 +187,7 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: None,
             width: Some(3840),
             height: Some(2160),
@@ -483,12 +484,36 @@ mod tests {
     /// the next change explicit: nothing may move this value without saying
     /// why. The composition itself is proven by the field-by-field mutation
     /// table above, which is where a missing field is actually caught.
+    ///
+    /// Re-measured twice since it was published, and here is the whole reason.
+    /// The published `845ecea3…` was taken at `RESOLVED_TRANSCODE_PLAN_VERSION
+    /// = 1`. The interlace work carries the source's `field_order` into
+    /// `FactsDigest`, which is inside `plan_digest`, and bumps that
+    /// serialization contract to 2 exactly as its own doc comment requires —
+    /// so the `plan` field of this key is a different string for the same
+    /// fixture, by design, and every v1 entry misses rather than being served
+    /// under a name that no longer describes it. That move published
+    /// `c8f935af…`. The `arate` field beside `aaction`, which pins lossy audio
+    /// to 48 kHz, entered the digest in the same commit that published
+    /// `845ecea3…`, so it is already inside that value and contributed
+    /// nothing to that move.
+    ///
+    /// `d42efd6b…` is the promotion merge that brings the tone-map work
+    /// alongside the interlace work. Its `tone_map_peak` pair — the peak in
+    /// nits and its provenance — is fed into `plan_digest` beside
+    /// `deinterlace`, and the serialization contract goes to 3 for the reason
+    /// its own constant states: 2 is already published and already means
+    /// something else. So the `plan` field is a different string again, for
+    /// the same fixture, by design. Nothing else that feeds the hash changed:
+    /// `CACHE_RECIPE_VERSION` is still 4, `PipelineDigest` still feeds only the
+    /// ffmpeg build, muxer and segment policy, and `plan_namespace` is
+    /// unchanged.
     #[test]
     fn planned_v4_recipe_hash_is_a_golden_fixture() {
         let (d, f, o) = (digest(), media(), TranscodeOptions::default());
         assert_eq!(
             hash_of(&d, &f, &o, Encoder::Software, false),
-            "845ecea396f201726cd6161c19c69330802f6a6cc6921af9ed26d0fc8fab270b"
+            "d42efd6bd1f7bd3c769b498f32d0f5ebcb0892e2d52957663c670d53503405de"
         );
     }
 

@@ -100,7 +100,10 @@ const DVR_EVENT_SCHEMA_VERSION: i64 = 39;
 const VIDEO_CODEC_TAG_SCHEMA_VERSION: i64 = 40;
 const CLASSIFICATION_SCHEMA_VERSION: i64 = 41;
 const CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION: i64 = 42;
-const LUMINANCE_SCHEMA_VERSION: i64 = 43;
+const FIELD_ORDER_SCHEMA_VERSION: i64 = 43;
+// S-07 drafted the luminance columns as v43; S-08's field-order column reached
+// main first, so the luminance step appends after it.
+const LUMINANCE_SCHEMA_VERSION: i64 = 44;
 pub const AUTH_SCHEMA_VERSION: i64 = LUMINANCE_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
@@ -143,7 +146,8 @@ const DVR_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERS
 const DVR_EVENT_SCHEMA_MIGRATION_SOURCE: i64 = SUBJECT_SCHEMA_VERSION;
 const VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE: i64 = DVR_EVENT_SCHEMA_VERSION;
 const CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE: i64 = CLASSIFICATION_SCHEMA_VERSION;
-const LUMINANCE_SCHEMA_MIGRATION_SOURCE: i64 = CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION;
+const FIELD_ORDER_SCHEMA_MIGRATION_SOURCE: i64 = CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION;
+const LUMINANCE_SCHEMA_MIGRATION_SOURCE: i64 = FIELD_ORDER_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -2547,6 +2551,26 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(FIELD_ORDER_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (super::FILES_FIELD_ORDER_COLUMN, params!()),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    FIELD_ORDER_SCHEMA_VERSION,
+                                    now,
+                                    FIELD_ORDER_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(FIELD_ORDER_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(LUMINANCE_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
                     let mut statements = super::FILES_LUMINANCE_COLUMNS
@@ -4365,6 +4389,7 @@ fn schema_migration_action(
         | VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE
         | VIDEO_CODEC_TAG_SCHEMA_VERSION
         | CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE
+        | FIELD_ORDER_SCHEMA_MIGRATION_SOURCE
         | LUMINANCE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
@@ -6309,18 +6334,27 @@ mod tests {
             "v41 must advance exactly one step to the content-analysis repair schema"
         );
         assert_eq!(
-            LUMINANCE_SCHEMA_MIGRATION_SOURCE, CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION,
-            "the luminance migration must start from the exact v42 shape"
+            FIELD_ORDER_SCHEMA_MIGRATION_SOURCE, CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION,
+            "the field-order migration must start from the exact v42 shape"
+        );
+        assert_eq!(
+            FIELD_ORDER_SCHEMA_MIGRATION_SOURCE + 1,
+            FIELD_ORDER_SCHEMA_VERSION,
+            "v42 must advance exactly one step to the field-order schema"
+        );
+        assert_eq!(
+            LUMINANCE_SCHEMA_MIGRATION_SOURCE, FIELD_ORDER_SCHEMA_VERSION,
+            "the luminance migration must start from the exact v43 shape"
         );
         assert_eq!(
             LUMINANCE_SCHEMA_MIGRATION_SOURCE + 1,
             LUMINANCE_SCHEMA_VERSION,
-            "v42 must advance exactly one step to the luminance schema"
+            "v43 must advance exactly one step to the luminance schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 38,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 39,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v43 step"
+            "this implementation contains every additive v5→v44 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
