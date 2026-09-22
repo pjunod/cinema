@@ -102,6 +102,9 @@ class ArchitectureReviewStatusPageCase(unittest.TestCase):
         self.assertIn('mode: snapshot.complete ? "available" : "truncated"', page)
         self.assertIn("complete: snapshot.complete", page)
         self.assertIn("overlayAbsenceText(state.overlay)", page)
+        self.assertIn("effectiveStatus(row.Status, pulls, state.overlay).group", page)
+        self.assertIn("metric(labels.livePlans, livePlans)", page)
+        self.assertGreaterEqual(page.count("renderSummary();"), 3)
         self.assertIn("the canonical board remains complete", page)
         load_board = page[page.index("async function loadBoard()") :]
         self.assertLess(

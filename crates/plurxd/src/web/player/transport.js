@@ -770,8 +770,37 @@ function skipMarker(m,automatic=false){
   PLAYER._lastMarkerSkipEndMs=m.end_ms;
   seekTo(m.end_ms/1000);
 }
-// Seek that works for every method: direct play seeks natively; remux/transcode
-// restart the server-side stream at the new offset (the stream is one-directional).
+function playbackSeekBufferedRangesMs(v,p){
+  const ranges=[];
+  const offsetMs=(Number(p&&p.offset)||0)*1000;
+  try{
+    for(let index=0;v&&v.buffered&&index<v.buffered.length;index+=1){
+      const from=offsetMs+v.buffered.start(index)*1000;
+      const through=offsetMs+v.buffered.end(index)*1000;
+      if(Number.isFinite(from)&&Number.isFinite(through)&&through>=from)
+        ranges.push({from,through});
+    }
+  }catch(e){}
+  return ranges;
+}
+function playbackSeekPublishedRangeMs(p){
+  if(!p||!p.hls||!p.hls.levels) return null;
+  const level=p.hls.levels[p.hls.currentLevel];
+  const details=level&&level.details, fragments=details&&details.fragments;
+  if(!details||!fragments||!fragments.length) return null;
+  const offsetMs=(Number(p.offset)||0)*1000;
+  const from=offsetMs+Number(fragments[0].start)*1000;
+  const through=offsetMs+Number(details.edge)*1000;
+  const targetdurationMs=Math.max(0,Number(details.targetduration)||0)*1000;
+  if(!Number.isFinite(from)||!Number.isFinite(through)||through<from) return null;
+  return {range:{from,through},holdbackMs:targetdurationMs};
+}
+function playbackSeekBufferCovers(v,p,targetMs){
+  return playbackSeekBufferedRangesMs(v,p).some(range=>
+    targetMs>=range.from&&targetMs<=range.through);
+}
+// Seek that works for every method: direct/VOD and safe rolling/progressive
+// destinations seek the attached element; everything else reopens at film time.
 async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true,
   recoveryEpisode=null){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
@@ -835,11 +864,45 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   // issued two media mutations and let their completion events race.
   await new Promise(done=>setTimeout(done,100));
   if(!PLAYER||PLAYER.controlSeek!==seekIntent||hasPendingPlaybackOpen(PLAYER)) return;
-  // Direct play and film-addressed VOD seek without opening a new session.
-  if(!forceReopen && (PLAYER.method==='direct_play' || PLAYER.vod)){
-    try{ v.currentTime=Math.max(0,targetSec-(PLAYER.offset||0)); }catch(e){}
-    markPlaybackControlSeekExecuted(PLAYER,targetSec);
-    playerActivity(); return;
+  const me=PLAYER;
+  const bufferedMs=playbackSeekBufferedRangesMs(v,me);
+  const published=playbackSeekPublishedRangeMs(me);
+  const route=PlaybackPolicy.seekRoute({
+    method:me.method,copyHls:!!me.copyHls,vod:!!me.vod,forceReopen,
+    changing:!!me.pendingMediaChange,targetMs:targetSec*1000,bufferedMs,
+    publishedMs:published&&published.range,
+    holdbackMs:published&&published.holdbackMs,
+  });
+  if(route.route==='local'){
+    const attachment=me.mediaAttachment, atMs=route.atMs;
+    let settled=false, timer=null;
+    const current=()=>PLAYER===me&&me.mediaAttachment===attachment&&me.controlSeek===seekIntent;
+    const cleanup=()=>{
+      if(timer!=null) clearTimeout(timer);
+      try{v.removeEventListener('seeked',onSeeked);}catch(e){}
+    };
+    const onSeeked=()=>{ if(!current()) return; settled=true; cleanup(); };
+    try{v.addEventListener('seeked',onSeeked,{once:true});}catch(e){}
+    try{ v.currentTime=Math.max(0,atMs/1000-(me.offset||0)); }catch(e){}
+    markPlaybackControlSeekExecuted(me,targetSec);
+    clientLog({level:'info',event:'seek_local',
+      detail:`${me.copyHls?'copy_hls':me.method||'unknown'}:${route.basis}`,
+      message:'seek stayed on the attached media'});
+    armStall(targetSec,PlaybackPolicy.HLS_STARTUP.seek_deadline_ms);
+    playerActivity();
+    if(route.basis==='direct'||route.basis==='vod') { cleanup(); return; }
+    timer=setTimeout(()=>{
+      if(settled||!current()) { cleanup(); return; }
+      if(playbackSeekBufferCovers(v,me,atMs)) { cleanup(); return; }
+      cleanup();
+      clientLog({level:'warn',event:'seek_local_fallback',
+        detail:me.copyHls?'copy_hls':me.method||'unknown',
+        message:'local seek did not settle; reopening at the same target'});
+      Promise.resolve(seekTo(
+        targetSec,true,autoHeightOverride,viewerInitiated,recoveryEpisode
+      )).catch(()=>{});
+    },PlaybackPolicy.SEEK_LOCAL_SETTLE_MS);
+    return;
   }
   // A retry must reconnect, not repeat the local seek that ordinary direct and
   // cached-VOD navigation uses. The old Try again button did exactly that: it

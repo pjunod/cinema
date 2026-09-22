@@ -48,6 +48,9 @@ pub struct ServerInfo {
     /// server's initial playback decision. Public because every signed-in web
     /// viewer needs the same node-wide playback policy.
     pub playback_auto_abr: bool,
+    /// Whether Android television clients may request a same-resolution mode
+    /// matching the delivery cadence.
+    pub display_mode_match: bool,
 }
 
 /// GET /api/v1/server — public; drives the client's setup-vs-login decision.
@@ -70,6 +73,11 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         .get_setting(keys::PLAYBACK_AUTO_ABR)
         .await?
         .is_some_and(|value| value.trim() == "1");
+    let display_mode_match = state
+        .store
+        .get_setting(keys::PLAYBACK_DISPLAY_MODE_MATCH)
+        .await?
+        .is_some_and(|value| value.trim() == "1");
     Ok(Json(ServerInfo {
         name,
         version: crate::version::SEMVER,
@@ -82,6 +90,7 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         setup_required,
         android_app,
         playback_auto_abr,
+        display_mode_match,
     }))
 }
 
@@ -607,6 +616,11 @@ pub struct ClientLog {
     pub vcodec: Option<String>,
     /// Stream URL (query/token stripped by the client).
     pub src: Option<String>,
+    /// Source position for an uncaught browser error.
+    pub line: Option<u64>,
+    pub col: Option<u64>,
+    /// Browser stack, retained only as a bounded single log-line field.
+    pub stack: Option<String>,
     /// Extra detail (hls.js error type, stall verdict, …).
     pub detail: Option<String>,
     /// Browser label the client computed ("Safari" | "Chrome" | …).
@@ -1471,8 +1485,17 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
     if let Some(id) = ev.file_id {
         line.push_str(&format!(" file={id}"));
     }
-    if let Some(s) = field(&ev.src, 160) {
+    if let Some(s) = one_line_field(&ev.src, 160) {
         line.push_str(&format!(" src={s}"));
+    }
+    if let Some(source_line) = ev.line {
+        line.push_str(&format!(" line={source_line}"));
+    }
+    if let Some(source_col) = ev.col {
+        line.push_str(&format!(" col={source_col}"));
+    }
+    if let Some(stack) = one_line_field(&ev.stack, 2_048) {
+        line.push_str(&format!(" stack={stack}"));
     }
     if let Some(d) = field(&ev.detail, 200) {
         line.push_str(&format!(" [{d}]"));
@@ -1569,6 +1592,7 @@ pub struct SettingsDto {
     pub live_tv_max_sessions: u8,
     pub live_tv_output_height: u16,
     pub live_tv_max_output_height: u16,
+    pub live_tv_deinterlace_output: String,
     pub live_tv_config_generation: i64,
     pub live_tv_transition_from_owner_node_id: String,
     pub live_tv_transition_drain_before: i64,
@@ -1737,6 +1761,9 @@ pub struct SettingsDto {
     /// Let the web client's Auto controller change rungs after playback starts.
     /// Explicit opt-in; missing is false.
     pub playback_auto_abr: bool,
+    /// Android television same-resolution refresh matching. The Developer
+    /// readiness rows explain current observations but never gate this switch.
+    pub playback_display_mode_match: bool,
     /// How many sessions may hold a hardware encoder at once
     /// (`transcode.max_hw_sessions`), and how many threads the software pool
     /// may use (`transcode.software_pool_threads`).
@@ -1875,6 +1902,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         setting(keys::PLAYBACK_NETWORK_PRIORS).is_some_and(|value| value.trim() == "1");
     let playback_auto_abr =
         setting(keys::PLAYBACK_AUTO_ABR).is_some_and(|value| value.trim() == "1");
+    let playback_display_mode_match =
+        setting(keys::PLAYBACK_DISPLAY_MODE_MATCH).is_some_and(|value| value.trim() == "1");
     // One parser owns the stored string. Three copies of this negated match
     // existed — here, in the preparer, and at the offline API boundary — and
     // none of them trimmed or folded case, so a hand-edited ` OFF ` read as
@@ -1970,6 +1999,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         live_tv_max_sessions: live_tv.max_sessions,
         live_tv_output_height: live_tv.output_height,
         live_tv_max_output_height: live_tv.max_output_height,
+        live_tv_deinterlace_output: live_tv.deinterlace_output.as_str().to_owned(),
         live_tv_config_generation: live_tv.generation,
         live_tv_transition_from_owner_node_id: live_tv.transition_from_owner_node_id,
         live_tv_transition_drain_before: live_tv.transition_drain_before,
@@ -2065,6 +2095,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         telemetry_retain_days,
         playback_network_priors,
         playback_auto_abr,
+        playback_display_mode_match,
         transcode_max_hw_sessions,
         transcode_software_pool_threads,
         offline_enabled,
@@ -2212,6 +2243,10 @@ pub struct UpdateSettings {
     /// Advisory quality ceiling for subsequent tunes. Zero preserves source
     /// resolution whenever the client can accept it.
     pub live_tv_max_output_height: Option<u16>,
+    /// Advisory output cadence for the software Live TV deinterlacer. This is
+    /// deliberately outside the tuner generation tuple and remains editable
+    /// while Live TV is enabled.
+    pub live_tv_deinterlace_output: Option<String>,
     pub live_tv_config_generation: Option<i64>,
     /// Programme-guide selection. Information settings, not tuner settings:
     /// they ride the same generation CAS but stay editable while Live TV is
@@ -2309,6 +2344,7 @@ pub struct UpdateSettings {
     pub telemetry_retain_days: Option<i64>,
     pub playback_network_priors: Option<bool>,
     pub playback_auto_abr: Option<bool>,
+    pub playback_display_mode_match: Option<bool>,
     /// Encoder capacity. Bounded rather than free-form, because both numbers
     /// buy hardware that does not exist if they are wrong: a hardware cap
     /// above the encoders a node has admits sessions that then fail at
@@ -2421,6 +2457,7 @@ impl UpdateSettings {
             || self.analysis_backoff_max_secs.is_some()
             || self.subtitle_window_secs.is_some()
             || self.subtitle_not_ready_503.is_some()
+            || self.live_tv_deinterlace_output.is_some()
             || self.default_audio_lang.is_some()
             || self.default_sub_lang.is_some()
             || self.sub_mode.is_some()
@@ -2443,6 +2480,7 @@ impl UpdateSettings {
             || self.telemetry_retain_days.is_some()
             || self.playback_network_priors.is_some()
             || self.playback_auto_abr.is_some()
+            || self.playback_display_mode_match.is_some()
             || self.transcode_max_hw_sessions.is_some()
             || self.transcode_software_pool_threads.is_some()
             || self.offline_enabled.is_some()
@@ -2617,6 +2655,7 @@ pub async fn update_settings(
             max_output_height: req
                 .live_tv_max_output_height
                 .unwrap_or(current.max_output_height),
+            deinterlace_output: current.deinterlace_output,
             guide_source,
             xmltv_url,
             guide_hours: req.live_tv_guide_hours.unwrap_or(current.guide_hours),
@@ -2682,6 +2721,16 @@ pub async fn update_settings(
     } else {
         None
     };
+
+    let live_tv_deinterlace_output = req
+        .live_tv_deinterlace_output
+        .as_deref()
+        .map(|value| {
+            crate::live_tv_delivery::LiveDeinterlaceOutput::parse(value).ok_or_else(|| {
+                ApiError::BadRequest("live_tv_deinterlace_output must be 'field' or 'frame'".into())
+            })
+        })
+        .transpose()?;
 
     if req
         .dv_disk_convert_parallel
@@ -3399,6 +3448,12 @@ pub async fn update_settings(
             .put_setting(keys::DV_CONVERT, if on { "1" } else { "0" })
             .await?;
     }
+    if let Some(output) = live_tv_deinterlace_output {
+        state
+            .store
+            .put_setting(keys::LIVE_TV_DEINTERLACE_OUTPUT, output.as_str())
+            .await?;
+    }
     if let Some(on) = req.vod_index_cluster_cache {
         state
             .store
@@ -3506,6 +3561,15 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::PLAYBACK_AUTO_ABR, if enabled { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(enabled) = req.playback_display_mode_match {
+        state
+            .store
+            .put_setting(
+                keys::PLAYBACK_DISPLAY_MODE_MATCH,
+                if enabled { "1" } else { "0" },
+            )
             .await?;
     }
     // Keep the ordinary offline-card values in one transaction. Disabling is
@@ -4772,6 +4836,17 @@ fn render_passive_raft_metrics(
     if let Some(snapshot) = view.snapshot_metrics {
         render_snapshot_metrics(&mut out, snapshot);
     }
+    if let Some(bytes) = view.state_machine_bytes {
+        out.push_str(&format!(
+            "# HELP plurx_raft_state_machine_bytes Bytes occupied by each fixed local Raft state-machine component.\n\
+             # TYPE plurx_raft_state_machine_bytes gauge\n\
+             plurx_raft_state_machine_bytes{{file=\"db\"}} {}\n\
+             plurx_raft_state_machine_bytes{{file=\"wal\"}} {}\n\
+             plurx_raft_state_machine_bytes{{file=\"snapshots\"}} {}\n\
+             plurx_raft_state_machine_bytes{{file=\"logs\"}} {}\n",
+            bytes.db, bytes.wal, bytes.snapshots, bytes.logs,
+        ));
+    }
     out
 }
 
@@ -5018,9 +5093,12 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
         plurx_core::store::prometheus_store_operations(),
+        crate::store_result::prometheus(),
+        plurx_core::scan::prometheus_scan_walk(),
+        plurx_core::metadata::prometheus_provider_requests(),
         // Stays at zero on a healthy node and on an unclustered one. It moves
         // only when this process declined the cluster's singleton work because
         // it could not read committed membership — a state nothing else in
@@ -5030,6 +5108,7 @@ pub(crate) async fn metrics(
         super::internal_activity::prometheus_cluster_activity(),
         super::prometheus_handler_deadlines(),
         crate::ffmpeg::engine_attestation_prometheus(),
+        crate::state::fragment_index_validation_prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus();
@@ -5053,6 +5132,7 @@ pub(crate) async fn metrics(
          # TYPE plurx_notify_received_total counter\n\
          plurx_notify_received_total {notifications}\n"
     ));
+    scans.push_str(&plurx_core::scan::prometheus_probe_outcomes());
 
     let body = format!(
         "# HELP plurx_build_info Build information.\n\
@@ -5064,7 +5144,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}",
+        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
@@ -5078,6 +5158,7 @@ pub(crate) async fn metrics(
         // two comparisons this server can make. Zero is the number that says
         // every scan in this library was written by the build serving it.
         probe_reporter_metrics = crate::ffmpeg::reporter_drift_prometheus(),
+        interlace_metrics = crate::decode_facts::interlace_prometheus(),
         // Node-wide statics, so this reads no lock a live segment GET can
         // hold and no `VodServe` handle that a cluster boot may have replaced.
         blocked_get_metrics = state.blocked_gets.prometheus(),
@@ -5098,6 +5179,16 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn display_mode_setting_is_an_independent_advisory_switch() {
+        let request: UpdateSettings = serde_json::from_value(serde_json::json!({
+            "playback_display_mode_match": true
+        }))
+        .expect("display-mode setting");
+        assert_eq!(request.playback_display_mode_match, Some(true));
+        assert!(request.has_non_live_tv_update());
+    }
 
     #[test]
     fn partial_coverage_preserves_legacy_settings_facts_and_reports_the_enabled_policy() {
@@ -5714,6 +5805,12 @@ mod tests {
                 last_build: None,
                 last_install: None,
             }),
+            state_machine_bytes: Some(plurx_core::cluster::migration::status::StateMachineBytes {
+                db: 10,
+                wal: 20,
+                snapshots: 30,
+                logs: 40,
+            }),
         });
 
         assert!(rendered.contains("plurx_raft_metric_sample_valid{source=\"local\"} 1"));
@@ -5741,6 +5838,10 @@ mod tests {
         assert!(rendered.contains(
             "plurx_raft_snapshot_seconds_sum{operation=\"build\",outcome=\"ok\"} 1.250000000"
         ));
+        assert!(rendered.contains("plurx_raft_state_machine_bytes{file=\"db\"} 10"));
+        assert!(rendered.contains("plurx_raft_state_machine_bytes{file=\"wal\"} 20"));
+        assert!(rendered.contains("plurx_raft_state_machine_bytes{file=\"snapshots\"} 30"));
+        assert!(rendered.contains("plurx_raft_state_machine_bytes{file=\"logs\"} 40"));
         assert!(!rendered.contains("node_id"));
         assert!(!rendered.contains("leader_id"));
 
@@ -5773,6 +5874,7 @@ mod tests {
                 watermark_local_reads_supported: true,
                 watermark_errors: 1,
                 snapshot_metrics: None,
+                state_machine_bytes: None,
             }
         });
         assert!(stale.contains("plurx_raft_metric_sample_valid{source=\"watermark\"} 0"));
@@ -5794,6 +5896,7 @@ mod tests {
             watermark_local_reads_supported: false,
             watermark_errors: 0,
             snapshot_metrics: None,
+            state_machine_bytes: None,
         });
         assert!(absent.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
         assert!(!absent.contains("plurx_raft_metric_sample_age_seconds"));
@@ -5814,6 +5917,9 @@ mod tests {
             file_id: None,
             vcodec: None,
             src: None,
+            line: None,
+            col: None,
+            stack: None,
             detail: None,
             ua: None,
             attempt: None,
@@ -5833,6 +5939,23 @@ mod tests {
             delivered_dv_profile: None,
             declared_dv_profiles: None,
         }
+    }
+
+    #[test]
+    fn client_log_error_report_fields_are_bounded() {
+        let mut event = beacon("client_error", 0);
+        event.src = Some("/assets/core/cards.js\nforged?token=secret".into());
+        event.line = Some(17);
+        event.col = Some(9);
+        event.stack = Some(format!("{}\nforged", "x".repeat(3_000)));
+        let line = client_log_line(&event, 0);
+        assert!(line.contains("src=/assets/core/cards.jsforged?token=secret"));
+        assert!(line.contains(" line=17 col=9 stack="));
+        assert!(!line.contains('\n'));
+        assert!(
+            line.chars().count() < 2_300,
+            "bounded stack keeps one log line bounded"
+        );
     }
 
     /// The accusation is printed where a delivery actually failed, and the
@@ -6197,6 +6320,8 @@ mod tests {
             user_name: "not persisted".into(),
             target_height: 1080,
             encoder: "qsv",
+            tone_map_peak_nits: None,
+            tone_map_peak_source: None,
             started_unix: 0,
             idle_seconds: 0,
             last_request: "segment",

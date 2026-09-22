@@ -523,7 +523,13 @@ impl ScopedKey {
             return Err(ApiError::Forbidden);
         }
         if key_activity_refresh_due(&key, unix_seconds()) {
-            let _ = state.store.touch_api_key(key.id).await;
+            // Best-effort activity freshness: authentication already
+            // succeeded, and a later request retries the bounded refresh.
+            crate::store_result::observe(
+                crate::store_result::Operation::TouchApiKey,
+                crate::store_result::Discard::BestEffort,
+                state.store.touch_api_key(key.id).await,
+            );
         }
         Ok(ScopedKey(key))
     }

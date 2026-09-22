@@ -162,6 +162,7 @@ private data class Plan(
     override val mode: String,
     override val requiresHls: Boolean,
     override val sourceHeight: Int?,
+    override val sourceFrameRate: Double?,
     override val aac: Boolean,
     override val preserveDolbyVision: Boolean,
     override val deliveredDynamicRange: String?,
@@ -246,6 +247,7 @@ private suspend fun loadPlan(
             // promise is made of. The item's file row is the fallback for a
             // server too old to send `source`.
             sourceHeight = (decision.source?.height ?: file?.height)?.toInt(),
+            sourceFrameRate = parseFrameRateRational(decision.source?.frame_rate),
             aac = decision.delivery?.aac ?: decision.transcode_audio,
             // Direct delivery has no remux-specific field, but the flattened
             // decision still says whether these exact source bytes are DV. Keep
@@ -736,6 +738,7 @@ private fun PlayerContent(
     val canUsePip = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
         context.packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
     val scope = rememberCoroutineScope()
+    val displayModeMatcher = remember(activity) { activity?.let(::DisplayModeMatcher) }
     val preferences by vm.preferences.collectAsStateWithLifecycle()
     val controller = remember(plan) {
         // The decision and its session body must describe the same quality,
@@ -750,6 +753,8 @@ private fun PlayerContent(
             playbackIntent,
             vm,
             scope,
+            displayModeMatcher = displayModeMatcher,
+            displayModeMatchEnabled = Session.displayModeMatch,
             initialAudioOffsetMs = audioOffsetMs,
             retainedAudio = retainedAudio,
             retainedSubtitle = retainedSubtitle,
@@ -2308,7 +2313,15 @@ internal fun playbackInfoRows(
         InfoRow("decode_resolution", "Playing resolution", "NOW DECODING", AllInfoModes, details.decodeResolution ?: "Not reported"),
         InfoRow("stream_format", "Stream format", "NOW DECODING", StandardAndDebug, details.playingVideo ?: "Not reported"),
         InfoRow("device_audio", "Device audio output", "NOW DECODING", StandardAndDebug, "Not reported"),
-        InfoRow("dynamic_range", "Dynamic range", "NOW DECODING", StandardAndDebug, details.dynamicRange, placement = "notes"),
+        InfoRow(
+            "dynamic_range",
+            "Dynamic range",
+            "NOW DECODING",
+            StandardAndDebug,
+            details.dynamicRange,
+            note = toneMapPeakSummary(status),
+            placement = "notes",
+        ),
         InfoRow("decode_audio", "Stream audio track", "NOW DECODING", StandardAndDebug, details.playingAudio, placement = "notes"),
         InfoRow("frames", "Frames", "NOW DECODING", StandardAndDebug, details.frames, tone = videoHealthTone(details.videoHealth)),
         InfoRow(
@@ -2721,6 +2734,17 @@ internal fun dynamicRangeSummary(
             reason.contains("tone", ignoreCase = true)
     } ?: "${dynamicRangeLabel(source)} source is not what this session is putting on screen"
     return "${dynamicRangeLabel(onScreen)} — $why"
+}
+
+internal fun toneMapPeakSummary(status: PlaybackSessionStatus?): String? {
+    val nits = status?.tone_map_peak_nits?.takeIf { it > 0 } ?: return null
+    val provenance = when (status.tone_map_peak_source?.lowercase(Locale.US)) {
+        "cll" -> "source MaxCLL"
+        "mdcv" -> "source mastering metadata"
+        "default" -> "policy default"
+        else -> return null
+    }
+    return "Tone-map peak ${String.format(Locale.US, "%,d", nits)} nits · $provenance"
 }
 
 private fun videoFormatSummary(format: Format?): String? {

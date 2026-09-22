@@ -40,7 +40,11 @@ class KnownRedContractTest(unittest.TestCase):
 
     def test_every_checked_in_entry_is_current_and_ignored(self):
         ignored = ignored_tests(ROOT)
-        self.assertEqual(len(ignored), 11)
+        # S-01 adds two reasoned ffmpeg fixture ignores to the P-01 baseline.
+        # S-08 adds two more of the same shape: the deinterlace argv fixture
+        # matrix and the descriptor-bound idet pass, each of which needs the
+        # shipped ffmpeg or ffprobe named in its own ignore reason.
+        self.assertEqual(len(ignored), 15)
         self.assertTrue(all(item.reason for item in ignored))
         self.assertTrue(all(item.path in item.identity for item in ignored))
         self.assertTrue(all(item.cargo_name in item.identity for item in ignored))
@@ -65,6 +69,27 @@ fn held_case() {}
             self.assertEqual(len(ignored), 1)
             self.assertEqual(ignored[0].cargo_name, "held_case")
             self.assertEqual(ignored[0].reason, "owned reason")
+
+    def test_literal_delimiters_cannot_unbalance_a_module_or_attribute(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self._crate(
+                root,
+                r'''
+mod suite {
+    const OPEN: &[u8] = b"{";
+    const CLOSE: &str = r#"}"#;
+
+    #[test]
+    #[ignore = "owned, reason"]
+    fn held_case() {}
+}
+''',
+            )
+            ignored = ignored_tests(root)
+            self.assertEqual(len(ignored), 1)
+            self.assertEqual(ignored[0].cargo_name, "suite::held_case")
+            self.assertEqual(ignored[0].reason, "owned, reason")
 
     def test_bare_or_empty_ignore_reason_fails_closed(self):
         for attribute in (

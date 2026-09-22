@@ -59,14 +59,15 @@ use plurx_core::segplan::{
 };
 use plurx_core::store::{
     analysis_backoff_ms, cluster_fragment_index_generation_key, cluster_fragment_index_key,
-    AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryQuery, ArtworkRepairFence,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
-    DvConversionMode, DvConversionState, DvRecoveryGuardState, IdentityRepairOutcome, LibraryStore,
-    MediaStore, NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
-    QueueDvConversionOutcome, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome,
-    SqliteStore, Store, ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS,
-    ANALYSIS_METRIC_PRIORITIES, ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS,
-    DV_CONVERSION_LEDGER_READ_MAX, DV_RECOVERY_GUARD_READ_MAX,
+    requeue_cluster_fragment_index_after_no_holder, AnalysisHistoryCursor, AnalysisHistoryFilter,
+    AnalysisHistoryQuery, ArtworkRepairFence, ClusterFragmentIndexArtifact,
+    ClusterFragmentIndexJob, ClusterFragmentIndexLocation, DvConversionMode, DvConversionState,
+    DvRecoveryGuardState, IdentityRepairOutcome, LibraryStore, MediaStore, NewAnalysisRequest,
+    NewClusterFragmentIndexJob, OutboxEntry, PublicationStore, QueueDvConversionOutcome,
+    ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, SqliteStore, Store,
+    ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS, ANALYSIS_METRIC_PRIORITIES,
+    ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS, DV_CONVERSION_LEDGER_READ_MAX,
+    DV_RECOVERY_GUARD_READ_MAX,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
@@ -386,6 +387,10 @@ const MEDIA_METHODS: &[&str] = &[
     "files_missing_dolby_vision",
     "files_missing_video_codec_tag",
     "set_file_video_codec_tag",
+    "files_missing_field_order",
+    "set_file_field_order",
+    "files_missing_luminance",
+    "set_file_luminance",
     "set_file_dolby_vision",
     "get_file_probe_json",
     "get_file_probe_chapters_json",
@@ -536,6 +541,11 @@ const FRAGMENT_INDEX_METHODS: &[&str] = &[
     "put_fragment_index",
     "fragment_index",
     "forget_fragment_index",
+    // C-05's bounded revalidation of legacy rows, node-local like the index
+    // itself: the replicated backend answers it from its own per-voter
+    // sidecar rather than through Raft. It marks structural refusals through
+    // `validated_revision` and never deletes an index.
+    "validate_fragment_index_page",
     // Why a pipeline has NO index — the other half of the same question, and
     // what stops the background pass spending the same whole-file read every
     // wrap of the library on a file that has already answered.
@@ -14667,6 +14677,11 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              ALTER TABLE files DROP COLUMN dv_bl_compat_id;
              ALTER TABLE files DROP COLUMN dv_level;
              ALTER TABLE files DROP COLUMN dv_profile;
+             ALTER TABLE files DROP COLUMN luminance_source;
+             ALTER TABLE files DROP COLUMN mastering_max_luminance;
+             ALTER TABLE files DROP COLUMN max_fall;
+             ALTER TABLE files DROP COLUMN max_cll;
+             ALTER TABLE files DROP COLUMN field_order;
              ALTER TABLE files DROP COLUMN video_codec_tag;
              DROP TRIGGER transcode_cache_location_identity_au;
              DROP TRIGGER transcode_cache_location_identity_ai;
@@ -14676,6 +14691,11 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE cache_storage_members;
              DROP INDEX rendition_plans_by_file;
              DROP TABLE rendition_plans;
+             -- v27's node-local index table. Dropping the table also removes
+             -- everything the migrations above v14 added to it -- v29's
+             -- promotion columns and v66's `validated_revision` -- so unlike
+             -- the `files` columns above, those need no separate DROP COLUMN
+             -- here.
              DROP TABLE fragment_indexes;
              ALTER TABLE transcode_cache_locations DROP COLUMN generation_id;
              ALTER TABLE transcode_cache_locations DROP COLUMN storage_id;
@@ -16409,7 +16429,18 @@ fn contract_inventory_matches_every_store_method() {
     // Both independently reviewed method sets survive this integration. Read
     // the total from the merged trait rather than carrying either parent's
     // count across the promotion merge.
-    assert_eq!(declared.len(), 375, "review the Store method count");
+    //
+    // 375 -> 377 for the two `MediaStore` methods S-08's field-order backfill
+    // adds, `files_missing_field_order` and `set_file_field_order`. 377 -> 379
+    // for the two S-07 adds on top of them, `files_missing_luminance` and
+    // `set_file_luminance`. All four are named in `MEDIA_METHODS` above; the
+    // name-set assertion below is what proves the count and the trait agree.
+    //
+    // 379 -> 380 for the one `FragmentIndexStore` method C-05 adds,
+    // `validate_fragment_index_page`, a bounded node-local pass over legacy
+    // rows. It is named in `FRAGMENT_INDEX_METHODS` above; no new trait and no
+    // new supertrait of `Store`, so nothing above this call had to change.
+    assert_eq!(declared.len(), 380, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -16657,6 +16688,7 @@ async fn video_codec_tag_round_trips_and_backfill_updates_are_exactly_fenced() {
                     container: Some("mp4".into()),
                     video_codec: Some("hevc".into()),
                     video_codec_tag: Some("hvc1".into()),
+                    field_order: None,
                     raw_json: Some(
                         r#"{"streams":[{"codec_type":"video","codec_tag_string":"hvc1"}]}"#.into(),
                     ),
@@ -16746,6 +16778,7 @@ async fn video_codec_tag_round_trips_and_backfill_updates_are_exactly_fenced() {
                     container: Some("mp4".into()),
                     video_codec: Some("hevc".into()),
                     video_codec_tag: Some("hvc1".into()),
+                    field_order: None,
                     raw_json: Some(
                         r#"{"streams":[{"codec_type":"video","codec_tag_string":"hvc1"}]}"#.into(),
                     ),
@@ -16795,6 +16828,224 @@ async fn video_codec_tag_round_trips_and_backfill_updates_are_exactly_fenced() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: second bounded page: {error}"));
         assert_eq!(second.len(), 1, "{backend}: row 257 remains reachable");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Field order".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/field-order".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Interlaced source".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+
+        let scanned = store
+            .upsert_file(
+                item,
+                "/field-order/scanned.mkv",
+                10,
+                100,
+                &ProbeResult {
+                    field_order: Some("progressive".into()),
+                    raw_json: Some(
+                        r#"{"streams":[{"codec_type":"video","field_order":"progressive"}]}"#
+                            .into(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: scanned file: {error}"));
+        assert_eq!(
+            store
+                .get_file(scanned)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: scanned read: {error}"))
+                .and_then(|file| file.field_order),
+            Some("progressive".into()),
+            "{backend}: a current scan owns the stored fact"
+        );
+
+        let legacy_probe = r#"{"streams":[{"codec_type":"video","field_order":"tt"}]}"#;
+        let legacy = store
+            .upsert_file(
+                item,
+                "/field-order/legacy.mkv",
+                20,
+                200,
+                &ProbeResult {
+                    raw_json: Some(legacy_probe.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: legacy file: {error}"));
+        let pending = store
+            .files_missing_field_order(0, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list pending: {error}"));
+        assert_eq!(pending.len(), 1, "{backend}: bounded page");
+        assert_eq!(pending[0].id, legacy, "{backend}");
+        assert_eq!(pending[0].probe_json, legacy_probe, "{backend}");
+        assert!(store
+            .set_file_field_order(&pending[0], "tt")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: guarded write: {error}")));
+        assert_eq!(
+            store
+                .get_file(legacy)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: legacy read: {error}"))
+                .and_then(|file| file.field_order),
+            Some("tt".into()),
+            "{backend}"
+        );
+
+        let replacement = store
+            .upsert_file(
+                item,
+                "/field-order/replaced.mkv",
+                30,
+                300,
+                &ProbeResult {
+                    raw_json: Some(legacy_probe.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replacement seed: {error}"));
+        let stale = store
+            .files_missing_field_order(legacy, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale candidate: {error}"))
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{backend}: replacement candidate"));
+        assert_eq!(stale.id, replacement, "{backend}");
+        store
+            .upsert_file(
+                item,
+                "/field-order/replaced.mkv",
+                31,
+                301,
+                &ProbeResult {
+                    field_order: Some("progressive".into()),
+                    raw_json: Some(
+                        r#"{"streams":[{"codec_type":"video","field_order":"progressive"}]}"#
+                            .into(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replacement scan: {error}"));
+        assert!(!store
+            .set_file_field_order(&stale, "tt")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale guarded write: {error}")));
+        assert_eq!(
+            store
+                .get_file(replacement)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replacement read: {error}"))
+                .and_then(|file| file.field_order),
+            Some("progressive".into()),
+            "{backend}: stale snapshot cannot overwrite a newer scan"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn luminance_round_trips_and_backfill_updates_are_exactly_fenced() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "HDR luminance".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/hdr".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "HDR fixture".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        let probe_json = r#"{"streams":[{"codec_type":"video","color_transfer":"smpte2084"}]}"#;
+        let file_id = store
+            .upsert_file(
+                item,
+                "/hdr/fixture.mkv",
+                10,
+                20,
+                &ProbeResult {
+                    hdr: Some("hdr10".into()),
+                    raw_json: Some(probe_json.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: file: {error}"));
+        let candidate = store
+            .files_missing_luminance(0, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: pending: {error}"))
+            .into_iter()
+            .next()
+            .expect("pending luminance");
+        assert_eq!(candidate.id, file_id);
+        assert!(store
+            .set_file_luminance(&candidate, Some(4000), Some(1000), Some(4000), "stream")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: write: {error}")));
+        let stored = store
+            .get_file(file_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+            .expect("stored file");
+        assert_eq!(
+            (
+                stored.max_cll,
+                stored.max_fall,
+                stored.mastering_max_luminance
+            ),
+            (Some(4000), Some(1000), Some(4000))
+        );
+        assert_eq!(stored.luminance_source.as_deref(), Some("stream"));
+        assert!(
+            !store
+                .set_file_luminance(&candidate, None, None, None, "none")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale write: {error}")),
+            "{backend}: a classified row refuses a repeated stale update"
+        );
     })
     .await;
 }
@@ -20053,7 +20304,7 @@ async fn exhausted_structural_lease_counts_loss_and_failure_through_dyn_store() 
 }
 
 #[tokio::test]
-async fn repair_requeue_cleanup_preserves_exhausted_lease_terminality_through_dyn_store() {
+async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality() {
     for_each_backend(|store, backend| async move {
         store
             .put_setting("analysis.max_attempts", "1")
@@ -20148,10 +20399,11 @@ async fn repair_requeue_cleanup_preserves_exhausted_lease_terminality_through_dy
             created_at_ms: 20,
             ..repair
         };
-        assert!(store
-            .requeue_cluster_fragment_index(&repair_requeue)
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: requeue repair: {error}")));
+        assert!(
+            requeue_cluster_fragment_index_after_no_holder(store.as_ref(), &repair_requeue,)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: requeue repair: {error}"))
+        );
 
         let failed = store
             .cluster_fragment_index_job(&expired.cache_key, &expired.target_node_id)

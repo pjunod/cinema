@@ -205,8 +205,12 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         cls.catalog = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
         cls.source_path = ROOT / cls.catalog["source"]
         cls.source = cls.source_path.read_text(encoding="utf-8")
-        module_root = ROOT / cls.catalog["module_root"]
-        cls.module_paths = tuple(sorted(module_root.rglob("*.rs")))
+        cls.module_roots = tuple(cls.catalog["module_roots"])
+        cls.module_paths = tuple(
+            path
+            for module_root in cls.module_roots
+            for path in sorted((ROOT / module_root).rglob("*.rs"))
+        )
         cls.module_source = "\n".join(
             path.read_text(encoding="utf-8") for path in cls.module_paths
         )
@@ -312,6 +316,14 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         self.assertGreaterEqual(len(negative_cases), 3)
         self.assertGreaterEqual(len(entries), 7)
         self.assertGreaterEqual(len(self.module_paths), 20)
+        self.assertEqual(
+            self.module_roots,
+            (
+                "crates/plurxd/src",
+                "crates/plurx-core/src/process",
+                "crates/plurx-core/src/scan",
+            ),
+        )
 
         self.assertEqual(
             {"id", "pattern", "expected_occurrences", "kind", "replacement"},
@@ -398,7 +410,8 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 self.assertEqual(
                     actual,
                     row["expected_occurrences"],
-                    f"{row['id']} changed anywhere under {self.catalog['module_root']}; "
+                    f"{row['id']} changed anywhere under "
+                    f"{', '.join(self.module_roots)}; "
                     "update the module-wide owner allowlist in the same reviewed change",
                 )
 
@@ -413,7 +426,8 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 self.assertEqual(
                     actual,
                     row["expected_occurrences"],
-                    f"{row['id']} changed anywhere under {self.catalog['module_root']}; "
+                    f"{row['id']} changed anywhere under "
+                    f"{', '.join(self.module_roots)}; "
                     "new task, timer, process, or alias shapes require an explicit "
                     "ownership review and allowlist update",
                 )

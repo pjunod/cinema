@@ -776,7 +776,7 @@
       `watermark ${esc(clusterOperationAge(clusterSampleAge(ops,raft.watermark_age_millis)))}`;
   }
   function clusterDatabaseRows(env,cluster,replication,ops){
-    const {esc,fmtAgo}=env;
+    const {esc,fmtAgo,fmtBytes}=env;
     if(replication&&replication.backend==="sqlite")
       return [["Backend","SQLite · single node",false],
         ["Peers","none — watch state is durable here and has nowhere to fall behind",false]];
@@ -804,7 +804,7 @@
       ["Behind by",behind===null?"unknown":`${behind} change${behind===1?"":"s"}`,true],
       ["Last converged",replication&&replication.last_converged_at?esc(fmtAgo(replication.last_converged_at)):"not yet observed",true],
       ["Snapshots",status?(snap.available
-        ? `build ${num(snap.build_ok_count)} ok / ${num(snap.build_error_count)} error · install ${num(snap.install_ok_count)} ok / ${num(snap.install_error_count)} error`
+        ? `build ${num(snap.build_ok_count)} ok / ${num(snap.build_error_count)} error · install ${num(snap.install_ok_count)} ok / ${num(snap.install_error_count)} error · DB ${snap.db_bytes===null||snap.db_bytes===undefined?"unknown":esc(fmtBytes(snap.db_bytes)||"0 B")}`
         : `<span style="color:var(--bad)">unavailable</span>`):"unknown",true],
       ["WAL",clusterDatabaseWal(env,status),true],
       ["Protocol",status?`${num(status.protocol_min)}–${num(status.protocol_max)}`:"unknown",true],

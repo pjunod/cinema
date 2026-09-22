@@ -86,36 +86,73 @@ pub(crate) fn inherit_file_descriptors(
     command: &mut tokio::process::Command,
     files: &[(&std::fs::File, i32)],
 ) {
+    inherit_file_descriptors_with_cwd(command, files, None);
+}
+
+/// Install inherited descriptors and optionally make one directory descriptor
+/// the child's working directory. Keeping both operations in this one
+/// post-fork hook preserves the dup-all-before-dup2 ordering when a held file
+/// happens to occupy one of the reserved target numbers.
+pub(crate) fn inherit_file_descriptors_with_cwd(
+    command: &mut tokio::process::Command,
+    files: &[(&std::fs::File, i32)],
+    cwd_target: Option<i32>,
+) {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        assert!(files.len() <= 7 && files.iter().all(|(_, target)| (3..=9).contains(target)));
         let descriptors = files
             .iter()
             .map(|(file, target)| (file.as_raw_fd(), *target))
             .collect::<Vec<_>>();
-        unsafe {
-            command.pre_exec(move || {
-                let mut copies = [None; 7];
-                for (index, (fd, target)) in descriptors.iter().enumerate() {
-                    let duplicate = libc::fcntl(*fd, libc::F_DUPFD_CLOEXEC, 10);
-                    if duplicate == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    copies[index] = Some((duplicate, *target));
-                }
-                for (duplicate, target) in copies.into_iter().flatten() {
-                    if libc::dup2(duplicate, target) == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    libc::close(duplicate);
-                }
-                Ok(())
-            });
-        }
+        inherit_raw_file_descriptors_with_cwd(command, &descriptors, cwd_target);
     }
     #[cfg(not(unix))]
-    let _ = (command, files);
+    let _ = (command, files, cwd_target);
+}
+
+/// Raw-descriptor form used by the producer spawn builder after callers have
+/// reduced held capabilities to the only values safe to capture in `pre_exec`.
+#[cfg(unix)]
+pub(crate) fn inherit_raw_file_descriptors_with_cwd(
+    command: &mut tokio::process::Command,
+    descriptors: &[(std::os::fd::RawFd, i32)],
+    cwd_target: Option<i32>,
+) {
+    assert!(
+        descriptors.len() <= 7
+            && descriptors
+                .iter()
+                .all(|(_, target)| (3..=9).contains(target))
+    );
+    assert!(cwd_target.is_none_or(|target| descriptors.iter().any(|(_, fd)| *fd == target)));
+    let descriptors = descriptors.to_vec();
+    unsafe {
+        command.pre_exec(move || {
+            let mut copies = [None; 7];
+            for (index, (fd, target)) in descriptors.iter().enumerate() {
+                let duplicate = libc::fcntl(*fd, libc::F_DUPFD_CLOEXEC, 10);
+                if duplicate == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                copies[index] = Some((duplicate, *target));
+            }
+            for (duplicate, target) in copies.into_iter().flatten() {
+                if libc::dup2(duplicate, target) == -1 {
+                    libc::close(duplicate);
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(duplicate);
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(target) = cwd_target {
+                if libc::fchdir(target) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
 }
 
 /// Drain diagnostics alongside the media pipe without letting a noisy
@@ -3072,6 +3109,33 @@ mod tests {
     /// regressions are about the verdict, which must stay identical.
     fn probes_describe_same_input(stored: &str, held: &str) -> Result<bool, String> {
         Ok(super::compare_probe_documents(stored, held)?.same)
+    }
+
+    /// The Dolby Vision proof consumes non-comment frame hashes from stdout.
+    /// Keep the fixture independent of private media while exercising the
+    /// same ffmpeg output shape and the production process helper.
+    #[tokio::test]
+    #[ignore = "needs ffmpeg"]
+    async fn dovi_probe_output_receives_frame_hashes() {
+        let mut command = tokio::process::Command::new(super::ffmpeg_bin());
+        command
+            .args(["-hide_banner", "-loglevel", "error"])
+            .args(["-f", "lavfi", "-i", "testsrc=size=64x64:rate=1:duration=2"])
+            .args(["-frames:v", "2", "-an", "-f", "framemd5", "-"]);
+        let output = crate::process_control::output_job_owned(&mut command)
+            .await
+            .expect("framemd5 probe output");
+        assert!(
+            output.status.success(),
+            "framemd5 probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let hashes: Vec<_> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .map(str::to_owned)
+            .collect();
+        assert!(!hashes.is_empty(), "framemd5 stdout had no frame hashes");
     }
 
     /// A production file on `media1`: 4K HEVC Dolby Vision Profile 8 in MP4

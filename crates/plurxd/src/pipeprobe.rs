@@ -586,8 +586,8 @@ fn probe_args(fixture: &Path, out: &Path, candidate: Pipeline, encoder: Encoder)
         // *different* CPU chain would be comparing against a fiction.
         None => format!(
             "zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le,\
-             tonemap=tonemap=hable:desat=0,\
-             zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p,\
+             zscale=p=bt709,tonemap=tonemap=hable:desat=0:peak=10,\
+             zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,format=yuv420p,\
              scale=-2:'min({PROBE_HEIGHT},ih)'"
         ),
     };
@@ -1700,7 +1700,9 @@ mod tests {
             .map(|i| args[i + 1].clone())
             .expect("a filter graph");
         assert!(vf.contains("tonemap=tonemap=hable"), "{vf}");
-        assert!(vf.contains("zscale=p=bt709:t=bt709:m=bt709"), "{vf}");
+        assert!(vf.contains("zscale=p=bt709,tonemap="), "{vf}");
+        assert!(vf.contains("peak=10"), "{vf}");
+        assert!(vf.contains("dither=error_diffusion"), "{vf}");
         assert!(vf.contains("tin=smpte2084"), "{vf}");
         assert!(
             vf.ends_with(&format!("scale=-2:'min({PROBE_HEIGHT},ih)'")),
