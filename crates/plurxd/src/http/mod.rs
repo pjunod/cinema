@@ -2619,6 +2619,14 @@ mod tests {
                 "sweep_content_orphans:store.referenced_artwork_filenames",
                 "sweep_content_orphans:store.artwork_filename_is_referenced",
                 "sweep_content_orphans:store.prune_unreferenced_book_cover_origins",
+                // The derivative sweep's only catalogue call. It is a
+                // background, node-local read of the artwork inventory — the
+                // same eventual read `sweep_orphan_artwork` makes, not an
+                // authority read and not a mutation. It decides retention
+                // only: a source the read has not yet caught up to keeps its
+                // derivatives, so a stale answer costs disk until the next
+                // pass and can never delete a live grid cache.
+                "sweep_derived_orphans:store.items_with_artwork",
                 "materialize_once:store.items_with_artwork_page",
             ],
         );
