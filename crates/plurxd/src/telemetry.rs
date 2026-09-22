@@ -801,18 +801,19 @@ fn install_test_sink(
 
 fn sink_for(store: Arc<dyn Store>) -> Arc<TelemetrySink> {
     let key = store_key(&store);
-    if let Some(sink) = SINKS
+    // The lookup binds to a `let` before anything branches on it, and that is
+    // load-bearing: a temporary `MutexGuard` in an `if let` scrutinee lives to
+    // the end of the WHOLE `if let` in this edition, so building the sink in
+    // an `else` arm would re-lock `SINKS` on the thread already holding it and
+    // deadlock `emit` outright.
+    let registered = SINKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&key)
-        .cloned()
-    {
-        sink
-    } else {
-        // Production registers during boot. Lazy construction keeps isolated
-        // handler tests on the same bounded path without making emit async.
-        ensure_sink(store)
-    }
+        .cloned();
+    // Production registers during boot. Lazy construction keeps isolated
+    // handler tests on the same bounded path without making emit async.
+    registered.unwrap_or_else(|| ensure_sink(store))
 }
 
 impl TelemetrySink {
@@ -2019,6 +2020,45 @@ mod tests {
             metrics.enqueued[EventClass::Terminal.index()].load(Ordering::Relaxed),
             1,
             "a terminal was refused by a queue full of samples"
+        );
+    }
+
+    /// `emit` against a Store boot never registered must build the sink and
+    /// return.
+    ///
+    /// It runs on its own thread with a timeout because the failure it guards
+    /// is a deadlock, and a deadlock does not fail a test -- it hangs the
+    /// whole binary, which is how this reached a review as a passing branch.
+    #[test]
+    fn an_unregistered_store_registers_its_sink_without_relocking() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async move {
+                let store: Arc<dyn Store> = Arc::new(
+                    plurx_core::store::SqliteStore::open_in_memory().expect("telemetry store"),
+                );
+                emit(
+                    Arc::clone(&store),
+                    PlaybackEvent {
+                        event: "ttff".into(),
+                        ..PlaybackEvent::default()
+                    },
+                );
+                let registered = SINKS
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains_key(&store_key(&store));
+                let _ = sender.send(registered);
+            });
+        });
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(10)),
+            Ok(true),
+            "emit against an unregistered Store must build its sink and return"
         );
     }
 
