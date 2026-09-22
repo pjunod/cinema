@@ -986,9 +986,11 @@ fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str)
     );
     video_filters_for_contract(
         output_size(source, opts.target_height),
-        source.hdr.as_deref(),
-        source.hdr.is_some(),
-        routing_hdr(source),
+        (
+            source.hdr.as_deref(),
+            source.hdr.is_some(),
+            routing_hdr(source),
+        ),
         Deinterlace::for_scan_type(crate::domain::ScanType::from_field_order(
             source.field_order.as_deref(),
         )),
@@ -998,16 +1000,19 @@ fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str)
     )
 }
 
+// The three dynamic-range facts travel as one tuple for the same reason the
+// tone-map peak does: they are read together and never apart, and clippy caps
+// this signature at seven. What the source declares, whether that counts as
+// HDR, and what the route will carry are one question asked three ways.
 fn video_filters_for_contract(
     output_size: Option<(i64, i64)>,
-    input_dynamic_range: Option<&str>,
-    input_is_hdr: bool,
-    routing_dynamic_range: Option<&str>,
+    dynamic_range: (Option<&str>, bool, Option<&str>),
     deinterlace: Deinterlace,
     tone_map_peak: (u32, ToneMapPeakSource),
     opts: &TranscodeOptions,
     source_path: &str,
 ) -> String {
+    let (input_dynamic_range, input_is_hdr, routing_dynamic_range) = dynamic_range;
     let mut chain: Vec<String> = Vec::new();
 
     // A GPU pipeline owns scale and tone-map together: they are one pass on
@@ -1600,9 +1605,11 @@ fn hls_args_inner(
         |plan| {
             video_filters_for_contract(
                 planned_output_size,
-                plan.input_hdr_format(),
-                plan.input_is_hdr(),
-                plan.routing_dynamic_range(),
+                (
+                    plan.input_hdr_format(),
+                    plan.input_is_hdr(),
+                    plan.routing_dynamic_range(),
+                ),
                 plan.deinterlace(),
                 (
                     plan.options().tone_map_peak_nits,
