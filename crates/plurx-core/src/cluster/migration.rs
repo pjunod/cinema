@@ -20,10 +20,14 @@ use std::io::Seek;
 use std::net::{IpAddr, SocketAddr};
 #[cfg(feature = "hiqlite-store")]
 use std::sync::Arc;
+#[cfg(feature = "hiqlite-store")]
+use std::sync::OnceLock;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
+#[cfg(feature = "hiqlite-store")]
+use futures_util::StreamExt;
 use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -92,6 +96,12 @@ const HIQLITE_HEALTH_TIMEOUT: Duration = Duration::from_secs(45);
 const MEMBERSHIP_ADMISSION_TIMEOUT: Duration = Duration::from_secs(45);
 #[cfg(feature = "hiqlite-store")]
 const SNAPSHOT_CATCHUP_GRACE: Duration = Duration::from_secs(45);
+#[cfg(feature = "hiqlite-store")]
+const JOIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(feature = "hiqlite-store")]
+const JOIN_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(feature = "hiqlite-store")]
+const JOIN_ERROR_MAX_BYTES: u64 = 4 * 1024 * 1024;
 // OpenRaft gives an AppendEntries RPC one heartbeat interval. Once a leader is
 // running this Hiqlite transport it lets that RPC use the whole hard deadline,
 // and this 800 ms window admits the observed 600-700 ms durable crash-recovery
@@ -595,7 +605,11 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     let credential_key = open_active_credential_key(config, &store).await?;
     let concrete_store = Arc::new(store);
     let store: Arc<dyn Store> = concrete_store.clone();
-    let replication = status::ReplicationMonitor::replicated(client.clone());
+    let replication = status::ReplicationMonitor::replicated(
+        client.clone(),
+        active.clone(),
+        HIQLITE_DATABASE_FILENAME,
+    );
     let catalogue = CatalogueReader::replicated(
         Arc::clone(&store),
         concrete_store,
@@ -870,19 +884,52 @@ async fn post_join_request<T: Serialize>(
     path: &str,
     request: &T,
 ) -> Result<(), StoreError> {
-    let response = reqwest::Client::new()
-        .post(format!("{}{path}", payload.bootstrap_http()))
+    post_join_url(
+        &join_client()?,
+        format!("{}{path}", payload.bootstrap_http()),
+        request,
+    )
+    .await
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn join_client() -> Result<reqwest::Client, StoreError> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(JOIN_CONNECT_TIMEOUT)
+                .timeout(JOIN_TOTAL_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .cloned()
+        .map_err(|error| {
+            StoreError::Database(format!("building bounded join coordinator client: {error}"))
+        })
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn post_join_url<T: Serialize>(
+    client: &reqwest::Client,
+    url: String,
+    request: &T,
+) -> Result<(), StoreError> {
+    let response = client
+        .post(url)
         .json(request)
         .send()
         .await
-        .map_err(|error| StoreError::Database(format!("contacting join coordinator: {error}")))?;
+        .map_err(join_request_error)?;
     if response.status().is_success() {
         return Ok(());
     }
     let status = response.status();
-    let error = response
-        .json::<JoinApiError>()
-        .await
+    let error = bounded_join_error_response(response)
+        .await?
+        .and_then(|body| serde_json::from_slice::<JoinApiError>(&body).ok())
         .unwrap_or(JoinApiError {
             code: "membership_internal".to_owned(),
             message: "join coordinator refused the request".to_owned(),
@@ -891,6 +938,45 @@ async fn post_join_request<T: Serialize>(
         "{}: {} (HTTP {status})",
         error.code, error.message
     )))
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn join_request_error(error: reqwest::Error) -> StoreError {
+    if error.is_timeout() {
+        StoreError::Migration(
+            "join_request_ambiguous: the coordinator did not answer within 30 s; the request \
+             may have been accepted — re-run the same staged join, do not mint a new token"
+                .to_owned(),
+        )
+    } else {
+        StoreError::Database(format!("contacting join coordinator: {error}"))
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn bounded_join_error_response(
+    response: reqwest::Response,
+) -> Result<Option<Vec<u8>>, StoreError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > JOIN_ERROR_MAX_BYTES)
+    {
+        return Err(StoreError::Migration(format!(
+            "join_response_too_large: the coordinator error exceeded {JOIN_ERROR_MAX_BYTES} bytes"
+        )));
+    }
+    let mut body = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(join_request_error)?;
+        if bytes.len().saturating_add(chunk.len()) > JOIN_ERROR_MAX_BYTES as usize {
+            return Err(StoreError::Migration(format!(
+                "join_response_too_large: the coordinator error exceeded {JOIN_ERROR_MAX_BYTES} bytes"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok((!bytes.is_empty()).then_some(bytes))
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -1526,7 +1612,11 @@ async fn open_active_store_with_key(
         };
         let concrete_store = Arc::new(store);
         let store: Arc<dyn Store> = concrete_store.clone();
-        let replication = status::ReplicationMonitor::replicated(client.clone());
+        let replication = status::ReplicationMonitor::replicated(
+            client.clone(),
+            active.clone(),
+            HIQLITE_DATABASE_FILENAME,
+        );
         let catalogue = CatalogueReader::replicated(
             Arc::clone(&store),
             concrete_store,
@@ -3581,6 +3671,44 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "hiqlite-store")]
+    #[tokio::test]
+    async fn an_accepted_join_that_never_answers_is_reported_as_ambiguous() {
+        use axum::routing::post;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("join mock listener");
+        let address = listener.local_addr().expect("join mock address");
+        tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/join",
+                post(|| async { std::future::pending::<axum::http::StatusCode>().await }),
+            );
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(50))
+            .timeout(Duration::from_millis(50))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("bounded test client");
+        let started = std::time::Instant::now();
+
+        let error = post_join_url(
+            &client,
+            format!("http://{address}/join"),
+            &serde_json::json!({ "token_digest": "accepted" }),
+        )
+        .await
+        .expect_err("the missing response is ambiguous");
+
+        assert!(matches!(error, StoreError::Migration(_)));
+        assert!(error.to_string().contains("join_request_ambiguous"));
+        assert!(error.to_string().contains("re-run the same staged join"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(feature = "hiqlite-store")]
     #[test]
     fn joined_store_open_retries_only_the_explicit_quorum_gap() {
         assert_eq!(REPLICATED_LEADER_RECOVERY_BUDGET, Duration::from_secs(16));
@@ -4656,22 +4784,24 @@ mod tests {
         let staged_local = configured_local_peer(&joining_config, issued.raft_id)
             .expect("configure the staged peer");
         let issued_digest = join_token_digest(&issued.token);
+        let staged_node_id = staged_identity.node_id.clone();
+        let redeem_request = RedeemJoinRequest {
+            token_digest: issued_digest.clone(),
+            raft_id: issued.raft_id,
+            node_id: staged_node_id.clone(),
+            hostname: "joining-test-node".to_owned(),
+            raft_address: staged_local.raft_address,
+            api_address: staged_local.api_address,
+            http_base: configured_artwork_url(&joining_config)
+                .expect("derive the staged node artwork origin"),
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+            protocol_min: crate::store::AUTH_PROTOCOL_MIN,
+            protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            live_tv_v1: true,
+        };
         coordinator
-            .redeem(&RedeemJoinRequest {
-                token_digest: issued_digest.clone(),
-                raft_id: issued.raft_id,
-                node_id: staged_identity.node_id,
-                hostname: "joining-test-node".to_owned(),
-                raft_address: staged_local.raft_address,
-                api_address: staged_local.api_address,
-                http_base: configured_artwork_url(&joining_config)
-                    .expect("derive the staged node artwork origin"),
-                schema_version: AUTH_SCHEMA_VERSION,
-                protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
-                protocol_min: crate::store::AUTH_PROTOCOL_MIN,
-                protocol_max: crate::store::AUTH_PROTOCOL_MAX,
-                live_tv_v1: true,
-            })
+            .redeem(&redeem_request)
             .await
             .expect("reserve the token to the staged node before its failed start");
         source_client
@@ -4682,6 +4812,14 @@ mod tests {
             )
             .await
             .expect("expire the identity-bound reservation deterministically");
+        // Treat the first successful redemption as an ambiguous transport
+        // outcome: the same staged identity must be able to repeat it after
+        // the reservation's original TTL, rather than losing the node to an
+        // orphaned `redeeming` record.
+        coordinator
+            .redeem(&redeem_request)
+            .await
+            .expect("repeat the expired identity-bound redemption");
         let joined = select_daemon_store(&joining_config)
             .await
             .expect("resume an expired identity-bound join through daemon store selection");
@@ -4698,6 +4836,19 @@ mod tests {
             local.join_token_digest.as_deref(),
             Some(issued_digest.as_str())
         );
+        let finalize_request = FinalizeJoinRequest {
+            token_digest: issued_digest.clone(),
+            raft_id: issued.raft_id,
+            node_id: staged_node_id,
+        };
+        coordinator
+            .finalize(&finalize_request)
+            .await
+            .expect("repeat finalization after the daemon lost its response");
+        coordinator
+            .finalize(&finalize_request)
+            .await
+            .expect("repeated finalization remains idempotent");
 
         // A crash after finalization but before unlink leaves exactly this
         // shape: active target + membership.json + the original token. The
@@ -6127,6 +6278,7 @@ pub mod status {
 
     use std::collections::BTreeSet;
     use std::future::Future;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -6235,6 +6387,15 @@ pub mod status {
         pub apply_lag_entries: Option<u64>,
     }
 
+    /// Fixed-cardinality sizes sampled from this process's local Hiqlite tree.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct StateMachineBytes {
+        pub db: u64,
+        pub wal: u64,
+        pub snapshots: u64,
+        pub logs: u64,
+    }
+
     /// Store-free view consumed by the Prometheus handler.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct PassiveRaftMetricsView {
@@ -6257,6 +6418,7 @@ pub mod status {
         pub watermark_local_reads_supported: bool,
         pub watermark_errors: u64,
         pub snapshot_metrics: Option<DbSnapshotMetricsSnapshot>,
+        pub state_machine_bytes: Option<StateMachineBytes>,
     }
 
     /// One quorum proof, captured while this node was eligible to serve on it.
@@ -6360,6 +6522,11 @@ pub mod status {
         watermark_local_epoch: AtomicU64,
         watermark_errors: AtomicU64,
         watermark_invalidated: AtomicBool,
+        state_machine_bytes_present: AtomicBool,
+        state_machine_db_bytes: AtomicU64,
+        state_machine_wal_bytes: AtomicU64,
+        state_machine_snapshots_bytes: AtomicU64,
+        state_machine_logs_bytes: AtomicU64,
         sampler_started: AtomicBool,
     }
 
@@ -6372,6 +6539,8 @@ pub mod status {
         watermark_source: bool,
         watermark_requires_local_binding: bool,
         snapshot_metrics: Option<LocalDbSnapshotMetrics>,
+        state_machine_path: Option<PathBuf>,
+        state_machine_filename: Option<String>,
     }
 
     impl PassiveRaftMetrics {
@@ -6383,6 +6552,8 @@ pub mod status {
                 watermark_source: local_source,
                 watermark_requires_local_binding: local_source,
                 snapshot_metrics: None,
+                state_machine_path: None,
+                state_machine_filename: None,
             }
         }
 
@@ -6397,12 +6568,51 @@ pub mod status {
                 watermark_source: true,
                 watermark_requires_local_binding: false,
                 snapshot_metrics: None,
+                state_machine_path: None,
+                state_machine_filename: None,
             }
         }
 
         fn with_snapshot_metrics(mut self, metrics: Option<LocalDbSnapshotMetrics>) -> Self {
             self.snapshot_metrics = metrics;
             self
+        }
+
+        fn with_state_machine_path(
+            mut self,
+            data_dir: PathBuf,
+            filename: impl Into<String>,
+        ) -> Self {
+            self.state_machine_path = Some(data_dir);
+            self.state_machine_filename = Some(filename.into());
+            self
+        }
+
+        fn sample_state_machine_bytes(&self) -> std::io::Result<()> {
+            let (Some(data_dir), Some(filename)) =
+                (&self.state_machine_path, &self.state_machine_filename)
+            else {
+                return Ok(());
+            };
+            let sample = state_machine_bytes(data_dir, filename)?;
+            let sequence = self.begin_write();
+            self.inner
+                .state_machine_db_bytes
+                .store(sample.db, Ordering::Relaxed);
+            self.inner
+                .state_machine_wal_bytes
+                .store(sample.wal, Ordering::Relaxed);
+            self.inner
+                .state_machine_snapshots_bytes
+                .store(sample.snapshots, Ordering::Relaxed);
+            self.inner
+                .state_machine_logs_bytes
+                .store(sample.logs, Ordering::Relaxed);
+            self.inner
+                .state_machine_bytes_present
+                .store(true, Ordering::Relaxed);
+            self.end_write(sequence);
+            Ok(())
         }
 
         /// Construct one current local/quorum proof for deterministic Store
@@ -6729,6 +6939,20 @@ pub mod status {
                 let watermark_errors = self.inner.watermark_errors.load(Ordering::Relaxed);
                 let watermark_invalidated =
                     self.inner.watermark_invalidated.load(Ordering::Relaxed);
+                let state_machine_bytes_present = self
+                    .inner
+                    .state_machine_bytes_present
+                    .load(Ordering::Relaxed);
+                let state_machine_db_bytes =
+                    self.inner.state_machine_db_bytes.load(Ordering::Relaxed);
+                let state_machine_wal_bytes =
+                    self.inner.state_machine_wal_bytes.load(Ordering::Relaxed);
+                let state_machine_snapshots_bytes = self
+                    .inner
+                    .state_machine_snapshots_bytes
+                    .load(Ordering::Relaxed);
+                let state_machine_logs_bytes =
+                    self.inner.state_machine_logs_bytes.load(Ordering::Relaxed);
                 let after = self.inner.sequence.load(Ordering::Acquire);
                 if before == after {
                     let age_seconds =
@@ -6782,6 +7006,14 @@ pub mod status {
                                 == hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION,
                         watermark_errors,
                         snapshot_metrics: self.snapshot_metrics.map(|metrics| metrics.snapshot()),
+                        state_machine_bytes: state_machine_bytes_present.then_some(
+                            StateMachineBytes {
+                                db: state_machine_db_bytes,
+                                wal: state_machine_wal_bytes,
+                                snapshots: state_machine_snapshots_bytes,
+                                logs: state_machine_logs_bytes,
+                            },
+                        ),
                     };
                 }
             }
@@ -7005,6 +7237,46 @@ pub mod status {
         u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
     }
 
+    fn state_machine_bytes(data_dir: &Path, filename: &str) -> std::io::Result<StateMachineBytes> {
+        let state_machine = data_dir.join("state_machine");
+        let database = state_machine.join("db").join(filename);
+        let wal = database.with_file_name(format!("{filename}-wal"));
+        Ok(StateMachineBytes {
+            db: regular_file_bytes(&database)?,
+            wal: regular_file_bytes(&wal)?,
+            snapshots: directory_bytes(&state_machine.join("snapshots"))?,
+            logs: directory_bytes(&data_dir.join("logs"))?,
+        })
+    }
+
+    fn regular_file_bytes(path: &Path) -> std::io::Result<u64> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => Ok(metadata.len()),
+            Ok(_) => Ok(0),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn directory_bytes(path: &Path) -> std::io::Result<u64> {
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        let mut bytes = 0_u64;
+        for entry in entries {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_file() {
+                bytes = bytes.saturating_add(entry.metadata()?.len());
+            } else if file_type.is_dir() {
+                bytes = bytes.saturating_add(directory_bytes(&entry.path())?);
+            }
+        }
+        Ok(bytes)
+    }
+
     #[async_trait::async_trait]
     trait PassiveRaftSource: Send {
         fn snapshot(&self) -> LocalDbRaftSnapshot;
@@ -7098,6 +7370,9 @@ pub mod status {
         S: PassiveRaftSource,
         F: Future<Output = ()> + Send,
     {
+        if let Err(error) = metrics.sample_state_machine_bytes() {
+            tracing::debug!(%error, "local Raft state-machine size sample failed");
+        }
         let initial = source.snapshot();
         if !metrics.publish(&initial) {
             return;
@@ -7107,7 +7382,7 @@ pub mod status {
         refresh.tick().await;
         tokio::pin!(shutdown);
         loop {
-            tokio::select! {
+            let refresh_sizes = tokio::select! {
                 biased;
                 _ = &mut shutdown => return,
                 changed = source.wait_for_change() => {
@@ -7115,8 +7390,14 @@ pub mod status {
                         metrics.record_error();
                         return;
                     }
+                    false
                 }
-                _ = refresh.tick() => {}
+                _ = refresh.tick() => true,
+            };
+            if refresh_sizes {
+                if let Err(error) = metrics.sample_state_machine_bytes() {
+                    tracing::debug!(%error, "local Raft state-machine size sample failed");
+                }
             }
             let sample = source.snapshot();
             if !metrics.publish(&sample) {
@@ -7159,13 +7440,18 @@ pub mod status {
 
         /// Monitor a local Hiqlite voter through the same client the Store uses.
         #[must_use]
-        pub fn replicated(client: Client) -> Self {
+        pub fn replicated(
+            client: Client,
+            data_dir: impl Into<PathBuf>,
+            filename: impl Into<String>,
+        ) -> Self {
             let local_metrics = client.local_db_raft_metrics().ok();
             let snapshot_metrics = client.local_db_snapshot_metrics().ok();
             let wal_status = client.local_db_wal_status().ok();
             let local_transport = client.local_snapshot_transport_status().ok();
             let passive_metrics = PassiveRaftMetrics::new(local_metrics.is_some())
-                .with_snapshot_metrics(snapshot_metrics);
+                .with_snapshot_metrics(snapshot_metrics)
+                .with_state_machine_path(data_dir.into(), filename);
             Self {
                 backend: ReplicationBackend::Replicated,
                 client: Some(client),
@@ -7548,6 +7834,37 @@ pub mod status {
                 committed_index,
                 local_read_protocol_version,
             }
+        }
+
+        #[test]
+        fn state_machine_size_sample_uses_the_fixed_local_components() {
+            let data = tempfile::tempdir().expect("temporary Hiqlite root");
+            let db_dir = data.path().join("state_machine/db");
+            let snapshots = data.path().join("state_machine/snapshots/nested");
+            let logs = data.path().join("logs");
+            std::fs::create_dir_all(&db_dir).expect("database directory");
+            std::fs::create_dir_all(&snapshots).expect("snapshot directory");
+            std::fs::create_dir_all(&logs).expect("log directory");
+            std::fs::write(db_dir.join("plurx.db"), [0_u8; 11]).expect("database fixture");
+            std::fs::write(db_dir.join("plurx.db-wal"), [0_u8; 13]).expect("WAL fixture");
+            std::fs::write(snapshots.join("snapshot"), [0_u8; 17]).expect("snapshot fixture");
+            std::fs::write(logs.join("segment"), [0_u8; 19]).expect("log fixture");
+
+            let metrics = PassiveRaftMetrics::new(true)
+                .with_state_machine_path(data.path().to_owned(), "plurx.db");
+            metrics
+                .sample_state_machine_bytes()
+                .expect("sample state-machine files");
+
+            assert_eq!(
+                metrics.snapshot().state_machine_bytes,
+                Some(StateMachineBytes {
+                    db: 11,
+                    wal: 13,
+                    snapshots: 17,
+                    logs: 19,
+                })
+            );
         }
 
         #[test]

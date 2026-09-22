@@ -8,6 +8,11 @@
 
 use serde_json::Value;
 
+use super::{
+    bounded_json_response, provider_client, provider_outcome, record_provider_request,
+    request_error, Provider, ProviderOutcome, PROVIDER_CONNECT_TIMEOUT, PROVIDER_READ_TIMEOUT,
+    PROVIDER_TOTAL_TIMEOUT,
+};
 use crate::error::MetadataError;
 
 const API: &str = "https://graphql.anilist.co";
@@ -56,10 +61,15 @@ pub struct AniListClient {
 impl AniListClient {
     pub fn new() -> Self {
         AniListClient {
-            http: reqwest::Client::builder()
-                .user_agent(concat!("plurx/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .unwrap_or_default(),
+            http: provider_client(
+                Provider::AniList,
+                reqwest::Client::builder()
+                    .user_agent(concat!("plurx/", env!("CARGO_PKG_VERSION")))
+                    .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+                    .read_timeout(PROVIDER_READ_TIMEOUT)
+                    .timeout(PROVIDER_TOTAL_TIMEOUT)
+                    .redirect(reqwest::redirect::Policy::limited(3)),
+            ),
             base: API.to_owned(),
         }
     }
@@ -76,39 +86,64 @@ impl AniListClient {
             "query": SEARCH_QUERY,
             "variables": { "search": title },
         });
-        let resp = self
-            .http
-            .post(&self.base)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| MetadataError::Http(e.to_string()))?;
+        let response = self.http.post(&self.base).json(&body).send().await;
+        let resp = match response {
+            Ok(response) => response,
+            Err(error) => {
+                let error = request_error(error);
+                record_provider_request(Provider::AniList, provider_outcome(&error));
+                return Err(error);
+            }
+        };
         // AniList returns 404 with a GraphQL error when nothing matches.
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            record_provider_request(Provider::AniList, ProviderOutcome::Status);
             return Ok(None);
         }
         if !resp.status().is_success() {
+            record_provider_request(Provider::AniList, ProviderOutcome::Status);
             return Err(MetadataError::Status(resp.status().as_u16()));
         }
-        let json: Value = resp
-            .json()
-            .await
-            .map_err(|e| MetadataError::Parse(e.to_string()))?;
+        let result = match bounded_json_response(resp).await {
+            Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
+                .map_err(|error| MetadataError::Parse(error.to_string())),
+            Err(error) => Err(error),
+        };
+        record_provider_request(
+            Provider::AniList,
+            result
+                .as_ref()
+                .map(|_| ProviderOutcome::Ok)
+                .unwrap_or_else(provider_outcome),
+        );
+        let json = result?;
         Ok(parse_media(json.get("data").and_then(|d| d.get("Media"))))
     }
 
     /// Download an image from an absolute URL (AniList serves full URLs).
     pub async fn download_image(&self, url: &str) -> Result<Vec<u8>, MetadataError> {
-        let resp = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| MetadataError::Http(e.to_string()))?;
+        let response = self.http.get(url).send().await;
+        let resp = match response {
+            Ok(response) => response,
+            Err(error) => {
+                let error = request_error(error);
+                record_provider_request(Provider::AniList, provider_outcome(&error));
+                return Err(error);
+            }
+        };
         if !resp.status().is_success() {
+            record_provider_request(Provider::AniList, ProviderOutcome::Status);
             return Err(MetadataError::Status(resp.status().as_u16()));
         }
-        super::bounded_artwork_response(resp).await
+        let result = super::bounded_artwork_response(resp).await;
+        record_provider_request(
+            Provider::AniList,
+            result
+                .as_ref()
+                .map(|_| ProviderOutcome::Ok)
+                .unwrap_or_else(provider_outcome),
+        );
+        result
     }
 }
 

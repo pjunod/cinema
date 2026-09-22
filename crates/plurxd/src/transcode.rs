@@ -54,6 +54,33 @@ const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
 /// The HTTP layer maps only this class to 503; source, filesystem, and ffmpeg
 /// failures remain server errors rather than being mislabeled as contention.
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
+/// The one capacity refusal a client may safely wait out by re-posting the
+/// same request: this player's previous start has not let go of it yet.
+///
+/// A strict subset of the capacity class, and deliberately narrow. The other
+/// producers of `capacity_error` are not all waits — one instructs the client
+/// to ask for a smaller height, and one reports a scratch ceiling above the
+/// configured budget, which no amount of retrying can satisfy. Those keep the
+/// codeless 503 that no client retries.
+const REPLACEMENT_WAIT_PREFIX: &str =
+    "transcode capacity is temporarily unavailable: waiting for this player's previous start: ";
+/// What a client should wait before re-posting. One cooperative window: by
+/// then the previous start has either let go or been reclaimed.
+pub(crate) const REPLACEMENT_WAIT_RETRY_AFTER_SECS: u64 = 3;
+/// Longer than any legitimate hold of a player's key.
+///
+/// The key is held from provisional creation through the durable activation
+/// verdict and predecessor settlement, so the ceiling has to clear the longest
+/// declared start budget plus those windows — not the cooperative wait, which
+/// is only how long an arrival is willing to queue. A holder past this has
+/// exceeded every budget it asked for and is wedged by definition; reclaiming
+/// on any shorter clock destroys healthy starts, which is what the review of
+/// the first version of this fix found.
+const CLUSTER_REPLACEMENT_HOLD_CEILING: Duration = Duration::from_secs(120);
+/// How many times one acquisition will re-enter the registry after finding the
+/// gate it waited on had been retired underneath it. Bounded because each pass
+/// spends real time from the caller's own deadline.
+const MAX_CLUSTER_REPLACEMENT_REENTRIES: usize = 4;
 const SERVING_FENCE_PREFIX: &str = "media serving authority is unavailable: ";
 const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unavailable: ";
 /// How long descriptor-bound fact collection may borrow from a producer's
@@ -63,10 +90,11 @@ const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unava
 /// precondition for producing anything. Left unbounded it takes the whole
 /// production window from a title whose source probes slowly, and the producer
 /// then makes nothing — every cycle, forever, for that title. Bounded, the
-/// worst case is two seconds and a plan built from stored facts, which is what
-/// every other path already uses. The elapsed time is added back to the
-/// production deadline so observing costs the encode nothing.
-const DECODE_PLAN_PROBE_BUDGET: Duration = Duration::from_secs(2);
+/// worst case is ten seconds and a plan built from stored facts, which is what
+/// every other path already uses. Ten seconds also bounds S-08's descriptor-
+/// bound `idet` verification for flagged sources. The elapsed time is added
+/// back to the production deadline so observing costs the encode nothing.
+const DECODE_PLAN_PROBE_BUDGET: Duration = Duration::from_secs(10);
 
 /// How long a mixed recovery waits for the CPU it newly needs.
 ///
@@ -170,6 +198,16 @@ fn replacement_deadline_error() -> String {
 
 pub(crate) fn is_retryable_capacity_error(error: &str) -> bool {
     error.starts_with(RETRYABLE_CAPACITY_PREFIX)
+}
+
+fn replacement_wait_error(message: impl AsRef<str>) -> String {
+    format!("{REPLACEMENT_WAIT_PREFIX}{}", message.as_ref())
+}
+
+/// A subset of [`is_retryable_capacity_error`], so every existing server-side
+/// consumer of the capacity class keeps seeing these unchanged.
+pub(crate) fn is_replacement_wait_error(error: &str) -> bool {
+    error.starts_with(REPLACEMENT_WAIT_PREFIX)
 }
 
 pub(crate) fn serving_fence_error(message: impl AsRef<str>) -> String {
@@ -1967,95 +2005,7 @@ fn apply_and_observe_progress_line(
 /// Spawn an ffmpeg HLS transcode, draining its stderr (at `-loglevel error`)
 /// into the logs so a failure is visible instead of a silently dead session,
 /// and its stdout — which carries `-progress` telemetry — into `progress`.
-#[derive(Clone, Default)]
-struct FfmpegDescriptors {
-    #[cfg(unix)]
-    source: Option<std::os::fd::RawFd>,
-    #[cfg(unix)]
-    output: Option<std::os::fd::RawFd>,
-    #[cfg(unix)]
-    subtitle: Option<std::os::fd::RawFd>,
-    #[cfg(windows)]
-    handoffs: Vec<WindowsPathHandoff>,
-}
-
-#[cfg(windows)]
-#[derive(Clone)]
-struct WindowsPathHandoff {
-    role: &'static str,
-    path: std::path::PathBuf,
-    identity: plurx_core::fs_secure::FileIdentity,
-    directory: bool,
-}
-
-#[cfg(windows)]
-impl WindowsPathHandoff {
-    fn file(role: &'static str, file: &std::fs::File) -> Result<Self, String> {
-        Ok(Self {
-            role,
-            path: plurx_core::fs_secure::std_file_path(file)
-                .map_err(|error| format!("resolving held {role} path: {error}"))?,
-            identity: plurx_core::fs_secure::std_file_identity(file)
-                .map_err(|error| format!("reading held {role} identity: {error}"))?,
-            directory: false,
-        })
-    }
-
-    fn directory(
-        role: &'static str,
-        directory: &plurx_core::fs_secure::SecureDirectory,
-    ) -> Result<Self, String> {
-        Ok(Self {
-            role,
-            path: directory.path().to_owned(),
-            identity: directory
-                .identity_blocking()
-                .map_err(|error| format!("reading held {role} identity: {error}"))?,
-            directory: true,
-        })
-    }
-
-    fn verify(&self) -> Result<(), String> {
-        let current = if self.directory {
-            plurx_core::fs_secure::directory_identity_nofollow_blocking(&self.path)
-        } else {
-            plurx_core::fs_secure::regular_file_identity_nofollow_blocking(&self.path)
-        }
-        .map_err(|error| format!("reopening held {} path: {error}", self.role))?;
-        if current == self.identity {
-            Ok(())
-        } else {
-            Err(format!(
-                "held {} path changed before ffmpeg launch",
-                self.role
-            ))
-        }
-    }
-}
-
-#[cfg(windows)]
-impl FfmpegDescriptors {
-    fn with_file(mut self, role: &'static str, file: &std::fs::File) -> Result<Self, String> {
-        self.handoffs.push(WindowsPathHandoff::file(role, file)?);
-        Ok(self)
-    }
-
-    fn with_directory(
-        mut self,
-        role: &'static str,
-        directory: &plurx_core::fs_secure::SecureDirectory,
-    ) -> Result<Self, String> {
-        self.handoffs
-            .push(WindowsPathHandoff::directory(role, directory)?);
-        Ok(self)
-    }
-
-    fn verify(&self) -> Result<(), String> {
-        self.handoffs
-            .iter()
-            .try_for_each(WindowsPathHandoff::verify)
-    }
-}
+type FfmpegDescriptors = crate::producer_spawn::Descriptors;
 
 #[cfg(windows)]
 fn windows_session_descriptors(session: &Session) -> Result<FfmpegDescriptors, String> {
@@ -2372,66 +2322,21 @@ fn spawn_ffmpeg(
     descriptors: FfmpegDescriptors,
     observation: DiagnosticObservation,
 ) -> Result<ObservedFfmpeg, String> {
-    // `-progress pipe:1` is a global option, so it can lead the vector; the
-    // HLS muxer writes to files, which leaves stdout free to carry it.
-    let mut full: Vec<String> = vec!["-progress".into(), "pipe:1".into()];
-    full.extend_from_slice(args);
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    configure_ffmpeg_runtime(&mut command, runtime_cache);
-    #[cfg(unix)]
-    if descriptors.source.is_some()
-        || descriptors.output.is_some()
-        || descriptors.subtitle.is_some()
-    {
-        // The held handles remain close-on-exec in plurxd. Duplicate both
-        // before assigning their fixed child descriptors so an unlucky raw-fd
-        // number cannot make one dup2 clobber the other's source.
-        unsafe {
-            command.pre_exec(move || {
-                let duplicate = |fd: Option<std::os::fd::RawFd>| -> std::io::Result<Option<i32>> {
-                    let Some(fd) = fd else { return Ok(None) };
-                    let duplicated = libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10);
-                    if duplicated == -1 {
-                        Err(std::io::Error::last_os_error())
-                    } else {
-                        Ok(Some(duplicated))
-                    }
-                };
-                let source = duplicate(descriptors.source)?;
-                let output = duplicate(descriptors.output)?;
-                let subtitle = duplicate(descriptors.subtitle)?;
-                for (duplicate, target) in [(source, 3), (output, 4), (subtitle, 5)] {
-                    let Some(duplicate) = duplicate else { continue };
-                    if libc::dup2(duplicate, target) == -1 {
-                        libc::close(duplicate);
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    libc::close(duplicate);
-                    let flags = libc::fcntl(target, libc::F_GETFD);
-                    if flags == -1
-                        || libc::fcntl(target, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
-                    {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
-                #[cfg(target_os = "macos")]
-                if output.is_some() && libc::fchdir(4) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    #[cfg(windows)]
-    descriptors.verify()?;
-    command
-        .args(&full)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let (mut child, child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|e| format!("spawning job-owned ffmpeg: {e}"))?;
+    let crate::producer_spawn::Spawned {
+        child,
+        child_job,
+        stdout,
+        stderr,
+    } = crate::producer_spawn::spawn(
+        std::path::Path::new(&ffmpeg_bin()),
+        args,
+        crate::producer_spawn::SpawnOptions {
+            runtime_cache,
+            progress: crate::producer_spawn::Progress::Stdout,
+            descriptors,
+            env: &[],
+        },
+    )?;
     // Built before the progress observer is moved into its own task: the sink
     // needs the actor handle and the attempt, and both live on the observer.
     let fault_sink = observation.fault_sink(&progress_observer);
@@ -2440,20 +2345,18 @@ fn spawn_ffmpeg(
     // and a stream that looked clean is what let a broken title into the
     // cache. §7.1: detached best-effort logging is insufficient for cache
     // qualification.
-    let progress = child.stdout.take().map(|stdout| {
-        tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                progress_observer.apply_line(&line);
-            }
-        })
-    });
+    let progress = Some(tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            progress_observer.apply_line(&line);
+        }
+    }));
     // The fault reaches the actor when it latches, not when the stream ends: a
     // producer that stops decoding and keeps running holds its stderr open for
     // the rest of the film, and a fault delivered then arrives after every
     // success fact it was supposed to precede.
-    let reader = child.stderr.take().map(|stderr| {
+    let reader = Some({
         let sid = session_id.to_owned();
         let started = Instant::now();
         let grammar = observation.grammar.clone();
@@ -2510,27 +2413,22 @@ fn spawn_ffmpeg_pipe(
     descriptors: FfmpegDescriptors,
     observation: DiagnosticObservation,
 ) -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String> {
-    let mut full: Vec<String> = vec!["-progress".into(), "pipe:2".into()];
-    full.extend_from_slice(args);
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    configure_ffmpeg_runtime(&mut command, runtime_cache);
-    #[cfg(windows)]
-    descriptors.verify()?;
-    #[cfg(unix)]
-    let _ = descriptors;
-    command
-        .args(&full)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let (mut child, child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|e| format!("spawning job-owned ffmpeg: {e}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "ffmpeg started without a stdout pipe".to_owned())?;
-    let reader = child.stderr.take().map(|stderr| {
+    let crate::producer_spawn::Spawned {
+        child,
+        child_job,
+        stdout,
+        stderr,
+    } = crate::producer_spawn::spawn(
+        std::path::Path::new(&ffmpeg_bin()),
+        args,
+        crate::producer_spawn::SpawnOptions {
+            runtime_cache,
+            progress: crate::producer_spawn::Progress::Stderr,
+            descriptors,
+            env: &[],
+        },
+    )?;
+    let reader = Some({
         let sid = session_id.to_owned();
         let started = Instant::now();
         let grammar = observation.grammar.clone();
@@ -2543,7 +2441,7 @@ fn spawn_ffmpeg_pipe(
                 grammar,
                 |line| log_ffmpeg_stderr(&sid, "copy", line),
                 |line| {
-                    if is_progress_line(line) {
+                    if plurx_core::transcode::progress::is_progress_line(line) {
                         progress_observer.apply_line(line);
                         true
                     } else {
@@ -2573,56 +2471,6 @@ fn spawn_ffmpeg_pipe(
         },
         stdout,
     ))
-}
-
-/// Give libraries loaded by ffmpeg a cache owned by plurxd.
-///
-/// Docker deployments commonly override the image user with a numeric host
-/// UID while leaving `HOME` out of the daemon environment. A non-login process
-/// does not synthesize it from passwd, so fontconfig has no user cache while
-/// libass initializes a text-subtitle burn. A transcode can then spend the
-/// entire producer startup budget rebuilding font metadata, leaving the
-/// player with no HLS resource.
-/// Keep the environment local to ffmpeg rather than changing the daemon's
-/// process environment, and use the data directory whose ownership plurxd has
-/// already proved by creating its session and cache directories.
-pub(crate) fn configure_ffmpeg_runtime(
-    command: &mut tokio::process::Command,
-    runtime_cache: &std::path::Path,
-) {
-    command.env("XDG_CACHE_HOME", runtime_cache);
-    // §7.1: disable terminal colouring for the child. FFmpeg suppresses it on
-    // a pipe today, but the grammar matches on exact bracketed contexts and a
-    // build or environment that decided otherwise would make every qualified
-    // line unreadable — silently, since an unmatched line is simply unrelated.
-    command.env("AV_LOG_FORCE_NOCOLOR", "1");
-}
-
-/// Is this stderr line one of ffmpeg's `-progress` blocks rather than a log
-/// message?
-///
-/// Matched on the key, from the set `-progress` actually emits, rather than on
-/// "contains an `=`" — an error message about `filter_units=remove_types=32-34`
-/// contains plenty of those, and swallowing it would hide exactly the failure
-/// a copy session is most likely to have.
-fn is_progress_line(line: &str) -> bool {
-    let Some((key, _)) = line.split_once('=') else {
-        return false;
-    };
-    matches!(
-        key,
-        "frame"
-            | "fps"
-            | "bitrate"
-            | "total_size"
-            | "out_time_us"
-            | "out_time_ms"
-            | "out_time"
-            | "dup_frames"
-            | "drop_frames"
-            | "speed"
-            | "progress"
-    ) || (key.starts_with("stream_") && key.ends_with("_q"))
 }
 
 /// Remove the (empty/partial) HLS output so a restarted ffmpeg starts clean.
@@ -4730,13 +4578,15 @@ async fn execute_prepublication_transcode_retry(
                     &retry.runtime_cache,
                     {
                         #[cfg(unix)]
-                        let descriptors = FfmpegDescriptors {
-                            subtitle: session
+                        let descriptors = FfmpegDescriptors::from_raw_fds(
+                            None,
+                            None,
+                            session
                                 .subtitle_handle
                                 .as_ref()
                                 .map(std::os::fd::AsRawFd::as_raw_fd),
-                            ..FfmpegDescriptors::default()
-                        };
+                            false,
+                        );
                         #[cfg(windows)]
                         let descriptors = windows_session_descriptors(&session)?;
                         descriptors
@@ -5642,9 +5492,18 @@ struct FrozenHlsPresentation {
 }
 
 impl FrozenHlsPresentation {
-    fn new(file: plurx_core::domain::MediaFile, context: HlsContext, kind: &SessionKind) -> Self {
+    fn new(
+        mut file: plurx_core::domain::MediaFile,
+        context: HlsContext,
+        kind: &SessionKind,
+    ) -> Self {
+        if let SessionKind::Transcode { height } = kind {
+            let geometry = plurx_core::transcode::output_size(&file, *height);
+            file.width = geometry.map(|(width, _)| width);
+            file.height = geometry.map(|(_, height)| height);
+        }
         let identity = serde_json::json!({
-            "version": 1,
+            "version": 2,
             "file": &file,
             "kind": kind,
             "start_seconds": context.start_seconds,
@@ -5655,9 +5514,11 @@ impl FrozenHlsPresentation {
         });
         let contract_fingerprint = hex::encode(Sha256::digest(identity.to_string().as_bytes()));
         let master_requires_attempt_init = context.codecs.split(',').next().is_some_and(|video| {
+            let video = video.trim();
             ["hvc1", "hev1", "dvh1", "dvhe"]
                 .into_iter()
-                .any(|entry| video.trim().starts_with(entry))
+                .any(|entry| video.starts_with(entry))
+                || (matches!(kind, SessionKind::Copy { .. }) && video.starts_with("avc1"))
         });
         let sealed_stable_master_contract =
             (!master_requires_attempt_init).then(|| contract_fingerprint.clone());
@@ -5668,6 +5529,34 @@ impl FrozenHlsPresentation {
             sealed_stable_master_contract,
         }
     }
+}
+
+/// Shape the source row into the bytes an encoded-VOD recipe emits.
+///
+/// Width and height come from the same `output_size` decision. Carrying one
+/// resolved coordinate with the requested height would advertise an aspect
+/// ratio the encoder never produced, and an unprobed source must omit both.
+fn encoded_vod_presentation_file(
+    mut file: plurx_core::domain::MediaFile,
+    target_height: i64,
+    grade: OutputGrade,
+) -> plurx_core::domain::MediaFile {
+    let geometry = plurx_core::transcode::output_size(&file, target_height);
+    file.width = geometry.map(|(width, _)| width);
+    file.height = geometry.map(|(_, height)| height);
+    file.hdr = (grade == OutputGrade::Hdr10).then(|| "hdr10".to_owned());
+    file.hdr_format = (grade == OutputGrade::Hdr10).then(|| "HDR10".to_owned());
+    file.dolby_vision = Default::default();
+    file.bit_depth = Some(if grade == OutputGrade::Hdr10 { 10 } else { 8 });
+    file.video_codec = Some(
+        if grade == OutputGrade::Hdr10 {
+            "hevc"
+        } else {
+            "h264"
+        }
+        .to_owned(),
+    );
+    file
 }
 
 fn frozen_video_frame_rate(probe_json: Option<&str>) -> Option<f64> {
@@ -6780,6 +6669,10 @@ struct Session {
     /// this outside CODECS so clients that only understand the base can still
     /// select the variant.
     target_height: i64,
+    /// The explicit CPU tone-map input and its bounded provenance. Absent for
+    /// copy delivery and GPU graphs, which do not consume this CPU-chain fact.
+    tone_map_peak_nits: Option<u32>,
+    tone_map_peak_source: Option<&'static str>,
     /// The encoder actually running *now*. Mutable because the
     /// hardware->software fallback replaces the process inside one session,
     /// and an activity page still naming the hardware encoder after that is
@@ -8993,6 +8886,8 @@ async fn session_info(
         user_name: s.user_name.clone(),
         target_height: s.target_height,
         encoder: *s.encoder_label.lock().await,
+        tone_map_peak_nits: s.tone_map_peak_nits,
+        tone_map_peak_source: s.tone_map_peak_source,
         started_unix: s.started_unix,
         idle_seconds,
         last_request: last_request_kind,
@@ -9121,6 +9016,8 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         user_name: info.user_name,
         target_height: info.target_height,
         encoder: "vod",
+        tone_map_peak_nits: None,
+        tone_map_peak_source: None,
         started_unix: info.started_unix,
         idle_seconds: info.idle_seconds,
         last_request: "vod",
@@ -9237,6 +9134,17 @@ pub(crate) struct VodResponsePublication<T> {
 }
 
 impl MediaResponseOwner {
+    /// AVC is init-derived only for fMP4 sessions. Rolling full transcodes use
+    /// MPEG-TS and have no initialization object to inspect.
+    pub(crate) fn avc_master_uses_init(&self) -> bool {
+        match &self.0 {
+            MediaResponseOwnerKind::Rolling { session, .. } => {
+                matches!(session.kind, SessionKind::Copy { .. })
+            }
+            MediaResponseOwnerKind::Vod(_) => true,
+        }
+    }
+
     /// A strong validator for one rolling object. VOD supplies its own
     /// artifact digest; rolling scratch needs both the process-local Session
     /// incarnation and exact producer attempt so an ABA reuse can never turn
@@ -10122,6 +10030,56 @@ pub(crate) async fn probe_media_origin(source_path: &std::path::Path, start_seco
     origin
 }
 
+/// A copy session must use the preceding keyframe reported on stdout, not the
+/// requested seek time. Generate exactly two keyframes so the expected origin
+/// is a property of this fixture rather than of an installed media file.
+#[cfg(test)]
+#[tokio::test]
+#[ignore = "needs ffmpeg"]
+async fn probe_media_origin_reads_the_preceding_keyframe() {
+    plurx_core::testfixtures::require_ffmpeg();
+    let directory = crate::test_tempdir().expect("media-origin fixture");
+    let source = directory.path().join("two-keyframes.mp4");
+    let output = std::process::Command::new(plurx_core::testfixtures::ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=160x120:rate=15:duration=2",
+        ])
+        .args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-g",
+            "15",
+            "-keyint_min",
+            "15",
+            "-sc_threshold",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&source)
+        .output()
+        .expect("generate media-origin fixture");
+    assert!(
+        output.status.success(),
+        "fixture encode failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requested = 1.5;
+    let origin = probe_media_origin(&source, requested).await;
+    assert!(
+        (origin - 1.0).abs() < 0.05,
+        "expected the preceding 1.0 s keyframe, got {origin}"
+    );
+    assert_ne!(origin, requested, "probe fell back to the requested seek");
+}
+
 fn audio_track(
     file: &plurx_core::domain::MediaFile,
     selected: Option<i64>,
@@ -10419,19 +10377,64 @@ struct ClusterServingAdmission {
 pub(crate) struct ClusterReplacementGuard {
     registry: Arc<ClusterReplacementGates>,
     key: String,
+    gate: Arc<ReplacementGate>,
     permit: Option<tokio::sync::OwnedMutexGuard<()>>,
     _predecessor_settlement: Option<SessionSettlementGuard>,
 }
 
+impl ClusterReplacementGuard {
+    /// Name a session this replacement has brought into existence, so a
+    /// reclaim can fence it before taking the key.
+    pub(crate) fn publish_fenceable(&self, session_id: &str) {
+        if let Ok(mut state) = self.gate.state.lock() {
+            if let Some(holder) = state.holder.as_mut() {
+                if !holder.fenceable.iter().any(|id| id == session_id) {
+                    holder.fenceable.push(session_id.to_owned());
+                }
+            }
+        }
+    }
+
+    /// Declare that this hold is no longer a start any viewer is waiting on —
+    /// its request has been answered and the guard now lives inside cleanup.
+    ///
+    /// This is the whole difference between a holder that may be reclaimed
+    /// immediately and one that may not. It is a fact the holder knows and a
+    /// waiter cannot infer: the measured failure was a cleanup task holding a
+    /// key six seconds after its request had already answered the viewer 503,
+    /// and from outside that is indistinguishable from a start still building.
+    pub(crate) fn mark_abandoned(&self) {
+        if let Ok(mut state) = self.gate.state.lock() {
+            if let Some(holder) = state.holder.as_mut() {
+                holder.abandoned = true;
+            }
+        }
+    }
+}
+
 impl Drop for ClusterReplacementGuard {
     fn drop(&mut self) {
+        if let Ok(mut state) = self.gate.state.lock() {
+            state.holder = None;
+        }
         drop(self.permit.take());
         let Ok(mut entries) = self.registry.entries.lock() else {
             return;
         };
-        if entries
-            .get(&self.key)
-            .is_some_and(|gate| gate.upgrade().is_none())
+        // Remove only the entry this guard actually held, and only when
+        // nothing else still wants it. Holding `entries` is what makes the
+        // count meaningful: a waiter upgrades the `Weak` under this same lock,
+        // so if one exists the count is already above one.
+        //
+        // The strong-count test is load-bearing now in a way it was not before
+        // the guard started carrying its own `Arc`: with that field alive
+        // during `drop`, the old "did the `Weak` fail to upgrade" test could
+        // never be true, and the entry was never removed at all.
+        if Arc::strong_count(&self.gate) == 1
+            && entries
+                .get(&self.key)
+                .and_then(Weak::upgrade)
+                .is_none_or(|gate| Arc::ptr_eq(&gate, &self.gate))
         {
             entries.remove(&self.key);
         }
@@ -10440,7 +10443,87 @@ impl Drop for ClusterReplacementGuard {
 
 #[derive(Default)]
 struct ClusterReplacementGates {
-    entries: std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    entries: std::sync::Mutex<HashMap<String, Weak<ReplacementGate>>>,
+}
+
+/// One player's replacement serialization, plus the supersession signal that
+/// keeps a newer open from queueing behind an abandoned one.
+///
+/// The lock alone was the whole gate until 2026-09-21, and a `tokio::sync::
+/// Mutex` has no timeout, no poisoning, and no owner the outside world can
+/// reach. Every production holder is a detached task — the activation task,
+/// the armed handoff, the takeover supervisor, the cleanup spawned by
+/// `StartedSessionGuard`'s `Drop` — so the request that began a replacement
+/// returns, or is cancelled, while its guard lives on, and nothing aged,
+/// expired or force-released the registry. One holder parked on an unbounded
+/// await therefore turned its player's key into a three-second refusal for the
+/// life of the process: observed on m6 on 2026-09-21, where a start blocked on
+/// a 402-second subtitle sidecar extraction refused the viewer's own reopen of
+/// the title they were watching.
+struct ReplacementGate {
+    lock: Arc<tokio::sync::Mutex<()>>,
+    /// Retirement and ownership under ONE lock, deliberately.
+    ///
+    /// They are the two halves of the same decision, and splitting them opens
+    /// a window where a start that won the lock a moment before a reclaim
+    /// retired the gate becomes a second live owner of one player. Sharing a
+    /// lock makes "judge this hold and retire it" and "claim this hold"
+    /// mutually exclusive, so whichever wins renders the other harmless: a
+    /// reclaim that loses finds a fresh, healthy holder and refuses; a
+    /// claimant that loses sees the retirement and re-enters the registry.
+    state: std::sync::Mutex<GateState>,
+}
+
+#[derive(Default)]
+struct GateState {
+    /// Set once this gate has been reclaimed. A waiter that afterwards wins
+    /// its lock is serializing nothing — the player's key is a different gate
+    /// now — so it drops the permit and re-enters the registry.
+    retired: bool,
+    /// Present exactly while someone holds the lock.
+    holder: Option<ReplacementHolder>,
+}
+
+/// What a waiter is allowed to know about the hold it is queued behind.
+struct ReplacementHolder {
+    /// When the key was taken. The only clock a reclaim consults, and it is
+    /// compared against [`CLUSTER_REPLACEMENT_HOLD_CEILING`], never against
+    /// the cooperative wait.
+    since: tokio::time::Instant,
+    /// Set by the holder itself once its request has been answered and the
+    /// guard lives on inside cleanup. See `ClusterReplacementGuard::
+    /// mark_abandoned`.
+    abandoned: bool,
+    /// Sessions this hold has brought into existence, fenced before the key
+    /// moves.
+    fenceable: Vec<String>,
+}
+
+impl ReplacementGate {
+    fn new() -> Self {
+        Self {
+            lock: Arc::new(tokio::sync::Mutex::new(())),
+            state: std::sync::Mutex::new(GateState::default()),
+        }
+    }
+
+    /// Claim a gate whose lock this caller has just won. `Ok(false)` means the
+    /// gate was retired first and this permit serializes nothing.
+    fn claim(&self) -> Result<bool, String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "cluster replacement gate state was poisoned".to_owned())?;
+        if state.retired {
+            return Ok(false);
+        }
+        state.holder = Some(ReplacementHolder {
+            since: tokio::time::Instant::now(),
+            abandoned: false,
+            fenceable: Vec::new(),
+        });
+        Ok(true)
+    }
 }
 
 struct SessionReleaseGate {
@@ -10570,6 +10653,10 @@ pub struct SessionInfo {
     pub user_name: String,
     pub target_height: i64,
     pub encoder: &'static str,
+    /// Present only when this session's delivered bytes use the CPU zscale
+    /// chain. `default` is the documented policy assumption, not source truth.
+    pub tone_map_peak_nits: Option<u32>,
+    pub tone_map_peak_source: Option<&'static str>,
     pub started_unix: i64,
     pub idle_seconds: u64,
     /// Last capability-authenticated resource this viewer requested. A stalled
@@ -12931,12 +13018,24 @@ async fn forget_unfenced_claim_with(
 ) {
     match publication_fence {
         Some(fence) => {
-            let _ = PublicationStore::fenced(store, fence.clone())
-                .forget_cache_entry(hash, node_id, "local")
-                .await;
+            // Best-effort cache repair: the invalid fenced entry is already
+            // excluded and later reconciliation retries its removal.
+            crate::store_result::observe(
+                crate::store_result::Operation::ForgetFencedUnfencedClaim,
+                crate::store_result::Discard::BestEffort,
+                PublicationStore::fenced(store, fence.clone())
+                    .forget_cache_entry(hash, node_id, "local")
+                    .await,
+            );
         }
         None => {
-            let _ = store.forget_cache_entry(hash, node_id, "local").await;
+            // Best-effort cache repair: the invalid entry is already excluded
+            // from this lookup and later cache reconciliation retries removal.
+            crate::store_result::observe(
+                crate::store_result::Operation::ForgetUnfencedCacheEntry,
+                crate::store_result::Discard::BestEffort,
+                store.forget_cache_entry(hash, node_id, "local").await,
+            );
         }
     }
 }
@@ -14226,8 +14325,9 @@ impl TranscodeManager {
         // Renditions are durable state — admitted ones are the copy cache the
         // plan promises — so they live beside the persistent caches rather
         // than in scratch. Replaced before serving starts, like the caches.
-        self.vod = crate::vodserve::VodServe::new_cluster(
+        self.vod = crate::vodserve::VodServe::new_cluster_with_runtime(
             rendition_cache,
+            self.runtime_cache.clone(),
             Arc::clone(&self.store),
             node_id.clone(),
             crate::fragment_index_cluster::cache_root(&self.runtime_cache),
@@ -15026,7 +15126,10 @@ impl TranscodeManager {
         let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref())
             .qualifying_artifacts(qualification);
         transcode::resolve_transcode(
-            &TranscodeRequest::new(encoder, TranscodeMediaOptions::from_options(file, options)),
+            &TranscodeRequest::new(
+                encoder,
+                TranscodeMediaOptions::from_options_with_facts(file, options, facts),
+            ),
             facts,
             &capabilities,
             &policy,
@@ -15640,12 +15743,13 @@ impl TranscodeManager {
             } else if dovi_reshape {
                 Pipeline::DoviTonemapx
             } else {
-                Pipeline::for_session(
+                Pipeline::for_session_with_scan(
                     self.pipeline,
                     encoder,
                     transcode::routing_hdr(file),
                     transcode::heavy_source(file),
                     subtitle_burn.as_ref().is_some_and(|b| !b.bitmap),
+                    plurx_core::domain::ScanType::from_field_order(file.field_order.as_deref()),
                 )
             },
             subtitle_burn,
@@ -16260,16 +16364,22 @@ impl TranscodeManager {
         .await;
 
         if let Some(pin) = shared_pin.as_ref() {
-            let _ = store
-                .release_cache_consumer_pin(
-                    &pin.storage_id,
-                    &pin.recipe_hash,
-                    &pin.generation_id,
-                    pin.consumer_kind,
-                    &pin.consumer_id,
-                    pin.consumer_epoch,
-                )
-                .await;
+            // Best effort: the durable pin expires if verification cleanup
+            // cannot release it immediately.
+            crate::store_result::observe(
+                crate::store_result::Operation::ReleaseSharedLookupPinAfterVerification,
+                crate::store_result::Discard::BestEffort,
+                store
+                    .release_cache_consumer_pin(
+                        &pin.storage_id,
+                        &pin.recipe_hash,
+                        &pin.generation_id,
+                        pin.consumer_kind,
+                        &pin.consumer_id,
+                        pin.consumer_epoch,
+                    )
+                    .await,
+            );
         };
         CacheOfferVerification {
             verified,
@@ -16323,8 +16433,12 @@ impl TranscodeManager {
                         u64::try_from(SHARED_LOOKUP_PIN_MS).unwrap_or(u64::MAX),
                     ))
                     .await;
-                    let _ = cleanup_store
-                        .release_cache_consumer_pin(
+                    // Best effort: this delayed release only shortens the
+                    // durable pin's own bounded expiry.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::ReleaseExpiredSharedLookupPin,
+                        crate::store_result::Discard::BestEffort,
+                        cleanup_store.release_cache_consumer_pin(
                             &cleanup_pin.storage_id,
                             &cleanup_pin.recipe_hash,
                             &cleanup_pin.generation_id,
@@ -16332,7 +16446,8 @@ impl TranscodeManager {
                             &cleanup_pin.consumer_id,
                             cleanup_pin.consumer_epoch,
                         )
-                        .await;
+                        .await,
+                    );
                 });
                 let prepared = async {
                     let dir =
@@ -16372,8 +16487,12 @@ impl TranscodeManager {
                 }
                 .await;
                 if prepared.is_err() {
-                    let _ = store
-                        .release_cache_consumer_pin(
+                    // Best effort: failed preparation cannot consume the
+                    // bytes, and the durable pin expires without this release.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::ReleaseSharedLookupPinAfterPreparationFailure,
+                        crate::store_result::Discard::BestEffort,
+                        store.release_cache_consumer_pin(
                             &pin.storage_id,
                             &pin.recipe_hash,
                             &pin.generation_id,
@@ -16381,7 +16500,8 @@ impl TranscodeManager {
                             &pin.consumer_id,
                             pin.consumer_epoch,
                         )
-                        .await;
+                        .await,
+                    );
                 }
                 prepared
             })
@@ -16587,15 +16707,30 @@ impl TranscodeManager {
         };
         drop(cache_lookup);
         if let Some(generation_id) = cache_location.generation_id.as_deref() {
-            let _ = self
-                .store
-                .touch_shared_cache_entry(&hash, &cache_location.node_id, generation_id, unix_ms())
-                .await;
+            // Best-effort recency hint: playback already pinned the generation
+            // and a later read can refresh its last-access timestamp.
+            crate::store_result::observe(
+                crate::store_result::Operation::TouchSharedCacheEntry,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .touch_shared_cache_entry(
+                        &hash,
+                        &cache_location.node_id,
+                        generation_id,
+                        unix_ms(),
+                    )
+                    .await,
+            );
         } else {
-            let _ = self
-                .store
-                .touch_cache_entry(&hash, &cache_location.node_id)
-                .await;
+            // Best-effort recency hint: the selected cache object remains
+            // usable, and a later read can refresh its access timestamp.
+            crate::store_result::observe(
+                crate::store_result::Operation::TouchCacheEntry,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .touch_cache_entry(&hash, &cache_location.node_id)
+                    .await,
+            );
         }
         let cached_kind = SessionKind::Transcode {
             height: opts.target_height,
@@ -16713,6 +16848,10 @@ impl TranscodeManager {
             media_origin_seconds: 0.0,
             grade: opts.pipeline.output_grade(),
             target_height: opts.target_height,
+            tone_map_peak_nits: (plan.options().tone_map == ToneMap::Zscale)
+                .then_some(plan.options().tone_map_peak_nits),
+            tone_map_peak_source: (plan.options().tone_map == ToneMap::Zscale)
+                .then_some(plan.options().tone_map_peak_source.name()),
             encoder_label: Mutex::new("cached"),
             started_unix: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -17320,16 +17459,21 @@ impl TranscodeManager {
             OfflineProduceOutcome::Ready(_) | OfflineProduceOutcome::Cached(_)
         ) {
             if let OfflineSubtitle::Native(index) = spec.subtitle {
-                let _ = self
-                    .store
-                    .update_offline_progress(
-                        &package.id,
-                        &package.node_id,
-                        package.claim_generation,
-                        "extracting_subtitles",
-                        999,
-                    )
-                    .await;
+                // Best effort: package production continues and its later
+                // terminal settlement supersedes this progress snapshot.
+                crate::store_result::observe(
+                    crate::store_result::Operation::UpdateOfflineProgressExtractingSubtitles,
+                    crate::store_result::Discard::BestEffort,
+                    self.store
+                        .update_offline_progress(
+                            &package.id,
+                            &package.node_id,
+                            package.claim_generation,
+                            "extracting_subtitles",
+                            999,
+                        )
+                        .await,
+                );
                 crate::subtitles::ensure_vtt(&self.subtitle_cache, file, index).await?;
             }
         }
@@ -17542,16 +17686,21 @@ impl TranscodeManager {
             if let Some(package_id) = offline_package_id {
                 let claim_generation = offline_claim_generation
                     .ok_or("offline package production lost its claim generation")?;
-                let _ = self
-                    .store
-                    .update_offline_progress(
-                        package_id,
-                        &cache.node_id,
-                        claim_generation,
-                        "transcoding",
-                        999,
-                    )
-                    .await;
+                // Best effort: this near-complete progress row is advisory;
+                // final package settlement is the durable result.
+                crate::store_result::observe(
+                    crate::store_result::Operation::UpdateOfflineProgressCachedTranscode,
+                    crate::store_result::Discard::BestEffort,
+                    self.store
+                        .update_offline_progress(
+                            package_id,
+                            &cache.node_id,
+                            claim_generation,
+                            "transcoding",
+                            999,
+                        )
+                        .await,
+                );
             }
             if let Some(fence) = &pretranscode_fence {
                 if let Some(expected) = expected_policy_generation.as_deref() {
@@ -17841,14 +17990,25 @@ impl TranscodeManager {
                     && pretranscode_fence.is_none()
                 {
                     if let Some(fence) = publication_fence {
-                        let _ = PublicationStore::fenced(self.store.as_ref(), fence.clone())
-                            .forget_cache_entry(&hash, &cache.node_id, "local")
-                            .await;
+                        // Cancelled: the produce path is already returning its
+                        // source error; this cleanup failure is not that cause.
+                        crate::store_result::observe(
+                            crate::store_result::Operation::ForgetFailedFencedOfflineCacheEntry,
+                            crate::store_result::Discard::Cancelled,
+                            PublicationStore::fenced(self.store.as_ref(), fence.clone())
+                                .forget_cache_entry(&hash, &cache.node_id, "local")
+                                .await,
+                        );
                     } else {
-                        let _ = self
-                            .store
-                            .forget_cache_entry(&hash, &cache.node_id, "local")
-                            .await;
+                        // Cancelled: the produce path is already returning its
+                        // source error; this cleanup failure is not that cause.
+                        crate::store_result::observe(
+                            crate::store_result::Operation::ForgetFailedOfflineCacheEntry,
+                            crate::store_result::Discard::Cancelled,
+                            self.store
+                                .forget_cache_entry(&hash, &cache.node_id, "local")
+                                .await,
+                        );
                     }
                 }
                 return Err(error);
@@ -18441,11 +18601,12 @@ impl TranscodeManager {
                 &self.runtime_cache,
                 {
                     #[cfg(unix)]
-                    let descriptors = FfmpegDescriptors {
-                        source: bound_source_fd,
-                        output: Some(temp.raw_fd()),
-                        subtitle: subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
-                    };
+                    let descriptors = FfmpegDescriptors::from_raw_fds(
+                        bound_source_fd,
+                        Some(temp.raw_fd()),
+                        subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
+                        true,
+                    );
                     #[cfg(windows)]
                     let descriptors = windows_offline_descriptors(
                         bound_source.as_deref(),
@@ -18528,16 +18689,21 @@ impl TranscodeManager {
                         .saturating_mul(1000)
                         .saturating_div(duration_ms)
                         .clamp(1, 999);
-                    let _ = self
-                        .store
-                        .update_offline_progress(
-                            package_id,
-                            self.offline_owner(),
-                            claim_generation,
-                            "transcoding",
-                            progress,
-                        )
-                        .await;
+                    // Best effort: a missed intermediate percentage cannot
+                    // invalidate the resumable parts or final settlement.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::UpdateOfflineProgressTranscoding,
+                        crate::store_result::Discard::BestEffort,
+                        self.store
+                            .update_offline_progress(
+                                package_id,
+                                self.offline_owner(),
+                                claim_generation,
+                                "transcoding",
+                                progress,
+                            )
+                            .await,
+                    );
                 }
             }
 
@@ -18772,6 +18938,7 @@ impl TranscodeManager {
                 priority,
             )
             .await?;
+        replacement.publish_fenceable(&creation.info.session_id);
         Ok(ClusterSessionStart {
             info: creation.info,
             replacement,
@@ -18857,46 +19024,169 @@ impl TranscodeManager {
         predecessor_session_id: Option<&str>,
         deadline: tokio::time::Instant,
     ) -> Result<ClusterReplacementGuard, String> {
-        let gate = {
+        for _ in 0..MAX_CLUSTER_REPLACEMENT_REENTRIES {
+            let gate = {
+                let mut entries = self
+                    .cluster_replacement_gates
+                    .entries
+                    .lock()
+                    .map_err(|_| "cluster replacement gate registry was poisoned".to_owned())?;
+                entries.retain(|_, gate| gate.strong_count() > 0);
+                if let Some(gate) = entries.get(&key).and_then(Weak::upgrade) {
+                    gate
+                } else {
+                    if entries.len() >= MAX_CLUSTER_REPLACEMENT_GATES {
+                        return Err(capacity_error(
+                            "too many player replacements are active on this worker",
+                        ));
+                    }
+                    let gate = Arc::new(ReplacementGate::new());
+                    entries.insert(key.clone(), Arc::downgrade(&gate));
+                    gate
+                }
+            };
+            let gate_deadline = std::cmp::min(
+                deadline,
+                tokio::time::Instant::now() + CLUSTER_REPLACEMENT_GATE_WAIT,
+            );
+            let (gate, permit) =
+                match tokio::time::timeout_at(gate_deadline, Arc::clone(&gate.lock).lock_owned())
+                    .await
+                {
+                    Ok(permit) => (gate, permit),
+                    Err(_) => match self.reclaim_stalled_replacement_gate(&key, &gate).await? {
+                        Some(reclaimed) => reclaimed,
+                        // A holder inside its budget keeps its player. The
+                        // caller waits out the bounded refusal and re-posts.
+                        None => {
+                            return Err(replacement_wait_error(
+                                "it has not finished releasing this player",
+                            ))
+                        }
+                    },
+                };
+            if !gate.claim()? {
+                // Reclaimed while this start queued. The permit serializes a
+                // key nobody uses any more, so start over against whatever the
+                // registry holds now.
+                drop(permit);
+                continue;
+            }
+            return Ok(ClusterReplacementGuard {
+                registry: Arc::clone(&self.cluster_replacement_gates),
+                key,
+                gate,
+                permit: Some(permit),
+                // Acquired after serialization and retained across provisional
+                // creation plus the durable activation verdict. The lease tick
+                // reads workers before this registry, so it observes either the
+                // predecessor process or this settlement protection while the
+                // successor remains make-before-break provisional.
+                _predecessor_settlement: predecessor_session_id.map(SessionSettlementGuard::begin),
+            });
+        }
+        Err(replacement_wait_error(
+            "this player's key changed hands repeatedly while the start waited",
+        ))
+    }
+
+    /// Take a player's key back from a hold that can be proved not to need it.
+    ///
+    /// `Ok(None)` means the holder is a start still inside its budget. Those
+    /// are never reclaimed: the work under this gate routinely takes tens of
+    /// seconds — the incident that prompted this fix had two 50-second starts —
+    /// so a timer short enough to unwedge a player is short enough to destroy
+    /// every healthy one, including the re-posts of the client's own retry
+    /// ladder. That is what the first version of this fix got wrong.
+    ///
+    /// Two things are provable instead. An **abandoned** hold has said so
+    /// itself: its request is answered and its guard lives on inside cleanup,
+    /// which is exactly the measured failure. A hold past
+    /// [`CLUSTER_REPLACEMENT_HOLD_CEILING`] has outlived every budget it asked
+    /// for, so whatever it is waiting on it is not going to finish in time to
+    /// matter.
+    ///
+    /// Fencing first is what keeps the reclaim exact. An abandoned hold always
+    /// has an id to fence, because the cleanup that abandons it publishes the
+    /// session it is tearing down. Installing a fresh gate and retiring the old
+    /// one is what keeps the reclaimed holder harmless: it keeps its own `Arc`
+    /// and its own lock, and anyone still queued on that lock re-enters the
+    /// registry instead of believing it serializes this player.
+    async fn reclaim_stalled_replacement_gate(
+        &self,
+        key: &str,
+        gate: &Arc<ReplacementGate>,
+    ) -> Result<Option<(Arc<ReplacementGate>, tokio::sync::OwnedMutexGuard<()>)>, String> {
+        let (reason, fenceable) = {
+            let mut state = gate
+                .state
+                .lock()
+                .map_err(|_| "cluster replacement gate state was poisoned".to_owned())?;
+            if state.retired {
+                // Someone else reclaimed this gate already; queue against
+                // whatever they installed rather than retiring it twice.
+                return Ok(None);
+            }
+            // No holder means the lock was released between the timeout and
+            // here. Nothing to reclaim; the ordinary path will win it.
+            let Some(holder) = state.holder.as_ref() else {
+                return Ok(None);
+            };
+            let judged = if holder.abandoned {
+                ("abandoned", holder.fenceable.clone())
+            } else if holder.since.elapsed() >= CLUSTER_REPLACEMENT_HOLD_CEILING {
+                ("hold_ceiling", holder.fenceable.clone())
+            } else {
+                // A start inside its budget keeps its player.
+                return Ok(None);
+            };
+            // Retired in the same critical section that judged it, so a start
+            // that wins the lock from here on cannot claim this gate and
+            // become a second owner. Anything that won the lock BEFORE this
+            // point already replaced `holder`, and the judgement above would
+            // have seen that fresh hold and refused.
+            state.retired = true;
+            judged
+        };
+        if !fenceable.is_empty() {
+            self.fence_sessions(&fenceable).await;
+        }
+        let successor = Arc::new(ReplacementGate::new());
+        {
             let mut entries = self
                 .cluster_replacement_gates
                 .entries
                 .lock()
                 .map_err(|_| "cluster replacement gate registry was poisoned".to_owned())?;
-            entries.retain(|_, gate| gate.strong_count() > 0);
-            if let Some(gate) = entries.get(&key).and_then(Weak::upgrade) {
-                gate
-            } else {
-                if entries.len() >= MAX_CLUSTER_REPLACEMENT_GATES {
-                    return Err(capacity_error(
-                        "too many player replacements are active on this worker",
-                    ));
+            // Re-read under the registry lock: another arrival may have
+            // reclaimed the same gate while this one awaited the fence. Its
+            // successor is as good as ours, so queue against that instead of
+            // installing a second one.
+            if entries
+                .get(key)
+                .and_then(Weak::upgrade)
+                .is_some_and(|current| !Arc::ptr_eq(&current, gate))
+            {
+                // Someone installed a successor while this reclaim awaited the
+                // fence. Theirs is as good as ours, so stand down — and undo
+                // the retirement, because a gate nobody will replace must not
+                // be left refusing every claimant.
+                if let Ok(mut state) = gate.state.lock() {
+                    state.retired = false;
                 }
-                let gate = Arc::new(tokio::sync::Mutex::new(()));
-                entries.insert(key.clone(), Arc::downgrade(&gate));
-                gate
+                return Ok(None);
             }
-        };
-        let gate_deadline = std::cmp::min(
-            deadline,
-            tokio::time::Instant::now() + CLUSTER_REPLACEMENT_GATE_WAIT,
+            entries.insert(key.to_owned(), Arc::downgrade(&successor));
+        }
+        tracing::warn!(
+            reason,
+            fenced = fenceable.len(),
+            "reclaimed a player's replacement key from a hold that could not use it"
         );
-        let permit = tokio::time::timeout_at(gate_deadline, gate.lock_owned())
-            .await
-            .map_err(|_| {
-                capacity_error("another replacement for this player is still being committed")
-            })?;
-        Ok(ClusterReplacementGuard {
-            registry: Arc::clone(&self.cluster_replacement_gates),
-            key,
-            permit: Some(permit),
-            // Acquired after serialization and retained across provisional
-            // creation plus the durable activation verdict. The lease tick
-            // reads workers before this registry, so it observes either the
-            // predecessor process or this settlement protection while the
-            // successor remains make-before-break provisional.
-            _predecessor_settlement: predecessor_session_id.map(SessionSettlementGuard::begin),
-        })
+        crate::playback_control::record_replacement_reclaimed(reason);
+        // Uncontended by construction — nothing else has reached this gate yet.
+        let permit = Arc::clone(&successor.lock).lock_owned().await;
+        Ok(Some((successor, permit)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -21513,6 +21803,12 @@ impl TranscodeManager {
                 .map_err(|error| error.to_string())?
                 .observing_qualified_grammar(observation.qualified_logging());
         let args = transcode::hls_args(&plan, &execution);
+        if plan.input_is_hdr()
+            && plan.options().pipeline == Pipeline::Cpu
+            && plan.options().tone_map == ToneMap::Zscale
+        {
+            crate::telemetry::record_tone_map_peak(plan.options().tone_map_peak_source);
+        }
         // Log the exact command — the single most useful diagnostic. It reveals
         // the decode/filter/encode pipeline actually used (e.g. whether heavy
         // HEVC is being hardware-decoded), and confirms which build is running.
@@ -21521,17 +21817,21 @@ impl TranscodeManager {
         // not. Without it `pipeline=cpu` on a 4K HDR title reads as the GPU
         // path being broken, when the usual answer is that the source is Dolby
         // Vision and the CPU chain is the *correct* choice.
-        let declined = Pipeline::declined(
+        let declined = Pipeline::declined_with_scan(
             self.pipeline,
             encoder,
             transcode::routing_hdr(&file),
             transcode::heavy_source(&file),
             opts.subtitle_burn.as_ref().is_some_and(|b| !b.bitmap),
+            plurx_core::domain::ScanType::from_field_order(file.field_order.as_deref()),
         );
         tracing::info!(
             session = %session_log_id(&session_id), encoder = encoder.label(), pipeline = opts.pipeline.name(),
             proven = self.pipeline.name(), hdr = file.hdr.as_deref().unwrap_or("sdr"),
+            peak_nits = plan.options().tone_map_peak_nits,
+            peak_source = plan.options().tone_map_peak_source.name(),
             declined = declined.unwrap_or(""),
+            deinterlace = plan.deinterlace().name(),
             build = crate::version::BUILD,
             "{}", ffmpeg_args_log_message("transcode ffmpeg args", &args, &session_id)
         );
@@ -21866,6 +22166,10 @@ impl TranscodeManager {
             media_origin_seconds: start_seconds,
             grade: opts.pipeline.output_grade(),
             target_height,
+            tone_map_peak_nits: (plan.options().tone_map == ToneMap::Zscale)
+                .then_some(plan.options().tone_map_peak_nits),
+            tone_map_peak_source: (plan.options().tone_map == ToneMap::Zscale)
+                .then_some(plan.options().tone_map_peak_source.name()),
             encoder_label: Mutex::new(encoder.label()),
             started_unix: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -21959,13 +22263,15 @@ impl TranscodeManager {
                     &self.runtime_cache,
                     {
                         #[cfg(unix)]
-                        let descriptors = FfmpegDescriptors {
-                            subtitle: session
+                        let descriptors = FfmpegDescriptors::from_raw_fds(
+                            None,
+                            None,
+                            session
                                 .subtitle_handle
                                 .as_ref()
                                 .map(std::os::fd::AsRawFd::as_raw_fd),
-                            ..FfmpegDescriptors::default()
-                        };
+                            false,
+                        );
                         #[cfg(windows)]
                         let descriptors = windows_session_descriptors(&session)?;
                         descriptors
@@ -22443,6 +22749,8 @@ impl TranscodeManager {
             start_seconds,
             media_origin_seconds,
             target_height: file.height.unwrap_or(0),
+            tone_map_peak_nits: None,
+            tone_map_peak_source: None,
             encoder_label: Mutex::new("copy"),
             started_unix: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -25337,22 +25645,7 @@ impl TranscodeManager {
             if let Some(encoding) = &facts.encoding {
                 let height = encoding.options.target_height;
                 let grade = encoding.options.pipeline.output_grade();
-                let mut file = facts.file;
-                file.width =
-                    plurx_core::transcode::output_size(&file, height).map(|(width, _)| width);
-                file.height = Some(height);
-                file.hdr = (grade == OutputGrade::Hdr10).then(|| "hdr10".to_owned());
-                file.hdr_format = (grade == OutputGrade::Hdr10).then(|| "HDR10".to_owned());
-                file.dolby_vision = Default::default();
-                file.bit_depth = Some(if grade == OutputGrade::Hdr10 { 10 } else { 8 });
-                file.video_codec = Some(
-                    if grade == OutputGrade::Hdr10 {
-                        "hevc"
-                    } else {
-                        "h264"
-                    }
-                    .to_owned(),
-                );
+                let file = encoded_vod_presentation_file(facts.file, height, grade);
                 let mut codecs = transcoded_hls_codecs(grade, height);
                 if file.audio_streams.is_empty() {
                     codecs.truncate(codecs.find(',').unwrap_or(codecs.len()));
@@ -28065,6 +28358,39 @@ pub(crate) struct HlsDeliveryFixture {
 
 #[cfg(test)]
 impl HlsDeliveryFixture {
+    /// Install a compatibility serving window without publishing first media
+    /// to the control actor. Response-race tests use this narrow state to open
+    /// predecessor bytes before an actor-authorized successor attempt begins.
+    pub(crate) async fn make_segment_window_servable(&self) {
+        let mut index = self.session.segments.lock().await;
+        if index.segs.is_empty() {
+            for segment in 0..12_i64 {
+                index.segs.push(SegmentMeta {
+                    index: segment,
+                    name: format!("seg{segment:05}.ts"),
+                    start_ms: segment * 4_000,
+                    end_ms: (segment + 1) * 4_000,
+                    bytes: 0,
+                    visibility: SegmentVisibility::Advertised,
+                });
+            }
+            index.revision = index.revision.saturating_add(1);
+        }
+        drop(index);
+        let producer_attempt = self.session.control.current_producer_attempt();
+        self.session.publication.lock().await.served = Some(ServedPlaylistSnapshot {
+            raw: Arc::from(&b"#EXTM3U\n"[..]),
+            producer_attempt,
+            revision: 1,
+            last_segment: 11,
+            first_segment: 0,
+            end_ms: 48_000,
+            duration_ms: 48_000,
+            end_list: false,
+            available_at: Instant::now(),
+        });
+    }
+
     /// Mark this synthetic session as having presented media to its client.
     ///
     /// A fixture session has an empty segment index, which is exactly the
@@ -28076,16 +28402,64 @@ impl HlsDeliveryFixture {
     /// rather than borrow the startup exemption by accident.
     pub(crate) async fn mark_started(&self) {
         let mut index = self.session.segments.lock().await;
-        index.segs.push(SegmentMeta {
-            index: 0,
-            name: "seg00000.ts".into(),
-            start_ms: 0,
-            end_ms: i64::from(plurx_core::transcode::COPY_PUBLISH_GATE_SECS) * 1_000,
-            bytes: 0,
-            visibility: SegmentVisibility::Advertised,
-        });
-        index.revision = index.revision.saturating_add(1);
+        if index.segs.is_empty() {
+            // A published rolling fixture must satisfy the same initial
+            // runway as production. Seed the ordinary four-second grid so
+            // HTTP tests can resolve any of the early segment names they
+            // materialize without borrowing a pre-publication state.
+            for segment in 0..16_i64 {
+                index.segs.push(SegmentMeta {
+                    index: segment,
+                    name: format!("seg{segment:05}.ts"),
+                    start_ms: segment * 4_000,
+                    end_ms: (segment + 1) * 4_000,
+                    bytes: 0,
+                    visibility: SegmentVisibility::Advertised,
+                });
+            }
+            index.revision = index.revision.saturating_add(1);
+        }
         drop(index);
+        let producer_attempt = self.session.control.current_producer_attempt();
+        let accepted = self
+            .session
+            .control
+            .observe_publication(crate::playback_control::RollingPublicationObservation {
+                producer_attempt,
+                publication_commit: true,
+                demand_sequence: None,
+                produced_segment: Some(15),
+                produced_end_ms: Some(64_000),
+                playlist_ready: true,
+                published_segment: Some(11),
+                published_end_ms: Some(48_000),
+                published_first_segment: Some(0),
+                published_start_ms: Some(0),
+                media_origin_ms: 0,
+                next_media_sequence: 12,
+                resolved_fetched_segment: None,
+                resolved_fetched_end_ms: None,
+            })
+            .await;
+        assert!(accepted, "fixture publication must reach the control actor");
+        let mut publication = self.session.publication.lock().await;
+        if publication.served.is_none() {
+            publication.served = Some(ServedPlaylistSnapshot {
+                raw: Arc::from(&b"#EXTM3U\n"[..]),
+                producer_attempt,
+                revision: 1,
+                last_segment: 11,
+                first_segment: 0,
+                end_ms: 48_000,
+                duration_ms: 48_000,
+                end_list: false,
+                available_at: Instant::now(),
+            });
+        }
+        publication.staged_attempt = Some(producer_attempt);
+        publication.staged_last_segment = Some(15);
+        publication.staged_end_ms = Some(64_000);
+        drop(publication);
         // A started fixture is one whose actor has accepted presentation, not
         // merely one whose producer filled the old publication floor.
         self.session.playlist_published.store(true, Relaxed);
@@ -28685,6 +29059,8 @@ fn test_session_with_control(
         media_origin_seconds: 0.0,
         grade: OutputGrade::Sdr,
         target_height: 720,
+        tone_map_peak_nits: None,
+        tone_map_peak_source: None,
         encoder_label: Mutex::new("test"),
         started_unix: 0,
         failed: Arc::new(AtomicBool::new(false)),
@@ -29357,7 +29733,7 @@ pub(crate) mod tests {
             assert_eq!(status.reported_position_ms, Some(10_000));
             assert_eq!(status.client_runway_ms, Some(15_000));
             assert_eq!(status.render_state, Some("rendering"));
-            assert_eq!(status.production_policy, "explicit_demand");
+            assert_eq!(status.production_policy, "publication_clock_explicit");
             let producer_control = status
                 .producer_control
                 .as_ref()
@@ -29806,10 +30182,13 @@ pub(crate) mod tests {
         let HlsSessionInfo::Live(active_status) = active.status else {
             panic!("rolling active returned VOD status");
         };
-        assert!(!active_status.suspended);
+        assert!(active_status.suspended);
         assert_eq!(active_status.control_demand, Some("active"));
-        assert_eq!(active_status.hold_reason, None);
-        assert_eq!(active_status.production_policy, "explicit_demand");
+        assert_eq!(active_status.hold_reason, Some(AheadHoldReason::Time));
+        assert_eq!(
+            active_status.production_policy,
+            "publication_clock_explicit"
+        );
 
         let events = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -29822,16 +30201,18 @@ pub(crate) mod tests {
                     })
                     .await
                     .expect("flow events");
-                if events.iter().any(|event| event.event == "suspend")
-                    && events.iter().any(|event| event.event == "resume")
-                {
+                if events.iter().any(|event| event.event == "suspend") {
                     return events;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("demand hold/resume events persisted");
+        .expect("demand hold event persisted");
+        assert!(
+            events.iter().all(|event| event.event != "resume"),
+            "active demand cannot bypass an already-staged publication batch"
+        );
         let suspend = events
             .iter()
             .find(|event| event.event == "suspend")
@@ -30351,12 +30732,17 @@ pub(crate) mod tests {
             container: Some("matroska".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(10),
             hdr: Some("dolby_vision".into()),
             hdr_format: Some("Dolby Vision · Profile 5".into()),
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(20_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -30399,6 +30785,145 @@ pub(crate) mod tests {
 
         assert_eq!(first.contract_fingerprint, identical.contract_fingerprint);
         assert_ne!(first.contract_fingerprint, changed.contract_fingerprint);
+    }
+
+    #[test]
+    fn an_fmp4_avc_master_is_attempt_media_not_generation_metadata() {
+        let file = profile5_file();
+        let context = HlsContext {
+            file_id: file.id,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs: "avc1.640034,mp4a.40.2".into(),
+            supplemental_codecs: None,
+            frame_rate: None,
+        };
+        let fmp4 = FrozenHlsPresentation::new(
+            file.clone(),
+            context.clone(),
+            &SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+        );
+        let mpeg_ts =
+            FrozenHlsPresentation::new(file, context, &SessionKind::Transcode { height: 1080 });
+
+        assert!(fmp4.sealed_stable_master_contract.is_none());
+        assert!(mpeg_ts.sealed_stable_master_contract.is_some());
+    }
+
+    #[test]
+    fn a_rolling_transcode_freezes_the_rung_geometry() {
+        let file = profile5_file();
+        let presentation = FrozenHlsPresentation::new(
+            file,
+            HlsContext {
+                file_id: 5,
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                codecs: "avc1.640034,mp4a.40.2".into(),
+                supplemental_codecs: None,
+                frame_rate: None,
+            },
+            &SessionKind::Transcode { height: 720 },
+        );
+
+        assert_eq!(presentation.file.width, Some(1280));
+        assert_eq!(presentation.file.height, Some(720));
+    }
+
+    #[test]
+    fn a_rolling_transcode_of_an_unprobed_source_freezes_no_geometry() {
+        let mut file = profile5_file();
+        file.width = None;
+        file.height = None;
+        let presentation = FrozenHlsPresentation::new(
+            file,
+            HlsContext {
+                file_id: 5,
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                codecs: "avc1.640034,mp4a.40.2".into(),
+                supplemental_codecs: None,
+                frame_rate: None,
+            },
+            &SessionKind::Transcode { height: 720 },
+        );
+
+        assert_eq!(presentation.file.width, None);
+        assert_eq!(presentation.file.height, None);
+    }
+
+    #[test]
+    fn a_rolling_transcode_never_upscales_its_declaration() {
+        let mut file = profile5_file();
+        file.width = Some(640);
+        file.height = Some(360);
+        let presentation = FrozenHlsPresentation::new(
+            file,
+            HlsContext {
+                file_id: 5,
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                codecs: "avc1.640034,mp4a.40.2".into(),
+                supplemental_codecs: None,
+                frame_rate: None,
+            },
+            &SessionKind::Transcode { height: 1080 },
+        );
+
+        assert_eq!(presentation.file.width, Some(640));
+        assert_eq!(presentation.file.height, Some(360));
+    }
+
+    #[test]
+    fn encoded_vod_presentation_never_mixes_source_width_with_requested_height() {
+        let mut file = profile5_file();
+        file.width = Some(640);
+        file.height = Some(360);
+
+        let presented = encoded_vod_presentation_file(file, 1080, OutputGrade::Sdr);
+
+        assert_eq!(presented.width, Some(640));
+        assert_eq!(presented.height, Some(360));
+    }
+
+    #[test]
+    fn encoded_vod_presentation_omits_both_unprobed_dimensions() {
+        let mut file = profile5_file();
+        file.width = None;
+        file.height = None;
+
+        let presented = encoded_vod_presentation_file(file, 1080, OutputGrade::Sdr);
+
+        assert_eq!(presented.width, None);
+        assert_eq!(presented.height, None);
+    }
+
+    #[test]
+    fn a_copy_session_keeps_the_source_geometry() {
+        let file = profile5_file();
+        let presentation = FrozenHlsPresentation::new(
+            file,
+            HlsContext {
+                file_id: 5,
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                codecs: "hvc1.2.4.H150.90,mp4a.40.2".into(),
+                supplemental_codecs: None,
+                frame_rate: None,
+            },
+            &SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+        );
+
+        assert_eq!(presentation.file.width, Some(3840));
+        assert_eq!(presentation.file.height, Some(2160));
     }
 
     #[test]
@@ -31163,7 +31688,7 @@ pub(crate) mod tests {
         assert!(expected.is_dir(), "the cache exists before ffmpeg starts");
 
         let mut command = tokio::process::Command::new("ffmpeg");
-        configure_ffmpeg_runtime(&mut command, &manager.runtime_cache);
+        crate::producer_spawn::configure_ffmpeg_runtime(&mut command, &manager.runtime_cache);
         let inherited = command
             .as_std()
             .get_envs()
@@ -35802,11 +36327,8 @@ pub(crate) mod tests {
         let stale = flow(&demand);
         assert_eq!(demand.runway_ms(), 0);
         assert_eq!(stale.production_ahead_seconds, Some(86));
-        assert_eq!(stale.production_target_seconds, Some(30));
-        assert_eq!(
-            stale.hold.map(|hold| hold.reason),
-            Some(AheadHoldReason::Time)
-        );
+        assert_eq!(stale.production_target_seconds, Some(16));
+        assert_eq!(stale.hold, None);
 
         // Counterfactual: if the client were presenting at this position and
         // could report its real 11.5-second buffer without a stale seek, the
@@ -35817,7 +36339,7 @@ pub(crate) mod tests {
         demand.buffered_through_ms = 809_211;
         let current = flow(&demand);
         assert_eq!(current.production_ahead_seconds, Some(18));
-        assert_eq!(current.production_target_seconds, Some(42));
+        assert_eq!(current.production_target_seconds, Some(16));
         assert_eq!(current.hold, None);
     }
 
@@ -35853,7 +36375,7 @@ pub(crate) mod tests {
                     bytes: 1_000,
                 }),
                 published_end_ms: Some(80_000),
-                staged_publication_seconds: None,
+                staged_publication_seconds: Some(16),
                 // Pre-existing coverage: the startup grant is already spent, so
                 // these assertions are about steady-state flow control.
                 startup_protected: false,
@@ -35868,23 +36390,23 @@ pub(crate) mod tests {
             })
         };
         let held = flow(false);
-        assert_eq!(held.production_ahead_seconds, Some(60));
+        assert_eq!(held.production_ahead_seconds, Some(16));
         assert_eq!(
             held.production_target_seconds,
-            Some(30),
-            "a frozen position asks for nothing but the wall-clock reserve",
+            Some(16),
+            "the publication clock asks for one fixed batch",
         );
         assert_eq!(
             held.hold,
             Some(AheadHold {
                 reason: AheadHoldReason::Time,
-                release_value: 30,
+                release_value: 0,
             }),
         );
         assert_eq!(
             flow(true).hold.map(|hold| hold.release_value),
-            Some(15),
-            "and the release value is the resume threshold, not a second policy",
+            Some(0),
+            "the next publication tick releases the staged-batch hold",
         );
 
         // The same hold, as the control plane sees it, for a client that is
@@ -35939,7 +36461,7 @@ pub(crate) mod tests {
                 bytes: 1_000,
             }),
             published_end_ms: Some(80_000),
-            staged_publication_seconds: None,
+            staged_publication_seconds: Some(16),
             startup_protected: false,
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
@@ -35950,7 +36472,7 @@ pub(crate) mod tests {
             currently_suspended: false,
             scratch_grant_exhausted: None,
         });
-        assert_eq!(loaded_flow.production_target_seconds, Some(52));
+        assert_eq!(loaded_flow.production_target_seconds, Some(16));
         assert_eq!(
             loaded_flow.hold.map(|hold| hold.reason),
             Some(AheadHoldReason::Time),
@@ -35997,7 +36519,7 @@ pub(crate) mod tests {
             currently_suspended: true,
             scratch_grant_exhausted: None,
         });
-        assert_eq!(supply_pending.production_target_seconds, Some(30));
+        assert_eq!(supply_pending.production_target_seconds, Some(16));
         assert_eq!(
             supply_pending.hold, None,
             "fixed-position supply below target must reach the existing resume operation"
@@ -36059,16 +36581,10 @@ pub(crate) mod tests {
             currently_suspended: false,
             scratch_grant_exhausted: None,
         });
-        assert_eq!(active.policy, "explicit_demand");
+        assert_eq!(active.policy, "publication_clock_explicit");
         assert_eq!(active.production_ahead_seconds, Some(60));
-        assert_eq!(active.production_target_seconds, Some(50));
-        assert_eq!(
-            active.hold,
-            Some(AheadHold {
-                reason: AheadHoldReason::Time,
-                release_value: 50,
-            })
-        );
+        assert_eq!(active.production_target_seconds, Some(16));
+        assert_eq!(active.hold, None);
 
         demand.playback_rate = 2.0;
         let faster = evaluate_flow(FlowInputs {
@@ -36089,8 +36605,8 @@ pub(crate) mod tests {
         });
         assert_eq!(
             faster.production_target_seconds,
-            Some(80),
-            "thirty seconds of wall-clock reserve becomes sixty media seconds at 2x"
+            Some(32),
+            "the publication batch scales with playback rate"
         );
         assert_eq!(faster.hold, None);
 
@@ -36143,7 +36659,7 @@ pub(crate) mod tests {
             currently_suspended: false,
             scratch_grant_exhausted: None,
         });
-        assert_eq!(unbounded_time.production_target_seconds, None);
+        assert_eq!(unbounded_time.production_target_seconds, Some(32));
         assert_eq!(
             unbounded_time.hold, None,
             "a zero configured time limit is disabled, not a target of zero"
@@ -36326,8 +36842,8 @@ pub(crate) mod tests {
         });
         assert_eq!(
             retried.hold.map(|hold| hold.reason),
-            Some(AheadHoldReason::Demand),
-            "a session that already spent its startup grant honours the hold"
+            None,
+            "an empty replacement keeps running until one publication batch is staged"
         );
 
         // The fleet-wide disk cap still answers while the index is empty. It
@@ -36893,6 +37409,7 @@ pub(crate) mod tests {
             index: 0,
             codec: "eac3".into(),
             channels: Some(6),
+            sample_rate: Some(48_000),
             language: Some("eng".into()),
             title: None,
             default: true,
@@ -37179,6 +37696,82 @@ pub(crate) mod tests {
             .expect("write playlist");
     }
 
+    async fn expire_seeded_prefix(session: &Session, count: usize) {
+        let removed_at = Instant::now() - Duration::from_secs(2);
+        let serve_until = Instant::now() - Duration::from_secs(1);
+        let mut segments = session.segments.lock().await;
+        for segment in segments.segs.iter_mut().take(count) {
+            segment.visibility = SegmentVisibility::Grace {
+                removed_at,
+                serve_until,
+            };
+        }
+    }
+
+    async fn install_seeded_served_playlist_snapshot(
+        session: &Session,
+        producer_attempt: u64,
+    ) -> (i64, i64) {
+        let raw = tokio::fs::read(session.dir.join("index.m3u8"))
+            .await
+            .expect("seeded playlist");
+        let index = SegmentIndex {
+            segs: parse_playlist(&String::from_utf8_lossy(&raw)),
+            revision: 0,
+        };
+        let first_segment = index.segs.first().expect("first segment").index;
+        let last_segment = index.segs.last().expect("last segment").index;
+        let end_ms = index
+            .produced_playable_end_ms()
+            .expect("seeded playable end");
+        let raw = served_live_playlist(
+            raw,
+            Some(first_segment),
+            Some(last_segment),
+            session.takeover.as_ref(),
+        )
+        .expect("seeded served playlist");
+        session.publication.lock().await.served = Some(ServedPlaylistSnapshot {
+            raw: Arc::from(raw),
+            producer_attempt,
+            revision: 1,
+            last_segment,
+            first_segment,
+            end_ms,
+            duration_ms: end_ms,
+            end_list: false,
+            available_at: Instant::now(),
+        });
+        (last_segment, end_ms)
+    }
+
+    async fn install_seeded_served_playlist(session: &Session, producer_attempt: u64) {
+        let (last_segment, end_ms) =
+            install_seeded_served_playlist_snapshot(session, producer_attempt).await;
+        assert!(
+            session
+                .control
+                .observe_publication(crate::playback_control::RollingPublicationObservation {
+                    producer_attempt,
+                    publication_commit: true,
+                    demand_sequence: None,
+                    produced_segment: Some(last_segment),
+                    produced_end_ms: Some(end_ms),
+                    playlist_ready: true,
+                    published_segment: Some(last_segment),
+                    published_end_ms: Some(end_ms),
+                    published_first_segment: Some(0),
+                    published_start_ms: Some(0),
+                    media_origin_ms: 0,
+                    next_media_sequence: last_segment.saturating_add(1),
+                    resolved_fetched_segment: None,
+                    resolved_fetched_end_ms: None,
+                })
+                .await,
+            "seeded publication must reach the control actor"
+        );
+    }
+
     async fn complete_seeded_replacement(
         session: Arc<Session>,
         dir: PathBuf,
@@ -37205,19 +37798,21 @@ pub(crate) mod tests {
             None,
         ));
         replacement.complete();
+        session.refresh_segments().await;
+        install_seeded_served_playlist(&session, attempt).await;
         attempt
     }
 
-    /// The manager must hold the first live response while ffmpeg has only a
-    /// one-segment EVENT playlist, then release it as soon as a second segment
-    /// provides the startup cushion. This pins both the asynchronous polling
-    /// behavior and the per-session one-way publication state.
+    /// The manager must hold the first live response below the rolling
+    /// publication runway, then release it as soon as the configured 48-second
+    /// cushion exists. This pins both the asynchronous polling behavior and
+    /// the per-session one-way publication state.
     #[tokio::test]
     async fn first_live_transcode_playlist_waits_for_two_segments() {
         use plurx_core::store::SqliteStore;
 
         let dir = crate::test_tempdir().expect("tempdir");
-        seeded_session_dir(dir.path(), 1, 2.0).await;
+        seeded_session_dir(dir.path(), 11, 4.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = Arc::new(TranscodeManager::new(
@@ -37235,18 +37830,30 @@ pub(crate) mod tests {
             tokio::time::timeout(Duration::from_millis(250), mgr.playlist("startup-gate")).await;
         assert!(
             held.is_err(),
-            "one segment must not escape the startup gate"
+            "a playlist below the 48-second runway must not escape the startup gate"
         );
         assert!(!session.playlist_published.load(Relaxed));
 
-        seeded_session_dir(dir.path(), 2, 2.0).await;
+        // The legacy publication clock advances while the request waits, so
+        // one complete segment beyond the fixed 48-second runway is required
+        // to cover that elapsed wall time without widening the request bound.
+        seeded_session_dir(dir.path(), 13, 4.0).await;
+        session
+            .publication_cycle("startup-gate")
+            .await
+            .expect("publish complete startup runway plus elapsed time");
+        assert!(!session.failed.load(Relaxed), "startup fixture retired");
+        assert!(
+            session.publication.lock().await.served.is_some(),
+            "complete runway must install a served snapshot"
+        );
         let playlist = tokio::time::timeout(Duration::from_secs(2), mgr.playlist("startup-gate"))
             .await
-            .expect("two-segment playlist should be released")
+            .expect("48-second playlist should be released")
             .expect("playlist");
         let text = String::from_utf8(playlist).expect("utf8 playlist");
         assert!(text.contains("seg00000.ts"));
-        assert!(text.contains("seg00001.ts"));
+        assert!(text.contains("seg00011.ts"));
         assert!(
             !session.playlist_published.load(Relaxed),
             "the read-only fixture does not impersonate response authorization"
@@ -37258,15 +37865,15 @@ pub(crate) mod tests {
             .expect("rolling actor")
             .delivery;
         assert!(actor_delivery.playlist_ready);
-        assert_eq!(actor_delivery.published_segment, Some(1));
-        assert_eq!(actor_delivery.published_end_ms, Some(4_000));
-        assert_eq!(actor_delivery.next_media_sequence, 2);
+        assert_eq!(actor_delivery.published_segment, Some(11));
+        assert_eq!(actor_delivery.published_end_ms, Some(48_000));
+        assert_eq!(actor_delivery.next_media_sequence, 12);
         let status = mgr.session_status("startup-gate").await.expect("status");
         assert_eq!(status.producer_attempt, Some(0));
         assert_eq!(status.playlist_ready, Some(true));
-        assert_eq!(status.published_segment, Some(1));
-        assert_eq!(status.published_end_ms, Some(4_000));
-        assert_eq!(status.next_media_sequence, Some(2));
+        assert_eq!(status.published_segment, Some(11));
+        assert_eq!(status.published_end_ms, Some(48_000));
+        assert_eq!(status.next_media_sequence, Some(12));
         assert_eq!(status.pending_fetched_segment, None);
     }
 
@@ -37305,7 +37912,7 @@ pub(crate) mod tests {
             .await
             .expect("prepublication successor");
         session.reset_compatibility_delivery(successor).await;
-        seeded_session_dir(dir.path(), 2, 2.0).await;
+        seeded_session_dir(dir.path(), 12, 4.0).await;
 
         let bytes = tokio::time::timeout(Duration::from_secs(2), playlist)
             .await
@@ -37314,7 +37921,7 @@ pub(crate) mod tests {
             .expect("the original request follows the successor");
         assert!(String::from_utf8(bytes)
             .expect("playlist text")
-            .contains("seg00001.ts"));
+            .contains("seg00011.ts"));
         assert_eq!(session.control.current_producer_attempt(), successor);
     }
 
@@ -37324,8 +37931,10 @@ pub(crate) mod tests {
 
         let dir = crate::test_tempdir().expect("tempdir");
         let manager_dir = crate::test_tempdir().expect("manager tempdir");
-        seeded_session_dir(dir.path(), 2, 2.0).await;
+        seeded_session_dir(dir.path(), 12, 4.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
+        session.publication_worker_started.store(true, Release);
+        install_seeded_served_playlist_snapshot(&session, 0).await;
         let pause = Arc::new(tokio::sync::Barrier::new(2));
         *session
             .playlist_publication_pause
@@ -37362,20 +37971,21 @@ pub(crate) mod tests {
             .await
             .expect("clear predecessor");
         session.confirm_predecessor_scratch_cleared();
-        seeded_session_dir(dir.path(), 1, 2.0).await;
+        seeded_session_dir(dir.path(), 11, 4.0).await;
         session.replacing_child.store(false, Release);
 
         tokio::time::sleep(PLAYLIST_WAIT_POLL * 2).await;
         assert!(
             !playlist.is_finished(),
-            "one successor segment must not inherit the predecessor's open gate"
+            "a successor below the runway must not inherit the predecessor's open gate"
         );
         assert_eq!(
             session.compatibility_playlist_published(successor),
             Some(false)
         );
 
-        seeded_session_dir(dir.path(), 2, 2.0).await;
+        seeded_session_dir(dir.path(), 12, 4.0).await;
+        install_seeded_served_playlist(&session, successor).await;
         let bytes = tokio::time::timeout(Duration::from_secs(2), playlist)
             .await
             .expect("successor cushion deadline")
@@ -37383,7 +37993,7 @@ pub(crate) mod tests {
             .expect("successor playlist");
         assert!(String::from_utf8(bytes)
             .expect("playlist text")
-            .contains("seg00001.ts"));
+            .contains("seg00011.ts"));
         let delivery = session
             .control
             .snapshot()
@@ -37391,8 +38001,8 @@ pub(crate) mod tests {
             .expect("rolling actor")
             .delivery;
         assert!(delivery.playlist_ready);
-        assert_eq!(delivery.published_segment, Some(1));
-        assert_eq!(delivery.published_end_ms, Some(4_000));
+        assert_eq!(delivery.published_segment, Some(11));
+        assert_eq!(delivery.published_end_ms, Some(48_000));
         assert_eq!(
             session.compatibility_playlist_published(successor),
             Some(false),
@@ -37405,8 +38015,10 @@ pub(crate) mod tests {
         use plurx_core::store::SqliteStore;
 
         let dir = crate::test_tempdir().expect("tempdir");
-        seeded_session_dir(dir.path(), 2, 2.0).await;
+        seeded_session_dir(dir.path(), 12, 4.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
+        session.publication_worker_started.store(true, Release);
+        install_seeded_served_playlist(&session, 0).await;
         let pause = Arc::new(tokio::sync::Barrier::new(2));
         *session
             .playlist_publication_pause
@@ -37440,7 +38052,7 @@ pub(crate) mod tests {
             .expect("the already-read exact playlist remains servable");
         assert!(String::from_utf8(bytes)
             .expect("playlist text")
-            .contains("seg00001.ts"));
+            .contains("seg00011.ts"));
         let delivery = session
             .control
             .snapshot()
@@ -37448,8 +38060,8 @@ pub(crate) mod tests {
             .expect("rolling actor")
             .delivery;
         assert!(delivery.playlist_ready);
-        assert_eq!(delivery.published_segment, Some(1));
-        assert_eq!(delivery.published_end_ms, Some(4_000));
+        assert_eq!(delivery.published_segment, Some(11));
+        assert_eq!(delivery.published_end_ms, Some(48_000));
         assert_eq!(
             session.kill_child_for_replacement().await.err(),
             Some(crate::playback_control::ProducerAttemptRejection::PlaylistPublished),
@@ -37530,7 +38142,7 @@ pub(crate) mod tests {
         use plurx_core::store::SqliteStore;
 
         let dir = crate::test_tempdir().expect("playlist bounded work dir");
-        seeded_session_dir(dir.path(), 2, 2.0).await;
+        seeded_session_dir(dir.path(), 12, 4.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = Arc::new(TranscodeManager::new(
@@ -37675,7 +38287,7 @@ pub(crate) mod tests {
             let path = dir.path().to_path_buf();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(400)).await;
-                seeded_session_dir(&path, 2, 2.0).await;
+                seeded_session_dir(&path, 12, 4.0).await;
             })
         };
         let started = Instant::now();
@@ -38446,7 +39058,8 @@ pub(crate) mod tests {
             .expect("predecessor bytes");
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         session.refresh_segments().await;
-        assert_eq!(session.live_bytes.load(Acquire), 1_024);
+        let predecessor_live_bytes = session.live_bytes.load(Acquire);
+        assert!(predecessor_live_bytes >= 1_024);
 
         let mut opts = mgr.options_for_tone_map(
             Encoder::VideoToolbox,
@@ -38518,7 +39131,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             session.live_bytes.load(Acquire),
-            1_024,
+            predecessor_live_bytes,
             "predecessor bytes remain charged until verified scratch clearing"
         );
         assert!(
@@ -38737,7 +39350,7 @@ pub(crate) mod tests {
         let successor = tokio::spawn(complete_seeded_replacement(
             Arc::clone(&session),
             dir.path().to_path_buf(),
-            2,
+            16,
             3.0,
             None,
         ));
@@ -38805,7 +39418,7 @@ pub(crate) mod tests {
         let successor = tokio::spawn(complete_seeded_replacement(
             Arc::clone(&session),
             dir.path().to_path_buf(),
-            1,
+            16,
             3.0,
             Some(b"successor"),
         ));
@@ -38860,7 +39473,7 @@ pub(crate) mod tests {
         let successor = tokio::spawn(complete_seeded_replacement(
             Arc::clone(&session),
             dir.path().to_path_buf(),
-            2,
+            16,
             3.0,
             None,
         ));
@@ -38874,7 +39487,7 @@ pub(crate) mod tests {
         session.refresh_segments().await;
         assert_eq!(
             session.segments.lock().await.produced_playable_end_ms(),
-            Some(6_000)
+            Some(48_000)
         );
         let delivery = session
             .control
@@ -38883,7 +39496,7 @@ pub(crate) mod tests {
             .expect("rolling actor")
             .delivery;
         assert_eq!(delivery.producer_attempt, successor);
-        assert_eq!(delivery.published_end_ms, Some(6_000));
+        assert_eq!(delivery.published_end_ms, Some(48_000));
     }
 
     #[tokio::test]
@@ -38903,6 +39516,7 @@ pub(crate) mod tests {
         }
         *session.segments.lock().await = seeded;
         session.fetched_end_ms.store(300_000, Relaxed);
+        expire_seeded_prefix(&session, 30).await;
 
         let pause = Arc::new(tokio::sync::Barrier::new(2));
         *session
@@ -38993,6 +39607,7 @@ pub(crate) mod tests {
         let session = Arc::new(fixture);
         session.refresh_segments().await;
         session.fetched_end_ms.store(300_000, Relaxed);
+        expire_seeded_prefix(&session, 30).await;
         let pause = Arc::new(tokio::sync::Barrier::new(2));
         *session
             .retention_delete_pause
@@ -39132,7 +39747,32 @@ pub(crate) mod tests {
         session
             .fetched_end_ms
             .store(observed_fetched_end_ms, Relaxed);
+        accept_rolling_publication_demand(
+            &session,
+            1,
+            observed_playhead_ms,
+            1.0,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Rendering,
+        )
+        .await;
+        assert!(
+            commit_rolling_publication_media(&session, 74, observed_fetched_end_ms).await,
+            "download frontier must reach the publication actor"
+        );
+        expire_seeded_prefix(&session, 30).await;
         gc_expired_segments(&session).await;
+        // This fixture expires files directly instead of advancing them
+        // through the publication transition, so mirror the logical retention
+        // boundary that production installs before selecting a new snapshot.
+        session.publication.lock().await.retention_first_segment = Some(30);
+        session
+            .publication_cycle_at(
+                "retained-window",
+                Instant::now() + ROLLING_PUBLICATION_TARGET,
+            )
+            .await
+            .expect("retention boundary reaches the served snapshot");
 
         // The retained/pruned segment boundary is the behavior under test.
         // Segment 30 begins at 120s, leaving 60s behind the observed 180s
@@ -39245,6 +39885,7 @@ pub(crate) mod tests {
         let session = test_session(dir.path().to_path_buf());
         session.refresh_segments().await;
         session.fetched_end_ms.store(300_000, Relaxed);
+        expire_seeded_prefix(&session, 30).await;
 
         let before = session.ahead().await.expect("published").bytes;
         gc_expired_segments(&session).await;
@@ -39352,7 +39993,7 @@ pub(crate) mod tests {
     /// SIGSTOP sent to the wrong pid — because every one of those looks
     /// perfectly healthy from the outside.
     #[tokio::test]
-    async fn a_client_fetch_releases_a_held_session_and_restarts_progress() {
+    async fn a_client_fetch_advances_publication_frontier_without_legacy_hold() {
         super::require_ffmpeg();
         use plurx_core::store::SqliteStore;
         use tokio::io::AsyncReadExt as _;
@@ -39526,28 +40167,20 @@ pub(crate) mod tests {
             assert!(session.first_media_handoff_applied.load(Acquire));
             assert!(!session.actor_prepublication_producer.load(Acquire));
 
-            // A window it has already exceeded suspends it, and a suspended
-            // encoder stops advancing — which is the property actor progress relies
-            // on being able to tell apart from a wedge.
+            // Publication-clock pacing does not turn a freshly served window
+            // into the old inferred-ahead hold. The encoder remains runnable
+            // until a complete next batch is staged.
             mgr.flow_control(&session, &info.session_id).await;
-            assert!(session.suspended.load(Relaxed), "session was held");
+            assert!(!session.suspended.load(Relaxed));
             let status = mgr.session_status(&info.session_id).await.expect("status");
             assert_eq!(status.readrate, 1.0, "HLS exposes its effective input pace");
-            assert_eq!(status.hold_reason, Some(AheadHoldReason::Time));
-            assert_eq!(status.resume_below_seconds, Some(1));
+            assert_eq!(status.production_policy, "publication_clock_legacy");
+            assert_eq!(status.hold_reason, None);
             assert_eq!(status.resume_below_bytes, None);
-            assert_eq!(status.suspend_count, 1, "the first transition is visible");
-            let frozen = session.progress.out_time_ms();
-            tokio::time::sleep(Duration::from_millis(1200)).await;
-            assert_eq!(
-                session.progress.out_time_ms(),
-                frozen,
-                "a suspended encoder produces nothing"
-            );
-
+            assert_eq!(status.suspend_count, 0);
             // Fetch the newest published segment through the real request path.
-            // That advances the download frontier, re-evaluates the same configured
-            // limit, sends SIGCONT, and restarts actual encoder progress.
+            // That advances the actor-owned download frontier without creating
+            // a legacy inferred-ahead suspend/resume transition.
             let opened = match mgr
                 .segment_for_publication(&info.session_id, &newest)
                 .await
@@ -39613,98 +40246,9 @@ pub(crate) mod tests {
             assert_eq!(
                 mgr.session_status(&info.session_id)
                     .await
-                    .expect("status after release")
+                    .expect("status after fetch")
                     .suspend_count,
-                1,
-                "resume preserves the transition history"
-            );
-            let flow_events = tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    let events = store
-                        .playback_events(&plurx_core::domain::PlaybackEventQuery {
-                            since_ms: None,
-                            event: None,
-                            limit: 20,
-                        })
-                        .await
-                        .expect("flow-control telemetry query");
-                    if events.iter().any(|event| event.event == "suspend")
-                        && events.iter().any(|event| event.event == "resume")
-                    {
-                        return events;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("suspend/resume telemetry persisted");
-            let suspend = flow_events
-                .iter()
-                .find(|event| event.event == "suspend")
-                .expect("suspend row");
-            assert_eq!(
-                suspend.session_id.as_deref(),
-                Some(session_log_id(&info.session_id).as_str())
-            );
-            assert_eq!(suspend.hold_reason.as_deref(), Some("time"));
-            assert_eq!(suspend.readrate, Some(1.0));
-            let resume = flow_events
-                .iter()
-                .find(|event| event.event == "resume")
-                .expect("resume row");
-            assert_eq!(resume.hold_reason.as_deref(), Some("time"));
-            assert!(
-                resume.ms.is_some_and(|held_ms| held_ms >= 1_000),
-                "resume row carries the measured hold duration: {:?}",
-                resume.ms
-            );
-            let moved = tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    if session.progress.out_time_ms() > frozen {
-                        return true;
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            })
-            .await
-            .unwrap_or(false);
-            assert!(moved, "SIGCONT actually restarted the encoder");
-
-            // A suspended child still dies on request — SIGKILL does not need the
-            // process to be scheduled, which is what makes the reaper safe.
-            let republished = tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    session.refresh_segments().await;
-                    if session.ahead().await.is_some_and(|ahead| ahead.bytes > 1) {
-                        return true;
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            })
-            .await
-            .unwrap_or(false);
-            assert!(republished, "the resumed encoder published another segment");
-            mgr.apply_ahead_window(
-                &session,
-                &info.session_id,
-                AheadLimits {
-                    max_secs: 0,
-                    max_bytes: 1,
-                    global_max_bytes: 0,
-                },
                 0,
-                0,
-                None,
-            )
-            .await;
-            assert!(session.suspended.load(Relaxed), "held again");
-            assert_eq!(
-                mgr.session_status(&info.session_id)
-                    .await
-                    .expect("status after second hold")
-                    .suspend_count,
-                2,
-                "a second transition cannot hide between activity polls"
             );
         }
         assert!(mgr.stop_session(&info.session_id, "test").await);
@@ -40114,12 +40658,17 @@ pub(crate) mod tests {
             container: Some("matroska".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(10),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(20_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -41171,6 +41720,8 @@ pub(crate) mod tests {
             media_origin_seconds: 0.0,
             grade: OutputGrade::Sdr,
             target_height: 1080,
+            tone_map_peak_nits: None,
+            tone_map_peak_source: None,
             encoder_label: Mutex::new("test"),
             started_unix: 0,
             failed: Arc::new(AtomicBool::new(false)),
@@ -41458,6 +42009,38 @@ pub(crate) mod tests {
             .compatibility_attempt
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = producer_attempt;
+        *session.segments.lock().await = SegmentIndex {
+            segs: vec![
+                SegmentMeta {
+                    index: 0,
+                    name: "seg00000.ts".into(),
+                    start_ms: 0,
+                    end_ms: 2_000,
+                    bytes: 9,
+                    visibility: SegmentVisibility::Advertised,
+                },
+                SegmentMeta {
+                    index: 1,
+                    name: "seg00001.ts".into(),
+                    start_ms: 2_000,
+                    end_ms: 4_000,
+                    bytes: 23,
+                    visibility: SegmentVisibility::Advertised,
+                },
+            ],
+            revision: 1,
+        };
+        session.publication.lock().await.served = Some(ServedPlaylistSnapshot {
+            raw: Arc::from(&b"#EXTM3U\n"[..]),
+            producer_attempt,
+            revision: 1,
+            last_segment: 0,
+            first_segment: 0,
+            end_ms: 2_000,
+            duration_ms: 2_000,
+            end_list: false,
+            available_at: Instant::now(),
+        });
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let manager = Arc::new(TranscodeManager::new(
             store,
@@ -46310,6 +46893,235 @@ pub(crate) mod tests {
         drop(reacquired);
     }
 
+    fn replacement_gate_fixture() -> (TranscodeManager, tempfile::TempDir) {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        (mgr, work)
+    }
+
+    /// A replacement that is abandoned — its request long since answered, its
+    /// guard living on inside a detached cleanup nothing can reach — used to
+    /// own its player's key for the life of the process. Every later open then
+    /// waited the cooperative window and was refused, so a viewer could not
+    /// restart the title they had been watching.
+    ///
+    /// Reproduced from m6, 2026-09-21 22:55 UTC, file 5208: a start blocked
+    /// under the gate on a 402-second subtitle sidecar extraction, answered
+    /// 503 at its own deadline, and its cleanup still held the key four
+    /// seconds later when the viewer pressed Retry.
+    #[tokio::test(start_paused = true)]
+    async fn an_abandoned_replacement_cannot_hold_its_player_against_the_next_open() {
+        let (mgr, _work) = replacement_gate_fixture();
+        let key = r#"[["user_id",42],"abandoned-player"]"#.to_owned();
+
+        let cleanup = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(600),
+            )
+            .await
+            .expect("the first replacement owns its gate");
+        // What `Drop for StartedSessionGuard` does before it spawns: name the
+        // session this teardown is tearing down, then say the hold is no
+        // longer a start anyone is waiting on.
+        cleanup.publish_fenceable("abandoned-provisional-session");
+        cleanup.mark_abandoned();
+
+        let opened = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+            .expect("a later open reclaims the player's key from an abandoned hold");
+
+        // The key really moved rather than being shared: a third open must now
+        // serialize behind the OPEN replacement, and must NOT be able to
+        // reclaim it, because that hold is neither abandoned nor past its
+        // ceiling.
+        match mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+        {
+            Ok(_) => panic!("a healthy replacement must keep its player"),
+            Err(error) => assert!(
+                is_replacement_wait_error(&error),
+                "the refusal a client can wait out, got: {error}"
+            ),
+        }
+
+        // And the reclaimed hold letting go afterwards must not hand out the
+        // live owner's key.
+        drop(cleanup);
+        assert!(
+            mgr.acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+            .is_err(),
+            "the reclaimed hold's release must not reopen the live owner's key"
+        );
+
+        drop(opened);
+        let reacquired = mgr
+            .acquire_cluster_replacement_gate(
+                key,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("a released gate is acquirable again");
+        drop(reacquired);
+    }
+
+    /// The property the first version of this fix broke, and the reason it is
+    /// pinned on its own: the work under this gate routinely takes tens of
+    /// seconds — the incident had two 50-second starts — and the client's own
+    /// retry ladder re-posts into it. A waiter must never be able to destroy a
+    /// start that is simply still building.
+    #[tokio::test(start_paused = true)]
+    async fn a_healthy_replacement_is_never_reclaimed_by_a_waiter() {
+        let (mgr, _work) = replacement_gate_fixture();
+        let key = r#"[["user_id",42],"slow-but-healthy-player"]"#.to_owned();
+        let building = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(600),
+            )
+            .await
+            .expect("the start owns its gate");
+        building.publish_fenceable("healthy-session");
+
+        // Three arrivals, the shape of the 1 s / 2 s / 4 s ladder, each waiting
+        // its full cooperative window and each refused rather than served.
+        for attempt in 0..3 {
+            match mgr
+                .acquire_cluster_replacement_gate(
+                    key.clone(),
+                    None,
+                    tokio::time::Instant::now() + Duration::from_secs(60),
+                )
+                .await
+            {
+                Ok(_) => panic!("attempt {attempt} reclaimed a healthy start's player"),
+                Err(error) => assert!(
+                    is_replacement_wait_error(&error),
+                    "attempt {attempt}: {error}"
+                ),
+            }
+        }
+        drop(building);
+    }
+
+    /// A hold that has outlived every budget it declared is wedged by
+    /// definition, and the next open takes its player back.
+    #[tokio::test(start_paused = true)]
+    async fn a_hold_past_its_ceiling_loses_its_player() {
+        let (mgr, _work) = replacement_gate_fixture();
+        let key = r#"[["user_id",42],"wedged-player"]"#.to_owned();
+        let wedged = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(6_000),
+            )
+            .await
+            .expect("the wedged start owns its gate");
+
+        tokio::time::advance(CLUSTER_REPLACEMENT_HOLD_CEILING + Duration::from_secs(1)).await;
+        let opened = mgr
+            .acquire_cluster_replacement_gate(
+                key,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+            .expect("a hold past its ceiling is reclaimable");
+        drop(opened);
+        drop(wedged);
+    }
+
+    /// The refusal a viewer waits out has to stay inside the narrow class the
+    /// clients retry. Widening it to the whole capacity class would put a
+    /// refusal that tells the client to ask for a smaller height, and one that
+    /// reports a misconfigured scratch ceiling, on a ladder neither can win.
+    #[tokio::test(start_paused = true)]
+    async fn the_replacement_wait_is_the_only_capacity_refusal_a_client_retries() {
+        let (mgr, _work) = replacement_gate_fixture();
+        let key = r#"[["user_id",42],"class-player"]"#.to_owned();
+        let held = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(600),
+            )
+            .await
+            .expect("the first replacement owns its gate");
+        let error = mgr
+            .acquire_cluster_replacement_gate(
+                key,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+            .err()
+            .expect("a healthy hold refuses");
+        assert!(is_replacement_wait_error(&error), "{error}");
+        assert!(
+            is_retryable_capacity_error(&error),
+            "the wait class stays a subset of the capacity class, so every \
+             existing server-side consumer keeps seeing it: {error}"
+        );
+        assert!(
+            !is_replacement_wait_error(&capacity_error(
+                "the proved 4K HDR10 QuickSync slot is busy; retry at 1080p"
+            )),
+            "a refusal that asks the client to change the request is not a wait"
+        );
+        drop(held);
+    }
+
+    /// A start with no budget left is out of time, not behind a wedged hold.
+    #[tokio::test]
+    async fn a_replacement_out_of_budget_refuses_instead_of_taking_the_key() {
+        let (mgr, _work) = replacement_gate_fixture();
+        let key = r#"[["user_id",42],"out-of-budget-player"]"#.to_owned();
+        let held = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+            .expect("the first replacement owns its gate");
+        let error = match mgr
+            .acquire_cluster_replacement_gate(key, None, tokio::time::Instant::now())
+            .await
+        {
+            Ok(_) => panic!("an expired start must not evict a live replacement"),
+            Err(error) => error,
+        };
+        assert!(is_retryable_capacity_error(&error), "{error}");
+        drop(held);
+    }
+
     /// The cluster replacement guard already spans provisional worker creation
     /// through the ingress activation verdict. A typed reopen must bind its
     /// predecessor to that same lifetime so the lease loop cannot terminalize
@@ -49014,12 +49826,17 @@ scope = "test"
                 container: Some("mkv".into()),
                 video_codec: Some("hevc".into()),
                 video_codec_tag: None,
+                field_order: None,
                 video_profile: None,
                 width: Some(1920),
                 height: Some(1080),
                 bit_depth: Some(if hdr.is_some() { 10 } else { 8 }),
                 hdr: hdr.map(str::to_owned),
                 hdr_format: hdr.map(str::to_owned),
+                max_cll: None,
+                max_fall: None,
+                mastering_max_luminance: None,
+                luminance_source: None,
                 bitrate: Some(8_000_000),
                 audio_streams: vec![
                     plurx_core::domain::AudioStream {

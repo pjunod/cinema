@@ -22,7 +22,7 @@ test refuses any reference in the repo to a `docs/` path that does not exist.
 ## Where the web app is
 
 `crates/plurxd/src/web/index.html` is a 97-line shell of markup and tags. The
-app itself is the sixty-two files
+app itself is the sixty-six files
 [docs/clients/WEB-SHELL-LAYOUT.md](docs/clients/WEB-SHELL-LAYOUT.md) maps —
 open that before grepping the shell for a function that is not in it. Adding a
 file means the file, a row in `WEB_ASSETS`, a tag in the shell and a row in
@@ -61,6 +61,9 @@ test failures, or denied lints.
 - Run the smallest focused regression for changed behavior locally and record
   that command in the task pull request. The effort workflow deliberately
   defers the full suites.
+- A focused `plurx-core` regression that covers replicated storage must use
+  `make unit-core` or pass `--features hiqlite-store`. Bare
+  `cargo test -p plurx-core --lib` is not evidence for `store/hiqlite*` code.
 - Commit normally on every branch. The tracked hook runs only catalog lint,
   Rust formatting and Clippy, and embedded JavaScript syntax; it does not run
   tests or compile-only effort evidence. Run the smallest focused regression

@@ -1,6 +1,6 @@
 # Scan and enrichment hygiene — walk off the runtime, deadlines on every provider call
 
-**Status:** ready for review · **Executes:** C3 / F-core-3 and C5 / F-core-6
+**Status:** M1-M3 implementation merged; post-merge fleet evidence pending · **Executes:** C3 / F-core-3 and C5 / F-core-6
 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (assessment rows C3, F-core-3, C5, F-core-6 in
@@ -12,10 +12,10 @@ from
 Read §2 first: it quotes the walk, the per-file stat, the two provider
 clients and the join request as they are, and states what the job lease
 does and does not do when one of them hangs. Then build §5 in order — M1
-(the scanner) and M2 (provider deadlines) are independent and may run in
-parallel sessions; M3 (`post_join_request`) is small and depends on
-neither. One draft PR per milestone into `main` under the fast lane.
-Every `file:line` is from `88a3957a`; re-verify by function name.
+(the scanner), M2 (provider deadlines), then M3 (`post_join_request`). The
+current workboard protocol keeps all three logical milestone commits in one
+draft implementation PR into `main`. Every `file:line` is from `88a3957a`;
+re-verify by function name.
 
 **If a step seems to require changing candidate order, the reconcile
 guard (`walk_errors == 0`), the size+mtime unchanged short-circuit, the
@@ -533,16 +533,20 @@ stop, paste the last 50 lines of journalctl -u plurxd, and do not restart.
 3. **`ITEM_ENRICH_DEADLINE` for anime.** AniList search is one call, so
    120 s is generous; if the metric shows AniList items never come near
    it, a per-provider constant is a one-line follow-up.
-4. **Coordinator idempotence on a repeated join digest** (M3 step 2). If
-   the handlers refuse a repeat, the fix belongs to the cluster
-   membership plan, and M3 ships with the ambiguous error pointing at
-   "start a new join" instead.
+4. **Coordinator idempotence on a repeated join digest** (M3 step 2).
+   Resolved in M3 and strengthened after adversarial review:
+   `daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization`
+   now drives the replicated coordinator state through reservation, an
+   expired identity-bound repeated redemption, admission, and repeated
+   finalization. The ambiguous error therefore directs the operator to
+   re-run the same staged join on an exercised recovery path rather than a
+   source-text assertion.
 
 ---
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per milestone (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
@@ -550,4 +554,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M1 | #400 | Commit `6412f1fbf7d8`: bounded four-page walker shared by full and targeted scans; async file stat and root canonicalization; walk/process histogram. `cargo test -p plurx-core scan::` (106 passed), `cargo test -p plurxd scan` (20 passed), pinned 1.97.1 checks and scoped Clippy passed. Fleet NAS timing remains post-merge evidence. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M2 | #400 | Commits `4995d5f6f611`, `fb98dc611a54`, and `9d766cf9169d`: bounded TMDB/AniList connect, read, total-call, retry-wall, JSON-body, and item deadlines with fixed-cardinality metrics; retryable continuation and independent lease renewal pinned. `cargo test -p plurx-core metadata::` (66 passed), `cargo test -p plurxd enrich` (6 passed), the focused lease-renewal test, pinned 1.97.1 checks and scoped Clippy passed. Fleet provider-drop acceptance remains post-merge evidence. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M3 | #400 | Commit `407683cc91b1`: shared bounded no-redirect join client, capped error body, distinct ambiguous-timeout recovery, and repeated same-node redemption contract. `cargo test -p plurx-core --features hiqlite-store cluster::migration` (80 passed), both focused new contract tests, pinned 1.97.1 checks and scoped Clippy passed. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | Review #3104 | #400 | Commits `8b7c20f5c92e`, `e49591fd52eb`, and `67269a7cf766`: cancellation is observed for every walked entry even when no media page is emitted; a partially enriched multi-season show remains in the ordinary queue until every local season succeeds; replicated join state now proves expired same-identity redemption and repeated finalization after an ambiguous response. The three focused regressions and the existing ambiguous-response test passed on pinned Rust 1.97.1. PR remains draft until P-01 #401 repairs and lands the shared fast lane; fleet NAS timing and provider-drop acceptance remain post-merge evidence. |

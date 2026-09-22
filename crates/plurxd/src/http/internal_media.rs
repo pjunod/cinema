@@ -140,19 +140,31 @@ pub(crate) async fn fragment_index(
             Ok(response)
         }
         Ok(None) => {
-            let _ = state
-                .store
-                .forget_cluster_fragment_index_location(&cache_key, &state.node_id)
-                .await;
+            // Best-effort: the endpoint already refuses the missing object;
+            // catalogue reconciliation can remove the stale location later.
+            crate::store_result::observe(
+                crate::store_result::Operation::ForgetMissingInternalIndex,
+                crate::store_result::Discard::BestEffort,
+                state
+                    .store
+                    .forget_cluster_fragment_index_location(&cache_key, &state.node_id)
+                    .await,
+            );
             Err(StatusCode::NOT_FOUND)
         }
         Err(error) => {
             tracing::warn!(cache_key, %error, "refusing a corrupt fragment-index blob");
             crate::fragment_index_cluster::remove_local_blob(&root, &cache_key).await;
-            let _ = state
-                .store
-                .forget_cluster_fragment_index_location(&cache_key, &state.node_id)
-                .await;
+            // Best-effort: the corrupt object was removed and cannot be
+            // served; catalogue reconciliation retries stale-row cleanup.
+            crate::store_result::observe(
+                crate::store_result::Operation::ForgetCorruptInternalIndex,
+                crate::store_result::Discard::BestEffort,
+                state
+                    .store
+                    .forget_cluster_fragment_index_location(&cache_key, &state.node_id)
+                    .await,
+            );
             Err(StatusCode::NOT_FOUND)
         }
     }

@@ -838,7 +838,7 @@ test("analysis controls are first-class settings separate from playback mode con
   // two writes with two buttons, and neither carries an analysis field.
   const save = shippedSource("saveStreaming");
   const liveRecovery = shippedSource("liveHlsRecoveryCard");
-  const saveLiveRecovery = shippedSource("saveLiveHlsRecoveryDeveloper");
+  const saveLiveRecovery = shippedSource("saveLiveHlsRecovery");
   const saveDefaults = shippedSource("savePlaybackDefaults");
   const analysisPanel = shippedSource("analysisSettingsPanel");
   assert.match(saveDefaults, /default_audio_lang:/);
@@ -3744,6 +3744,19 @@ test("playback-info row builders follow the shared web field list in fixture ord
   }
 });
 
+test("playback info labels tone-map peak provenance without calling policy source truth", () => {
+  const summarize = new Function(`${shippedSource("statsToneMapPeak")}\nreturn statsToneMapPeak;`)();
+  assert.equal(
+    summarize({tone_map_peak_nits: 4000, tone_map_peak_source: "cll"}),
+    "Tone-map peak 4,000 nits · source MaxCLL",
+  );
+  assert.equal(
+    summarize({tone_map_peak_nits: 1000, tone_map_peak_source: "default"}),
+    "Tone-map peak 1,000 nits · policy default",
+  );
+  assert.equal(summarize({tone_map_peak_nits: 1000}), null);
+});
+
 // A section in the shared field list that no column renders is a row nobody
 // can read: the SURFACE section is the ledger half of the surface contract's
 // attributability (§5), and it had to be added to a hand-written column list
@@ -4140,6 +4153,8 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
       shippedSource("positionForPlaybackIntent"),
       shippedSource("selectedAudioIndex"),
       "function cancelPendingSeek(){}",
+      "function notifyPlaybackControl(){}",
+      shippedSource("playbackChangeRecipeKey"),
       shippedSource("requestPlaybackMediaChange"),shippedSource("executePlaybackMediaChange"),
       shippedSource("beginPlaybackPreparation"),
       shippedSource("burnSub"),
@@ -4405,7 +4420,7 @@ test("the detail screen names the supported HLS mode before playback", () => {
   const pending = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "pending" });
   assert.match(pending, /<span class="mode-chip live">Live HLS fallback<\/span>/);
   assert.match(pending, /while VOD analysis is pending/);
-  assert.match(pending, /when live recovery is enabled in Developer settings/);
+  assert.match(pending, /when live recovery is enabled in Playback settings/);
   const unsupported = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "unsupported" });
   assert.match(unsupported, /cannot use the VOD indexer/);
   assert.match(unsupported, /Live HLS requires live recovery to be enabled/);
@@ -6001,19 +6016,14 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
   // Anchored inside the branch: `player.prepare()` appears at eight other
   // sites in that file, so asserting the bare call pinned nothing. What has to
   // be true is that the owner hands the recovery a seek target on the PLAYER's
-  // timeline and the player's own seek and prepare, and re-arms the budget
-  // wherever an item takes the screen.
+  // timeline and the player's own seek and prepare. This source inventory can
+  // establish ownership and call shape, but not frame continuity or
+  // cancellation cleanup. BehindLiveWindowRecoveryTest drives `attached()`
+  // behaviorally and proves that a spent budget gets exactly one fresh use.
   assert.match(
     androidController,
     /seekTargetMs = \{ playerTimelinePositionMs\(filmPositionMs\) \},\s*\n\s*seekTo = \{ target -> player\.seekTo\(target\) \},\s*\n\s*prepare = \{ player\.prepare\(\) \},/,
     "the recovery seeks on the player's timeline and prepares again",
-  );
-  assert.equal(
-    (androidController.match(/behindLiveWindow\.attached\(\)/g) || []).length,
-    2,
-    "the per-attach budget is re-armed at BOTH attach sites: `attachRecipe` and "
-      + "`commitPreparedReplacement`, which swaps in a second ExoPlayer without "
-      + "coming near the first",
   );
   assert.match(
     androidController,
@@ -6028,6 +6038,47 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
     /\.\s*seekToDefaultPosition\s*\(/,
     "seekToDefaultPosition is a live-edge policy the contract forbids",
   );
+});
+
+test("hls.js media recovery is fenced by the shared attach and item budgets", () => {
+  const decide = (overrides = {}) => policy.hlsMediaFatalAction({
+    type: "mediaError",
+    details: "fragParsingError",
+    sourceBufferName: null,
+    retryUsed: 0,
+    itemRecoveries: 0,
+    recoveredAtMs: null,
+    nowMs: 10_000,
+    ...overrides,
+  });
+  assert.equal(decide({ details: "bufferIncompatibleCodecsError" }), "fallback");
+  assert.equal(decide({ details: "bufferAddCodecError" }), "fallback");
+  assert.equal(decide(), "recover");
+  assert.equal(decide({ itemRecoveries: 1, recoveredAtMs: 9_000 }), "fallback");
+  assert.equal(decide({
+    details: "bufferAppendError",
+    sourceBufferName: "audio",
+    itemRecoveries: 1,
+    recoveredAtMs: 5_000,
+  }), "swap_audio");
+  assert.equal(decide({
+    details: "bufferAppendError",
+    sourceBufferName: "video",
+    itemRecoveries: 1,
+    recoveredAtMs: 5_000,
+  }), "fallback");
+  assert.equal(decide({ retryUsed: 1 }), "fallback");
+  assert.equal(decide({ itemRecoveries: 2 }), "fallback");
+  assert.equal(decide({ type: "networkError" }), "none");
+
+  const attach = shippedSource("attachHls");
+  const recovery = attach.indexOf("PlaybackPolicy.hlsMediaFatalAction");
+  const terminal = attach.indexOf('notifyPlaybackControl("failed"', recovery);
+  assert.ok(recovery >= 0, "the shipped fatal handler must ask the recovery policy");
+  assert.ok(terminal > recovery,
+    "decoder rescue must run before the attempt is reported terminal");
+  assert.match(attach, /sourceBufferName:d\.sourceBufferName\|\|null/,
+    "the vendored hls.js 1.6.16 payload names its SourceBuffer explicitly");
 });
 
 test("web HLS startup has one bounded manifest policy and terminal precedence", () => {

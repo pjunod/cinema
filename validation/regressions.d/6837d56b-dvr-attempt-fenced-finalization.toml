@@ -1,0 +1,43 @@
+version = 1
+
+[[coverage]]
+commits = ["6837d56b"]
+points = ["live.dvr"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+The corrections and their evidence landed together in \
+`crates/plurxd/src/live_tv/dvr.rs`, and each one closes a hole the bounded \
+writers of 46a1aeec opened. `stop_sink` and `begin_finishing` matched a sink \
+by recording id alone and returned at the first match, so a finalizer holding \
+a row snapshot from before a retry could cancel -- and then assemble and \
+unlink -- a part belonging to a later attempt that recovery had already \
+attached, and a recording with parts from more than one attempt was assembled \
+after joining only the first writer found. Both now take the row's attempt: \
+a strictly later attempt in the registry answers `Settling` so the stale \
+caller neither cancels nor assembles, and every writer through the row's \
+attempt is joined before assembly reads the parts. \
+`finalization_fences_a_later_retry_and_joins_every_attempt_before_assembly` \
+stands up attempts 1 and 2 for one recording with attempt 2 blocked behind a \
+queued chunk, and asserts `begin_finishing("retried", 1)` is refused, \
+`stop_sink("retried", 1)` answers `Settling`, attempt 2 is not cancelled and \
+no final file exists; with the identity match restored the stale attempt-1 \
+call finds attempt 2 first, cancels it and reports it settled, and the test \
+fails on the cancellation and on the final file appearing. The second defect \
+is in recovery: `dvr_recover` appended an actionable `worker_lost` \
+interruption for any row whose worker was gone, including one whose sink had \
+already recorded and drained the precise reason, so a disk failure was \
+reported twice and the vaguer diagnosis was the one an operator read last. \
+It now consults `sink_interruption_reason` for the row's attempt first. \
+`recovery_preserves_one_durable_sink_failure_without_worker_lost` claims a \
+recording, fails its sink, drains the observation, runs `dvr_recover`, and \
+asserts the durable history holds exactly one `capture_interrupted` row \
+whose reason is `disk_write_failed`; reverting the guard makes that count \
+two. The commit also threads an explicit clock into the reminder pass as \
+`reminder_tick_at` so \
+`a_late_reminder_is_not_moved_when_only_the_full_guide_contains_it` can \
+reconcile at the guide fixture's own epoch and prove a reminder present only \
+in the full guide view stays `Armed`, instead of depending on the test run \
+falling inside the guide window. All three are `crates/plurxd` unit tests, \
+run by `make rust-check` under `rust-gate` and by `make ci-rust-gate` under \
+`rust-gate-ci`.
+"""

@@ -499,6 +499,14 @@ impl Drop for StartedSessionGuard {
             #[cfg(test)]
             test_settlement,
         } = cleanup;
+        // Declared before the spawn, not inside it: from here the guard is
+        // held by cleanup, its request has already answered the viewer, and a
+        // later open for this player must not queue behind it. Publishing the
+        // session first is what lets that open fence this teardown exactly.
+        if let Some(replacement) = _replacement.as_ref() {
+            replacement.publish_fenceable(&session_id);
+            replacement.mark_abandoned();
+        }
         std::mem::drop(runtime.spawn(async move {
             if owns_worker {
                 abort_started_session(&state, &owner_node_id, &incarnation_id, &session_id).await;
@@ -3901,6 +3909,26 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
         return ApiError::Conflict(error);
     }
     tracing::warn!(file = file_id, "session create failed: {error}");
+    // This player's previous start has not let go yet — a wait, and a bounded
+    // one, so name it. Left as a bare `{error}` sentence this was a codeless
+    // 503, which every client correctly refuses to retry because a 503 nobody
+    // explained is not a "still building" answer. The viewer got a terminal
+    // overlay quoting an internal sentence, over a Retry button that re-posted
+    // into the same contention with no backoff. With a code it joins
+    // `create_503_not_yet` and the existing 1s/2s/4s ladder waits it out.
+    //
+    // Deliberately narrower than the whole capacity class. Sibling refusals in
+    // that class are not all waits: one tells the client to ask for a smaller
+    // height, and one reports a scratch ceiling above the configured budget
+    // that no retry can satisfy. Those keep the codeless 503 nothing retries.
+    if crate::transcode::is_replacement_wait_error(&error) {
+        return ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "transcode_capacity_pending",
+            message: error,
+            retry_after_seconds: crate::transcode::REPLACEMENT_WAIT_RETRY_AFTER_SECS,
+        };
+    }
     if crate::transcode::is_serving_fence_error(&error)
         || crate::transcode::is_start_infrastructure_error(&error)
         || crate::transcode::is_retryable_capacity_error(&error)
@@ -11585,9 +11613,16 @@ async fn exact_hls_context_before(
     let inspection_deadline = deadline
         .checked_sub(Duration::from_millis(25))
         .unwrap_or(deadline);
+    let inspect_avc_init = owner.avc_master_uses_init();
     let inspected = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        exact_hls_context_at(state, session, context, inspection_deadline),
+        exact_hls_context_at(
+            state,
+            session,
+            context,
+            inspect_avc_init,
+            inspection_deadline,
+        ),
     )
     .await;
     match inspected {
@@ -11712,6 +11747,7 @@ async fn exact_hls_context(
         state,
         session,
         context,
+        true,
         Instant::now() + RESPONSE_PUBLICATION_LIFECYCLE_BUDGET,
     )
     .await
@@ -11721,12 +11757,13 @@ async fn exact_hls_context_at(
     state: &AppState,
     session: &str,
     mut context: crate::transcode::HlsContext,
+    inspect_avc_init: bool,
     deadline: Instant,
 ) -> Result<crate::transcode::HlsContext, HlsInitInspectionError> {
     let fallback_video = context.codecs.split(',').next().unwrap_or_default();
-    let Some(sample_entry) = ["hvc1", "hev1", "dvh1", "dvhe"]
+    let Some(sample_entry) = ["hvc1", "hev1", "dvh1", "dvhe", "avc1"]
         .into_iter()
-        .find(|entry| fallback_video.starts_with(entry))
+        .find(|entry| fallback_video.starts_with(entry) && (*entry != "avc1" || inspect_avc_init))
     else {
         return Ok(context);
     };
@@ -11862,11 +11899,14 @@ async fn exact_hls_context_at(
             | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
         ) => return Err(HlsInitInspectionError::unsupported()),
     };
-    let required_box = if matches!(sample_entry, "dvh1" | "dvhe") {
-        init.windows(4)
-            .any(|window| window == b"dvcC" || window == b"dvvC")
-    } else {
-        init.windows(4).any(|window| window == b"hvcC")
+    let required_box = match sample_entry {
+        "dvh1" | "dvhe" => init
+            .windows(4)
+            .any(|window| window == b"dvcC" || window == b"dvvC"),
+        // AVC is resolved structurally from the selected video track below;
+        // a raw byte occurrence is not evidence that an avcC belongs to it.
+        "avc1" => true,
+        _ => init.windows(4).any(|window| window == b"hvcC"),
     };
     if !required_box {
         return Err(HlsInitInspectionError::invalid());
@@ -11883,21 +11923,34 @@ async fn exact_hls_context_at(
             ) => return Err(HlsInitInspectionError::unsupported()),
         }
     }
-    match plurx_core::fmp4::validate_hevc_sample_entries(&parsed) {
-        Ok(plurx_core::fmp4::HevcSampleEntryLayout::Single) => {}
-        Ok(plurx_core::fmp4::HevcSampleEntryLayout::NotHevc)
-        | Ok(plurx_core::fmp4::HevcSampleEntryLayout::Multiple { .. }) => {
-            return Err(HlsInitInspectionError::unsupported());
+    if sample_entry != "avc1" {
+        match plurx_core::fmp4::validate_hevc_sample_entries(&parsed) {
+            Ok(plurx_core::fmp4::HevcSampleEntryLayout::Single) => {}
+            Ok(plurx_core::fmp4::HevcSampleEntryLayout::NotHevc)
+            | Ok(plurx_core::fmp4::HevcSampleEntryLayout::Multiple { .. }) => {
+                return Err(HlsInitInspectionError::unsupported());
+            }
+            Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
+                return Err(HlsInitInspectionError::invalid());
+            }
+            Err(
+                plurx_core::fmp4::Fmp4Error::Unsupported(_)
+                | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
+            ) => return Err(HlsInitInspectionError::unsupported()),
         }
-        Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
-            return Err(HlsInitInspectionError::invalid());
-        }
-        Err(
-            plurx_core::fmp4::Fmp4Error::Unsupported(_)
-            | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
-        ) => return Err(HlsInitInspectionError::unsupported()),
     }
-    let derived = if matches!(sample_entry, "dvh1" | "dvhe") {
+    let derived = if sample_entry == "avc1" {
+        match plurx_core::fmp4::avc_rfc6381_codec(&parsed) {
+            Ok(Some(codec)) => Some(codec),
+            Ok(None) | Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
+                return Err(HlsInitInspectionError::invalid());
+            }
+            Err(
+                plurx_core::fmp4::Fmp4Error::Unsupported(_)
+                | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
+            ) => return Err(HlsInitInspectionError::unsupported()),
+        }
+    } else if matches!(sample_entry, "dvh1" | "dvhe") {
         dolby_vision_codec_from_init(&init, sample_entry)
     } else {
         hevc_codec_from_init(&init, sample_entry)
@@ -15645,6 +15698,7 @@ mod tests {
         assert_eq!(held.status(), StatusCode::OK);
         let held_after = fixture.actor_snapshot().await;
         assert_status_snapshot_is_observational(held_before, held_after);
+        fixture.mark_started().await;
 
         let segment_name = "seg00000.m4s";
         let segment_bytes = b"published-media";
@@ -16791,6 +16845,7 @@ mod tests {
             container: file.container.clone(),
             video_codec: file.video_codec.clone(),
             video_codec_tag: file.video_codec_tag.clone(),
+            field_order: file.field_order.clone(),
             video_profile: file.video_profile.clone(),
             width: file.width,
             height: file.height,
@@ -16798,6 +16853,10 @@ mod tests {
             hdr: file.hdr.clone(),
             dolby_vision: Default::default(),
             hdr_format: file.hdr_format.clone(),
+            max_cll: file.max_cll,
+            max_fall: file.max_fall,
+            mastering_max_luminance: file.mastering_max_luminance,
+            luminance_source: file.luminance_source.clone(),
             bitrate: file.bitrate,
             audio_streams: file.audio_streams.clone(),
             subtitle_streams: vec![SubtitleStream {
@@ -16983,7 +17042,7 @@ mod tests {
                 index,
                 anchor_seconds,
                 window_seconds,
-                move |tmp, _, _, _, _| async move {
+                move |tmp, _, _, anchor_seconds, _| async move {
                     runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let now = live.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     peak_live.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
@@ -17009,7 +17068,9 @@ mod tests {
                         .await
                         .expect("release window producer")
                         .forget();
-                    tokio::fs::write(tmp, b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nready cue\n")
+                    let start = format_vtt_timestamp(anchor_seconds as f64 + 1.0);
+                    let end = format_vtt_timestamp(anchor_seconds as f64 + 2.0);
+                    tokio::fs::write(tmp, format!("WEBVTT\n\n{start} --> {end}\nready cue\n"))
                         .await
                         .map_err(|error| error.to_string())
                 },
@@ -18598,7 +18659,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_subtitle_playlist_rebinds_after_video_attempt_handoff() {
+    async fn published_subtitle_playlist_refuses_in_place_video_attempt_handoff() {
         let dir = crate::test_tempdir().expect("session directory");
         let mut fixture = HlsDeliveryFixture::publish(dir.path(), "subtitle-handoff").await;
         add_http_text_subtitle(&mut fixture, "subtitle-handoff").await;
@@ -18609,18 +18670,17 @@ mod tests {
             .set_subtitle_playlist_commit_pause(Arc::clone(&pause));
         let owner_pause = Arc::new(tokio::sync::Barrier::new(2));
         fixture.pause_playlist_publication(Arc::clone(&owner_pause));
-        tokio::fs::write(dir.path().join("seg00000.ts"), b"old-zero")
+        let mut predecessor = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:4\n");
+        for index in 0..12 {
+            let name = format!("seg{index:05}.ts");
+            tokio::fs::write(dir.path().join(&name), format!("old-{index}"))
+                .await
+                .expect("predecessor segment");
+            predecessor.push_str(&format!("#EXTINF:4.000,\n{name}\n"));
+        }
+        tokio::fs::write(dir.path().join("index.m3u8"), predecessor)
             .await
-            .expect("predecessor segment zero");
-        tokio::fs::write(dir.path().join("seg00001.ts"), b"old-one")
-            .await
-            .expect("predecessor segment one");
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\nseg00000.ts\n#EXTINF:2.000,\nseg00001.ts\n",
-        )
-        .await
-        .expect("predecessor playlist");
+            .expect("predecessor playlist");
         let state = fixture.state.clone();
         let waiting =
             tokio::spawn(
@@ -18630,22 +18690,11 @@ mod tests {
             .await
             .expect("subtitle request read predecessor playlist");
 
-        assert_eq!(fixture.begin_producer_attempt().await, Ok(1));
-        tokio::fs::write(dir.path().join("seg00000.ts"), b"zero")
-            .await
-            .expect("segment zero");
-        tokio::fs::write(dir.path().join("seg00001.ts"), b"one")
-            .await
-            .expect("segment one");
-        tokio::fs::write(dir.path().join("seg00002.ts"), b"two")
-            .await
-            .expect("segment two");
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\nseg00000.ts\n#EXTINF:2.000,\nseg00001.ts\n#EXTINF:2.000,\nseg00002.ts\n",
-        )
-        .await
-        .expect("successor playlist");
+        assert_eq!(
+            fixture.begin_producer_attempt().await,
+            Err(crate::playback_control::ProducerAttemptRejection::PlaylistPublished),
+            "published media permanently closes in-place producer replacement"
+        );
         tokio::time::timeout(Duration::from_secs(5), owner_pause.wait())
             .await
             .expect("release predecessor playlist publication");
@@ -18662,14 +18711,14 @@ mod tests {
         let response = waiting
             .await
             .expect("subtitle task")
-            .expect("subtitle response commits against successor owner");
+            .expect("subtitle response commits against its published owner");
         let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
             .await
             .expect("subtitle playlist body");
         let text = String::from_utf8(body.to_vec()).expect("subtitle playlist text");
         assert!(
-            text.lines().any(|line| line == "seg00002.vtt"),
-            "subtitle child playlist must rebind to successor-relative segment URIs: {text}"
+            text.lines().any(|line| line == "seg00011.vtt"),
+            "subtitle child playlist retains its published owner: {text}"
         );
         assert_eq!(fixture.last_renewal_kind().await, "subtitle-playlist");
     }
@@ -23276,12 +23325,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("h264".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: None,
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(18_183_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -24287,6 +24341,7 @@ mod tests {
 
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "drain").await;
+        fixture.make_segment_window_servable().await;
         let body = vec![7_u8; 12 * 1024];
         tokio::fs::write(dir.path().join("seg00001.m4s"), &body)
             .await
@@ -24333,6 +24388,7 @@ mod tests {
     async fn completed_segment_eof_does_not_wait_for_a_blocked_producer_transition() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "nonblocking-eof").await;
+        fixture.make_segment_window_servable().await;
         let body = vec![11_u8; 12 * 1024];
         tokio::fs::write(dir.path().join("seg00001.m4s"), &body)
             .await
@@ -24797,6 +24853,7 @@ mod tests {
     async fn range_and_bodyless_segment_responses_keep_delivery_truth() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "range").await;
+        fixture.mark_started().await;
         let body = vec![5_u8; 16 * 1024];
         tokio::fs::write(dir.path().join("seg00004.m4s"), &body)
             .await
@@ -24862,7 +24919,7 @@ mod tests {
             "a Range response that contains every byte advances the frontier"
         );
         assert_eq!(actor_delivery.fetched_segment, Some(4));
-        assert_eq!(actor_delivery.pending_fetched_segment, Some(4));
+        assert_eq!(actor_delivery.pending_fetched_segment, None);
         let mut stale_if_range = HeaderMap::new();
         stale_if_range.insert(
             header::RANGE,
@@ -24932,6 +24989,7 @@ mod tests {
 
         let init_dir = crate::test_tempdir().expect("init directory");
         let init_fixture = HlsDeliveryFixture::publish(init_dir.path(), "init-range").await;
+        init_fixture.mark_started().await;
         tokio::fs::write(init_dir.path().join("init.mp4"), vec![9_u8; 4_096])
             .await
             .expect("init bytes");
@@ -24990,6 +25048,7 @@ mod tests {
 
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "abandoned").await;
+        fixture.make_segment_window_servable().await;
         let renewal_before = fixture.last_renewal_kind().await;
         let frontier_before = fixture.fetched_segment();
         let body = vec![3_u8; 64 * 1024];
@@ -25059,6 +25118,7 @@ mod tests {
     async fn a_stream_resolved_before_retirement_cannot_commit_after_eof() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "retired-body").await;
+        fixture.make_segment_window_servable().await;
         let body = vec![7_u8; 32 * 1024];
         tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
             .await
@@ -25104,6 +25164,7 @@ mod tests {
     async fn a_stream_from_an_old_producer_attempt_cannot_advance_its_successor() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "old-attempt-body").await;
+        fixture.make_segment_window_servable().await;
         let body = vec![9_u8; 32 * 1024];
         tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
             .await
@@ -25139,6 +25200,7 @@ mod tests {
     async fn accepted_predecessor_eof_cannot_project_after_successor_reset() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "projection-race").await;
+        fixture.make_segment_window_servable().await;
         let body = vec![5_u8; 32 * 1024];
         tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
             .await
@@ -25181,6 +25243,7 @@ mod tests {
 
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "unreadable").await;
+        fixture.make_segment_window_servable().await;
         let renewal_before = fixture.last_renewal_kind().await;
         let frontier_before = fixture.fetched_segment();
         // A directory opens like a file and reports a length, then fails its
@@ -25240,6 +25303,7 @@ mod tests {
     async fn an_unreadable_small_init_never_commits_lease_or_frontier() {
         let dir = crate::test_tempdir().expect("init directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "unreadable-init").await;
+        fixture.make_segment_window_servable().await;
         tokio::fs::create_dir(dir.path().join("init.mp4"))
             .await
             .expect("unreadable init");
@@ -25275,6 +25339,7 @@ mod tests {
     async fn web_hls_startup_init_probe_is_not_client_delivery_or_a_short_response() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "probe").await;
+        fixture.make_segment_window_servable().await;
         // Past the inspection bound, so the read stops short of the file's
         // advertised length by design.
         let oversized = vec![0_u8; (INIT_INSPECTION_LIMIT_BYTES + 4_096) as usize];
@@ -25317,6 +25382,7 @@ mod tests {
     async fn web_hls_startup_failed_init_probe_is_internal_and_unavailable() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "probe-error").await;
+        fixture.make_segment_window_servable().await;
         tokio::fs::create_dir(dir.path().join("init.mp4"))
             .await
             .expect("unreadable init");
@@ -25652,12 +25718,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: None,
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(10),
             hdr: Some("dolby_vision".into()),
             hdr_format: Some("Dolby Vision".into()),
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(40_000_000),
             audio_streams: vec![],
             subtitle_streams,
@@ -26233,6 +26304,7 @@ mod tests {
                         container: Some("mp4".into()),
                         video_codec: Some("hevc".into()),
                         video_codec_tag: Some("hvc1".into()),
+                        field_order: None,
                         video_profile: Some("Main".into()),
                         width: Some(1920),
                         height: Some(1080),
@@ -27841,7 +27913,7 @@ mod tests {
         assert!(master.starts_with("#EXTM3U\n#EXT-X-VERSION:7\n"));
         assert!(master.contains(
             "#EXT-X-STREAM-INF:BANDWIDTH=40000000,AVERAGE-BANDWIDTH=40000000,\
-             RESOLUTION=3840x2160,FRAME-RATE=23.976,SUBTITLES=\"subs\""
+             RESOLUTION=3840x2160,FRAME-RATE=23.976,CLOSED-CAPTIONS=NONE,SUBTITLES=\"subs\""
         ));
         assert!(!master.contains("CODECS="));
         assert!(!master.contains("#EXT-X-INDEPENDENT-SEGMENTS"));
@@ -27889,11 +27961,11 @@ mod tests {
         let minimal = master_playlist_diagnostic(&file, None, &context, Some("video-only"));
         assert_eq!(
             minimal,
-            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH=40000000,AVERAGE-BANDWIDTH=40000000,RESOLUTION=3840x2160,FRAME-RATE=23.976\nindex.m3u8\n"
+            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH=40000000,AVERAGE-BANDWIDTH=40000000,RESOLUTION=3840x2160,FRAME-RATE=23.976,CLOSED-CAPTIONS=NONE\nindex.m3u8\n"
         );
 
         let range = master_playlist_diagnostic(&file, None, &context, Some("video-only-range"));
-        assert!(range.contains("FRAME-RATE=23.976,VIDEO-RANGE=PQ\n"));
+        assert!(range.contains("VIDEO-RANGE=PQ,CLOSED-CAPTIONS=NONE\n"));
         assert!(!range.contains("CODECS="));
         assert!(!range.contains("SUBTITLES="));
 
@@ -28159,6 +28231,173 @@ mod tests {
         assert!(hevc_codec_from_init(&init[..12], "hvc1").is_none());
     }
 
+    #[test]
+    fn avc_codec_from_init_reads_the_avcc_triplet() {
+        let mut init = valid_avc_init();
+        let avc1 = plurx_core::fmp4::avc_rfc6381_codec(&init)
+            .expect("valid sample-entry layout")
+            .expect("AVC codec");
+        assert!(avc1.starts_with("avc1."));
+
+        plurx_core::testfixtures::replace_avc_sample_entry(&mut init, *b"avc3");
+        assert_eq!(
+            plurx_core::fmp4::avc_rfc6381_codec(&init)
+                .expect("valid avc3 layout")
+                .expect("AVC codec"),
+            avc1.replacen("avc1.", "avc3.", 1)
+        );
+    }
+
+    #[test]
+    fn avc_codec_from_init_ignores_an_earlier_decoy_box() {
+        let mut init = valid_avc_init();
+        let expected = plurx_core::fmp4::avc_rfc6381_codec(&init).expect("valid AVC layout");
+        let ftyp_size =
+            u32::from_be_bytes(init.bytes[0..4].try_into().expect("ftyp size")) as usize;
+        let mut decoy = 20_u32.to_be_bytes().to_vec();
+        decoy.extend_from_slice(b"free");
+        decoy.extend_from_slice(&[0, 0, 0, 12]);
+        decoy.extend_from_slice(b"avcC");
+        decoy.extend_from_slice(&[1, 0x4D, 0, 0x1F]);
+        init.bytes.splice(ftyp_size..ftyp_size, decoy);
+        let init = parse_avc_init(&init.bytes);
+
+        assert_eq!(
+            plurx_core::fmp4::avc_rfc6381_codec(&init).expect("decoy init remains valid"),
+            expected
+        );
+    }
+
+    #[test]
+    fn avc_codec_from_init_rejects_ambiguous_sample_descriptions() {
+        let mut init = valid_avc_init();
+        let expected = plurx_core::fmp4::avc_rfc6381_codec(&init).expect("valid AVC layout");
+        plurx_core::testfixtures::duplicate_avc_sample_entry(&mut init);
+        assert_eq!(
+            plurx_core::fmp4::avc_rfc6381_codec(&init)
+                .expect("matching duplicate descriptions remain valid"),
+            expected
+        );
+
+        plurx_core::testfixtures::replace_second_avc_triplet(&mut init, 0x4D, 0, 0x1F);
+        assert!(matches!(
+            plurx_core::fmp4::avc_rfc6381_codec(&init),
+            Err(plurx_core::fmp4::Fmp4Error::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn avc_codec_from_init_refuses_a_truncated_box() {
+        let mut init = valid_avc_init();
+        init.bytes.truncate(init.bytes.len() - 1);
+
+        assert!(matches!(
+            plurx_core::fmp4::avc_rfc6381_codec(&init),
+            Err(plurx_core::fmp4::Fmp4Error::Malformed(_))
+        ));
+    }
+
+    fn parse_avc_init(bytes: &[u8]) -> plurx_core::fmp4::Init {
+        use plurx_core::fmp4::{FragmentReader, Unit};
+        let mut reader = FragmentReader::new();
+        reader.push(bytes);
+        let Some(Unit::Init(init)) = reader.next_unit().expect("fixture init parses") else {
+            panic!("the fixture opens with an init");
+        };
+        init
+    }
+
+    fn valid_avc_init() -> plurx_core::fmp4::Init {
+        let feed = plurx_core::testfixtures::pipe("h264");
+        parse_avc_init(&feed)
+    }
+
+    #[tokio::test]
+    async fn an_fmp4_avc_session_normalises_its_codec_from_the_init() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "avc-init").await;
+        fixture.make_segment_window_servable().await;
+        let init = valid_avc_init();
+        let expected = plurx_core::fmp4::avc_rfc6381_codec(&init)
+            .expect("valid sample-entry layout")
+            .expect("fixture carries avcC");
+        tokio::fs::write(dir.path().join("init.mp4"), &init.bytes)
+            .await
+            .expect("AVC init");
+
+        let context = crate::transcode::HlsContext {
+            file_id: 1,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs: "avc1.640034,mp4a.40.2".to_owned(),
+            supplemental_codecs: None,
+            frame_rate: None,
+        };
+        let resolved = exact_hls_context(&fixture.state, "avc-init", context)
+            .await
+            .expect("valid AVC init is supported");
+
+        assert_eq!(resolved.codecs, format!("{expected},mp4a.40.2"));
+    }
+
+    #[tokio::test]
+    async fn an_fmp4_avc_session_refuses_ambiguous_sample_descriptions() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "ambiguous-avc-init").await;
+        fixture.make_segment_window_servable().await;
+        let mut init = valid_avc_init();
+        plurx_core::testfixtures::duplicate_avc_sample_entry(&mut init);
+        plurx_core::testfixtures::replace_second_avc_triplet(&mut init, 0x4D, 0, 0x1F);
+        tokio::fs::write(dir.path().join("init.mp4"), &init.bytes)
+            .await
+            .expect("ambiguous AVC init");
+        let context = crate::transcode::HlsContext {
+            file_id: 1,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs: "avc1.640034,mp4a.40.2".to_owned(),
+            supplemental_codecs: None,
+            frame_rate: None,
+        };
+
+        let error = exact_hls_context(&fixture.state, "ambiguous-avc-init", context)
+            .await
+            .expect_err("ambiguous AVC identity must not be published");
+        assert!(matches!(
+            error,
+            HlsInitInspectionError::Response {
+                code: "hls_init_unsupported",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_mpegts_session_keeps_its_static_codec_string() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "mpegts-avc").await;
+        let context = crate::transcode::HlsContext {
+            file_id: 1,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs: "avc1.640034,mp4a.40.2".to_owned(),
+            supplemental_codecs: None,
+            frame_rate: None,
+        };
+
+        let resolved = exact_hls_context_at(
+            &fixture.state,
+            "mpegts-avc",
+            context.clone(),
+            false,
+            Instant::now() + RESPONSE_PUBLICATION_LIFECYCLE_BUDGET,
+        )
+        .await
+        .expect("MPEG-TS needs no init inspection");
+
+        assert_eq!(resolved, context);
+    }
+
     /// A `dvcC` record laid out the way the reference episode I Profile 5 title's init
     /// segment carries it: version 1.0, profile 5, level 6, RPU and BL
     /// present, no enhancement layer, compatibility id 0.
@@ -28240,6 +28479,7 @@ mod tests {
     async fn a_preserved_dolby_vision_master_keeps_its_dolby_vision_identifier() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "dv").await;
+        fixture.make_segment_window_servable().await;
         let init = valid_dolby_vision_init(5, 6);
         tokio::fs::write(dir.path().join("init.mp4"), &init)
             .await
@@ -28270,6 +28510,7 @@ mod tests {
     async fn a_bare_dolby_vision_declaration_is_completed_from_the_init() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "dv-bare").await;
+        fixture.make_segment_window_servable().await;
         tokio::fs::write(dir.path().join("init.mp4"), valid_dolby_vision_init(5, 6))
             .await
             .expect("dolby vision init");
@@ -28294,6 +28535,7 @@ mod tests {
     async fn web_hls_startup_dolby_init_without_configuration_is_invalid() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "dv-nodvcc").await;
+        fixture.make_segment_window_servable().await;
         let init = valid_hevc_init();
         tokio::fs::write(dir.path().join("init.mp4"), &init)
             .await

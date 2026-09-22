@@ -48,6 +48,8 @@ class PlaybackInfoContractTest {
         sessionStatus = PlaybackSessionStatus(
             id = "session-42",
             encoder = "nvenc",
+            tone_map_peak_nits = 1_000,
+            tone_map_peak_source = "default",
             speed = 1.25,
             recent_speed = 1.20,
             out_time_ms = 90_000,
@@ -157,5 +159,21 @@ class PlaybackInfoContractTest {
         assertEquals("800 kb/s", formatBitrate(800_000))
         assertEquals("9.5 Mb/s", formatBitrate(9_500_000))
         assertEquals("12 Mb/s", formatBitrate(12_300_000))
+    }
+
+    @Test
+    fun toneMapPeakProvenanceDoesNotCallThePolicyDefaultSourceTruth() {
+        val dynamicRange = playbackInfoRows(details, emptyList()).single { it.id == "dynamic_range" }
+        assertEquals("Tone-map peak 1,000 nits · policy default", dynamicRange.note)
+        assertEquals(
+            "Tone-map peak 4,000 nits · source MaxCLL",
+            toneMapPeakSummary(
+                PlaybackSessionStatus(
+                    id = "source-cll",
+                    tone_map_peak_nits = 4_000,
+                    tone_map_peak_source = "cll",
+                ),
+            ),
+        )
     }
 }

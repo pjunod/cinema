@@ -4816,6 +4816,37 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT, "{mixed_enable}");
     }
 
+    #[tokio::test]
+    async fn android_display_mode_checkbox_saves_without_live_tv_generation() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+
+        for enabled in [true, false] {
+            // Exact Android checkbox body: this ordinary playback preference
+            // deliberately carries no Live TV tuple generation.
+            let (status, saved) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"playback_display_mode_match": enabled}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{saved}");
+            assert_eq!(saved["playback_display_mode_match"], json!(enabled));
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_MODE_MATCH)
+                    .await
+                    .expect("setting")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+        }
+    }
+
     /// Readiness is advisory (2026-09-07). Structural invariants still refuse:
     /// an enable with no address is a 400 above, and a stale generation is a
     /// 409. But "the tuner did not answer just now" is a thing the operator is
@@ -4988,6 +5019,44 @@ mod tests {
         let (_, unchanged) = call(&app, get("/api/v1/settings", Some(&admin))).await;
         assert_eq!(unchanged["live_tv_guide_source"], json!("hdhomerun"));
         assert_eq!(unchanged["live_tv_config_generation"], json!(3));
+    }
+
+    #[tokio::test]
+    async fn live_tv_deinterlace_output_is_an_independent_advisory_setting() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::LIVE_TV_ENABLED, "1")
+            .await
+            .expect("mark Live TV enabled");
+
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"live_tv_deinterlace_output": "frame"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["live_tv_deinterlace_output"], json!("frame"));
+        assert_eq!(saved["live_tv_enabled"], json!(true));
+        assert_eq!(saved["live_tv_config_generation"], json!(0));
+
+        let (status, invalid) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"live_tv_deinterlace_output": "double"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+        let (_, current) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(current["live_tv_deinterlace_output"], json!("frame"));
     }
 
     #[tokio::test]
@@ -5753,6 +5822,10 @@ mod tests {
             ids,
             vec![
                 "windows_server",
+                // D-01 adds the Android TV display-mode card. Its one row is
+                // advisory and reports `unobservable` on a node with no
+                // display-mode telemetry; the enable switch stays available.
+                "android_display_mode_match",
                 "library_channels",
                 "library_channel_subject_matching",
                 "embedded_semantic_search",
@@ -5818,6 +5891,7 @@ mod tests {
             vec![
                 "authoritative_store",
                 "durable_queue",
+                "rolling_contract_built",
                 "runtime",
                 "server_preparation_is_real",
                 "source_fencing",
@@ -7031,6 +7105,31 @@ mod tests {
 
         // A near-empty body is tolerated too (all fields optional).
         let (status, _) = call(&app, post("/api/v1/client-log", Some(&admin), json!({}))).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn client_log_accepts_error_reports_with_bounded_stack() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({
+                    "level": "error",
+                    "event": "client_error",
+                    "detail": "error",
+                    "message": "load failed",
+                    "src": "/assets/core/cards.js",
+                    "line": 17,
+                    "col": 9,
+                    "stack": "x".repeat(3_000)
+                }),
+            ),
+        )
+        .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
@@ -10275,11 +10374,12 @@ mod tests {
         );
         assert_eq!(audio_only["selection"]["audio_index"], 0, "{audio_only}");
         assert_eq!(
-            audio_only["selection"]["subtitle_index"], 0,
-            "the effective policy subtitle remains visible without changing delivery: {audio_only}"
+            audio_only["selection"]["subtitle_index"],
+            serde_json::Value::Null,
+            "an explicit audio-only request does not implicitly select a subtitle: {audio_only}"
         );
         assert_eq!(
-            audio_only["selection"]["subtitle_requires_burn_in"], true,
+            audio_only["selection"]["subtitle_requires_burn_in"], false,
             "{audio_only}"
         );
     }
@@ -11050,6 +11150,7 @@ mod tests {
                         index: 0,
                         codec: "truehd".into(),
                         channels: Some(8),
+                        sample_rate: None,
                         language: Some("eng".into()),
                         default: true,
                         ..Default::default()
@@ -11097,6 +11198,7 @@ mod tests {
                         index: 0,
                         codec: "aac".into(),
                         channels: Some(2),
+                        sample_rate: None,
                         language: Some("eng".into()),
                         default: true,
                         ..Default::default()
@@ -14273,11 +14375,8 @@ mod tests {
             ),
         )
         .await;
-        assert!(
-            status == StatusCode::UNPROCESSABLE_ENTITY
-                || negotiated["code"] == "hdr_subtitle_burn_refused",
-            "an HDR10 transcode is an HDR delivery: {status} {negotiated}"
-        );
+        assert_eq!(status, StatusCode::CONFLICT, "{negotiated}");
+        assert_eq!(negotiated["code"], "vod_source_rescan_required");
 
         // And the population the old guard over-refused: a client asking for
         // a transcode at a height, with no HDR10 negotiated. That body
@@ -15008,6 +15107,7 @@ mod tests {
                         index: 0,
                         codec: "truehd".into(),
                         channels: Some(8),
+                        sample_rate: Some(48_000),
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -15035,6 +15135,7 @@ mod tests {
                         index: 0,
                         codec: "aac".into(),
                         channels: Some(2),
+                        sample_rate: Some(48_000),
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -15229,6 +15330,7 @@ mod tests {
                         index: 0,
                         codec: "aac".into(),
                         channels: Some(2),
+                        sample_rate: Some(48_000),
                         language: None,
                         title: None,
                         default: true,

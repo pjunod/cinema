@@ -18,6 +18,10 @@ object Session {
     @Volatile
     var token: String? = null
 
+    /** Replicated Android-TV refresh matching policy from `/api/v1/server`. */
+    @Volatile
+    var displayModeMatch: Boolean = false
+
     private val nodeLock = Any()
     private var mediaFailoverOrigins: List<String> = emptyList()
     private var mediaFailoverIndex: Int = 0
