@@ -325,6 +325,10 @@ impl ActivationFailpoint {
 /// A prior interrupted attempt consumes exactly one SQLite recovery boot: its
 /// incoming target is removed, the attempt marker is fsynced away, and the
 /// unchanged legacy store is returned. A completed atomic target always wins.
+///
+/// Each startup branch (join, reopen, first activation) is boxed. Inlined,
+/// their state machines were summed into this one future, and a debug build
+/// of a caller that awaits it overflowed a 2 MiB test thread's stack.
 #[cfg(feature = "hiqlite-store")]
 pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, StoreError> {
     install_default_crypto_provider();
@@ -339,10 +343,10 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
             && path_exists(&config.cluster.join_token_file)?
             && !path_exists(&active.join(ACTIVATION_MARKER_FILENAME))?;
         if pending_join {
-            return join_fresh_store(config, daemon_lock).await;
+            return Box::pin(join_fresh_store(config, daemon_lock)).await;
         }
         readdress_single_voter_if_needed(config)?;
-        let selected = open_active_store(config, daemon_lock).await?;
+        let selected = Box::pin(open_active_store(config, daemon_lock)).await?;
         finalize_pending_join_best_effort(config, &selected).await;
         // A crash immediately after rename may expose the target before its
         // parent-directory entry is durable. Observing it on recovery lets us
@@ -377,7 +381,7 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
     }
 
     if !config.cluster.join_token_file.as_os_str().is_empty() {
-        return join_fresh_store(config, daemon_lock).await;
+        return Box::pin(join_fresh_store(config, daemon_lock)).await;
     }
 
     ensure_sqlite_source(&config.storage.data_dir)?;
@@ -421,7 +425,15 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
     let credential_key = legacy.credential_key;
     drop(legacy.store);
 
-    match activate_fresh_store(config, failpoint, daemon_lock, identity, credential_key).await {
+    match Box::pin(activate_fresh_store(
+        config,
+        failpoint,
+        daemon_lock,
+        identity,
+        credential_key,
+    ))
+    .await
+    {
         Ok(store) => Ok(store),
         Err(error) => Err(activation_failure(&config.storage.data_dir, error)),
     }
