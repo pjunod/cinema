@@ -1655,7 +1655,20 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 546
+# 546 -> 548 with K-01: one `tokio::task::spawn_blocking` in `backup.rs` and
+# one `tokio::spawn` in `main.rs`. The blocking call is where
+# `build_under_lease` hands the already-opened snapshot generation to
+# `build_cluster_backup_artifact`, so the synchronous archive write stays off
+# the runtime; the same caller awaits its `JoinHandle` immediately and
+# propagates the archive or its error, so it owns no producer, process or
+# timer -- only the snapshot file handle it consumes. The `main.rs` spawn is
+# the backup scheduler, registered in `spawn_background_loops` in the same
+# shape as every background loop beside it: `schedule_loop` selects on the
+# shared `background_shutdown` token and returns on cancellation, and it owns
+# no producer and no process. Which voter actually publishes a given UTC day
+# is decided by the cluster-wide `backup:cluster` job lease, not by this
+# task; its own waits are the sleeps counted in `namespaced-time-constructor`.
+expected_occurrences = 548
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2142,7 +2155,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 840
+# 840 -> 843 with K-01: three `tokio::time::sleep` calls, all in `backup.rs`.
+# One is the 50 ms poll in `build_under_lease` that waits for the database
+# snapshot this attempt triggered to publish its applied index; it runs under
+# the held `backup:cluster` lease and under the manager's `snapshot_timeout`
+# deadline, and exhausting that deadline returns an error rather than
+# abandoning anything. The other two are arms of `tokio::select!` in
+# `schedule_loop` whose other arm is `shutdown.cancelled()`: the 60-second
+# scheduler tick, and the 5-second pause before the same owner retries a
+# failed attempt while its scheduled UTC minute is still open. None of the
+# three owns a producer, a process, or a replacement policy.
+expected_occurrences = 843
 
 [[module_structures]]
 id = "bare-time-constructor"
