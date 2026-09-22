@@ -1587,6 +1587,7 @@ impl Drop for TerminalCleanupGuard {
 /// dropping a resurrection/build cannot drop the only process owner.
 struct HeadChildOwner {
     child: Option<tokio::process::Child>,
+    child_job: Option<crate::process_control::ChildJob>,
     permit: Option<crate::vodencode::EncodePermit>,
     #[cfg(test)]
     reap_pause: Option<Arc<tokio::sync::Barrier>>,
@@ -1596,6 +1597,20 @@ impl HeadChildOwner {
     fn new(child: tokio::process::Child) -> Self {
         Self {
             child: Some(child),
+            child_job: None,
+            permit: None,
+            #[cfg(test)]
+            reap_pause: None,
+        }
+    }
+
+    fn new_job_owned(
+        child: tokio::process::Child,
+        child_job: crate::process_control::ChildJob,
+    ) -> Self {
+        Self {
+            child: Some(child),
+            child_job: Some(child_job),
             permit: None,
             #[cfg(test)]
             reap_pause: None,
@@ -1609,6 +1624,7 @@ impl HeadChildOwner {
     ) -> Self {
         Self {
             child: Some(child),
+            child_job: None,
             permit: None,
             reap_pause: Some(reap_pause),
         }
@@ -1616,18 +1632,20 @@ impl HeadChildOwner {
 
     fn begin_reap(&mut self) -> Option<tokio::task::JoinHandle<()>> {
         let mut child = self.child.take()?;
+        let child_job = self.child_job.take();
         let permit = self.permit.take();
         let _ = child.start_kill();
         #[cfg(test)]
         let reap_pause = self.reap_pause.take();
         Some(tokio::spawn(async move {
+            let _child_job = child_job;
+            let _permit = permit;
             #[cfg(test)]
             if let Some(pause) = reap_pause {
                 pause.wait().await;
                 pause.wait().await;
             }
             let _ = child.wait().await;
-            drop(permit);
         }))
     }
 
@@ -2090,6 +2108,7 @@ where
 /// per-rendition driver and generation tasks can be `'static`.
 struct Shared {
     base: PathBuf,
+    runtime_cache: PathBuf,
     store: Arc<dyn Store>,
     /// Startup-discovered obsolete encoded generations. The directory remains
     /// present until its exact plan row is deleted, so cancellation or Store
@@ -2218,7 +2237,11 @@ impl VodServe {
 
     /// `base` is the renditions root directory (created lazily).
     pub fn new(base: PathBuf, store: Arc<dyn Store>) -> Arc<VodServe> {
-        Self::new_configured(base, store, None, None, None)
+        let runtime_cache = base
+            .parent()
+            .unwrap_or(base.as_path())
+            .join(".runtime-cache");
+        Self::new_configured(base, runtime_cache, store, None, None, None)
     }
 
     /// Publish a producer-less VOD attachment for HTTP response-finalization
@@ -2395,6 +2418,7 @@ impl VodServe {
         attached
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new_cluster(
         base: PathBuf,
         store: Arc<dyn Store>,
@@ -2402,8 +2426,31 @@ impl VodServe {
         cluster_index_root: PathBuf,
         membership: Option<plurx_core::cluster::membership::MembershipManager>,
     ) -> Arc<VodServe> {
+        let runtime_cache = cluster_index_root
+            .parent()
+            .unwrap_or(cluster_index_root.as_path())
+            .to_owned();
+        Self::new_cluster_with_runtime(
+            base,
+            runtime_cache,
+            store,
+            node_id,
+            cluster_index_root,
+            membership,
+        )
+    }
+
+    pub(crate) fn new_cluster_with_runtime(
+        base: PathBuf,
+        runtime_cache: PathBuf,
+        store: Arc<dyn Store>,
+        node_id: String,
+        cluster_index_root: PathBuf,
+        membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    ) -> Arc<VodServe> {
         Self::new_configured(
             base,
+            runtime_cache,
             store,
             Some(node_id),
             Some(cluster_index_root),
@@ -2413,6 +2460,7 @@ impl VodServe {
 
     fn new_configured(
         base: PathBuf,
+        runtime_cache: PathBuf,
         store: Arc<dyn Store>,
         cluster_node_id: Option<String>,
         cluster_index_root: Option<PathBuf>,
@@ -2428,6 +2476,7 @@ impl VodServe {
         Arc::new(VodServe {
             shared: Arc::new(Shared {
                 base,
+                runtime_cache,
                 store,
                 obsolete_encoded_generations: Mutex::new(VecDeque::from(
                     obsolete_encoded_generations,
@@ -5857,6 +5906,7 @@ impl Shared {
                             &source,
                             &identity,
                             &self.head_regeneration_slots,
+                            &self.runtime_cache,
                         )
                         .await
                         {
@@ -6893,24 +6943,32 @@ async fn spawn_generation(
     // One ffmpeg, converting or not. The conversion happens on the far side of
     // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
     // process writes — so the producer is the producer it always was.
-    let (mut child, stdout, stderr) = {
+    let (mut child, child_job, stdout, stderr) = {
         let args = recipe_pipe_args(recipe, start_seconds, attested);
-        let mut command = tokio::process::Command::new(recipe_program(recipe));
-        attach_recipe_descriptors(
-            &mut command,
-            rendition.source.as_ref(),
-            audio_source.as_ref(),
-            recipe,
+        #[cfg(unix)]
+        let descriptors = crate::producer_spawn::Descriptors::from_files(
+            rendition.source.as_ref().map(|source| &source.handle),
+            audio_source.as_ref().map(|audio| &audio.handle),
+            recipe
+                .encoding
+                .as_ref()
+                .and_then(|encoding| encoding.subtitle.as_deref()),
+            false,
         );
-        let mut child = match command
-            .args(&args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-        {
-            Ok(child) => child,
+        #[cfg(windows)]
+        let descriptors = crate::producer_spawn::Descriptors::default();
+        let program = recipe_program(recipe);
+        let spawned = match crate::producer_spawn::spawn(
+            &program,
+            &args,
+            crate::producer_spawn::SpawnOptions {
+                runtime_cache: &shared.runtime_cache,
+                progress: crate::producer_spawn::Progress::None,
+                descriptors,
+                env: &[],
+            },
+        ) {
+            Ok(spawned) => spawned,
             Err(error) => {
                 let cause = format!("spawning the producer: {error}");
                 record_failure(
@@ -6922,18 +6980,12 @@ async fn spawn_generation(
                 return;
             }
         };
-        let Some(stdout) = child.stdout.take() else {
-            let _ = child.kill().await;
-            record_failure(
-                shared,
-                rendition,
-                crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
-                "the producer started without a stdout".to_string(),
-            );
-            return;
-        };
-        let stderr = child.stderr.take().expect("piped producer stderr");
-        (child, stdout, stderr)
+        (
+            spawned.child,
+            spawned.child_job,
+            spawned.stdout,
+            spawned.stderr,
+        )
     };
     // The rendition can be closed between the spawn above and the attach
     // below (a purge committing on the maintain task). Attaching would leave
@@ -6956,8 +7008,9 @@ async fn spawn_generation(
         .store(child.id().unwrap_or(0), Relaxed);
     rendition
         .slot
-        .attach_owned(
+        .attach_job_owned(
             child,
+            child_job,
             at,
             permit.map(|permit| Box::new(permit) as Box<dyn Send>),
         )
@@ -7055,27 +7108,6 @@ async fn reopen_encoded_audio(
         }
     }
     Ok(None)
-}
-
-fn attach_recipe_descriptors(
-    command: &mut tokio::process::Command,
-    source: Option<&crate::fragment_index_cluster::SourceFence>,
-    audio: Option<&crate::fragment_index_cluster::SourceFence>,
-    recipe: &Recipe,
-) {
-    let subtitle = recipe
-        .encoding
-        .as_ref()
-        .and_then(|encoding| encoding.subtitle.as_deref());
-    let files = [
-        source.map(|source| (&source.handle, 3)),
-        audio.map(|audio| (&audio.handle, 4)),
-        subtitle.map(|subtitle| (subtitle, 5)),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    crate::ffmpeg::inherit_file_descriptors(command, &files);
 }
 
 /// Whether this rendition's producers read the source through the attested
@@ -7972,6 +8004,7 @@ async fn regenerate_init_head(
     source: &crate::fragment_index_cluster::SourceFence,
     identity: &InitIdentity,
     slots: &Arc<Semaphore>,
+    runtime_cache: &Path,
 ) -> Result<Init, HeadRegenerationError> {
     let _permit = Arc::clone(slots)
         .try_acquire_owned()
@@ -7997,33 +8030,36 @@ async fn regenerate_init_head(
     let audio_source = reopen_encoded_audio(Some(source), recipe)
         .await
         .map_err(HeadRegenerationError::Failed)?;
-    let mut command = tokio::process::Command::new(recipe_program(recipe));
-    attach_recipe_descriptors(&mut command, Some(source), audio_source.as_ref(), recipe);
-    let mut child = command
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| {
-            HeadRegenerationError::Failed(format!("spawning the head regeneration: {error}"))
-        })?;
-    let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill().await;
-        return Err(HeadRegenerationError::Failed(
-            "the head regeneration started without a stdout".to_owned(),
-        ));
-    };
-    let mut owner = HeadChildOwner::new(child);
+    #[cfg(unix)]
+    let descriptors = crate::producer_spawn::Descriptors::from_files(
+        Some(&source.handle),
+        audio_source.as_ref().map(|audio| &audio.handle),
+        recipe
+            .encoding
+            .as_ref()
+            .and_then(|encoding| encoding.subtitle.as_deref()),
+        false,
+    );
+    #[cfg(windows)]
+    let descriptors = crate::producer_spawn::Descriptors::default();
+    let program = recipe_program(recipe);
+    let spawned = crate::producer_spawn::spawn(
+        &program,
+        &args,
+        crate::producer_spawn::SpawnOptions {
+            runtime_cache,
+            progress: crate::producer_spawn::Progress::None,
+            descriptors,
+            env: &[],
+        },
+    )
+    .map_err(|error| {
+        HeadRegenerationError::Failed(format!("spawning the head regeneration: {error}"))
+    })?;
+    let mut owner = HeadChildOwner::new_job_owned(spawned.child, spawned.child_job);
     owner.permit = permit;
-    let stderr = owner
-        .child
-        .as_mut()
-        .expect("owned head producer")
-        .stderr
-        .take()
-        .expect("piped head stderr");
+    let stdout = spawned.stdout;
+    let stderr = spawned.stderr;
     let (muxer, diagnostic) = tokio::join!(
         read_regenerated_head_before(
             owner,

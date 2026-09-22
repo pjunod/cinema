@@ -19,6 +19,7 @@ mod encoder;
 pub mod health;
 pub mod manifest;
 mod pipeline;
+pub mod progress;
 mod recipe;
 mod vod;
 
