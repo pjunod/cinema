@@ -367,10 +367,16 @@ impl EncodedExecutable {
         })
     }
 
-    pub fn is_current(&self) -> bool {
-        engine_path_version(&self.path)
-            .ok()
-            .is_some_and(|version| version == self.object_version)
+    /// The `(path, version)` pair this executable attests.
+    ///
+    /// Callers fold this into the engine's blocking batch instead of
+    /// statting it inline. The check is paid before every producer launch
+    /// and before every segment is published, so an inline `metadata` on a
+    /// cold page cache or a network mount would block a runtime worker that
+    /// is also pumping media bodies — the exact stall the batch exists to
+    /// remove.
+    pub fn attestation_object(&self) -> (std::path::PathBuf, String) {
+        (self.path.clone(), self.object_version.clone())
     }
 }
 
@@ -1610,6 +1616,14 @@ impl EngineAttestationKind {
             Self::Font => ENGINE_ATTESTATION_FONT,
         }
     }
+
+    #[cfg(test)]
+    fn label(self) -> &'static str {
+        match self {
+            Self::Media => "media",
+            Self::Font => "font",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1624,6 +1638,88 @@ impl EngineAttestationPhase {
             Self::Spawn => ENGINE_ATTESTATION_SPAWN,
             Self::Stat => ENGINE_ATTESTATION_STAT,
         }
+    }
+
+    #[cfg(test)]
+    fn label(self) -> &'static str {
+        match self {
+            Self::Spawn => "spawn",
+            Self::Stat => "stat",
+        }
+    }
+}
+
+/// What one logical attestation owes the histogram.
+///
+/// An attestation is several internal blocking batches — the captured media
+/// objects, the captured font objects, the font re-enumeration's own stat
+/// loop, and the enumerated closure — and each series must be charged once
+/// for the whole check, not once per batch. Observing per batch made
+/// `plurx_engine_attestation_seconds_count{kind="font",phase="stat"}` read
+/// three times the number of checks on a text-burn recipe, so `_sum/_count`
+/// was not the mean cost of a check and a before/after comparison across a
+/// milestone that collapses those batches compared different units.
+///
+/// Time is summed per `(kind, phase)`; the series is chosen by what was
+/// actually statted, never by the recipe's kind. A burn recipe stats the
+/// media dependency closure too, and that cost belongs under `media`.
+#[derive(Default)]
+struct EngineAttestationCharges {
+    entries: Vec<EngineAttestationCharge>,
+}
+
+struct EngineAttestationCharge {
+    kind: EngineAttestationKind,
+    phase: EngineAttestationPhase,
+    elapsed: Duration,
+    /// How many internal blocking batches were folded into this one
+    /// observation. Three, for the font stats of a text-burn check.
+    batches: usize,
+}
+
+impl EngineAttestationCharges {
+    /// Fold one internal batch into its series. Every batch is charged
+    /// through here, so the flushed observation count is the number of
+    /// attestations rather than the number of batches.
+    fn add(
+        &mut self,
+        kind: EngineAttestationKind,
+        phase: EngineAttestationPhase,
+        elapsed: Duration,
+    ) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| {
+            entry.kind.index() == kind.index() && entry.phase.index() == phase.index()
+        }) {
+            entry.elapsed = entry.elapsed.saturating_add(elapsed);
+            entry.batches += 1;
+            return;
+        }
+        self.entries.push(EngineAttestationCharge {
+            kind,
+            phase,
+            elapsed,
+            batches: 1,
+        });
+    }
+
+    fn flush(&self) {
+        for entry in &self.entries {
+            observe_engine_attestation(entry.kind, entry.phase, entry.elapsed);
+        }
+    }
+
+    /// The series this attestation charged and how many batches each folded,
+    /// sorted, so a test can pin both the label chosen for a batch and the
+    /// fact that the series is observed once however many batches it ran.
+    #[cfg(test)]
+    fn charged(&self) -> Vec<(&'static str, &'static str, usize)> {
+        let mut charged: Vec<(&'static str, &'static str, usize)> = self
+            .entries
+            .iter()
+            .map(|entry| (entry.kind.label(), entry.phase.label(), entry.batches))
+            .collect();
+        charged.sort_unstable();
+        charged
     }
 }
 
@@ -1704,7 +1800,12 @@ struct FragmentIndexEngine {
 pub(crate) struct EncodedEngine {
     pub digest: String,
     process_identity: String,
+    /// The encoder dependency closure. Statted under `kind="media"`.
     objects: Arc<[(std::path::PathBuf, String)]>,
+    /// The Fontconfig rules and font files a text burn captured, kept apart
+    /// from `objects` so their cost is charged under `kind="font"`. Empty
+    /// for every recipe that does not burn text.
+    font_objects: Arc<[(std::path::PathBuf, String)]>,
     font_digest: Option<String>,
 }
 
@@ -1713,13 +1814,19 @@ impl EncodedEngine {
         let media = FRAGMENT_INDEX_ENGINE
             .get_or_init(fragment_index_engine_inner)
             .await;
-        if !media.usable
-            || !engine_objects_are_current_async(
-                Arc::clone(&media.objects),
-                EngineAttestationKind::Media,
-            )
-            .await
-        {
+        let mut charges = EngineAttestationCharges::default();
+        if !media.usable {
+            return Err("the encoder dependency closure could not be attested".to_owned());
+        }
+        let (media_current, media_elapsed) =
+            engine_objects_are_current_batch(None, Arc::clone(&media.objects)).await;
+        charges.add(
+            EngineAttestationKind::Media,
+            EngineAttestationPhase::Stat,
+            media_elapsed,
+        );
+        if !media_current {
+            charges.flush();
             return Err("the encoder dependency closure could not be attested".to_owned());
         }
         let process = encoded_process_identity();
@@ -1728,33 +1835,56 @@ impl EncodedEngine {
         digest.update(media.digest.as_bytes());
         digest.update(process.as_bytes());
         let mut objects = media.objects.to_vec();
+        let mut font_objects: Vec<(std::path::PathBuf, String)> = Vec::new();
         let mut font_digest = None;
         if text_burn {
             // Fontconfig's closure is live configuration, unlike the process's
             // loaded media libraries. Probe it for every recipe capture so a
             // newly installed font or rule cannot reuse the old URI identity.
-            let fonts = font_render_engine_inner().await;
-            if !fonts.usable
-                || !engine_objects_are_current_async(
-                    Arc::clone(&fonts.objects),
+            let enumeration = font_render_engine_inner().await;
+            charges.add(
+                EngineAttestationKind::Font,
+                EngineAttestationPhase::Spawn,
+                enumeration.spawn_elapsed,
+            );
+            charges.add(
+                EngineAttestationKind::Font,
+                EngineAttestationPhase::Stat,
+                enumeration.stat_elapsed,
+            );
+            let fonts = enumeration.engine;
+            let attested = if fonts.usable {
+                let (current, elapsed) =
+                    engine_objects_are_current_batch(None, Arc::clone(&fonts.objects)).await;
+                charges.add(
                     EngineAttestationKind::Font,
-                )
-                .await
-            {
+                    EngineAttestationPhase::Stat,
+                    elapsed,
+                );
+                current
+            } else {
+                false
+            };
+            if !attested {
+                charges.flush();
                 return Err(
                     "Fontconfig rules and resolved font files could not be attested".to_owned(),
                 );
             }
             digest.update(fonts.digest.as_bytes());
             font_digest = Some(fonts.digest.clone());
-            objects.extend(fonts.objects.iter().cloned());
+            font_objects = fonts.objects.to_vec();
         }
+        charges.flush();
         objects.sort_by(|left, right| left.0.cmp(&right.0));
         objects.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+        font_objects.sort_by(|left, right| left.0.cmp(&right.0));
+        font_objects.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
         Ok(Self {
             digest: hex::encode(digest.finalize()),
             process_identity: process.to_owned(),
             objects: objects.into(),
+            font_objects: font_objects.into(),
             font_digest,
         })
     }
@@ -1763,20 +1893,82 @@ impl EncodedEngine {
     /// recipe. Fontconfig must be enumerated again: checking only the files
     /// captured earlier detects replacements and removals, but not additions
     /// which change font resolution.
+    #[cfg(test)]
     pub async fn is_current(&self) -> bool {
-        let kind = if self.font_digest.is_some() {
-            EngineAttestationKind::Font
-        } else {
-            EngineAttestationKind::Media
-        };
-        if !engine_objects_are_current_async(Arc::clone(&self.objects), kind).await {
-            return false;
+        self.is_current_charged(None).await.0
+    }
+
+    /// Attest the recipe's encoder executable in the same blocking batch as
+    /// the dependency closure it belongs to.
+    ///
+    /// The executable used to be statted inline by the caller, ahead of this
+    /// batch and short-circuiting it, which left one synchronous
+    /// `std::fs::metadata` on a runtime worker on every producer launch and
+    /// every segment materialisation — for non-burn renditions as well as
+    /// burn ones. Folding the pair in costs one `PathBuf`/`String` clone per
+    /// check and leaves the whole attestation as one blocking task. The
+    /// answer is unchanged: the batch compares versions with `all`, which
+    /// short-circuits on the executable exactly as the caller's `||` did.
+    pub async fn is_current_with_executable(&self, executable: &EncodedExecutable) -> bool {
+        self.is_current_charged(Some(executable.attestation_object()))
+            .await
+            .0
+    }
+
+    /// The answer plus what it charged the histogram. Tests read the charges
+    /// directly so the series a check attributes its cost to can be pinned
+    /// without racing other tests on the process-wide counters.
+    async fn is_current_charged(
+        &self,
+        executable: Option<(std::path::PathBuf, String)>,
+    ) -> (bool, EngineAttestationCharges) {
+        let mut charges = EngineAttestationCharges::default();
+        let (media_current, media_elapsed) =
+            engine_objects_are_current_batch(executable, Arc::clone(&self.objects)).await;
+        charges.add(
+            EngineAttestationKind::Media,
+            EngineAttestationPhase::Stat,
+            media_elapsed,
+        );
+        if !media_current {
+            charges.flush();
+            return (false, charges);
         }
         let Some(expected_font_digest) = self.font_digest.as_deref() else {
-            return true;
+            charges.flush();
+            return (true, charges);
         };
-        let current_fonts = font_render_engine_inner().await;
-        font_closure_is_current(expected_font_digest, &current_fonts).await
+
+        // Three font stat batches, one observation: the captured font
+        // objects, the re-enumeration's own stat loop, and the freshly
+        // enumerated closure.
+        let (captured_current, captured_elapsed) =
+            engine_objects_are_current_batch(None, Arc::clone(&self.font_objects)).await;
+        charges.add(
+            EngineAttestationKind::Font,
+            EngineAttestationPhase::Stat,
+            captured_elapsed,
+        );
+        let enumeration = font_render_engine_inner().await;
+        charges.add(
+            EngineAttestationKind::Font,
+            EngineAttestationPhase::Spawn,
+            enumeration.spawn_elapsed,
+        );
+        charges.add(
+            EngineAttestationKind::Font,
+            EngineAttestationPhase::Stat,
+            enumeration.stat_elapsed,
+        );
+        let (closure_current, closure_elapsed) =
+            font_closure_is_current(expected_font_digest, &enumeration.engine).await;
+        charges.add(
+            EngineAttestationKind::Font,
+            EngineAttestationPhase::Stat,
+            closure_elapsed,
+        );
+        charges.flush();
+        (captured_current && closure_current, charges)
     }
 
     pub fn process_identity(&self) -> &str {
@@ -1801,6 +1993,7 @@ impl EncodedEngine {
             digest: hex::encode(digest.finalize()),
             process_identity: process.to_owned(),
             objects: objects.into(),
+            font_objects: Vec::new().into(),
             font_digest: None,
         })
     }
@@ -1816,14 +2009,22 @@ pub(crate) fn encoded_process_identity() -> &'static str {
         .as_str()
 }
 
-async fn font_closure_is_current(expected_digest: &str, current: &FragmentIndexEngine) -> bool {
-    current.usable
-        && engine_objects_are_current_async(
-            Arc::clone(&current.objects),
-            EngineAttestationKind::Font,
-        )
-        .await
-        && current.digest == expected_digest
+/// Compare a freshly enumerated Fontconfig closure with the captured digest,
+/// returning what the stat batch cost so the caller can charge it once for
+/// the whole attestation.
+async fn font_closure_is_current(
+    expected_digest: &str,
+    current: &FragmentIndexEngine,
+) -> (bool, Duration) {
+    if !current.usable {
+        return (false, Duration::ZERO);
+    }
+    let (objects_current, elapsed) =
+        engine_objects_are_current_batch(None, Arc::clone(&current.objects)).await;
+    (
+        objects_current && current.digest == expected_digest,
+        elapsed,
+    )
 }
 
 /// Digest the executable bytes and its complete self/dependency reports once
@@ -1850,12 +2051,17 @@ pub async fn fragment_index_engine_is_current() -> bool {
 }
 
 async fn fragment_index_engine_snapshot_is_current(engine: &FragmentIndexEngine) -> bool {
-    engine.usable
-        && engine_objects_are_current_async(
-            Arc::clone(&engine.objects),
-            EngineAttestationKind::Media,
-        )
-        .await
+    if !engine.usable {
+        return false;
+    }
+    let (current, elapsed) =
+        engine_objects_are_current_batch(None, Arc::clone(&engine.objects)).await;
+    observe_engine_attestation(
+        EngineAttestationKind::Media,
+        EngineAttestationPhase::Stat,
+        elapsed,
+    );
+    current
 }
 
 fn engine_objects_are_current(objects: &[(std::path::PathBuf, String)]) -> bool {
@@ -1869,16 +2075,31 @@ fn engine_objects_are_current(objects: &[(std::path::PathBuf, String)]) -> bool 
 /// Run the same fail-closed identity comparison away from runtime workers.
 /// A cold or remote dependency can make `metadata` block, and this check is
 /// paid before every encoded segment is published.
-async fn engine_objects_are_current_async(
+///
+/// `extra` is an object that is not part of the captured list — today the
+/// recipe's encoder executable — checked first and inside the same blocking
+/// task, so no caller has to stat it on a runtime worker. It reports its
+/// elapsed time rather than observing, because one attestation is several of
+/// these batches and the histogram is charged once for the whole check.
+async fn engine_objects_are_current_batch(
+    extra: Option<(std::path::PathBuf, String)>,
     objects: Arc<[(std::path::PathBuf, String)]>,
-    kind: EngineAttestationKind,
-) -> bool {
+) -> (bool, Duration) {
     let started = Instant::now();
-    let current = tokio::task::spawn_blocking(move || engine_objects_are_current(&objects))
-        .await
-        .unwrap_or(false);
-    observe_engine_attestation(kind, EngineAttestationPhase::Stat, started.elapsed());
-    current
+    let current = tokio::task::spawn_blocking(move || {
+        if let Some((path, expected)) = extra {
+            if !engine_path_version(&path)
+                .ok()
+                .is_some_and(|current| current == expected)
+            {
+                return false;
+            }
+        }
+        engine_objects_are_current(&objects)
+    })
+    .await
+    .unwrap_or(false);
+    (current, started.elapsed())
 }
 
 async fn fragment_index_engine_inner() -> FragmentIndexEngine {
@@ -1992,7 +2213,16 @@ async fn fragment_index_engine_inner() -> FragmentIndexEngine {
     }
 }
 
-async fn font_render_engine_inner() -> FragmentIndexEngine {
+/// A Fontconfig enumeration with the two costs it incurred kept apart: the
+/// `fc-list`/`fc-conflist` children and the stat loop over what they named.
+/// The caller charges each series once for the whole attestation.
+struct FontEnumeration {
+    engine: FragmentIndexEngine,
+    spawn_elapsed: Duration,
+    stat_elapsed: Duration,
+}
+
+async fn font_render_engine_inner() -> FontEnumeration {
     let probe_started = Instant::now();
     let mut digest = Sha256::new();
     digest.update(b"plurx/font-render/engine-v1\0");
@@ -2038,11 +2268,7 @@ async fn font_render_engine_inner() -> FragmentIndexEngine {
             digest.update(error.as_bytes());
         }
     }
-    observe_engine_attestation(
-        EngineAttestationKind::Font,
-        EngineAttestationPhase::Spawn,
-        probe_started.elapsed(),
-    );
+    let spawn_elapsed = probe_started.elapsed();
 
     paths.sort();
     paths.dedup();
@@ -2050,7 +2276,7 @@ async fn font_render_engine_inner() -> FragmentIndexEngine {
         usable = false;
         digest.update(b"no font inputs discovered");
     }
-    let versions = font_object_versions(paths).await;
+    let (versions, stat_elapsed) = font_object_versions(paths).await;
     let objects = versions.objects;
     let mut object_digests = versions.object_digests;
     for error in versions.errors {
@@ -2062,10 +2288,14 @@ async fn font_render_engine_inner() -> FragmentIndexEngine {
         digest.update((object_digest.len() as u64).to_be_bytes());
         digest.update(object_digest);
     }
-    FragmentIndexEngine {
-        digest: hex::encode(digest.finalize()),
-        objects: objects.into(),
-        usable,
+    FontEnumeration {
+        engine: FragmentIndexEngine {
+            digest: hex::encode(digest.finalize()),
+            objects: objects.into(),
+            usable,
+        },
+        spawn_elapsed,
+        stat_elapsed,
     }
 }
 
@@ -2075,14 +2305,16 @@ struct FontObjectVersions {
     errors: Vec<String>,
 }
 
-async fn font_object_versions(paths: Vec<std::path::PathBuf>) -> FontObjectVersions {
+async fn font_object_versions(paths: Vec<std::path::PathBuf>) -> (FontObjectVersions, Duration) {
     font_object_versions_observed(paths, || {}).await
 }
 
+/// Reports its elapsed time rather than observing it: it is one batch inside
+/// a larger attestation, and the histogram is charged per attestation.
 async fn font_object_versions_observed<F>(
     paths: Vec<std::path::PathBuf>,
     observe_task: F,
-) -> FontObjectVersions
+) -> (FontObjectVersions, Duration)
 where
     F: FnOnce() + Send + 'static,
 {
@@ -2116,12 +2348,7 @@ where
         object_digests: Vec::new(),
         errors: vec![format!("font object stat task failed: {error}")],
     });
-    observe_engine_attestation(
-        EngineAttestationKind::Font,
-        EngineAttestationPhase::Stat,
-        started.elapsed(),
-    );
-    result
+    (result, started.elapsed())
 }
 
 struct BoundedOutput {
@@ -4025,7 +4252,12 @@ mod tests {
         let engine = EncodedExecutable::capture_at(path.clone())
             .await
             .expect("capture engine");
-        assert!(engine.is_current());
+        // Exactly the composition `recipe_engine_is_current` uses: the
+        // executable is attested inside the engine's blocking batch.
+        let closure = EncodedEngine::capture_test_objects(&[], "process-a")
+            .await
+            .expect("engine closure");
+        assert!(closure.is_current_with_executable(&engine).await);
         let replacement = base.path().join("replacement");
         tokio::fs::write(&replacement, b"encoder-b")
             .await
@@ -4037,7 +4269,7 @@ mod tests {
             .set_times(std::fs::FileTimes::new().set_modified(modified))
             .expect("preserve mtime");
         std::fs::rename(replacement, &path).expect("atomic engine replacement");
-        assert!(!engine.is_current());
+        assert!(!closure.is_current_with_executable(&engine).await);
         assert_ne!(
             engine.digest,
             EncodedExecutable::capture_at(path)
@@ -4137,6 +4369,105 @@ mod tests {
         });
     }
 
+    /// A stale encoder executable must not be detectable without the
+    /// blocking pool. While the pool is occupied the whole attestation —
+    /// executable included — has to queue; an inline `std::fs::metadata` on
+    /// the executable would answer `false` from the runtime thread and the
+    /// check would finish immediately.
+    #[test]
+    fn a_stale_executable_is_detected_on_the_blocking_pool() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let base = crate::test_tempdir().expect("engine identity");
+            let path = base.path().join("encoder");
+            tokio::fs::write(&path, b"encoder-a")
+                .await
+                .expect("first engine");
+            let executable = EncodedExecutable::capture_at(path.clone())
+                .await
+                .expect("capture engine");
+            let closure = EncodedEngine::capture_test_objects(&[], "process-a")
+                .await
+                .expect("engine closure");
+            tokio::fs::write(&path, b"encoder-b-longer")
+                .await
+                .expect("replace engine");
+
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).expect("announce blocking task");
+                release_rx.recv().expect("release blocking task");
+            });
+            started_rx.recv().expect("blocking task started");
+            let check =
+                tokio::spawn(async move { closure.is_current_with_executable(&executable).await });
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            assert!(
+                !check.is_finished(),
+                "the executable must be attested on the blocking pool, not inline on a runtime worker"
+            );
+            release_tx.send(()).expect("release blocker");
+            blocker.await.expect("blocking task");
+            assert!(
+                !tokio::time::timeout(Duration::from_secs(1), check)
+                    .await
+                    .expect("currentness deadline")
+                    .expect("currentness task"),
+                "a replaced executable must withdraw the recipe"
+            );
+        });
+    }
+
+    /// One attestation charges each series once, and a burn recipe's media
+    /// dependency closure is charged under `media` even though the recipe is
+    /// a font one. Observing per internal batch made the burn path emit three
+    /// `font,stat` observations per check and none under `media`.
+    #[tokio::test]
+    async fn one_attestation_charges_each_series_once_by_what_it_stats() {
+        let base = crate::test_tempdir().expect("engine closure");
+        let dependency = base.path().join("libcodec");
+        let font = base.path().join("font-a");
+        tokio::fs::write(&dependency, b"codec")
+            .await
+            .expect("dependency");
+        tokio::fs::write(&font, b"font").await.expect("font");
+
+        let media = EncodedEngine::capture_test_objects(std::slice::from_ref(&dependency), "p")
+            .await
+            .expect("media engine");
+        assert_eq!(
+            media.is_current_charged(None).await.1.charged(),
+            vec![("media", "stat", 1)],
+            "a non-burn check stats the dependency closure and nothing else"
+        );
+
+        let fonts = EncodedEngine::capture_test_objects(std::slice::from_ref(&font), "p")
+            .await
+            .expect("font objects");
+        let burn = EncodedEngine {
+            digest: media.digest.clone(),
+            process_identity: media.process_identity.clone(),
+            objects: Arc::clone(&media.objects),
+            font_objects: Arc::clone(&fonts.objects),
+            font_digest: Some("captured-font-closure".to_owned()),
+        };
+        assert_eq!(
+            burn.is_current_charged(None).await.1.charged(),
+            vec![
+                ("font", "spawn", 1),
+                ("font", "stat", 3),
+                ("media", "stat", 1)
+            ],
+            "a burn check charges its dependency closure to media, and folds its three \
+             font stat batches into one observation"
+        );
+    }
+
     #[tokio::test]
     async fn font_object_versions_are_computed_in_one_blocking_task() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4148,10 +4479,11 @@ mod tests {
         }
         let tasks = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&tasks);
-        let versions = font_object_versions_observed(paths.into_iter().collect(), move || {
-            observed.fetch_add(1, Ordering::Relaxed);
-        })
-        .await;
+        let (versions, _elapsed) =
+            font_object_versions_observed(paths.into_iter().collect(), move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+            })
+            .await;
         assert!(versions.errors.is_empty(), "{:?}", versions.errors);
         assert_eq!(versions.objects.len(), 2);
         assert_eq!(tasks.load(Ordering::Relaxed), 1);
@@ -4183,8 +4515,12 @@ mod tests {
             usable: true,
         };
 
-        assert!(font_closure_is_current("font-closure-a", &captured).await);
-        assert!(!font_closure_is_current("font-closure-a", &added_font).await);
+        assert!(font_closure_is_current("font-closure-a", &captured).await.0);
+        assert!(
+            !font_closure_is_current("font-closure-a", &added_font)
+                .await
+                .0
+        );
     }
 
     #[test]

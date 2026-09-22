@@ -193,6 +193,23 @@ blocking pool.
 
 `engine_path_version` is unchanged; it is the leaf.
 
+**The executable is in the batch, not in front of it.** `recipe_engine_is_current`
+(`vodserve.rs`) used to read `encoding.executable.is_current() ||
+encoding.engine.is_current().await`. `EncodedExecutable::is_current` was a
+synchronous `engine_path_version`, and `||` short-circuits left to right, so
+that stat ran inline on the runtime worker *before* either blocking batch, at
+all five call sites — every producer launch and every `materialize`, for
+non-burn renditions as well as burn ones. Moving the other stats does not help
+while this one is in front of them. `EncodedExecutable` now exposes
+`attestation_object()` and `EncodedEngine::is_current_with_executable` folds
+that `(path, version)` pair into the same `spawn_blocking` as the dependency
+closure, checked first inside the task. The answer is unchanged: the batch
+compares with `all`, which short-circuits on the executable exactly as the
+caller's `||` did. §2.2's cost table already listed `executable.is_current()`
+as part of what `recipe_engine_is_current` pays per segment, so it was always
+inside Objective 1 even though the first draft of this section enumerated only
+the other two functions.
+
 Cancellation: `spawn_blocking` work cannot be cancelled once started. The
 callers already tolerate that — `materialize` awaits the answer before the
 manifest lock, and a dropped `materialize` future (generation superseded)
@@ -319,13 +336,39 @@ Code: §3.1. Tests in `ffmpeg.rs`:
 | `a_current_engine_is_current_on_the_blocking_pool` | with `tokio::runtime::Builder::new_current_thread().max_blocking_threads(1)`, `is_current()` completes while a second `spawn_blocking` is queued behind it — proves the stat is on the pool, not the runtime thread |
 | `font_object_versions_are_computed_in_one_blocking_task` | instrument with a test-only counter of `spawn_blocking` calls inside `font_render_engine_inner`: exactly 1 for N paths |
 
+| `a_stale_executable_is_detected_on_the_blocking_pool` | with the one blocking thread held, a check whose executable has been replaced must not finish — an inline `std::fs::metadata` would answer `false` from the runtime thread |
+| `one_attestation_charges_each_series_once_by_what_it_stats` | a non-burn check charges `[(media, stat)]`; a burn check charges `[(font, spawn), (font, stat) × 3 batches, (media, stat)]` — its dependency closure under `media`, and its three internal font stat batches folded into one observation |
+
 Metric, rendered in `system::metrics` beside the VOD gauges:
 `plurx_engine_attestation_seconds{kind="media"|"font",phase="spawn"|"stat"}`
-— a histogram with the repo's existing bucket set, observed around the
-two `fc-*` spawns (`phase="spawn"`) and around the blocking stat task
-(`phase="stat"`). Four series. Reason: §2.7's cost is "real but
-unmeasured"; this is the measurement, and after M2 the `font`/`spawn`
-series must go to zero for frozen recipes.
+— a histogram with the repo's existing bucket set. Four series. Reason: §2.7's
+cost is "real but unmeasured"; this is the measurement, and after M2 the
+`font`/`spawn` series must go to zero for frozen recipes.
+
+**Two rules the series must obey to be readable as a before/after.** §2.7's
+cost is the sum of two separable things — the ffmpeg dependency closure, and
+for a text burn that plus the Fontconfig closure — so:
+
+1. **The label is what is statted, not what kind of recipe it is.** A burn
+   recipe's `objects` used to be the union of both closures and the whole
+   batch was labelled from `font_digest.is_some()`, so on a burn rendition the
+   dependency-closure stats were counted under `kind="font"` and
+   `kind="media",phase="stat"` recorded nothing at all. `EncodedEngine` now
+   keeps `objects` (the dependency closure) and `font_objects` apart and each
+   batch is charged to its own series.
+2. **One observation per attestation, not per internal batch.** One
+   `is_current()` on a burn recipe runs three font stat batches — the captured
+   font objects, the re-enumeration's own stat loop, and the enumerated
+   closure — and used to emit three `font,stat` observations. `_count` then
+   read 3× the number of checks, so `_sum / _count` was not the mean cost of a
+   check and M1's "before" was a 3×-inflated number against M2's 1× "after".
+   `EngineAttestationCharges` sums the batches per `(kind, phase)` and flushes
+   one observation each.
+
+Also worth knowing when reading them: `ENGINE_ATTESTATION_BUCKETS_MS` starts at
+100 ms, so every warm-cache stat lands in `le="0.1"` and the histogram carries
+no information about the regime that dominates. Only `_sum / _count` is usable,
+which is why rule 2 matters.
 
 Acceptance: `cargo test -p plurxd ffmpeg::tests::.*current.*
 ffmpeg::tests::.*font_object.*` green; `make unit` green; on lab4 with a
@@ -430,3 +473,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#413](http://192.168.4.7:3000/noirr/plurx/pulls/413) | Built at `da0b96a7`: identical object-version comparison now runs in one blocking task per batch and fails closed; four attestation histogram series are rendered. Rust 1.97.1 check and Clippy passed; six focused currentness, blocking-task and metric tests passed. Broad `make unit` was deliberately not run. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 decision | [#413](http://192.168.4.7:3000/noirr/plurx/pulls/413) | Not implemented. media1 links fontconfig, but its captured config closure contains live system/user discovery directives, contradicting the proposed byte-copy isolation. Needs the §7.5 design correction and its two-font isolation proof. |
+| 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 review fixes | [#413](http://192.168.4.7:3000/noirr/plurx/pulls/413) | Both adversarial-review findings fixed. The recipe's encoder executable is folded into the engine's blocking batch instead of being statted inline ahead of it at all five `recipe_engine_is_current` call sites; the four attestation series are labelled by what each batch stats and charged once per attestation instead of once per batch. `a_stale_executable_is_detected_on_the_blocking_pool` and `one_attestation_charges_each_series_once_by_what_it_stats` both fail on revert. Full `cargo test -p plurxd --bin plurxd`: 2542 passed, 0 failed. |
