@@ -5458,7 +5458,13 @@ async function main() {
     // 1 s · 2 s · 4 s under ONE request identity, and the surface is
     // `preparing` for the whole of it.
     const h = createRetryHarness();
-    for (const code of ["startup_timeout", "media_owner_transition", "vod_index_pending", "vod_engine_unattested"]) {
+    for (const code of [
+      "startup_timeout",
+      "media_owner_transition",
+      "vod_index_pending",
+      "vod_engine_unattested",
+      "transcode_capacity_pending",
+    ]) {
       h.answers.push({ error: refusal503(code) });
     }
     h.answers.push({ error: refusal503("startup_timeout") });

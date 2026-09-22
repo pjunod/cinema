@@ -1,8 +1,38 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-20 · Kept current by the working agent in the same
+**Updated:** 2026-09-21 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## An abandoned replacement held its player's key — reported, diagnosed, fixed
+
+`PR #437`, branch `fix/replacement-gate-supersession`, **merged, NOT deployed**.
+
+Reported from the Android client on the TCL tablet, 2026-09-21 ~18:50 ET,
+playing *Bad Boys: Ride or Die*: `transcode capacity is temporarily
+unavailable: another replacement for this player is still being committed`,
+over a Retry button that could not clear it.
+
+**Orphaned**, not a commit in flight. On m6 the cluster replacement gate for
+that player was held by the detached cleanup of a request that had answered
+the viewer 503 six seconds earlier, and nothing in the tree ages, expires or
+force-releases that registry. What wedged the hold inside the start was a
+402-second subtitle sidecar extraction awaited under the gate with no timeout.
+Node evidence, anchors and the mechanism:
+[docs/playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md](docs/playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md).
+
+A key is now reclaimed only from a hold that can be proved not to need it —
+one that has declared itself abandoned, or one past a 120 s ceiling — never on
+the cooperative window, because the work under this gate routinely takes tens
+of seconds and the client's retry ladder re-posts into it. The refusal itself
+became a typed, `Retry-After`-carrying 503 (`transcode_capacity_pending`) so
+the ladder all three clients already carry waits it out instead of showing a
+terminal overlay quoting an internal sentence.
+
+Still open, all in the RCA's §4: `ensure_burn_file` is still awaited under the
+gate unbounded; `Drop for StartedSessionGuard` still releases only after a full
+retirement rather than after the fence; and a hold wedged before it registers
+anything still has nothing to fence. Neither client half has run on hardware.
 
 ## Implementation plans for the architecture review, and one work board for every vendor
 
