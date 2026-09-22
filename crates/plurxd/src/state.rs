@@ -45,6 +45,25 @@ use crate::schedule::{due_jobs, DueJob, GlobalSchedule};
 use crate::trakt::TraktManager;
 use crate::transcode::{PretranscodeFence, PretranscodeProduceOutcome, TranscodeManager};
 
+const FRAGMENT_INDEX_VALIDATION_PAGE: u32 = 64;
+const FRAGMENT_INDEX_VALIDATION_INTERVAL: Duration = Duration::from_secs(30);
+static FRAGMENT_INDEX_VALIDATED: AtomicU64 = AtomicU64::new(0);
+static FRAGMENT_INDEX_REFUSED: AtomicU64 = AtomicU64::new(0);
+static FRAGMENT_INDEX_GONE: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn fragment_index_validation_prometheus() -> String {
+    format!(
+        "# HELP plurx_index_validation_backfill_total Legacy fragment-index validation attempts by result.\n\
+         # TYPE plurx_index_validation_backfill_total counter\n\
+         plurx_index_validation_backfill_total{{result=\"validated\"}} {}\n\
+         plurx_index_validation_backfill_total{{result=\"refused\"}} {}\n\
+         plurx_index_validation_backfill_total{{result=\"gone\"}} {}\n",
+        FRAGMENT_INDEX_VALIDATED.load(Ordering::Relaxed),
+        FRAGMENT_INDEX_REFUSED.load(Ordering::Relaxed),
+        FRAGMENT_INDEX_GONE.load(Ordering::Relaxed),
+    )
+}
+
 /// Environment facts collected once at startup, shown on the settings page.
 /// Everything here is admin-facing diagnostics — paths, tool versions,
 /// detected hardware — not runtime state.
@@ -2791,6 +2810,46 @@ impl Drop for ActivePretranscodeJob {
 }
 
 impl JobManager {
+    /// Revalidate one bounded node-local page every interval. This deliberately
+    /// does not take cluster job authority: both SQLite and hiqlite route the
+    /// index rows through this process's local database, never through Raft.
+    pub(crate) async fn fragment_index_validation_loop(
+        self: Arc<Self>,
+        shutdown: CancellationToken,
+    ) {
+        let mut ticker = tokio::time::interval(FRAGMENT_INDEX_VALIDATION_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
+            match self
+                .store
+                .validate_fragment_index_page(FRAGMENT_INDEX_VALIDATION_PAGE)
+                .await
+            {
+                Ok(report) => {
+                    FRAGMENT_INDEX_VALIDATED.fetch_add(report.validated, Ordering::Relaxed);
+                    FRAGMENT_INDEX_REFUSED.fetch_add(report.refused, Ordering::Relaxed);
+                    FRAGMENT_INDEX_GONE.fetch_add(report.gone, Ordering::Relaxed);
+                    if report.validated != 0 || report.refused != 0 || report.gone != 0 {
+                        tracing::info!(
+                            validated = report.validated,
+                            refused = report.refused,
+                            gone = report.gone,
+                            remaining = report.remaining,
+                            "validated a node-local fragment-index page"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "node-local fragment-index validation failed");
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     fn new(store: Arc<dyn Store>, artwork_dir: PathBuf) -> Self {
         Self::new_with_scan_prune_percent(

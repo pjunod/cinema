@@ -1132,6 +1132,12 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // S-07 drafted this as v64; S-08's field-order column reached main first,
     // so the luminance batch appends after it.
     super::FILES_LUMINANCE_COLUMNS_BATCH,
+    // v66: publication-time proof consumed by metadata-only detail status.
+    // Legacy rows default to unverified and are revalidated in bounded,
+    // node-local pages; the packed payload never enters Raft. C-05 drafted
+    // this as v64; the field-order and luminance columns reached main first,
+    // so the validation column appends after them.
+    crate::store::fragindex::FRAGMENT_INDEXES_VALIDATION_COLUMN,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2549,9 +2555,12 @@ mod tests {
         // below. 64 -> 65 for v65, `FILES_LUMINANCE_COLUMNS_BATCH`: the four
         // additive `files` luminance columns the tone-map work drafted as v64
         // and which append after the field-order column now that it reached
-        // main first. No earlier entry moved; the list stays append-only.
+        // main first. 65 -> 66 for v66, `FRAGMENT_INDEXES_VALIDATION_COLUMN`:
+        // the node-local publication proof C-05 drafted as v64, appended after
+        // both of those for the same reason they reached main first. No
+        // earlier entry moved; the list stays append-only.
         assert_eq!(
-            version, 65,
+            version, 66,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

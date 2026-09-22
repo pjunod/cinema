@@ -718,7 +718,7 @@ pub async fn search(
 ) -> Result<Json<SearchResponse>, ApiError> {
     let query = q.q.unwrap_or_default();
     let limit = clamp_limit(q.limit);
-    let hits = state.store.search_items(&query, limit).await?;
+    let hits = state.catalogue.search_items(&query, limit).await?;
     let items: Vec<Item> = hits.iter().map(|r| r.item.clone()).collect();
     let watch = watch_lookup(&state, user.id, &items).await?;
     let results = hits

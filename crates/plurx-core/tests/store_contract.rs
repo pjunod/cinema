@@ -541,6 +541,11 @@ const FRAGMENT_INDEX_METHODS: &[&str] = &[
     "put_fragment_index",
     "fragment_index",
     "forget_fragment_index",
+    // C-05's bounded revalidation of legacy rows, node-local like the index
+    // itself: the replicated backend answers it from its own per-voter
+    // sidecar rather than through Raft. It marks structural refusals through
+    // `validated_revision` and never deletes an index.
+    "validate_fragment_index_page",
     // Why a pipeline has NO index — the other half of the same question, and
     // what stops the background pass spending the same whole-file read every
     // wrap of the library on a file that has already answered.
@@ -10410,75 +10415,114 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
     );
 }
 
+/// v44 through v40, newest first, for the downgrade helpers below. Each of
+/// these migrations is an `ADD COLUMN` or an unconditional `CREATE`, so
+/// replaying it over a fixture that still carries its result fails; v42 also
+/// rebuilt the active-request index over `video_identity`, which must be back
+/// in its v22 shape before v27's column can be dropped. v41 and v35-v39 are
+/// `IF NOT EXISTS`, so their objects are left in place and replay cleanly.
+/// One list, so the next non-idempotent migration is reversed in one place.
+#[cfg(feature = "hiqlite-contract-tests")]
+fn post_v39_downgrade_statements() -> Vec<(&'static str, hiqlite::Params)> {
+    [
+        "ALTER TABLE files DROP COLUMN luminance_source",
+        "ALTER TABLE files DROP COLUMN mastering_max_luminance",
+        "ALTER TABLE files DROP COLUMN max_fall",
+        "ALTER TABLE files DROP COLUMN max_cll",
+        "ALTER TABLE files DROP COLUMN field_order",
+        "DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor",
+        "DROP INDEX IF EXISTS analysis_requests_one_active_forced_skip_successor",
+        "DROP INDEX IF EXISTS analysis_requests_one_active_source",
+        r#"CREATE UNIQUE INDEX analysis_requests_one_active_source
+                    ON analysis_requests(file_id, source_size, source_mtime, component,
+                                         pipeline_version, requested_generation, target_node_id)
+                    WHERE state IN ('queued', 'running', 'submitted')"#,
+        "DROP INDEX IF EXISTS analysis_requests_one_active_forced_successor",
+        r#"CREATE UNIQUE INDEX analysis_requests_one_active_forced_successor
+                    ON analysis_requests(file_id, source_size, source_mtime, component)
+                    WHERE force_rebuild = 1 AND state IN ('queued', 'running', 'submitted')"#,
+        "DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source",
+        "DROP TABLE IF EXISTS analysis_index_repairs",
+        "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_diagnostic_json",
+        "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_retry_deadline_ms",
+        "ALTER TABLE files DROP COLUMN video_codec_tag",
+    ]
+    .into_iter()
+    .map(|sql| (sql, hiqlite::params!()))
+    .collect()
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn downgrade_current_schema_after_request_identity(client: &Client) {
+    let mut statements = post_v39_downgrade_statements();
+    statements.extend([
+        (
+            "DROP TRIGGER IF EXISTS cache_publication_generation_guard",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS offline_recovery_guard",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE offline_packages DROP COLUMN claim_generation",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TABLE media_session_producer_recovery",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP INDEX IF EXISTS analysis_requests_terminal_identity",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE media_playback_pointers DROP COLUMN desired_revision",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TABLE IF EXISTS media_playback_desired",
+            hiqlite::params!(),
+        ),
+    ]);
     let results = client
-        .txn([
-            (
-                "DROP TRIGGER IF EXISTS cache_publication_generation_guard",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS offline_recovery_guard",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE offline_packages DROP COLUMN claim_generation",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TABLE media_session_producer_recovery",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP INDEX IF EXISTS analysis_requests_terminal_identity",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE media_playback_pointers DROP COLUMN desired_revision",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TABLE IF EXISTS media_playback_desired",
-                hiqlite::params!(),
-            ),
-        ])
+        .txn(statements)
         .await
         .expect("submit post-v27 fixture downgrade");
     results
@@ -10489,41 +10533,43 @@ async fn downgrade_current_schema_after_request_identity(client: &Client) {
 
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn downgrade_current_schema_after_producer_recovery(client: &Client) {
+    let mut statements = post_v39_downgrade_statements();
+    statements.extend([
+        (
+            "DROP TRIGGER IF EXISTS cache_publication_generation_guard",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS offline_recovery_guard",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE offline_packages DROP COLUMN claim_generation",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
+            hiqlite::params!(),
+        ),
+    ]);
     let results = client
-        .txn([
-            (
-                "DROP TRIGGER IF EXISTS cache_publication_generation_guard",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS offline_recovery_guard",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE offline_packages DROP COLUMN claim_generation",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
-                hiqlite::params!(),
-            ),
-        ])
+        .txn(statements)
         .await
         .expect("submit post-v32 fixture downgrade");
     results
@@ -13466,12 +13512,22 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
             5,
         ),
         (
+            // v42 split the forced-successor index into a skip-marker one and
+            // a fragment-index one keyed on `video_identity`; the settled
+            // shape is the current one, so it carries both and not the v22
+            // index they replaced.
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index'
              AND name IN ('cluster_fragment_index_jobs_due',
                           'analysis_requests_one_active_source',
-                          'analysis_requests_one_active_forced_successor',
+                          'analysis_requests_one_active_forced_skip_successor',
+                          'analysis_requests_one_active_forced_fragment_successor',
                           'analysis_attempts_recent')",
-            4,
+            5,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index'
+             AND name = 'analysis_requests_one_active_forced_successor'",
+            0,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('cluster_fragment_index_jobs')
@@ -14686,6 +14742,11 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE cache_storage_members;
              DROP INDEX rendition_plans_by_file;
              DROP TABLE rendition_plans;
+             -- v27's node-local index table. Dropping the table also removes
+             -- everything the migrations above v14 added to it -- v29's
+             -- promotion columns and v66's `validated_revision` -- so unlike
+             -- the `files` columns above, those need no separate DROP COLUMN
+             -- here.
              DROP TABLE fragment_indexes;
              ALTER TABLE transcode_cache_locations DROP COLUMN generation_id;
              ALTER TABLE transcode_cache_locations DROP COLUMN storage_id;
@@ -14769,12 +14830,13 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    // 46 with the current durable tables, including the Library channel
-    // entities. A v14 source has no rows for newer tables — each one's
+    // 52 with the current durable tables, including the Library channel
+    // entities, media classifications, channel subject jobs and decisions,
+    // and the three DVR tables. A v14 source has no rows for newer tables — each one's
     // `minimum_schema` is later — but every table is still reported, because
     // the digest inventory is over what the import *plans*, not over what the
     // source happened to hold.
-    assert_eq!(report.tables.len(), 46);
+    assert_eq!(report.tables.len(), 52);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -16425,7 +16487,12 @@ fn contract_inventory_matches_every_store_method() {
     // for the two S-07 adds on top of them, `files_missing_luminance` and
     // `set_file_luminance`. All four are named in `MEDIA_METHODS` above; the
     // name-set assertion below is what proves the count and the trait agree.
-    assert_eq!(declared.len(), 379, "review the Store method count");
+    //
+    // 379 -> 380 for the one `FragmentIndexStore` method C-05 adds,
+    // `validate_fragment_index_page`, a bounded node-local pass over legacy
+    // rows. It is named in `FRAGMENT_INDEX_METHODS` above; no new trait and no
+    // new supertrait of `Store`, so nothing above this call had to change.
+    assert_eq!(declared.len(), 380, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
