@@ -1,0 +1,66 @@
+version = 1
+
+[[coverage]]
+commits = ["c7721be7"]
+points = ["cluster.auth", "operations.packaging"]
+checks = ["operations-contract", "hiqlite-vendor-clippy"]
+reason = """
+The earlier K-08 commit `a94c71a9e` gated `cryptr/s3` behind Hiqlite's own \
+`backup`/`s3` features and then deleted `vendor/s3-simple` together with the \
+root `[patch.crates-io]` row that overrode it. For the workspace graph that \
+was right and stays right: plurx builds hiqlite with `auto-heal,macros,\
+sqlite`, so `s3-simple` is absent from `Cargo.lock` entirely. For the \
+configuration the fork still advertises it was wrong. `backup` and `s3` still \
+reach `cryptr/s3`, and with no override they resolve registry `s3-simple` \
+0.8.0, whose manifest requires `quick-xml ^0.39` and declares a non-optional \
+`aws-lc-sys = "0.39"`. `vendor/hiqlite/Cargo.lock` therefore pinned \
+`quick-xml` 0.39.4 -- the release RUSTSEC-2026-0194 and RUSTSEC-2026-0195 \
+name -- and `aws-lc-sys` 0.39.1, which `deny.toml` forbids by exact version. \
+Nothing caught it: `cargo deny check bans` resolves the workspace graph only, \
+and the workspace does not enable `backup`, so the ban and the advisory scan \
+both looked past the one configuration that still contained the crate.
+
+What pins the repair is `ForkBackupGraphPolicyCase` in \
+`tests/operations/test_hiqlite_patch_ledger.py`, which `operations-contract` \
+runs through `make operations-check`. It parses `vendor/hiqlite/Cargo.lock` \
+-- a cargo lockfile resolves every optional dependency of every feature \
+whether or not anything selects it, which is exactly why it is the right \
+artefact for a feature this repository never compiles -- and asserts four \
+things about it: that `s3-simple` resolves with no `source` key, i.e. through \
+`vendor/hiqlite/Cargo.toml`'s own `[patch.crates-io]` row rather than from \
+the registry; that every resolved `quick-xml` is at or above 0.41; that no \
+package in that graph matches any `[bans] deny` row read out of `deny.toml` \
+itself, so the fork's graph is judged against the repository's single \
+statement of policy rather than a second list that could drift from it; and \
+that `vendor/s3-simple/Cargo.toml` still states the constraints the lock \
+proves, including the absence of the four `aws-lc-rs`/`aws-lc-sys`/`quinn`/\
+`quinn-proto` edges that `src/` never references and that upstream s3-simple \
+0.9.0 also dropped. The ban parser raises on a `[bans] deny` shape it cannot \
+evaluate instead of skipping it, so a ban cannot quietly stop being checked \
+against the fork.
+
+On revert the case goes red four ways at once, which is how it was verified: \
+restoring the deletion puts registry `s3-simple` 0.8.0 back in the fork lock, \
+so `test_the_vendored_override_is_what_resolves` sees a `source` key, \
+`test_no_resolved_quick_xml_is_advisory_affected` sees 0.39.4 under the 0.41 \
+floor, `test_the_enabled_graph_obeys_the_repository_ban_list` reports \
+`aws-lc-sys 0.39.1`, and \
+`test_the_vendored_manifest_states_the_constraints_the_lock_proves` errors \
+because `vendor/s3-simple/Cargo.toml` is gone. Dropping only the \
+`[patch.crates-io]` row from `vendor/hiqlite/Cargo.toml` reds the first three \
+and `test_unused_s3_edge_is_gated_and_the_override_is_scoped_to_the_fork` as \
+well. Re-adding the row to the workspace root instead reds that same case, \
+which is deliberate: the workspace graph contains no `s3-simple`, so the row \
+there is an unused patch and a cargo warning on every invocation rather than \
+a protection.
+
+`hiqlite-vendor-clippy` is the second check because the same commit edits \
+`vendor/hiqlite/Cargo.toml` and regenerates `vendor/hiqlite/Cargo.lock`; a \
+`[patch.crates-io]` row that does not apply, or a vendored manifest whose \
+dropped dependencies turn out to be referenced after all, fails the vendor \
+lane before any contract test runs. The enabled configuration was compiled \
+directly as well -- `cargo check --locked --manifest-path \
+vendor/hiqlite/Cargo.toml --no-default-features --features \
+auto-heal,backup,macros,sqlite` -- which is what proves the four removed \
+edges really are unreferenced and that backup/S3 still builds.
+"""
