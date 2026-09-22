@@ -3773,6 +3773,10 @@ async function main() {
         "let PLAYER=null; let quality='auto';",
         "function playbackContext(){return {};}",
         "function cancelHlsStartup(){}",
+        // The sampling tick refreshes the wait sentence before each presenter
+        // step; this harness renders nothing, so the refresh has nowhere to go.
+        "function renderPlaybackSurface(){}",
+        "function playbackWaitLiveDetail(){return null;}",
         // §3.3 row 18: a staging nobody took up raises a log-only fault, and
         // the seam records it so the assertions below can read it.
         "const surfaceRaised=[];",

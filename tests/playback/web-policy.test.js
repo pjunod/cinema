@@ -274,17 +274,64 @@ test("playback info keeps readiness unknown distinct from measured zero", () => 
     { value: "2 active", note: "oldest 1450 ms · segment 37" },
   );
   assert.deepEqual(telemetry.playbackWaitCopy(0, 0), {
-    title: "Presentation waiting…",
+    title: "Buffering…",
     detail: "0.0 s client loaded · no server HTTP waits",
   });
   assert.deepEqual(telemetry.playbackWaitCopy(3.25, 1), {
-    title: "Presentation waiting…",
+    title: "Buffering…",
     detail: "3.3 s client loaded · 1 server HTTP wait",
   });
   assert.equal(
     telemetry.playbackWaitCopy(0, null).detail,
     "0.0 s client loaded · server wait state unavailable",
   );
+});
+
+// The wait sentence used to be composed once, when `waiting` fired, and so it
+// always read "0.0 s client loaded" for the whole wait. The sampling tick now
+// recomputes it, and only for the player that owns the attached element.
+test("the wait detail is sampled live and only for the owning player", () => {
+  const live = new Function(
+    "bufferRunway", "playbackOwnsAttachedMedia",
+    `let PLAYER=null;\n${shippedSource("playbackWaitCopy")}\n${shippedSource("playbackWaitLiveDetail")}\n` +
+      "return {own(p){PLAYER=p;}, playbackWaitLiveDetail};",
+  )(() => 4.26, () => true);
+  const player = { health: { http_wait_count: 2 } };
+  live.own(player);
+  assert.equal(live.playbackWaitLiveDetail({}, player), "4.3 s client loaded · 2 server HTTP waits");
+  assert.equal(live.playbackWaitLiveDetail({}, { health: null }), null,
+    "a player that is not PLAYER has no runway to report");
+  assert.equal(live.playbackWaitLiveDetail(null, player), null);
+  // Both places that arm the sampling tick (a cold attach and a prepared
+  // handoff's adoption) refresh the reading before the presenter step paints.
+  for (const name of ["armPlaybackSampling", "adoptPlaybackMediaElement"]) {
+    assert.match(shippedSource(name),
+      /renderPlaybackSurface\.waitDetail=playbackWaitLiveDetail\(v,p\);\s*playbackProgressTick\(v,p\);/,
+      `${name} must refresh the wait detail before the presenter step renders it`);
+  }
+});
+
+test("a media wait renders the live detail; every other fault renders its own", () => {
+  const { render, elements } = buildShippedSurfaceRender();
+  const fn = render;
+  fn.waitDetail = "7.5 s client loaded · 1 server HTTP wait";
+  fn({ kind: "blocking", class: "buffering", source: "media_waiting", title: "Buffering…",
+    detail: "0.0 s client loaded · server wait state unavailable", actions: [] });
+  assert.equal(elements.ploadText.textContent, "Buffering…");
+  assert.equal(elements.ploadSub.textContent, "7.5 s client loaded · 1 server HTTP wait");
+  fn({ kind: "indicator", class: "buffering", source: "media_waiting", title: "Buffering…",
+    detail: null, actions: [] });
+  assert.equal(elements.pindText.textContent, "Buffering… · 7.5 s client loaded · 1 server HTTP wait",
+    "the in-chrome indicator carries the reading too");
+  fn({ kind: "blocking", class: "preparing", source: "client_preparing", title: "Loading…",
+    detail: "owner detail", actions: [] });
+  assert.equal(elements.ploadSub.textContent, "owner detail",
+    "only a media wait's sentence is replaced");
+  fn.waitDetail = null;
+  fn({ kind: "blocking", class: "buffering", source: "media_waiting", title: "Buffering…",
+    detail: "raised detail", actions: [] });
+  assert.equal(elements.ploadSub.textContent, "raised detail",
+    "with no live sample the raise's own sentence stands");
 });
 
 // `openSession` reaches two more shipped helpers than it used to, and every

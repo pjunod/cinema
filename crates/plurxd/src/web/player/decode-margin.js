@@ -512,7 +512,10 @@ function stopPlayerTimers(){
 function armPlaybackSampling(v,p){
   if(!v||!p) return;
   clearInterval(p.progressTimer);
-  p.progressTimer=setInterval(()=>playbackProgressTick(v,p),500);
+  p.progressTimer=setInterval(()=>{
+    renderPlaybackSurface.waitDetail=playbackWaitLiveDetail(v,p);
+    playbackProgressTick(v,p);
+  },500);
   clearInterval(p.timer);
   p.timer=setInterval(()=>{
     if(!playbackOwnsAttachedMedia(p)) return;

@@ -143,7 +143,7 @@ class PlaybackInfoContractTest {
     fun waitingCopyDoesNotCallServerWaitsClientBuffering() {
         assertEquals(
             PlaybackWaitPresentation(
-                title = "Presentation waiting",
+                title = "Buffering…",
                 detail = "3.3 s client loaded · 2 server HTTP waits",
             ),
             playbackWaitPresentation(3.25, 2),
@@ -151,6 +151,10 @@ class PlaybackInfoContractTest {
         assertEquals(
             "0.0 s client loaded · server wait state unavailable",
             playbackWaitPresentation(0.0, null).detail,
+        )
+        assertEquals(
+            "Loading…",
+            playbackWaitPresentation(0.0, null, buffering = false).title,
         )
     }
 

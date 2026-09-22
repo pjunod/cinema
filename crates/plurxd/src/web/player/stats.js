@@ -251,7 +251,18 @@ function playbackWaitCopy(runwaySeconds,httpWaitCount){
   const waits=httpWaitCount==null?null:Math.max(0,Math.trunc(Number(httpWaitCount)||0));
   const waitText=waits==null?"server wait state unavailable":waits===0?"no server HTTP waits":
     `${waits} server HTTP ${waits===1?"wait":"waits"}`;
-  return {title:"Presentation waiting…",detail:`${runway.toFixed(1)} s client loaded · ${waitText}`};
+  return {title:"Buffering…",detail:`${runway.toFixed(1)} s client loaded · ${waitText}`};
+}
+// The wait sentence as it is NOW. The raise can only say what was true the
+// instant the wait began — which is always "0.0 s client loaded", and on a
+// cold open "server wait state unavailable" too — so the sampling tick hands
+// the render a fresh one twice a second. Null when this player does not own
+// the attached element: a predecessor's runway is not this wait's runway.
+function playbackWaitLiveDetail(v,p){
+  if(!v||!p||PLAYER!==p||!playbackOwnsAttachedMedia(p)) return null;
+  let runway=0;
+  try{ runway=bufferRunway(v); }catch(e){}
+  return playbackWaitCopy(runway,p.health&&p.health.http_wait_count).detail;
 }
 function playbackStatsTelemetry(){
   const p=PLAYER||{},v=playbackOwnsAttachedMedia(PLAYER)?document.getElementById("video"):null,s=p.source||{},h=p.health||null;
