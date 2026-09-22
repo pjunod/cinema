@@ -332,7 +332,7 @@ kill "$sampler"; wait "$sampler" || true
 # reservation is entirely overhead, scaled by request count. Decision 1
 # (§7) is settled by both, not by group A alone.
 PHOTO=<photo id whose original is a few hundred KiB or less>
-( while sleep 1; do awk '"'"'/VmRSS/{print systime(), $2}'"'"' /proc/$PID/status; done ) &
+( while sleep 1; do awk '/VmRSS/{print systime(), $2}' /proc/$PID/status; done ) &
 sampler=$!
 for round in $(seq 20); do
   pids=()
