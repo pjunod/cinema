@@ -12,6 +12,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use plurx_core::auth;
+use plurx_core::store::MAX_DEVICE_LABEL_BYTES;
 use serde::{Deserialize, Serialize};
 
 use super::dto::UserDto;
@@ -24,6 +25,17 @@ use crate::state::AppState;
 /// verification route on one contract and bounds request memory without
 /// silently changing any existing stored hash.
 pub(crate) const MAX_PASSWORD_BYTES: usize = 1024;
+/// Explicit body cap for `POST /api/v1/auth/login`.
+///
+/// Without a route layer this endpoint inherits axum's 2 MiB default, which is
+/// three orders of magnitude more than a login needs and is exactly the
+/// multiplier an oversized device label uses. Every field of `LoginRequest`
+/// has a stated ceiling — `MAX_PASSWORD_BYTES` (1 KiB) and
+/// `MAX_DEVICE_LABEL_BYTES` (256 B) — and a username long enough to matter is
+/// already a bad-credentials answer, so 8 KiB holds the whole contract with
+/// room for JSON punctuation and a generous username while refusing the
+/// megabyte body before it is ever parsed or hashed.
+pub(crate) const MAX_LOGIN_BODY_BYTES: usize = 8 * 1024;
 const PASSWORD_HASH_WORKERS: usize = 2;
 const PASSWORD_HASH_WAITERS: usize = 16;
 const PASSWORD_HASH_ADMISSION_WAIT: Duration = Duration::from_secs(2);
@@ -283,6 +295,7 @@ pub async fn login(
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
     validate_password_size(&req.password)?;
+    validate_device_label(req.device.as_deref())?;
     let address = client_ip(&headers, peer, &state.trusted_proxies);
     state
         .login_throttle
@@ -422,6 +435,22 @@ pub async fn logout(
 /// GET /api/v1/me
 pub async fn me(AuthUser(user): AuthUser) -> Json<UserDto> {
     Json(user.into())
+}
+
+/// Refuse an oversized device label before a token row is minted.
+///
+/// The label is persisted verbatim and replayed on every device-inventory
+/// read, so it is bounded at the boundary that creates it rather than hidden
+/// at the boundary that reads it: the caller gets a `400` and no session,
+/// instead of a session whose name the server silently rewrote. See
+/// [`MAX_DEVICE_LABEL_BYTES`] for why 256 bytes.
+pub(crate) fn validate_device_label(device: Option<&str>) -> Result<(), ApiError> {
+    if device.is_some_and(|device| device.len() > MAX_DEVICE_LABEL_BYTES) {
+        return Err(ApiError::BadRequest(format!(
+            "device label must be at most {MAX_DEVICE_LABEL_BYTES} bytes"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_password_size(password: &str) -> Result<(), ApiError> {

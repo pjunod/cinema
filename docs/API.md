@@ -338,6 +338,18 @@ Login takes `{"username", "password", "device"?}` and returns
 `{"token", "user"}`. Unknown user, wrong password, and a password changed
 between the read and the token write are all the same 401.
 
+Three sizes are stated rather than inherited. The whole request body is capped
+at **8 KiB** by the route itself, so a large body is refused before it is
+parsed, hashed or read against the Store. `password` is capped at **1024
+bytes**. `device` — the label this session will carry in the inventory above —
+is capped at **256 bytes** and a longer one is a 400 `device label must be at
+most 256 bytes`, with no token minted: the label is bounded where it is
+created, because `/me/devices` bounds rows (256) and not bytes, so an unbounded
+label would make one devices read as large as the account cared to make it. A
+label stored before this bound existed is truncated at a character boundary
+where the inventory is projected, never dropped — a device you cannot see is a
+device you cannot revoke.
+
 Logout takes both the validated user and the raw token — the first so an
 invalid token 401s rather than silently succeeding, the second so there is a
 digest to delete. Returns `{"ok": true}`. Its two failure modes beyond 401 are

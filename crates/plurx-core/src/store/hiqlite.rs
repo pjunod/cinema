@@ -25,9 +25,10 @@ use sha2::{Digest, Sha256};
 use super::replicated::ReplicatedSql;
 use super::telemetry::NodeLocalTelemetry;
 use super::{
-    keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence, CacheAdminMutationClaim,
-    DeleteTokenByPrefixOutcome, MetricsStore, NetworkPriorStore, PlaybackTelemetryStore,
-    PrometheusStoreSnapshot, SettingsStore, TokenSummary, UserStore, TOKEN_SUMMARY_MAX,
+    bounded_device_label, keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence,
+    CacheAdminMutationClaim, DeleteTokenByPrefixOutcome, MetricsStore, NetworkPriorStore,
+    PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore, TokenSummary, UserStore,
+    MAX_DEVICE_LABEL_BYTES, TOKEN_SUMMARY_MAX,
 };
 use crate::domain::{
     ApiKey, NetworkPrior, NetworkPriorObservation, OfflinePackageStats, PlaybackEvent,
@@ -4039,6 +4040,9 @@ impl UserStore for HiqliteAuthStore {
         device: Option<&str>,
     ) -> Result<(), StoreError> {
         let now = self.now()?;
+        // Defence in depth behind the login admission check, so a replicated
+        // row never carries a label above the documented byte bound.
+        let device = bounded_device_label(device.map(str::to_owned));
         self.credential_mutation(vec![(
             "INSERT INTO tokens \
              (token_hash, user_id, device, created_at, last_seen_at) \
@@ -4057,6 +4061,7 @@ impl UserStore for HiqliteAuthStore {
         expected_password_hash: &str,
     ) -> Result<bool, StoreError> {
         let now = self.now()?;
+        let device = bounded_device_label(device.map(str::to_owned));
         Ok(self
             .credential_mutation(vec![(
                 "INSERT INTO tokens \
@@ -4121,16 +4126,23 @@ impl UserStore for HiqliteAuthStore {
     }
 
     async fn list_tokens_for_user(&self, user_id: i64) -> Result<Vec<TokenSummary>, StoreError> {
+        // `substr` counts characters, so `$2` characters is at most four times
+        // that many bytes: no whole legacy label crosses the Raft read path,
+        // and `TokenSummaryRow` trims what is left to the exact byte bound.
         let sql = "SELECT substr(token_hash, 1, 8) AS token_hash_prefix, \
-                          device, created_at, last_seen_at \
+                          substr(device, 1, $2) AS device, created_at, last_seen_at \
                    FROM tokens WHERE user_id = $1 \
-                   ORDER BY created_at, token_hash LIMIT $2";
+                   ORDER BY created_at, token_hash LIMIT $3";
         validate_sql(sql)?;
         Ok(self
             .client()
             .query_consistent_map::<TokenSummaryRow, _>(
                 sql,
-                params!(user_id, TOKEN_SUMMARY_MAX as i64),
+                params!(
+                    user_id,
+                    MAX_DEVICE_LABEL_BYTES as i64,
+                    TOKEN_SUMMARY_MAX as i64
+                ),
             )
             .await?
             .into_iter()
@@ -4742,7 +4754,7 @@ impl From<TokenSummaryRow> for TokenSummary {
     fn from(row: TokenSummaryRow) -> Self {
         Self {
             token_hash_prefix: row.token_hash_prefix,
-            device: row.device,
+            device: bounded_device_label(row.device),
             created_at: row.created_at,
             last_seen_at: row.last_seen_at,
         }

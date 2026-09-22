@@ -703,7 +703,10 @@ pub fn router(state: AppState) -> Router {
         // hashing, scans, or child work. Five minutes stays above their own
         // fences while still making a wedged request finite.
         .route("/setup", post(system::setup))
-        .route("/auth/login", post(auth::login))
+        .route(
+            "/auth/login",
+            post(auth::login).layer(DefaultBodyLimit::max(auth::MAX_LOGIN_BODY_BYTES)),
+        )
         .route("/auth/logout", post(auth::logout))
         .route("/me/devices", get(users::list_my_devices))
         .route("/me/devices/{prefix}", delete(users::revoke_my_device))
@@ -6355,6 +6358,78 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The device label is the only caller-chosen, caller-repeatable field in
+    /// `tokens`, and `TOKEN_SUMMARY_MAX` bounds inventory rows but not bytes.
+    /// Bound it where it is created, and refuse the oversized body before the
+    /// handler ever parses it.
+    #[tokio::test]
+    async fn login_bounds_the_device_label_and_caps_its_request_body() {
+        use plurx_core::store::MAX_DEVICE_LABEL_BYTES;
+
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+
+        let at_bound = "d".repeat(MAX_DEVICE_LABEL_BYTES);
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": at_bound }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "a label at the bound must log in: {body}");
+
+        let over_bound = "d".repeat(MAX_DEVICE_LABEL_BYTES + 1);
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": over_bound }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "one byte over the bound must be refused, not stored: {body}"
+        );
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("device label"));
+
+        // A megabyte body is refused by the route's own limit, before the
+        // JSON is parsed, before any password work, and before the Store.
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({
+                    "username": "paul",
+                    "password": "supersecret",
+                    "device": "d".repeat(1024 * 1024)
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+        // Exactly two sessions exist: setup's, and the one at the bound. The
+        // refused attempts minted nothing.
+        let (status, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{devices}");
+        let devices = devices.as_array().expect("device array");
+        assert_eq!(devices.len(), 2);
+        // The label at the bound is stored whole, not silently shortened.
+        assert!(devices
+            .iter()
+            .any(|row| row["device"].as_str() == Some(at_bound.as_str())));
     }
 
     #[tokio::test]
