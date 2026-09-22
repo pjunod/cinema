@@ -5087,13 +5087,14 @@ pub(crate) async fn metrics(
 ) -> impl axum::response::IntoResponse {
     let uptime = state.started_at.elapsed().as_secs();
     let (sessions, active_cache_entries) = state.transcode.snapshot();
+    let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
     let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot());
     let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
         plurx_core::store::prometheus_store_operations(),
         crate::store_result::prometheus(),
@@ -5107,10 +5108,12 @@ pub(crate) async fn metrics(
         plurx_core::cluster::membership::prometheus_cluster_activity_authority(),
         super::internal_activity::prometheus_cluster_activity(),
         super::prometheus_handler_deadlines(),
+        super::prometheus_http_store_attribution(),
         crate::state::fragment_index_validation_prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus();
+    let codec_qualification_metrics = state.transcode.codec_qualification_prometheus();
 
     // Integration counters (plan P6). Scans by what asked for them, and how
     // many times another application has called in at all — the pair that
@@ -5143,7 +5146,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}",
+        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{codec_qualification_metrics}{decode_fact_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
@@ -5161,6 +5164,7 @@ pub(crate) async fn metrics(
         // Node-wide statics, so this reads no lock a live segment GET can
         // hold and no `VodServe` handle that a cluster boot may have replaced.
         blocked_get_metrics = state.blocked_gets.prometheus(),
+        codec_qualification_metrics = codec_qualification_metrics,
         live_tv_metrics = live_tv_metrics,
         library_channel_metrics = crate::http::library_channels::prometheus(),
     );
