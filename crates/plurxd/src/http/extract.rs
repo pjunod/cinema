@@ -56,8 +56,9 @@ pub struct CacheOnlyAdminUser;
 
 const CACHE_ONLY_ADMIN_PROOF_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_CACHE_ONLY_ADMIN_PROOFS: usize = 64;
-const REVOCATION_WAITERS: usize = 8;
-const REVOCATION_ADMISSION_WAIT: Duration = Duration::from_millis(2_500);
+/// Queued callers admitted behind the one active operation, process-wide.
+pub(super) const REVOCATION_WAITERS: usize = 8;
+pub(super) const REVOCATION_ADMISSION_WAIT: Duration = Duration::from_millis(2_500);
 
 static REVOCATION_COMPLETE: AtomicU64 = AtomicU64::new(0);
 static REVOCATION_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
@@ -81,9 +82,14 @@ impl Default for CacheOnlyAdminProofCache {
     }
 }
 
+/// Ownership of the single active cache-admin revocation slot.
+///
+/// The queue permit is deliberately **not** held here. The operation mutex is
+/// itself the active slot; keeping the permit for the Begin/Store/End lifetime
+/// would spend one of [`REVOCATION_WAITERS`] on the caller that is no longer
+/// waiting, leaving a queue seven deep behind a contract that says eight.
 pub(crate) struct RevocationAdmission {
     _operation: tokio::sync::OwnedMutexGuard<()>,
-    _waiting: tokio::sync::OwnedSemaphorePermit,
 }
 
 pub(crate) fn record_revocation_complete() {
@@ -285,9 +291,14 @@ impl CacheOnlyAdminProofCache {
             REVOCATION_ADMISSION_TIMEOUT.fetch_add(1, Ordering::Relaxed);
             "cache-admin revocation admission timed out"
         })?;
+        // Admitted: this caller now owns the one active slot and has left the
+        // queue, so its permit belongs to the next waiter. Releasing here is
+        // what makes the depth eight waiters behind one active operation
+        // rather than seven; the bound on futures, claims and detached
+        // cleanup tasks is unchanged at nine in flight.
+        drop(waiting);
         Ok(RevocationAdmission {
             _operation: operation,
-            _waiting: waiting,
         })
     }
 
@@ -990,20 +1001,40 @@ mod tests {
             .acquire_revocation_operation()
             .await
             .expect("first request owns the process gate");
+        // The active operation holds the mutex, not a queue slot. If it kept
+        // its permit for the Begin/Store/End lifetime the queue would be one
+        // shorter than the contract states.
+        assert_eq!(
+            cache.revocation_waiters.available_permits(),
+            super::REVOCATION_WAITERS,
+            "an admitted operation must not occupy a waiting slot"
+        );
         let mut waiters = Vec::new();
-        for _ in 1..super::REVOCATION_WAITERS {
+        for _ in 0..super::REVOCATION_WAITERS {
             let cache = cache.clone();
             waiters.push(tokio::spawn(async move {
                 cache.acquire_revocation_operation().await
             }));
         }
-        tokio::task::yield_now().await;
+        for _ in 0..64 {
+            if cache.revocation_waiters.available_permits() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
         assert_eq!(cache.revocation_waiters.available_permits(), 0);
         assert!(cache.acquire_revocation_operation().await.is_err());
 
         tokio::time::advance(super::REVOCATION_ADMISSION_WAIT).await;
         for waiter in waiters {
-            assert!(waiter.await.expect("waiter task").is_err());
+            // Every one of the eight was *queued*: none of them was turned
+            // away at the door because the active operation had taken a slot.
+            match waiter.await.expect("waiter task") {
+                Ok(_) => panic!("a waiter behind a held operation cannot be admitted"),
+                Err(error) => {
+                    assert_eq!(error, "cache-admin revocation admission timed out")
+                }
+            }
         }
         drop(owner);
         assert!(

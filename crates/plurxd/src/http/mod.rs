@@ -6432,6 +6432,120 @@ mod tests {
             .any(|row| row["device"].as_str() == Some(at_bound.as_str())));
     }
 
+    /// M1's contract is that a second sign-out queues behind the first rather
+    /// than receiving a 503 while the server still honours its bearer. Hold
+    /// the single active slot the way a live fence does, so the contention is
+    /// a fact of the test rather than a race it hopes to win.
+    #[tokio::test]
+    async fn two_concurrent_logouts_queue_behind_one_operation_and_both_succeed() {
+        let (app, state) = test_app_with_state();
+        let first = setup_admin(&app).await;
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": "Kitchen" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let second = body["token"].as_str().expect("second token").to_owned();
+
+        let held = state
+            .cache_only_admin_proofs
+            .acquire_revocation_operation()
+            .await
+            .expect("the test owns the active revocation slot");
+
+        let mut signouts = Vec::new();
+        for token in [first.clone(), second.clone()] {
+            let app = app.clone();
+            signouts.push(tokio::spawn(async move {
+                call(&app, post("/api/v1/auth/logout", Some(&token), json!({}))).await
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for signout in &signouts {
+            assert!(
+                !signout.is_finished(),
+                "a sign-out behind a running fence must queue, not be refused"
+            );
+        }
+
+        drop(held);
+        for signout in signouts {
+            let (status, body) = signout.await.expect("sign-out task");
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["ok"], true);
+        }
+
+        // Two bearers cleared, two rows gone.
+        for token in [&first, &second] {
+            assert_eq!(
+                call(&app, get("/api/v1/me", Some(token))).await.0,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert!(state
+            .store
+            .list_tokens_for_user(1)
+            .await
+            .expect("inventory")
+            .is_empty());
+    }
+
+    /// The other side of the bound: past the admission wait the caller is
+    /// still refused, and a refused caller leaves nothing behind — no claim,
+    /// no armed fence, no deleted row.
+    #[tokio::test]
+    async fn a_logout_that_waits_out_the_admission_window_is_refused_and_changes_nothing() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": "Kitchen" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let second = body["token"].as_str().expect("second token").to_owned();
+
+        let held = state
+            .cache_only_admin_proofs
+            .acquire_revocation_operation()
+            .await
+            .expect("the test owns the active revocation slot");
+
+        let started = Instant::now();
+        let (status, body) = call(
+            &app,
+            post("/api/v1/auth/logout", Some(&second), json!({})),
+        )
+        .await;
+        let waited = started.elapsed();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            waited >= extract::REVOCATION_ADMISSION_WAIT,
+            "the caller must actually wait its admission window, not fail fast: {waited:?}"
+        );
+        drop(held);
+
+        // Nothing was revoked and no fence was armed: both sessions still
+        // authenticate and both rows are still listed.
+        for token in [&admin, &second] {
+            assert_eq!(
+                call(&app, get("/api/v1/me", Some(token))).await.0,
+                StatusCode::OK
+            );
+        }
+        let (_, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert_eq!(devices.as_array().expect("device array").len(), 2);
+    }
+
     #[tokio::test]
     async fn device_inventory_and_fenced_revocation_cover_self_and_admin_routes() {
         let app = test_app();
