@@ -48,6 +48,9 @@ pub struct ServerInfo {
     /// server's initial playback decision. Public because every signed-in web
     /// viewer needs the same node-wide playback policy.
     pub playback_auto_abr: bool,
+    /// Whether Android television clients may request a same-resolution mode
+    /// matching the delivery cadence.
+    pub display_mode_match: bool,
 }
 
 /// GET /api/v1/server — public; drives the client's setup-vs-login decision.
@@ -70,6 +73,11 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         .get_setting(keys::PLAYBACK_AUTO_ABR)
         .await?
         .is_some_and(|value| value.trim() == "1");
+    let display_mode_match = state
+        .store
+        .get_setting(keys::PLAYBACK_DISPLAY_MODE_MATCH)
+        .await?
+        .is_some_and(|value| value.trim() == "1");
     Ok(Json(ServerInfo {
         name,
         version: crate::version::SEMVER,
@@ -82,6 +90,7 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         setup_required,
         android_app,
         playback_auto_abr,
+        display_mode_match,
     }))
 }
 
@@ -1752,6 +1761,9 @@ pub struct SettingsDto {
     /// Let the web client's Auto controller change rungs after playback starts.
     /// Explicit opt-in; missing is false.
     pub playback_auto_abr: bool,
+    /// Android television same-resolution refresh matching. The Developer
+    /// readiness rows explain current observations but never gate this switch.
+    pub playback_display_mode_match: bool,
     /// How many sessions may hold a hardware encoder at once
     /// (`transcode.max_hw_sessions`), and how many threads the software pool
     /// may use (`transcode.software_pool_threads`).
@@ -1890,6 +1902,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         setting(keys::PLAYBACK_NETWORK_PRIORS).is_some_and(|value| value.trim() == "1");
     let playback_auto_abr =
         setting(keys::PLAYBACK_AUTO_ABR).is_some_and(|value| value.trim() == "1");
+    let playback_display_mode_match =
+        setting(keys::PLAYBACK_DISPLAY_MODE_MATCH).is_some_and(|value| value.trim() == "1");
     // One parser owns the stored string. Three copies of this negated match
     // existed — here, in the preparer, and at the offline API boundary — and
     // none of them trimmed or folded case, so a hand-edited ` OFF ` read as
@@ -2081,6 +2095,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         telemetry_retain_days,
         playback_network_priors,
         playback_auto_abr,
+        playback_display_mode_match,
         transcode_max_hw_sessions,
         transcode_software_pool_threads,
         offline_enabled,
@@ -2329,6 +2344,7 @@ pub struct UpdateSettings {
     pub telemetry_retain_days: Option<i64>,
     pub playback_network_priors: Option<bool>,
     pub playback_auto_abr: Option<bool>,
+    pub playback_display_mode_match: Option<bool>,
     /// Encoder capacity. Bounded rather than free-form, because both numbers
     /// buy hardware that does not exist if they are wrong: a hardware cap
     /// above the encoders a node has admits sessions that then fail at
@@ -2464,6 +2480,7 @@ impl UpdateSettings {
             || self.telemetry_retain_days.is_some()
             || self.playback_network_priors.is_some()
             || self.playback_auto_abr.is_some()
+            || self.playback_display_mode_match.is_some()
             || self.transcode_max_hw_sessions.is_some()
             || self.transcode_software_pool_threads.is_some()
             || self.offline_enabled.is_some()
@@ -3544,6 +3561,15 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::PLAYBACK_AUTO_ABR, if enabled { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(enabled) = req.playback_display_mode_match {
+        state
+            .store
+            .put_setting(
+                keys::PLAYBACK_DISPLAY_MODE_MATCH,
+                if enabled { "1" } else { "0" },
+            )
             .await?;
     }
     // Keep the ordinary offline-card values in one transaction. Disabling is
@@ -5140,6 +5166,16 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn display_mode_setting_is_an_independent_advisory_switch() {
+        let request: UpdateSettings = serde_json::from_value(serde_json::json!({
+            "playback_display_mode_match": true
+        }))
+        .expect("display-mode setting");
+        assert_eq!(request.playback_display_mode_match, Some(true));
+        assert!(request.has_non_live_tv_update());
+    }
 
     #[test]
     fn partial_coverage_preserves_legacy_settings_facts_and_reports_the_enabled_policy() {
