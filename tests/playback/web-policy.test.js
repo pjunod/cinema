@@ -6040,6 +6040,47 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
   );
 });
 
+test("hls.js media recovery is fenced by the shared attach and item budgets", () => {
+  const decide = (overrides = {}) => policy.hlsMediaFatalAction({
+    type: "mediaError",
+    details: "fragParsingError",
+    sourceBufferName: null,
+    retryUsed: 0,
+    itemRecoveries: 0,
+    recoveredAtMs: null,
+    nowMs: 10_000,
+    ...overrides,
+  });
+  assert.equal(decide({ details: "bufferIncompatibleCodecsError" }), "fallback");
+  assert.equal(decide({ details: "bufferAddCodecError" }), "fallback");
+  assert.equal(decide(), "recover");
+  assert.equal(decide({ itemRecoveries: 1, recoveredAtMs: 9_000 }), "fallback");
+  assert.equal(decide({
+    details: "bufferAppendError",
+    sourceBufferName: "audio",
+    itemRecoveries: 1,
+    recoveredAtMs: 5_000,
+  }), "swap_audio");
+  assert.equal(decide({
+    details: "bufferAppendError",
+    sourceBufferName: "video",
+    itemRecoveries: 1,
+    recoveredAtMs: 5_000,
+  }), "fallback");
+  assert.equal(decide({ retryUsed: 1 }), "fallback");
+  assert.equal(decide({ itemRecoveries: 2 }), "fallback");
+  assert.equal(decide({ type: "networkError" }), "none");
+
+  const attach = shippedSource("attachHls");
+  const recovery = attach.indexOf("PlaybackPolicy.hlsMediaFatalAction");
+  const terminal = attach.indexOf('notifyPlaybackControl("failed"', recovery);
+  assert.ok(recovery >= 0, "the shipped fatal handler must ask the recovery policy");
+  assert.ok(terminal > recovery,
+    "decoder rescue must run before the attempt is reported terminal");
+  assert.match(attach, /sourceBufferName:d\.sourceBufferName\|\|null/,
+    "the vendored hls.js 1.6.16 payload names its SourceBuffer explicitly");
+});
+
 test("web HLS startup has one bounded manifest policy and terminal precedence", () => {
   const startup = policy.HLS_STARTUP;
   assert.deepEqual(startup, {

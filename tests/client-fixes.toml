@@ -3,6 +3,18 @@ enforce_after = "e8a910f"
 
 # The unmerged counter-fallback proposals were superseded by callback
 # lifecycle repair; retain their history mappings against the current proof.
+# The capacity 503 this player's previous start produced was codeless, so
+# every client correctly declined to retry it and the viewer got a terminal
+# overlay quoting an internal sentence. The fix is the wire code that lets it
+# enter the create-retry ladder all three clients already carry.
+[[fixes]]
+id = "clients.transcode-capacity-pending-is-a-not-yet-answer"
+commits = ["064b5def5", "fceff688a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackPolicy.kt"
+source_anchor = "\"transcode_capacity_pending\","
+test = "clients/android/app/src/test/java/tv/plurx/app/player/CreateRetryTest.kt"
+test_anchor = "transcode_capacity_pending"
+
 [[fixes]]
 id = "web.frame-callback-registration-lifecycle"
 commits = ["790ffc9da", "4c8830b2c", "b217c615e", "85b177a1b", "3d22d5ee2"]

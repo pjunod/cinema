@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["8e025e9a"]
+reason = "Board bookkeeping only. The single file this commit touches is `docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md`, and the single line it changes is the W-01 row, moving Status from `unclaimed` to `claimed` and filling in the agent, session, branch and note columns. No shipped file, test, script or validation input is touched, so the commit matches no functionality point and there is no runtime behaviour a revert could turn red — reverting it restores an unclaimed row in a coordination table and nothing else. Ignored rather than mapped to a check that does not read this table."
+ignore = true

@@ -67,7 +67,7 @@
   // tests/playback/playback-surface-contract.json by scripts/player-contract-table
   // --embed; do not edit by hand ----
   const SURFACE_CLASSES = {"preparing":{"severity":"progress","blocking":"while_not_presenting","retired_by":["presenting","intent_settled","attached_retired"]},"buffering":{"severity":"progress","blocking":"while_not_presenting","min_ms":350,"retired_by":["presenting","playback_not_requested","attached_retired"]},"recovering":{"severity":"progress","blocking":"while_not_presenting","retired_by":["presenting_after_raise","owner_success","attached_retired"]},"hold":{"severity":"notice","timed_ms":30000,"retired_by":["timer","presenting_after_raise"]},"degraded":{"severity":"notice","timed_ms":5000,"retired_by":["timer","presenting_continuous_ms"],"timer_paused_while_actions":true},"refused":{"severity":"notice","timed_ms":null,"retired_by":["intent_superseded","presenting_continuous_ms"],"default_actions":["retry"]},"exhausted":{"severity":"prompt","blocking":true,"requires_player_stopped":true,"retired_by":["user"],"title":"Playback is stalled.","default_actions":["keep_waiting","retry","close"]},"stopped":{"severity":"terminal","blocking":true,"requires_player_stopped":true,"retired_by":["user"],"default_actions":["retry","close"]}};
-  const SURFACE_SOURCES = [{"id":"owner_stopped","context":"any","class":"stopped","requires":{"player_stopped":true}},{"id":"owner_exhausted","context":"any","class":"exhausted","requires":{"player_stopped":true}},{"id":"startup_exhausted","context":"any","class":"exhausted","actions":["close","retry"],"requires":{"player_stopped":true}},{"id":"hls_init_invalid","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"hls_init_unsupported","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"auth_401_403","context":"any","class":"stopped","actions":["sign_in","close"],"requires":{"player_stopped":true}},{"id":"vod_source_rescan_required","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_source_unsupported","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_transcode_unavailable","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_subtitle_burn_unavailable","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_disabled","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"create_503_not_yet","context":"start","class":"preparing","codes":["startup_timeout","media_owner_transition","vod_index_pending","vod_engine_unattested"],"retryable":true},{"id":"client_preparing","context":"any","class":"preparing"},{"id":"change_failed","context":"change","class":"refused","actions":["retry"]},{"id":"segment_503_not_yet","context":"attached","class":"recovering","codes":["startup_timeout","playlist_state_changed","segment_pending","segment_wait_busy","node_wait_capacity","media_owner_transition","vod_resurrection_unavailable","response_owner_transition","response_state_changed","response_owner_reclassification_unavailable","response_publication_timeout","response_completion_capacity","response_snapshot_capacity","node_maintenance","node_removal_fenced","learner_route_ineligible"]},{"id":"media_owner_lost_410","context":"any","class":"recovering","then_when_stopped":"stopped","carries":["position_ms"]},{"id":"control_hold","context":"attached","class":"hold"},{"id":"media_waiting","context":"attached","class":"buffering"},{"id":"owner_recovery_step","context":"any","class":"recovering"},{"id":"readiness_deadline_rungs_left","context":"any","class":"recovering"},{"id":"decoder_failed","context":"any","class":"stopped","requires":{"player_stopped":true}},{"id":"black_frame_ladder_spent","context":"start","class":"exhausted","requires":{"player_stopped":true},"actions":["close","retry"]},{"id":"repeated_early_end","context":"attached","class":"stopped","requires":{"player_stopped":true}},{"id":"degraded_notice","context":"any","class":"degraded"},{"id":"log_only","context":"any","class":null}];
+  const SURFACE_SOURCES = [{"id":"owner_stopped","context":"any","class":"stopped","requires":{"player_stopped":true}},{"id":"owner_exhausted","context":"any","class":"exhausted","requires":{"player_stopped":true}},{"id":"startup_exhausted","context":"any","class":"exhausted","actions":["close","retry"],"requires":{"player_stopped":true}},{"id":"hls_init_invalid","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"hls_init_unsupported","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"auth_401_403","context":"any","class":"stopped","actions":["sign_in","close"],"requires":{"player_stopped":true}},{"id":"vod_source_rescan_required","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_source_unsupported","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_transcode_unavailable","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_subtitle_burn_unavailable","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_disabled","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"create_503_not_yet","context":"start","class":"preparing","codes":["startup_timeout","media_owner_transition","vod_index_pending","vod_engine_unattested","transcode_capacity_pending"],"retryable":true},{"id":"client_preparing","context":"any","class":"preparing"},{"id":"change_failed","context":"change","class":"refused","actions":["retry"]},{"id":"segment_503_not_yet","context":"attached","class":"recovering","codes":["startup_timeout","playlist_state_changed","segment_pending","segment_wait_busy","node_wait_capacity","media_owner_transition","vod_resurrection_unavailable","response_owner_transition","response_state_changed","response_owner_reclassification_unavailable","response_publication_timeout","response_completion_capacity","response_snapshot_capacity","node_maintenance","node_removal_fenced","learner_route_ineligible"]},{"id":"media_owner_lost_410","context":"any","class":"recovering","then_when_stopped":"stopped","carries":["position_ms"]},{"id":"control_hold","context":"attached","class":"hold"},{"id":"media_waiting","context":"attached","class":"buffering"},{"id":"owner_recovery_step","context":"any","class":"recovering"},{"id":"readiness_deadline_rungs_left","context":"any","class":"recovering"},{"id":"decoder_failed","context":"any","class":"stopped","requires":{"player_stopped":true}},{"id":"black_frame_ladder_spent","context":"start","class":"exhausted","requires":{"player_stopped":true},"actions":["close","retry"]},{"id":"repeated_early_end","context":"attached","class":"stopped","requires":{"player_stopped":true}},{"id":"degraded_notice","context":"any","class":"degraded"},{"id":"log_only","context":"any","class":null}];
   const SURFACE_TIMINGS = {"buffering_min_ms":350,"hold_notice_ms":30000,"degraded_notice_ms":5000,"refused_progress_ms":10000,"notes":["refused_progress_ms is CONTINUOUS presenting on the attached generation, not accumulated playback.","buffering_min_ms debounces the surface, not the fault: a `media_waiting` fault exists from the moment it is raised and is simply not drawn until it has lasted this long.","A hidden page freezes every timer as well as every evidence sample. The reducer does this by carrying the hidden interval forward: on becoming visible again every fault's raise time is shifted by however long the page was hidden, and the continuous-presenting clock is reset, because no sample bridged the gap.","disagreement_notice_ms retires the \"Playback recovered\" banner a demotion leaves behind (§3.2). Its actions stay valid while the picture could still fail again; this much CONTINUOUS presenting is the point at which the offer is stale. Ruled by the implementer 2026-09-13 in Paul's absence — §3.1 says such a banner does not expire \"while an action is still valid\" and does not say when that ends; a banner with no end is the Android `playFailure` defect wearing a different hat.","presenting_after_raise is the contract's \"presenting evidence on the NEW attached generation\": what makes the evidence count is that the run of presentation BEGAN at or after the fault was raised. An owner that reopens in place, on the same generation, produces exactly that, and a recovering indicator that only a new generation could retire would outlive every in-place recovery."],"disagreement_notice_ms":30000};
   const SURFACE_SEVERITY_RANK = {"notice":1,"progress":2,"prompt":3,"terminal":4};
   // ---- end generated surface table ----
@@ -920,6 +920,57 @@
     per_attach: 1,
   });
 
+  // Media recovery spends the same per-attach budget as network startLoad.
+  // The item bound survives internal reopens, so a decoder that repeatedly
+  // rejects the same title cannot acquire a fresh rescue on every attachment.
+  const HLS_MEDIA_RECOVERY = Object.freeze({
+    per_item: 2,
+    settle_ms: 4_000,
+  });
+
+  // A local rolling/progressive seek gets one short chance to land. The
+  // transport owns the timer; this policy owns the frozen bound and route.
+  const SEEK_LOCAL_SETTLE_MS = 3_000;
+
+  function seekRoute({
+    method,
+    copyHls = false,
+    vod = false,
+    forceReopen = false,
+    changing = false,
+    targetMs,
+    bufferedMs = [],
+    publishedMs = null,
+    holdbackMs = 0,
+  } = {}) {
+    const target = Number(targetMs);
+    if (!Number.isFinite(target) || target < 0 || forceReopen || changing) {
+      return { route: "reopen" };
+    }
+    if (method === "direct_play") return { route: "local", atMs: target, basis: "direct" };
+    if (vod) return { route: "local", atMs: target, basis: "vod" };
+    const rolling = Boolean(copyHls) || method === "transcode";
+    if (!rolling && method !== "remux") return { route: "reopen" };
+    for (const range of Array.isArray(bufferedMs) ? bufferedMs : []) {
+      const from = Number(range && range.from);
+      const through = Number(range && range.through);
+      if (Number.isFinite(from) && Number.isFinite(through)
+          && target >= from && target <= through) {
+        return { route: "local", atMs: target, basis: "buffered" };
+      }
+    }
+    if (rolling && publishedMs) {
+      const from = Number(publishedMs.from);
+      const through = Number(publishedMs.through);
+      const holdback = Math.max(0, Number(holdbackMs) || 0);
+      if (Number.isFinite(from) && Number.isFinite(through)
+          && target >= from && target <= through - holdback) {
+        return { route: "local", atMs: target, basis: "published" };
+      }
+    }
+    return { route: "reopen" };
+  }
+
   // One absolute startup policy for the web HLS attachment. hls.js owns the
   // retry ladder inside a source-load cycle; the application owns one
   // corrective cycle and the ceiling across both. Keeping the numbers here
@@ -997,6 +1048,39 @@
   // that schedules the retry cannot disagree with the test that pins it.
   function hlsRetryAllowed({ used = 0 } = {}) {
     return (Number(used) || 0) < HLS_RETRY.per_attach;
+  }
+
+  function hlsMediaFatalAction({
+    type,
+    details,
+    sourceBufferName = null,
+    retryUsed = 0,
+    itemRecoveries = 0,
+    recoveredAtMs = null,
+    nowMs = 0,
+  } = {}) {
+    if (type !== "mediaError") return "none";
+    if (
+      details === "bufferIncompatibleCodecsError" ||
+      details === "bufferAddCodecError"
+    ) {
+      return "fallback";
+    }
+    if (!hlsRetryAllowed({ used: retryUsed })) return "fallback";
+    if (itemRecoveries >= HLS_MEDIA_RECOVERY.per_item) return "fallback";
+    if (
+      recoveredAtMs != null &&
+      Number(nowMs) - Number(recoveredAtMs) < HLS_MEDIA_RECOVERY.settle_ms
+    ) {
+      return "fallback";
+    }
+    if (itemRecoveries > 0) {
+      return (details === "bufferAppendError" || details === "bufferAppendingError") &&
+        sourceBufferName === "audio"
+        ? "swap_audio"
+        : "fallback";
+    }
+    return "recover";
   }
 
   // Android's `BEHIND_LIVE_WINDOW` recovery (M5 addition 3). Finite timelines
@@ -1952,6 +2036,10 @@
     createRetryStep,
     HLS_RETRY,
     hlsRetryAllowed,
+    HLS_MEDIA_RECOVERY,
+    hlsMediaFatalAction,
+    SEEK_LOCAL_SETTLE_MS,
+    seekRoute,
     HLS_STARTUP,
     HLS_STARTUP_TERMINAL_CODES,
     STREAM_FAILURE_BODY_MAX_CHARS,

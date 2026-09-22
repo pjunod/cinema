@@ -39,7 +39,7 @@ use super::{ResolvedTranscode, SEGMENT_SECONDS};
 /// express — a different hash construction, a corrected serialisation, a fixed
 /// bug in what the fields *mean*. Every old entry misses; nothing is served
 /// wrongly while a deploy rolls out.
-pub const CACHE_RECIPE_VERSION: i64 = 3;
+pub const CACHE_RECIPE_VERSION: i64 = 4;
 
 /// Everything about *how this server encodes* that changes the output bytes.
 ///
@@ -122,6 +122,18 @@ impl Recipe<'_> {
             &mut h,
             "aaction",
             if self.audio_copied { b"copy" } else { b"aac" },
+        );
+        // Every lossy audio path is now explicitly pinned to 48 kHz. Keep
+        // that byte-changing decision visible in the identity, rather than
+        // relying only on a version bump whose reason is easy to lose.
+        field(
+            &mut h,
+            "arate",
+            if self.audio_copied {
+                b"source"
+            } else {
+                b"48000"
+            },
         );
 
         // Deliberately NOT in the key: `start_seconds`. A cached asset is the
@@ -451,8 +463,8 @@ mod tests {
         assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    /// Version 3 binds the complete validated decode/render/encode plan and
-    /// deliberately invalidates every pre-plan recipe. Pin its exact bytes so
+    /// Version 4 binds the fixed 48 kHz lossy-audio output decision and
+    /// deliberately invalidates every recipe that predated that rule. Pin its exact bytes so
     /// future namespace changes remain explicit fleet-wide decisions.
     ///
     /// The value cannot be checked against v2's golden: v3 is not v2 with a
@@ -465,19 +477,18 @@ mod tests {
     /// that were forking the key on how a file was measured rather than on
     /// what would be produced from it.
     ///
-    /// So this fixture cannot prove v3 was composed correctly — it was
+    /// So this fixture cannot prove v4 was composed correctly — it was
     /// regenerated from the implementation, and a mistake made in the same
     /// commit would be pinned along with everything else. What it does is make
     /// the next change explicit: nothing may move this value without saying
     /// why. The composition itself is proven by the field-by-field mutation
-    /// table above, which is where a missing field is actually caught. v3 has
-    /// never been published, so nothing on disk has moved.
+    /// table above, which is where a missing field is actually caught.
     #[test]
-    fn planned_v3_recipe_hash_is_a_golden_fixture() {
+    fn planned_v4_recipe_hash_is_a_golden_fixture() {
         let (d, f, o) = (digest(), media(), TranscodeOptions::default());
         assert_eq!(
             hash_of(&d, &f, &o, Encoder::Software, false),
-            "82b1fd5b9c96d0e0201ef5f56606cc0d677996c67907d1d46bef870996e526cb"
+            "845ecea396f201726cd6161c19c69330802f6a6cc6921af9ed26d0fc8fab270b"
         );
     }
 

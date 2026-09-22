@@ -358,7 +358,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
         self.assertRegex(
             self.core_recipe,
-            r"(?m)^pub const CACHE_RECIPE_VERSION: i64 = 3;$",
+            r"(?m)^pub const CACHE_RECIPE_VERSION: i64 = 4;$",
         )
         digest_body = self.core_decode.split("pub fn plan_digest", 1)[1].split(
             "pub fn artifact_namespace", 1
