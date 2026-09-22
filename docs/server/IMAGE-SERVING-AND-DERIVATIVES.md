@@ -237,11 +237,33 @@ ratio `cached / (cached + hashed)` is the number that says M1 works.
 `bucket ∈ {w300, w500, w780}` (a closed enum; anything else is 400, so
 the derived set per source is at most three). `size` absent or `original`
 is today's behaviour. Derivatives are node-local, like the originals:
-`<artwork_dir>/derived/<digest32hex>-<bucket>.<ext>` where `digest32hex`
-is the first 32 hex characters of the **verified** source digest from M1.
-Keying by the source's verified digest, not its filename, means a legacy
+`<artwork_dir>/derived/<source>-<bucket>-<digest32hex>.<ext>` where
+`<source>` is the source artwork filename and `digest32hex` is the first 32
+hex characters of the **verified** source digest from M1. Keying by the
+source's verified digest, not its filename, means a legacy
 `{item}-poster.jpg` whose bytes change simply produces a new derivative and
 the old one becomes an orphan; nothing is ever served under a stale key.
+
+**Why the name carries the source too.** This section first specified
+`<digest32hex>-<bucket>.<ext>`, with no source filename. That key cannot
+support the per-source retention **Orphans** below asks for. A legacy name
+publishes no digest, so a referenced legacy source whose bytes nothing has
+verified since boot has an *unknown* live digest — and while any source's
+digest is unknown, every derivative prefix that matches nothing could
+belong to it. The sweep therefore cannot judge one derivative without
+resolving them all, and its only safe move is to retain everything and
+reap nothing. That is precisely what the first implementation did, by
+returning early on the first unresolved legacy source: with one
+`{item}-poster.jpg` in the library, `derived/` was never reaped at all,
+every pass, after every restart. Naming the source makes the question
+local — "is *this* derivative's own source still referenced, and does its
+digest still match?" — so an unknown digest retains that one source's
+derivatives and says nothing about any other. The digest still decides
+correctness; the source filename only decides cleanup. Nothing had shipped
+under the old shape, so no derivative on any node is keyed the old way;
+`superseded_derivative_name` recognises it regardless and reclaims it after
+the same grace, so a node that ran an earlier build of this branch strands
+nothing.
 
 **Generation.** Through the shipped ffmpeg, not a new decoder crate: the
 workspace has none (§2.4), adding one is a compile-weight decision the
@@ -287,14 +309,32 @@ peers replicate originals and derive locally; a request for `?size=` on
 `/cluster/artwork/…` is 400.
 
 **Orphans.** `sweep_orphan_artwork` (`:740-773`) gains a second pass over
-`derived/`: a derivative whose 32-hex prefix matches no currently verified
-source digest *and* is older than `CONTENT_ORPHAN_GRACE` (24 h, `:43`) is
-removed under the same `ORPHAN_REMOVE_LIMIT = 256` per pass. The set of
-current source digests comes from the M1 cache plus one bounded
-`items_with_artwork()` pass that reads (not hashes) — for a source with no
-cache entry the derivative is kept until the source is next verified; a
-kept orphan costs disk, a wrong delete costs a re-derive, and disk is the
-cheaper mistake.
+`derived/`, bounded by the same `ORPHAN_REMOVE_LIMIT = 256` per pass and
+the same `CONTENT_ORPHAN_GRACE` (24 h, `:43`). One bounded
+`items_with_artwork()` pass gives the referenced source filenames; each
+one's live digest prefix comes from its own name for the two
+content-addressed families, or from the M1 cache for a legacy name, or is
+unknown. Retention is then decided per entry: a derivative whose source is
+gone from the catalogue is removed; one whose source is referenced and
+whose digest is known is removed only if it was made from other bytes; one
+whose source is referenced with an unknown digest is kept until that source
+is next verified. A kept orphan costs disk, a wrong delete costs a
+re-derive, and disk is the cheaper mistake — but one unresolved source no
+longer suspends the sweep for every other source.
+
+The comparison width matters and is easy to get wrong. Derivative names
+carry 32 hex characters, but `{item}-{kind}-c{16hex}` sources — every
+backdrop — publish only 16, so both sides narrow to the 16 both families
+can supply (`DERIVATIVE_PREFIX_MATCH`). Comparing 16 against 32 matches
+nothing, which classifies every live backdrop derivative as an orphan.
+The failure direction of a 64-bit prefix is safe: a collision retains a
+dead derivative, and a derivative's prefix is by construction the digest
+of the source it was made from, so it can never delete a live one.
+
+The same pass reclaims two things nothing else walks `derived/` to find:
+`.{derived_name}.{uuid}.tmp` temporaries left by a generation that a
+SIGKILL, panic or deploy restart interrupted, and the superseded
+`<digest32hex>-<bucket>.<ext>` layout above. Both only once past the grace.
 
 **Clients.** This PR changes no client. The DTO gains
 `poster_sizes: ["w300","w500","w780"]` on `ItemDto` only when the source
@@ -474,3 +514,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Claimed `plan/C-03` from `main` @ `9deb58a2`; M1-M2 remain pending. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Identity-bound digest cache, separate local-byte/peer-fetch permits, authenticated 304, strong ETag and bounded metrics implemented; `cargo test -p plurxd http::images -- --test-threads=1` passed 25 tests. Lab and device observations remain pending. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Closed `size` buckets, digest-keyed derivatives, two-child/timeout/output bounds, single-flight, original fallback, conservative orphan cleanup, DTO readiness and fixed-cardinality metrics implemented. The existing job-owned bounded-file child was used instead of widening the probe-only output helper. Focused image tests pass; §6.2-§6.4 fleet, browser and device observations remain pending. |
+| 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 review | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Adversarial review answered: all nine findings fixed, none deferred or disputed. The `derived/` key gained its source filename so orphan retention is decided per source (§3.2); the sweep's prefix comparison narrowed to the 16 hex characters every source family publishes; fallbacks revalidate instead of caching an original as `immutable` under a `?size=` URL; the post-generation fence compares file identity instead of re-reading and admitting the source a second time; the derived key is resolved from the cached digest before the original is read; `.tmp` temporaries and the superseded key layout are reclaimable; the resize child caches in `runtime_cache`. `serve_derivative` gained real coverage — the five missing §5.2 tests plus the fallback response, the warm hit and its 304, and the identity fence — each proved to fail with its fix reverted. `peer_route_refuses_size` drives `serve_verified_peer_artwork` rather than the route, because `verify_artwork_peer_auth` needs a consistent cluster read no unit test can supply. Gates at `79f9a4d57`: `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -D warnings`, `cargo test -p plurxd --bin plurxd` 2551 passed / 0 failed, `make operations-check` 435 passed, `make history-check`, `make validation-lint`, `tests/validation` 200 passed, four Node suites. §6.2-§6.4 lab1 concurrency, Chrome cold/warm byte and Apple TV / Android TV observations are still not gathered and remain pending. |
