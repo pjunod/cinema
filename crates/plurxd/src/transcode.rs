@@ -95,6 +95,7 @@ const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unava
 /// bound `idet` verification for flagged sources. The elapsed time is added
 /// back to the production deadline so observing costs the encode nothing.
 const DECODE_PLAN_PROBE_BUDGET: Duration = Duration::from_secs(10);
+static PROBE_CHANGED_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
 /// How long a mixed recovery waits for the CPU it newly needs.
 ///
@@ -275,6 +276,26 @@ pub(crate) fn vod_refusal(error: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((code, message))
+}
+
+#[derive(Clone, Copy)]
+enum BoundPlanCaller {
+    Pretranscode,
+    Vod,
+}
+
+impl BoundPlanCaller {
+    fn finish(
+        self,
+        result: Result<ResolvedTranscode, String>,
+    ) -> Result<ResolvedTranscode, String> {
+        match self {
+            Self::Pretranscode => result,
+            Self::Vod => {
+                result.map_err(|error| vod_refusal_error("vod_decoder_plan_refused", error))
+            }
+        }
+    }
 }
 
 /// What "Auto" resolves to — see [`TranscodeManager::auto_height`].
@@ -13803,6 +13824,12 @@ pub struct TranscodeManager {
     /// authority; every production insert/removal publishes its resulting
     /// length while holding that map's lock.
     active_session_count: Arc<AtomicUsize>,
+    /// Process-local, closed-cardinality inventory of the encoder contract
+    /// selected by successful session starts. These counters deliberately
+    /// live beside the boot-probed caps: `/metrics` can compare what this
+    /// process proved with what playback actually selected without a Store
+    /// read or a request-derived label.
+    codec_qualification: Arc<CodecQualificationMetrics>,
     /// Creation requests by `request_id` — reserved *before* work starts, so
     /// two concurrent creates with the same id cannot both pass the check and
     /// spawn two encoders (the check-then-act race this map used to have).
@@ -13878,6 +13905,124 @@ pub struct TranscodeManager {
 pub(crate) struct TranscodeMetrics {
     active_sessions: Arc<AtomicUsize>,
     active_cache: crate::cachekeep::ActiveCacheMetrics,
+    decode_facts: Arc<crate::decode_facts::DecodeFactMetrics>,
+    caps: EncoderCaps,
+    codec_qualification: Arc<CodecQualificationMetrics>,
+}
+
+const QUALIFICATION_ENCODERS: [Encoder; 5] = [
+    Encoder::Software,
+    Encoder::Nvenc,
+    Encoder::Qsv,
+    Encoder::Vaapi,
+    Encoder::VideoToolbox,
+];
+const QUALIFICATION_GRADES: [OutputGrade; 2] = [OutputGrade::Sdr, OutputGrade::Hdr10];
+const QUALIFICATION_PIPELINES: [Pipeline; 8] = [
+    Pipeline::VppQsv,
+    Pipeline::TonemapVaapi,
+    Pipeline::Libplacebo,
+    Pipeline::TonemapOpencl,
+    Pipeline::DoviTonemapx,
+    Pipeline::DoviPassthrough,
+    Pipeline::Hdr10Passthrough,
+    Pipeline::Cpu,
+];
+
+struct CodecQualificationMetrics {
+    encoder_sessions: [[AtomicU64; QUALIFICATION_GRADES.len()]; QUALIFICATION_ENCODERS.len()],
+    pipeline_sessions: [AtomicU64; QUALIFICATION_PIPELINES.len()],
+}
+
+impl Default for CodecQualificationMetrics {
+    fn default() -> Self {
+        Self {
+            encoder_sessions: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+            pipeline_sessions: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+impl CodecQualificationMetrics {
+    fn encoder_slot(encoder: Encoder) -> usize {
+        match encoder {
+            Encoder::Software => 0,
+            Encoder::Nvenc => 1,
+            Encoder::Qsv => 2,
+            Encoder::Vaapi => 3,
+            Encoder::VideoToolbox => 4,
+        }
+    }
+
+    fn grade_slot(grade: OutputGrade) -> usize {
+        match grade {
+            OutputGrade::Sdr => 0,
+            OutputGrade::Hdr10 => 1,
+        }
+    }
+
+    fn pipeline_slot(pipeline: Pipeline) -> usize {
+        match pipeline {
+            Pipeline::VppQsv => 0,
+            Pipeline::TonemapVaapi => 1,
+            Pipeline::Libplacebo => 2,
+            Pipeline::TonemapOpencl => 3,
+            Pipeline::DoviTonemapx => 4,
+            Pipeline::DoviPassthrough => 5,
+            Pipeline::Hdr10Passthrough => 6,
+            Pipeline::Cpu => 7,
+        }
+    }
+
+    fn record_encoder(&self, encoder: Encoder, grade: OutputGrade) {
+        self.encoder_sessions[Self::encoder_slot(encoder)][Self::grade_slot(grade)]
+            .fetch_add(1, Relaxed);
+    }
+
+    fn record_pipeline(&self, pipeline: Pipeline) {
+        self.pipeline_sessions[Self::pipeline_slot(pipeline)].fetch_add(1, Relaxed);
+    }
+
+    fn prometheus(&self, caps: &EncoderCaps) -> String {
+        let mut out = String::from(
+            "# HELP plurx_encoder_available Whether boot validation test-encoded through this family.\n\
+             # TYPE plurx_encoder_available gauge\n",
+        );
+        for encoder in QUALIFICATION_ENCODERS {
+            out.push_str(&format!(
+                "plurx_encoder_available{{family=\"{}\"}} {}\n",
+                encoder.family_name(),
+                u8::from(caps.available(encoder)),
+            ));
+        }
+        out.push_str(
+            "# HELP plurx_encoder_sessions_total Accepted encoding starts after their serving owner is registered, by family and output grade. Process-local; use reset-aware increase() or uninterrupted uptime for interval totals.\n\
+             # TYPE plurx_encoder_sessions_total counter\n",
+        );
+        for encoder in QUALIFICATION_ENCODERS {
+            for grade in QUALIFICATION_GRADES {
+                out.push_str(&format!(
+                    "plurx_encoder_sessions_total{{family=\"{}\",grade=\"{}\"}} {}\n",
+                    encoder.family_name(),
+                    grade.name(),
+                    self.encoder_sessions[Self::encoder_slot(encoder)][Self::grade_slot(grade)]
+                        .load(Relaxed),
+                ));
+            }
+        }
+        out.push_str(
+            "# HELP plurx_tone_map_pipeline_sessions_total Accepted encoding starts after their serving owner is registered, by resolved video pipeline. Process-local; use reset-aware increase() or uninterrupted uptime for interval totals.\n\
+             # TYPE plurx_tone_map_pipeline_sessions_total counter\n",
+        );
+        for pipeline in QUALIFICATION_PIPELINES {
+            out.push_str(&format!(
+                "plurx_tone_map_pipeline_sessions_total{{pipeline=\"{}\"}} {}\n",
+                pipeline.name(),
+                self.pipeline_sessions[Self::pipeline_slot(pipeline)].load(Relaxed),
+            ));
+        }
+        out
+    }
 }
 
 /// Bounded local facts published in the cluster media snapshot. None of these
@@ -13921,6 +14066,14 @@ impl TranscodeMetrics {
             self.active_sessions.load(Relaxed),
             self.active_cache.active_entries(),
         )
+    }
+
+    pub(crate) fn decode_facts_prometheus(&self) -> String {
+        self.decode_facts.prometheus()
+    }
+
+    pub(crate) fn codec_qualification_prometheus(&self) -> String {
+        self.codec_qualification.prometheus(&self.caps)
     }
 }
 
@@ -14120,6 +14273,7 @@ impl TranscodeManager {
             serving_ready: AtomicBool::new(true),
             serving_loss_generation: AtomicU64::new(0),
             active_session_count: Arc::new(AtomicUsize::new(0)),
+            codec_qualification: Arc::new(CodecQualificationMetrics::default()),
             requests: std::sync::Mutex::new(HashMap::new()),
             producer: ProducerTuning::default(),
             background_producer: Mutex::new(()),
@@ -14420,7 +14574,46 @@ impl TranscodeManager {
         TranscodeMetrics {
             active_sessions: Arc::clone(&self.active_session_count),
             active_cache: self.cache_readers.metrics(),
+            decode_facts: self.decode_facts.metrics_handle(),
+            caps: self.caps.clone(),
+            codec_qualification: Arc::clone(&self.codec_qualification),
         }
+    }
+
+    /// Record one accepted encoding start after its serving owner is
+    /// registered. For rolling this is manager registration, for VOD it is
+    /// the reader attachment returned by `try_create`, and Live TV calls it
+    /// only after the first publishable scratch inventory crosses its serving
+    /// fence. Callers that do not execute a video pipeline (copy/remux) must
+    /// not call this method.
+    pub(crate) fn record_codec_qualification_session(
+        &self,
+        encoder: Encoder,
+        grade: OutputGrade,
+        pipeline: Option<Pipeline>,
+    ) {
+        self.codec_qualification.record_encoder(encoder, grade);
+        if let Some(pipeline) = pipeline {
+            self.codec_qualification.record_pipeline(pipeline);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn codec_qualification_encoder_count(
+        &self,
+        encoder: Encoder,
+        grade: OutputGrade,
+    ) -> u64 {
+        self.codec_qualification.encoder_sessions[CodecQualificationMetrics::encoder_slot(encoder)]
+            [CodecQualificationMetrics::grade_slot(grade)]
+        .load(Relaxed)
+    }
+
+    #[cfg(test)]
+    fn codec_qualification_pipeline_count(&self, pipeline: Pipeline) -> u64 {
+        self.codec_qualification.pipeline_sessions
+            [CodecQualificationMetrics::pipeline_slot(pipeline)]
+        .load(Relaxed)
     }
 
     /// Override [`ProducerTuning`]. Tests only — there is deliberately no
@@ -15138,18 +15331,20 @@ impl TranscodeManager {
         deadline: Instant,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<ResolvedTranscode, String> {
-        self.resolve_held_movie_plan(
-            file,
-            options,
-            encoder,
-            crate::decode_facts::DecodeFactSource::new(
-                Arc::clone(&source.handle),
-                Arc::clone(&source.offset_gate),
-            ),
-            deadline,
-            cancelled,
+        BoundPlanCaller::Pretranscode.finish(
+            self.resolve_held_movie_plan(
+                file,
+                options,
+                encoder,
+                crate::decode_facts::DecodeFactSource::new(
+                    Arc::clone(&source.handle),
+                    Arc::clone(&source.offset_gate),
+                ),
+                deadline,
+                cancelled,
+            )
+            .await,
         )
-        .await
     }
 
     /// Resolve decoder facts through the exact source description the caller
@@ -15186,6 +15381,17 @@ impl TranscodeManager {
                 cancelled,
             )
             .await;
+        self.resolve_held_movie_plan_facts(file, options, encoder, facts)
+            .await
+    }
+
+    async fn resolve_held_movie_plan_facts(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        facts: Result<plurx_core::transcode::DecodeFacts, crate::decode_facts::DecodeFactError>,
+    ) -> Result<ResolvedTranscode, String> {
         match facts {
             Ok(facts) => self.resolve_movie_plan_with_facts(
                 file,
@@ -15200,8 +15406,57 @@ impl TranscodeManager {
             // use; the plan records `CatalogRow` so nothing downstream can
             // mistake it for a descriptor-bound measurement.
             Err(error) => {
+                use crate::decode_facts::DecodePlanFallbackReason;
+
+                let reason = error.fallback_reason();
+                self.decode_facts.metrics().record_fallback(reason);
+                match reason {
+                    DecodePlanFallbackReason::Deadline | DecodePlanFallbackReason::Cancelled => {}
+                    DecodePlanFallbackReason::ProbeChanged => {
+                        if PROBE_CHANGED_WARNING_EMITTED
+                            .compare_exchange(false, true, AcqRel, Acquire)
+                            .is_ok()
+                        {
+                            tracing::warn!(
+                                file_id = file.id,
+                                reason = reason.label(),
+                                "the configured ffprobe changed on disk after startup; bound facts are refused until plurxd restarts"
+                            );
+                        }
+                    }
+                    DecodePlanFallbackReason::RefusedSourceChanged => {
+                        tracing::warn!(
+                            file_id = file.id,
+                            reason = reason.label(),
+                            %error,
+                            "bound decoder planning refused changed source facts"
+                        );
+                        return Err(
+                            "the held source changed during decoder probing; rescan before playback"
+                                .to_owned(),
+                        );
+                    }
+                    DecodePlanFallbackReason::ProbeFailed
+                    | DecodePlanFallbackReason::IdentityIo => {
+                        tracing::warn!(
+                            file_id = file.id,
+                            reason = reason.label(),
+                            %error,
+                            "bound decoder planning fell back to stored probe facts"
+                        );
+                    }
+                    DecodePlanFallbackReason::Invariant => {
+                        tracing::error!(
+                            file_id = file.id,
+                            reason = reason.label(),
+                            %error,
+                            "bound decoder planning invariant failed; using stored probe facts"
+                        );
+                    }
+                }
                 tracing::debug!(
                     file_id = file.id,
+                    reason = reason.label(),
                     %error,
                     "bound decoder planning fell back to stored probe facts"
                 );
@@ -19622,8 +19877,8 @@ impl TranscodeManager {
                 format!("the held source could not be retained for decoder planning: {error}"),
             )
         })?;
-        let plan = self
-            .resolve_held_movie_plan(
+        let plan = BoundPlanCaller::Vod.finish(
+            self.resolve_held_movie_plan(
                 file,
                 &options,
                 encoder,
@@ -19634,8 +19889,8 @@ impl TranscodeManager {
                 Instant::now() + DECODE_PLAN_PROBE_BUDGET,
                 None,
             )
-            .await
-            .map_err(|error| vod_refusal_error("vod_decoder_plan_refused", error))?;
+            .await,
+        )?;
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
             return Err(vod_refusal_error(
@@ -19751,6 +20006,13 @@ impl TranscodeManager {
         let encoder = encoding
             .as_ref()
             .map_or("vod", |encoding| encoding.plan.encoder().label());
+        let codec_qualification = encoding.as_ref().map(|encoding| {
+            (
+                encoding.plan.encoder(),
+                encoding.options.pipeline.output_grade(),
+                encoding.options.pipeline,
+            )
+        });
         let prepared = crate::vodserve::VodRecipeRequest {
             request: req,
             encoding,
@@ -19809,6 +20071,9 @@ impl TranscodeManager {
                 .try_create(prepared, &file, &settings, attribution, session_id)
                 .await?
         };
+        if let Some((encoder, grade, pipeline)) = codec_qualification {
+            self.record_codec_qualification_session(encoder, grade, Some(pipeline));
+        }
         Ok(StartInfo {
             playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
             session_id: start.session_id,
@@ -22308,6 +22573,11 @@ impl TranscodeManager {
             },
         )
         .await;
+        self.record_codec_qualification_session(
+            encoder,
+            opts.pipeline.output_grade(),
+            Some(opts.pipeline),
+        );
 
         Ok(StartInfo {
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -29087,6 +29357,251 @@ fn test_session_with_control(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn metrics_encoder_inventory_has_closed_labels_and_records_successful_starts() {
+        let metrics = CodecQualificationMetrics::default();
+        metrics.record_encoder(Encoder::Qsv, OutputGrade::Hdr10);
+        metrics.record_encoder(Encoder::Qsv, OutputGrade::Hdr10);
+        metrics.record_pipeline(Pipeline::DoviPassthrough);
+        let rendered = metrics.prometheus(&EncoderCaps {
+            qsv: true,
+            vaapi: true,
+            ..EncoderCaps::default()
+        });
+
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("plurx_encoder_available{"))
+                .count(),
+            QUALIFICATION_ENCODERS.len()
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("plurx_encoder_sessions_total{"))
+                .count(),
+            QUALIFICATION_ENCODERS.len() * QUALIFICATION_GRADES.len()
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("plurx_tone_map_pipeline_sessions_total{"))
+                .count(),
+            QUALIFICATION_PIPELINES.len()
+        );
+        assert!(rendered.contains("plurx_encoder_available{family=\"software\"} 1\n"));
+        assert!(rendered.contains("plurx_encoder_available{family=\"qsv\"} 1\n"));
+        assert!(rendered.contains("plurx_encoder_available{family=\"nvenc\"} 0\n"));
+        assert!(
+            rendered.contains("plurx_encoder_sessions_total{family=\"qsv\",grade=\"hdr10\"} 2\n")
+        );
+        assert!(rendered
+            .contains("plurx_tone_map_pipeline_sessions_total{pipeline=\"dovi_passthrough\"} 1\n"));
+    }
+
+    #[tokio::test]
+    async fn held_plan_fallback_reasons() {
+        use crate::decode_facts::{DecodeFactError, DecodePlanFallbackReason};
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::PlanSourceBinding;
+
+        let cases = vec![
+            (
+                DecodeFactError::Deadline,
+                DecodePlanFallbackReason::Deadline,
+            ),
+            (
+                DecodeFactError::Cancelled,
+                DecodePlanFallbackReason::Cancelled,
+            ),
+            (
+                DecodeFactError::ProbeChanged,
+                DecodePlanFallbackReason::ProbeChanged,
+            ),
+            (
+                DecodeFactError::Spawn("spawn".into()),
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::MissingPipe,
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::Read("read".into()),
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::OversizedOutput,
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::Failed(Some(1), "failed".into()),
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::InvalidJson("json".into()),
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::InvalidFacts("facts".into()),
+                DecodePlanFallbackReason::ProbeFailed,
+            ),
+            (
+                DecodeFactError::ProbeIdentity("identity".into()),
+                DecodePlanFallbackReason::IdentityIo,
+            ),
+            (
+                DecodeFactError::SourceMetadata("metadata".into()),
+                DecodePlanFallbackReason::IdentityIo,
+            ),
+            (
+                DecodeFactError::CacheInvariant,
+                DecodePlanFallbackReason::Invariant,
+            ),
+        ];
+        #[cfg(not(target_os = "linux"))]
+        let cases = cases
+            .into_iter()
+            .chain(std::iter::once((
+                DecodeFactError::UnsupportedPlatform,
+                DecodePlanFallbackReason::Invariant,
+            )))
+            .collect::<Vec<_>>();
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("get file")
+            .expect("media file");
+        for (error, expected) in cases {
+            assert_eq!(error.fallback_reason(), expected, "{error}");
+            let (manager, _work, _cache) = cached_manager(&store);
+            let options = manager.options_for_tone_map(
+                Encoder::Software,
+                &file,
+                720,
+                0.0,
+                None,
+                None,
+                Some(1),
+                ToneMap::None,
+                OutputGrade::Sdr,
+            );
+            let plan = manager
+                .resolve_held_movie_plan_facts(&file, &options, Encoder::Software, Err(error))
+                .await
+                .expect("every non-source-change failure keeps the catalog fallback");
+            assert_eq!(plan.source_binding(), PlanSourceBinding::CatalogRow);
+            assert!(
+                manager
+                    .decode_facts
+                    .metrics()
+                    .prometheus()
+                    .contains(&format!(
+                        "plurx_decode_plan_fallbacks_total{{reason=\"{}\"}} 1",
+                        expected.label()
+                    )),
+                "the real fallback disposition records {}",
+                expected.label()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn source_change_refuses_bound_plan() {
+        use plurx_core::store::SqliteStore;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let source_path = media.path().join("source-change.mkv");
+        std::fs::write(&source_path, b"source before probe").expect("source fixture");
+        let file_id = seed_real_file(&store, &source_path).await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("get file")
+            .expect("media file");
+
+        let probe_path = media.path().join("ffprobe-source-change");
+        std::fs::write(
+            &probe_path,
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then printf '%s\\n' 'ffprobe version source-change'; exit 0; fi\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\",\"profile\":\"High\",\"pix_fmt\":\"yuv420p\",\"width\":160,\"height\":120,\"avg_frame_rate\":\"24/1\",\"r_frame_rate\":\"24/1\",\"color_transfer\":\"bt709\",\"disposition\":{\"attached_pic\":0}}]}'\n",
+        )
+        .expect("probe fixture");
+        let mut permissions = std::fs::metadata(&probe_path)
+            .expect("probe metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&probe_path, permissions).expect("executable probe");
+        let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
+            probe_path.to_str().expect("probe path"),
+        )
+        .await
+        .expect("probe identity");
+        let (manager, _work, _cache) = cached_manager(&store);
+        let manager = manager
+            .with_decode_probe(Some(probe))
+            .with_decode_source_final_identity_delay(Duration::from_millis(250));
+        let options = manager.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            120,
+            0.0,
+            None,
+            None,
+            Some(1),
+            ToneMap::None,
+            OutputGrade::Sdr,
+        );
+        let mutation_path = source_path.clone();
+        let mutation = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            std::fs::write(mutation_path, b"source changed after collection")
+                .expect("mutate source");
+        });
+        let result = manager
+            .resolve_held_movie_plan(
+                &file,
+                &options,
+                Encoder::Software,
+                crate::decode_facts::DecodeFactSource::new(
+                    Arc::new(std::fs::File::open(&source_path).expect("open held source")),
+                    Arc::new(tokio::sync::Semaphore::new(1)),
+                ),
+                Instant::now() + Duration::from_secs(2),
+                None,
+            )
+            .await;
+        mutation.await.expect("source mutation");
+        assert_eq!(
+            result,
+            Err("the held source changed during decoder probing; rescan before playback".into())
+        );
+        let reason = "the held source changed during decoder probing; rescan before playback";
+        let vod_error = BoundPlanCaller::Vod
+            .finish(Err(reason.to_owned()))
+            .expect_err("VOD must preserve the typed decoder-plan refusal");
+        assert_eq!(
+            vod_refusal(&vod_error),
+            Some(("vod_decoder_plan_refused", reason))
+        );
+        assert_eq!(
+            BoundPlanCaller::Pretranscode.finish(Err(reason.to_owned())),
+            Err(reason.to_owned()),
+            "the pretranscode job must receive the actionable failure for retry/settlement"
+        );
+        assert!(manager
+            .decode_facts
+            .metrics()
+            .prometheus()
+            .contains("plurx_decode_plan_fallbacks_total{reason=\"refused_source_changed\"} 1"));
+    }
 
     #[tokio::test]
     async fn channel_playback_repair_installs_normalized_native_hls_retry() {
@@ -40435,6 +40950,10 @@ pub(crate) mod tests {
             EncoderCaps::default(),
             Pipeline::Cpu,
         );
+        assert_eq!(
+            mgr.codec_qualification_encoder_count(Encoder::Software, OutputGrade::Sdr),
+            0
+        );
 
         let error = match mgr
             .start(file_id, 720, 0.0, None, None, "paul", "pb-failed-start")
@@ -40447,6 +40966,12 @@ pub(crate) mod tests {
         assert_eq!(mgr.active_sessions().await, 0);
         assert!(!mgr.admissions.live_is_waiting());
         assert_eq!(mgr.admissions.in_use(), 0);
+        assert_eq!(
+            mgr.codec_qualification_encoder_count(Encoder::Software, OutputGrade::Sdr),
+            0,
+            "a start that failed before manager registration was counted"
+        );
+        assert_eq!(mgr.codec_qualification_pipeline_count(Pipeline::Cpu), 0);
         assert_eq!(
             mgr.admissions.software_in_use(),
             0,
@@ -40555,11 +41080,21 @@ pub(crate) mod tests {
             .put_setting(keys::MAX_HW_SESSIONS, "1")
             .await
             .expect("cap");
+        assert_eq!(
+            mgr.codec_qualification_encoder_count(Encoder::Nvenc, OutputGrade::Sdr),
+            0
+        );
 
         let info = mgr
             .start(file_id, 1080, 0.0, None, None, "paul", "pb-mixed")
             .await
             .expect("hardware start");
+        assert_eq!(
+            mgr.codec_qualification_encoder_count(Encoder::Nvenc, OutputGrade::Sdr),
+            1,
+            "one manager-registered rolling start must count once"
+        );
+        assert_eq!(mgr.codec_qualification_pipeline_count(Pipeline::Cpu), 1);
         assert_eq!(mgr.admissions.in_use(), 1, "the start holds the only slot");
         let session = mgr
             .sessions
@@ -46074,7 +46609,6 @@ pub(crate) mod tests {
             block_budget_secs: None,
             transport: None,
         };
-
         // The idempotency identity is `intent_fingerprint`, so that is what
         // these guards have to name. Asserting against anything else lets a
         // field silently leave the real key while the test stays green.

@@ -42,6 +42,9 @@ pub use scan_identity_repair::{
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite;
 #[cfg(feature = "hiqlite-store")]
+#[doc(hidden)]
+pub use hiqlite::validation_time_http_store_operation;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_catalog;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_coordination;
@@ -5055,6 +5058,54 @@ pub async fn requeue_cluster_fragment_index_after_no_holder(
     store.requeue_cluster_fragment_index(replacement).await
 }
 
+/// Per-request replicated Store operation counts populated by `TimedClient`.
+///
+/// The HTTP daemon installs one of these around a matched request. Background
+/// work and SQLite requests have no scope, so recording remains a cheap no-op.
+/// Keeping the scope here, at the Store boundary, prevents route handlers from
+/// having to guess how many physical local, authority, or write operations a
+/// high-level Store method performed.
+#[derive(Clone, Default)]
+pub struct HttpStoreOperationCounts {
+    counts: std::sync::Arc<[std::sync::atomic::AtomicU64; 3]>,
+}
+
+impl HttpStoreOperationCounts {
+    #[must_use]
+    pub fn snapshot(&self) -> [u64; 3] {
+        use std::sync::atomic::Ordering;
+
+        std::array::from_fn(|index| self.counts[index].load(Ordering::Relaxed))
+    }
+
+    fn record(&self, class_index: usize) {
+        use std::sync::atomic::Ordering;
+
+        let _ = self.counts[class_index].fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| (current != u64::MAX).then(|| current.saturating_add(1)),
+        );
+    }
+}
+
+tokio::task_local! {
+    static HTTP_STORE_OPERATION_COUNTS: HttpStoreOperationCounts;
+}
+
+/// Scope one HTTP request so replicated Store operations can be attributed
+/// after its response is ready without putting route labels in `plurx-core`.
+pub async fn scope_http_store_operations<T>(
+    counts: HttpStoreOperationCounts,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    HTTP_STORE_OPERATION_COUNTS.scope(counts, future).await
+}
+
+pub(super) fn record_http_store_operation(class_index: usize) {
+    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index));
+}
+
 /// The only application-facing boundary for catalogue consistency choices.
 ///
 /// Ordinary [`Store`] methods remain Authority. This wrapper may run one
@@ -5285,6 +5336,22 @@ impl CatalogueReader {
             return Ok(result);
         }
         self.authority.recently_added(library_id, limit).await
+    }
+
+    /// Search is explicitly `NodeLocal`: Hiqlite's FTS tables are derived
+    /// state and its Store implementation already uses `query_map`. Keeping
+    /// the call on this named reader makes the classification visible to HTTP
+    /// handlers without incorrectly applying the bounded-replica permit.
+    pub async fn search_items(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<RecentItem>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(bounded) = &self.bounded {
+            return bounded.store.search_items(query, limit).await;
+        }
+        self.authority.search_items(query, limit).await
     }
 
     pub async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {
