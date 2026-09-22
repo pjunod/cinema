@@ -1325,6 +1325,12 @@ mod tests {
                  ALTER TABLE files DROP COLUMN max_cll;
                  ALTER TABLE files DROP COLUMN field_order;
                  ALTER TABLE files DROP COLUMN video_codec_tag;
+                 -- v66's publication proof. `fragment_indexes` itself is v27,
+                 -- so the table stays standing in a v43 database and only the
+                 -- column it gained above the guard goes. Leaving it would
+                 -- make the replayed v66 `ADD COLUMN` fail outright with
+                 -- `duplicate column name`.
+                 ALTER TABLE fragment_indexes DROP COLUMN validated_revision;
                  PRAGMA user_version = 43;",
             )
             .expect("construct unrecoverable v43 commit");
@@ -1414,7 +1420,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 21] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 22] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1451,6 +1457,12 @@ mod tests {
             // four, newest first, because a replay would otherwise meet its own
             // column.
             "ADD COLUMN max_cll",
+            // v66's publication proof, an additive `fragment_indexes` column
+            // rather than a `files` one. The two fixtures undo it differently:
+            // the v43 fixture drops the column, because that table is v27 and
+            // survives its wind-back, while the v14 fixture drops the whole
+            // table and takes the column with it.
+            "ADD COLUMN validated_revision",
         ];
 
         assert!(
