@@ -142,6 +142,24 @@ merge, is **green now**: `main` fixed it in `5ae76988`.
 
 ## What remains unproved
 
+### 2026-09-21 scheduler and sink isolation follow-up
+
+Draft PR [#407](http://192.168.4.7:3000/noirr/plurx/pulls/407) implements the
+architecture review's L1/L10 correction without changing a setting or wire
+shape. The owner-side scheduler, reconciliation pass and reminder sweep now
+share one immutable, unclipped guide generation; the public and relay guide
+bodies remain capped at 2 MiB. Each recording sink now owns a bounded writer
+queue, so a stalled disk ends only that attempt with one of three fixed reason
+codes while the tuner reader and healthy sibling sinks continue.
+
+Pinned Rust 1.97.1 compilation and focused in-memory regressions prove the
+day-13 scheduling/public-clipping split, late-row reconciliation, bounded
+backpressure, sink-local failure, shared overlap bytes, serving-fence
+cancellation and settlement-before-assembly. The fleet prompts in the plan
+have not run: there is no claim yet about a real 336-hour HDHomeRun guide, NAS
+export pause, attempt rollover or owner log. This row remains implementation
+evidence, not hardware acceptance.
+
 Everything that needs the hardware. The FLEX 4K has never been asked whether
 its tier answers `Start=` days out or carries `SeriesID`; no capture has ever
 been written; the raw-TS files have never been played back through the real

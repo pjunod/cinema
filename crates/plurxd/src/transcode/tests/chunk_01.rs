@@ -1635,12 +1635,17 @@
             container: Some("matroska".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(10),
             hdr: Some("dolby_vision".into()),
             hdr_format: Some("Dolby Vision · Profile 5".into()),
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(20_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -1683,6 +1688,145 @@
 
         assert_eq!(first.contract_fingerprint, identical.contract_fingerprint);
         assert_ne!(first.contract_fingerprint, changed.contract_fingerprint);
+    }
+
+    #[test]
+    fn an_fmp4_avc_master_is_attempt_media_not_generation_metadata() {
+        let file = profile5_file();
+        let context = HlsContext {
+            file_id: file.id,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs: "avc1.640034,mp4a.40.2".into(),
+            supplemental_codecs: None,
+            frame_rate: None,
+        };
+        let fmp4 = FrozenHlsPresentation::new(
+            file.clone(),
+            context.clone(),
+            &SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+        );
+        let mpeg_ts =
+            FrozenHlsPresentation::new(file, context, &SessionKind::Transcode { height: 1080 });
+
+        assert!(fmp4.sealed_stable_master_contract.is_none());
+        assert!(mpeg_ts.sealed_stable_master_contract.is_some());
+    }
+
+    #[test]
+    fn a_rolling_transcode_freezes_the_rung_geometry() {
+        let file = profile5_file();
+        let presentation = FrozenHlsPresentation::new(
+            file,
+            HlsContext {
+                file_id: 5,
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                codecs: "avc1.640034,mp4a.40.2".into(),
+                supplemental_codecs: None,
+                frame_rate: None,
+            },
+            &SessionKind::Transcode { height: 720 },
+        );
+
+        assert_eq!(presentation.file.width, Some(1280));
+        assert_eq!(presentation.file.height, Some(720));
+    }
+
+    #[test]
+    fn a_rolling_transcode_of_an_unprobed_source_freezes_no_geometry() {
+        let mut file = profile5_file();
+        file.width = None;
+        file.height = None;
+        let presentation = FrozenHlsPresentation::new(
+            file,
+            HlsContext {
+                file_id: 5,
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                codecs: "avc1.640034,mp4a.40.2".into(),
+                supplemental_codecs: None,
+                frame_rate: None,
+            },
+            &SessionKind::Transcode { height: 720 },
+        );
+
+        assert_eq!(presentation.file.width, None);
+        assert_eq!(presentation.file.height, None);
+    }
+
+    #[test]
+    fn a_rolling_transcode_never_upscales_its_declaration() {
+        let mut file = profile5_file();
+        file.width = Some(640);
+        file.height = Some(360);
+        let presentation = FrozenHlsPresentation::new(
+            file,
+            HlsContext {
+                file_id: 5,
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                codecs: "avc1.640034,mp4a.40.2".into(),
+                supplemental_codecs: None,
+                frame_rate: None,
+            },
+            &SessionKind::Transcode { height: 1080 },
+        );
+
+        assert_eq!(presentation.file.width, Some(640));
+        assert_eq!(presentation.file.height, Some(360));
+    }
+
+    #[test]
+    fn encoded_vod_presentation_never_mixes_source_width_with_requested_height() {
+        let mut file = profile5_file();
+        file.width = Some(640);
+        file.height = Some(360);
+
+        let presented = encoded_vod_presentation_file(file, 1080, OutputGrade::Sdr);
+
+        assert_eq!(presented.width, Some(640));
+        assert_eq!(presented.height, Some(360));
+    }
+
+    #[test]
+    fn encoded_vod_presentation_omits_both_unprobed_dimensions() {
+        let mut file = profile5_file();
+        file.width = None;
+        file.height = None;
+
+        let presented = encoded_vod_presentation_file(file, 1080, OutputGrade::Sdr);
+
+        assert_eq!(presented.width, None);
+        assert_eq!(presented.height, None);
+    }
+
+    #[test]
+    fn a_copy_session_keeps_the_source_geometry() {
+        let file = profile5_file();
+        let presentation = FrozenHlsPresentation::new(
+            file,
+            HlsContext {
+                file_id: 5,
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                codecs: "hvc1.2.4.H150.90,mp4a.40.2".into(),
+                supplemental_codecs: None,
+                frame_rate: None,
+            },
+            &SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+        );
+
+        assert_eq!(presentation.file.width, Some(3840));
+        assert_eq!(presentation.file.height, Some(2160));
     }
 
     #[test]

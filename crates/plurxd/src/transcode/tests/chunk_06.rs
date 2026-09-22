@@ -438,6 +438,8 @@
             media_origin_seconds: 0.0,
             grade: OutputGrade::Sdr,
             target_height: 1080,
+            tone_map_peak_nits: None,
+            tone_map_peak_source: None,
             encoder_label: Mutex::new("test"),
             started_unix: 0,
             failed: Arc::new(AtomicBool::new(false)),

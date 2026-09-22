@@ -1141,12 +1141,17 @@
                 container: Some("mkv".into()),
                 video_codec: Some("hevc".into()),
                 video_codec_tag: None,
+                field_order: None,
                 video_profile: None,
                 width: Some(1920),
                 height: Some(1080),
                 bit_depth: Some(if hdr.is_some() { 10 } else { 8 }),
                 hdr: hdr.map(str::to_owned),
                 hdr_format: hdr.map(str::to_owned),
+                max_cll: None,
+                max_fall: None,
+                mastering_max_luminance: None,
+                luminance_source: None,
                 bitrate: Some(8_000_000),
                 audio_streams: vec![
                     plurx_core::domain::AudioStream {

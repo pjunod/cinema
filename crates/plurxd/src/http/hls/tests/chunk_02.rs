@@ -98,6 +98,7 @@
             container: file.container.clone(),
             video_codec: file.video_codec.clone(),
             video_codec_tag: file.video_codec_tag.clone(),
+            field_order: file.field_order.clone(),
             video_profile: file.video_profile.clone(),
             width: file.width,
             height: file.height,
@@ -105,6 +106,10 @@
             hdr: file.hdr.clone(),
             dolby_vision: Default::default(),
             hdr_format: file.hdr_format.clone(),
+            max_cll: file.max_cll,
+            max_fall: file.max_fall,
+            mastering_max_luminance: file.mastering_max_luminance,
+            luminance_source: file.luminance_source.clone(),
             bitrate: file.bitrate,
             audio_streams: file.audio_streams.clone(),
             subtitle_streams: vec![SubtitleStream {

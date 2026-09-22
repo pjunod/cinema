@@ -829,6 +829,235 @@
         drop(reacquired);
     }
 
+    fn replacement_gate_fixture() -> (TranscodeManager, tempfile::TempDir) {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        (mgr, work)
+    }
+
+    /// A replacement that is abandoned — its request long since answered, its
+    /// guard living on inside a detached cleanup nothing can reach — used to
+    /// own its player's key for the life of the process. Every later open then
+    /// waited the cooperative window and was refused, so a viewer could not
+    /// restart the title they had been watching.
+    ///
+    /// Reproduced from m6, 2026-09-21 22:55 UTC, file 5208: a start blocked
+    /// under the gate on a 402-second subtitle sidecar extraction, answered
+    /// 503 at its own deadline, and its cleanup still held the key four
+    /// seconds later when the viewer pressed Retry.
+    #[tokio::test(start_paused = true)]
+    async fn an_abandoned_replacement_cannot_hold_its_player_against_the_next_open() {
+        let (mgr, _work) = replacement_gate_fixture();
+        let key = r#"[["user_id",42],"abandoned-player"]"#.to_owned();
+
+        let cleanup = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(600),
+            )
+            .await
+            .expect("the first replacement owns its gate");
+        // What `Drop for StartedSessionGuard` does before it spawns: name the
+        // session this teardown is tearing down, then say the hold is no
+        // longer a start anyone is waiting on.
+        cleanup.publish_fenceable("abandoned-provisional-session");
+        cleanup.mark_abandoned();
+
+        let opened = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+            .expect("a later open reclaims the player's key from an abandoned hold");
+
+        // The key really moved rather than being shared: a third open must now
+        // serialize behind the OPEN replacement, and must NOT be able to
+        // reclaim it, because that hold is neither abandoned nor past its
+        // ceiling.
+        match mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+        {
+            Ok(_) => panic!("a healthy replacement must keep its player"),
+            Err(error) => assert!(
+                is_replacement_wait_error(&error),
+                "the refusal a client can wait out, got: {error}"
+            ),
+        }
+
+        // And the reclaimed hold letting go afterwards must not hand out the
+        // live owner's key.
+        drop(cleanup);
+        assert!(
+            mgr.acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+            .is_err(),
+            "the reclaimed hold's release must not reopen the live owner's key"
+        );
+
+        drop(opened);
+        let reacquired = mgr
+            .acquire_cluster_replacement_gate(
+                key,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("a released gate is acquirable again");
+        drop(reacquired);
+    }
+
+    /// The property the first version of this fix broke, and the reason it is
+    /// pinned on its own: the work under this gate routinely takes tens of
+    /// seconds — the incident had two 50-second starts — and the client's own
+    /// retry ladder re-posts into it. A waiter must never be able to destroy a
+    /// start that is simply still building.
+    #[tokio::test(start_paused = true)]
+    async fn a_healthy_replacement_is_never_reclaimed_by_a_waiter() {
+        let (mgr, _work) = replacement_gate_fixture();
+        let key = r#"[["user_id",42],"slow-but-healthy-player"]"#.to_owned();
+        let building = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(600),
+            )
+            .await
+            .expect("the start owns its gate");
+        building.publish_fenceable("healthy-session");
+
+        // Three arrivals, the shape of the 1 s / 2 s / 4 s ladder, each waiting
+        // its full cooperative window and each refused rather than served.
+        for attempt in 0..3 {
+            match mgr
+                .acquire_cluster_replacement_gate(
+                    key.clone(),
+                    None,
+                    tokio::time::Instant::now() + Duration::from_secs(60),
+                )
+                .await
+            {
+                Ok(_) => panic!("attempt {attempt} reclaimed a healthy start's player"),
+                Err(error) => assert!(
+                    is_replacement_wait_error(&error),
+                    "attempt {attempt}: {error}"
+                ),
+            }
+        }
+        drop(building);
+    }
+
+    /// A hold that has outlived every budget it declared is wedged by
+    /// definition, and the next open takes its player back.
+    #[tokio::test(start_paused = true)]
+    async fn a_hold_past_its_ceiling_loses_its_player() {
+        let (mgr, _work) = replacement_gate_fixture();
+        let key = r#"[["user_id",42],"wedged-player"]"#.to_owned();
+        let wedged = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(6_000),
+            )
+            .await
+            .expect("the wedged start owns its gate");
+
+        tokio::time::advance(CLUSTER_REPLACEMENT_HOLD_CEILING + Duration::from_secs(1)).await;
+        let opened = mgr
+            .acquire_cluster_replacement_gate(
+                key,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+            .expect("a hold past its ceiling is reclaimable");
+        drop(opened);
+        drop(wedged);
+    }
+
+    /// The refusal a viewer waits out has to stay inside the narrow class the
+    /// clients retry. Widening it to the whole capacity class would put a
+    /// refusal that tells the client to ask for a smaller height, and one that
+    /// reports a misconfigured scratch ceiling, on a ladder neither can win.
+    #[tokio::test(start_paused = true)]
+    async fn the_replacement_wait_is_the_only_capacity_refusal_a_client_retries() {
+        let (mgr, _work) = replacement_gate_fixture();
+        let key = r#"[["user_id",42],"class-player"]"#.to_owned();
+        let held = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(600),
+            )
+            .await
+            .expect("the first replacement owns its gate");
+        let error = mgr
+            .acquire_cluster_replacement_gate(
+                key,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+            .err()
+            .expect("a healthy hold refuses");
+        assert!(is_replacement_wait_error(&error), "{error}");
+        assert!(
+            is_retryable_capacity_error(&error),
+            "the wait class stays a subset of the capacity class, so every \
+             existing server-side consumer keeps seeing it: {error}"
+        );
+        assert!(
+            !is_replacement_wait_error(&capacity_error(
+                "the proved 4K HDR10 QuickSync slot is busy; retry at 1080p"
+            )),
+            "a refusal that asks the client to change the request is not a wait"
+        );
+        drop(held);
+    }
+
+    /// A start with no budget left is out of time, not behind a wedged hold.
+    #[tokio::test]
+    async fn a_replacement_out_of_budget_refuses_instead_of_taking_the_key() {
+        let (mgr, _work) = replacement_gate_fixture();
+        let key = r#"[["user_id",42],"out-of-budget-player"]"#.to_owned();
+        let held = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+            .expect("the first replacement owns its gate");
+        let error = match mgr
+            .acquire_cluster_replacement_gate(key, None, tokio::time::Instant::now())
+            .await
+        {
+            Ok(_) => panic!("an expired start must not evict a live replacement"),
+            Err(error) => error,
+        };
+        assert!(is_retryable_capacity_error(&error), "{error}");
+        drop(held);
+    }
+
     /// The cluster replacement guard already spans provisional worker creation
     /// through the ingress activation verdict. A typed reopen must bind its
     /// predecessor to that same lifetime so the lease loop cannot terminalize

@@ -170,11 +170,12 @@
     #[test]
     fn one_start_mints_one_recovery_epoch_for_both_the_session_and_the_row() {
         // The production half only: this module's own text contains every
-        // literal it asserts about, so counting the whole file counts the test.
-        let source = include_str!("../../hls.rs")
-            .split_once("\nmod tests {")
-            .expect("the test module boundary")
-            .0;
+        // literal it asserts about, so counting the whole file counts the
+        // test. That used to need a split at `\nmod tests {`; since the tests
+        // moved out of `hls.rs` into this directory, the file *is* the
+        // production half and the split has nothing to find — it returned
+        // `None` and this `expect` panicked. Read the file whole instead.
+        let source = include_str!("../../hls.rs");
         assert_eq!(
             source
                 .matches("recovery_epoch_for(activation_predecessor.as_ref())")

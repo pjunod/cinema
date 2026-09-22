@@ -499,6 +499,14 @@ impl Drop for StartedSessionGuard {
             #[cfg(test)]
             test_settlement,
         } = cleanup;
+        // Declared before the spawn, not inside it: from here the guard is
+        // held by cleanup, its request has already answered the viewer, and a
+        // later open for this player must not queue behind it. Publishing the
+        // session first is what lets that open fence this teardown exactly.
+        if let Some(replacement) = _replacement.as_ref() {
+            replacement.publish_fenceable(&session_id);
+            replacement.mark_abandoned();
+        }
         std::mem::drop(runtime.spawn(async move {
             if owns_worker {
                 abort_started_session(&state, &owner_node_id, &incarnation_id, &session_id).await;
@@ -3901,6 +3909,26 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
         return ApiError::Conflict(error);
     }
     tracing::warn!(file = file_id, "session create failed: {error}");
+    // This player's previous start has not let go yet — a wait, and a bounded
+    // one, so name it. Left as a bare `{error}` sentence this was a codeless
+    // 503, which every client correctly refuses to retry because a 503 nobody
+    // explained is not a "still building" answer. The viewer got a terminal
+    // overlay quoting an internal sentence, over a Retry button that re-posted
+    // into the same contention with no backoff. With a code it joins
+    // `create_503_not_yet` and the existing 1s/2s/4s ladder waits it out.
+    //
+    // Deliberately narrower than the whole capacity class. Sibling refusals in
+    // that class are not all waits: one tells the client to ask for a smaller
+    // height, and one reports a scratch ceiling above the configured budget
+    // that no retry can satisfy. Those keep the codeless 503 nothing retries.
+    if crate::transcode::is_replacement_wait_error(&error) {
+        return ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "transcode_capacity_pending",
+            message: error,
+            retry_after_seconds: crate::transcode::REPLACEMENT_WAIT_RETRY_AFTER_SECS,
+        };
+    }
     if crate::transcode::is_serving_fence_error(&error)
         || crate::transcode::is_start_infrastructure_error(&error)
         || crate::transcode::is_retryable_capacity_error(&error)
@@ -11585,9 +11613,16 @@ async fn exact_hls_context_before(
     let inspection_deadline = deadline
         .checked_sub(Duration::from_millis(25))
         .unwrap_or(deadline);
+    let inspect_avc_init = owner.avc_master_uses_init();
     let inspected = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        exact_hls_context_at(state, session, context, inspection_deadline),
+        exact_hls_context_at(
+            state,
+            session,
+            context,
+            inspect_avc_init,
+            inspection_deadline,
+        ),
     )
     .await;
     match inspected {
@@ -11712,6 +11747,7 @@ async fn exact_hls_context(
         state,
         session,
         context,
+        true,
         Instant::now() + RESPONSE_PUBLICATION_LIFECYCLE_BUDGET,
     )
     .await
@@ -11721,12 +11757,13 @@ async fn exact_hls_context_at(
     state: &AppState,
     session: &str,
     mut context: crate::transcode::HlsContext,
+    inspect_avc_init: bool,
     deadline: Instant,
 ) -> Result<crate::transcode::HlsContext, HlsInitInspectionError> {
     let fallback_video = context.codecs.split(',').next().unwrap_or_default();
-    let Some(sample_entry) = ["hvc1", "hev1", "dvh1", "dvhe"]
+    let Some(sample_entry) = ["hvc1", "hev1", "dvh1", "dvhe", "avc1"]
         .into_iter()
-        .find(|entry| fallback_video.starts_with(entry))
+        .find(|entry| fallback_video.starts_with(entry) && (*entry != "avc1" || inspect_avc_init))
     else {
         return Ok(context);
     };
@@ -11862,11 +11899,14 @@ async fn exact_hls_context_at(
             | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
         ) => return Err(HlsInitInspectionError::unsupported()),
     };
-    let required_box = if matches!(sample_entry, "dvh1" | "dvhe") {
-        init.windows(4)
-            .any(|window| window == b"dvcC" || window == b"dvvC")
-    } else {
-        init.windows(4).any(|window| window == b"hvcC")
+    let required_box = match sample_entry {
+        "dvh1" | "dvhe" => init
+            .windows(4)
+            .any(|window| window == b"dvcC" || window == b"dvvC"),
+        // AVC is resolved structurally from the selected video track below;
+        // a raw byte occurrence is not evidence that an avcC belongs to it.
+        "avc1" => true,
+        _ => init.windows(4).any(|window| window == b"hvcC"),
     };
     if !required_box {
         return Err(HlsInitInspectionError::invalid());
@@ -11883,21 +11923,34 @@ async fn exact_hls_context_at(
             ) => return Err(HlsInitInspectionError::unsupported()),
         }
     }
-    match plurx_core::fmp4::validate_hevc_sample_entries(&parsed) {
-        Ok(plurx_core::fmp4::HevcSampleEntryLayout::Single) => {}
-        Ok(plurx_core::fmp4::HevcSampleEntryLayout::NotHevc)
-        | Ok(plurx_core::fmp4::HevcSampleEntryLayout::Multiple { .. }) => {
-            return Err(HlsInitInspectionError::unsupported());
+    if sample_entry != "avc1" {
+        match plurx_core::fmp4::validate_hevc_sample_entries(&parsed) {
+            Ok(plurx_core::fmp4::HevcSampleEntryLayout::Single) => {}
+            Ok(plurx_core::fmp4::HevcSampleEntryLayout::NotHevc)
+            | Ok(plurx_core::fmp4::HevcSampleEntryLayout::Multiple { .. }) => {
+                return Err(HlsInitInspectionError::unsupported());
+            }
+            Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
+                return Err(HlsInitInspectionError::invalid());
+            }
+            Err(
+                plurx_core::fmp4::Fmp4Error::Unsupported(_)
+                | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
+            ) => return Err(HlsInitInspectionError::unsupported()),
         }
-        Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
-            return Err(HlsInitInspectionError::invalid());
-        }
-        Err(
-            plurx_core::fmp4::Fmp4Error::Unsupported(_)
-            | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
-        ) => return Err(HlsInitInspectionError::unsupported()),
     }
-    let derived = if matches!(sample_entry, "dvh1" | "dvhe") {
+    let derived = if sample_entry == "avc1" {
+        match plurx_core::fmp4::avc_rfc6381_codec(&parsed) {
+            Ok(Some(codec)) => Some(codec),
+            Ok(None) | Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
+                return Err(HlsInitInspectionError::invalid());
+            }
+            Err(
+                plurx_core::fmp4::Fmp4Error::Unsupported(_)
+                | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
+            ) => return Err(HlsInitInspectionError::unsupported()),
+        }
+    } else if matches!(sample_entry, "dvh1" | "dvhe") {
         dolby_vision_codec_from_init(&init, sample_entry)
     } else {
         hevc_codec_from_init(&init, sample_entry)

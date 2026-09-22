@@ -5,6 +5,7 @@
 //! consumes the answer; it does not make another codec, size, or packaging
 //! decision later.
 
+use plurx_core::domain::ScanType;
 use plurx_core::playback::caps::{DeviceCaps, Transfer};
 use serde::{Deserialize, Serialize};
 
@@ -211,9 +212,10 @@ pub(crate) struct LiveSourceFacts {
 
 impl LiveSourceFacts {
     fn interlaced(&self) -> bool {
-        self.field_order
-            .as_deref()
-            .is_some_and(|order| !matches!(order, "progressive" | "unknown"))
+        matches!(
+            ScanType::from_field_order(self.field_order.as_deref()),
+            ScanType::Interlaced(_)
+        )
     }
 }
 
@@ -272,6 +274,8 @@ pub(crate) struct LiveDeliveryPlan {
     pub(crate) reasons: Vec<LiveDeliveryReason>,
     pub(crate) deinterlace: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) deinterlace_output: Option<LiveDeinterlaceOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_bitrate_bps: Option<u64>,
 }
 
@@ -279,6 +283,32 @@ pub(crate) struct LiveDeliveryPlan {
 pub(crate) struct LiveQualityPolicy {
     pub(crate) max_height: Option<u16>,
     pub(crate) max_bitrate_bps: Option<u64>,
+    pub(crate) deinterlace_output: LiveDeinterlaceOutput,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LiveDeinterlaceOutput {
+    #[default]
+    Field,
+    Frame,
+}
+
+impl LiveDeinterlaceOutput {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Field => "field",
+            Self::Frame => "frame",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "field" => Some(Self::Field),
+            "frame" => Some(Self::Frame),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -299,6 +329,70 @@ fn rate_within(source: Option<LiveRational>, limit: LiveRational) -> bool {
     source.is_none_or(|source| {
         u64::from(source.num) * u64::from(limit.den) <= u64::from(limit.num) * u64::from(source.den)
     })
+}
+
+fn doubled_rate(rate: LiveRational) -> Option<LiveRational> {
+    let numerator = u64::from(rate.num).checked_mul(2)?;
+    let denominator = u64::from(rate.den);
+    let divisor = gcd(numerator, denominator);
+    Some(LiveRational {
+        num: u32::try_from(numerator / divisor).ok()?,
+        den: u32::try_from(denominator / divisor).ok()?,
+    })
+}
+
+fn scaled_output_size(width: u16, height: u16, maximum_height: u16) -> (u16, u16) {
+    let output_height = height.min(maximum_height);
+    let output_width = if output_height < height {
+        let scaled = u32::from(width) * u32::from(output_height) / u32::from(height);
+        u16::try_from(scaled & !1).unwrap_or(width)
+    } else {
+        width
+    };
+    (output_width, output_height)
+}
+
+fn encoded_output_for_request(
+    request: &LivePlaybackRequest,
+    codec: &str,
+    width: u16,
+    height: u16,
+    explicit_height: Option<u16>,
+    output_frame_rate: Option<LiveRational>,
+) -> Option<(u16, u16)> {
+    request
+        .video_limits
+        .iter()
+        .filter(|limit| normalized(&limit.codec) == codec)
+        .filter_map(|limit| {
+            let width_limited_height = if width > limit.max_width {
+                u16::try_from(u32::from(height) * u32::from(limit.max_width) / u32::from(width))
+                    .ok()?
+            } else {
+                height
+            };
+            let maximum_height = [
+                explicit_height.unwrap_or(height),
+                limit.max_height,
+                width_limited_height,
+            ]
+            .into_iter()
+            .min()?;
+            let output = scaled_output_size(width, height, maximum_height);
+            (output.0 <= limit.max_width && rate_within(output_frame_rate, limit.max_frame_rate))
+                .then_some(output)
+        })
+        // Select one complete limit. Taking the maximum of each field across
+        // different limits can invent a 1080p60 capability from a 1080p30 row
+        // and a 720p60 row.
+        .max_by_key(|(width, height)| u32::from(*width) * u32::from(*height))
+}
+
+fn gcd(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left.max(1)
 }
 
 fn video_limit_supports(source: &LiveSourceFacts, limit: &LiveVideoLimit) -> bool {
@@ -640,24 +734,40 @@ pub(crate) fn resolve_live_delivery(
         ));
     }
 
-    let client_video_ceiling = request.and_then(|request| {
-        request
-            .video_limits
-            .iter()
-            .filter(|limit| normalized(&limit.codec) == video_codec)
-            .map(|limit| limit.max_height)
-            .max()
-    });
-    let output_height = [Some(height), explicit_height, client_video_ceiling]
-        .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or(height);
-    let output_width = if output_height < height {
-        let scaled = u32::from(width) * u32::from(output_height) / u32::from(height);
-        u16::try_from(scaled & !1).unwrap_or(width)
+    let deinterlace = source.interlaced() && video_action == LiveTrackAction::Encode;
+    // Two cadences, and they are not the same number. `plan.source.frame_rate`
+    // stays exactly as the source reported it — that is what a television
+    // client reads when it picks a display mode. `output.frame_rate` is what
+    // this encode will actually emit, so it has to agree with the bwdif mode
+    // the filter chain builds from `policy.deinterlace_output`: `send_field`
+    // emits one frame per field (doubled), `send_frame` one per frame pair
+    // (unchanged). Declaring the field rate for a `send_frame` chain would
+    // also mis-pick the client video limit chosen from it just below.
+    let output_frame_rate =
+        if deinterlace && policy.deinterlace_output == LiveDeinterlaceOutput::Field {
+            source.frame_rate.and_then(doubled_rate)
+        } else {
+            source.frame_rate
+        };
+    let (output_width, output_height) = if video_action == LiveTrackAction::Encode {
+        if let Some(request) = request {
+            encoded_output_for_request(
+                request,
+                &video_codec,
+                width,
+                height,
+                explicit_height,
+                output_frame_rate,
+            )
+            .ok_or_else(|| {
+                "client_route_unsupported: no single final video limit admits the encoded dimensions and frame rate"
+                    .to_owned()
+            })?
+        } else {
+            scaled_output_size(width, height, explicit_height.unwrap_or(height))
+        }
     } else {
-        width
+        scaled_output_size(width, height, explicit_height.unwrap_or(height))
     };
     let audio_channels = if audio_action == LiveTrackAction::Copy {
         source_channels
@@ -702,7 +812,7 @@ pub(crate) fn resolve_live_delivery(
             bit_depth: (video_action == LiveTrackAction::Copy)
                 .then_some(source.bit_depth)
                 .flatten(),
-            frame_rate: source.frame_rate,
+            frame_rate: output_frame_rate,
             hdr: (video_action == LiveTrackAction::Copy)
                 .then_some(source.hdr.clone())
                 .flatten(),
@@ -712,7 +822,8 @@ pub(crate) fn resolve_live_delivery(
         audio_action,
         packaging,
         reasons,
-        deinterlace: source.interlaced() && video_action == LiveTrackAction::Encode,
+        deinterlace,
+        deinterlace_output: deinterlace.then_some(policy.deinterlace_output),
         max_bitrate_bps,
     })
 }
@@ -739,6 +850,100 @@ mod tests {
             audio_channels: Some(6),
             ..LiveSourceFacts::default()
         }
+    }
+
+    /// D-01 hands a television the cadence to switch its panel to, so the plan
+    /// has to carry both numbers at once: the source cadence it reports, and
+    /// the cadence this encode will emit. They differ whenever bwdif runs in
+    /// `send_field`, so neither one may be derived from the other at the
+    /// reader.
+    #[test]
+    fn deinterlaced_output_reports_field_rate_for_display_matching() {
+        let mut interlaced = source();
+        interlaced.field_order = Some("tt".into());
+        interlaced.frame_rate = Some(LiveRational {
+            num: 30000,
+            den: 1001,
+        });
+        let mut playback = request("ac3");
+        playback.caps = serde_json::json!({
+            "v": 2,
+            "video": [{"codec":"h264","profiles":[],"max_height":2160,"present":[]}],
+            "audio": ["aac"],
+            "containers": ["mpegts"],
+            "transports": ["hls"]
+        });
+        playback.hls_formats = vec![LiveHlsFormat {
+            container: "mpegts".into(),
+            video: "h264".into(),
+            audio: "aac".into(),
+        }];
+        playback.video_limits = vec![LiveVideoLimit {
+            codec: "h264".into(),
+            profile: None,
+            max_width: 3840,
+            max_height: 2160,
+            max_frame_rate: LiveRational { num: 60, den: 1 },
+            interlaced: false,
+        }];
+        playback.audio_limits = vec![LiveAudioLimit {
+            codec: "aac".into(),
+            max_channels: 2,
+        }];
+        let plan = resolve_live_delivery(
+            &interlaced,
+            Some(&playback),
+            &LiveQualityPolicy::default(),
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: true,
+            },
+        )
+        .expect("interlaced input is converted");
+
+        assert!(plan.deinterlace);
+        assert_eq!(
+            plan.output.frame_rate,
+            Some(LiveRational {
+                num: 60000,
+                den: 1001,
+            }),
+        );
+        // The source cadence is reported unchanged beside it.
+        assert_eq!(
+            plan.source.frame_rate,
+            Some(LiveRational {
+                num: 30000,
+                den: 1001,
+            }),
+        );
+
+        // Under `send_frame` the encode emits the source cadence, and the plan
+        // still reports the same source cadence beside it.
+        let frame = resolve_live_delivery(
+            &interlaced,
+            Some(&playback),
+            &LiveQualityPolicy {
+                deinterlace_output: LiveDeinterlaceOutput::Frame,
+                ..LiveQualityPolicy::default()
+            },
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: true,
+            },
+        )
+        .expect("interlaced input is converted");
+        assert!(frame.deinterlace);
+        assert_eq!(
+            frame.output.frame_rate,
+            Some(LiveRational {
+                num: 30000,
+                den: 1001,
+            }),
+        );
+        assert_eq!(frame.source.frame_rate, frame.output.frame_rate);
     }
 
     fn request(audio: &str) -> LivePlaybackRequest {
@@ -796,6 +1001,27 @@ mod tests {
         assert_eq!(plan.audio_action, LiveTrackAction::Copy);
         assert_eq!(plan.packaging, LivePackaging::Fmp4);
         assert_eq!(plan.output.height, 2160);
+    }
+
+    #[test]
+    fn source_scan_type_is_conservative_for_unknown_and_future_tokens() {
+        let mut source = source();
+        for field_order in [
+            None,
+            Some("unknown"),
+            Some("future-order"),
+            Some("progressive"),
+        ] {
+            source.field_order = field_order.map(str::to_owned);
+            assert!(
+                !source.interlaced(),
+                "unexpected interlace for {field_order:?}"
+            );
+        }
+        for field_order in ["tt", "bb", "tb", "bt"] {
+            source.field_order = Some(field_order.to_owned());
+            assert!(source.interlaced(), "missing interlace for {field_order}");
+        }
     }
 
     #[test]
@@ -872,6 +1098,7 @@ mod tests {
             &LiveQualityPolicy {
                 max_height: Some(2160),
                 max_bitrate_bps: None,
+                ..LiveQualityPolicy::default()
             },
             &LiveExecutionSupport {
                 video_encode: true,
@@ -881,5 +1108,154 @@ mod tests {
         )
         .expect("bounded route");
         assert_eq!(plan.output.height, 720);
+    }
+
+    #[test]
+    fn interlaced_encode_reports_the_selected_output_cadence() {
+        let mut input = source();
+        input.width = Some(1920);
+        input.height = Some(1080);
+        input.field_order = Some("tt".into());
+        input.hdr = None;
+        input.frame_rate = Some(LiveRational {
+            num: 30_000,
+            den: 1_001,
+        });
+        let field = resolve_live_delivery(
+            &input,
+            None,
+            &LiveQualityPolicy::default(),
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: false,
+            },
+        )
+        .expect("field-rate plan");
+        assert!(field.deinterlace);
+        assert_eq!(
+            field.output.frame_rate,
+            Some(LiveRational {
+                num: 60_000,
+                den: 1_001
+            })
+        );
+
+        let frame = resolve_live_delivery(
+            &input,
+            None,
+            &LiveQualityPolicy {
+                deinterlace_output: LiveDeinterlaceOutput::Frame,
+                ..LiveQualityPolicy::default()
+            },
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: false,
+            },
+        )
+        .expect("frame-rate plan");
+        assert_eq!(
+            frame.output.frame_rate,
+            Some(LiveRational {
+                num: 30_000,
+                den: 1_001
+            })
+        );
+    }
+
+    #[test]
+    fn interlaced_encode_selects_one_h264_limit_for_dimensions_and_final_cadence() {
+        let mut input = source();
+        input.width = Some(1920);
+        input.height = Some(1080);
+        input.field_order = Some("tt".into());
+        input.hdr = None;
+        input.frame_rate = Some(LiveRational {
+            num: 30_000,
+            den: 1_001,
+        });
+
+        let mut playback = request("aac");
+        playback.caps = serde_json::json!({
+            "v": 2,
+            "video": [{"codec":"h264","profiles":[],"max_height":2160,"present":[]}],
+            "audio": ["aac"],
+            "containers": ["mpegts"],
+            "transports": ["hls"]
+        });
+        playback.hls_formats = vec![LiveHlsFormat {
+            container: "mpegts".into(),
+            video: "h264".into(),
+            audio: "aac".into(),
+        }];
+        playback.video_limits = vec![
+            LiveVideoLimit {
+                codec: "h264".into(),
+                profile: None,
+                max_width: 3840,
+                max_height: 2160,
+                max_frame_rate: LiveRational { num: 30, den: 1 },
+                interlaced: false,
+            },
+            LiveVideoLimit {
+                codec: "h264".into(),
+                profile: None,
+                max_width: 1280,
+                max_height: 720,
+                max_frame_rate: LiveRational { num: 60, den: 1 },
+                interlaced: false,
+            },
+        ];
+        let support = LiveExecutionSupport {
+            video_encode: true,
+            audio_encode: true,
+            tone_map: false,
+        };
+
+        let field = resolve_live_delivery(
+            &input,
+            Some(&playback),
+            &LiveQualityPolicy::default(),
+            &support,
+        )
+        .expect("the 720p60 H.264 limit admits field-rate output");
+        assert_eq!((field.output.width, field.output.height), (1280, 720));
+        assert_eq!(
+            field.output.frame_rate,
+            Some(LiveRational {
+                num: 60_000,
+                den: 1_001
+            })
+        );
+
+        let frame = resolve_live_delivery(
+            &input,
+            Some(&playback),
+            &LiveQualityPolicy {
+                deinterlace_output: LiveDeinterlaceOutput::Frame,
+                ..LiveQualityPolicy::default()
+            },
+            &support,
+        )
+        .expect("the 1080p30 H.264 limit admits frame-rate output");
+        assert_eq!((frame.output.width, frame.output.height), (1920, 1080));
+        assert_eq!(
+            frame.output.frame_rate,
+            Some(LiveRational {
+                num: 30_000,
+                den: 1_001
+            })
+        );
+
+        playback.video_limits.pop();
+        let error = resolve_live_delivery(
+            &input,
+            Some(&playback),
+            &LiveQualityPolicy::default(),
+            &support,
+        )
+        .expect_err("1080p30 must not be treated as 1080p59.94");
+        assert!(error.contains("no single final video limit"), "{error}");
     }
 }

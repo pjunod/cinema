@@ -67,7 +67,7 @@
         assert!(expected.is_dir(), "the cache exists before ffmpeg starts");
 
         let mut command = tokio::process::Command::new("ffmpeg");
-        configure_ffmpeg_runtime(&mut command, &manager.runtime_cache);
+        crate::producer_spawn::configure_ffmpeg_runtime(&mut command, &manager.runtime_cache);
         let inherited = command
             .as_std()
             .get_envs()

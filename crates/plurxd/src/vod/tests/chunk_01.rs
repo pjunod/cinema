@@ -409,12 +409,17 @@
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main".into()),
             width: Some(640),
             height: Some(360),
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(1_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -774,8 +779,13 @@
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
             capacity_hold: StdMutex::new(None),
+            ahead_hold: AtomicBool::new(false),
             init_notify: Notify::new(),
             wake: Notify::new(),
+            #[cfg(test)]
+            stopped_poll_armed: Notify::new(),
+            #[cfg(test)]
+            stopped_poll_fired: Notify::new(),
             gen_epoch: AtomicU64::new(0),
             last_child_pid: AtomicU32::new(0),
             dormant_since: StdMutex::new(None),
@@ -905,6 +915,7 @@
             produced_through: None,
             positioned_at: None,
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false,
             working_set: WorkingSet::default(),
         };
         assert_eq!(
@@ -945,6 +956,7 @@
             produced_through: Some(foreground_end),
             positioned_at: Some(0),
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false,
             working_set: WorkingSet {
                 used_bytes: 2,
                 budget_bytes: 1,

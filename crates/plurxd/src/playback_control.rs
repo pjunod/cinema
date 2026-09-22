@@ -13955,6 +13955,32 @@ pub(crate) fn preparation_cancelled_label(reason: &str) -> &'static str {
     }
 }
 
+/// Players whose replacement key was reclaimed from a hold that could not use
+/// it, by what proved the hold was reclaimable.
+///
+/// Index order is [`REPLACEMENT_RECLAIMED_REASONS`]. Counted rather than only
+/// logged for the same reason the teardown above is: a key moving between two
+/// starts for one player is a decision the product made about someone's
+/// playback, and it has to be visible from inside the product.
+///
+/// The two buckets mean different things to whoever is reading. `abandoned` is
+/// the design working — a cleanup outlived its request and the next open took
+/// the key back. `hold_ceiling` is not: it means something under the gate ran
+/// past every budget it declared, and it is the signal to go find what.
+static REPLACEMENTS_RECLAIMED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// The label vocabulary for [`record_replacement_reclaimed`], in index order.
+pub(crate) const REPLACEMENT_RECLAIMED_REASONS: [&str; 2] = ["abandoned", "hold_ceiling"];
+
+pub(crate) fn record_replacement_reclaimed(reason: &str) {
+    if let Some(index) = REPLACEMENT_RECLAIMED_REASONS
+        .iter()
+        .position(|name| *name == reason)
+    {
+        REPLACEMENTS_RECLAIMED[index].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 pub(crate) fn record_preparation_cancelled(reason: &str) {
     let label = preparation_cancelled_label(reason);
     if let Some(index) = PREPARATION_CANCELLED_REASONS
@@ -14344,6 +14370,16 @@ pub(crate) fn prometheus() -> String {
         output.push_str(&format!(
             "plurx_playback_preparation_cancelled_total{{reason=\"{reason}\"}} {}\n",
             PREPARATIONS_CANCELLED[index].load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_replacement_reclaimed_total Players whose replacement key was reclaimed from a hold that could not use it, by what proved it reclaimable.\n\
+         # TYPE plurx_playback_replacement_reclaimed_total counter\n",
+    );
+    for (index, reason) in REPLACEMENT_RECLAIMED_REASONS.iter().enumerate() {
+        output.push_str(&format!(
+            "plurx_playback_replacement_reclaimed_total{{reason=\"{reason}\"}} {}\n",
+            REPLACEMENTS_RECLAIMED[index].load(Ordering::Relaxed)
         ));
     }
     output.push_str(
@@ -15258,6 +15294,8 @@ mod tests {
             file_id: 7,
             target_height: 1080,
             encoder: "vod",
+            tone_map_peak_nits: None,
+            tone_map_peak_source: None,
             playlist_shape: "vod",
             producer_state: "held",
             producer_hold: Some("working_set"),
