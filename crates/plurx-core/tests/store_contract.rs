@@ -10419,6 +10419,75 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 async fn downgrade_current_schema_after_request_identity(client: &Client) {
     let results = client
         .txn([
+            // v44 through v40, newest first. Each of these migrations is an
+            // `ADD COLUMN` or an unconditional `CREATE`, so replaying it over a
+            // fixture that still carries its result fails; v42 also rebuilt
+            // the active-request index over `video_identity`, which must be
+            // back in its v22 shape before v27's column can be dropped. v41
+            // and v35-v39 are `IF NOT EXISTS` and replay cleanly.
+            (
+                "ALTER TABLE files DROP COLUMN luminance_source",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN mastering_max_luminance",
+                hiqlite::params!(),
+            ),
+            ("ALTER TABLE files DROP COLUMN max_fall", hiqlite::params!()),
+            ("ALTER TABLE files DROP COLUMN max_cll", hiqlite::params!()),
+            (
+                "ALTER TABLE files DROP COLUMN field_order",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS analysis_requests_one_active_forced_skip_successor",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS analysis_requests_one_active_source",
+                hiqlite::params!(),
+            ),
+            (
+                r#"CREATE UNIQUE INDEX analysis_requests_one_active_source
+                    ON analysis_requests(file_id, source_size, source_mtime, component,
+                                         pipeline_version, requested_generation, target_node_id)
+                    WHERE state IN ('queued', 'running', 'submitted')"#,
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS analysis_requests_one_active_forced_successor",
+                hiqlite::params!(),
+            ),
+            (
+                r#"CREATE UNIQUE INDEX analysis_requests_one_active_forced_successor
+                    ON analysis_requests(file_id, source_size, source_mtime, component)
+                    WHERE force_rebuild = 1 AND state IN ('queued', 'running', 'submitted')"#,
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE IF EXISTS analysis_index_repairs",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_diagnostic_json",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_retry_deadline_ms",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN video_codec_tag",
+                hiqlite::params!(),
+            ),
             (
                 "DROP TRIGGER IF EXISTS cache_publication_generation_guard",
                 hiqlite::params!(),
@@ -10496,6 +10565,75 @@ async fn downgrade_current_schema_after_request_identity(client: &Client) {
 async fn downgrade_current_schema_after_producer_recovery(client: &Client) {
     let results = client
         .txn([
+            // v44 through v40, newest first. Each of these migrations is an
+            // `ADD COLUMN` or an unconditional `CREATE`, so replaying it over a
+            // fixture that still carries its result fails; v42 also rebuilt
+            // the active-request index over `video_identity`, which must be
+            // back in its v22 shape before v27's column can be dropped. v41
+            // and v35-v39 are `IF NOT EXISTS` and replay cleanly.
+            (
+                "ALTER TABLE files DROP COLUMN luminance_source",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN mastering_max_luminance",
+                hiqlite::params!(),
+            ),
+            ("ALTER TABLE files DROP COLUMN max_fall", hiqlite::params!()),
+            ("ALTER TABLE files DROP COLUMN max_cll", hiqlite::params!()),
+            (
+                "ALTER TABLE files DROP COLUMN field_order",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS analysis_requests_one_active_forced_skip_successor",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS analysis_requests_one_active_source",
+                hiqlite::params!(),
+            ),
+            (
+                r#"CREATE UNIQUE INDEX analysis_requests_one_active_source
+                    ON analysis_requests(file_id, source_size, source_mtime, component,
+                                         pipeline_version, requested_generation, target_node_id)
+                    WHERE state IN ('queued', 'running', 'submitted')"#,
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS analysis_requests_one_active_forced_successor",
+                hiqlite::params!(),
+            ),
+            (
+                r#"CREATE UNIQUE INDEX analysis_requests_one_active_forced_successor
+                    ON analysis_requests(file_id, source_size, source_mtime, component)
+                    WHERE force_rebuild = 1 AND state IN ('queued', 'running', 'submitted')"#,
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE IF EXISTS analysis_index_repairs",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_diagnostic_json",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_retry_deadline_ms",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN video_codec_tag",
+                hiqlite::params!(),
+            ),
             (
                 "DROP TRIGGER IF EXISTS cache_publication_generation_guard",
                 hiqlite::params!(),
@@ -13471,12 +13609,17 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
             5,
         ),
         (
+            // v42 split the forced-successor index into a skip-marker one and
+            // a fragment-index one keyed on `video_identity`; the settled
+            // shape is the current one, so it carries both and not the v22
+            // index they replaced.
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index'
              AND name IN ('cluster_fragment_index_jobs_due',
                           'analysis_requests_one_active_source',
-                          'analysis_requests_one_active_forced_successor',
+                          'analysis_requests_one_active_forced_skip_successor',
+                          'analysis_requests_one_active_forced_fragment_successor',
                           'analysis_attempts_recent')",
-            4,
+            5,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('cluster_fragment_index_jobs')
@@ -14779,12 +14922,13 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    // 46 with the current durable tables, including the Library channel
-    // entities. A v14 source has no rows for newer tables — each one's
+    // 52 with the current durable tables, including the Library channel
+    // entities, media classifications, channel subject jobs and decisions,
+    // and the three DVR tables. A v14 source has no rows for newer tables — each one's
     // `minimum_schema` is later — but every table is still reported, because
     // the digest inventory is over what the import *plans*, not over what the
     // source happened to hold.
-    assert_eq!(report.tables.len(), 46);
+    assert_eq!(report.tables.len(), 52);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
