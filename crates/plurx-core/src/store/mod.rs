@@ -154,6 +154,28 @@ ALTER TABLE files ADD COLUMN dv_rpu_present INTEGER;";
 /// explicitly unknown until the bounded stored-probe backfill reaches them.
 const FILES_VIDEO_CODEC_TAG_COLUMN: &str = "ALTER TABLE files ADD COLUMN video_codec_tag TEXT;";
 
+/// The selected playable video's field-order token.
+///
+/// Nullable with no default so the bounded stored-probe backfill can
+/// distinguish rows it has not considered from rows it resolved to the
+/// explicit `unknown` token.
+const FILES_FIELD_ORDER_COLUMN: &str = "ALTER TABLE files ADD COLUMN field_order TEXT;";
+/// Source luminance facts used by the CPU tone-map recipe. Nullable values
+/// distinguish unknown rows from a completed probe whose `luminance_source`
+/// is `none`.
+pub(crate) const FILES_LUMINANCE_COLUMNS: &[&str] = &[
+    "ALTER TABLE files ADD COLUMN max_cll INTEGER",
+    "ALTER TABLE files ADD COLUMN max_fall INTEGER",
+    "ALTER TABLE files ADD COLUMN mastering_max_luminance INTEGER",
+    "ALTER TABLE files ADD COLUMN luminance_source TEXT CHECK (luminance_source IN ('stream','frame','none'))",
+];
+
+const FILES_LUMINANCE_COLUMNS_BATCH: &str = "
+ALTER TABLE files ADD COLUMN max_cll INTEGER;
+ALTER TABLE files ADD COLUMN max_fall INTEGER;
+ALTER TABLE files ADD COLUMN mastering_max_luminance INTEGER;
+ALTER TABLE files ADD COLUMN luminance_source TEXT CHECK (luminance_source IN ('stream','frame','none'));";
+
 /// The staged-generation ledger, shared verbatim by both backends.
 ///
 /// One statement, because SQLite's append-only migration list keeps one
@@ -828,6 +850,19 @@ pub struct MissingVideoCodecTag {
     pub probe_json: String,
 }
 
+/// One exact stored-probe snapshot eligible for the field-order backfill.
+///
+/// The source identity fields fence the update against a concurrent rescan in
+/// exactly the same way as [`MissingVideoCodecTag`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MissingFieldOrder {
+    pub id: i64,
+    pub path: String,
+    pub size: i64,
+    pub mtime: i64,
+    pub probe_json: String,
+}
+
 /// Result of applying an externally supplied series identifier to one show.
 /// The operation is deliberately narrower than general metadata updates: a
 /// known, different provider ID is diagnostic evidence, never permission to
@@ -1483,6 +1518,9 @@ pub mod keys {
     /// legacy output height remains separate for mixed-version sessions.
     pub const LIVE_TV_MAX_OUTPUT_HEIGHT: &str = "live_tv.max_output_height";
     pub const LIVE_TV_OUTPUT_HEIGHT: &str = "live_tv.output_height";
+    /// Operator-selected deinterlace cadence. This is an advisory Developer
+    /// choice, not part of the tuner ownership/generation tuple.
+    pub const LIVE_TV_DEINTERLACE_OUTPUT: &str = "live_tv.deinterlace_output";
     pub const LIVE_TV_CONFIG_GENERATION: &str = "live_tv.config_generation";
     /// Persisted owner-handoff safety barrier. These are internal state, not
     /// operator-editable settings: a replacement owner admits only after the
@@ -1596,6 +1634,9 @@ pub mod keys {
     /// Opt-in web Auto controller. Missing and every value other than `"1"`
     /// are off, leaving the server's initial Auto choice in place.
     pub const PLAYBACK_AUTO_ABR: &str = "playback.auto_abr";
+    /// Opt-in Android TV refresh-rate matching. Missing and every value other
+    /// than `"1"` are off; readiness observations are advisory only.
+    pub const PLAYBACK_DISPLAY_MODE_MATCH: &str = "playback.display_mode_match";
     /// Last successful bounded telemetry-prune pass, in unix seconds.
     pub const JOB_LAST_TELEMETRY_PRUNE: &str = "jobs.last_telemetry_prune";
     pub const TELEMETRY_RETAIN_DEFAULT_DAYS: i64 = 30;
@@ -1857,6 +1898,13 @@ pub mod keys {
     pub const JOB_VIDEO_CODEC_TAG_BACKFILL_DONE: &str = "jobs.video_codec_tag_backfilled";
     /// Node-local strictly-after cursor for the bounded sample-entry walk.
     pub const JOB_VIDEO_CODEC_TAG_BACKFILL_CURSOR: &str = "jobs.video_codec_tag_backfill_cursor";
+    /// Set after the bounded stored-probe walk has assigned every pre-column
+    /// file either its reporter token or the explicit `unknown` value.
+    pub const JOB_FIELD_ORDER_BACKFILL_DONE: &str = "jobs.field_order_backfilled";
+    /// Node-local strictly-after cursor for the field-order backfill.
+    pub const JOB_FIELD_ORDER_BACKFILL_CURSOR: &str = "jobs.field_order_backfill_cursor";
+    pub const JOB_LUMINANCE_BACKFILL_DONE: &str = "jobs.luminance_backfilled";
+    pub const JOB_LUMINANCE_BACKFILL_CURSOR: &str = "jobs.luminance_backfill_cursor";
     /// Per-library permanent Profile 7 conversion policy, encoded as a JSON
     /// object from decimal library id to `off`, `manual`, or `auto`. Missing
     /// libraries are always off: an upgrade must never rewrite media by
@@ -2821,6 +2869,36 @@ pub trait MediaStore: Send + Sync + 'static {
         &self,
         candidate: &MissingVideoCodecTag,
         video_codec_tag: &str,
+    ) -> Result<bool, StoreError>;
+    /// Rows whose retained probe document can populate the additive field
+    /// order column, strictly after `after_id` and bounded.
+    async fn files_missing_field_order(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingFieldOrder>, StoreError>;
+    /// Write the recovered token only while every source and probe identity
+    /// field still matches the snapshot returned above.
+    async fn set_file_field_order(
+        &self,
+        candidate: &MissingFieldOrder,
+        field_order: &str,
+    ) -> Result<bool, StoreError>;
+    /// HDR rows whose additive luminance columns have not been classified.
+    /// The same identity projection as the codec-tag backfill keeps the
+    /// subsequent write fenced to this exact stored probe snapshot.
+    async fn files_missing_luminance(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError>;
+    async fn set_file_luminance(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        max_cll: Option<i64>,
+        max_fall: Option<i64>,
+        mastering_max_luminance: Option<i64>,
+        source: &str,
     ) -> Result<bool, StoreError>;
     /// Write one file's Dolby Vision columns, and the display label derived
     /// from them.

@@ -579,7 +579,6 @@ function attachHls(video, playlistUrl, startAt){
       &&!playbackAttemptTerminallyStopped(attachedPlayer,startup.mediaAttachment);
     const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
     const hls=new Hls({
-      enableWorker:false,
       maxBufferLength:tgt.fwd,
       backBufferLength:tgt.back,
       ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
@@ -767,6 +766,30 @@ function attachHls(video, playlistUrl, startAt){
       console.warn("[cinema] hls.js fatal",d.type,d.details);
       const hlsFailure=playbackControlHlsFatal(d,!!(PLAYER&&PLAYER.started));
       const isMedia=hlsFailure.media_failure;
+      const mediaAction=PlaybackPolicy.hlsMediaFatalAction({
+        type:d.type,details:d.details,sourceBufferName:d.sourceBufferName||null,
+        retryUsed:attachedPlayer.hlsRetryUsed||0,
+        itemRecoveries:attachedPlayer.mediaRecoveries||0,
+        recoveredAtMs:attachedPlayer.mediaRecoveredAtMs,
+        nowMs:performance.now()
+      });
+      if(mediaAction==="recover"||mediaAction==="swap_audio"){
+        attachedPlayer.hlsRetryUsed=(attachedPlayer.hlsRetryUsed||0)+1;
+        attachedPlayer.mediaRecoveries=(attachedPlayer.mediaRecoveries||0)+1;
+        attachedPlayer.mediaRecoveredAtMs=performance.now();
+        clientLog(Object.assign({level:"warn",event:"hls_media_recovery",
+          detail:String(d.details||d.type||"media"),message:mediaAction},playbackContext()));
+        raisePlaybackSurface("owner_recovery_step",{context:attachedPlayer.started?"attached":"start",
+          title:"Recovering the decoder…",detail:"hls.js is repairing the current media attachment"});
+        try{
+          if(mediaAction==="swap_audio") hls.swapAudioCodec();
+          else hls.recoverMediaError();
+          return;
+        }catch(error){
+          clientLog({level:"warn",event:"hls_media_recovery",detail:"call_failed",
+            message:String(error&&error.message||error)});
+        }
+      }
       if(isMedia) startup.decoderFailed=true;
       const controlTrigger=notifyPlaybackControl("failed",hlsFailure.observation);
       clientLog(Object.assign({level:"error",event:"hls_fatal",detail:d.type,message:d.details,
