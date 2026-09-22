@@ -65,7 +65,23 @@ pub(crate) const MAX_ADMITTED_MEDIA_BODY_LIFETIME: Duration = Duration::from_sec
 /// Tokio's file reader performs one blocking-pool hop per read and caps an
 /// individual read at 2 MiB. This matches the existing fragment-index and
 /// offline transfer paths while keeping the per-body resident bound finite.
+///
+/// This is a storage-efficiency number only. It is deliberately *not* the
+/// unit the HLS pump proves delivery in; see `MEDIA_BODY_ACK_GRANULARITY`.
 pub(crate) const MEDIA_BODY_READ_BUFFER: usize = 256 * 1024;
+/// Bytes of a media body proved delivered per downstream acknowledgement.
+///
+/// The HLS pump counts bytes, renews the playback lease and completes an
+/// object only after the body side has acknowledged a chunk, so this constant
+/// *is* the resolution of that proof: the most a response can over-credit,
+/// and the smallest object for which a single body poll can look like a
+/// complete delivery. Keeping it at 4 KiB bounds both at 4 KiB no matter how
+/// large `MEDIA_BODY_READ_BUFFER` grows -- one storage read is split into
+/// this many-byte pieces, which is a refcount bump on the buffer the read
+/// already filled, not a copy. Raising the read size without this split would
+/// raise the proof granularity with it and let any object at or below the
+/// read size commit on one poll.
+pub(crate) const MEDIA_BODY_ACK_GRANULARITY: usize = 4 * 1024;
 /// Longest authenticated public/relay resource envelope before response
 /// headers, including accepted inter-node clock disagreement. This is the
 /// playlist ceiling; segment and short-control envelopes are smaller.

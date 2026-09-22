@@ -39,9 +39,9 @@ use crate::media_sessions::{
     unix_ms, worker_session_request_is_valid, DurableRouteResolution, RelayHeaders, RelayRequest,
     RelayResource, ReleaseAdmission, ReleaseSettlement, RemoteAbortRequest, RemotePrepareRequest,
     RemoteStartRequest, RemoteStartResponse, ACTIVATION_STORE_DEADLINE, LEASE_TTL_MS,
-    MAX_ADMITTED_MEDIA_BODY_LIFETIME, MEDIA_BODY_NO_PROGRESS_TIMEOUT, MEDIA_BODY_READ_BUFFER,
-    OWNER_ASSIGNMENT_DEADLINE, PREPARED_SUCCESSOR_PLAN_NOTE, REMOTE_ACTIVATION_CONFIRMATION_WINDOW,
-    START_DEADLINE, TERMINAL_PROJECTION_SAFETY_WINDOW,
+    MAX_ADMITTED_MEDIA_BODY_LIFETIME, MEDIA_BODY_ACK_GRANULARITY, MEDIA_BODY_NO_PROGRESS_TIMEOUT,
+    MEDIA_BODY_READ_BUFFER, OWNER_ASSIGNMENT_DEADLINE, PREPARED_SUCCESSOR_PLAN_NOTE,
+    REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE, TERMINAL_PROJECTION_SAFETY_WINDOW,
 };
 use crate::state::AppState;
 use crate::transcode::{ClusterReplacementGuard, PlaylistError};
@@ -13599,78 +13599,90 @@ async fn vod_segment_response_before(
                     return;
                 }
             };
-            let bytes_len = bytes.len() as u64;
-            let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
-            let send = sender.send(DrivenLocalChunk {
-                bytes,
-                accepted: accepted_tx,
-            });
-            tokio::pin!(send);
-            let sent = tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(body_deadline) => {
-                    fail(
-                        std::io::ErrorKind::TimedOut,
-                        "media response exceeded its maximum admitted body lifetime".to_owned(),
-                    );
-                    false
+            // One storage read is handed downstream in acknowledgement-sized
+            // pieces. `Bytes::split_to` is a refcount bump on the buffer this
+            // read already filled, not a copy, so the proof granularity below
+            // stays at MEDIA_BODY_ACK_GRANULARITY however large
+            // MEDIA_BODY_READ_BUFFER is. Without this split the read size
+            // *is* the ack unit, and any object at or below it would be
+            // counted and completed by a single body poll.
+            let mut bytes = bytes;
+            while !bytes.is_empty() {
+                let piece = bytes.split_to(bytes.len().min(MEDIA_BODY_ACK_GRANULARITY));
+                let bytes_len = piece.len() as u64;
+                let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+                let send = sender.send(DrivenLocalChunk {
+                    bytes: piece,
+                    accepted: accepted_tx,
+                });
+                tokio::pin!(send);
+                let sent = tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(body_deadline) => {
+                        fail(
+                            std::io::ErrorKind::TimedOut,
+                            "media response exceeded its maximum admitted body lifetime".to_owned(),
+                        );
+                        false
+                    }
+                    result = &mut send => result.is_ok(),
+                };
+                if !sent {
+                    return;
                 }
-                result = &mut send => result.is_ok(),
-            };
-            if !sent {
-                return;
-            }
-            let downstream_deadline =
-                (tokio::time::Instant::now() + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline);
-            let accepted = tokio::select! {
-                biased;
-                Ok(()) = accepted_rx => true,
-                _ = tokio::time::sleep_until(body_deadline) => {
-                    fail(
-                        std::io::ErrorKind::TimedOut,
-                        "media response exceeded its maximum admitted body lifetime".to_owned(),
-                    );
-                    false
+                let downstream_deadline = (tokio::time::Instant::now()
+                    + MEDIA_BODY_NO_PROGRESS_TIMEOUT)
+                    .min(body_deadline);
+                let accepted = tokio::select! {
+                    biased;
+                    Ok(()) = accepted_rx => true,
+                    _ = tokio::time::sleep_until(body_deadline) => {
+                        fail(
+                            std::io::ErrorKind::TimedOut,
+                            "media response exceeded its maximum admitted body lifetime".to_owned(),
+                        );
+                        false
+                    }
+                    _ = tokio::time::sleep_until(downstream_deadline) => {
+                        fail(
+                            std::io::ErrorKind::TimedOut,
+                            "media response made no downstream progress before its body deadline".to_owned(),
+                        );
+                        false
+                    }
+                    () = sender.closed() => false,
+                };
+                if !accepted {
+                    return;
                 }
-                _ = tokio::time::sleep_until(downstream_deadline) => {
-                    fail(
-                        std::io::ErrorKind::TimedOut,
-                        "media response made no downstream progress before its body deadline".to_owned(),
-                    );
-                    false
+                // Counted here — where the bytes actually left. `accepted` is the
+                // downstream acknowledgement, so nothing is credited to this
+                // viewer's rate until the chunk has been taken. A meter advanced
+                // at read time instead would measure the disk.
+                //
+                // The buffered init object is deliberately *not* counted. It is
+                // handed to the response whole, so crediting it would date bytes
+                // at handoff rather than at delivery and inflate the first window
+                // of a session that has delivered nothing yet. One small object
+                // missing from the total is the honest trade; an unmeasured
+                // session correctly reports no rate at all rather than a fast
+                // one, even though that advisory value no longer gates handoff.
+                delivery.note(bytes_len);
+                delivered = delivered.saturating_add(bytes_len);
+                if delivered == len {
+                    if let Some((manager, session, authorization, complete_object, permit)) =
+                        completion.take()
+                    {
+                        settle_streamed_response_completion(
+                            manager,
+                            session,
+                            authorization,
+                            complete_object,
+                            permit,
+                        );
+                    }
+                    return;
                 }
-                () = sender.closed() => false,
-            };
-            if !accepted {
-                return;
-            }
-            // Counted here — where the bytes actually left. `accepted` is the
-            // downstream acknowledgement, so nothing is credited to this
-            // viewer's rate until the chunk has been taken. A meter advanced
-            // at read time instead would measure the disk.
-            //
-            // The buffered init object is deliberately *not* counted. It is
-            // handed to the response whole, so crediting it would date bytes
-            // at handoff rather than at delivery and inflate the first window
-            // of a session that has delivered nothing yet. One small object
-            // missing from the total is the honest trade; an unmeasured
-            // session correctly reports no rate at all rather than a fast
-            // one, even though that advisory value no longer gates handoff.
-            delivery.note(bytes_len);
-            delivered = delivered.saturating_add(bytes_len);
-            if delivered == len {
-                if let Some((manager, session, authorization, complete_object, permit)) =
-                    completion.take()
-                {
-                    settle_streamed_response_completion(
-                        manager,
-                        session,
-                        authorization,
-                        complete_object,
-                        permit,
-                    );
-                }
-                return;
             }
         }
     });
@@ -14214,74 +14226,95 @@ async fn segment_local_before(
                     return;
                 }
             };
-            let bytes_len = bytes.len() as u64;
-            let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
-            let send = sender.send(DrivenLocalChunk {
-                bytes,
-                accepted: accepted_tx,
-            });
-            tokio::pin!(send);
-            let sent = tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(body_deadline) => {
-                    let error = std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "media response exceeded its maximum admitted body lifetime",
-                    );
-                    delivery.fail_transport(&error, "body_lifetime_exceeded");
-                    fail(error.kind(), error.to_string());
-                    false
-                }
-                result = &mut send => result.is_ok(),
-            };
-            if !sent {
-                return;
-            }
-            let downstream_deadline =
-                (tokio::time::Instant::now() + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline);
-            let accepted = tokio::select! {
-                biased;
-                Ok(()) = accepted_rx => true,
-                _ = tokio::time::sleep_until(body_deadline) => {
-                    let error = std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "media response exceeded its maximum admitted body lifetime",
-                    );
-                    delivery.fail_transport(&error, "body_lifetime_exceeded");
-                    fail(error.kind(), error.to_string());
-                    false
-                }
-                _ = tokio::time::sleep_until(downstream_deadline) => {
-                    let error = std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "media response made no downstream progress before its body deadline",
-                    );
-                    delivery.fail_transport(&error, "downstream_no_progress");
-                    fail(error.kind(), error.to_string());
-                    false
-                }
-                () = sender.closed() => false,
-            };
-            if !accepted {
-                return;
-            }
-            delivery.note_read(bytes_len, read_elapsed);
-            delivered = delivered.saturating_add(bytes_len);
-            if delivered == opened_len {
-                if delivery.finish() {
-                    if let Some((manager, session, authorization, complete_object, permit)) =
-                        completion.take()
-                    {
-                        settle_streamed_response_completion(
-                            manager,
-                            session,
-                            authorization,
-                            complete_object,
-                            permit,
+            // See the VOD pump: the storage read size above and the delivery
+            // proof granularity below are separate decisions. Splitting here
+            // keeps the ack -- and therefore the byte count, the slow-read
+            // report and the completion that renews the lease and moves the
+            // fetched-segment frontier -- at MEDIA_BODY_ACK_GRANULARITY.
+            let read_len = bytes.len() as u64;
+            let mut storage_read_noted = false;
+            let mut bytes = bytes;
+            while !bytes.is_empty() {
+                let piece = bytes.split_to(bytes.len().min(MEDIA_BODY_ACK_GRANULARITY));
+                let bytes_len = piece.len() as u64;
+                let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+                let send = sender.send(DrivenLocalChunk {
+                    bytes: piece,
+                    accepted: accepted_tx,
+                });
+                tokio::pin!(send);
+                let sent = tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(body_deadline) => {
+                        let error = std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "media response exceeded its maximum admitted body lifetime",
                         );
+                        delivery.fail_transport(&error, "body_lifetime_exceeded");
+                        fail(error.kind(), error.to_string());
+                        false
                     }
+                    result = &mut send => result.is_ok(),
+                };
+                if !sent {
+                    return;
                 }
-                return;
+                let downstream_deadline = (tokio::time::Instant::now()
+                    + MEDIA_BODY_NO_PROGRESS_TIMEOUT)
+                    .min(body_deadline);
+                let accepted = tokio::select! {
+                    biased;
+                    Ok(()) = accepted_rx => true,
+                    _ = tokio::time::sleep_until(body_deadline) => {
+                        let error = std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "media response exceeded its maximum admitted body lifetime",
+                        );
+                        delivery.fail_transport(&error, "body_lifetime_exceeded");
+                        fail(error.kind(), error.to_string());
+                        false
+                    }
+                    _ = tokio::time::sleep_until(downstream_deadline) => {
+                        let error = std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "media response made no downstream progress before its body deadline",
+                        );
+                        delivery.fail_transport(&error, "downstream_no_progress");
+                        fail(error.kind(), error.to_string());
+                        false
+                    }
+                    () = sender.closed() => false,
+                };
+                if !accepted {
+                    return;
+                }
+                delivery.note_delivered(bytes_len);
+                if !storage_read_noted {
+                    // The stall signal is a property of the storage read, not of
+                    // the acknowledgement unit, so it is evaluated once per read
+                    // against the bytes storage actually produced in that time --
+                    // but only after the body has taken the first piece of it, so
+                    // a chunk the consumer never accepted still reports nothing.
+                    storage_read_noted = true;
+                    delivery.note_storage_read(read_len, read_elapsed);
+                }
+                delivered = delivered.saturating_add(bytes_len);
+                if delivered == opened_len {
+                    if delivery.finish() {
+                        if let Some((manager, session, authorization, complete_object, permit)) =
+                            completion.take()
+                        {
+                            settle_streamed_response_completion(
+                                manager,
+                                session,
+                                authorization,
+                                complete_object,
+                                permit,
+                            );
+                        }
+                    }
+                    return;
+                }
             }
         }
     });
@@ -24584,6 +24617,82 @@ mod tests {
             taken,
             "exactly the bytes the viewer took — a reader that counted at read \
              time would be ahead of this, and one that never counted behind it"
+        );
+    }
+
+    /// The unit a body is proved delivered in is `MEDIA_BODY_ACK_GRANULARITY`,
+    /// and it does not move when `MEDIA_BODY_READ_BUFFER` does.
+    ///
+    /// The pump acknowledges a chunk, then counts it, then -- at the last byte
+    /// -- renews the lease and moves the fetched-segment frontier. So the
+    /// chunk size is the resolution of that whole proof: the most a response
+    /// can over-credit, and the largest object a single body poll can make
+    /// look complete. Raising the storage read to 256 KiB without splitting it
+    /// here would raise that resolution 64x and let `init.mp4`, subtitle
+    /// segments and audio-only renditions -- every media object at or below
+    /// the read size -- commit on one poll from a client that then walked
+    /// away. This pins the two numbers apart: the object below is one storage
+    /// read and many acknowledgements.
+    #[tokio::test]
+    async fn a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units() {
+        use futures_util::StreamExt;
+
+        const {
+            assert!(
+                MEDIA_BODY_ACK_GRANULARITY < MEDIA_BODY_READ_BUFFER,
+                "the proof granularity is only meaningful while it is finer than the read"
+            )
+        };
+
+        let dir = crate::test_tempdir().expect("VOD HTTP directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        let headers = RelayHeaders::default();
+        let session_id = "vod-ack-granularity";
+        let owner = install_vod_http_session(&fixture, dir.path(), session_id).await;
+
+        // One 64 KiB object: comfortably inside a single MEDIA_BODY_READ_BUFFER
+        // read, and the exact size class (init/subtitle/audio segment) the
+        // coarser proof would have completed on the first poll.
+        let path = dir.path().join("granularity.m4s");
+        let bytes = vec![5_u8; 64 * 1024];
+        tokio::fs::write(&path, &bytes).await.expect("VOD object");
+        assert!(bytes.len() <= MEDIA_BODY_READ_BUFFER);
+
+        let delivery = std::sync::Arc::new(crate::meter::Meter::new());
+        let response = vod_segment_response(
+            &fixture.state,
+            session_id,
+            "seg00005.m4s",
+            &headers,
+            vod_ready_metered(&path, bytes.len() as u64, std::sync::Arc::clone(&delivery)).await,
+            owner,
+        )
+        .await
+        .expect("VOD response");
+
+        let mut body = response.into_body().into_data_stream();
+        let first = body
+            .next()
+            .await
+            .expect("a first chunk")
+            .expect("a readable first chunk");
+        assert_eq!(
+            first.len(),
+            MEDIA_BODY_ACK_GRANULARITY,
+            "one poll takes one acknowledgement unit, not one storage read"
+        );
+        drop(body);
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            delivery.total_bytes(),
+            MEDIA_BODY_ACK_GRANULARITY as i64,
+            "and exactly that unit is credited, not the whole object"
+        );
+        assert_eq!(
+            vod_fetched_segment(&fixture, session_id).await,
+            None,
+            "an object smaller than one storage read still cannot complete on one poll"
         );
     }
 
