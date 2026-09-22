@@ -347,7 +347,7 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
         }
         readdress_single_voter_if_needed(config)?;
         let selected = Box::pin(open_active_store(config, daemon_lock)).await?;
-        finalize_pending_join_best_effort(config, &selected).await;
+        Box::pin(finalize_pending_join_best_effort(config, &selected)).await;
         // A crash immediately after rename may expose the target before its
         // parent-directory entry is durable. Observing it on recovery lets us
         // finish that durability boundary before clearing attempt artifacts.
@@ -4615,6 +4615,32 @@ mod tests {
     /// token file, public redeem/finalize wire, local membership state, and
     /// fully-TLS voter startup. The in-process membership harness alone cannot
     /// cover any of these pre-store decisions.
+    /// 496 bytes with every branch boxed (debug, 2026-09-22). With the join,
+    /// reopen and finalize branches awaited inline it measured 9,984, so the
+    /// limit leaves room for ordinary growth and still refuses a branch
+    /// awaited inline again.
+    #[cfg(feature = "hiqlite-store")]
+    const SELECT_DAEMON_STORE_FUTURE_LIMIT: usize = 2048;
+
+    /// `select_daemon_store` is awaited inline by daemon startup and by the
+    /// join tests, so its future lives on the caller's stack. Its branches are
+    /// boxed to keep it small; awaiting one inline again summed every branch's
+    /// state machine into it and overflowed a 2 MiB debug test thread.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn select_daemon_store_future_stays_small() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let config = membership_test_config(data_dir.path());
+        let future = select_daemon_store(&config);
+        let size = std::mem::size_of_val(&future);
+        drop(future);
+        println!("select_daemon_store future: {size} bytes");
+        assert!(
+            size <= SELECT_DAEMON_STORE_FUTURE_LIMIT,
+            "select_daemon_store's future grew to {size} bytes; box the branch that grew it"
+        );
+    }
+
     #[cfg(feature = "hiqlite-store")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {

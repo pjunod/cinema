@@ -10415,144 +10415,114 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
     );
 }
 
+/// v44 through v40, newest first, for the downgrade helpers below. Each of
+/// these migrations is an `ADD COLUMN` or an unconditional `CREATE`, so
+/// replaying it over a fixture that still carries its result fails; v42 also
+/// rebuilt the active-request index over `video_identity`, which must be back
+/// in its v22 shape before v27's column can be dropped. v41 and v35-v39 are
+/// `IF NOT EXISTS`, so their objects are left in place and replay cleanly.
+/// One list, so the next non-idempotent migration is reversed in one place.
 #[cfg(feature = "hiqlite-contract-tests")]
-async fn downgrade_current_schema_after_request_identity(client: &Client) {
-    let results = client
-        .txn([
-            // v44 through v40, newest first. Each of these migrations is an
-            // `ADD COLUMN` or an unconditional `CREATE`, so replaying it over a
-            // fixture that still carries its result fails; v42 also rebuilt
-            // the active-request index over `video_identity`, which must be
-            // back in its v22 shape before v27's column can be dropped. v41
-            // and v35-v39 are `IF NOT EXISTS` and replay cleanly.
-            (
-                "ALTER TABLE files DROP COLUMN luminance_source",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE files DROP COLUMN mastering_max_luminance",
-                hiqlite::params!(),
-            ),
-            ("ALTER TABLE files DROP COLUMN max_fall", hiqlite::params!()),
-            ("ALTER TABLE files DROP COLUMN max_cll", hiqlite::params!()),
-            (
-                "ALTER TABLE files DROP COLUMN field_order",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP INDEX IF EXISTS analysis_requests_one_active_forced_skip_successor",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP INDEX IF EXISTS analysis_requests_one_active_source",
-                hiqlite::params!(),
-            ),
-            (
-                r#"CREATE UNIQUE INDEX analysis_requests_one_active_source
+fn post_v39_downgrade_statements() -> Vec<(&'static str, hiqlite::Params)> {
+    [
+        "ALTER TABLE files DROP COLUMN luminance_source",
+        "ALTER TABLE files DROP COLUMN mastering_max_luminance",
+        "ALTER TABLE files DROP COLUMN max_fall",
+        "ALTER TABLE files DROP COLUMN max_cll",
+        "ALTER TABLE files DROP COLUMN field_order",
+        "DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor",
+        "DROP INDEX IF EXISTS analysis_requests_one_active_forced_skip_successor",
+        "DROP INDEX IF EXISTS analysis_requests_one_active_source",
+        r#"CREATE UNIQUE INDEX analysis_requests_one_active_source
                     ON analysis_requests(file_id, source_size, source_mtime, component,
                                          pipeline_version, requested_generation, target_node_id)
                     WHERE state IN ('queued', 'running', 'submitted')"#,
-                hiqlite::params!(),
-            ),
-            (
-                "DROP INDEX IF EXISTS analysis_requests_one_active_forced_successor",
-                hiqlite::params!(),
-            ),
-            (
-                r#"CREATE UNIQUE INDEX analysis_requests_one_active_forced_successor
+        "DROP INDEX IF EXISTS analysis_requests_one_active_forced_successor",
+        r#"CREATE UNIQUE INDEX analysis_requests_one_active_forced_successor
                     ON analysis_requests(file_id, source_size, source_mtime, component)
                     WHERE force_rebuild = 1 AND state IN ('queued', 'running', 'submitted')"#,
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TABLE IF EXISTS analysis_index_repairs",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_diagnostic_json",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_retry_deadline_ms",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE files DROP COLUMN video_codec_tag",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS cache_publication_generation_guard",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS offline_recovery_guard",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE offline_packages DROP COLUMN claim_generation",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TABLE media_session_producer_recovery",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP INDEX IF EXISTS analysis_requests_terminal_identity",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE media_playback_pointers DROP COLUMN desired_revision",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TABLE IF EXISTS media_playback_desired",
-                hiqlite::params!(),
-            ),
-        ])
+        "DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source",
+        "DROP TABLE IF EXISTS analysis_index_repairs",
+        "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_diagnostic_json",
+        "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_retry_deadline_ms",
+        "ALTER TABLE files DROP COLUMN video_codec_tag",
+    ]
+    .into_iter()
+    .map(|sql| (sql, hiqlite::params!()))
+    .collect()
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn downgrade_current_schema_after_request_identity(client: &Client) {
+    let mut statements = post_v39_downgrade_statements();
+    statements.extend([
+        (
+            "DROP TRIGGER IF EXISTS cache_publication_generation_guard",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS offline_recovery_guard",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE offline_packages DROP COLUMN claim_generation",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TABLE media_session_producer_recovery",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP INDEX IF EXISTS analysis_requests_terminal_identity",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE media_playback_pointers DROP COLUMN desired_revision",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TABLE IF EXISTS media_playback_desired",
+            hiqlite::params!(),
+        ),
+    ]);
+    let results = client
+        .txn(statements)
         .await
         .expect("submit post-v27 fixture downgrade");
     results
@@ -10563,110 +10533,43 @@ async fn downgrade_current_schema_after_request_identity(client: &Client) {
 
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn downgrade_current_schema_after_producer_recovery(client: &Client) {
+    let mut statements = post_v39_downgrade_statements();
+    statements.extend([
+        (
+            "DROP TRIGGER IF EXISTS cache_publication_generation_guard",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard",
+            hiqlite::params!(),
+        ),
+        (
+            "DROP TRIGGER IF EXISTS offline_recovery_guard",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE offline_packages DROP COLUMN claim_generation",
+            hiqlite::params!(),
+        ),
+        (
+            "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
+            hiqlite::params!(),
+        ),
+    ]);
     let results = client
-        .txn([
-            // v44 through v40, newest first. Each of these migrations is an
-            // `ADD COLUMN` or an unconditional `CREATE`, so replaying it over a
-            // fixture that still carries its result fails; v42 also rebuilt
-            // the active-request index over `video_identity`, which must be
-            // back in its v22 shape before v27's column can be dropped. v41
-            // and v35-v39 are `IF NOT EXISTS` and replay cleanly.
-            (
-                "ALTER TABLE files DROP COLUMN luminance_source",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE files DROP COLUMN mastering_max_luminance",
-                hiqlite::params!(),
-            ),
-            ("ALTER TABLE files DROP COLUMN max_fall", hiqlite::params!()),
-            ("ALTER TABLE files DROP COLUMN max_cll", hiqlite::params!()),
-            (
-                "ALTER TABLE files DROP COLUMN field_order",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP INDEX IF EXISTS analysis_requests_one_active_forced_skip_successor",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP INDEX IF EXISTS analysis_requests_one_active_source",
-                hiqlite::params!(),
-            ),
-            (
-                r#"CREATE UNIQUE INDEX analysis_requests_one_active_source
-                    ON analysis_requests(file_id, source_size, source_mtime, component,
-                                         pipeline_version, requested_generation, target_node_id)
-                    WHERE state IN ('queued', 'running', 'submitted')"#,
-                hiqlite::params!(),
-            ),
-            (
-                "DROP INDEX IF EXISTS analysis_requests_one_active_forced_successor",
-                hiqlite::params!(),
-            ),
-            (
-                r#"CREATE UNIQUE INDEX analysis_requests_one_active_forced_successor
-                    ON analysis_requests(file_id, source_size, source_mtime, component)
-                    WHERE force_rebuild = 1 AND state IN ('queued', 'running', 'submitted')"#,
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TABLE IF EXISTS analysis_index_repairs",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_diagnostic_json",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_retry_deadline_ms",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE files DROP COLUMN video_codec_tag",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS cache_publication_generation_guard",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard",
-                hiqlite::params!(),
-            ),
-            (
-                "DROP TRIGGER IF EXISTS offline_recovery_guard",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE offline_packages DROP COLUMN claim_generation",
-                hiqlite::params!(),
-            ),
-            (
-                "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
-                hiqlite::params!(),
-            ),
-        ])
+        .txn(statements)
         .await
         .expect("submit post-v32 fixture downgrade");
     results
@@ -13620,6 +13523,11 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
                           'analysis_requests_one_active_forced_fragment_successor',
                           'analysis_attempts_recent')",
             5,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index'
+             AND name = 'analysis_requests_one_active_forced_successor'",
+            0,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('cluster_fragment_index_jobs')

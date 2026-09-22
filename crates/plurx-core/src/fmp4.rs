@@ -2603,11 +2603,11 @@ struct AvcCLocation {
     payload: Range<usize>,
     /// Read only by the fixture builders that duplicate or rewrite a sample
     /// entry; the production reader needs `sample_entry` and `payload` alone.
-    #[cfg_attr(not(any(test, feature = "fixtures")), allow(dead_code))]
+    #[cfg_attr(not(any(test, feature = "fixtures")), expect(dead_code))]
     entry: BoxAt,
     /// `stsd` first, then every enclosing box through `moov`. Fixture-only,
     /// like `entry`.
-    #[cfg_attr(not(any(test, feature = "fixtures")), allow(dead_code))]
+    #[cfg_attr(not(any(test, feature = "fixtures")), expect(dead_code))]
     ancestors: Vec<BoxAt>,
 }
 
