@@ -349,6 +349,18 @@ terminal to a sample.
 `Sample` are refused once `len() > QUEUE - TERMINAL_RESERVE`. The reserve
 is what "room reserved for terminal outcomes" means in the remedy.
 
+Two corrections from C-06's sole adversarial review, both in the built code.
+First, the decision and the enqueue have to be **one** step: a depth snapshot
+followed by a separate send lets concurrent non-terminal producers all read
+the same sub-reserve depth and all send, spending the reserve exactly when it
+is needed. Admission therefore happens inside the queue's own lock. Second, a
+reserve alone is not the stated priority: 896 samples plus 128 terminals is a
+full queue, and the next terminal would be refused with 896 samples queued
+ahead of it. So a terminal arriving at a full queue **displaces the oldest
+non-terminal**, which is counted `queue_full`. Occupancy still never exceeds
+`QUEUE`, and the only queue that can refuse a terminal is one already holding
+`QUEUE` terminals.
+
 **Coalescing** happens in the writer, over the batch it has just taken, not
 in the queue: consecutive `Sample` jobs with the same
 `(session_id, event)` collapse to the newest, and the collapsed ones count
@@ -362,22 +374,36 @@ than at enqueue keeps `emit` free of a map lookup.
 | Metric | Labels |
 |---|---|
 | `plurx_telemetry_enqueued_total` | `class="terminal\|lifecycle\|sample"` |
-| `plurx_telemetry_dropped_total` | `reason="queue_full\|coalesced\|writer_degraded\|shutdown"` |
+| `plurx_telemetry_dropped_total` | `reason="queue_full\|coalesced\|writer_degraded\|writer_panic\|shutdown"` |
 | `plurx_telemetry_written_total` | `outcome="ok\|error"` |
 | `plurx_telemetry_queue_depth` | none (gauge) |
 | `plurx_telemetry_batch_size` | none (histogram; 1,2,4,8,16,32,64,+Inf) |
 | `plurx_telemetry_batch_seconds` | none (histogram; 0.001,0.01,0.05,0.25,1,5,+Inf) |
 | `plurx_telemetry_setting_refresh_failures_total` | none |
 
-Three classes × one label each: twelve series in total, all fixed. No
+Three classes × one label each: thirteen series in total, all fixed. No
 session ids, no file ids, no user ids, no paths — the same rule
 [OPERATIONS.md](../OPERATIONS.md) §"Health & metrics" already states for
 the cluster counters.
 
+**`writer_panic` is a fifth reason this plan did not ask for.** It was added
+during C-06's sole adversarial review, which found that a store future
+panicking after the writer had taken its batch off the queue destroyed that
+batch without incrementing any reason at all. The four reasons above are all
+deliberate discards; this one is not, and labelling it `writer_degraded`
+would have conflated "refused at the door because this node's sidecar keeps
+dying" with "already accepted and then lost". The cardinality is still
+fixed.
+
 **Shutdown.** `const DRAIN: Duration = Duration::from_secs(2);` On the
 drain signal the sink refuses `Sample`, the writer finishes the batch it
 holds and drains the queue for at most `DRAIN`, then counts the remainder
-as `reason="shutdown"` and returns. Two seconds sits inside the 10 s
+as `reason="shutdown"` and returns. The remainder is **transferred, not
+inferred from occupancy** — the review's third finding. Closing the queue
+and taking the writer's in-flight batch each yield their contents to exactly
+one caller, so a writer still wedged in a store call cannot afterwards report
+as written the jobs the drain has already reported lost, and the in-flight
+batch is part of the remainder instead of invisible to it. Two seconds sits inside the 10 s
 restart-preparation window `main.rs:1505-1512` already opens before Live TV
 shutdown, so this adds no wall time to a deploy. It is bounded because an
 unbounded drain against a wedged sidecar would hold the process open

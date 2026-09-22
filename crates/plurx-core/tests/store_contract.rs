@@ -534,6 +534,14 @@ const OFFLINE_METHODS: &[&str] = &[
 ];
 const TELEMETRY_METHODS: &[&str] = &[
     "record_playback_event",
+    // C-06's bounded writer drains its queue in batches, and the sidecar's
+    // single connection mutex is the resource that batching exists to stop
+    // reacquiring per event. The folded network-prior observations ride the
+    // same call for the same reason: they live in the same node-local file
+    // behind the same mutex, and folding them one at a time would put the
+    // per-event acquisition straight back. The two opt-ins stay independent
+    // -- either slice may be empty.
+    "record_playback_batch",
     "prune_playback_events",
     "playback_events",
 ];
@@ -16440,7 +16448,13 @@ fn contract_inventory_matches_every_store_method() {
     // `validate_fragment_index_page`, a bounded node-local pass over legacy
     // rows. It is named in `FRAGMENT_INDEX_METHODS` above; no new trait and no
     // new supertrait of `Store`, so nothing above this call had to change.
-    assert_eq!(declared.len(), 380, "review the Store method count");
+    //
+    // 380 -> 381 for the one `PlaybackTelemetryStore` method C-06 adds,
+    // `record_playback_batch`. It is named in `TELEMETRY_METHODS` above, and
+    // it is an addition rather than a replacement of `record_playback_event`,
+    // which the admin read path and the sidecar tests still use one row at a
+    // time. No new trait and no new supertrait of `Store`.
+    assert_eq!(declared.len(), 381, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -21789,6 +21803,112 @@ async fn playback_telemetry_contract_runs_through_dyn_store() {
             .expect("query remaining telemetry");
         assert_eq!(remaining.len(), 1, "backend {backend}");
         assert_eq!(remaining[0].id, second_id, "backend {backend}");
+
+        // The batch contract, both subjects, on both backends. A writer that
+        // has taken a batch off its queue persists the retained rows and
+        // folds the opted-in network-prior observations through this one
+        // call; either side may be empty because the two opt-ins are
+        // independent of each other.
+        let batched = (0..8)
+            .map(|index| PlaybackEvent {
+                at_unix_ms: 1_700_000_100_000 + index,
+                session_id: Some(format!("batch-{index}")),
+                event: "producer_pass".to_owned(),
+                ..PlaybackEvent::default()
+            })
+            .collect::<Vec<_>>();
+        let batch_generation = CredentialGeneration::from(format!(
+            "store-contract-batch-{}",
+            if backend.contains("hiqlite") { 3 } else { 2 }
+        ));
+        let batch_fingerprint = format!(
+            "198.51.{}.0/24",
+            if backend.contains("hiqlite") { 3 } else { 2 }
+        );
+        let folded = vec![NetworkPriorObservation {
+            user_id: 77,
+            credential_generation: batch_generation.clone(),
+            client_class: "batch-client".to_owned(),
+            network_fingerprint: batch_fingerprint.clone(),
+            throughput_kbps: Some(6_000),
+            starved_rung_height: None,
+            observed_at_ms: 1_700_000_100_000,
+        }];
+        assert_eq!(
+            store
+                .record_playback_batch(&batched, &folded)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: batch: {error}")),
+            8,
+            "backend {backend}"
+        );
+        let stored = store
+            .playback_events(&PlaybackEventQuery {
+                event: Some("producer_pass".to_owned()),
+                limit: 16,
+                ..PlaybackEventQuery::default()
+            })
+            .await
+            .expect("query batched telemetry");
+        assert_eq!(stored.len(), 8, "backend {backend}");
+        assert_eq!(
+            store
+                .network_prior(
+                    batch_generation.as_str(),
+                    "batch-client",
+                    &batch_fingerprint
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: folded prior: {error}"))
+                .expect("folded prior")
+                .sustained_kbps,
+            Some(6_000),
+            "backend {backend}"
+        );
+
+        // Retention off is an empty `events`: no rows, the prior still folds.
+        assert_eq!(
+            store
+                .record_playback_batch(
+                    &[],
+                    &[NetworkPriorObservation {
+                        observed_at_ms: 1_700_000_200_000,
+                        throughput_kbps: Some(2_000),
+                        ..folded[0].clone()
+                    }]
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: prior-only batch: {error}")),
+            0,
+            "backend {backend}"
+        );
+        assert_eq!(
+            store
+                .playback_events(&PlaybackEventQuery {
+                    event: Some("producer_pass".to_owned()),
+                    limit: 16,
+                    ..PlaybackEventQuery::default()
+                })
+                .await
+                .expect("query after prior-only batch")
+                .len(),
+            8,
+            "backend {backend}"
+        );
+        assert_eq!(
+            store
+                .network_prior(
+                    batch_generation.as_str(),
+                    "batch-client",
+                    &batch_fingerprint
+                )
+                .await
+                .expect("prior after prior-only batch")
+                .expect("folded prior")
+                .sample_count,
+            2,
+            "backend {backend}"
+        );
     })
     .await;
 }

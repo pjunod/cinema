@@ -13,10 +13,17 @@ impl PlaybackTelemetryStore for SqliteStore {
             .await
     }
 
-    async fn record_playback_events(&self, events: &[PlaybackEvent]) -> Result<u64, StoreError> {
+    async fn record_playback_batch(
+        &self,
+        events: &[PlaybackEvent],
+        observations: &[NetworkPriorObservation],
+    ) -> Result<u64, StoreError> {
         let events = events.to_vec();
-        self.with_conn(move |conn| crate::store::telemetry::insert_batch(conn, &events))
-            .await
+        let observations = observations.to_vec();
+        self.with_conn(move |conn| {
+            crate::store::telemetry::insert_batch_with_priors(conn, &events, &observations)
+        })
+        .await
     }
 
     async fn prune_playback_events(&self, before_ms: i64, limit: i64) -> Result<u64, StoreError> {
