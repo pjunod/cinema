@@ -387,6 +387,8 @@ const MEDIA_METHODS: &[&str] = &[
     "files_missing_dolby_vision",
     "files_missing_video_codec_tag",
     "set_file_video_codec_tag",
+    "files_missing_field_order",
+    "set_file_field_order",
     "set_file_dolby_vision",
     "get_file_probe_json",
     "get_file_probe_chapters_json",
@@ -14668,6 +14670,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              ALTER TABLE files DROP COLUMN dv_bl_compat_id;
              ALTER TABLE files DROP COLUMN dv_level;
              ALTER TABLE files DROP COLUMN dv_profile;
+             ALTER TABLE files DROP COLUMN field_order;
              ALTER TABLE files DROP COLUMN video_codec_tag;
              DROP TRIGGER transcode_cache_location_identity_au;
              DROP TRIGGER transcode_cache_location_identity_ai;
@@ -16410,7 +16413,12 @@ fn contract_inventory_matches_every_store_method() {
     // Both independently reviewed method sets survive this integration. Read
     // the total from the merged trait rather than carrying either parent's
     // count across the promotion merge.
-    assert_eq!(declared.len(), 375, "review the Store method count");
+    //
+    // 375 -> 377 for the two `MediaStore` methods the field-order backfill
+    // adds, `files_missing_field_order` and `set_file_field_order`, both
+    // already named in `MEDIA_METHODS` above; the name-set assertion below is
+    // what proves the count and the trait agree.
+    assert_eq!(declared.len(), 377, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -16658,6 +16666,7 @@ async fn video_codec_tag_round_trips_and_backfill_updates_are_exactly_fenced() {
                     container: Some("mp4".into()),
                     video_codec: Some("hevc".into()),
                     video_codec_tag: Some("hvc1".into()),
+                    field_order: None,
                     raw_json: Some(
                         r#"{"streams":[{"codec_type":"video","codec_tag_string":"hvc1"}]}"#.into(),
                     ),
@@ -16747,6 +16756,7 @@ async fn video_codec_tag_round_trips_and_backfill_updates_are_exactly_fenced() {
                     container: Some("mp4".into()),
                     video_codec: Some("hevc".into()),
                     video_codec_tag: Some("hvc1".into()),
+                    field_order: None,
                     raw_json: Some(
                         r#"{"streams":[{"codec_type":"video","codec_tag_string":"hvc1"}]}"#.into(),
                     ),
@@ -16796,6 +16806,148 @@ async fn video_codec_tag_round_trips_and_backfill_updates_are_exactly_fenced() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: second bounded page: {error}"));
         assert_eq!(second.len(), 1, "{backend}: row 257 remains reachable");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Field order".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/field-order".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Interlaced source".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+
+        let scanned = store
+            .upsert_file(
+                item,
+                "/field-order/scanned.mkv",
+                10,
+                100,
+                &ProbeResult {
+                    field_order: Some("progressive".into()),
+                    raw_json: Some(
+                        r#"{"streams":[{"codec_type":"video","field_order":"progressive"}]}"#
+                            .into(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: scanned file: {error}"));
+        assert_eq!(
+            store
+                .get_file(scanned)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: scanned read: {error}"))
+                .and_then(|file| file.field_order),
+            Some("progressive".into()),
+            "{backend}: a current scan owns the stored fact"
+        );
+
+        let legacy_probe = r#"{"streams":[{"codec_type":"video","field_order":"tt"}]}"#;
+        let legacy = store
+            .upsert_file(
+                item,
+                "/field-order/legacy.mkv",
+                20,
+                200,
+                &ProbeResult {
+                    raw_json: Some(legacy_probe.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: legacy file: {error}"));
+        let pending = store
+            .files_missing_field_order(0, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list pending: {error}"));
+        assert_eq!(pending.len(), 1, "{backend}: bounded page");
+        assert_eq!(pending[0].id, legacy, "{backend}");
+        assert_eq!(pending[0].probe_json, legacy_probe, "{backend}");
+        assert!(store
+            .set_file_field_order(&pending[0], "tt")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: guarded write: {error}")));
+        assert_eq!(
+            store
+                .get_file(legacy)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: legacy read: {error}"))
+                .and_then(|file| file.field_order),
+            Some("tt".into()),
+            "{backend}"
+        );
+
+        let replacement = store
+            .upsert_file(
+                item,
+                "/field-order/replaced.mkv",
+                30,
+                300,
+                &ProbeResult {
+                    raw_json: Some(legacy_probe.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replacement seed: {error}"));
+        let stale = store
+            .files_missing_field_order(legacy, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale candidate: {error}"))
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{backend}: replacement candidate"));
+        assert_eq!(stale.id, replacement, "{backend}");
+        store
+            .upsert_file(
+                item,
+                "/field-order/replaced.mkv",
+                31,
+                301,
+                &ProbeResult {
+                    field_order: Some("progressive".into()),
+                    raw_json: Some(
+                        r#"{"streams":[{"codec_type":"video","field_order":"progressive"}]}"#
+                            .into(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replacement scan: {error}"));
+        assert!(!store
+            .set_file_field_order(&stale, "tt")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale guarded write: {error}")));
+        assert_eq!(
+            store
+                .get_file(replacement)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replacement read: {error}"))
+                .and_then(|file| file.field_order),
+            Some("progressive".into()),
+            "{backend}: stale snapshot cannot overwrite a newer scan"
+        );
     })
     .await;
 }

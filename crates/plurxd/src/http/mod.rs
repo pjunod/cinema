@@ -4991,6 +4991,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_tv_deinterlace_output_is_an_independent_advisory_setting() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::LIVE_TV_ENABLED, "1")
+            .await
+            .expect("mark Live TV enabled");
+
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"live_tv_deinterlace_output": "frame"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["live_tv_deinterlace_output"], json!("frame"));
+        assert_eq!(saved["live_tv_enabled"], json!(true));
+        assert_eq!(saved["live_tv_config_generation"], json!(0));
+
+        let (status, invalid) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"live_tv_deinterlace_output": "double"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+        let (_, current) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(current["live_tv_deinterlace_output"], json!("frame"));
+    }
+
+    #[tokio::test]
     async fn live_tv_dead_owner_disable_preserves_barrier_across_edits_and_exact_recovery() {
         use plurx_core::store::keys;
         let (app, state) = test_app_with_state();
