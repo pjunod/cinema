@@ -157,6 +157,21 @@ const FILES_VIDEO_CODEC_TAG_COLUMN: &str = "ALTER TABLE files ADD COLUMN video_c
 /// distinguish rows it has not considered from rows it resolved to the
 /// explicit `unknown` token.
 const FILES_FIELD_ORDER_COLUMN: &str = "ALTER TABLE files ADD COLUMN field_order TEXT;";
+/// Source luminance facts used by the CPU tone-map recipe. Nullable values
+/// distinguish unknown rows from a completed probe whose `luminance_source`
+/// is `none`.
+pub(crate) const FILES_LUMINANCE_COLUMNS: &[&str] = &[
+    "ALTER TABLE files ADD COLUMN max_cll INTEGER",
+    "ALTER TABLE files ADD COLUMN max_fall INTEGER",
+    "ALTER TABLE files ADD COLUMN mastering_max_luminance INTEGER",
+    "ALTER TABLE files ADD COLUMN luminance_source TEXT CHECK (luminance_source IN ('stream','frame','none'))",
+];
+
+const FILES_LUMINANCE_COLUMNS_BATCH: &str = "
+ALTER TABLE files ADD COLUMN max_cll INTEGER;
+ALTER TABLE files ADD COLUMN max_fall INTEGER;
+ALTER TABLE files ADD COLUMN mastering_max_luminance INTEGER;
+ALTER TABLE files ADD COLUMN luminance_source TEXT CHECK (luminance_source IN ('stream','frame','none'));";
 
 /// The staged-generation ledger, shared verbatim by both backends.
 ///
@@ -1885,6 +1900,8 @@ pub mod keys {
     pub const JOB_FIELD_ORDER_BACKFILL_DONE: &str = "jobs.field_order_backfilled";
     /// Node-local strictly-after cursor for the field-order backfill.
     pub const JOB_FIELD_ORDER_BACKFILL_CURSOR: &str = "jobs.field_order_backfill_cursor";
+    pub const JOB_LUMINANCE_BACKFILL_DONE: &str = "jobs.luminance_backfilled";
+    pub const JOB_LUMINANCE_BACKFILL_CURSOR: &str = "jobs.luminance_backfill_cursor";
     /// Per-library permanent Profile 7 conversion policy, encoded as a JSON
     /// object from decimal library id to `off`, `manual`, or `auto`. Missing
     /// libraries are always off: an upgrade must never rewrite media by
@@ -2863,6 +2880,22 @@ pub trait MediaStore: Send + Sync + 'static {
         &self,
         candidate: &MissingFieldOrder,
         field_order: &str,
+    ) -> Result<bool, StoreError>;
+    /// HDR rows whose additive luminance columns have not been classified.
+    /// The same identity projection as the codec-tag backfill keeps the
+    /// subsequent write fenced to this exact stored probe snapshot.
+    async fn files_missing_luminance(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError>;
+    async fn set_file_luminance(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        max_cll: Option<i64>,
+        max_fall: Option<i64>,
+        mastering_max_luminance: Option<i64>,
+        source: &str,
     ) -> Result<bool, StoreError>;
     /// Write one file's Dolby Vision columns, and the display label derived
     /// from them.

@@ -412,6 +412,10 @@ pub struct VodSessionInfo {
     pub file_id: i64,
     pub target_height: i64,
     pub encoder: &'static str,
+    /// Explicit CPU tone-map peak and its source, absent for copy and GPU
+    /// renditions. `default` is policy provenance, not source metadata.
+    pub tone_map_peak_nits: Option<u32>,
+    pub tone_map_peak_source: Option<&'static str>,
     pub playlist_shape: &'static str,
     pub producer_state: &'static str,
     pub producer_hold: Option<&'static str>,
@@ -4167,6 +4171,22 @@ impl VodServe {
                 file_id: rendition.recipe.file.id,
                 target_height,
                 encoder: "vod",
+                tone_map_peak_nits: rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .filter(|encoding| {
+                        encoding.plan.options().tone_map == plurx_core::transcode::ToneMap::Zscale
+                    })
+                    .map(|encoding| encoding.plan.options().tone_map_peak_nits),
+                tone_map_peak_source: rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .filter(|encoding| {
+                        encoding.plan.options().tone_map == plurx_core::transcode::ToneMap::Zscale
+                    })
+                    .map(|encoding| encoding.plan.options().tone_map_peak_source.name()),
                 playlist_shape: "vod",
                 producer_state,
                 producer_hold,
@@ -8668,6 +8688,10 @@ mod tests {
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(1_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],

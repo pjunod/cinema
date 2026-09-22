@@ -829,7 +829,13 @@ fn is_sqlite_candidate(text: &str) -> bool {
 /// contributes, and the census was re-measured site by site against
 /// `origin/main`: that one literal is the entire difference between the two
 /// sets, so nothing else changed binding shape in this merge.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 91;
+///
+/// 91 -> 92 for exactly one more reviewed site of that same shape: the
+/// `SELECT` prepared by `files_missing_luminance` in `sqlite/media.rs`, whose
+/// `?1`/`?2` are bound by the `query_map` on the next statement. The census
+/// was re-measured against the merged tree and that one literal is the whole
+/// difference; the luminance `UPDATE` beside it binds locally and is checked.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 92;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

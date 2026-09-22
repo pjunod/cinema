@@ -692,6 +692,9 @@ data class PlaybackSessionStatus(
     val file_id: Long? = null,
     val target_height: Long? = null,
     val encoder: String? = null,
+    /** Explicit CPU tone-map input; `default` is policy, not source truth. */
+    val tone_map_peak_nits: Long? = null,
+    val tone_map_peak_source: String? = null,
     val speed: Double? = null,
     val recent_speed: Double? = null,
     val out_time_ms: Long? = null,

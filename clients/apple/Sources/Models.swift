@@ -877,6 +877,10 @@ struct PlaybackSessionStatus: Codable {
     let id: String
     var targetHeight: Int?
     var encoder: String?
+    /// Explicit CPU tone-map input. `default` provenance is policy, not source
+    /// metadata; both stay optional for older servers and non-CPU routes.
+    var toneMapPeakNits: Int?
+    var toneMapPeakSource: String?
     var speed: Double?
     var recentSpeed: Double?
     var outTimeMs: Int?

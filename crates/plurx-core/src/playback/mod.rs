@@ -1744,6 +1744,10 @@ mod tests {
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(8_000_000),
             audio_streams: vec![AudioStream {
                 index: 0,

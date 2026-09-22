@@ -6660,6 +6660,10 @@ struct Session {
     /// this outside CODECS so clients that only understand the base can still
     /// select the variant.
     target_height: i64,
+    /// The explicit CPU tone-map input and its bounded provenance. Absent for
+    /// copy delivery and GPU graphs, which do not consume this CPU-chain fact.
+    tone_map_peak_nits: Option<u32>,
+    tone_map_peak_source: Option<&'static str>,
     /// The encoder actually running *now*. Mutable because the
     /// hardware->software fallback replaces the process inside one session,
     /// and an activity page still naming the hardware encoder after that is
@@ -8873,6 +8877,8 @@ async fn session_info(
         user_name: s.user_name.clone(),
         target_height: s.target_height,
         encoder: *s.encoder_label.lock().await,
+        tone_map_peak_nits: s.tone_map_peak_nits,
+        tone_map_peak_source: s.tone_map_peak_source,
         started_unix: s.started_unix,
         idle_seconds,
         last_request: last_request_kind,
@@ -9001,6 +9007,8 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         user_name: info.user_name,
         target_height: info.target_height,
         encoder: "vod",
+        tone_map_peak_nits: None,
+        tone_map_peak_source: None,
         started_unix: info.started_unix,
         idle_seconds: info.idle_seconds,
         last_request: "vod",
@@ -10636,6 +10644,10 @@ pub struct SessionInfo {
     pub user_name: String,
     pub target_height: i64,
     pub encoder: &'static str,
+    /// Present only when this session's delivered bytes use the CPU zscale
+    /// chain. `default` is the documented policy assumption, not source truth.
+    pub tone_map_peak_nits: Option<u32>,
+    pub tone_map_peak_source: Option<&'static str>,
     pub started_unix: i64,
     pub idle_seconds: u64,
     /// Last capability-authenticated resource this viewer requested. A stalled
@@ -15105,7 +15117,10 @@ impl TranscodeManager {
         let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref())
             .qualifying_artifacts(qualification);
         transcode::resolve_transcode(
-            &TranscodeRequest::new(encoder, TranscodeMediaOptions::from_options(file, options)),
+            &TranscodeRequest::new(
+                encoder,
+                TranscodeMediaOptions::from_options_with_facts(file, options, facts),
+            ),
             facts,
             &capabilities,
             &policy,
@@ -16824,6 +16839,10 @@ impl TranscodeManager {
             media_origin_seconds: 0.0,
             grade: opts.pipeline.output_grade(),
             target_height: opts.target_height,
+            tone_map_peak_nits: (plan.options().tone_map == ToneMap::Zscale)
+                .then_some(plan.options().tone_map_peak_nits),
+            tone_map_peak_source: (plan.options().tone_map == ToneMap::Zscale)
+                .then_some(plan.options().tone_map_peak_source.name()),
             encoder_label: Mutex::new("cached"),
             started_unix: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -21775,6 +21794,12 @@ impl TranscodeManager {
                 .map_err(|error| error.to_string())?
                 .observing_qualified_grammar(observation.qualified_logging());
         let args = transcode::hls_args(&plan, &execution);
+        if plan.input_is_hdr()
+            && plan.options().pipeline == Pipeline::Cpu
+            && plan.options().tone_map == ToneMap::Zscale
+        {
+            crate::telemetry::record_tone_map_peak(plan.options().tone_map_peak_source);
+        }
         // Log the exact command — the single most useful diagnostic. It reveals
         // the decode/filter/encode pipeline actually used (e.g. whether heavy
         // HEVC is being hardware-decoded), and confirms which build is running.
@@ -21794,6 +21819,8 @@ impl TranscodeManager {
         tracing::info!(
             session = %session_log_id(&session_id), encoder = encoder.label(), pipeline = opts.pipeline.name(),
             proven = self.pipeline.name(), hdr = file.hdr.as_deref().unwrap_or("sdr"),
+            peak_nits = plan.options().tone_map_peak_nits,
+            peak_source = plan.options().tone_map_peak_source.name(),
             declined = declined.unwrap_or(""),
             deinterlace = plan.deinterlace().name(),
             build = crate::version::BUILD,
@@ -22130,6 +22157,10 @@ impl TranscodeManager {
             media_origin_seconds: start_seconds,
             grade: opts.pipeline.output_grade(),
             target_height,
+            tone_map_peak_nits: (plan.options().tone_map == ToneMap::Zscale)
+                .then_some(plan.options().tone_map_peak_nits),
+            tone_map_peak_source: (plan.options().tone_map == ToneMap::Zscale)
+                .then_some(plan.options().tone_map_peak_source.name()),
             encoder_label: Mutex::new(encoder.label()),
             started_unix: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -22709,6 +22740,8 @@ impl TranscodeManager {
             start_seconds,
             media_origin_seconds,
             target_height: file.height.unwrap_or(0),
+            tone_map_peak_nits: None,
+            tone_map_peak_source: None,
             encoder_label: Mutex::new("copy"),
             started_unix: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -29017,6 +29050,8 @@ fn test_session_with_control(
         media_origin_seconds: 0.0,
         grade: OutputGrade::Sdr,
         target_height: 720,
+        tone_map_peak_nits: None,
+        tone_map_peak_source: None,
         encoder_label: Mutex::new("test"),
         started_unix: 0,
         failed: Arc::new(AtomicBool::new(false)),
@@ -30695,6 +30730,10 @@ pub(crate) mod tests {
             bit_depth: Some(10),
             hdr: Some("dolby_vision".into()),
             hdr_format: Some("Dolby Vision · Profile 5".into()),
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(20_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -40603,6 +40642,10 @@ pub(crate) mod tests {
             bit_depth: Some(10),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(20_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -41654,6 +41697,8 @@ pub(crate) mod tests {
             media_origin_seconds: 0.0,
             grade: OutputGrade::Sdr,
             target_height: 1080,
+            tone_map_peak_nits: None,
+            tone_map_peak_source: None,
             encoder_label: Mutex::new("test"),
             started_unix: 0,
             failed: Arc::new(AtomicBool::new(false)),
@@ -49765,6 +49810,10 @@ scope = "test"
                 bit_depth: Some(if hdr.is_some() { 10 } else { 8 }),
                 hdr: hdr.map(str::to_owned),
                 hdr_format: hdr.map(str::to_owned),
+                max_cll: None,
+                max_fall: None,
+                mastering_max_luminance: None,
+                luminance_source: None,
                 bitrate: Some(8_000_000),
                 audio_streams: vec![
                     plurx_core::domain::AudioStream {

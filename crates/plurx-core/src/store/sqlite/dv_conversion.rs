@@ -1319,6 +1319,10 @@ mod tests {
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_diagnostic_json;
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_retry_deadline_ms;
                  ALTER TABLE analysis_requests DROP COLUMN video_identity;
+                 ALTER TABLE files DROP COLUMN luminance_source;
+                 ALTER TABLE files DROP COLUMN mastering_max_luminance;
+                 ALTER TABLE files DROP COLUMN max_fall;
+                 ALTER TABLE files DROP COLUMN max_cll;
                  ALTER TABLE files DROP COLUMN field_order;
                  ALTER TABLE files DROP COLUMN video_codec_tag;
                  PRAGMA user_version = 43;",
@@ -1410,7 +1414,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 20] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 21] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1441,6 +1445,12 @@ mod tests {
             // `files` column, so both fixtures drop it or the replay meets its
             // own column and fails with `duplicate column name`.
             "ADD COLUMN field_order",
+            // v65's four luminance columns, appended by the tone-map work. One
+            // migration, so one entry: `max_cll` names it uniquely, exactly as
+            // `dvr_recordings` names v57's three tables. The fixture drops all
+            // four, newest first, because a replay would otherwise meet its own
+            // column.
+            "ADD COLUMN max_cll",
         ];
 
         assert!(

@@ -31,8 +31,8 @@ pub use decode::{
     DecodeSurfaceContract, Deinterlace, DynamicRangeClass, FrameDomain, FrameRate,
     FrameRateProvenance, InterlaceVerdict, OutputWidthRule, PlanError, PlanSourceBinding,
     PresentationContract, Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder,
-    StreamSelectionProvenance, SubtitleRendering, TranscodeMediaOptions, TranscodeRequest,
-    HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
+    StreamSelectionProvenance, SubtitleRendering, ToneMapPeakSource, TranscodeMediaOptions,
+    TranscodeRequest, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use encoder::{
@@ -971,28 +971,48 @@ fn bitmap_overlay_for_size(
 /// Returns `None` when no filtering is needed (rare for transcode, but keeps
 /// the caller simple).
 fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str) -> String {
+    let (peak_nits, peak_source) = source.max_cll.map_or_else(
+        || {
+            source
+                .mastering_max_luminance
+                .map_or((1000, ToneMapPeakSource::Default), |value| {
+                    (
+                        u32::try_from(value).unwrap_or(1000),
+                        ToneMapPeakSource::Mdcv,
+                    )
+                })
+        },
+        |value| (u32::try_from(value).unwrap_or(1000), ToneMapPeakSource::Cll),
+    );
     video_filters_for_contract(
         output_size(source, opts.target_height),
-        source.hdr.as_deref(),
-        source.hdr.is_some(),
-        routing_hdr(source),
+        (
+            source.hdr.as_deref(),
+            source.hdr.is_some(),
+            routing_hdr(source),
+        ),
         Deinterlace::for_scan_type(crate::domain::ScanType::from_field_order(
             source.field_order.as_deref(),
         )),
+        (peak_nits, peak_source),
         opts,
         source_path,
     )
 }
 
+// The three dynamic-range facts travel as one tuple for the same reason the
+// tone-map peak does: they are read together and never apart, and clippy caps
+// this signature at seven. What the source declares, whether that counts as
+// HDR, and what the route will carry are one question asked three ways.
 fn video_filters_for_contract(
     output_size: Option<(i64, i64)>,
-    input_dynamic_range: Option<&str>,
-    input_is_hdr: bool,
-    routing_dynamic_range: Option<&str>,
+    dynamic_range: (Option<&str>, bool, Option<&str>),
     deinterlace: Deinterlace,
+    tone_map_peak: (u32, ToneMapPeakSource),
     opts: &TranscodeOptions,
     source_path: &str,
 ) -> String {
+    let (input_dynamic_range, input_is_hdr, routing_dynamic_range) = dynamic_range;
     let mut chain: Vec<String> = Vec::new();
 
     // A GPU pipeline owns scale and tone-map together: they are one pass on
@@ -1078,8 +1098,10 @@ fn video_filters_for_contract(
                 };
                 chain.push(format!(
                     "zscale=tin={tin}:min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le,\
-                     tonemap=tonemap=hable:desat=0,\
-                     zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p"
+                     zscale=p=bt709,\
+                     tonemap=tonemap=hable:desat=0:peak={peak},\
+                     zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,format=yuv420p",
+                    peak = tone_map_peak.0 as f64 / 100.0,
                 ));
             }
         }
@@ -1583,10 +1605,16 @@ fn hls_args_inner(
         |plan| {
             video_filters_for_contract(
                 planned_output_size,
-                plan.input_hdr_format(),
-                plan.input_is_hdr(),
-                plan.routing_dynamic_range(),
+                (
+                    plan.input_hdr_format(),
+                    plan.input_is_hdr(),
+                    plan.routing_dynamic_range(),
+                ),
                 plan.deinterlace(),
+                (
+                    plan.options().tone_map_peak_nits,
+                    plan.options().tone_map_peak_source,
+                ),
                 opts,
                 &source_path,
             )
@@ -2369,6 +2397,10 @@ mod tests {
             bit_depth: Some(10),
             hdr: hdr.map(str::to_owned),
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(60_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -2377,6 +2409,40 @@ mod tests {
             probed: true,
             dolby_vision: crate::domain::DolbyVisionFacts::default(),
         }
+    }
+
+    #[test]
+    fn the_cpu_tone_map_names_peak_provenance_in_its_recipe() {
+        let options = TranscodeOptions {
+            target_height: 1080,
+            pipeline: Pipeline::Cpu,
+            tone_map: ToneMap::Zscale,
+            ..TranscodeOptions::default()
+        };
+        let default = file(Some("hdr10"));
+        let default_filter = video_filters(&default, &options, "/media/movie.mkv");
+        assert!(default_filter.contains("peak=10"), "{default_filter}");
+
+        let mut cll = default.clone();
+        cll.max_cll = Some(4000);
+        cll.luminance_source = Some("stream".to_owned());
+        let cll_filter = video_filters(&cll, &options, "/media/movie.mkv");
+        assert!(cll_filter.contains("peak=40"), "{cll_filter}");
+
+        let mut mdcv = default;
+        mdcv.mastering_max_luminance = Some(2000);
+        mdcv.luminance_source = Some("frame".to_owned());
+        let mdcv_filter = video_filters(&mdcv, &options, "/media/movie.mkv");
+        assert!(mdcv_filter.contains("peak=20"), "{mdcv_filter}");
+        assert!(mdcv_filter.contains("zscale=p=bt709,tonemap="));
+        assert!(mdcv_filter.contains("dither=error_diffusion"));
+
+        let default_media = TranscodeMediaOptions::from_options(&file(Some("hdr10")), &options);
+        let cll_media = TranscodeMediaOptions::from_options(&cll, &options);
+        let mdcv_media = TranscodeMediaOptions::from_options(&mdcv, &options);
+        assert_eq!(default_media.tone_map_peak_source.name(), "default");
+        assert_eq!(cll_media.tone_map_peak_source.name(), "cll");
+        assert_eq!(mdcv_media.tone_map_peak_source.name(), "mdcv");
     }
 
     fn normalized_m0_args(
@@ -2410,6 +2476,16 @@ mod tests {
 
     /// M0 migration fixture: M1 and M2 may change only the cases whose policy
     /// change is named in the decoder plan. Every other token stays stable.
+    ///
+    /// Re-measured once on the promotion merge, for exactly one named policy
+    /// change: S-07's CPU tone-map correction. The three heavy HDR cases moved
+    /// from `tonemap=...:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv` to
+    /// `zscale=p=bt709,tonemap=...:desat=0:peak=10,zscale=t=bt709:m=bt709:\
+    /// r=tv:dither=error_diffusion` — gamut conversion before the tone map,
+    /// the explicit peak in hundreds of nits, and error-diffusion dithering on
+    /// the way back to 8-bit. Every other token in every case is unchanged,
+    /// including S-08's field-order routing, whose sources here are
+    /// progressive and therefore name no deinterlace filter.
     #[test]
     fn decoder_selection_m0_argument_baseline_is_stable() {
         let mut light_h264 = file(None);
@@ -3178,8 +3254,8 @@ mod tests {
         // That is correct, and a naive substring guard condemns it.
         assert_no_pq_at_8_bit(
             "zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:t=linear:npl=100,\
-             format=gbrpf32le,tonemap=tonemap=hable:desat=0,\
-             zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p",
+             format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0:peak=10,\
+             zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,format=yuv420p",
         );
         // A 10-bit PQ map followed by an unrelated 8-bit convert in a later
         // filter is swscale's business, not tonemapx's.
@@ -4331,6 +4407,10 @@ mod index_pipe_tests {
             bit_depth: Some(10),
             hdr: Some("dolby_vision".into()),
             hdr_format: Some("Profile 5".into()),
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(60_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],

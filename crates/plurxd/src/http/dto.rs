@@ -349,6 +349,17 @@ pub struct FileDto {
     pub hdr: Option<String>,
     /// Rich HDR label for display ("Dolby Vision · Profile 7 (HDR10-compatible)").
     pub hdr_format: Option<String>,
+    /// Source luminance facts in cd/m². `luminance_source = "none"` means a
+    /// completed probe found no authored value and the server will use its
+    /// documented policy default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cll: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_fall: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mastering_max_luminance: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub luminance_source: Option<String>,
     /// The Dolby Vision profile as a number, from the configuration record
     /// rather than parsed back out of the label above. Absent for a non-DV
     /// file, and for a row the backfill has not reached — which is the state
@@ -575,6 +586,10 @@ impl FileDto {
             bit_depth: f.bit_depth,
             hdr: f.hdr,
             hdr_format: f.hdr_format,
+            max_cll: f.max_cll,
+            max_fall: f.max_fall,
+            mastering_max_luminance: f.mastering_max_luminance,
+            luminance_source: f.luminance_source,
             dv_profile: f.dolby_vision.profile,
             bitrate: f.bitrate,
             audio_streams: f.audio_streams,

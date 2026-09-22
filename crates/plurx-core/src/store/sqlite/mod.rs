@@ -1128,6 +1128,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v64: selected-video field order retained as a catalogue fact. Existing
     // rows remain null until the bounded stored-probe backfill considers them.
     super::FILES_FIELD_ORDER_COLUMN,
+    // v65: retained source luminance facts for deterministic CPU tone maps.
+    // S-07 drafted this as v64; S-08's field-order column reached main first,
+    // so the luminance batch appends after it.
+    super::FILES_LUMINANCE_COLUMNS_BATCH,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1223,7 +1227,8 @@ const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container,
      subtitle_streams, scanned_at, hdr_format, audio_offset_ms, \
      (probe_json IS NOT NULL), \
      dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, \
-     video_codec_tag, field_order";
+     video_codec_tag, field_order, \
+     max_cll, max_fall, mastering_max_luminance, luminance_source";
 
 fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
     let path: String = row.get(2)?;
@@ -1261,6 +1266,10 @@ fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
             el_present: row.get::<_, Option<i64>>(23)?.map(|value| value != 0),
             rpu_present: row.get::<_, Option<i64>>(24)?.map(|value| value != 0),
         },
+        max_cll: row.get(27)?,
+        max_fall: row.get(28)?,
+        mastering_max_luminance: row.get(29)?,
+        luminance_source: row.get(30)?,
     })
 }
 
@@ -2537,9 +2546,12 @@ mod tests {
         // 63 -> 64 for v64, `FILES_FIELD_ORDER_COLUMN`: one additive
         // `ALTER TABLE files ADD COLUMN field_order` appended by the interlace
         // work, covered by `v64_adds_field_order_to_the_existing_files_table`
-        // below. No earlier entry moved; the list stays append-only.
+        // below. 64 -> 65 for v65, `FILES_LUMINANCE_COLUMNS_BATCH`: the four
+        // additive `files` luminance columns the tone-map work drafted as v64
+        // and which append after the field-order column now that it reached
+        // main first. No earlier entry moved; the list stays append-only.
         assert_eq!(
-            version, 64,
+            version, 65,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2578,6 +2590,23 @@ mod tests {
                  so nothing has to read a profile number back out of a display \
                  label: {files}"
             );
+        }
+        assert_eq!(
+            super::super::FILES_LUMINANCE_COLUMNS
+                .iter()
+                .map(|statement| format!("{statement};"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            super::super::FILES_LUMINANCE_COLUMNS_BATCH.trim(),
+            "the per-statement and batch spellings of the luminance migration have drifted"
+        );
+        for column in [
+            "max_cll",
+            "max_fall",
+            "mastering_max_luminance",
+            "luminance_source",
+        ] {
+            assert!(files.contains(column), "v64 carries {column}: {files}");
         }
         let fragment_indexes: String = conn
             .query_row(

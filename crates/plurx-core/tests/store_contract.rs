@@ -389,6 +389,8 @@ const MEDIA_METHODS: &[&str] = &[
     "set_file_video_codec_tag",
     "files_missing_field_order",
     "set_file_field_order",
+    "files_missing_luminance",
+    "set_file_luminance",
     "set_file_dolby_vision",
     "get_file_probe_json",
     "get_file_probe_chapters_json",
@@ -14670,6 +14672,10 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              ALTER TABLE files DROP COLUMN dv_bl_compat_id;
              ALTER TABLE files DROP COLUMN dv_level;
              ALTER TABLE files DROP COLUMN dv_profile;
+             ALTER TABLE files DROP COLUMN luminance_source;
+             ALTER TABLE files DROP COLUMN mastering_max_luminance;
+             ALTER TABLE files DROP COLUMN max_fall;
+             ALTER TABLE files DROP COLUMN max_cll;
              ALTER TABLE files DROP COLUMN field_order;
              ALTER TABLE files DROP COLUMN video_codec_tag;
              DROP TRIGGER transcode_cache_location_identity_au;
@@ -16414,11 +16420,12 @@ fn contract_inventory_matches_every_store_method() {
     // the total from the merged trait rather than carrying either parent's
     // count across the promotion merge.
     //
-    // 375 -> 377 for the two `MediaStore` methods the field-order backfill
-    // adds, `files_missing_field_order` and `set_file_field_order`, both
-    // already named in `MEDIA_METHODS` above; the name-set assertion below is
-    // what proves the count and the trait agree.
-    assert_eq!(declared.len(), 377, "review the Store method count");
+    // 375 -> 377 for the two `MediaStore` methods S-08's field-order backfill
+    // adds, `files_missing_field_order` and `set_file_field_order`. 377 -> 379
+    // for the two S-07 adds on top of them, `files_missing_luminance` and
+    // `set_file_luminance`. All four are named in `MEDIA_METHODS` above; the
+    // name-set assertion below is what proves the count and the trait agree.
+    assert_eq!(declared.len(), 379, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -16947,6 +16954,82 @@ async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
                 .and_then(|file| file.field_order),
             Some("progressive".into()),
             "{backend}: stale snapshot cannot overwrite a newer scan"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn luminance_round_trips_and_backfill_updates_are_exactly_fenced() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "HDR luminance".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/hdr".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "HDR fixture".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        let probe_json = r#"{"streams":[{"codec_type":"video","color_transfer":"smpte2084"}]}"#;
+        let file_id = store
+            .upsert_file(
+                item,
+                "/hdr/fixture.mkv",
+                10,
+                20,
+                &ProbeResult {
+                    hdr: Some("hdr10".into()),
+                    raw_json: Some(probe_json.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: file: {error}"));
+        let candidate = store
+            .files_missing_luminance(0, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: pending: {error}"))
+            .into_iter()
+            .next()
+            .expect("pending luminance");
+        assert_eq!(candidate.id, file_id);
+        assert!(store
+            .set_file_luminance(&candidate, Some(4000), Some(1000), Some(4000), "stream")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: write: {error}")));
+        let stored = store
+            .get_file(file_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+            .expect("stored file");
+        assert_eq!(
+            (
+                stored.max_cll,
+                stored.max_fall,
+                stored.mastering_max_luminance
+            ),
+            (Some(4000), Some(1000), Some(4000))
+        );
+        assert_eq!(stored.luminance_source.as_deref(), Some("stream"));
+        assert!(
+            !store
+                .set_file_luminance(&candidate, None, None, None, "none")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale write: {error}")),
+            "{backend}: a classified row refuses a repeated stale update"
         );
     })
     .await;

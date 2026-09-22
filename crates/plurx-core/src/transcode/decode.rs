@@ -28,7 +28,13 @@ pub const LEGACY_DECODE_POLICY_REVISION: u32 = 1;
 
 /// Stable serialization contract for [`ResolvedTranscode::plan_digest`].
 /// Changing the meaning or order of any fed field requires a revision bump.
-pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 2;
+///
+/// 2 is what S-08 published on main: the frozen `deinterlace` decision entered
+/// the digest there. S-07 independently drafted its `tone_map_peak` pair as 2
+/// against the older main. Merged, the digest feeds both, so the serialization
+/// is neither branch's 2 and takes the next number rather than reusing a
+/// revision an already-shipped tree means something else by.
+pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 3;
 
 /// Semantic file-transcode deinterlace decision frozen into the plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -585,15 +591,20 @@ pub struct DecodeCatalogMetadata {
     dynamic_range: Option<DynamicRangeClass>,
     hdr_format: Option<String>,
     dolby_vision: DolbyVisionFacts,
+    max_cll: Option<u32>,
+    mastering_max_luminance: Option<u32>,
     digest: String,
 }
 
 impl DecodeCatalogMetadata {
     pub fn from_media_file(file: &MediaFile) -> Result<Self, PlanError> {
-        Self::new(
+        Self::new_with_luminance(
             file.hdr.as_deref(),
             file.hdr_format.as_deref(),
             file.dolby_vision,
+            file.max_cll.and_then(|value| u32::try_from(value).ok()),
+            file.mastering_max_luminance
+                .and_then(|value| u32::try_from(value).ok()),
         )
     }
 
@@ -601,6 +612,16 @@ impl DecodeCatalogMetadata {
         dynamic_range: Option<&str>,
         hdr_format: Option<&str>,
         dolby_vision: DolbyVisionFacts,
+    ) -> Result<Self, PlanError> {
+        Self::new_with_luminance(dynamic_range, hdr_format, dolby_vision, None, None)
+    }
+
+    fn new_with_luminance(
+        dynamic_range: Option<&str>,
+        hdr_format: Option<&str>,
+        dolby_vision: DolbyVisionFacts,
+        max_cll: Option<u32>,
+        mastering_max_luminance: Option<u32>,
     ) -> Result<Self, PlanError> {
         let mut dynamic_range = dynamic_range.map(parse_catalog_dynamic_range).transpose()?;
         let hdr_format = validated_optional_text(hdr_format, "catalog hdr format")?;
@@ -648,12 +669,20 @@ impl DecodeCatalogMetadata {
                 }
             }
         }
-        let encoded = serde_json::to_vec(&(dynamic_range, hdr_format.as_deref(), dolby_vision))
-            .map_err(|_| PlanError::InvalidFact("catalog serialization"))?;
+        let encoded = serde_json::to_vec(&(
+            dynamic_range,
+            hdr_format.as_deref(),
+            dolby_vision,
+            max_cll,
+            mastering_max_luminance,
+        ))
+        .map_err(|_| PlanError::InvalidFact("catalog serialization"))?;
         Ok(Self {
             dynamic_range,
             hdr_format,
             dolby_vision,
+            max_cll,
+            mastering_max_luminance,
             digest: hex::encode(Sha256::digest(encoded)),
         })
     }
@@ -718,6 +747,8 @@ pub struct DecodeFacts {
     dynamic_range: Option<DynamicRangeClass>,
     hdr_format: Option<String>,
     dolby_vision: DolbyVisionFacts,
+    max_cll: Option<u32>,
+    mastering_max_luminance: Option<u32>,
     source_identity: DecodeSourceIdentity,
     binding: PlanSourceBinding,
     facts_digest: String,
@@ -751,6 +782,8 @@ struct FactsDigest<'a> {
     dynamic_range: Option<DynamicRangeClass>,
     hdr_format: &'a Option<String>,
     dolby_vision: DolbyVisionFacts,
+    max_cll: Option<u32>,
+    mastering_max_luminance: Option<u32>,
 }
 
 impl DecodeFacts {
@@ -844,6 +877,17 @@ impl DecodeFacts {
         let hdr_format = catalog.and_then(|metadata| metadata.hdr_format.clone());
         let dolby_vision =
             catalog.map_or_else(DolbyVisionFacts::default, |metadata| metadata.dolby_vision);
+        let (probed_max_cll, probed_mastering_max_luminance) = parse_luminance(selected);
+        let max_cll = merge_luminance(
+            probed_max_cll,
+            catalog.and_then(|metadata| metadata.max_cll),
+            "max cll",
+        )?;
+        let mastering_max_luminance = merge_luminance(
+            probed_mastering_max_luminance,
+            catalog.and_then(|metadata| metadata.mastering_max_luminance),
+            "mastering luminance",
+        )?;
         let digest_input = FactsDigest {
             input_video_stream,
             codec: &codec,
@@ -862,6 +906,8 @@ impl DecodeFacts {
             dynamic_range,
             hdr_format: &hdr_format,
             dolby_vision,
+            max_cll,
+            mastering_max_luminance,
         };
         let encoded = serde_json::to_vec(&digest_input)
             .map_err(|_| PlanError::InvalidFact("serialization"))?;
@@ -886,6 +932,8 @@ impl DecodeFacts {
             dynamic_range,
             hdr_format,
             dolby_vision,
+            max_cll,
+            mastering_max_luminance,
             source_identity,
             binding: PlanSourceBinding::CatalogRow,
             facts_digest,
@@ -1033,6 +1081,14 @@ impl DecodeFacts {
         self.dolby_vision
     }
 
+    pub fn max_cll(&self) -> Option<u32> {
+        self.max_cll
+    }
+
+    pub fn mastering_max_luminance(&self) -> Option<u32> {
+        self.mastering_max_luminance
+    }
+
     pub fn source_identity(&self) -> &DecodeSourceIdentity {
         &self.source_identity
     }
@@ -1052,6 +1108,60 @@ impl DecodeFacts {
 
     pub fn facts_digest(&self) -> &str {
         &self.facts_digest
+    }
+}
+
+fn parse_luminance(stream: &Value) -> (Option<u32>, Option<u32>) {
+    let mut max_cll = None;
+    let mut mastering_max_luminance = None;
+    for side_data in stream
+        .get("side_data_list")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match side_data.get("side_data_type").and_then(Value::as_str) {
+            Some(kind) if kind.contains("Content light level") => {
+                max_cll = side_data
+                    .get("max_content")
+                    .and_then(|value| {
+                        value
+                            .as_u64()
+                            .or_else(|| value.as_str()?.parse::<u64>().ok())
+                    })
+                    .and_then(|value| u32::try_from(value).ok())
+                    .filter(|value| *value > 0);
+            }
+            Some(kind) if kind.contains("Mastering display metadata") => {
+                mastering_max_luminance = side_data
+                    .get("max_luminance")
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.split_once('/'))
+                    .and_then(|(numerator, denominator)| {
+                        let numerator = numerator.parse::<u64>().ok()?;
+                        let denominator = denominator.parse::<u64>().ok()?;
+                        (denominator > 0).then_some(numerator / denominator)
+                    })
+                    .and_then(|value| u32::try_from(value).ok())
+                    .filter(|value| *value > 0);
+            }
+            _ => {}
+        }
+    }
+    (max_cll, mastering_max_luminance)
+}
+
+fn merge_luminance(
+    probed: Option<u32>,
+    catalog: Option<u32>,
+    field: &'static str,
+) -> Result<Option<u32>, PlanError> {
+    match (probed, catalog) {
+        (Some(probed), Some(catalog)) if probed != catalog => {
+            Err(PlanError::ConflictingMetadata(field))
+        }
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
     }
 }
 
@@ -1773,6 +1883,8 @@ pub struct TranscodeMediaOptions {
     pub audio_offset_ms: i64,
     pub input_has_audio: bool,
     pub tone_map: ToneMap,
+    pub tone_map_peak_nits: u32,
+    pub tone_map_peak_source: ToneMapPeakSource,
     pub pipeline: Pipeline,
     pub subtitle_burn: Option<SubtitleBurn>,
     /// Which source this is, for the artifact key. Semantic, not execution:
@@ -1784,6 +1896,16 @@ impl TranscodeMediaOptions {
     /// Copy only media semantics from the legacy aggregate. Attempt-local
     /// paths, positions, pacing, and resource caps stay in execution state.
     pub fn from_options(source: &MediaFile, options: &TranscodeOptions) -> Self {
+        let (tone_map_peak_nits, tone_map_peak_source) = source.max_cll.map_or_else(
+            || {
+                source
+                    .mastering_max_luminance
+                    .map_or((1000, ToneMapPeakSource::Default), |nits| {
+                        (u32::try_from(nits).unwrap_or(1000), ToneMapPeakSource::Mdcv)
+                    })
+            },
+            |nits| (u32::try_from(nits).unwrap_or(1000), ToneMapPeakSource::Cll),
+        );
         Self {
             target_height: options.target_height,
             video_bitrate_kbps: options.video_bitrate_kbps,
@@ -1794,9 +1916,51 @@ impl TranscodeMediaOptions {
             audio_offset_ms: source.audio_offset_ms,
             input_has_audio: !source.audio_streams.is_empty(),
             tone_map: options.tone_map,
+            tone_map_peak_nits,
+            tone_map_peak_source,
             pipeline: options.pipeline,
             subtitle_burn: options.subtitle_burn.clone(),
             cache_identity: DecodeCacheIdentity::from_media_file(source),
+        }
+    }
+
+    /// Copy media semantics while preferring facts observed from the exact
+    /// descriptor that the encoder will inherit.
+    ///
+    /// A retained catalog row can predate luminance collection. When the held
+    /// probe sees stream-level CLL/MDCV, keeping the catalog-derived default in
+    /// the filter would make the digest describe a fact the argv ignored. The
+    /// decoder collector already merges and rejects contradictions, so its
+    /// values are the authoritative refinement here.
+    pub fn from_options_with_facts(
+        source: &MediaFile,
+        options: &TranscodeOptions,
+        facts: &DecodeFacts,
+    ) -> Self {
+        let mut media = Self::from_options(source, options);
+        if let Some(nits) = facts.max_cll() {
+            (media.tone_map_peak_nits, media.tone_map_peak_source) = (nits, ToneMapPeakSource::Cll);
+        } else if let Some(nits) = facts.mastering_max_luminance() {
+            (media.tone_map_peak_nits, media.tone_map_peak_source) =
+                (nits, ToneMapPeakSource::Mdcv);
+        }
+        media
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToneMapPeakSource {
+    Cll,
+    Mdcv,
+    Default,
+}
+
+impl ToneMapPeakSource {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cll => "cll",
+            Self::Mdcv => "mdcv",
+            Self::Default => "default",
         }
     }
 }
@@ -2191,6 +2355,14 @@ impl ResolvedTranscode {
                 ToneMap::Tonemapx => b"tonemapx",
                 ToneMap::None => b"none",
             },
+        );
+        feed(
+            "tone_map_peak_nits",
+            options.tone_map_peak_nits.to_string().as_bytes(),
+        );
+        feed(
+            "tone_map_peak_source",
+            options.tone_map_peak_source.name().as_bytes(),
         );
         feed("renderer", options.pipeline.name().as_bytes());
         feed("deinterlace", self.deinterlace.name().as_bytes());

@@ -29,7 +29,12 @@ const MAX_PROBE_STDERR_BYTES: usize = 16 * 1024;
 const MAX_PROBE_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_VERSION_BYTES: usize = 64 * 1024;
 /// Bump when the selective FFprobe projection changes the meaning of cached facts.
-const PROBE_SCHEMA_VERSION: u32 = 3;
+///
+/// v3 is the projection S-08 published on main, which added `field_order`.
+/// S-07 drafted its luminance side-data projection as v2 against the older
+/// main; merged, the projection is a superset of v3, so it takes the next
+/// number rather than either branch's.
+const PROBE_SCHEMA_VERSION: u32 = 4;
 const IDENTITY_DEADLINE: Duration = Duration::from_secs(10);
 const VERSION_DEADLINE: Duration = Duration::from_secs(5);
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
@@ -3551,7 +3556,7 @@ async fn collect(
         "-print_format",
         "json",
         "-show_entries",
-        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_side_data=side_data_type",
+        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_side_data=side_data_type,max_content,max_average,max_luminance",
         "-show_streams",
         "/dev/fd/3",
     ]
@@ -3843,7 +3848,7 @@ async fn collect(
         "-print_format",
         "json",
         "-show_entries",
-        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_side_data=side_data_type",
+        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_side_data=side_data_type,max_content,max_average,max_luminance",
         "-show_streams",
     ];
     let mut command =

@@ -2242,3 +2242,16 @@ source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"
 source_anchor = "if (mine == currentSerial() && ownerIsCurrent()) {"
 test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
 test_anchor = "fun delayedDisplayMatchCannotOutliveChannelOrWindowOwnership()"
+
+[[fixes]]
+# Both clients now read an explicit tone-map peak and the provenance of that
+# number. The 1,000-nit `default` is a policy value, not something read off
+# the file, and the playback-info note has to say which one it is showing.
+# The Apple formatter is the production boundary shared with the Android
+# `toneMapPeakSummary` the same commit added.
+id = "clients.tone-map-peak-provenance-label"
+commits = ["0ce7b42f"]
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = "static func toneMapPeakSummary(_ status: PlaybackSessionStatus?) -> String? {"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testToneMapPeakSummaryKeepsPolicyDistinctFromSourceTruth()"

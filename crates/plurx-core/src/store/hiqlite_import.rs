@@ -520,6 +520,10 @@ const TABLES: &[TablePlan] = &[
             "dv_rpu_present",
             "video_codec_tag",
             "field_order",
+            "max_cll",
+            "max_fall",
+            "mastering_max_luminance",
+            "luminance_source",
         ],
         order_by: "id",
         minimum_schema: 5,
@@ -2528,6 +2532,17 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 // The stored probe document crosses with every legacy row;
                 // the destination's fenced bounded job recovers the token.
                 "NULL".to_owned()
+            } else if table.name == "files"
+                && matches!(
+                    *column,
+                    "max_cll" | "max_fall" | "mastering_max_luminance" | "luminance_source"
+                )
+                && schema_version < 65
+            {
+                // The luminance columns land one step after the field-order
+                // column, so v64 sources still predate them; the stored probe
+                // JSON crosses with the row and the bounded job classifies it.
+                "NULL".to_owned()
             } else if table.name == "cluster_fragment_index_jobs"
                 && *column == "attempt_errors"
                 && schema_version < 46
@@ -2875,13 +2890,17 @@ mod tests {
         let v37 = value_projection(table, 37, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
         assert!(
-            v37.ends_with("hdr_format, audio_offset_ms, NULL, NULL, NULL, NULL, NULL, NULL, NULL"),
+            v37.ends_with(
+                "hdr_format, audio_offset_ms, NULL, NULL, NULL, NULL, NULL, NULL, NULL, \
+                 NULL, NULL, NULL, NULL"
+            ),
             "{v37}"
         );
         assert!(
             current.ends_with(
                 "hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, \
-                 dv_el_present, dv_rpu_present, video_codec_tag, field_order"
+                 dv_el_present, dv_rpu_present, video_codec_tag, field_order, \
+                 max_cll, max_fall, mastering_max_luminance, luminance_source"
             ),
             "{current}"
         );
@@ -2897,10 +2916,13 @@ mod tests {
         let v59 = value_projection(table, 59, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
         assert!(
-            v59.ends_with("dv_el_present, dv_rpu_present, NULL, NULL"),
+            v59.ends_with("dv_el_present, dv_rpu_present, NULL, NULL, NULL, NULL, NULL, NULL"),
             "{v59}"
         );
-        assert!(current.ends_with("dv_el_present, dv_rpu_present, video_codec_tag, field_order"));
+        assert!(current.ends_with(
+            "dv_el_present, dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, \
+             mastering_max_luminance, luminance_source"
+        ));
     }
 
     #[test]
@@ -2913,10 +2935,34 @@ mod tests {
         let v63 = value_projection(table, 63, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
         assert!(
-            v63.ends_with("dv_rpu_present, video_codec_tag, NULL"),
+            v63.ends_with("dv_rpu_present, video_codec_tag, NULL, NULL, NULL, NULL, NULL"),
             "{v63}"
         );
-        assert!(current.ends_with("dv_rpu_present, video_codec_tag, field_order"));
+        assert!(current.ends_with(
+            "dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, \
+             mastering_max_luminance, luminance_source"
+        ));
+    }
+
+    /// The luminance columns append one step after the field-order column, so
+    /// a v64 source predates them and has to project explicit nulls.
+    #[test]
+    fn pre_v65_file_projection_supplies_null_luminance() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "files")
+            .copied()
+            .expect("files table plan");
+        let v64 = value_projection(table, 64, false);
+        let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
+        assert!(
+            v64.ends_with("video_codec_tag, field_order, NULL, NULL, NULL, NULL"),
+            "{v64}"
+        );
+        assert!(current.ends_with(
+            "video_codec_tag, field_order, max_cll, max_fall, mastering_max_luminance, \
+             luminance_source"
+        ));
     }
 
     /// Every import plan must name the migration that actually creates its

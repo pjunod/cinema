@@ -534,6 +534,14 @@ pub struct MediaFile {
     /// out of it any more except as a fallback for rows the backfill has not
     /// reached.
     pub hdr_format: Option<String>,
+    /// Source luminance in cd/m², retained independently of frame side data
+    /// that the tone-map filter chain may discard while linearising.
+    pub max_cll: Option<i64>,
+    pub max_fall: Option<i64>,
+    pub mastering_max_luminance: Option<i64>,
+    /// `stream`, `frame`, or `none`; `none` is an observed absence, not a
+    /// source-authored luminance value.
+    pub luminance_source: Option<String>,
     /// The Dolby Vision configuration record's own facts, as columns. Empty
     /// for a non-DV file, and empty for a DV file whose row predates the
     /// backfill — `hdr_format` is the fallback for those.
@@ -568,6 +576,10 @@ pub struct ProbeResult {
     pub bit_depth: Option<i64>,
     pub hdr: Option<String>,
     pub hdr_format: Option<String>,
+    pub max_cll: Option<i64>,
+    pub max_fall: Option<i64>,
+    pub mastering_max_luminance: Option<i64>,
+    pub luminance_source: Option<String>,
     /// The Dolby Vision configuration record, parsed. `hdr_format` is built
     /// from this rather than the other way round.
     pub dolby_vision: DolbyVisionFacts,
