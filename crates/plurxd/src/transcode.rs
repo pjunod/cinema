@@ -1996,95 +1996,7 @@ fn apply_and_observe_progress_line(
 /// Spawn an ffmpeg HLS transcode, draining its stderr (at `-loglevel error`)
 /// into the logs so a failure is visible instead of a silently dead session,
 /// and its stdout — which carries `-progress` telemetry — into `progress`.
-#[derive(Clone, Default)]
-struct FfmpegDescriptors {
-    #[cfg(unix)]
-    source: Option<std::os::fd::RawFd>,
-    #[cfg(unix)]
-    output: Option<std::os::fd::RawFd>,
-    #[cfg(unix)]
-    subtitle: Option<std::os::fd::RawFd>,
-    #[cfg(windows)]
-    handoffs: Vec<WindowsPathHandoff>,
-}
-
-#[cfg(windows)]
-#[derive(Clone)]
-struct WindowsPathHandoff {
-    role: &'static str,
-    path: std::path::PathBuf,
-    identity: plurx_core::fs_secure::FileIdentity,
-    directory: bool,
-}
-
-#[cfg(windows)]
-impl WindowsPathHandoff {
-    fn file(role: &'static str, file: &std::fs::File) -> Result<Self, String> {
-        Ok(Self {
-            role,
-            path: plurx_core::fs_secure::std_file_path(file)
-                .map_err(|error| format!("resolving held {role} path: {error}"))?,
-            identity: plurx_core::fs_secure::std_file_identity(file)
-                .map_err(|error| format!("reading held {role} identity: {error}"))?,
-            directory: false,
-        })
-    }
-
-    fn directory(
-        role: &'static str,
-        directory: &plurx_core::fs_secure::SecureDirectory,
-    ) -> Result<Self, String> {
-        Ok(Self {
-            role,
-            path: directory.path().to_owned(),
-            identity: directory
-                .identity_blocking()
-                .map_err(|error| format!("reading held {role} identity: {error}"))?,
-            directory: true,
-        })
-    }
-
-    fn verify(&self) -> Result<(), String> {
-        let current = if self.directory {
-            plurx_core::fs_secure::directory_identity_nofollow_blocking(&self.path)
-        } else {
-            plurx_core::fs_secure::regular_file_identity_nofollow_blocking(&self.path)
-        }
-        .map_err(|error| format!("reopening held {} path: {error}", self.role))?;
-        if current == self.identity {
-            Ok(())
-        } else {
-            Err(format!(
-                "held {} path changed before ffmpeg launch",
-                self.role
-            ))
-        }
-    }
-}
-
-#[cfg(windows)]
-impl FfmpegDescriptors {
-    fn with_file(mut self, role: &'static str, file: &std::fs::File) -> Result<Self, String> {
-        self.handoffs.push(WindowsPathHandoff::file(role, file)?);
-        Ok(self)
-    }
-
-    fn with_directory(
-        mut self,
-        role: &'static str,
-        directory: &plurx_core::fs_secure::SecureDirectory,
-    ) -> Result<Self, String> {
-        self.handoffs
-            .push(WindowsPathHandoff::directory(role, directory)?);
-        Ok(self)
-    }
-
-    fn verify(&self) -> Result<(), String> {
-        self.handoffs
-            .iter()
-            .try_for_each(WindowsPathHandoff::verify)
-    }
-}
+type FfmpegDescriptors = crate::producer_spawn::Descriptors;
 
 #[cfg(windows)]
 fn windows_session_descriptors(session: &Session) -> Result<FfmpegDescriptors, String> {
@@ -2401,66 +2313,21 @@ fn spawn_ffmpeg(
     descriptors: FfmpegDescriptors,
     observation: DiagnosticObservation,
 ) -> Result<ObservedFfmpeg, String> {
-    // `-progress pipe:1` is a global option, so it can lead the vector; the
-    // HLS muxer writes to files, which leaves stdout free to carry it.
-    let mut full: Vec<String> = vec!["-progress".into(), "pipe:1".into()];
-    full.extend_from_slice(args);
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    configure_ffmpeg_runtime(&mut command, runtime_cache);
-    #[cfg(unix)]
-    if descriptors.source.is_some()
-        || descriptors.output.is_some()
-        || descriptors.subtitle.is_some()
-    {
-        // The held handles remain close-on-exec in plurxd. Duplicate both
-        // before assigning their fixed child descriptors so an unlucky raw-fd
-        // number cannot make one dup2 clobber the other's source.
-        unsafe {
-            command.pre_exec(move || {
-                let duplicate = |fd: Option<std::os::fd::RawFd>| -> std::io::Result<Option<i32>> {
-                    let Some(fd) = fd else { return Ok(None) };
-                    let duplicated = libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10);
-                    if duplicated == -1 {
-                        Err(std::io::Error::last_os_error())
-                    } else {
-                        Ok(Some(duplicated))
-                    }
-                };
-                let source = duplicate(descriptors.source)?;
-                let output = duplicate(descriptors.output)?;
-                let subtitle = duplicate(descriptors.subtitle)?;
-                for (duplicate, target) in [(source, 3), (output, 4), (subtitle, 5)] {
-                    let Some(duplicate) = duplicate else { continue };
-                    if libc::dup2(duplicate, target) == -1 {
-                        libc::close(duplicate);
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    libc::close(duplicate);
-                    let flags = libc::fcntl(target, libc::F_GETFD);
-                    if flags == -1
-                        || libc::fcntl(target, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
-                    {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
-                #[cfg(target_os = "macos")]
-                if output.is_some() && libc::fchdir(4) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    #[cfg(windows)]
-    descriptors.verify()?;
-    command
-        .args(&full)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let (mut child, child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|e| format!("spawning job-owned ffmpeg: {e}"))?;
+    let crate::producer_spawn::Spawned {
+        child,
+        child_job,
+        stdout,
+        stderr,
+    } = crate::producer_spawn::spawn(
+        std::path::Path::new(&ffmpeg_bin()),
+        args,
+        crate::producer_spawn::SpawnOptions {
+            runtime_cache,
+            progress: crate::producer_spawn::Progress::Stdout,
+            descriptors,
+            env: &[],
+        },
+    )?;
     // Built before the progress observer is moved into its own task: the sink
     // needs the actor handle and the attempt, and both live on the observer.
     let fault_sink = observation.fault_sink(&progress_observer);
@@ -2469,20 +2336,18 @@ fn spawn_ffmpeg(
     // and a stream that looked clean is what let a broken title into the
     // cache. §7.1: detached best-effort logging is insufficient for cache
     // qualification.
-    let progress = child.stdout.take().map(|stdout| {
-        tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                progress_observer.apply_line(&line);
-            }
-        })
-    });
+    let progress = Some(tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            progress_observer.apply_line(&line);
+        }
+    }));
     // The fault reaches the actor when it latches, not when the stream ends: a
     // producer that stops decoding and keeps running holds its stderr open for
     // the rest of the film, and a fault delivered then arrives after every
     // success fact it was supposed to precede.
-    let reader = child.stderr.take().map(|stderr| {
+    let reader = Some({
         let sid = session_id.to_owned();
         let started = Instant::now();
         let grammar = observation.grammar.clone();
@@ -2539,27 +2404,22 @@ fn spawn_ffmpeg_pipe(
     descriptors: FfmpegDescriptors,
     observation: DiagnosticObservation,
 ) -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String> {
-    let mut full: Vec<String> = vec!["-progress".into(), "pipe:2".into()];
-    full.extend_from_slice(args);
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    configure_ffmpeg_runtime(&mut command, runtime_cache);
-    #[cfg(windows)]
-    descriptors.verify()?;
-    #[cfg(unix)]
-    let _ = descriptors;
-    command
-        .args(&full)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let (mut child, child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|e| format!("spawning job-owned ffmpeg: {e}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "ffmpeg started without a stdout pipe".to_owned())?;
-    let reader = child.stderr.take().map(|stderr| {
+    let crate::producer_spawn::Spawned {
+        child,
+        child_job,
+        stdout,
+        stderr,
+    } = crate::producer_spawn::spawn(
+        std::path::Path::new(&ffmpeg_bin()),
+        args,
+        crate::producer_spawn::SpawnOptions {
+            runtime_cache,
+            progress: crate::producer_spawn::Progress::Stderr,
+            descriptors,
+            env: &[],
+        },
+    )?;
+    let reader = Some({
         let sid = session_id.to_owned();
         let started = Instant::now();
         let grammar = observation.grammar.clone();
@@ -2572,7 +2432,7 @@ fn spawn_ffmpeg_pipe(
                 grammar,
                 |line| log_ffmpeg_stderr(&sid, "copy", line),
                 |line| {
-                    if is_progress_line(line) {
+                    if plurx_core::transcode::progress::is_progress_line(line) {
                         progress_observer.apply_line(line);
                         true
                     } else {
@@ -2602,56 +2462,6 @@ fn spawn_ffmpeg_pipe(
         },
         stdout,
     ))
-}
-
-/// Give libraries loaded by ffmpeg a cache owned by plurxd.
-///
-/// Docker deployments commonly override the image user with a numeric host
-/// UID while leaving `HOME` out of the daemon environment. A non-login process
-/// does not synthesize it from passwd, so fontconfig has no user cache while
-/// libass initializes a text-subtitle burn. A transcode can then spend the
-/// entire producer startup budget rebuilding font metadata, leaving the
-/// player with no HLS resource.
-/// Keep the environment local to ffmpeg rather than changing the daemon's
-/// process environment, and use the data directory whose ownership plurxd has
-/// already proved by creating its session and cache directories.
-pub(crate) fn configure_ffmpeg_runtime(
-    command: &mut tokio::process::Command,
-    runtime_cache: &std::path::Path,
-) {
-    command.env("XDG_CACHE_HOME", runtime_cache);
-    // §7.1: disable terminal colouring for the child. FFmpeg suppresses it on
-    // a pipe today, but the grammar matches on exact bracketed contexts and a
-    // build or environment that decided otherwise would make every qualified
-    // line unreadable — silently, since an unmatched line is simply unrelated.
-    command.env("AV_LOG_FORCE_NOCOLOR", "1");
-}
-
-/// Is this stderr line one of ffmpeg's `-progress` blocks rather than a log
-/// message?
-///
-/// Matched on the key, from the set `-progress` actually emits, rather than on
-/// "contains an `=`" — an error message about `filter_units=remove_types=32-34`
-/// contains plenty of those, and swallowing it would hide exactly the failure
-/// a copy session is most likely to have.
-fn is_progress_line(line: &str) -> bool {
-    let Some((key, _)) = line.split_once('=') else {
-        return false;
-    };
-    matches!(
-        key,
-        "frame"
-            | "fps"
-            | "bitrate"
-            | "total_size"
-            | "out_time_us"
-            | "out_time_ms"
-            | "out_time"
-            | "dup_frames"
-            | "drop_frames"
-            | "speed"
-            | "progress"
-    ) || (key.starts_with("stream_") && key.ends_with("_q"))
 }
 
 /// Remove the (empty/partial) HLS output so a restarted ffmpeg starts clean.
@@ -4759,13 +4569,15 @@ async fn execute_prepublication_transcode_retry(
                     &retry.runtime_cache,
                     {
                         #[cfg(unix)]
-                        let descriptors = FfmpegDescriptors {
-                            subtitle: session
+                        let descriptors = FfmpegDescriptors::from_raw_fds(
+                            None,
+                            None,
+                            session
                                 .subtitle_handle
                                 .as_ref()
                                 .map(std::os::fd::AsRawFd::as_raw_fd),
-                            ..FfmpegDescriptors::default()
-                        };
+                            false,
+                        );
                         #[cfg(windows)]
                         let descriptors = windows_session_descriptors(&session)?;
                         descriptors
@@ -14492,8 +14304,9 @@ impl TranscodeManager {
         // Renditions are durable state — admitted ones are the copy cache the
         // plan promises — so they live beside the persistent caches rather
         // than in scratch. Replaced before serving starts, like the caches.
-        self.vod = crate::vodserve::VodServe::new_cluster(
+        self.vod = crate::vodserve::VodServe::new_cluster_with_runtime(
             rendition_cache,
+            self.runtime_cache.clone(),
             Arc::clone(&self.store),
             node_id.clone(),
             crate::fragment_index_cluster::cache_root(&self.runtime_cache),
@@ -18760,11 +18573,12 @@ impl TranscodeManager {
                 &self.runtime_cache,
                 {
                     #[cfg(unix)]
-                    let descriptors = FfmpegDescriptors {
-                        source: bound_source_fd,
-                        output: Some(temp.raw_fd()),
-                        subtitle: subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
-                    };
+                    let descriptors = FfmpegDescriptors::from_raw_fds(
+                        bound_source_fd,
+                        Some(temp.raw_fd()),
+                        subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
+                        true,
+                    );
                     #[cfg(windows)]
                     let descriptors = windows_offline_descriptors(
                         bound_source.as_deref(),
@@ -22409,13 +22223,15 @@ impl TranscodeManager {
                     &self.runtime_cache,
                     {
                         #[cfg(unix)]
-                        let descriptors = FfmpegDescriptors {
-                            subtitle: session
+                        let descriptors = FfmpegDescriptors::from_raw_fds(
+                            None,
+                            None,
+                            session
                                 .subtitle_handle
                                 .as_ref()
                                 .map(std::os::fd::AsRawFd::as_raw_fd),
-                            ..FfmpegDescriptors::default()
-                        };
+                            false,
+                        );
                         #[cfg(windows)]
                         let descriptors = windows_session_descriptors(&session)?;
                         descriptors
@@ -31824,7 +31640,7 @@ pub(crate) mod tests {
         assert!(expected.is_dir(), "the cache exists before ffmpeg starts");
 
         let mut command = tokio::process::Command::new("ffmpeg");
-        configure_ffmpeg_runtime(&mut command, &manager.runtime_cache);
+        crate::producer_spawn::configure_ffmpeg_runtime(&mut command, &manager.runtime_cache);
         let inherited = command
             .as_std()
             .get_envs()

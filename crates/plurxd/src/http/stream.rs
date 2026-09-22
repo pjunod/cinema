@@ -104,9 +104,9 @@ fn parse_readrate(value: &str) -> Option<f64> {
 /// the two delivery paths can't drift on what pacing means. `legacy_realtime_ok`
 /// is false here: a progressive remux is consumed by the browser's own
 /// back-pressure, so an old ffmpeg is better off unpaced than pinned to 1x.
-fn push_pacing(cmd: &mut tokio::process::Command, caps: PacingCaps, rate: f64) {
+fn push_pacing(args: &mut Vec<String>, caps: PacingCaps, rate: f64) {
     for arg in caps.resolve(rate, READRATE_BURST_SECS, false).args() {
-        cmd.arg(arg);
+        args.push(arg);
     }
 }
 
@@ -2786,6 +2786,7 @@ pub async fn stream_mp4(
         have_dovi_bsf: state.system.dovi_rpu,
         preserve_dolby_vision: served.preserve_dolby_vision,
         promote_hevc_parameter_sets,
+        runtime_cache: &state.runtime_cache_dir,
         readrate,
         tracked,
         serving: state.serving.subscribe(),
@@ -3035,6 +3036,7 @@ struct RemuxSpec<'a> {
     /// rewrite the init after muxing, so retain the in-band sets and use the
     /// `hev1`/`dvhe` sample entry that permits them.
     promote_hevc_parameter_sets: bool,
+    runtime_cache: &'a Path,
     readrate: f64,
     /// Telemetry handle and its registration, when the client asked to be able
     /// to watch this stream's health.
@@ -3152,6 +3154,30 @@ fn progressive_hevc_copy_args(
     args
 }
 
+/// Consume the stderr stream shared by progressive-remux diagnostics and
+/// `-progress`. Keeping the complete reader in one function lets the contract
+/// test exercise the same classification, telemetry mutation, and log path as
+/// production rather than testing the classifier in isolation.
+async fn consume_remux_stderr<R>(
+    stderr: R,
+    telemetry: Option<(std::sync::Arc<crate::transcode::Progress>, u64)>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+    let mut lines = BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some((progress, generation)) = &telemetry {
+            if plurx_core::transcode::progress::is_progress_line(&line) {
+                crate::transcode::apply_progress_line(progress, *generation, &line);
+                continue;
+            }
+        }
+        tracing::warn!("remux ffmpeg: {line}");
+    }
+}
+
 async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     let RemuxSpec {
         path,
@@ -3166,6 +3192,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         have_dovi_bsf,
         preserve_dolby_vision,
         promote_hevc_parameter_sets,
+        runtime_cache,
         readrate,
         tracked,
         mut serving,
@@ -3180,25 +3207,23 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         authority.loss_generation
     };
     let pacing = pacing_caps().await;
-    let mut cmd = tokio::process::Command::new(ffmpeg_bin());
-    cmd.arg("-hide_banner").arg("-loglevel").arg("error");
-    // Telemetry goes to stderr, not stdout: stdout is the MP4. The stderr
-    // reader below already exists to surface remux failures, and progress
-    // lines are `key=value` — trivially separable from ffmpeg's prose.
-    if tracked.is_some() {
-        cmd.arg("-progress").arg("pipe:2");
-    }
+    let mut args = vec![
+        "-hide_banner".to_owned(),
+        "-loglevel".to_owned(),
+        "error".to_owned(),
+    ];
     // Input-side seek (fast) for resume. Copied video starts at the preceding
     // keyframe, so retain the matching audio preroll as well; accurate seek
     // would discard it when audio is being encoded and desynchronise the two.
     if let Some(s) = start.filter(|s| *s > 0.0) {
-        cmd.args(plurx_core::transcode::copy_input_seek_args(s));
+        args.extend(plurx_core::transcode::copy_input_seek_args(s));
     }
     // Pace this input (see READRATE_DEFAULT). Every input gets the same
     // treatment, as with -ss: the muxer interleaves them, so an unpaced second
     // input would drag the whole pipeline back to flat-out.
-    push_pacing(&mut cmd, pacing, readrate);
-    cmd.arg("-i").arg(path);
+    push_pacing(&mut args, pacing, readrate);
+    args.push("-i".to_owned());
+    args.push(path.to_string_lossy().into_owned());
     // This playback's A/V sync correction (positive = audio later). Copied audio
     // keeps the second `-itsoffset`'d input of the same file — copy moves
     // packets and filters need frames, so there is no other way in — with
@@ -3209,26 +3234,27 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // again (review §3.4).
     let audio_input = if audio_offset_ms != 0 && !transcode_audio {
         if let Some(s) = start.filter(|s| *s > 0.0) {
-            cmd.args(plurx_core::transcode::copy_input_seek_args(s));
+            args.extend(plurx_core::transcode::copy_input_seek_args(s));
         }
-        push_pacing(&mut cmd, pacing, readrate);
-        cmd.arg("-itsoffset")
-            .arg(format!("{:.3}", audio_offset_ms as f64 / 1000.0));
-        cmd.arg("-i").arg(path);
+        push_pacing(&mut args, pacing, readrate);
+        args.push("-itsoffset".to_owned());
+        args.push(format!("{:.3}", audio_offset_ms as f64 / 1000.0));
+        args.push("-i".to_owned());
+        args.push(path.to_string_lossy().into_owned());
         1
     } else {
         0
     };
     // Optional video + the chosen audio track, no subtitles into the MP4.
     // Audio-only books share this remux path when their source codec needs AAC.
-    cmd.args([
-        "-map",
-        "0:v:0?",
-        "-map",
-        &format!("{audio_input}:a:{audio_index}?"),
-        "-sn",
+    args.extend([
+        "-map".to_owned(),
+        "0:v:0?".to_owned(),
+        "-map".to_owned(),
+        format!("{audio_input}:a:{audio_index}?"),
+        "-sn".to_owned(),
     ]);
-    cmd.args(["-c:v", "copy"]);
+    args.extend(["-c:v".to_owned(), "copy".to_owned()]);
     // Safari only decodes HEVC in MP4 when the sample entry is tagged `hvc1`;
     // MKV HEVC is commonly `hev1`, which Safari renders black. Harmless for a
     // stream that's already hvc1. Video-stream-scoped so H.264 is untouched.
@@ -3236,7 +3262,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // parameter sets (and no dead DV metadata) — same hygiene, same reasons,
     // as the segmented copy path (`hevc_copy_bsf`).
     if hevc {
-        cmd.args(progressive_hevc_copy_args(
+        args.extend(progressive_hevc_copy_args(
             media,
             have_dovi_bsf,
             preserve_dolby_vision,
@@ -3245,11 +3271,19 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     }
     if transcode_audio {
         if let Some(af) = plurx_core::transcode::audio_offset_filter(audio_offset_ms) {
-            cmd.arg("-af").arg(af);
+            args.extend(["-af".to_owned(), af]);
         }
-        cmd.args(progressive_audio_args(true));
+        args.extend(
+            progressive_audio_args(true)
+                .iter()
+                .map(|argument| (*argument).to_owned()),
+        );
     } else {
-        cmd.args(progressive_audio_args(false));
+        args.extend(
+            progressive_audio_args(false)
+                .iter()
+                .map(|argument| (*argument).to_owned()),
+        );
     }
     // Fragmented MP4 so it streams without a seekable output.
     // `-avoid_negative_ts make_zero` normalizes the first timestamp to zero: a
@@ -3261,24 +3295,46 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // sample entry needs a packet peek — AC-3/E-AC-3 copy especially — don't
     // fail with "cannot write moov atom before AC3 packets". Harmless for
     // AAC/H.264 (verified: ftyp+moov still lead the stream).
-    cmd.args([
-        "-avoid_negative_ts",
-        "make_zero",
-        "-movflags",
-        "frag_keyframe+empty_moov+default_base_moof+delay_moov",
-        "-f",
-        "mp4",
-        "pipe:1",
-    ]);
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
+    args.extend(
+        [
+            "-avoid_negative_ts",
+            "make_zero",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]
+        .map(str::to_owned),
+    );
 
     #[cfg(windows)]
-    crate::ffmpeg::verify_windows_source_path(source, path).map_err(ApiError::Internal)?;
-    let (mut child, child_job) = crate::process_control::spawn_job_owned(&mut cmd)
-        .map_err(|e| ApiError::Internal(format!("spawning job-owned ffmpeg: {e}")))?;
+    let descriptors = crate::producer_spawn::Descriptors::default()
+        .with_file("media source", source)
+        .map_err(ApiError::Internal)?;
+    #[cfg(not(windows))]
+    let descriptors = crate::producer_spawn::Descriptors::default();
+    let program = ffmpeg_bin();
+    let crate::producer_spawn::Spawned {
+        child,
+        child_job,
+        stdout,
+        stderr,
+    } = crate::producer_spawn::spawn(
+        Path::new(&program),
+        &args,
+        crate::producer_spawn::SpawnOptions {
+            runtime_cache,
+            progress: if tracked.is_some() {
+                crate::producer_spawn::Progress::Stderr
+            } else {
+                crate::producer_spawn::Progress::None
+            },
+            descriptors,
+            env: &[],
+        },
+    )
+    .map_err(ApiError::Internal)?;
 
     // Probe after the remux starts opening the source, matching the HLS copy
     // path: the work overlaps instead of adding its full latency to startup.
@@ -3318,33 +3374,14 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // otherwise yields an empty pipe and a blank player with nothing logged.
     // When tracked, the same pipe carries `-progress` telemetry; progress lines
     // are keyed `key=value` and everything else is still an error worth logging.
-    if let Some(stderr) = child.stderr.take() {
-        let telemetry = tracked_stream.as_ref().map(|s| {
-            let p = std::sync::Arc::clone(&s.progress);
-            // One attempt per stream — a progressive remux never respawns —
-            // so a single generation is taken here and quoted for its life.
-            let generation = p.begin_attempt();
-            (p, generation)
-        });
-        tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Some((progress, generation)) = &telemetry {
-                    if is_progress_line(&line) {
-                        crate::transcode::apply_progress_line(progress, *generation, &line);
-                        continue;
-                    }
-                }
-                tracing::warn!("remux ffmpeg: {line}");
-            }
-        });
-    }
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| ApiError::Internal("ffmpeg stdout unavailable".into()))?;
+    let telemetry = tracked_stream.as_ref().map(|s| {
+        let p = std::sync::Arc::clone(&s.progress);
+        // One attempt per stream — a progressive remux never respawns —
+        // so a single generation is taken here and quoted for its life.
+        let generation = p.begin_attempt();
+        (p, generation)
+    });
+    tokio::spawn(consume_remux_stderr(stderr, telemetry));
 
     let owner_guard = guard.clone();
     let (process_guard, _process_owner) = spawn_remux_process_owner(
@@ -3444,23 +3481,6 @@ fn progressive_audio_args(transcode_audio: bool) -> &'static [&'static str] {
         &["-c:a", "aac", "-ac", "2", "-b:a", "256k", "-ar", "48000"]
     } else {
         &["-c:a", "copy"]
-    }
-}
-
-/// Is this stderr line one of ffmpeg's `-progress` blocks rather than a
-/// diagnostic? Progress is strictly `lower_snake_key=value`; ffmpeg's own
-/// messages are prose and normally carry a `[component @ 0x…]` prefix, so the
-/// two never collide — and a misfiled line costs a log entry, not correctness.
-fn is_progress_line(line: &str) -> bool {
-    match line.split_once('=') {
-        Some((key, _)) => {
-            let key = key.trim();
-            !key.is_empty()
-                && key
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        }
-        None => false,
     }
 }
 
@@ -4495,7 +4515,10 @@ mod tests {
             "progress=continue",
             "bitrate=N/A",
         ] {
-            assert!(is_progress_line(line), "progress: {line}");
+            assert!(
+                plurx_core::transcode::progress::is_progress_line(line),
+                "progress: {line}"
+            );
         }
         for line in [
             "[matroska @ 0x55f4] Could not find codec parameters",
@@ -4505,9 +4528,73 @@ mod tests {
             // An ffmpeg message that happens to contain '=' is still prose:
             // the key side has spaces and capitals, which progress keys never do.
             "[out#0/mp4 @ 0x1] Output file is empty, nothing was encoded",
+            "filter_units=remove_types=32-34",
+            "some_future_key=1",
         ] {
-            assert!(!is_progress_line(line), "prose: {line}");
+            assert!(
+                !plurx_core::transcode::progress::is_progress_line(line),
+                "prose: {line}"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn tracked_remux_logs_diagnostics_without_advancing_progress() {
+        use tokio::io::AsyncWriteExt as _;
+        use tracing_subscriber::prelude::*;
+
+        let logs = std::sync::Arc::new(crate::logbuf::LogBuffer::new(8));
+        let subscriber = tracing_subscriber::registry()
+            .with(crate::logbuf::BufferLayer(std::sync::Arc::clone(&logs)));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let progress = std::sync::Arc::new(crate::transcode::Progress::new());
+        let generation = progress.begin_attempt();
+
+        let (mut diagnostic_writer, diagnostic_reader) = tokio::io::duplex(256);
+        diagnostic_writer
+            .write_all(b"filter_units=remove_types=32-34\n")
+            .await
+            .expect("write diagnostic transcript");
+        diagnostic_writer
+            .shutdown()
+            .await
+            .expect("finish diagnostic transcript");
+        consume_remux_stderr(
+            diagnostic_reader,
+            Some((std::sync::Arc::clone(&progress), generation)),
+        )
+        .await;
+
+        assert_eq!(progress.speed(), None);
+        assert_eq!(progress.out_time_ms(), None);
+        let captured = logs.tail("trace", 8);
+        assert_eq!(captured.len(), 1, "{captured:?}");
+        assert!(
+            captured[0]
+                .message
+                .contains("remux ffmpeg: filter_units=remove_types=32-34"),
+            "{}",
+            captured[0].message
+        );
+
+        let (mut progress_writer, progress_reader) = tokio::io::duplex(256);
+        progress_writer
+            .write_all(b"speed=2.50x\nout_time_us=1250000\n")
+            .await
+            .expect("write progress transcript");
+        progress_writer
+            .shutdown()
+            .await
+            .expect("finish progress transcript");
+        consume_remux_stderr(progress_reader, Some((progress.clone(), generation))).await;
+
+        assert_eq!(progress.speed(), Some(2.5));
+        assert_eq!(progress.out_time_ms(), Some(1_250));
+        assert_eq!(
+            logs.tail("trace", 8).len(),
+            1,
+            "progress lines stay out of logs"
+        );
     }
 
     /// This is the response-start budget in isolation: an artificially cold

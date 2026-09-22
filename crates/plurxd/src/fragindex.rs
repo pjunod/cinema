@@ -1662,7 +1662,7 @@ async fn build_with_args(
     let identity = identity_for(file, video);
 
     let mut command = tokio::process::Command::new(ffmpeg_bin());
-    crate::transcode::configure_ffmpeg_runtime(&mut command, runtime_cache);
+    crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
     #[cfg(unix)]
     if let Some(source_fd) = source_fd {
         unsafe {
