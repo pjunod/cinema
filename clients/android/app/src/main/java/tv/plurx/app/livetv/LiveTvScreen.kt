@@ -170,6 +170,10 @@ fun LiveTvScreen(
     // browser seeds its own toolbar instead.
     RequestInitialFocus(backFocus, enabled = !television)
     val activity = LocalActivity.current
+    DisposableEffect(controller, activity) {
+        activity?.let(controller::bindDisplayMode)
+        onDispose { activity?.let(controller::unbindDisplayMode) }
+    }
     val componentActivity = activity as? ComponentActivity
     val canUsePip = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
         context.packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)

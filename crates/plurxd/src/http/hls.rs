@@ -499,6 +499,14 @@ impl Drop for StartedSessionGuard {
             #[cfg(test)]
             test_settlement,
         } = cleanup;
+        // Declared before the spawn, not inside it: from here the guard is
+        // held by cleanup, its request has already answered the viewer, and a
+        // later open for this player must not queue behind it. Publishing the
+        // session first is what lets that open fence this teardown exactly.
+        if let Some(replacement) = _replacement.as_ref() {
+            replacement.publish_fenceable(&session_id);
+            replacement.mark_abandoned();
+        }
         std::mem::drop(runtime.spawn(async move {
             if owns_worker {
                 abort_started_session(&state, &owner_node_id, &incarnation_id, &session_id).await;
@@ -3901,6 +3909,26 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
         return ApiError::Conflict(error);
     }
     tracing::warn!(file = file_id, "session create failed: {error}");
+    // This player's previous start has not let go yet — a wait, and a bounded
+    // one, so name it. Left as a bare `{error}` sentence this was a codeless
+    // 503, which every client correctly refuses to retry because a 503 nobody
+    // explained is not a "still building" answer. The viewer got a terminal
+    // overlay quoting an internal sentence, over a Retry button that re-posted
+    // into the same contention with no backoff. With a code it joins
+    // `create_503_not_yet` and the existing 1s/2s/4s ladder waits it out.
+    //
+    // Deliberately narrower than the whole capacity class. Sibling refusals in
+    // that class are not all waits: one tells the client to ask for a smaller
+    // height, and one reports a scratch ceiling above the configured budget
+    // that no retry can satisfy. Those keep the codeless 503 nothing retries.
+    if crate::transcode::is_replacement_wait_error(&error) {
+        return ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "transcode_capacity_pending",
+            message: error,
+            retry_after_seconds: crate::transcode::REPLACEMENT_WAIT_RETRY_AFTER_SECS,
+        };
+    }
     if crate::transcode::is_serving_fence_error(&error)
         || crate::transcode::is_start_infrastructure_error(&error)
         || crate::transcode::is_retryable_capacity_error(&error)
@@ -16811,6 +16839,7 @@ mod tests {
             container: file.container.clone(),
             video_codec: file.video_codec.clone(),
             video_codec_tag: file.video_codec_tag.clone(),
+            field_order: file.field_order.clone(),
             video_profile: file.video_profile.clone(),
             width: file.width,
             height: file.height,
@@ -16818,6 +16847,10 @@ mod tests {
             hdr: file.hdr.clone(),
             dolby_vision: Default::default(),
             hdr_format: file.hdr_format.clone(),
+            max_cll: file.max_cll,
+            max_fall: file.max_fall,
+            mastering_max_luminance: file.mastering_max_luminance,
+            luminance_source: file.luminance_source.clone(),
             bitrate: file.bitrate,
             audio_streams: file.audio_streams.clone(),
             subtitle_streams: vec![SubtitleStream {
@@ -23286,12 +23319,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("h264".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: None,
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(18_183_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -25674,12 +25712,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: None,
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(10),
             hdr: Some("dolby_vision".into()),
             hdr_format: Some("Dolby Vision".into()),
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(40_000_000),
             audio_streams: vec![],
             subtitle_streams,
@@ -26255,6 +26298,7 @@ mod tests {
                         container: Some("mp4".into()),
                         video_codec: Some("hevc".into()),
                         video_codec_tag: Some("hvc1".into()),
+                        field_order: None,
                         video_profile: Some("Main".into()),
                         width: Some(1920),
                         height: Some(1080),

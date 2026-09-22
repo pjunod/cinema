@@ -237,7 +237,8 @@
         "startup_timeout",
         "media_owner_transition",
         "vod_index_pending",
-        "vod_engine_unattested"
+        "vod_engine_unattested",
+        "transcode_capacity_pending"
       ],
       "retryable": true
     },
