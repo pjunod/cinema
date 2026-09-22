@@ -607,6 +607,11 @@ pub struct ClientLog {
     pub vcodec: Option<String>,
     /// Stream URL (query/token stripped by the client).
     pub src: Option<String>,
+    /// Source position for an uncaught browser error.
+    pub line: Option<u64>,
+    pub col: Option<u64>,
+    /// Browser stack, retained only as a bounded single log-line field.
+    pub stack: Option<String>,
     /// Extra detail (hls.js error type, stall verdict, …).
     pub detail: Option<String>,
     /// Browser label the client computed ("Safari" | "Chrome" | …).
@@ -1471,8 +1476,17 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
     if let Some(id) = ev.file_id {
         line.push_str(&format!(" file={id}"));
     }
-    if let Some(s) = field(&ev.src, 160) {
+    if let Some(s) = one_line_field(&ev.src, 160) {
         line.push_str(&format!(" src={s}"));
+    }
+    if let Some(source_line) = ev.line {
+        line.push_str(&format!(" line={source_line}"));
+    }
+    if let Some(source_col) = ev.col {
+        line.push_str(&format!(" col={source_col}"));
+    }
+    if let Some(stack) = one_line_field(&ev.stack, 2_048) {
+        line.push_str(&format!(" stack={stack}"));
     }
     if let Some(d) = field(&ev.detail, 200) {
         line.push_str(&format!(" [{d}]"));
@@ -5842,6 +5856,9 @@ mod tests {
             file_id: None,
             vcodec: None,
             src: None,
+            line: None,
+            col: None,
+            stack: None,
             detail: None,
             ua: None,
             attempt: None,
@@ -5861,6 +5878,23 @@ mod tests {
             delivered_dv_profile: None,
             declared_dv_profiles: None,
         }
+    }
+
+    #[test]
+    fn client_log_error_report_fields_are_bounded() {
+        let mut event = beacon("client_error", 0);
+        event.src = Some("/assets/core/cards.js\nforged?token=secret".into());
+        event.line = Some(17);
+        event.col = Some(9);
+        event.stack = Some(format!("{}\nforged", "x".repeat(3_000)));
+        let line = client_log_line(&event, 0);
+        assert!(line.contains("src=/assets/core/cards.jsforged?token=secret"));
+        assert!(line.contains(" line=17 col=9 stack="));
+        assert!(!line.contains('\n'));
+        assert!(
+            line.chars().count() < 2_300,
+            "bounded stack keeps one log line bounded"
+        );
     }
 
     /// The accusation is printed where a delivery actually failed, and the

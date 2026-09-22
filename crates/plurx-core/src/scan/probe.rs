@@ -353,6 +353,9 @@ pub fn parse_probe_json(json: &Value) -> ProbeResult {
                     index: audio_i,
                     codec: str_field(stream, "codec_name").unwrap_or_default(),
                     channels: int_field(stream, "channels"),
+                    sample_rate: str_field(stream, "sample_rate")
+                        .and_then(|rate| rate.parse::<i64>().ok())
+                        .filter(|rate| *rate > 0),
                     language: tag(stream, "language"),
                     title: tag(stream, "title"),
                     default: disposition(stream, "default"),
@@ -882,6 +885,7 @@ pub(crate) mod tests {
                   "width": 3840, "height": 2160, "pix_fmt": "yuv420p10le",
                   "color_transfer": "smpte2084" },
                 { "codec_type": "audio", "codec_name": "truehd", "channels": 8,
+                  "sample_rate": "48000",
                   "disposition": { "default": 1 }, "tags": { "language": "eng" } },
                 { "codec_type": "audio", "codec_name": "ac3", "channels": 6,
                   "tags": { "language": "fre" } },
@@ -900,6 +904,7 @@ pub(crate) mod tests {
         assert_eq!(p.audio_streams.len(), 2);
         assert_eq!(p.audio_streams[0].codec, "truehd");
         assert_eq!(p.audio_streams[0].channels, Some(8));
+        assert_eq!(p.audio_streams[0].sample_rate, Some(48_000));
         assert!(p.audio_streams[0].default);
         assert_eq!(p.audio_streams[1].index, 1);
         assert_eq!(p.subtitle_streams.len(), 1);

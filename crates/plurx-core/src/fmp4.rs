@@ -73,6 +73,53 @@ pub enum HevcSampleEntryLayout {
     Multiple { count: usize },
 }
 
+/// Derive the exact RFC 6381 AVC identity from the selected video track.
+///
+/// The decoder configuration is accepted only when every sample description
+/// on that track is AVC and every description names the same sample-entry
+/// fourcc and profile/compatibility/level triplet. This is deliberately
+/// stricter than finding an `avcC` byte sequence: payloads in unrelated boxes
+/// and ambiguous alternate descriptions must not become playlist identity.
+pub fn avc_rfc6381_codec(init: &Init) -> Result<Option<String>, Fmp4Error> {
+    let Some(video) = init.video() else {
+        return Ok(None);
+    };
+    if video.codec != Some(VideoCodec::H264) {
+        return Ok(None);
+    }
+    let (description_count, locations) = locate_avc_sample_entries(&init.bytes, video.id)?;
+    if locations.is_empty() || locations.len() != description_count {
+        return Err(Fmp4Error::Unsupported(
+            "the H.264 video track has a missing or non-AVC sample description".into(),
+        ));
+    }
+
+    let mut codec = None;
+    for location in locations {
+        let record = &init.bytes[location.payload];
+        let [1, profile, compatibility, level, ..] = record else {
+            return malformed("avcC has no complete profile/compatibility/level header");
+        };
+        if *profile == 0 || *level == 0 {
+            return malformed("avcC carries an unassigned profile or level");
+        }
+        let current = format!(
+            "{}.{profile:02X}{compatibility:02X}{level:02X}",
+            fourcc(&location.sample_entry)
+        );
+        match &codec {
+            None => codec = Some(current),
+            Some(first) if first == &current => {}
+            Some(_) => {
+                return Err(Fmp4Error::Unsupported(
+                    "the H.264 video track has ambiguous sample descriptions".into(),
+                ));
+            }
+        }
+    }
+    Ok(codec)
+}
+
 fn malformed<T>(msg: impl Into<String>) -> Result<T, Fmp4Error> {
     Err(Fmp4Error::Malformed(msg.into()))
 }
@@ -2550,6 +2597,108 @@ struct HvcCLocation {
     ancestors: Vec<BoxAt>,
 }
 
+#[derive(Clone)]
+struct AvcCLocation {
+    sample_entry: [u8; 4],
+    payload: Range<usize>,
+    entry: BoxAt,
+    /// `stsd` first, then every enclosing box through `moov`.
+    ancestors: Vec<BoxAt>,
+}
+
+fn track_id_in_trak(bytes: &[u8], trak_body: Range<usize>) -> Result<Option<u32>, Fmp4Error> {
+    let Some((tkhd_at, tkhd)) = find_child(bytes, trak_body, b"tkhd")? else {
+        return Ok(None);
+    };
+    let body = tkhd_at.start + tkhd.header_len..tkhd_at.start + tkhd.size;
+    let version = *bytes
+        .get(body.start)
+        .ok_or_else(|| Fmp4Error::Malformed("tkhd too short while locating stsd".into()))?;
+    let id_at = body.start + if version == 1 { 20 } else { 12 };
+    if id_at + 4 > body.end {
+        return malformed("tkhd too short while locating stsd");
+    }
+    Ok(Some(be_u32(bytes, id_at)))
+}
+
+/// Locate AVC configurations structurally under the selected track's
+/// `trak/mdia/minf/stbl/stsd/avc1|avc3|dva1|dvav` chain.
+fn locate_avc_sample_entries(
+    bytes: &[u8],
+    track_id: u32,
+) -> Result<(usize, Vec<AvcCLocation>), Fmp4Error> {
+    let mut result = None;
+    let Some((moov_at, moov)) = find_child(bytes, 0..bytes.len(), b"moov")? else {
+        return Ok((0, Vec::new()));
+    };
+    let moov_body = moov_at.start + moov.header_len..moov_at.start + moov.size;
+    for (trak_at, trak) in find_children(bytes, moov_body, b"trak")? {
+        let trak_body = trak_at.start + trak.header_len..trak_at.start + trak.size;
+        if track_id_in_trak(bytes, trak_body.clone())? != Some(track_id) {
+            continue;
+        }
+        if result.is_some() {
+            return malformed("more than one trak carries the selected video track id");
+        }
+        let Some((mdia_at, mdia)) = find_child(bytes, trak_body, b"mdia")? else {
+            return malformed("selected video trak has no mdia");
+        };
+        let mdia_body = mdia_at.start + mdia.header_len..mdia_at.start + mdia.size;
+        let Some((minf_at, minf)) = find_child(bytes, mdia_body, b"minf")? else {
+            return malformed("selected video mdia has no minf");
+        };
+        let minf_body = minf_at.start + minf.header_len..minf_at.start + minf.size;
+        let Some((stbl_at, stbl)) = find_child(bytes, minf_body, b"stbl")? else {
+            return malformed("selected video minf has no stbl");
+        };
+        let stbl_body = stbl_at.start + stbl.header_len..stbl_at.start + stbl.size;
+        let Some((stsd_at, stsd)) = find_child(bytes, stbl_body, b"stsd")? else {
+            return malformed("selected video stbl has no stsd");
+        };
+        let stsd_body = stsd_at.start + stsd.header_len..stsd_at.start + stsd.size;
+        if stsd_body.start + 8 > stsd_body.end {
+            return malformed("stsd too short while locating avcC");
+        }
+        let declared = be_u32(bytes, stsd_body.start + 4) as usize;
+        let entries_start = stsd_body.start + 8;
+        let entries = children(&bytes[entries_start..stsd_body.end])?;
+        if entries.len() != declared {
+            return malformed("stsd entry_count does not match its sample entries");
+        }
+        let mut locations = Vec::new();
+        for (entry, payload_start, entry_end) in entries {
+            if !matches!(entry.kind(), b"avc1" | b"avc3" | b"dva1" | b"dvav") {
+                continue;
+            }
+            let entry_at = BoxAt {
+                start: entries_start + payload_start - entry.header_len,
+                header_len: entry.header_len,
+            };
+            let body_start = entries_start + payload_start;
+            let body_end = entries_start + entry_end;
+            let extra_start = body_start + 78;
+            if extra_start > body_end {
+                return malformed("visual sample entry too short while locating avcC");
+            }
+            let Some((avcc_at, avcc)) = find_child(bytes, extra_start..body_end, b"avcC")? else {
+                continue;
+            };
+            let payload = avcc_at.start + avcc.header_len..avcc_at.start + avcc.size;
+            if payload.len() < 5 {
+                return malformed("avcC too short");
+            }
+            locations.push(AvcCLocation {
+                sample_entry: *entry.kind(),
+                payload,
+                entry: entry_at,
+                ancestors: vec![stsd_at, stbl_at, minf_at, mdia_at, trak_at, moov_at],
+            });
+        }
+        result = Some((declared, locations));
+    }
+    result.ok_or_else(|| Fmp4Error::Malformed("selected video track has no trak".into()))
+}
+
 fn locate_hevc_sample_entries(bytes: &[u8]) -> Result<Vec<Option<HvcCLocation>>, Fmp4Error> {
     let mut locations = Vec::new();
     let Some((moov_at, moov)) = find_child(bytes, 0..bytes.len(), b"moov")? else {
@@ -2638,6 +2787,66 @@ fn locate_hvcc(bytes: &[u8]) -> Result<Option<HvcCLocation>, Fmp4Error> {
         });
     }
     Ok(locations.pop().flatten())
+}
+
+#[cfg(any(test, feature = "fixtures"))]
+pub(crate) fn duplicate_avc_sample_entry_for_fixture(init: &mut Init) {
+    let video_id = init.video().expect("AVC fixture has video").id;
+    let (_, locations) =
+        locate_avc_sample_entries(&init.bytes, video_id).expect("locating original avcC");
+    assert_eq!(locations.len(), 1, "fixture must start with one AVC entry");
+    let location = &locations[0];
+    let entry_size = peek_box(&init.bytes, location.entry.start)
+        .expect("reading AVC sample entry")
+        .expect("complete AVC sample entry")
+        .size;
+    let entry_end = location.entry.start + entry_size;
+    let duplicate = init.bytes[location.entry.start..entry_end].to_vec();
+    let delta = duplicate.len();
+    init.bytes.splice(entry_end..entry_end, duplicate);
+
+    let stsd = location.ancestors[0];
+    let entry_count_at = stsd.start + stsd.header_len + 4;
+    let entry_count = be_u32(&init.bytes, entry_count_at);
+    init.bytes[entry_count_at..entry_count_at + 4]
+        .copy_from_slice(&(entry_count + 1).to_be_bytes());
+    for &ancestor in &location.ancestors {
+        grow_box(&mut init.bytes, ancestor, delta).expect("growing AVC sample-entry ancestors");
+    }
+}
+
+#[cfg(any(test, feature = "fixtures"))]
+pub(crate) fn replace_second_avc_triplet_for_fixture(
+    init: &mut Init,
+    profile: u8,
+    compatibility: u8,
+    level: u8,
+) {
+    let video_id = init.video().expect("AVC fixture has video").id;
+    let (_, locations) =
+        locate_avc_sample_entries(&init.bytes, video_id).expect("locating duplicate avcC");
+    assert_eq!(locations.len(), 2, "fixture must have two AVC entries");
+    let payload = locations[1].payload.clone();
+    init.bytes[payload.start + 1..payload.start + 4].copy_from_slice(&[
+        profile,
+        compatibility,
+        level,
+    ]);
+}
+
+#[cfg(any(test, feature = "fixtures"))]
+pub(crate) fn replace_avc_sample_entry_for_fixture(init: &mut Init, sample_entry: [u8; 4]) {
+    assert!(
+        matches!(&sample_entry, b"avc1" | b"avc3" | b"dva1" | b"dvav"),
+        "fixture replacement must remain AVC"
+    );
+    let video_id = init.video().expect("AVC fixture has video").id;
+    let (_, locations) = locate_avc_sample_entries(&init.bytes, video_id).expect("locating avcC");
+    assert!(!locations.is_empty(), "fixture has AVC sample entries");
+    for location in locations {
+        init.bytes[location.entry.start + 4..location.entry.start + 8]
+            .copy_from_slice(&sample_entry);
+    }
 }
 
 #[cfg(any(test, feature = "fixtures"))]

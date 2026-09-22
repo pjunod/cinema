@@ -474,7 +474,10 @@ pattern = "RESPONSE_PUBLICATION_LIFECYCLE_BUDGET"
 # 4 -> 5: exact initialization-segment inspection is a response-publication
 # operation and takes the same outer owner budget as the segment response it
 # explains. It starts no independent producer and cannot outlive the request.
-expected_occurrences = 5
+# 5 -> 6: `an_mpegts_session_keeps_its_static_codec_string` is a unit test that
+# calls `exact_hls_context_at` with that same budget as its deadline, so the
+# sixth site is the test reading the constant, not a new owner or producer.
+expected_occurrences = 6
 
 [[module_symbols]]
 id = "m4-eof-media-commit-handoff"
@@ -754,7 +757,14 @@ pattern = "ServingAuthority"
 # in a test helper that drives `settle_activation_predecessor` at its real call
 # site. It projects the always-ready authority the other fixtures use and owns
 # no producer, lease or serving generation of its own.
-expected_occurrences = 21
+# 21 -> 27 with L-01's DVR sink isolation: six
+# `ServingAuthority::always_ready()` fixtures in the test module of
+# `crates/plurxd/src/live_tv/dvr.rs` -- the shared oversized-scheduler manager
+# and five fan-out tests that need an admitted generation before they can pump
+# bytes. They project the always-ready authority every other fixture uses; the
+# one test that proves lost authority cancels the sinks builds a real
+# `ServingFence` instead. No production serving lease is added.
+expected_occurrences = 27
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -1600,12 +1610,19 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # +4 for C-02's bounded scan walk, root fingerprint, contained-path check, and
 # sparse-walker cancellation fixture. Every blocking task is awaited; none is
 # a detached producer or process owner.
+# 534 -> 538 on the promotion merge, +2 from L-01's DVR sink isolation:
+# writer task per capture attempt, whose JoinHandle is stored on the sink and
+# joined by `settle_sink` before the attempt part is read. The second is the
+# transport worker's cleanup hop -- a task cannot await its own JoinHandle, so
+# the worker hands `close_transport` to a sibling task and drops that handle;
+# the sibling only settles the writers and collects the worker. Neither owns a
+# media producer, child process, or replacement policy.
 # 534 -> 536 with S-08: `state.rs` spawns the one leased field-order backfill
 # beside the existing catalogue backfills -- it walks a node-local cursor and
 # writes a column, owning no producer, process or timer -- and `decode_facts.rs`
 # spawns one `#[cfg(test)]` actor in the idet cancellation fixture, which is
 # awaited inside the test that created it.
-expected_occurrences = 536
+expected_occurrences = 538
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2043,11 +2060,19 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +1 for K-07's test-only zero-duration timeout: it deterministically exercises
 # the outer-deadline arm of the Store result observer, is awaited immediately,
 # and owns no task, process, producer, or replacement policy.
+# 828 -> 834 on the promotion merge, +2 from L-01's per-sink DVR writers:
+# `tokio::time::timeout(TUNER_READ_TIMEOUT, close)` bounds the writer loop's
+# final flush and `sync_all`, and one
+# `tokio::time::timeout(super::SESSION_DRAIN_TIMEOUT, &mut task)` in
+# `settle_sink` bounds the join of that one writer task before assembly reads
+# its attempt part. Each bounds exactly one owned task, and the timed-out arm
+# puts the handle back for the next DVR tick rather than abandoning it;
+# neither starts a producer, process, or replacement policy.
 # 828 -> 832 with S-08: one `tokio::time::timeout` bounds the idet verification
 # pass in `decode_facts.rs` against the caller's remaining budget, and three are
 # `#[cfg(test)]` bounds in the cancellation fixture beside it. None of them owns
 # a producer; the idet bound is the caller's deadline, not a new one.
-expected_occurrences = 832
+expected_occurrences = 834
 
 [[module_structures]]
 id = "bare-time-constructor"
