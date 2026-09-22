@@ -106,18 +106,25 @@ changed — only which file to open.
 
 ## 3. Vendored Rust crates — upstream sources, locally modified
 
-Three crates are vendored under `vendor/` rather than pulled from crates.io.
+Four crates are vendored under `vendor/` rather than pulled from crates.io.
 Each carries a `PLURX-PATCH.md` recording what plurx changed and why.
 
 | Crate | Version | License | Upstream | Changes |
 |---|---|---|---|---|
 | `hiqlite` | 0.14.0 | Apache-2.0 | Sebastian Dobe · [sebadob/hiqlite](https://github.com/sebadob/hiqlite) | [15 clustering patches](vendor/hiqlite/PLURX-PATCH.md) |
 | `hiqlite-wal` | 0.14.0 | Apache-2.0 | Sebastian Dobe · [sebadob/hiqlite](https://github.com/sebadob/hiqlite) | [3 restart-recovery patches](vendor/hiqlite-wal/PLURX-PATCH.md) |
+| `s3-simple` | 0.8.0 | Apache-2.0 | Sebastian Dobe · [sebadob/s3-simple](https://github.com/sebadob/s3-simple) | [quick-xml bump for RUSTSEC-2026-0194/0195 and four unreferenced edges dropped](vendor/s3-simple/PLURX-PATCH.md) |
 | `rust_decimal` | 1.42.1 | MIT | Paul Mason · [paupino/rust-decimal](https://github.com/paupino/rust-decimal) | [rkyv 0.7 removal for RUSTSEC-2026-0235](vendor/rust_decimal/PLURX-PATCH.md) |
 
 Each directory carries its upstream license at `vendor/<crate>/LICENSE`.
 
-For the two Apache-2.0 crates, §4(b) asks that modified files carry
+`s3-simple` is vendored but is not part of the default resolution: plurx
+builds hiqlite without `backup`/`s3`, so it reaches no shipped binary and
+carries no row in the resolved-dependency table below. It is attributed here
+because the repository redistributes the modified source. See
+[vendor/s3-simple/PLURX-PATCH.md](vendor/s3-simple/PLURX-PATCH.md).
+
+For the three Apache-2.0 crates, §4(b) asks that modified files carry
 prominent notices of the change. `PLURX-PATCH.md` records every change at the
 directory level, which is how the patches are kept reviewable against
 upstream; it is not a per-file annotation. `rust_decimal` is MIT, where no

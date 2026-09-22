@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries sixteen compatibility patches for clustered
+Apache-2.0. Plurx carries seventeen compatibility patches for clustered
 deployments:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
@@ -26,6 +26,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 14 | Bounded definitive-forward recovery | plurx policy | — | Never; Plurx owns the attempt and replay limits plus backup leader attribution. |
 | 15 | Validation apply counters and controls | plurx policy | — | Never; Plurx's separate-process validation harness consumes this surface. |
 | 16 | Gate `cryptr/s3` behind Hiqlite `s3` | generic bug | pending M6 | Upstream release no longer enables S3 dependencies when backup and S3 are off. |
+| 17 | Scope the vendored `s3-simple` override to this manifest | dependency-only | — | Upstream cryptr accepts `s3-simple` 0.9 or newer, which already carries these dependency-only corrections. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -157,9 +158,21 @@ made-up URL and prevents the fork from being declared fully tracked.
   downstream users that select `backup` or `s3` retain the same backend while
   builds such as Plurx that select neither do not compile an unused S3, QUIC,
   and second aws-lc stack.
+- This manifest carries its own `[patch.crates-io]` row pointing `s3-simple`
+  at `vendor/s3-simple`. Gating the edge removes S3 from the configuration
+  Plurx builds, but it does not make the configuration Hiqlite still
+  advertises safe: with `backup` or `s3` enabled, registry `s3-simple` 0.8.0
+  resolves `quick-xml` 0.39.4 (RUSTSEC-2026-0194, RUSTSEC-2026-0195) and a
+  retired `aws-lc-sys` 0.39.1 that `deny.toml` forbids. cryptr 0.10.0 requires
+  `s3-simple ^0.8.0`, so upstream 0.9.x cannot be selected instead. The
+  override lives here rather than in the workspace root because the workspace
+  graph contains no `s3-simple` at all, where the same row would be an unused
+  patch. `tests/operations/test_hiqlite_patch_ledger.py` resolves this
+  directory's lockfile against `deny.toml` and the advisory floor, so the
+  advertised backup/S3 graph cannot regress unnoticed.
 
-Remove this vendor when an upstream Hiqlite release contains all sixteen patches
-and Plurx has upgraded to it. Until then, the sparse-roster regression in
+Remove this vendor when an upstream Hiqlite release contains all seventeen
+patches and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
 and the snapshot RPC error-boundary plus queue-saturated reset tests above keep
 the transport-recovery patches load-bearing.
