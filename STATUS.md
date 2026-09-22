@@ -4,6 +4,34 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The full Rust suite and the release build are clean again
+
+`PR #443`, branch `fix/red-suite-2026-09-22`. Nothing here changes runtime
+behaviour except one allocation at daemon startup; nothing to deploy for it.
+
+The fast lane (`make unit`) was green on `main`; the red was all in what only
+`make test-full` builds, which no CI lane runs any more.
+
+- **Release/Docker build warning.** `AvcCLocation.entry` and `.ancestors` in
+  `plurx-core/src/fmp4.rs` are read only by the `fixtures` builders, so every
+  release build warned they were never read. `expect(dead_code)` outside that
+  cfg.
+- **plurx-core lib aborted on a stack overflow** with `hiqlite-store` on, in two
+  join tests, taking every later test in the binary with it.
+  `select_daemon_store` awaited its join, reopen and activation branches
+  inline, so its future carried all of them (9,984 bytes; 496 boxed). Branches
+  are boxed now, and `select_daemon_store_future_stays_small` holds it under
+  2 KiB.
+- **14 hiqlite store contracts** failed in their fixtures: the downgrade
+  helpers stopped at schema v34, so replaying v40/v42/v43/v44 collided with
+  their own `ADD COLUMN`s, and v42's index over `video_identity` blocked the
+  v27 rewind. One shared reversal list now walks back v44..v40. Two stale
+  expectations were updated with it (the v42 index split; 46 to 52 import
+  tables).
+- **`live_tv_two_node`** (4 cases) needs to bind ports 80 and 5004, and fails
+  by design on a host that cannot. With `cap_net_bind_service` on nuc3 all
+  four pass. Not a code defect.
+
 ## Resume stopped working on every client — reproduced, half fixed
 
 `PR #438`, branch `fix/resume-progress-zero-clobber`, **merged, NOT deployed**.
