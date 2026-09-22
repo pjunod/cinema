@@ -323,19 +323,48 @@ test("an older quality save never overwrites a newer draft", async () => {
   assert.deepEqual(notices, ["Earlier quality change saved; newer edit remains unsaved"]);
 });
 
+// Twice already — #309, and again when `liveTvDeinterlaceCard` shipped — a new
+// card reached `developerPanel` without being composed into the harness below,
+// and the whole gate died on a bare `ReferenceError: <name> is not defined`
+// thrown from inside an evaluated `new Function`: one opaque failure in place
+// of every assertion this file makes about the Developer tab, with the name it
+// wanted legible only from a stack trace through two layers of eval.
+//
+// The composed list stays explicit, because what the panel may compose is the
+// thing being pinned. This only makes the third time say what to do about it.
+// Deciding statically which of a panel's calls need composing is not reliable
+// — a save handler named inside an `onclick` string is text for the DOM, not a
+// call this harness makes — so the question is answered where it is exact:
+// after the call actually failed.
+function renderComposedPanel(panelName, render) {
+  try {
+    return render();
+  } catch (error) {
+    const missing = /^(?:\w+ )?(?:ReferenceError: )?([A-Za-z_][\w$]*) is not defined$/
+      .exec(error && error.message);
+    if (!missing || !shippedDeclares(missing[1])) throw error;
+    throw new Error(
+      `${panelName} calls ${missing[1]}, which index.html declares and this `
+      + `harness does not compose; add shippedSource("${missing[1]}") to the `
+      + "list beside the other cards",
+      { cause: error },
+    );
+  }
+}
+function shippedDeclares(name) {
+  return DECLARATIONS.some((kind) => SHIPPED_UI.includes(`${kind}${name}(`));
+}
+
 test("Developer keeps only experiments; everyday controls retain their saves and advisory readiness", () => {
   assert.doesNotMatch(
     shippedSource("playbackPanel"),
     /preparedQualityCard/,
     "the server-wide experimental enable must not remain in everyday Playback settings",
   );
-  const panels = new Function(
-    "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc", "window", "Hls",
-    "currentCapsDocument",
-    // Joined with newlines, never bare interpolation: `shippedSource` here
-    // stops at the next `\nfunction `, so a fragment can end inside a trailing
-    // `//` comment and swallow whatever follows it.
-    [
+  // Joined with newlines, never bare interpolation: `shippedSource` here
+  // stops at the next `\nfunction `, so a fragment can end inside a trailing
+  // `//` comment and swallow whatever follows it.
+  const composedBody = [
       shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
       shippedSource("verifiedDecodeCard"), shippedSource("decodeRecoveryCard"),
       // #309's sibling problem, twice over: a card or fragment `developerPanel`
@@ -343,7 +372,8 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
       shippedSource("seekScratchReservationsCard"),
-      shippedSource("liveTvGuideCard"), shippedConst("DEV_READINESS_LABEL"),
+      shippedSource("liveTvGuideCard"), shippedSource("liveTvDeinterlaceCard"),
+      shippedConst("DEV_READINESS_LABEL"),
       shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
       shippedSource("devReadinessEvidence"), shippedSource("devReq"),
       shippedSource("devStaticReq"), shippedSource("clusterTransportRecoveryCard"),
@@ -363,7 +393,11 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
       "return {developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard,playbackPanel,metadataPanel,maintenancePanel};",
-    ].join("\n"),
+    ].join("\n");
+  const panels = new Function(
+    "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc", "window", "Hls",
+    "currentCapsDocument",
+    composedBody,
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
     (body) => `CARD[${body}]`,
@@ -404,7 +438,9 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     dvr_reminder_lead_s: 300,
     dvr_webhook_url: "",
   };
-  const html = panels.developerPanel(settings, readiness);
+  const html = renderComposedPanel(
+    "developerPanel", () => panels.developerPanel(settings, readiness),
+  );
   for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   assert.doesNotMatch(html, /HDHomeRun Live TV|CARDHEAD:Programme guide/);

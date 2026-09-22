@@ -541,6 +541,11 @@ const FRAGMENT_INDEX_METHODS: &[&str] = &[
     "put_fragment_index",
     "fragment_index",
     "forget_fragment_index",
+    // C-05's bounded revalidation of legacy rows, node-local like the index
+    // itself: the replicated backend answers it from its own per-voter
+    // sidecar rather than through Raft. It marks structural refusals through
+    // `validated_revision` and never deletes an index.
+    "validate_fragment_index_page",
     // Why a pipeline has NO index — the other half of the same question, and
     // what stops the background pass spending the same whole-file read every
     // wrap of the library on a file that has already answered.
@@ -14686,6 +14691,11 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE cache_storage_members;
              DROP INDEX rendition_plans_by_file;
              DROP TABLE rendition_plans;
+             -- v27's node-local index table. Dropping the table also removes
+             -- everything the migrations above v14 added to it -- v29's
+             -- promotion columns and v66's `validated_revision` -- so unlike
+             -- the `files` columns above, those need no separate DROP COLUMN
+             -- here.
              DROP TABLE fragment_indexes;
              ALTER TABLE transcode_cache_locations DROP COLUMN generation_id;
              ALTER TABLE transcode_cache_locations DROP COLUMN storage_id;
@@ -16425,7 +16435,12 @@ fn contract_inventory_matches_every_store_method() {
     // for the two S-07 adds on top of them, `files_missing_luminance` and
     // `set_file_luminance`. All four are named in `MEDIA_METHODS` above; the
     // name-set assertion below is what proves the count and the trait agree.
-    assert_eq!(declared.len(), 379, "review the Store method count");
+    //
+    // 379 -> 380 for the one `FragmentIndexStore` method C-05 adds,
+    // `validate_fragment_index_page`, a bounded node-local pass over legacy
+    // rows. It is named in `FRAGMENT_INDEX_METHODS` above; no new trait and no
+    // new supertrait of `Store`, so nothing above this call had to change.
+    assert_eq!(declared.len(), 380, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

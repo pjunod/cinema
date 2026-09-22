@@ -405,6 +405,13 @@ paths = [
   "Cargo.lock",
   "Cargo.toml",
   "crates/plurx-core/Cargo.toml",
+  # The K-05 catalogue fixture generator. It opens a database through
+  # `SqliteStore::open` so production owns the schema, then populates and
+  # censuses the core media model's durable rows — libraries, items, files,
+  # probes, users and watch state — for query-plan evidence. A migration that
+  # adds a newly-required column breaks it, so it belongs with the model whose
+  # persistence it reproduces.
+  "crates/plurx-core/examples/catalogue_fixture.rs",
   "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,testfixtures}.rs",
   "crates/plurx-core/src/content_analysis.rs",
   "crates/plurx-core/src/store/mod.rs",
