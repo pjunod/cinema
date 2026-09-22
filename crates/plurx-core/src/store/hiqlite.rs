@@ -4129,9 +4129,12 @@ impl UserStore for HiqliteAuthStore {
         // `substr` counts characters, so `$2` characters is at most four times
         // that many bytes: no whole legacy label crosses the Raft read path,
         // and `TokenSummaryRow` trims what is left to the exact byte bound.
+        // Replicated statements must introduce `$n` in order of first
+        // appearance, and the label cap appears in the projection list before
+        // the user predicate, so it is `$1`.
         let sql = "SELECT substr(token_hash, 1, 8) AS token_hash_prefix, \
-                          substr(device, 1, $2) AS device, created_at, last_seen_at \
-                   FROM tokens WHERE user_id = $1 \
+                          substr(device, 1, $1) AS device, created_at, last_seen_at \
+                   FROM tokens WHERE user_id = $2 \
                    ORDER BY created_at, token_hash LIMIT $3";
         validate_sql(sql)?;
         Ok(self
@@ -4139,8 +4142,8 @@ impl UserStore for HiqliteAuthStore {
             .query_consistent_map::<TokenSummaryRow, _>(
                 sql,
                 params!(
-                    user_id,
                     MAX_DEVICE_LABEL_BYTES as i64,
+                    user_id,
                     TOKEN_SUMMARY_MAX as i64
                 ),
             )

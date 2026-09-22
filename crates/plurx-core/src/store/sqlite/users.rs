@@ -471,11 +471,7 @@ mod tests {
             .with_conn(move |conn| {
                 conn.execute(
                     "INSERT INTO tokens (token_hash, user_id, device) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![
-                        format!("aaaaaaaa{}", "1".repeat(56)),
-                        owner,
-                        legacy_ascii
-                    ],
+                    rusqlite::params![format!("aaaaaaaa{}", "1".repeat(56)), owner, legacy_ascii],
                 )?;
                 conn.execute(
                     "INSERT INTO tokens (token_hash, user_id, device) VALUES (?1, ?2, ?3)",

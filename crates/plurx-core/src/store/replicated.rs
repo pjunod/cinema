@@ -393,6 +393,23 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BranchOnRowsAffected,
     },
+    // Counting the rows an eight-hex prefix matches and deleting the one it
+    // matched are one boundary because the count is the authorization: a
+    // prefix that matched two rows must delete neither, and a prefix that
+    // matched one must delete exactly that one. Split them and a token minted
+    // between the count and the delete can turn a unique prefix ambiguous
+    // under a delete that has already been authorized -- which is revoking a
+    // device the caller never saw.
+    //
+    // `ReadBranchWrite` because the caller is told which of the three
+    // outcomes happened, and the write runs only on the middle one.
+    SqliteTransactionSite {
+        module: "users.rs",
+        method: "delete_token_by_prefix_for_user",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
     SqliteTransactionSite {
         module: "offline.rs",
         method: "invalidate_ready_offline_package",

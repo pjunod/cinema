@@ -235,6 +235,13 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/auth/logout"
         | "/api/v1/users"
         | "/api/v1/users/{id}"
+        // The device inventory and per-device revocation are account
+        // administration on the same rows as login and logout, so they are
+        // attributed here rather than opening a group of their own.
+        | "/api/v1/me/devices"
+        | "/api/v1/me/devices/{prefix}"
+        | "/api/v1/users/{id}/devices"
+        | "/api/v1/users/{id}/devices/{prefix}"
         | "/api/v1/keys"
         | "/api/v1/keys/{id}" => 0,
 
@@ -6381,7 +6388,11 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "a label at the bound must log in: {body}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a label at the bound must log in: {body}"
+        );
 
         let over_bound = "d".repeat(MAX_DEVICE_LABEL_BYTES + 1);
         let (status, body) = call(
@@ -6521,11 +6532,8 @@ mod tests {
             .expect("the test owns the active revocation slot");
 
         let started = Instant::now();
-        let (status, body) = call(
-            &app,
-            post("/api/v1/auth/logout", Some(&second), json!({})),
-        )
-        .await;
+        let (status, body) =
+            call(&app, post("/api/v1/auth/logout", Some(&second), json!({}))).await;
         let waited = started.elapsed();
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         assert!(
