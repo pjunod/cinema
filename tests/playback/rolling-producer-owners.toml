@@ -1652,10 +1652,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # leased catalogue job that walks a node-local cursor and writes MaxCLL,
 # MaxFALL, mastering peak and provenance columns. It owns no producer, no
 # process and no timer of its own.
+# 546 -> 547 with C-05: `spawn_background_loops` spawns one more per-node
+# background loop, `fragment_index_validation_loop`, beside the shared-cache
+# and media-session loops already there. Fragment indexes are node-local for
+# both storage backends, so this runs on every node rather than behind a
+# leadership check; it walks one bounded page of legacy rows per tick and
+# writes the validation marker. It owns no producer and no process, and its
+# only timer is the shared 30-second tick recorded in the time-constructor
+# row below.
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 546
+expected_occurrences = 547
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2139,10 +2147,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # pass in `decode_facts.rs` against the caller's remaining budget, and three are
 # `#[cfg(test)]` bounds in the cancellation fixture beside it. None of them owns
 # a producer; the idet bound is the caller's deadline, not a new one.
+# 840 -> 841 with C-05: `FRAGMENT_INDEX_VALIDATION_INTERVAL` is one
+# `Duration::from_secs(30)` const, the sleep between bounded validation pages
+# in the loop added to the task-spawn row above. It is a pacing interval for a
+# node-local backfill, not a deadline, a lease or a producer's clock, and
+# nothing reads it but that loop.
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 840
+expected_occurrences = 841
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2519,10 +2532,15 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 326 -> 327 with S-08: the added `.status()` belongs to the `#[cfg(test)]`
 # fixture renderer in `decode_facts.rs`, which is awaited to completion before
 # the test that built it proceeds.
+# 332 -> 333 with K-04: the added `.status()` reads the `Response` an Axum
+# `oneshot` returned in `metrics_route_attribution_renders_fixed_labels_and_
+# scoped_store_counts`, which drives one in-process request through the
+# attribution middleware. It is an HTTP status read, not a command launch,
+# and the test owns no process and no producer.
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 332
+expected_occurrences = 333
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

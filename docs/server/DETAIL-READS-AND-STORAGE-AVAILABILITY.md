@@ -1,6 +1,6 @@
 # Detail reads and storage availability — a badge that never unpacks an index, and an availability answer that carries its age
 
-**Status:** ready for review · **Executes:** C14 (§3.3.3) from
+**Status:** implementation in progress · **Executes:** C14 (§3.3.3) from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
 
@@ -10,11 +10,13 @@ Board id **C-05**. Read §2 first: it quotes the detail loop, the index
 read it calls, and the two rows in the sidecar that decide the badge, and
 it states exactly which of `get`'s five refusal conditions a cheap
 projection has to reproduce. Then build §5 in order — M1 (the validation
-marker) must land before M2 (the projection), because the projection's
-whole safety argument is that marker; M3 (availability) is independent of
-both and may run in a parallel session. One draft PR per milestone into
-`main` under the fast lane. Every `file:line` is from `0f02b7ea`;
-re-verify by function name.
+marker) is the first logical commit and must be deployed/backfilled before M2
+is eligible for promotion, because the projection's whole safety argument is
+that marker; M3 (availability) is independent of both. Current protocol keeps
+all milestones in one draft plan PR with logical commits. The intermediate M1
+commit is therefore a named rollout prerequisite, not a claim that the final
+tree may expose M2 on an unbackfilled fleet. Every `file:line` is from
+`0f02b7ea`; re-verify by function name.
 
 **If a step seems to require changing invalidation-by-mismatch (a stale
 row answering `None` rather than being deleted), making the detail page
@@ -230,12 +232,15 @@ let validated = !index.rows.is_empty()
 let validated_revision = if validated { i64::from(VALIDATION_REVISION) } else { 0 };
 ```
 
-A row that fails validation is still written, with marker `0`. It is not
-an error and not a deletion: the indexer's own retry and outcome machinery
-owns that decision (`record_typed_outcome`, `:453+`), and deleting here
-would make a publication failure indistinguishable from a file that was
-never indexed. What the `0` buys is that the row can never be read as
-`indexed`.
+A row that fails validation during typed publication is still written, with
+marker `0`. It is not an error and not a deletion: the indexer's own retry and
+outcome machinery owns that decision (`record_typed_outcome`, `:453+`), and
+deleting here would make a publication failure indistinguishable from a file
+that was never indexed. What the `0` buys is that the row can never be read as
+`indexed`. The typed publisher cannot manufacture malformed promotion JSON —
+it serialises and immediately decodes the same `PromotionInputs` value — so
+the executable malformed-payload case is a legacy row corrupted before the
+backfill, not an artificial `put` input that its type makes unrepresentable.
 
 **Legacy rows.** Every row already on disk gets `0` from the column
 default. `0` means *unverified*, not *invalid*: the projection reports
@@ -243,10 +248,15 @@ default. `0` means *unverified*, not *invalid*: the projection reports
 `vod_index_refusal` stays empty. This is fail-closed and it is visible —
 `pending` is the state the badge already uses for "the indexer has not
 answered yet". A bounded background revalidation pass (M1 step 3) reads
-`file_id, argv_fingerprint` for rows with `validated_revision <>
+`file_id, argv_fingerprint` for rows with `ABS(validated_revision) <
 VALIDATION_REVISION`, in pages of `VALIDATION_PAGE = 64`, at most one page
 per `VALIDATION_INTERVAL = 30 s`, calls the existing `get` for each (which
-does the real unpack) and writes the marker. A library converges in
+does the real unpack) and writes the marker. A valid row gets the positive
+revision; a row refused at that revision gets the negative revision. The
+negative value is still unverified to the projection, but prevents one corrupt
+row at the front of the ordered page from starving every sound row behind it;
+the absolute-value predicate naturally retries it after a revision bump. A
+library converges in
 `rows / 64` half-minutes — a 20,000-row node in under three hours —
 without a rebuild and without a startup stall.
 
@@ -483,14 +493,14 @@ Settings → Developer entry.
    `SIDECAR_SCHEMA_VERSION`), with the `creating_indexes ||
    !column_exists(…)` guard the v6 comment (`:462-478`) explains.
 2. `put` computes and writes the marker (§3.1).
-3. The bounded backfill: a new arm in the existing background loop that
-   owns index housekeeping, `VALIDATION_PAGE = 64` per
-   `VALIDATION_INTERVAL = 30 s`, calling `get` per row and writing the
-   marker; `plurx_index_validation_backfill_total`.
+3. The bounded backfill: a cancellation-bound node-local background loop,
+   `VALIDATION_PAGE = 64` per `VALIDATION_INTERVAL = 30 s`, calling `get`
+   per row and writing the marker; `plurx_index_validation_backfill_total`.
 4. Tests in `fragindex.rs`'s test module:
    `put_marks_a_sound_row_validated`;
-   `put_leaves_an_unparsable_promotion_unmarked` (construct a
-   `FragmentIndex` whose promotion fails to serialise round-trip);
+   `backfill_refuses_an_unparsable_promotion_without_deleting` (corrupt a
+   legacy persisted payload, because typed publication cannot construct an
+   unserialisable `PromotionInputs` value);
    `an_empty_row_set_is_never_marked`;
    `a_revision_bump_unmarks_without_deleting` (write at revision N, read
    at N+1, assert the row is still there and reports unverified);
@@ -569,11 +579,15 @@ un-WIP. `make validate-staged` before every push. M3 touches
 
 ### 6.2 Rollout
 
-M1 first and alone, to one node, watched for one backfill convergence
+The one-plan PR records M1 as its first implementation commit. Build and deploy
+that exact intermediate commit first and alone to one node, watched for one backfill convergence
 (`plurx_index_validation_backfill_total` stops rising) before M2 goes
 anywhere — M2's badge is only correct once markers exist, and on an
 unbackfilled node every title reads `pending`, which is a visible
-regression if the two land together. M2 and M3 to the fleet after that.
+regression if the two land together. The PR remains draft and cannot be
+promoted until that M1 receipt exists; this preserves the required order
+without splitting one plan across multiple PRs. M2 and M3 go to the fleet
+only after that receipt.
 Nothing here changes recipe identity, argv fingerprints or cache digests;
 the sidecar schema version moves, and a rollback to the previous
 `sha-` image reads the new column as absent, which the frozen-create rule
@@ -627,14 +641,14 @@ badge". Three independent checks, all in M2:
    `plurx_detail_probe_json_bytes` (histogram) in M2 and decide from the
    p95 on the real library. If it is under a few hundred kilobytes per
    page, leave it.
-2. **Who owns the backfill loop.** M1 step 3 needs a home in an existing
-   background loop rather than a new one. The content-analysis housekeeping
-   loop is the obvious host
+2. **Who owns the backfill loop.** M1 step 3 initially preferred a home in an
+   existing background loop. The content-analysis housekeeping loop was the
+   obvious candidate
    ([CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md](../streaming/CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md)),
-   but it is lease-gated for cluster-singleton work and this backfill is
-   node-local. Confirm at build time that the arm runs on every node, not
-   only the lease holder; if the loop cannot host node-local work, the
-   backfill gets its own interval task and M1 says so.
+   but it is lease-gated for cluster-singleton work while these rows are
+   node-local on both backends. The implementation therefore owns a dedicated
+   cancellation-bound interval task on every node. It acquires the existing
+   local connection once per bounded page and never touches Raft.
 3. **`available` for `unknown` is a product call.** §3.3 chooses
    "unknown reads as available" and gives the reason. If Paul prefers the
    client to show a "cannot check this right now" state instead, that is a
@@ -649,7 +663,7 @@ badge". Three independent checks, all in M2:
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per logical milestone in the one plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
@@ -657,4 +671,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | claim | [#435](http://192.168.4.7:3000/noirr/plurx/pulls/435) | Claimed one-plan/one-PR ownership from `main` @ `9deb58a2`; Rust 1.97.1 baseline `cargo check --locked -p plurxd --all-targets` passed before edits. M1 will be the first implementation commit and its rollout/backfill receipt remains mandatory before M2 promotion. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#435](http://192.168.4.7:3000/noirr/plurx/pulls/435) | Exact deployable M1 boundary `33e66cfd1`: standalone v66 and sidecar v10 marker, publication proof, node-local bounded backfill, refusal-without-deletion, and fixed-cardinality convergence metric. Focused Rust 1.97.1 evidence: `cargo test --locked -p plurx-core --features hiqlite-store store::fragindex -- --test-threads=1` (20 passed), `cargo test --locked -p plurx-core --features hiqlite-store store::telemetry -- --test-threads=1` (14 passed), `cargo test --locked -p plurxd prometheus_scrape_has_no_store_operation -- --test-threads=1` (1 passed), `cargo check --locked -p plurxd --all-targets`, and `cargo clippy --locked -p plurxd --all-targets -- -D warnings`. M2/M3 remain pending; M2 is deliberately not implemented or promotable until the exact M1 boundary is deployed and its backfill receipt exists. |
