@@ -317,6 +317,93 @@ const SEGMENT_WAIT: Duration = Duration::from_secs(20);
 /// Record any material wait so a client-side freeze can be joined to producer
 /// starvation instead of being inferred from a later timeout.
 const SEGMENT_WAIT_EVENT_MIN: Duration = Duration::from_millis(250);
+
+/// Segment requests parked in [`TranscodeManager::segment_for_publication_before`]
+/// waiting for the producer to publish what they asked for.
+///
+/// The rolling twin of the VOD wait pool's reading. The rolling status used to
+/// report a constant zero here, on the claim that rolling delivery never parks
+/// a response — but the publication loop does park, for up to [`SEGMENT_WAIT`],
+/// and that wait is exactly what a client's "Buffering…" detail needs in order
+/// to tell a starved producer from a player sitting on media it already has.
+#[derive(Default)]
+struct HttpWaitLedger {
+    entries: std::sync::Mutex<HttpWaitEntries>,
+}
+
+#[derive(Default)]
+struct HttpWaitEntries {
+    next_id: u64,
+    open: HashMap<u64, (Instant, Option<i64>)>,
+}
+
+/// One status sample of a [`HttpWaitLedger`]: how many requests are parked,
+/// how long the oldest has been, and which segment it asked for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HttpWaitSnapshot {
+    count: usize,
+    oldest_ms: Option<i64>,
+    oldest_segment: Option<i64>,
+}
+
+impl HttpWaitLedger {
+    fn enter(&self, segment: Option<i64>) -> u64 {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = entries.next_id;
+        entries.next_id = entries.next_id.wrapping_add(1);
+        entries.open.insert(id, (Instant::now(), segment));
+        id
+    }
+
+    fn leave(&self, id: u64) {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .open
+            .remove(&id);
+    }
+
+    fn snapshot(&self) -> HttpWaitSnapshot {
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let oldest = entries.open.values().min_by_key(|(since, _)| *since);
+        HttpWaitSnapshot {
+            count: entries.open.len(),
+            oldest_ms: oldest
+                .map(|(since, _)| since.elapsed().as_millis().min(i64::MAX as u128) as i64),
+            oldest_segment: oldest.and_then(|(_, segment)| *segment),
+        }
+    }
+}
+
+/// Holds one entry in a session's [`HttpWaitLedger`] for as long as a segment
+/// request is parked. Dropping it is the only way the entry leaves — on a
+/// served segment, on every early return, and when the client disconnects and
+/// the request future is dropped mid-sleep — so the count cannot leak.
+struct HttpWaitGuard {
+    session: Arc<Session>,
+    id: u64,
+}
+
+impl HttpWaitGuard {
+    fn enter(session: &Arc<Session>, segment: Option<i64>) -> Self {
+        Self {
+            id: session.http_waits.enter(segment),
+            session: Arc::clone(session),
+        }
+    }
+}
+
+impl Drop for HttpWaitGuard {
+    fn drop(&mut self) {
+        self.session.http_waits.leave(self.id);
+    }
+}
 /// Hold the first live transcode playlist until it has both two complete
 /// segments and this much published media. The first playlist used to expose
 /// one ~2 s segment while ffmpeg was already writing the rest; hls.js reached
@@ -6794,6 +6881,9 @@ struct Session {
     /// exists only when hls.js is the one fetching. The server serves every
     /// segment on every path, so it is the one place the answer always exists.
     delivery: Meter,
+    /// Segment requests currently parked waiting for publication; see
+    /// [`HttpWaitLedger`].
+    http_waits: HttpWaitLedger,
     /// Effective input pace for this session; 0 means unpaced.
     readrate: f64,
     /// True while the child is SIGSTOPped for running too far ahead of the
@@ -8869,6 +8959,7 @@ async fn session_info(
         "unavailable"
     };
     let actor_producer = lease.as_ref().map(|lease| &lease.producer_control);
+    let http_waits = s.http_waits.snapshot();
     let producer_state = if s.failed.load(Relaxed) {
         "failed"
     } else if s.cached
@@ -9008,9 +9099,9 @@ async fn session_info(
         delivered_bytes: s.delivery.total_bytes(),
         delivered_bps: s.delivery.recent_bps().map(|b| b * 8),
         delivered_idle_ms: s.delivery.idle_for_ms(),
-        http_wait_count: 0,
-        http_wait_oldest_ms: None,
-        http_wait_segment: None,
+        http_wait_count: http_waits.count,
+        http_wait_oldest_ms: http_waits.oldest_ms,
+        http_wait_segment: http_waits.oldest_segment,
         status_generated_unix_ms: crate::media_sessions::unix_ms(),
         readrate: s.readrate,
         suspended,
@@ -10821,8 +10912,10 @@ pub struct SessionInfo {
     /// its last real value and this says how old it is, so a reader can tell a
     /// measurement from a memory.
     pub delivered_idle_ms: i64,
-    /// Rolling delivery never parks a response waiting for publication; VOD
-    /// fills these fields from its bounded wait pool.
+    /// Segment requests parked waiting for publication right now: rolling
+    /// sessions measure it in their [`HttpWaitLedger`], VOD from its bounded
+    /// wait pool. The diagnostics-only VOD delivery listing does not carry the
+    /// pool and reports zero.
     pub http_wait_count: usize,
     pub http_wait_oldest_ms: Option<i64>,
     pub http_wait_segment: Option<i64>,
@@ -17124,6 +17217,7 @@ impl TranscodeManager {
             sw_permit: std::sync::Mutex::new(None),
             sw_delta_permit: std::sync::Mutex::new(None),
             delivery: Meter::new(),
+            http_waits: HttpWaitLedger::default(),
             readrate: 0.0,
             suspended: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
@@ -22456,6 +22550,7 @@ impl TranscodeManager {
             sw_permit: std::sync::Mutex::new(sw_permit),
             sw_delta_permit: std::sync::Mutex::new(None),
             delivery: Meter::new(),
+            http_waits: HttpWaitLedger::default(),
             readrate: pacing
                 .readrate
                 .unwrap_or(if pacing.legacy_re { 1.0 } else { 0.0 }),
@@ -23038,6 +23133,7 @@ impl TranscodeManager {
             sw_permit: std::sync::Mutex::new(None),
             sw_delta_permit: std::sync::Mutex::new(None),
             delivery: Meter::new(),
+            http_waits: HttpWaitLedger::default(),
             readrate: pacing
                 .readrate
                 .unwrap_or(if pacing.legacy_re { 1.0 } else { 0.0 }),
@@ -26832,6 +26928,9 @@ impl TranscodeManager {
         };
 
         let started_waiting = Instant::now();
+        // Taken at the first sleep, not here: a segment that is already
+        // published is served without ever counting as a wait.
+        let mut parked: Option<HttpWaitGuard> = None;
         loop {
             let producer_attempt = if retired_owner {
                 Some(resolved_attempt)
@@ -26850,6 +26949,7 @@ impl TranscodeManager {
                     }
                     return Ok(SegmentPublication::Pending(current_owner()));
                 }
+                parked.get_or_insert_with(|| HttpWaitGuard::enter(&session, idx));
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             };
@@ -26911,6 +27011,7 @@ impl TranscodeManager {
                     if Instant::now() >= deadline {
                         return Ok(SegmentPublication::Pending(current_owner()));
                     }
+                    parked.get_or_insert_with(|| HttpWaitGuard::enter(&session, idx));
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
@@ -27140,6 +27241,7 @@ impl TranscodeManager {
                 .await;
                 return Ok(SegmentPublication::Pending(current_owner()));
             }
+            parked.get_or_insert_with(|| HttpWaitGuard::enter(&session, idx));
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -29345,6 +29447,7 @@ fn test_session_with_control(
         sw_permit: std::sync::Mutex::new(None),
         sw_delta_permit: std::sync::Mutex::new(None),
         delivery: Meter::new(),
+        http_waits: HttpWaitLedger::default(),
         readrate: 0.0,
         suspended: AtomicBool::new(false),
         suspended_at: Mutex::new(None),
@@ -39941,6 +40044,101 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn http_wait_ledger_counts_parked_requests_until_their_guard_drops() {
+        let dir = crate::test_tempdir().expect("tempdir");
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        assert_eq!(session.http_waits.snapshot(), HttpWaitSnapshot::default());
+        let first = HttpWaitGuard::enter(&session, Some(7));
+        std::thread::sleep(Duration::from_millis(5));
+        let second = HttpWaitGuard::enter(&session, Some(9));
+        let parked = session.http_waits.snapshot();
+        assert_eq!(parked.count, 2);
+        assert_eq!(
+            parked.oldest_segment,
+            Some(7),
+            "the oldest wait names its segment"
+        );
+        assert!(parked.oldest_ms.is_some_and(|ms| ms >= 5), "{parked:?}");
+        drop(first);
+        let after = session.http_waits.snapshot();
+        assert_eq!((after.count, after.oldest_segment), (1, Some(9)));
+        drop(second);
+        assert_eq!(session.http_waits.snapshot(), HttpWaitSnapshot::default());
+    }
+
+    /// The status reading is only honest if a request that is really waiting
+    /// shows up in it, and one the client abandons mid-wait leaves it again.
+    #[tokio::test]
+    async fn a_parked_segment_request_is_counted_until_the_client_drops_it() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("tempdir");
+        let manager_dir = crate::test_tempdir().expect("manager tempdir");
+        seeded_session_dir(dir.path(), 1, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            manager_dir.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.sessions
+            .lock()
+            .await
+            .insert("parked-wait".into(), Arc::clone(&session));
+
+        let request = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move {
+                mgr.segment_for_publication_before(
+                    "parked-wait",
+                    "seg00009.ts",
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .await
+                .map(|_| ())
+            }
+        });
+        let give_up = Instant::now() + Duration::from_secs(5);
+        while session.http_waits.snapshot().count == 0 {
+            assert!(
+                Instant::now() < give_up,
+                "a request for an unpublished segment never registered as a wait"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let parked = session.http_waits.snapshot();
+        assert_eq!(parked.count, 1);
+        assert_eq!(parked.oldest_segment, Some(9));
+        // And the status clients poll carries it, rather than the zero it
+        // used to report whatever was happening.
+        let status = session_info(
+            "parked-wait",
+            &session,
+            AheadLimits {
+                max_secs: 0,
+                max_bytes: 0,
+                global_max_bytes: 0,
+            },
+            0,
+            0,
+        )
+        .await;
+        assert_eq!(status.http_wait_count, 1);
+        assert_eq!(status.http_wait_segment, Some(9));
+        assert!(status.http_wait_oldest_ms.is_some());
+
+        request.abort();
+        let _ = request.await;
+        assert_eq!(
+            session.http_waits.snapshot(),
+            HttpWaitSnapshot::default(),
+            "a request the client dropped mid-wait must not stay counted"
+        );
+    }
+
+    #[tokio::test]
     async fn refresh_owner_sampling_cannot_cross_a_complete_replacement_aba() {
         let dir = crate::test_tempdir().expect("tempdir");
         seeded_session_dir(dir.path(), 2, 2.0).await;
@@ -42257,6 +42455,7 @@ pub(crate) mod tests {
             sw_permit: std::sync::Mutex::new(None),
             sw_delta_permit: std::sync::Mutex::new(None),
             delivery: Meter::new(),
+            http_waits: HttpWaitLedger::default(),
             readrate: 0.0,
             suspended: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
