@@ -1434,6 +1434,9 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/playback/player-input-contract.test.js
 	@node tests/playback/playback-surface-contract.test.js
 	@node tests/web/player-dom.test.js
+	# A startup that never presented a frame must not post position 0 over a
+	# resume point. One failed session used to erase it for good.
+	@node --test tests/web/progress-never-presented.test.js
 	@node tests/web/nav-keyboard.test.js
 	@node tests/web/reader.test.js
 	@node tests/web/library-channels.test.js
