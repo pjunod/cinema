@@ -1673,7 +1673,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # within its two-second bound. Nothing here owns a process, a producer or a
 # tuner; the writer owns one node-local sidecar batch at a time and hands that
 # ownership to the drain or the supervisor rather than dropping it silently.
-expected_occurrences = 552
+# +1 more for the `std::thread::spawn` in
+# `an_unregistered_store_registers_its_sink_without_relocking`. It is
+# test-only and deliberately detached: the failure it guards is a deadlock in
+# `sink_for`, and a deadlock cannot be observed from the thread it blocks, so
+# the assertion is a ten-second `recv_timeout` on the main thread. It builds a
+# current-thread runtime, emits one event and reports; it owns no producer, no
+# process and no tuner.
+expected_occurrences = 553
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
