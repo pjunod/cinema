@@ -315,15 +315,20 @@ moves it off the play path. That is why §6 exists.
 
 ### 5.3 The real blocker, and it is not a matrix
 
-The plan's M4 says *"enable default/forced PGS overlay selection for approved
-clients"*. **There is no notion of an approved client anywhere in the tree.**
-The gate is a single node-wide boolean; nothing in a request says whether the
-caller can render `pgs-v1`. Both native clients read the `overlay` field off
-the response (`clients/apple/Sources/Models.swift:746`,
-`clients/android/.../Models.kt:427`) and neither declares a capability.
+**This section is written as it stood before #447, because it is the argument
+for #447.** Every "there is no" below was true when it was written and is not
+true now; §5.4 says what replaced each one.
 
-And **the web client has no renderer at all.** It knows the overlay exists and
-routes around it — `crates/plurxd/src/web/player/decode-tiers.js:955`:
+The plan's M4 says *"enable default/forced PGS overlay selection for approved
+clients"*. **There was no notion of an approved client anywhere in the tree.**
+The gate was a single node-wide boolean; nothing in a request said whether the
+caller could render `pgs-v1`. Both native clients read the `overlay` field off
+the response (`clients/apple/Sources/Models.swift`,
+`clients/android/.../Models.kt`) and neither declared a capability.
+
+And **the web client has no renderer at all** — that part is still true. It
+knows the overlay exists and routes around it (`decode-tiers.js`, the `preBurn`
+override):
 
 > "The server's plan is a remux (or a direct play) when the PGS application
 > overlay is enabled — a delivery this player does not implement"
@@ -331,16 +336,32 @@ routes around it — `crates/plurxd/src/web/player/decode-tiers.js:955`:
 so it force-overrides `initialRoute` to `'transcode_hls'`.
 
 **Consequence, before #447: turning the gate on downgraded a web direct-play
-to a full transcode** whenever the language policy picked a PGS track — or, on
-an HDR title, replaced the subtitle with a degraded notice. `/decision`
-auto-selected a PGS track for every caller (`deliverable_as_default` at
-`crates/plurx-core/src/tracks.rs:235`, called from `http/stream.rs:2230`),
-including the one that cannot draw it, and stamped it `default` on the wire
-(`stream.rs:2376-2379`). The web then applies that pick 400 ms after open
-(`web/player/decode-tiers.js:935-948`), `subNeedsBurn` is true for any bitmap
-track (`menus.js:23`, `s.text===false`), and `setSub` turns it into a burn or
-a `keep_hdr` refusal (`audio-sync.js:85-117`). `docs/PLAYBACK.md`
-(`server.track-selection`) documents this path as settled fact.
+to a full transcode** — or, on an HDR title, put a degraded notice in front of
+a viewer who had chosen no subtitle at all.
+
+The trigger is not narrow. With the gate on, `deliverable_as_default`
+(`crates/plurx-core/src/tracks.rs:235`) admits **every** PGS track, forced or
+not, and it does so on a branch that short-circuits before the HDR term — so
+the HDR guard does not protect the *selection*, only the burn that follows.
+`forced_or_default` then picks any eligible track the container itself flags
+as default, with no step that would prefer a text track sitting beside it. **A
+Blu-ray remux with a `default`-flagged English PGS track is the common case in
+a library like this one** — including the 79.5 GB remux that started this
+incident.
+
+The repo already knew: `select_tracks_with`'s own doc comment
+(`plurx-core/src/tracks.rs`) says a remux like that *"had the PGS stamped as
+the default; on an HDR base delivery that track can only be shown by an SDR
+burn the HDR guard then refuses, so the viewer got the refusal notice on the
+web client and silence on the native ones — for a choice nobody made."*
+
+The server stamped that pick onto the wire `default` flag (`stream.rs`, the
+`s.default` loop after `sub_tracks`). The web applies the server's default
+400 ms after open (`decode-tiers.js`, *"Server-chosen default subtitle"*),
+`subNeedsBurn` is true for any bitmap track (`menus.js` — `s.text===false`),
+and `setSub` (`audio-sync.js`) turns that into a burn, or into the `keep_hdr`
+notice. `docs/PLAYBACK.md` documents the path as settled fact under
+`server.track-selection`.
 
 > **This paragraph was wrong twice, in opposite directions, and the second time
 > was mine.** The first revision called it a code-provable regression, which
@@ -352,17 +373,18 @@ a `keep_hdr` refusal (`audio-sync.js:85-117`). `docs/PLAYBACK.md`
 > the web does apply. The over-generalisation is corrected here and in #447's
 > own body.
 
-The web's local `initialRoute` override (`decode-tiers.js:965`) does **not**
-save it: that branch is reached only when `preBurn` is non-null, which happens
-only for an explicit viewer pick (`web/detail/preplay-selection.js:139-158`).
-Nothing stood between the auto-pick and the burn.
+The web's local `initialRoute` override does **not** save it: that branch is
+reached only when `preBurn` is non-null, which happens only for an explicit
+viewer pick (`web/detail/preplay-selection.js`, `prePlayApplication`). Nothing
+stood between the auto-pick and the burn.
 
 Underneath the bytes there is a defect about honesty, and it is the one #447
 fixes: the server issued a plan the caller cannot execute and then described
 the delivery in terms untrue for that caller. **#447 closed both.** The overlay
-term is now narrowed per caller, so a client with no renderer is not offered
-the PGS default at all, and there is no longer a regression waiting behind the
-gate. The rest of §5.4 is what that took.
+term is now narrowed per caller, so a client with no renderer **that sends a
+capabilities document** is not offered the PGS default at all, and there is no
+longer a regression waiting behind the gate. (The qualifier is load-bearing and
+§5.5 says why.) The rest of §5.4 is what that took.
 
 ### 5.4 Shape — B1 built, B2 deliberately not, B5 partial (#447)
 
@@ -650,9 +672,12 @@ Ranked by how much the answer changes the work.
 | per-caller overlay term | `crates/plurxd/src/http/stream.rs` `overlay_for_caller` |
 | the claim on the wire | `crates/plurx-core/src/playback/caps.rs` `subtitle_overlays` |
 | pre-play hardcoded off | `crates/plurxd/src/http/dto.rs:506` |
-| web applies the server default | `crates/plurxd/src/web/player/decode-tiers.js:935` |
-| web force-override (explicit pick only) | `crates/plurxd/src/web/player/decode-tiers.js:965` |
-| web ignores the pre-play echo | `crates/plurxd/src/web/detail/preplay-selection.js:135` |
+| web applies the server default | `web/player/decode-tiers.js` "Server-chosen default subtitle" |
+| web force-override (explicit pick only) | `web/player/decode-tiers.js`, the `preBurn` branch |
+| bitmap needs a burn | `web/player/menus.js` `subNeedsBurn` |
+| the burn decision | `web/player/audio-sync.js` `setSub` |
+| web ignores the pre-play echo | `web/detail/preplay-selection.js` `prePlayApplication` |
+| which track the policy picks | `crates/plurx-core/src/tracks.rs` `forced_or_default` |
 | retry ladder (web) | `crates/plurxd/src/web/playback-policy.js:871` |
 | retry ladder (Apple) | `clients/apple/Sources/PlayerController.swift:1550` |
 | `playbackId` per open | `clients/android/.../player/PlaybackIntent.kt:16` |
