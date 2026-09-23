@@ -626,8 +626,17 @@ struct PlayerRecipeRevision: Equatable {
 /// Why a create body is being posted. Everything a viewer does — a seek, a
 /// quality/audio/subtitle change, a fresh title — is `.normal`. An observed
 /// presentation stall is `.sameDeliveryRepair`: it preserves the recovery
-/// budgets without carrying the legacy server ticket that lowers Auto quality.
-/// `.stallReopen` remains only for explicitly attributed legacy recovery.
+/// budgets without carrying the server ticket that lowers Auto quality.
+///
+/// `.stallReopen` is the bound half of the wire and **nothing in this target
+/// constructs it**. A-04 deleted the `stallReopenIntent` minter that used to
+/// (the repository owner decided on 2026-09-23 to revive the wire and delete
+/// the Apple helper), because one untyped "stall" cause cannot carry the five
+/// evidence classes the adaptive-quality design distinguishes. The case, the
+/// ticket, `applyOpenIntent`'s binding, `unboundStallRetry` and the floor
+/// budget are all retained and still exercised by tests, so the client that
+/// A-04's build plan writes mints onto this, rather than rebuilding it. See
+/// docs/clients/NATIVE-ADAPTIVE-QUALITY-DESIGN.md §7.1.
 enum PlayerOpenIntent: Equatable {
     case normal
     case sameDeliveryRepair
@@ -640,9 +649,10 @@ enum PlayerOpenIntent: Equatable {
 
 /// The bound half of a same-session stall reopen: the exact predecessor the
 /// server reads the resolved rung from, plus the request identity that makes a
-/// transport replay of this one recovery idempotent. Minted once per stall, so
-/// a replayed create returns the predecessor's already-persisted answer
-/// instead of stepping the ladder down a second time.
+/// transport replay of this one recovery idempotent. A ticket is meant to be
+/// minted once per stall, so a replayed create returns the predecessor's
+/// already-persisted answer instead of stepping the ladder down a second time.
+/// No production code in this target mints one today — see `PlayerOpenIntent`.
 struct StallReopenTicket: Equatable {
     let previousSessionId: String
     let requestId: String
@@ -5733,40 +5743,6 @@ final class PlayerController: ObservableObject {
         return decision
     }
 
-    /// The cause this recovery's create should carry. Only a live growing
-    /// session has a predecessor rung to step down from: direct play holds no
-    /// session at all, and a VOD session is a completed cache entry whose
-    /// bytes are already on disk, so neither is something the ladder can
-    /// answer. Those reopen unbound, exactly as before.
-    ///
-    /// A wedge reopens unbound for a different reason. The server reads a
-    /// ticketed automatic reopen as evidence that this rung is too heavy for
-    /// the link and rewrites it one rung down — right for a slow link, wrong
-    /// for a session whose published bytes were simply never fetched, which
-    /// must come back on the rung it was already serving.
-    nonisolated static func stallReopenIntent(
-        sessionId: String?,
-        isVOD: Bool,
-        // One identity for this one stall. A transport replay of the same
-        // create returns the answer already persisted under it rather than
-        // stepping the ladder a second time.
-        requestId: String,
-        wedge: Bool
-    ) -> PlayerOpenIntent {
-        guard let sessionId, !isVOD, !wedge else { return .normal }
-        return .stallReopen(
-            StallReopenTicket(previousSessionId: sessionId, requestId: requestId)
-        )
-    }
-
-    private func stallReopenIntent(wedge: Bool) -> PlayerOpenIntent {
-        Self.stallReopenIntent(
-            sessionId: sessionId,
-            isVOD: isVOD,
-            requestId: UUID().uuidString,
-            wedge: wedge
-        )
-    }
 
     /// Stamp an open's cause onto its create body.
     ///

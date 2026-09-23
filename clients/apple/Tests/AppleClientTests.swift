@@ -2334,12 +2334,14 @@ final class AppleClientTests: XCTestCase {
 
     /// A reach expansion the merge created and neither side had on its own:
     /// `main`'s server-truth delivery watchdog funnels into
-    /// `retrySameDeliveryAfterStall`, the exact arm this branch bound to the
-    /// ladder. So a wedge that AVPlayer never reported is bounded by the same
-    /// floor and stops with its own message. It reopens unticketed, though: a
-    /// session whose published bytes were simply never fetched has nothing
-    /// wrong with the rung it was already serving.
-    func testTheDeliveryWatchdogAlsoStepsTheLadderDownAndStopsAtItsFloor() {
+    /// `retrySameDeliveryAfterStall`. So a wedge that AVPlayer never reported
+    /// is bounded by the same floor and stops with its own message.
+    ///
+    /// What intent that reopen carries is no longer asserted here, because
+    /// there is no longer a client function that decides it: A-04 deleted the
+    /// `stallReopenIntent` minter, so every reopen this arm produces is
+    /// `.normal`. The wire it used to mint onto is untouched.
+    func testTheDeliveryWatchdogIsBoundedByItsFloorAndStopsWithItsOwnMessage() {
         var storm = RecoveryReopenBudget()
 
         // With floor budget left, a watchdog-detected starvation reopens, and
@@ -2355,17 +2357,6 @@ final class AppleClientTests: XCTestCase {
             ),
             .reopen
         )
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: "session-a",
-                isVOD: false,
-                requestId: "request-1",
-                wedge: true
-            ),
-            .normal,
-            "the watchdog arm comes back on the rung it was already serving"
-        )
-
         // At the floor it stops with the delivery-specific message rather than
         // the generic buffering one, so the failure screen still names what
         // actually went wrong.
@@ -2395,40 +2386,6 @@ final class AppleClientTests: XCTestCase {
                 now: 202
             ),
             .reopen
-        )
-    }
-
-    /// The legacy typed helper remains narrowly scoped for interoperability;
-    /// timer-only presentation recovery no longer calls it.
-    func testLegacyBoundRecoveryOnlyNamesAGrowingServerSession() {
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: "session-a",
-                isVOD: false,
-                requestId: "request-1",
-                wedge: false
-            ),
-            stallIntent()
-        )
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: "session-a",
-                isVOD: true,
-                requestId: "request-1",
-                wedge: false
-            ),
-            .normal,
-            "a completed cache entry has no ladder answer to give"
-        )
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: nil,
-                isVOD: false,
-                requestId: "request-1",
-                wedge: false
-            ),
-            .normal,
-            "direct play holds no session at all"
         )
     }
 
