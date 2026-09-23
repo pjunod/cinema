@@ -10,6 +10,20 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **The web watch view shows the title's facts and its chapters instead of
+  hiding them.** Once a movie or episode is playing on the page, the media
+  ledger — video, audio tracks, subtitle tracks, delivery mode, file — is
+  beside the picture (or under it in the Larger state) instead of behind a
+  "Title details" button, and the audio and subtitle chips switch tracks
+  through the same calls the player's menus use. Chapters are a rail under
+  the picture: a proportional ruler with the playhead across it and a strip
+  of thumbnails, collapsible to one line that keeps the ruler. Audio and
+  subtitle rows fold to the selected track and a count, so a file with a
+  dozen tracks does not grow the panel past the picture. The page-level
+  "Close player" button is gone; the player bar's ✕ is the one Close, and
+  the heading is the item page's breadcrumb. Folds and the player size are
+  remembered per browser. [docs/clients/WATCH-VIEW-LAYOUT.md](docs/clients/WATCH-VIEW-LAYOUT.md).
+
 - **A newer FFprobe describing an old scan no longer reads as a replaced
   file.** Starting an encoded session compares the catalog's scan with a fresh
   probe of the held source, and those two reports can come from different
@@ -28,6 +42,15 @@ bump may break compatibility and a **patch** bump never does.
   carries an advisory Source verification section that gates nothing.
 
 ### Added
+
+- **Chapter thumbnails, made on request.** `GET /api/v1/files/{id}/chapters/{n}/thumb`
+  answers a 320 px JPEG of the chapter, extracted by one ffmpeg seek the
+  first time a watch page asks and kept under the runtime cache keyed by the
+  file's identity. At most two extractions run at once, each bounded to
+  15 s; nothing runs for a film nobody opens, and there is no library sweep.
+  Settings → Developer → Chapter thumbnails is the switch (`chapter_thumbnails`,
+  on by default) with advisory rows: ffmpeg present, cache room, and what
+  this process has extracted, served, failed and has running now.
 
 - **`make install` installs the server as a service in one command on every
   platform it runs on.** `make install` detects the host and hands off to
