@@ -1121,6 +1121,14 @@ impl From<&mut Row<'_>> for LocationRow {
 
 struct CacheKeyRow(String);
 
+struct BuilderRow(String);
+
+impl From<&mut Row<'_>> for BuilderRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("built_by_node_id"))
+    }
+}
+
 impl From<&mut Row<'_>> for CacheKeyRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self(row.get("cache_key"))
@@ -4155,6 +4163,34 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                    FROM cluster_fragment_index_locations
                   WHERE cache_key = $1 ORDER BY last_seen_at_ms DESC, node_id LIMIT 128",
                 params!(cache_key),
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.0)
+            .collect())
+    }
+
+    async fn fragment_index_builders_held_by(
+        &self,
+        node_id: &str,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+    ) -> Result<Vec<String>, StoreError> {
+        Ok(self
+            .client()
+            .query_consistent_map::<BuilderRow, _>(
+                "SELECT DISTINCT artifacts.built_by_node_id AS built_by_node_id
+                   FROM cluster_fragment_index_locations AS locations
+                   JOIN cluster_fragment_index_artifacts AS artifacts
+                     ON artifacts.cache_key = locations.cache_key
+                  WHERE locations.node_id = $1
+                    AND artifacts.file_id = $2
+                    AND artifacts.source_size = $3
+                    AND artifacts.source_mtime = $4
+                  ORDER BY artifacts.built_by_node_id
+                  LIMIT 16",
+                params!(node_id, file_id, source_size, source_mtime),
             )
             .await?
             .into_iter()

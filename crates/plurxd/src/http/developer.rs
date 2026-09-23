@@ -158,8 +158,8 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         false,
     );
-    // Absent is on: with no producer the store is empty, and once there is
-    // one, reading it is the point.
+    // Absent is on: keeping and reading PGS tracks is the point of the store.
+    // One switch stops the producer and both consumers.
     let stored_sources_on = plurx_core::store::stored_switch(
         settings
             .get(plurx_core::store::keys::SUBTITLE_STORED_SOURCES)
@@ -220,7 +220,7 @@ pub(crate) async fn readiness(
             content_analysis_repair(&state, content_analysis_on).await,
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
-            subtitle_stored_sources(stored_sources_on),
+            subtitle_stored_sources(stored_sources_on, &state.runtime_cache_dir),
             subtitle_not_ready_503(plurx_core::store::stored_switch(
                 settings
                     .get(plurx_core::store::keys::SUBTITLE_NOT_READY_503)
@@ -688,32 +688,120 @@ fn pgs_overlay(enabled: bool) -> DeveloperEnableItem {
     }
 }
 
-/// Stored PGS tracks read in place of a whole-source extraction.
+/// Stored PGS tracks: kept by the fragment-index pass, read in place of a
+/// whole-source extraction.
 ///
-/// The consumer half of the subtitle-source store
-/// (`docs/clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md` §6). On by default
-/// and inert while nothing produces into the store: every lookup misses and
-/// both the overlay and the burn path run the extraction they always did. The
-/// switch is here so that, once a producer ships, a wrong artifact it wrote
-/// can be taken out of service without a redeploy.
-fn subtitle_stored_sources(enabled: bool) -> DeveloperEnableItem {
+/// `docs/clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md` §6. One switch for
+/// both halves: off stops the index pass keeping tracks and makes the overlay
+/// and the burn path ignore what is stored, so a wrong artifact is out of
+/// service without a redeploy. The producer also needs the startup self-test
+/// to have passed and a local cache filesystem; the rows below say whether it
+/// has them. Advisory: no row turns the switch on or off.
+fn subtitle_stored_sources(enabled: bool, runtime_cache: &std::path::Path) -> DeveloperEnableItem {
+    use crate::subtitle_ride_along::{self as ride_along, SelfTest};
+
     let (hits, empty, misses) = crate::subtitle_source::lookup_snapshot();
+    let (attempted, [kept, no_cues, malformed, transient], written, published) =
+        ride_along::snapshot();
+    let (self_test_status, self_test_evidence) = match ride_along::self_test_state() {
+        SelfTest::Passed {
+            elapsed_ms,
+            version,
+        } => (
+            RequirementStatus::Met,
+            format!(
+                "Passed in {elapsed_ms} ms: ffprobe and ffmpeg are the same build ({version}); \
+                 the tee left the index output byte-identical, kept the intact track, recognised \
+                 the corrupted track's stderr failure, and the framecrc byte arithmetic alone \
+                 judged the corrupted track malformed."
+            ),
+        ),
+        SelfTest::Failed { reason } => (
+            RequirementStatus::Unmet,
+            format!("Failed, so the index pass keeps no PGS tracks on this process: {reason}"),
+        ),
+        SelfTest::Running => (
+            RequirementStatus::Unobservable,
+            "Running now; the index pass keeps no PGS tracks until it passes.".to_owned(),
+        ),
+        SelfTest::NotRun => (
+            RequirementStatus::Unobservable,
+            "Has not run in this process; the index pass keeps no PGS tracks until it passes."
+                .to_owned(),
+        ),
+    };
+    let store_root = crate::subtitle_source::store_root(runtime_cache);
+    let checked = if store_root.is_dir() {
+        store_root
+    } else {
+        runtime_cache.to_owned()
+    };
+    let (filesystem_status, filesystem_evidence) = match ride_along::local_filesystem(&checked) {
+        Ok(kind) => (
+            RequirementStatus::Met,
+            format!("{} is on a local filesystem ({kind}).", checked.display()),
+        ),
+        Err(reason) => (
+            RequirementStatus::Unmet,
+            format!(
+                "{}: {reason}. The index pass keeps no PGS tracks here: a blocked stage \
+                 write would stall the demuxer the index shares.",
+                checked.display()
+            ),
+        ),
+    };
+    let (space_status, space_evidence) = match ride_along::free_space(&checked) {
+        Ok(evidence) => (
+            RequirementStatus::Met,
+            format!("{}: {evidence}.", checked.display()),
+        ),
+        Err(reason) => (
+            RequirementStatus::Unmet,
+            format!(
+                "{}: {reason}. The index pass keeps no PGS tracks until there is room: stage \
+                 writes share the disk with the index blob the pass is about to publish.",
+                checked.display()
+            ),
+        ),
+    };
+    let failed = ride_along::failed_ride_count();
     DeveloperEnableItem {
         id: "subtitle_stored_sources",
-        title: "Read stored PGS tracks instead of the source",
+        title: "Keep PGS tracks during indexing and read them instead of the source",
         enabled: Some(enabled),
         setting: Some("subtitle_stored_sources"),
         requirements: vec![
             DeveloperRequirement {
                 id: "stored_source_producer",
                 title: "Something fills the store",
-                // A statement about this build, read from this build: it has
-                // readers and no writer.
-                status: RequirementStatus::Unmet,
-                evidence: "No producer yet: this build reads the store but nothing writes it. \
-                           The store stays empty until the fragment-index ride-along ships, so \
-                           every lookup falls through to the extraction that has always run."
-                    .to_owned(),
+                // A statement about this build, read from this build.
+                status: RequirementStatus::Met,
+                evidence: format!(
+                    "The fragment-index pass keeps every PGS track it reads. Since this process \
+                     started: {attempted} track(s) attempted — {kept} kept, {no_cues} with no \
+                     cues, {malformed} malformed, {transient} transient — {written} byte(s) \
+                     written to stages, {published} manifest(s) published; {failed} file(s) \
+                     whose riding pass did not build its index are indexed without the \
+                     ride-along until the next restart. Process-local."
+                ),
+            },
+            DeveloperRequirement {
+                id: "stored_source_self_test",
+                title: "The startup self-test passed",
+                status: self_test_status,
+                evidence: self_test_evidence,
+            },
+            DeveloperRequirement {
+                id: "stored_source_local_cache",
+                title: "The cache is on a local filesystem",
+                status: filesystem_status,
+                evidence: filesystem_evidence,
+            },
+            DeveloperRequirement {
+                id: "stored_source_free_space",
+                title: "The cache has room for the stage",
+                status: space_status,
+                evidence: space_evidence,
             },
             DeveloperRequirement {
                 id: "stored_source_lookups",

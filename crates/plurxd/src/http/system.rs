@@ -1737,6 +1737,12 @@ pub struct SettingsDto {
     /// store kept instead of the whole source. On by default; off makes both
     /// ignore the store entirely.
     pub subtitle_stored_sources: bool,
+    /// What the subtitle-source store occupies on this node and what its
+    /// producer is doing: the footprint its last sweep measured, its cap, the
+    /// ride-alongs running now and the verdicts since this process started.
+    /// Node-local, like `cache_used_bytes`. Read-only here; the switch above
+    /// turns the whole thing off.
+    pub subtitle_store: crate::subtitle_source::StoreDiagnostics,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
     /// readiness bit is true only while the replicated flag is enabled and
     /// every committed voter publishes the current media protocol.
@@ -1819,6 +1825,25 @@ pub struct SettingsDto {
     /// it worked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub genre_backfill_last: Option<GenreBackfillReport>,
+}
+
+/// The subtitle-source store's diagnostics for the Maintenance card, with each
+/// running ride-along named by its title: the producer knows only file ids.
+/// A handful of keyed reads — one ride per running index pass.
+async fn subtitle_store_diagnostics(
+    state: &AppState,
+    switch_on: bool,
+) -> crate::subtitle_source::StoreDiagnostics {
+    let mut diagnostics = crate::subtitle_source::diagnostics(switch_on, &state.runtime_cache_dir);
+    let mut titles = HashMap::new();
+    for ride in &mut diagnostics.riding {
+        let Ok(Some(file)) = state.store.get_file(ride.file_id).await else {
+            continue;
+        };
+        ride.item_id = file.item_id;
+        ride.title = title_of(state, file.item_id, &mut titles).await;
+    }
+    diagnostics
 }
 
 async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
@@ -2108,6 +2133,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
             true,
         ),
+        subtitle_store: subtitle_store_diagnostics(
+            state,
+            plurx_core::store::stored_switch(
+                setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
+                true,
+            ),
+        )
+        .await,
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,

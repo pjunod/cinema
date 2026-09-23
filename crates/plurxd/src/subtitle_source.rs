@@ -6,12 +6,13 @@
 //! demux the whole source — `pgs_overlay::prepare_stage` for the overlay's
 //! `.sup`, and `subtitles::ensure_burn_file` for the burn sidecar — on a 79.5
 //! GB remux that is 402 s each to produce 18,866 bytes. The fragment-index
-//! pass already reads every one of those packets; the producer (a later
-//! change) keeps them here, and this module is everything that reads them.
+//! pass already reads every one of those packets; the producer,
+//! [`crate::subtitle_ride_along`], keeps them here, and this module is
+//! everything that reads them.
 //!
-//! **Nothing produces into this store yet.** Until the index ride-along ships,
-//! every lookup misses and both consumers fall through to the extraction they
-//! have always run, so this module changes no behaviour on a real fleet.
+//! A file whose index pass has not ridden on this node has no directory here,
+//! so every lookup for it misses and both consumers fall through to the
+//! extraction they have always run.
 //!
 //! The rules it keeps:
 //!
@@ -166,6 +167,17 @@ impl Consumer {
     }
 }
 
+impl TrackEntry {
+    /// Nothing more to do for this track: `kept`, `empty` or `malformed`, or
+    /// `transient` with its attempts used.
+    pub(crate) fn settled(&self) -> bool {
+        match self.verdict {
+            Verdict::Kept | Verdict::Empty | Verdict::Malformed => true,
+            Verdict::Transient => self.attempts >= TRANSIENT_ATTEMPTS,
+        }
+    }
+}
+
 impl Manifest {
     pub(crate) fn track(&self, ordinal: i64) -> Option<&TrackEntry> {
         self.tracks.iter().find(|track| track.ordinal == ordinal)
@@ -195,13 +207,9 @@ impl Manifest {
     /// Every probed track has a settled verdict: `kept`, `empty` or
     /// `malformed`, or `transient` that has used its attempts.
     pub(crate) fn latched(&self) -> bool {
-        self.ordinals.iter().all(|ordinal| {
-            self.track(*ordinal)
-                .is_some_and(|track| match track.verdict {
-                    Verdict::Kept | Verdict::Empty | Verdict::Malformed => true,
-                    Verdict::Transient => track.attempts >= TRANSIENT_ATTEMPTS,
-                })
-        })
+        self.ordinals
+            .iter()
+            .all(|ordinal| self.track(*ordinal).is_some_and(TrackEntry::settled))
     }
 
     /// The design's *current*: this build's version, this file, a source
@@ -238,6 +246,10 @@ pub(crate) fn parse_manifest(bytes: &[u8]) -> Result<Manifest, MissReason> {
 pub(crate) struct StoreAccess {
     root: PathBuf,
     switch: Switch,
+    /// This node's id, when the caller knows it: a miss with no directory is
+    /// then classified (`never_indexed`, `hydrated_only`, `absent`) off the
+    /// request path. Without it such a miss is `absent`.
+    node_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -255,6 +267,7 @@ impl StoreAccess {
         Self {
             root,
             switch: Switch::Fixed(enabled),
+            node_id: None,
         }
     }
 
@@ -278,7 +291,15 @@ impl StoreAccess {
         Self {
             root: store_root(runtime_cache),
             switch: Switch::Setting(store),
+            node_id: None,
         }
+    }
+
+    /// Name the node this access serves, so a miss with no directory can be
+    /// classified — in a detached task, never on the request path.
+    pub(crate) fn on_node(mut self, node_id: Option<&str>) -> Self {
+        self.node_id = node_id.map(str::to_owned);
+        self
     }
 
     async fn is_enabled(&self) -> bool {
@@ -316,8 +337,13 @@ impl Live<'_> {
 }
 
 /// `subtitles.stored_sources`, parsed the way every other switch is. On by
-/// default: with no producer the store is empty, and once there is one, on is
-/// the point of it.
+/// default: keeping and reading the tracks is the point of the store.
+///
+/// One switch for both sides. It stops the producer
+/// ([`crate::subtitle_ride_along::RideAlongGate::open`]) and makes both
+/// consumers ignore what is already stored, so a wrong artifact a bad build
+/// published is out of service without a redeploy. An unreadable setting is
+/// off for both.
 pub(crate) async fn enabled(store: &dyn plurx_core::store::Store) -> bool {
     match store
         .get_setting(plurx_core::store::keys::SUBTITLE_STORED_SOURCES)
@@ -348,18 +374,13 @@ pub(crate) enum MissReason {
     Mpegts,
     /// The stored bytes do not hash to the manifest's sha256.
     HashMismatch,
-    /// The file has never been indexed on this node.
-    // TODO(PR 2, the ride-along producer): classify this. It needs a store
-    // query for this node's fragment index of the file, which the consumers
-    // do not hold today; until the producer exists every miss here is
-    // `absent` and this reads zero.
-    #[allow(dead_code)]
+    /// No directory, and this node holds no fragment index for the file's
+    /// current source: the pass that fills the store has never run here.
     NeverIndexed,
-    /// This node's index was hydrated from a peer, so the pass never ran here.
-    // TODO(PR 2, the ride-along producer): the design's query — a
-    // fragment-index location row for this node whose `built_by_node_id` is
-    // another node. Reads zero until then.
-    #[allow(dead_code)]
+    /// No directory, and every fragment index this node holds for the file's
+    /// current source was built by another node — a location row for this
+    /// node whose `built_by_node_id` is a peer. The node hydrated the index,
+    /// so the pass that keeps PGS tracks never ran here (§6.6).
     HydratedOnly,
     /// The overlay asked about a track the store holds as `empty`. The burn
     /// path can answer "nothing to burn" from that; the overlay cannot, so it
@@ -478,12 +499,18 @@ pub(crate) async fn lookup(
     ordinal: i64,
     live: Live<'_>,
 ) -> Lookup {
-    let result = match classify(access, consumer, file, ordinal, live).await {
+    let mut no_directory = false;
+    let result = match classify(access, consumer, file, ordinal, live, &mut no_directory).await {
         Lookup::Empty(_) if consumer == Consumer::Overlay => {
             Lookup::Miss(MissReason::EmptyForOverlay)
         }
         other => other,
     };
+    if no_directory {
+        // Answered at once; why there is no directory is counted later.
+        classify_no_directory_later(access, consumer, file);
+        return result;
+    }
     match &result {
         Lookup::Kept(_) => {}
         Lookup::Empty(_) => record_empty(consumer),
@@ -492,12 +519,94 @@ pub(crate) async fn lookup(
     result
 }
 
+/// Whether the store holds `ordinal` as a real track with no cues, for the
+/// burn path's rule — the HTTP HDR guard's question, asked only when it is
+/// about to refuse. Nothing is counted: this is not a consumer's lookup.
+pub(crate) async fn stored_as_empty(
+    access: &StoreAccess,
+    file: &MediaFile,
+    ordinal: i64,
+    live: Live<'_>,
+) -> bool {
+    matches!(
+        classify(access, Consumer::Burn, file, ordinal, live, &mut false).await,
+        Lookup::Empty(_)
+    )
+}
+
+/// Classifications in flight. Past the bound a miss with no directory is
+/// simply `absent`: the reason is a counter, and a burst of misses must not
+/// become a burst of catalog reads.
+static CLASSIFYING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_CLASSIFYING: usize = 8;
+
+/// Count a miss with no directory under the reason it deserves, without the
+/// request waiting for it. The catalog read runs in a detached task, bounded
+/// in number; when there is no store or no node to ask about, or the bound is
+/// reached, the miss is counted `absent` at once.
+fn classify_no_directory_later(access: &StoreAccess, consumer: Consumer, file: &MediaFile) {
+    let (Switch::Setting(store), Some(node_id)) = (&access.switch, access.node_id.clone()) else {
+        record_miss(consumer, MissReason::Absent);
+        return;
+    };
+    if CLASSIFYING.fetch_add(1, Ordering::AcqRel) >= MAX_CLASSIFYING {
+        CLASSIFYING.fetch_sub(1, Ordering::AcqRel);
+        record_miss(consumer, MissReason::Absent);
+        return;
+    }
+    let store = std::sync::Arc::clone(store);
+    let (file_id, size, mtime) = (file.id, file.size, file.mtime);
+    tokio::spawn(async move {
+        let reason = classify_no_directory(store.as_ref(), &node_id, file_id, size, mtime).await;
+        record_miss(consumer, reason);
+        CLASSIFYING.fetch_sub(1, Ordering::AcqRel);
+    });
+}
+
+/// Why a file has no directory here, from this node's own holdings for the
+/// file's current source: an index in this node's own table (built here, by
+/// either path) is `absent` — the pass ran and kept nothing, or ran before the
+/// producer shipped or while the switch was off; otherwise the cluster's
+/// location rows say whether this node only hydrated a peer's index
+/// (`hydrated_only`) or holds none at all (`never_indexed`). A read that fails
+/// is `absent`: the reason is a counter, never a decision.
+pub(crate) async fn classify_no_directory(
+    store: &dyn plurx_core::store::Store,
+    node_id: &str,
+    file_id: i64,
+    size: i64,
+    mtime: i64,
+) -> MissReason {
+    match store
+        .holds_fragment_index_for_source(file_id, size, mtime)
+        .await
+    {
+        Ok(true) => return MissReason::Absent,
+        Ok(false) => {}
+        Err(error) => {
+            tracing::debug!(file_id, %error, "classifying a stored-subtitle miss");
+            return MissReason::Absent;
+        }
+    }
+    match store
+        .fragment_index_builders_held_by(node_id, file_id, size, mtime)
+        .await
+    {
+        Ok(builders) => absent_reason_from(node_id, &builders),
+        Err(error) => {
+            tracing::debug!(file_id, %error, "classifying a stored-subtitle miss");
+            MissReason::Absent
+        }
+    }
+}
+
 async fn classify(
     access: &StoreAccess,
     consumer: Consumer,
     file: &MediaFile,
     ordinal: i64,
     live: Live<'_>,
+    no_directory: &mut bool,
 ) -> Lookup {
     if !access.is_enabled().await {
         return Lookup::Miss(MissReason::Disabled);
@@ -514,7 +623,8 @@ async fn classify(
     {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Lookup::Miss(MissReason::Absent)
+            *no_directory = true;
+            return Lookup::Miss(MissReason::Absent);
         }
         Err(_) => return Lookup::Miss(MissReason::Stale),
     };
@@ -552,6 +662,21 @@ async fn classify(
                 sha256: sha256.to_owned(),
             })
         }
+    }
+}
+
+/// From the cluster's rows alone: `never_indexed` when this node holds no
+/// index for the source,
+/// `hydrated_only` when every one it holds was built by a peer, and `absent`
+/// when it built one itself — the pass ran here and kept nothing, or ran
+/// before the producer shipped or while the switch was off.
+fn absent_reason_from(node_id: &str, builders: &[String]) -> MissReason {
+    if builders.is_empty() {
+        MissReason::NeverIndexed
+    } else if builders.iter().any(|builder| builder == node_id) {
+        MissReason::Absent
+    } else {
+        MissReason::HydratedOnly
     }
 }
 
@@ -768,7 +893,7 @@ pub(crate) fn prometheus() -> String {
         }
     }
     out.push_str(
-        "# HELP plurx_subtitle_source_misses_total Stored-subtitle lookups that fell through to extraction, by reason.\n\
+        "# HELP plurx_subtitle_source_misses_total Stored-subtitle lookups that fell through to extraction, by reason. never_indexed and hydrated_only split the lookups that found no directory by this node's own fragment-index holdings (none at all, or only a peer's), classified after the request has moved on.\n\
          # TYPE plurx_subtitle_source_misses_total counter\n",
     );
     for consumer in Consumer::ALL {
@@ -794,6 +919,19 @@ pub(crate) fn prometheus() -> String {
             FALLBACKS[reason as usize].load(Ordering::Relaxed)
         );
     }
+    if let Some(footprint) = footprint() {
+        let _ = write!(
+            out,
+            "# HELP plurx_subtitle_source_store_bytes Bytes the subtitle-source store occupies on this node, as its last sweep walk measured.\n\
+             # TYPE plurx_subtitle_source_store_bytes gauge\n\
+             plurx_subtitle_source_store_bytes {}\n\
+             # HELP plurx_subtitle_source_store_directories Files the subtitle-source store holds a directory for on this node.\n\
+             # TYPE plurx_subtitle_source_store_directories gauge\n\
+             plurx_subtitle_source_store_directories {}\n",
+            footprint.bytes, footprint.directories
+        );
+    }
+    out.push_str(&crate::subtitle_ride_along::prometheus());
     out
 }
 
@@ -811,9 +949,16 @@ pub(crate) struct SweepOutcome {
     /// Deletes that failed and are left for the next pass — on Windows, a
     /// reader holding a stored file without `FILE_SHARE_DELETE`.
     pub(crate) deferred: usize,
+    /// Stored tracks no manifest names, removed from directories that stay:
+    /// what a publish interrupted between its rename and its manifest swap
+    /// leaves behind.
+    pub(crate) unnamed: usize,
     /// Where the next call starts: `f<id>` of the last directory examined,
     /// or empty once the walk has wrapped.
     pub(crate) next: String,
+    /// What the store occupies after this call, measured when the walk
+    /// wrapped (and the cap was enforced); `None` on a page that did not.
+    pub(crate) footprint: Option<Footprint>,
 }
 
 /// Reconcile one page of the store with the catalog, and enforce the size cap
@@ -881,7 +1026,12 @@ where
             Some(manifest) => match row(file_id).await? {
                 None => true,
                 Some((size, mtime)) => {
-                    manifest.source.size != size.max(0) as u64 || manifest.source.mtime != mtime
+                    let moved = manifest.source.size != size.max(0) as u64
+                        || manifest.source.mtime != mtime;
+                    if !moved {
+                        outcome.unnamed += remove_unnamed_tracks(&dir, &manifest).await;
+                    }
+                    moved
                 }
             },
             // No manifest this build can read. A publish writes its `.sup`
@@ -901,7 +1051,8 @@ where
         }
     }
     if exhausted {
-        let (evicted, deferred) = enforce_cap(root, max_bytes).await;
+        let (evicted, deferred, footprint) = enforce_cap(root, max_bytes).await;
+        outcome.footprint = Some(footprint);
         outcome.evicted = evicted;
         outcome.deferred += deferred;
         outcome.next = String::new();
@@ -932,12 +1083,41 @@ async fn list_file_dirs(root: &Path) -> std::io::Result<Vec<i64>> {
     Ok(ids)
 }
 
-async fn read_manifest(dir: &Path) -> Option<Manifest> {
+pub(crate) async fn read_manifest(dir: &Path) -> Option<Manifest> {
     let bytes =
         plurx_core::fs_secure::read_bounded_regular(&dir.join(MANIFEST_NAME), MAX_MANIFEST_BYTES)
             .await
             .ok()?;
     parse_manifest(&bytes).ok()
+}
+
+/// Remove `.sup` files the manifest does not name and that are older than
+/// the abandonment grace — never a young one, which may be a publish between
+/// its rename and its manifest swap. Returns how many went.
+async fn remove_unnamed_tracks(dir: &Path, manifest: &Manifest) -> usize {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return 0;
+    };
+    let mut removed = 0;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.ends_with(".sup")
+            || manifest
+                .tracks
+                .iter()
+                .any(|track| track.file.as_deref() == Some(name))
+        {
+            continue;
+        }
+        let path = entry.path();
+        if older_than(&path, ABANDONED_GRACE).await && tokio::fs::remove_file(&path).await.is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 async fn older_than(path: &Path, age: Duration) -> bool {
@@ -957,10 +1137,19 @@ async fn remove_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Evict whole directories, least recently accessed first, until the store is
-/// at or under `max_bytes`. Returns `(evicted, deferred)`.
-async fn enforce_cap(root: &Path, max_bytes: u64) -> (usize, usize) {
+/// at or under `max_bytes`. Returns `(evicted, deferred, footprint)`.
+/// Also measures the store as it walks, so the footprint the product shows
+/// costs no second walk.
+async fn enforce_cap(root: &Path, max_bytes: u64) -> (usize, usize, Footprint) {
     let Ok(ids) = list_file_dirs(root).await else {
-        return (0, 0);
+        return (
+            0,
+            0,
+            Footprint {
+                measured_at_ms: unix_ms(),
+                ..Footprint::default()
+            },
+        );
     };
     let mut dirs = Vec::with_capacity(ids.len());
     for file_id in ids {
@@ -976,8 +1165,14 @@ async fn enforce_cap(root: &Path, max_bytes: u64) -> (usize, usize) {
         dirs.push((accessed, size, dir));
     }
     let mut total: u64 = dirs.iter().map(|(_, size, _)| *size).sum();
+    let mut remaining = dirs.len() as u64;
+    let footprint = |total: u64, remaining: u64| Footprint {
+        bytes: total,
+        directories: remaining,
+        measured_at_ms: unix_ms(),
+    };
     if total <= max_bytes {
-        return (0, 0);
+        return (0, 0, footprint(total, remaining));
     }
     dirs.sort_by_key(|(accessed, _, _)| *accessed);
     let (mut evicted, mut deferred) = (0, 0);
@@ -988,6 +1183,7 @@ async fn enforce_cap(root: &Path, max_bytes: u64) -> (usize, usize) {
         match remove_dir(&dir).await {
             Ok(()) => {
                 evicted += 1;
+                remaining = remaining.saturating_sub(1);
                 total = total.saturating_sub(size);
             }
             // Still counted against the cap, so the next-oldest goes instead
@@ -995,7 +1191,115 @@ async fn enforce_cap(root: &Path, max_bytes: u64) -> (usize, usize) {
             Err(_) => deferred += 1,
         }
     }
-    (evicted, deferred)
+    (evicted, deferred, footprint(total, remaining))
+}
+
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
+/// What the store occupies on this node's disk, as the last full sweep walk
+/// measured it: the bytes of every `f<id>/` directory and how many there are.
+/// Stages in flight are not counted; [`crate::subtitle_ride_along::active_rides`]
+/// reports those.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Footprint {
+    pub bytes: u64,
+    pub directories: u64,
+    pub measured_at_ms: i64,
+}
+
+static FOOTPRINT: std::sync::Mutex<Option<Footprint>> = std::sync::Mutex::new(None);
+
+/// Remember the footprint a completed sweep walk measured.
+pub(crate) fn record_footprint(footprint: Footprint) {
+    *FOOTPRINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(footprint);
+}
+
+/// The footprint the last completed sweep walk measured, if one has run.
+pub(crate) fn footprint() -> Option<Footprint> {
+    *FOOTPRINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Everything the product shows about the store and its producer on this
+/// node: what it occupies, its cap, what is being kept right now, and what
+/// the ride-along has done since this process started. For the Maintenance
+/// card, which is where background work says what it costs and where to turn
+/// it off.
+#[derive(Clone, Debug, Serialize)]
+pub struct StoreDiagnostics {
+    /// `None` until the store's sweep has walked it once in this process.
+    pub footprint: Option<Footprint>,
+    /// How long ago that walk was, by this node's clock.
+    pub footprint_age_ms: Option<i64>,
+    pub cap_bytes: u64,
+    pub riding: Vec<crate::subtitle_ride_along::ActiveRide>,
+    pub tracks_attempted: u64,
+    pub kept: u64,
+    pub empty: u64,
+    pub malformed: u64,
+    pub transient: u64,
+    pub bytes_written: u64,
+    pub manifests_published: u64,
+    /// Files whose riding pass did not build its index, indexed without the
+    /// ride-along until the next restart.
+    pub files_not_riding: usize,
+    /// Finished riding passes whose tracks were not published because the
+    /// switch was turned off while they ran.
+    pub discarded_switch_off: u64,
+    /// Whether the next index pass on this node would keep PGS tracks.
+    pub gate: GateState,
+}
+
+/// The ride-along gate as the Maintenance card shows it: open, or closed with
+/// the reason — the switch, the self-test, the filesystem or the free space.
+#[derive(Clone, Debug, Serialize)]
+pub struct GateState {
+    pub open: bool,
+    pub reason: Option<String>,
+}
+
+pub(crate) fn diagnostics(switch_on: bool, runtime_cache: &Path) -> StoreDiagnostics {
+    let gate = match crate::subtitle_ride_along::gate_verdict(switch_on, runtime_cache) {
+        Ok(()) => GateState {
+            open: true,
+            reason: None,
+        },
+        Err(reason) => GateState {
+            open: false,
+            reason: Some(reason),
+        },
+    };
+    let (attempted, [kept, empty, malformed, transient], written, published) =
+        crate::subtitle_ride_along::snapshot();
+    let footprint = footprint();
+    StoreDiagnostics {
+        footprint_age_ms: footprint
+            .map(|footprint| unix_ms().saturating_sub(footprint.measured_at_ms).max(0)),
+        footprint,
+        cap_bytes: MAX_STORE_BYTES,
+        riding: crate::subtitle_ride_along::active_rides(),
+        tracks_attempted: attempted,
+        kept,
+        empty,
+        malformed,
+        transient,
+        bytes_written: written,
+        manifests_published: published,
+        files_not_riding: crate::subtitle_ride_along::failed_ride_count(),
+        discarded_switch_off: crate::subtitle_ride_along::discarded(
+            crate::subtitle_ride_along::Discard::SwitchOff,
+        ),
+        gate,
+    }
 }
 
 /// A file directory is flat — a manifest, `.sup` files and `.access`.
@@ -1016,8 +1320,8 @@ async fn directory_bytes(dir: &Path) -> u64 {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    //! Hand-written manifests, as PR 1's tests need them: nothing in this
-    //! build writes a store, so a test that wants one has to author it.
+    //! Hand-written manifests, for the readers' tests: a test that wants a
+    //! particular store state authors it rather than running a pass.
 
     use super::*;
 
@@ -1513,6 +1817,179 @@ mod tests {
         );
     }
 
+    /// A miss with no directory says why, from the cluster's rows.
+    #[test]
+    fn a_miss_with_no_directory_is_classified_by_who_built_the_index() {
+        let here = "node-a".to_owned();
+        assert_eq!(absent_reason_from(&here, &[]), MissReason::NeverIndexed);
+        assert_eq!(
+            absent_reason_from(&here, &["node-b".to_owned()]),
+            MissReason::HydratedOnly,
+            "every index this node holds came from a peer"
+        );
+        assert_eq!(
+            absent_reason_from(&here, &["node-a".to_owned(), "node-b".to_owned()]),
+            MissReason::Absent,
+            "the pass ran here at least once"
+        );
+    }
+
+    async fn counted(consumer: Consumer, reason: MissReason, above: u64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while misses_for_test(consumer, reason) <= above {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{reason:?} was never counted"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// The request is answered before the catalog is asked: the lookup
+    /// returns `absent` at once and the reason is counted by a detached task.
+    /// A node whose own index table holds an index for the source — the
+    /// non-cluster path's only record — is `absent`, not `never_indexed`.
+    #[tokio::test]
+    async fn a_miss_with_no_directory_is_classified_off_the_request_path() {
+        use plurx_core::store::Store;
+
+        let base = crate::test_tempdir().expect("store");
+        let runtime = base.path().join("runtime");
+        let source = base.path().join("source.mkv");
+        std::fs::write(&source, b"source bytes").expect("source");
+        let live = stamp_of(&source);
+        let file = media_file(31, source.clone(), live.size as i64, live.mtime);
+        let catalog: std::sync::Arc<dyn Store> =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
+        let access = StoreAccess::from_setting(std::sync::Arc::clone(&catalog), &runtime)
+            .on_node(Some("node-a"));
+
+        let before = misses_for_test(Consumer::Overlay, MissReason::NeverIndexed);
+        assert!(matches!(
+            lookup(&access, Consumer::Overlay, &file, 0, Live::Stamp(live)).await,
+            Lookup::Miss(MissReason::Absent)
+        ));
+        counted(Consumer::Overlay, MissReason::NeverIndexed, before).await;
+
+        // An index this node built itself.
+        let index = plurx_core::segplan::FragmentIndex::new(
+            16_000,
+            vec![plurx_core::segplan::IndexRow {
+                dts: 0,
+                duration: 28_016,
+                bytes: 104_452,
+                video_bytes: 103_836,
+                class: plurx_core::fmp4::CutClass::CleanIdr,
+            }],
+            "abc123",
+            // The index keys its source by the scanner's size and mtime.
+            plurx_core::segplan::SourceIdentity::new(live.size, live.mtime, "fingerprint"),
+        );
+        catalog
+            .put_fragment_index(file.id, &index)
+            .await
+            .expect("local index");
+        assert_eq!(
+            classify_no_directory(catalog.as_ref(), "node-a", file.id, file.size, file.mtime).await,
+            MissReason::Absent
+        );
+
+        // Without a node to ask about, the miss is counted `absent` at once.
+        let before = misses_for_test(Consumer::Burn, MissReason::Absent);
+        assert!(matches!(
+            lookup(
+                &access.clone().on_node(None),
+                Consumer::Burn,
+                &file,
+                0,
+                Live::Stamp(live)
+            )
+            .await,
+            Lookup::Miss(MissReason::Absent)
+        ));
+        assert!(misses_for_test(Consumer::Burn, MissReason::Absent) > before);
+    }
+
+    /// The HDR guard's question: only an `empty` entry for a current source
+    /// answers yes, and nothing is counted.
+    #[tokio::test]
+    async fn stored_as_empty_is_yes_only_for_a_current_empty_track() {
+        let base = crate::test_tempdir().expect("store");
+        let root = base.path().join(STORE_DIR);
+        let source = base.path().join("source.mkv");
+        std::fs::write(&source, b"source bytes").expect("source");
+        let live = stamp_of(&source);
+        let file = media_file(41, source.clone(), live.size as i64, live.mtime);
+        let on = StoreAccess::new(root.clone(), true);
+        assert!(
+            !stored_as_empty(&on, &file, 1, Live::Stamp(live)).await,
+            "no directory"
+        );
+        let dir = file_dir(&root, 41);
+        write_manifest(
+            &root,
+            41,
+            live,
+            vec![kept(&dir, 0, b"PG"), settled(1, Verdict::Empty)],
+        );
+        assert!(stored_as_empty(&on, &file, 1, Live::Stamp(live)).await);
+        assert!(
+            !stored_as_empty(&on, &file, 0, Live::Stamp(live)).await,
+            "kept"
+        );
+        assert!(
+            !stored_as_empty(
+                &StoreAccess::new(root.clone(), false),
+                &file,
+                1,
+                Live::Stamp(live)
+            )
+            .await,
+            "off"
+        );
+        let moved = SourceStamp {
+            size: live.size + 1,
+            ..live
+        };
+        assert!(
+            !stored_as_empty(&on, &file, 1, Live::Stamp(moved)).await,
+            "stale"
+        );
+    }
+
+    /// A publish interrupted between placing a track and swapping the
+    /// manifest leaves a `.sup` nothing names. The sweep removes it once it
+    /// is older than the grace, and never a young one or a named one.
+    #[tokio::test]
+    async fn the_sweep_removes_old_tracks_the_manifest_does_not_name() {
+        let base = crate::test_tempdir().expect("store");
+        let root = base.path().join(STORE_DIR);
+        let dir = file_dir(&root, 1);
+        let named = kept(&dir, 0, b"PG named");
+        write_manifest(&root, 1, stamp(10, 1, None, None), vec![named.clone()]);
+        let old = dir.join("s0-0123456789abcdef.sup");
+        let young = dir.join("s1-fedcba9876543210.sup");
+        std::fs::write(&old, b"PG orphan").expect("orphan");
+        std::fs::write(&young, b"PG in flight").expect("young");
+        let long_ago = std::time::SystemTime::now() - ABANDONED_GRACE - Duration::from_secs(60);
+        for path in [&old, &dir.join(named.file.as_deref().expect("name"))] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .expect("open")
+                .set_modified(long_ago)
+                .expect("backdate");
+        }
+        static KNOWN: [(i64, i64, i64); 1] = [(1, 10, 1)];
+        let outcome = sweep_with(&root, None, 256, u64::MAX, rows(&KNOWN))
+            .await
+            .expect("sweep");
+        assert_eq!(outcome.unnamed, 1, "{outcome:?}");
+        assert!(!old.exists(), "the old orphan goes");
+        assert!(young.exists(), "a young one may be a publish in flight");
+        assert!(dir.join(named.file.as_deref().expect("name")).exists());
+    }
+
     #[test]
     fn the_exposition_names_every_outcome_and_reason() {
         let text = prometheus();
@@ -1576,6 +2053,13 @@ mod tests {
             .expect("sweep");
         assert_eq!(outcome.removed, 3, "{outcome:?}");
         assert_eq!(outcome.next, "", "a short store is walked whole and wraps");
+        // PR 3: a walk that wraps measures what is left, for the product.
+        let footprint = outcome.footprint.expect("measured when the walk wrapped");
+        assert_eq!(footprint.directories, 2, "f1 and the young f5 remain");
+        assert_eq!(
+            footprint.bytes,
+            directory_bytes(&file_dir(&root, 1)).await + directory_bytes(&file_dir(&root, 5)).await
+        );
         assert!(file_dir(&root, 1).exists(), "a current directory is kept");
         for gone in [2, 3, 4] {
             assert!(!file_dir(&root, gone).exists(), "f{gone} should be gone");
