@@ -48,7 +48,7 @@ Library-page revision: [Quiet Home and open media details](clients/CALM-LIBRARY-
 | Why was the transport-recovery campaign red on main for so long? | [cluster/TRANSPORT-RECOVERY-RESOURCE-BASELINE.md](cluster/TRANSPORT-RECOVERY-RESOURCE-BASELINE.md) |
 | What does its resource check assert now, and why? | [cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md](cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md) |
 | Which button does what on which client? | [clients/PLAYER-INPUT-CONTRACT.md](clients/PLAYER-INPUT-CONTRACT.md) |
-| Why is a title with PGS subtitles slow or refusing to start? | [clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md](clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md) |
+| Why is a title with PGS subtitles slow or refusing to start? | [clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md](clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md) · [review](clients/PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) |
 | Why did subtitles refuse, not appear, or stop? | [clients/SUBTITLE-RELIABILITY-ASSESSMENT.md](clients/SUBTITLE-RELIABILITY-ASSESSMENT.md) · [handoff](clients/SUBTITLE-RELIABILITY-HANDOFF.md) · [physical verification](clients/SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md) |
 | Why is there an error overlay while the picture is still playing? | [clients/PLAYBACK-SURFACE-CONTRACT.md](clients/PLAYBACK-SURFACE-CONTRACT.md) |
 | Why does Live TV freeze a few seconds after it starts? | [features/LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md](features/LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md) |
@@ -354,6 +354,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [CLIENTS-REMEDIATION-PLAN.md](clients/CLIENTS-REMEDIATION-PLAN.md) | Restoring trust, then raising the quality ceiling. | built |
 | [APPLE-NATIVE-SUBTITLES-PLAN.md](clients/APPLE-NATIVE-SUBTITLES-PLAN.md) · [handoff](clients/APPLE-NATIVE-SUBTITLES-HANDOFF.md) | Native text subtitles on Apple: the road, and what shipped. | built |
 | [PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md](clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md) | Why a 79.5 GB read blocks a start when a title needs PGS burn-in, what the 2026-09-21 incident actually was, and the three fixes. | open |
+| [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](clients/PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) | Adversarial review of the RCA at `5c605768`: §5.3's web regression refuted, the index pass proven to be one full demux (so Fix C rides on it for free), answers to all seven questions, six rulings. | done |
 | [SUBTITLE-RELIABILITY-ASSESSMENT.md](clients/SUBTITLE-RELIABILITY-ASSESSMENT.md) | Why subtitles still fail on every client after the rework landed — three symptoms root-caused at `c9e4edf4`, with confidence labels. | done |
 | [SUBTITLE-RELIABILITY-HANDOFF.md](clients/SUBTITLE-RELIABILITY-HANDOFF.md) | The build order for the repairs: six milestones, exact contracts, non-goals, acceptance. | open |
 | [SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md](clients/SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md) | Eight cases for the session that has the devices — the hardware evidence none of this has yet. | open |
