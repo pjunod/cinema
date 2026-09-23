@@ -399,9 +399,9 @@ proposed:
 |---|---|---|
 | **B1** capability negotiation | a boolean the server ANDs in | built, as a **list** of protocol names, with two limits the review added |
 | **B2** thread the switch into item detail | do it | **implemented, reviewed, reverted** — the proposal rested on a claim that is false for the web |
-| **B3** seek test on each native client | — | open |
-| **B4** overlay-failure guardrail | — | open |
-| **B5** correct the documentation | three docs | `PLAYBACK.md` done; the acceptance doc's retired env gate and the missing Android equivalent still open |
+| **B3** seek test on each native client | — | **built** (PR `fix/pgs-overlay-seek-and-failure`): seek, tick and cue-due decisions extracted into pure policy on both clients and held to `tests/playback/pgs-overlay-cases.json`; fixed Android's stale frame after a seek into the refresh margin and Apple's tick that cancelled its own covering load |
+| **B4** overlay-failure guardrail | — | **built** (same PR): a remembered preparation failure is a typed terminal `pgs_overlay_prepare_failed`, capacity a retryable 503 `pgs_overlay_capacity`; both clients read the code, stop polling and raise the existing `degraded_notice`, and Apple no longer refetches a failed window every second |
+| **B5** correct the documentation | three docs | `PLAYBACK.md` done; the acceptance doc's retired env gate done in the B3/B4 PR; the missing Android equivalent still open |
 
 Each proposal is kept verbatim below, with what actually landed beneath it.
 
@@ -489,7 +489,8 @@ equivalent.
 
 > **Built** for `PLAYBACK.md`, with the correction dated in the text so the
 > next reader can see the paragraph used to say the opposite. The acceptance
-> doc's retired env gate and the missing Android equivalent are still open.
+> doc's retired env gate is corrected by the B3/B4 PR; the missing Android
+> equivalent is still open.
 
 ### 5.5 The proof bar — deliberately not a matrix
 
