@@ -2255,3 +2255,33 @@ source = "clients/apple/Sources/PlayerView.swift"
 source_anchor = "static func toneMapPeakSummary(_ status: PlaybackSessionStatus?) -> String? {"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testToneMapPeakSummaryKeepsPolicyDistinctFromSourceTruth()"
+
+[[fixes]]
+# Two defects, one commit. A forward seek into the loaded window's 20 s
+# refresh margin refreshed without clearing, because the position was still
+# inside the loaded window, so the pre-seek cue (often one that had ended)
+# stayed up until the new window loaded; the clear is now keyed on the cue
+# due. And Retrofit leaves body() null for every non-2xx, so a refused overlay
+# read "empty PGS overlay response" and a remembered failure never stopped the
+# poll; manifestResponsesFromSharedFixture holds that half.
+id = "android.pgs-overlay-seek-clears-a-stale-frame"
+commits = ["d7553793"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/AndroidPGSOverlay.kt"
+source_anchor = "clearFrame = if (forceWindow) shownCueId != plan.activeCueId else plan.clearNow,"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PGSOverlayTest.kt"
+test_anchor = "fun seekCasesFromSharedFixture()"
+
+[[fixes]]
+# Three defects, one commit. The 1 s periodic observer cancelled and restarted
+# the in-flight window load for as long as the position was outside the
+# published window, so a slow window after an out-of-window seek never
+# arrived. After a window failure every tick refetched it and raised another
+# notice once a second (testPGSOverlayFailedWindowIsNotRetriedOrRenoticedByTheTick).
+# And a typed refusal was thrown as .http(status), so a remembered preparation
+# failure could not be told apart (testPGSOverlayManifestResponsesFromSharedFixture).
+id = "apple.pgs-overlay-tick-keeps-a-covering-load"
+commits = ["ca639dbb"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "loadingRange: pgsOverlayLoadingRange,"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testPGSOverlayTickDoesNotCancelCoveringLoad()"

@@ -1,0 +1,26 @@
+version = 1
+
+[[coverage]]
+commits = ["303cb18c"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+A remembered PGS overlay preparation failure (demux, I/O, cancellation,
+timeout, missing duration) was a plain 503, which both native clients read as
+"still preparing" and polled for up to ten minutes showing nothing, and
+capacity-full was the same 503.
+
+`http::pgs_overlay::tests::a_remembered_preparation_failure_is_a_typed_terminal_answer_not_a_503`
+pins that every `Unavailable` is a typed 500 `pgs_overlay_prepare_failed`
+with no Retry-After; reverting the mapping to `ServiceUnavailable` fails it.
+`capacity_full_is_the_only_retryable_503` pins the TypedRetry 503
+`pgs_overlay_capacity` with Retry-After 5, and
+`a_malformed_or_over_limit_stream_keeps_its_422_and_gains_the_code` pins the
+422 bodies keeping their legacy `error` and `detail` fields beside the code.
+In crates/plurxd/src/pgs_overlay.rs,
+`preparation_capacity_refuses_a_third_cold_generation` now requires the
+capacity refusal to be `OverlayError::Capacity`, and
+`a_failed_preparation_is_remembered_as_a_failure_not_as_capacity` requires a
+failed runner to be replayed as `Unavailable` three times with one run.
+Run `cargo test -p plurxd pgs_overlay`.
+"""
