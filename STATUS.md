@@ -27,8 +27,16 @@ the array at 198 MB/s.
   because for them a slow success must stay a success.
 - **#447** (open) — the PGS overlay capability. `/decision` now narrows on the
   server switch **and** the caller's own `subtitle_overlays` claim, so a client
-  that cannot paint a bitmap is not offered a PGS default, is told no protocol
-  it cannot speak, and is told the truth that selecting one burns the video.
+  that cannot paint a bitmap is not offered a PGS default and is told the truth
+  that selecting one burns the video. Two deliberate limits, both from the
+  adversarial review: **no caps document at all** falls back to the switch
+  alone, because the legacy query is a mixed-fleet path both native clients
+  reach on any 400/404/405 and reading silence as a refusal would send a
+  capable client off to re-encode a whole film; and the `overlay` field on the
+  track keeps the server's own answer, because it describes what this process
+  can deliver rather than what this caller can paint. Item detail keeps
+  answering `false` for the same reason it always did — it has no capabilities
+  document, and the web's detail surface does no narrowing of its own.
   `tests/validation/test_caps_wire_conformance.py` pins the field name across
   all four ports, because `DeviceCaps` has no `deny_unknown_fields` and a
   misspelled claim is silently dropped rather than refused.
