@@ -1,0 +1,516 @@
+{
+  "schema": 1,
+  "title": "Shared Auto-quality policy fixture",
+  "designed_by": "docs/clients/NATIVE-ADAPTIVE-QUALITY-DESIGN.md (board A-04), milestone D1",
+  "what_this_is": [
+    "One policy, three runners. Every case is an `AutoSample` (design section 3.1) and the",
+    "`AutoDecision` the design says it must produce. `tests/playback/web-policy.test.js`",
+    "drives `PlaybackPolicy.decideRung` from it today; the Swift and JVM runners the build",
+    "plan adds read the same file, so `upgradeHeadroom = 1.8` cannot come to mean three",
+    "different things on three platforms without this file failing somewhere.",
+    "",
+    "`expect` is what the design says. `web_current` is what the shipped browser actually",
+    "does where the two differ, and the runner asserts `web_current` when it is present so",
+    "the suite stays green while the disagreement stays visible. A case carrying",
+    "`web_current` must also carry a `finding`: a disagreement is a result, not a test to",
+    "paper over, and every one of them is an input to the build plan.",
+    "",
+    "This file changes no runtime behaviour. Nothing reads it but tests."
+  ],
+  "defaults_source": "AUTO_DEFAULTS in crates/plurxd/src/web/playback-policy.js, asserted equal by the runner",
+  "defaults": {
+    "sampleMs": 5000,
+    "safeEstimateFactor": 0.95,
+    "severeEstimateRatio": 0.7,
+    "mildHeadroom": 1.3,
+    "mildSamples": 2,
+    "cooldownMs": 20000,
+    "upgradeHeadroom": 1.8,
+    "upgradeHoldMs": 45000,
+    "upgradeSpeedFloor": 1.15,
+    "stallWindowMs": 60000,
+    "dwellMs": 60000,
+    "nearEmptyRunwaySeconds": 1.5,
+    "restartCostSeconds": 2.5,
+    "causeMaxAgeMs": 15000,
+    "recentSampleMaxAgeMs": 15000
+  },
+  "proposed_defaults": {
+    "switchBudgetPerHour": 6,
+    "note": "Design section 3.4 proposes it and section 7.3 asks whether it should exist at all. It is NOT in AUTO_DEFAULTS and no platform implements it, so it is kept out of `defaults` rather than smuggled in beside constants that are real."
+  },
+  "causes": ["link", "encode", "decode", "hold", "authority", "unknown"],
+  "cause_map": {
+    "comment": "Design section 3.2's five classes against the kinds `autoCauseEvidence` actually emits (crates/plurxd/src/web/player/stall-diagnosis.js). `decideRung` reads the web kinds, so the cases below are written in web kinds and named by design class.",
+    "link": ["bandwidth-limited", "delivery-refused"],
+    "encode": ["capacity-shortfall"],
+    "decode": [],
+    "hold": ["loader-suspended"],
+    "authority": ["authority-refused", "producer-failed"],
+    "unknown": ["unknown", "stale"]
+  },
+  "ladder": [
+    {"height": 1080, "total_kbps": 8160, "peak_kbps": 12160},
+    {"height": 720, "total_kbps": 4160, "peak_kbps": 6160},
+    {"height": 480, "total_kbps": 2160, "peak_kbps": 3160},
+    {"height": 360, "total_kbps": 1360, "peak_kbps": 1960}
+  ],
+  "sample_defaults": {
+    "currentHeight": 720,
+    "estimateKbps": null,
+    "recentEstimateKbps": null,
+    "recentEstimateAtMs": null,
+    "runwaySeconds": null,
+    "previousRunwaySeconds": null,
+    "recentSpeed": null,
+    "activeSupplyStall": false,
+    "supplyStalls": 0,
+    "lastStallAtMs": null,
+    "nowMs": 600000,
+    "lastSwitchAtMs": null,
+    "mildSamples": 0,
+    "upgradeSinceMs": null,
+    "playerHeight": 2160,
+    "blockedHeights": [],
+    "causeEvidence": null
+  },
+  "cases": [
+    {
+      "name": "link: a fresh cliff steps past rungs to the one the link can carry",
+      "section": "3.2 link, 3.4 downward may skip rungs only under link evidence",
+      "sample": {
+        "currentHeight": 1080,
+        "estimateKbps": 1500,
+        "recentEstimateKbps": 1500,
+        "recentEstimateAtMs": 599000,
+        "lastSwitchAtMs": 599000,
+        "causeEvidence": {"kind": "bandwidth-limited", "ageMs": 1000}
+      },
+      "expect": {
+        "height": 360,
+        "reason": "bandwidth cliff",
+        "action": "switch",
+        "emergency": true,
+        "evidence": {"kind": "bandwidth-limited"}
+      }
+    },
+    {
+      "name": "link: an emergency ignores the cooldown a voluntary move obeys",
+      "section": "3.4 cooldown, except an emergency decision",
+      "sample": {
+        "currentHeight": 1080,
+        "estimateKbps": 1500,
+        "recentEstimateKbps": 1500,
+        "recentEstimateAtMs": 599900,
+        "runwaySeconds": 0.4,
+        "lastSwitchAtMs": 599999,
+        "causeEvidence": {"kind": "bandwidth-limited", "ageMs": 100}
+      },
+      "expect": {"height": 360, "reason": "bandwidth cliff", "emergency": true}
+    },
+    {
+      "name": "link: a publication refusal is constrained delivery to the design and silence to the browser",
+      "section": "3.2 link",
+      "sample": {
+        "activeSupplyStall": true,
+        "runwaySeconds": 0.4,
+        "estimateKbps": 5000,
+        "causeEvidence": {"kind": "delivery-refused", "ageMs": 2000, "code": "response_publication_timeout"}
+      },
+      "expect": {"height": 480, "reason": "link"},
+      "web_current": {"height": 720, "reason": "delivery-refused", "action": "suppressed"},
+      "finding": "Design section 3.2 folds a `publication`/`segment_`/`response_` refusal into the `link:` class, which steps down. `decideRung` puts `delivery-refused` in its `namedSuppression` list and retains the rung. The browser's behaviour is the one with an argument behind it (section 2.3: a server declining to publish is not the link being slow, and stepping a rung on `response_owner_transition` would be a quality drop caused by an ownership move), so this is a defect in section 3.2's table rather than in the code. Recorded here rather than silently corrected because the decision belongs to the build plan; see design section 7.6."
+    },
+    {
+      "name": "encode: a capacity shortfall steps exactly one rung",
+      "section": "3.2 encode",
+      "sample": {
+        "estimateKbps": 9000,
+        "recentSpeed": 0.8,
+        "runwaySeconds": 5,
+        "previousRunwaySeconds": 8,
+        "mildSamples": 1,
+        "causeEvidence": {"kind": "capacity-shortfall", "ageMs": 1000}
+      },
+      "expect": {"height": 480, "reason": "server supply"}
+    },
+    {
+      "name": "encode: one rung even from the top, never by the estimate",
+      "section": "3.2 encode, 3.4 downward may skip rungs only under link evidence",
+      "sample": {
+        "currentHeight": 1080,
+        "estimateKbps": 20000,
+        "recentSpeed": 0.8,
+        "runwaySeconds": 5,
+        "previousRunwaySeconds": 8,
+        "mildSamples": 1,
+        "causeEvidence": {"kind": "capacity-shortfall", "ageMs": 1000}
+      },
+      "expect": {"height": 720, "reason": "server supply"}
+    },
+    {
+      "name": "encode: never step up, whatever the estimate says",
+      "section": "3.2 encode, 3.4 upward recovery is gated on encode headroom",
+      "sample": {
+        "estimateKbps": 60000,
+        "recentSpeed": 0.8,
+        "runwaySeconds": 30,
+        "previousRunwaySeconds": 30,
+        "upgradeSinceMs": 500000,
+        "causeEvidence": {"kind": "capacity-shortfall", "ageMs": 1000}
+      },
+      "expect": {"height": 720, "reason": null, "upgradeSinceMs": null}
+    },
+    {
+      "name": "decode: a codec failure blocks this rung and steps down",
+      "section": "3.2 decode",
+      "sample": {
+        "estimateKbps": 9000,
+        "runwaySeconds": 20,
+        "decodeStalls": 2,
+        "causeEvidence": {"kind": "decode-failed", "ageMs": 500, "code": "codec_error"}
+      },
+      "expect": {"height": 480, "reason": "decode", "blockedHeights": [720]},
+      "web_current": {"height": 720, "reason": null},
+      "finding": "`decideRung` has no decode cause and no `decodeStalls` input: `autoCauseEvidence` never returns one, and `decodeStalls` is not a parameter. Decode evidence reaches the policy only as a pre-populated `blockedHeights` set, filled by `maybeDecodeRescue` and passed as `p.abr.failedHeights` from `autoControllerTick`. So the browser does the blocking, outside the policy, and the policy cannot report `decode` as a reason or tell a second decode failure from a first. Design section 3.2 requires the class to be inside the shared policy, which means `decideRung` gains a `decodeStalls` input and a `decode` cause, and the returned decision gains the height to block. That is build-plan work; the case is pinned here so it is not forgotten."
+    },
+    {
+      "name": "hold: a suspended loader is a transport repair, not a rung change",
+      "section": "3.2 hold, 3.5 a control verdict in force",
+      "sample": {
+        "activeSupplyStall": true,
+        "runwaySeconds": 0.2,
+        "causeEvidence": {"kind": "loader-suspended", "ageMs": 0}
+      },
+      "expect": {
+        "height": 720,
+        "reason": "loader-suspended",
+        "action": "suppressed",
+        "emergency": false,
+        "evidence": {"kind": "loader-suspended"}
+      }
+    },
+    {
+      "name": "hold: a control verdict in force must stop an upgrade the link would otherwise justify",
+      "section": "3.2 hold, 3.5 a control verdict in force",
+      "sample": {
+        "estimateKbps": 20000,
+        "recentSpeed": 3.0,
+        "runwaySeconds": 30,
+        "upgradeSinceMs": 540000,
+        "causeEvidence": {"kind": "control-hold", "ageMs": 1000}
+      },
+      "expect": {"height": 720, "reason": "hold", "action": "suppressed"},
+      "web_current": {"height": 1080, "reason": "bandwidth recovered"},
+      "finding": "The most valuable disagreement in this file. `autoCauseEvidence` has no control-verdict kind at all, so a hold or retry verdict is invisible to the policy; with a healthy buffer and a fast sample the browser upgrades straight through it. A starved viewer is protected only incidentally, because an empty runway with no fresh cause suppresses for insufficient evidence instead. Design sections 3.2 and 3.5 both require the verdict itself to be the gate. Two things follow for the build plan: `autoCauseEvidence` gains a `control-hold` kind fed by the control verdict already in hand, and `decideRung` adds it to the `namedSuppression` list. Android already has the verdict at the same seam (`Controller.kt`'s `hold`/`retry_resource` arm), which is the one place this is easier off the browser than on it."
+    },
+    {
+      "name": "authority: a refused owner outranks even a fresh cliff",
+      "section": "3.2 authority",
+      "sample": {
+        "activeSupplyStall": true,
+        "runwaySeconds": 0.1,
+        "estimateKbps": 800,
+        "recentEstimateKbps": 800,
+        "recentEstimateAtMs": 599000,
+        "causeEvidence": {"kind": "authority-refused", "ageMs": 1000, "code": "owner_lost"}
+      },
+      "expect": {
+        "height": 720,
+        "reason": "authority-refused",
+        "action": "suppressed",
+        "emergency": false
+      }
+    },
+    {
+      "name": "authority: a dead producer is not a rung that is too heavy",
+      "section": "3.2 authority",
+      "sample": {
+        "activeSupplyStall": true,
+        "runwaySeconds": 0.1,
+        "causeEvidence": {"kind": "producer-failed", "ageMs": 3000}
+      },
+      "expect": {"height": 720, "reason": "producer-failed", "action": "suppressed"}
+    },
+    {
+      "name": "unknown: a stationary presentation with stale evidence never steps down",
+      "section": "3.2 unknown, 2.5 Android's refusal generalised",
+      "sample": {
+        "activeSupplyStall": true,
+        "runwaySeconds": 0.1,
+        "causeEvidence": {"kind": "stale", "ageMs": 30000}
+      },
+      "expect": {
+        "height": 720,
+        "reason": "insufficient-evidence",
+        "action": "suppressed",
+        "evidence": {"kind": "stale"}
+      }
+    },
+    {
+      "name": "unknown: a throughput sample older than recentSampleMaxAgeMs cannot establish a cliff",
+      "section": "3.2 unknown, 2.3 the refusal",
+      "sample": {
+        "activeSupplyStall": true,
+        "runwaySeconds": 0.2,
+        "estimateKbps": 1500,
+        "recentEstimateKbps": 1500,
+        "recentEstimateAtMs": 580000
+      },
+      "expect": {"height": 720, "reason": "insufficient-evidence", "action": "suppressed"}
+    },
+    {
+      "name": "unknown: three supply stalls with nothing fresh are urgency, not cause",
+      "section": "3.2 unknown",
+      "sample": {"supplyStalls": 3, "runwaySeconds": 6, "estimateKbps": 9000},
+      "expect": {"height": 720, "reason": "insufficient-evidence", "action": "suppressed"}
+    },
+    {
+      "name": "hysteresis: a mild downgrade one millisecond inside the cooldown is refused",
+      "section": "3.4 cooldown, boundary just inside",
+      "sample": {
+        "estimateKbps": 5000,
+        "runwaySeconds": 20,
+        "previousRunwaySeconds": 20,
+        "mildSamples": 1,
+        "lastSwitchAtMs": 580001
+      },
+      "expect": {"height": 720, "reason": null, "mildSamples": 2}
+    },
+    {
+      "name": "hysteresis: at exactly cooldownMs the design switches and the browser does not",
+      "section": "3.4 cooldown, boundary just outside",
+      "sample": {
+        "estimateKbps": 5000,
+        "runwaySeconds": 20,
+        "previousRunwaySeconds": 20,
+        "mildSamples": 1,
+        "lastSwitchAtMs": 580000
+      },
+      "expect": {"height": 480, "reason": "bandwidth pressure"},
+      "web_current": {"height": 720, "reason": null, "mildSamples": 2},
+      "finding": "Design section 3.4 says `No switch within cooldownMs of the last one`, which reads as a 20 s minimum gap. `decideRung` computes `voluntaryAllowed = sinceSwitch >= cooldownMs && sinceSwitch >= dwellMs`, and `dwellMs` is 60000, so the real minimum gap between two voluntary moves is 60 s and `cooldownMs` is dead weight on this path — it binds only through the second condition it is always smaller than. One of the two has to move: either section 3.4 is corrected to say the voluntary gap is `max(cooldownMs, dwellMs)`, or `dwellMs` goes back to being only the horizon the restart-cost model amortises over, which is what its own table row in section 2.2 says it governs. Naming the wrong number to three platforms is exactly the failure a shared fixture exists to prevent, so this must be settled before any adapter is written."
+    },
+    {
+      "name": "hysteresis: a full dwell after the last switch the mild downgrade is taken",
+      "section": "3.4 mild downgrades need repetition",
+      "sample": {
+        "estimateKbps": 5000,
+        "runwaySeconds": 20,
+        "previousRunwaySeconds": 20,
+        "mildSamples": 1,
+        "lastSwitchAtMs": 540000
+      },
+      "expect": {"height": 480, "reason": "bandwidth pressure"}
+    },
+    {
+      "name": "hysteresis: one mild sample is not a mild downgrade",
+      "section": "3.4 mild downgrades need repetition",
+      "sample": {
+        "estimateKbps": 5000,
+        "runwaySeconds": 20,
+        "previousRunwaySeconds": 20,
+        "mildSamples": 0,
+        "lastSwitchAtMs": 540000
+      },
+      "expect": {"height": 720, "reason": null, "mildSamples": 1}
+    },
+    {
+      "name": "hysteresis: a downgrade that would not pay for itself over the dwell is not taken",
+      "section": "3.4 restart cost is amortised, not ignored",
+      "sample": {
+        "estimateKbps": 5300,
+        "runwaySeconds": 20,
+        "previousRunwaySeconds": 20,
+        "mildSamples": 1,
+        "lastSwitchAtMs": 540000
+      },
+      "expect": {"height": 720, "reason": null, "mildSamples": 2}
+    },
+    {
+      "name": "upgrade: encode headroom clears and the rung rises one step",
+      "section": "3.4 upward recovery is gated on encode headroom",
+      "sample": {
+        "estimateKbps": 20000,
+        "recentSpeed": 3.0,
+        "runwaySeconds": 30,
+        "upgradeSinceMs": 540000
+      },
+      "expect": {"height": 1080, "reason": "bandwidth recovered"}
+    },
+    {
+      "name": "upgrade: bandwidth to spare does not buy a rung the encoder cannot hold",
+      "section": "3.4 upward recovery is gated on encode headroom, 2.2 upgradeSpeedFloor",
+      "sample": {
+        "estimateKbps": 20000,
+        "recentSpeed": 2.0,
+        "runwaySeconds": 30,
+        "upgradeSinceMs": 540000
+      },
+      "expect": {"height": 720, "reason": null, "upgradeSinceMs": null}
+    },
+    {
+      "name": "upgrade: a null recent speed is absence of evidence, not evidence",
+      "section": "3.4, playback-policy.js predictedSpeed",
+      "sample": {
+        "estimateKbps": 20000,
+        "recentSpeed": null,
+        "runwaySeconds": 30,
+        "upgradeSinceMs": 540000
+      },
+      "expect": {"height": 1080, "reason": "bandwidth recovered"}
+    },
+    {
+      "name": "upgrade: the hold has not elapsed and the clock is carried forward",
+      "section": "3.4 upgradeHoldMs",
+      "sample": {
+        "estimateKbps": 20000,
+        "recentSpeed": 3.0,
+        "runwaySeconds": 30,
+        "upgradeSinceMs": 570000
+      },
+      "expect": {"height": 720, "reason": null, "upgradeSinceMs": 570000}
+    },
+    {
+      "name": "upgrade: a recent stall holds the rung even once the hold has elapsed",
+      "section": "3.4 stallWindowMs",
+      "sample": {
+        "estimateKbps": 20000,
+        "recentSpeed": 3.0,
+        "runwaySeconds": 30,
+        "upgradeSinceMs": 540000,
+        "lastStallAtMs": 570000
+      },
+      "expect": {"height": 720, "reason": null, "upgradeSinceMs": null}
+    },
+    {
+      "name": "upgrade: a height this playback already failed is not a candidate",
+      "section": "3.2 decode, 3.4 blockedHeights",
+      "sample": {
+        "estimateKbps": 20000,
+        "recentSpeed": 3.0,
+        "runwaySeconds": 30,
+        "upgradeSinceMs": 540000,
+        "blockedHeights": [1080]
+      },
+      "expect": {"height": 720, "reason": null, "upgradeSinceMs": null}
+    },
+    {
+      "name": "upgrade: the presentation ceiling vetoes a rung the link could carry",
+      "section": "3.1 playerHeight is a ceiling only",
+      "sample": {
+        "estimateKbps": 20000,
+        "recentSpeed": 3.0,
+        "runwaySeconds": 30,
+        "upgradeSinceMs": 540000,
+        "playerHeight": 800
+      },
+      "expect": {"height": 720, "reason": null, "upgradeSinceMs": null}
+    },
+    {
+      "name": "upgrade: one rung at a time, never a jump to the top",
+      "section": "3.4 one rung at a time upward, always",
+      "sample": {
+        "currentHeight": 360,
+        "estimateKbps": 60000,
+        "recentSpeed": 6.0,
+        "runwaySeconds": 30,
+        "upgradeSinceMs": 540000
+      },
+      "expect": {"height": 480, "reason": "bandwidth recovered"}
+    },
+    {
+      "name": "the presentation ceiling never strands a downgrade from a rung above it",
+      "section": "3.1 playerHeight is a ceiling only",
+      "sample": {
+        "currentHeight": 1080,
+        "playerHeight": 400,
+        "estimateKbps": 1500,
+        "recentEstimateKbps": 1500,
+        "recentEstimateAtMs": 599000,
+        "causeEvidence": {"kind": "bandwidth-limited", "ageMs": 1000}
+      },
+      "expect": {"height": 360, "reason": "bandwidth cliff", "emergency": true}
+    },
+    {
+      "name": "budget: the sixth automatic change in the hour is the last one",
+      "section": "3.4 switch budget, 7.3",
+      "sample": {
+        "estimateKbps": 5000,
+        "runwaySeconds": 20,
+        "previousRunwaySeconds": 20,
+        "mildSamples": 1,
+        "lastSwitchAtMs": 540000,
+        "switchesThisPlaybackHour": 6
+      },
+      "expect": {"height": 720, "reason": null},
+      "web_current": {"height": 480, "reason": "bandwidth pressure"},
+      "finding": "No platform has a switch budget. `decideRung` takes no count of automatic changes and returns none, so `switchesThisPlaybackHour` in this sample is inert and the browser takes the seventh switch exactly like the first. The browser bounds the rate (cooldown plus stall window) and not the total, which is the gap section 3.4 names. The proposed number is six per playback-hour and it is a proposal, not a measurement: section 7.3 asks whether a real cliff even provokes that many, and the shaped-network traces of D3 are what answers it. If those traces show two, this case and the `switchBudgetPerHour` row in `proposed_defaults` are deleted rather than implemented."
+    }
+  ],
+  "controller_gates": [
+    {
+      "comment": "Design section 3.5's rows are not `decideRung` inputs: they decide whether the controller runs at all, so they live in `autoControllerTick` (crates/plurxd/src/web/player/stall-diagnosis.js). `web_gate` is the literal substring of that shipped function which implements the row; the runner asserts it is still there, so deleting a gate fails here rather than silently enabling the controller somewhere it must not run. A null `web_gate` means the browser has no such gate and the row carries a finding."
+    },
+    {
+      "viewer_state": "Original",
+      "rule": "the controller is off entirely",
+      "web_gate": "qualityForce()!=='auto'",
+      "why": "`qualityForce` maps `original` and `nomse` to `original`, so the same gate that refuses a manual rung refuses Original. Original is a fidelity promise, not a rung."
+    },
+    {
+      "viewer_state": "Manual rung",
+      "rule": "off; an explicit pick is an instruction, not a hint",
+      "web_gate": "qualityForce()!=='auto'",
+      "why": "`qualityForce` maps any numeric height to `transcode`."
+    },
+    {
+      "viewer_state": "Paused",
+      "rule": "off; a paused player's runway is meaningless and its estimate is stale",
+      "web_gate": "v.paused",
+      "why": "Read straight off the media element in the tick's first gate."
+    },
+    {
+      "viewer_state": "Not yet started",
+      "rule": "off until the first frame; there is nothing to measure",
+      "web_gate": "!p.started",
+      "why": "Startup owns its own recovery ladder; the quality controller must not race it."
+    },
+    {
+      "viewer_state": "A move already in flight",
+      "rule": "one automatic move ever, claimed and released",
+      "web_gate": "p.abr.switching",
+      "why": "Section 3.3's `one automatic move in flight, ever`. The tick re-reads it after the awaited health poll as well, because `maybeDecodeRescue` can claim while the tick waits."
+    },
+    {
+      "viewer_state": "Media this playback does not own",
+      "rule": "off; a rung change on media another playback owns is a second session",
+      "web_gate": "playbackOwnsAttachedMedia(p)",
+      "why": "Checked before the poll and again after it, together with attachment, session and stream identity."
+    },
+    {
+      "viewer_state": "The replicated setting is off",
+      "rule": "off; `playback_auto_abr` is the switch that already exists and no new one is added",
+      "web_gate": "SERVER.playback_auto_abr",
+      "why": "Design section 3.7 and section 4: no new settings key, and readiness never gates enablement."
+    },
+    {
+      "viewer_state": "Background / PiP",
+      "rule": "off while not presenting",
+      "web_gate": null,
+      "finding": "The browser has no visibility gate in `autoControllerTick`. `document.hidden` is read in `crates/plurxd/src/web/player/transport.js` for the control-plane active flag, not here, and a hidden tab is quietened by the browser's own timer throttling rather than by a decision this code makes. Neither native client gets that for free: a backgrounded Android activity and an Apple app in PiP both keep their timers. So this row is a real requirement on the native adapters and an unstated dependency on browser behaviour on the web. D2 names the per-platform predicate; the web gate is worth adding explicitly so all three read alike."
+    },
+    {
+      "viewer_state": "HDR fidelity",
+      "rule": "a rung change must not silently change OutputGrade; a downward step out of HDR must be reported",
+      "web_gate": null,
+      "finding": "`decideRung` has no grade input and `autoControllerTick` has no grade gate, so the policy cannot tell a rung that keeps HDR10 from one that drops to SDR. The server decides the grade per rung (`hdr10_rung_fits`, `crates/plurxd/src/transcode.rs`), so the client learns of an unexpected SDR transition only after the switch has landed. Design section 3.5 wants it refused while the cause is `link:` only, and section 5.3 counts unexpected SDR transitions as an acceptance metric, so the ladder the policy is given has to carry each rung's grade. That is a server-shaped change (the ladder gains a grade per rung) and belongs to the build plan, not here."
+    },
+    {
+      "viewer_state": "A control verdict in force",
+      "rule": "off until the verdict's deadline",
+      "web_gate": null,
+      "finding": "Same gap as the `control-hold` case above, seen from the tick rather than from the policy: nothing in `autoControllerTick` reads the control verdict. Android is the platform where this is already at hand, in the `hold`/`retry_resource` arm of its verdict handling."
+    }
+  ]
+}
