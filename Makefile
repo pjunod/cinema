@@ -1748,7 +1748,7 @@ android-instrumentation-run: ## Install and run instrumented tests (set PLURX_AN
 android-instrumentation: android-instrumentation-build android-instrumentation-run ## Run UI tests on an explicitly selected disposable device
 
 .PHONY: android
-android: android-image ## Build the Android debug APK in Docker (no host JDK/SDK)
+android: android-image ## Build the Android debug APK for local use (NOT what ships)
 	docker run --rm \
 	  --platform $(ANDROID_PLATFORM) \
 	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
@@ -1760,11 +1760,42 @@ android: android-image ## Build the Android debug APK in Docker (no host JDK/SDK
 .PHONY: apk
 apk: android ## Build the Android debug APK (alias for android)
 
+# The variant that reaches devices. `release` clears `debuggable`, which is
+# what `adb shell run-as` follows: while the fleet ran the debug APK, any host
+# the device trusted could read the account bearer straight out of
+# `files/datastore/plurx.preferences_pb`.
+#
+# The keystore stays wherever the vault put it on the host — never in the
+# repository, never in the image — and is bind-mounted read-only for the one
+# build. `PLURX_ANDROID_KEYSTORE` names the host path here and the mount point
+# inside the container; the three secrets ride `-e NAME`, which forwards the
+# caller's value and passes nothing when the caller has none. Gradle then
+# fails naming whichever is missing (`requiredSigningValue` in
+# clients/android/app/build.gradle.kts), so an unsigned or debug-signed
+# "release" is not a reachable outcome.
+.PHONY: android-release
+android-release: android-image ## Build the SIGNED Android release APK (needs PLURX_ANDROID_KEYSTORE etc.)
+	@test -n "$${PLURX_ANDROID_KEYSTORE:-}" || { echo "set PLURX_ANDROID_KEYSTORE to the upload keystore's path on this host (streamed from the vault, not stored in the repo)"; exit 1; }
+	@test -f "$${PLURX_ANDROID_KEYSTORE}" || { echo "PLURX_ANDROID_KEYSTORE=$${PLURX_ANDROID_KEYSTORE} is not a file"; exit 1; }
+	docker run --rm \
+	  --platform $(ANDROID_PLATFORM) \
+	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
+	  -e GRADLE_USER_HOME=/workspace/clients/android/.gradle-docker \
+	  -e PLURX_ANDROID_KEYSTORE_PASSWORD -e PLURX_ANDROID_KEY_ALIAS \
+	  -e PLURX_ANDROID_KEY_PASSWORD \
+	  -e PLURX_ANDROID_KEYSTORE=/signing/upload.jks \
+	  -v "$${PLURX_ANDROID_KEYSTORE}":/signing/upload.jks:ro \
+	  -v "$(CURDIR)":/workspace -w /workspace/clients/android \
+	  $(ANDROID_IMAGE) ./gradlew --no-daemon :app:assembleRelease
+	@echo "→ clients/android/app/build/outputs/apk/release/app-release.apk"
+
 .PHONY: android-publish
-android-publish: android ## Build the APK + serve it from the web UI (ANDROID_DATA_DIR=/path/to/data)
+android-publish: android-release ## Build the signed APK + serve it from the web UI (ANDROID_DATA_DIR=/path/to/data)
 	@test -n "$(ANDROID_DATA_DIR)" || { echo "set ANDROID_DATA_DIR to the server's data_dir, e.g. make android-publish ANDROID_DATA_DIR=~/.local/share/plurx"; exit 1; }
-	cp clients/android/app/build/outputs/apk/debug/app-debug.apk "$(ANDROID_DATA_DIR)/plurx-android.apk"
+	cp clients/android/app/build/outputs/apk/release/app-release.apk "$(ANDROID_DATA_DIR)/plurx-android.apk"
 	@echo "Published -> $(ANDROID_DATA_DIR)/plurx-android.apk (served at /download/plurx-android.apk, no restart needed)"
+	@echo "NOTE: the signing key changed with the debug->release switch; the first"
+	@echo "      install on each device needs an 'adb uninstall tv.plurx.app' first."
 
 .PHONY: clean
 clean: ## Remove build artifacts and coverage output

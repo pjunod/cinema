@@ -76,6 +76,22 @@ What the roster does and does not enforce:
   devices passes green. If Apple coverage matters for what you are testing,
   confirm it from the summary yourself.
 
+**2026-09-23 — the Android variant changed from debug to release.**
+`make android-publish` now builds and serves `app-release.apk`, signed with the
+upload key (`docs/PUBLISHING.md` §5.1). Two consequences for this playbook, and
+neither is automatic:
+
+- The `mobile_release` role lives in `~/code/plurx-agent`, not in this
+  repository, and **still builds and installs the debug variant**. Its Gradle
+  task must change to `:app:assembleRelease` and its install path to
+  `app-release.apk`, with the four `PLURX_ANDROID_*` variables available to the
+  build step, before a release APK reaches a device through Ansible.
+- The signing key changes with the variant, so Android refuses the upgrade
+  in place. **Every Android device needs `adb uninstall tv.plurx.app` once**,
+  before its first release install. This is not the downgrade case below and
+  `mobile_release_allow_downgrade` does not address it; an uninstall drops
+  `/data`, so each device signs in again afterwards.
+
 Two refusals the role makes on purpose:
 
 - **It will not downgrade by default.** `adb install -d` is absent, because a

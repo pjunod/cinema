@@ -372,18 +372,37 @@ Play requirement. The pinned JDK 25 / AGP 9.3.2 / SDK 37.0 image is documented
 in [clients/android/README.md](../clients/android/README.md), and
 `make android-test` proves its JVM suite and lint in that image.
 
-One real blocker remains, not polish: **a release signing config.**
-`build.gradle.kts` defines no `signingConfigs`,
-so `assembleRelease` produces an unsigned or debug-signed artifact that Play
-refuses. Generate an upload key, keep it out of git, and enrol in **Play App
-Signing** so Google holds the distribution key — losing an upload key is
-recoverable, losing a distribution key without Play App Signing means the app
-can never be updated again.
+**The release signing blocker is closed in the repository.**
+`build.gradle.kts` now defines `signingConfigs.release`, and the `release`
+build type selects it. The four values come from the environment —
+`PLURX_ANDROID_KEYSTORE`, `PLURX_ANDROID_KEYSTORE_PASSWORD`,
+`PLURX_ANDROID_KEY_ALIAS`, `PLURX_ANDROID_KEY_PASSWORD` — and any one of them
+missing fails the build naming it (`requiredSigningValue`). There is
+deliberately no fallback to the debug key: Play refuses a debug-signed
+artifact, and once one is installed a properly signed build cannot upgrade it
+in place, so every device would need an uninstall first.
+
+`make android-release` builds it; `make android-publish` serves it at
+`/download/plurx-android.apk`. `make android` still produces the debug APK for
+local use.
+
+What remains is operational, not structural: **generate the upload key and put
+it in the fleet vault.** It is streamed to the build host, never committed,
+never passed as a command-line argument.
 
 ```bash
 keytool -genkey -v -keystore plurx-upload.jks \
   -keyalg RSA -keysize 2048 -validity 10000 -alias upload   # store OUTSIDE the repo
 ```
+
+Enrol in **Play App Signing** so Google holds the distribution key — losing an
+upload key is recoverable, losing a distribution key without Play App Signing
+means the app can never be updated again. The key generated here should be the
+one enrolled later, so the sideload fleet and Play share a signing lineage.
+
+Because the fleet's existing installs are debug-signed, the first release
+install on each device needs `adb uninstall tv.plurx.app` first. `make
+android-publish` prints that reminder.
 
 ### 5.2 Build and upload
 
