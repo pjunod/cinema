@@ -2,6 +2,7 @@ package tv.plurx.app.player
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import tv.plurx.app.data.parseRefusal
 
 @Serializable
 internal data class PGSOverlayPreparing(
@@ -124,6 +125,28 @@ internal enum class PGSOverlayStatus(val label: String?) {
 
 internal enum class PGSOverlayManifestDisposition { Ready, Preparing, Terminal }
 
+/**
+ * What a seek, or any other playback discontinuity, does to the overlay.
+ *
+ * [clearNow] is the part a refresh used to get wrong: a refresh publishes only
+ * once its new window has loaded, so whatever is on screen stays there until
+ * then. That was right only when the shown cue is still the one due; after a
+ * forward seek into the loaded window's last 20 s it was usually a cue that
+ * had already ended.
+ */
+internal data class PGSOverlaySeekPlan(
+    val refresh: Boolean,
+    val clearNow: Boolean,
+    val activeCueId: String?,
+    val window: PGSOverlayTimeWindow,
+)
+
+/** A non-2xx overlay answer, read for its code rather than its status alone. */
+internal sealed interface PGSOverlayRefusal {
+    data class Wait(val retryAfterMs: Int) : PGSOverlayRefusal
+    data class Terminal(val message: String) : PGSOverlayRefusal
+}
+
 /** The overlay protocol this client implements, named once. */
 const val PGS_OVERLAY_PROTOCOL = "pgs-v1"
 
@@ -140,11 +163,45 @@ internal object PGSOverlayPolicy {
     const val refreshMarginMs = 20_000L
     const val maximumPrepareMs = 10L * 60 * 1_000
 
-    fun manifestDisposition(statusCode: Int): PGSOverlayManifestDisposition = when (statusCode) {
-        200 -> PGSOverlayManifestDisposition.Ready
-        202, 503 -> PGSOverlayManifestDisposition.Preparing
-        else -> PGSOverlayManifestDisposition.Terminal
+    /** The server remembered a failed preparation; asking again only replays it. */
+    const val PREPARE_FAILED_CODE = "pgs_overlay_prepare_failed"
+
+    /** Both preparation slots are busy: the one refusal worth waiting out. */
+    const val CAPACITY_CODE = "pgs_overlay_capacity"
+
+    /** docs/clients/PGS_OVERLAY_PLAN.md §15.2, the same sentence Apple shows. */
+    const val PREPARE_FAILED_MESSAGE = "That subtitle could not be prepared."
+
+    /**
+     * A typed code outranks the status. A codeless 503 stays a wait so an
+     * older server that still answers a failure that way keeps its behaviour.
+     */
+    fun manifestDisposition(statusCode: Int, code: String? = null): PGSOverlayManifestDisposition =
+        when {
+            code == PREPARE_FAILED_CODE -> PGSOverlayManifestDisposition.Terminal
+            code == CAPACITY_CODE -> PGSOverlayManifestDisposition.Preparing
+            statusCode == 200 -> PGSOverlayManifestDisposition.Ready
+            statusCode == 202 || statusCode == 503 -> PGSOverlayManifestDisposition.Preparing
+            else -> PGSOverlayManifestDisposition.Terminal
+        }
+
+    /** A non-2xx manifest answer: wait on the server's cadence, or stop. */
+    fun manifestRefusal(statusCode: Int, retryAfterHeader: String?, errorBody: String?): PGSOverlayRefusal {
+        val code = parseRefusal(statusCode, errorBody)?.code
+        return when (manifestDisposition(statusCode, code)) {
+            PGSOverlayManifestDisposition.Preparing ->
+                PGSOverlayRefusal.Wait(retryAfterMs(retryAfterHeader))
+            else -> PGSOverlayRefusal.Terminal(
+                refusalMessage(code, "The PGS overlay request failed ($statusCode)."),
+            )
+        }
     }
+
+    fun refusalMessage(code: String?, fallback: String): String =
+        if (code == PREPARE_FAILED_CODE) PREPARE_FAILED_MESSAGE else fallback
+
+    /** Every overlay failure keeps the video exactly as it was (plan §16). */
+    fun failureNotice(message: String): String = "$message Video playback was kept unchanged."
 
     fun retryAfterMs(header: String?): Int =
         ((header?.toIntOrNull() ?: 1) * 1_000).coerceIn(250, 5_000)
@@ -168,6 +225,35 @@ internal object PGSOverlayPolicy {
         loaded == null ||
             sourceTimeMs < loaded.lowerMs ||
             sourceTimeMs >= loaded.upperExclusiveMs - refreshMarginMs
+
+    /**
+     * Held to `tests/playback/pgs-overlay-cases.json` `seek_cases`, the same
+     * rows the Apple suite reads.
+     */
+    fun seekPlan(
+        positionMs: Long,
+        loadedWindow: PGSOverlayTimeWindow?,
+        shownCueId: String?,
+        cues: List<PGSOverlayCue>,
+        durationMs: Long,
+    ): PGSOverlaySeekPlan {
+        val refresh = shouldRefresh(positionMs, loadedWindow)
+        val active = activeCueIndex(cues, positionMs)?.let { cues[it].id }
+        return PGSOverlaySeekPlan(
+            refresh = refresh,
+            // Without a refresh the active cue is published at once, which
+            // replaces whatever is shown. With one, nothing is published until
+            // the new window loads, so a shown cue that is not the one due at
+            // the new position has to go now.
+            clearNow = refresh && shownCueId != null && shownCueId != active,
+            activeCueId = active,
+            window = if (refresh || loadedWindow == null) {
+                windowAt(positionMs, durationMs)
+            } else {
+                loadedWindow
+            },
+        )
+    }
 
     fun activeCueIndex(cues: List<PGSOverlayCue>, sourceTimeMs: Long): Int? {
         var low = 0

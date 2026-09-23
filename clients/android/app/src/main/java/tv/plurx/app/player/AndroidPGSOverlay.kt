@@ -11,8 +11,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
+import okhttp3.ResponseBody
+import retrofit2.Response
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.PlurxApi
+import tv.plurx.app.data.parseRefusal
 import java.util.Locale
 import kotlin.math.ceil
 
@@ -46,6 +49,9 @@ internal class AndroidPGSOverlayController(
     private var trackIndex: Long? = null
     private var manifest: PGSOverlayManifest? = null
     private var loadedWindow: PGSOverlayTimeWindow? = null
+
+    /** The cue last handed to [onFrame], so a seek can tell a stale frame. */
+    private var shownCueId: String? = null
     private var selectionGeneration = 0L
     private var itemGeneration = 0L
     private var revision = 0L
@@ -106,7 +112,7 @@ internal class AndroidPGSOverlayController(
         windowJob?.cancel()
         boundaryJob?.cancel()
         loadedWindow = null
-        onFrame(null)
+        show(null)
         if (trackIndex != null) reconcile(forceWindow = true)
     }
 
@@ -114,16 +120,30 @@ internal class AndroidPGSOverlayController(
         val ready = manifest ?: return
         val index = trackIndex ?: return
         val position = sourcePositionMs().coerceAtLeast(0)
-        if (forceWindow || PGSOverlayPolicy.shouldRefresh(position, loadedWindow)) {
+        val plan = PGSOverlayPolicy.seekPlan(
+            position,
+            loadedWindow,
+            shownCueId,
+            ready.cues,
+            ready.durationMs,
+        )
+        if (forceWindow || plan.refresh) {
             loadWindow(
                 ready,
                 index,
                 position,
-                clearFrame = loadedWindow?.contains(position) != true,
+                // Keyed on the cue, not on the window: a seek into the loaded
+                // window's refresh margin used to keep a cue that had ended.
+                clearFrame = if (forceWindow) shownCueId != plan.activeCueId else plan.clearNow,
             )
             return
         }
         publishActive(ready, position)
+    }
+
+    private fun show(frame: PGSOverlayFrame?) {
+        shownCueId = frame?.cue?.id
+        onFrame(frame)
     }
 
     fun release() = clearState()
@@ -142,7 +162,7 @@ internal class AndroidPGSOverlayController(
         loadedWindow = null
         imageCache.clear()
         imageCacheBytes = 0
-        onFrame(null)
+        show(null)
         onStatus(PGSOverlayStatus.Off)
     }
 
@@ -159,7 +179,7 @@ internal class AndroidPGSOverlayController(
         val windowToken = ++windowGeneration
         windowJob?.cancel()
         boundaryJob?.cancel()
-        if (clearFrame) onFrame(null)
+        if (clearFrame) show(null)
         windowJob = scope.launch {
             try {
                 require(cues.size <= PGSOverlayPolicy.maximumWindowCues) {
@@ -215,18 +235,18 @@ internal class AndroidPGSOverlayController(
         boundaryJob?.cancel()
         val cue = PGSOverlayPolicy.activeCueIndex(ready.cues, position)?.let(ready.cues::get)
         if (cue == null) {
-            onFrame(null)
+            show(null)
         } else {
             val objects = cue.objects.map { object_ ->
                 val bitmap = imageCache[object_.image]?.bitmap ?: run {
-                    onFrame(null)
+                    show(null)
                     reconcile(forceWindow = true)
                     return
                 }
                 PGSOverlayRenderedObject(object_, bitmap)
             }
             revision++
-            onFrame(PGSOverlayFrame(revision, cue, objects))
+            show(PGSOverlayFrame(revision, cue, objects))
         }
         scheduleBoundary(ready, position)
     }
@@ -255,13 +275,22 @@ internal class AndroidPGSOverlayController(
 
     private suspend fun fetchManifest(index: Long): ManifestFetch {
         val response = api().pgsOverlayManifest(fileId, index)
-        val disposition = PGSOverlayPolicy.manifestDisposition(response.code())
-        if (disposition == PGSOverlayManifestDisposition.Preparing && response.code() == 503) {
-            response.errorBody()?.close()
-            return ManifestFetch.Preparing(
-                PGSOverlayPolicy.retryAfterMs(response.headers()["Retry-After"]),
-            )
+        if (!response.isSuccessful) {
+            // Retrofit leaves body() null for every non-2xx, so the answer the
+            // server gave is only in errorBody(). Reading body() here made a
+            // 404, 422 or 500 read "empty PGS overlay response".
+            return when (
+                val refusal = PGSOverlayPolicy.manifestRefusal(
+                    response.code(),
+                    response.headers()["Retry-After"],
+                    boundedErrorBody(response),
+                )
+            ) {
+                is PGSOverlayRefusal.Wait -> ManifestFetch.Preparing(refusal.retryAfterMs)
+                is PGSOverlayRefusal.Terminal -> error(refusal.message)
+            }
         }
+        val disposition = PGSOverlayPolicy.manifestDisposition(response.code())
         val body = response.body() ?: error("The server returned an empty PGS overlay response.")
         body.use {
             require(
@@ -299,9 +328,17 @@ internal class AndroidPGSOverlayController(
         object_: PGSOverlayObject,
     ): Bitmap {
         val response = api().pgsOverlayObject(fileId, index, generation, hash)
+        if (!response.isSuccessful) {
+            val code = parseRefusal(response.code(), boundedErrorBody(response))?.code
+            error(
+                PGSOverlayPolicy.refusalMessage(
+                    code,
+                    "The PGS subtitle image request failed (${response.code()}).",
+                ),
+            )
+        }
         val body = response.body() ?: error("The server returned an empty PGS subtitle image.")
         body.use {
-            require(response.isSuccessful) { "The PGS subtitle image request failed (${response.code()})." }
             require(
                 response.headers()["Content-Type"]
                     ?.lowercase(Locale.ROOT)
@@ -341,6 +378,16 @@ internal class AndroidPGSOverlayController(
             }
         }
     }
+
+    /** A refusal is a sentence, not a payload; anything larger is not one. */
+    private fun boundedErrorBody(response: Response<ResponseBody>): String? =
+        runCatching {
+            response.errorBody()?.use { body ->
+                val source = body.source()
+                source.request(MAXIMUM_REFUSAL_BYTES + 1)
+                if (source.buffer.size > MAXIMUM_REFUSAL_BYTES) null else source.buffer.readUtf8()
+            }
+        }.getOrNull()
 
     private fun store(key: String, bitmap: Bitmap) {
         val bytes = bitmap.allocationByteCount.toLong()
@@ -382,9 +429,9 @@ internal class AndroidPGSOverlayController(
         windowJob?.cancel()
         boundaryJob?.cancel()
         loadedWindow = null
-        onFrame(null)
+        show(null)
         onStatus(PGSOverlayStatus.Failed)
-        onFailure("$message Video playback was kept unchanged.")
+        onFailure(PGSOverlayPolicy.failureNotice(message))
     }
 
     private sealed interface ManifestFetch {
@@ -395,5 +442,6 @@ internal class AndroidPGSOverlayController(
     private companion object {
         const val MAXIMUM_MANIFEST_BYTES = 64 * 1_024 * 1_024
         const val MAXIMUM_PNG_BYTES = 36 * 1_024 * 1_024
+        const val MAXIMUM_REFUSAL_BYTES = 16_384L
     }
 }

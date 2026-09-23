@@ -1,6 +1,16 @@
 package tv.plurx.app.player
 
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -195,6 +205,117 @@ class PGSOverlayTest {
         )
         assertEquals(PGSOverlayRect(150f, 900f, 1620f, 180f), anamorphic)
     }
+
+    /**
+     * `tests/playback/pgs-overlay-cases.json` is the fixture the Apple suite
+     * reads too. The row that failed before this test existed is the refresh
+     * margin one: a forward seek into the loaded window's last 20 s kept the
+     * pre-seek cue on screen, because the refresh cleared only when the new
+     * position was outside the loaded window.
+     */
+    @Test
+    fun seekCasesFromSharedFixture() {
+        val fixture = sharedFixture()
+        val manifest = fixture.getValue("manifest").jsonObject
+        val durationMs = manifest.getValue("duration_ms").jsonPrimitive.long
+        val cues = manifest.getValue("cues").jsonArray.map {
+            val cue = it.jsonObject
+            cue(
+                cue.getValue("id").jsonPrimitive.content,
+                cue.getValue("start_ms").jsonPrimitive.long,
+                cue.getValue("end_ms").jsonPrimitive.long,
+            )
+        }
+        val cases = fixture.getValue("seek_cases").jsonArray
+        assertTrue(cases.size >= 6)
+        cases.forEach { element ->
+            val case = element.jsonObject
+            val name = case.getValue("name").jsonPrimitive.content
+            val expect = case.getValue("expect").jsonObject
+            val plan = PGSOverlayPolicy.seekPlan(
+                positionMs = case.getValue("to_ms").jsonPrimitive.long,
+                loadedWindow = window(case.getValue("loaded_window")),
+                shownCueId = case.getValue("shown_cue").stringOrNull(),
+                cues = cues,
+                durationMs = durationMs,
+            )
+            assertEquals(name, expect.getValue("refresh").jsonPrimitive.boolean, plan.refresh)
+            assertEquals(name, expect.getValue("clear_now").jsonPrimitive.boolean, plan.clearNow)
+            assertEquals(name, expect.getValue("active_cue").stringOrNull(), plan.activeCueId)
+            assertEquals(name, window(expect.getValue("window")), plan.window)
+        }
+    }
+
+    /**
+     * The manifest answers both clients must read the same way. The rows that
+     * matter are the typed ones: a remembered preparation failure has to stop
+     * the ten-minute poll and say so, and capacity has to keep it going.
+     */
+    @Test
+    fun manifestResponsesFromSharedFixture() {
+        val cases = sharedFixture().getValue("manifest_responses").jsonArray
+        assertTrue(cases.size >= 6)
+        cases.forEach { element ->
+            val case = element.jsonObject
+            val name = case.getValue("name").jsonPrimitive.content
+            val status = case.getValue("status").jsonPrimitive.int
+            val retryAfter = case.getValue("retry_after").stringOrNull()
+            val body = case.getValue("body").toString()
+            val expect = case.getValue("expect").jsonObject
+            val disposition = expect.getValue("disposition").jsonPrimitive.content
+            val expectedRetry = expect["retry_after_ms"]?.jsonPrimitive?.int
+            val expectedNotice = expect["notice"]?.jsonPrimitive?.content
+
+            if (status in 200..299) {
+                val actual = PGSOverlayPolicy.manifestDisposition(status)
+                assertEquals(name, disposition, actual.name.lowercase())
+                when (actual) {
+                    PGSOverlayManifestDisposition.Ready -> Net.json
+                        .decodeFromString<PGSOverlayManifest>(body)
+                        .validated(42, 3)
+                    PGSOverlayManifestDisposition.Preparing -> assertEquals(
+                        name,
+                        expectedRetry,
+                        Net.json.decodeFromString<PGSOverlayPreparing>(body).retryAfterMs,
+                    )
+                    PGSOverlayManifestDisposition.Terminal -> Unit
+                }
+                return@forEach
+            }
+
+            when (val refusal = PGSOverlayPolicy.manifestRefusal(status, retryAfter, body)) {
+                is PGSOverlayRefusal.Wait -> {
+                    assertEquals(name, "preparing", disposition)
+                    assertEquals(name, expectedRetry, refusal.retryAfterMs)
+                }
+                is PGSOverlayRefusal.Terminal -> {
+                    assertEquals(name, "terminal", disposition)
+                    val notice = PGSOverlayPolicy.failureNotice(refusal.message)
+                    if (expectedNotice != null) {
+                        assertEquals(name, expectedNotice, notice)
+                    } else {
+                        assertFalse(name, notice.contains("empty"))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun sharedFixture(): JsonObject {
+        val resource = checkNotNull(javaClass.classLoader?.getResource("pgs-overlay-cases.json")) {
+            "tests/playback/pgs-overlay-cases.json is not on the JVM test classpath"
+        }
+        return Net.json.parseToJsonElement(resource.readText()).jsonObject
+    }
+
+    private fun window(element: JsonElement): PGSOverlayTimeWindow? {
+        if (element is JsonNull) return null
+        val bounds = element as JsonArray
+        return PGSOverlayTimeWindow(bounds[0].jsonPrimitive.long, bounds[1].jsonPrimitive.long)
+    }
+
+    private fun JsonElement.stringOrNull(): String? =
+        if (this is JsonNull) null else jsonPrimitive.content
 
     private fun manifest(cues: List<PGSOverlayCue>) = PGSOverlayManifest(
         schema = 1,
