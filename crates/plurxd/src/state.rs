@@ -667,6 +667,11 @@ pub struct AppState {
     pub(crate) media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
     /// Always-compiled HDHomeRun configuration, readiness, and lineup owner.
     pub(crate) live_tv: Arc<crate::live_tv::LiveTvManager>,
+    /// One HTTP client for every Live TV ingress-to-owner exchange, plus a
+    /// five-second memory of the owner's address. Signing, expected-node
+    /// binding and response verification stay per request inside the
+    /// transport; nothing about a credential is held here.
+    pub(crate) live_tv_peers: Arc<crate::http::live_tv::LiveTvPeers>,
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
@@ -984,6 +989,7 @@ impl AppState {
         );
         let cache_only_admin_proofs =
             crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
+        let live_tv_peers = crate::http::live_tv::LiveTvPeers::new(membership.clone());
         let live_tv = crate::live_tv::LiveTvManager::new(
             Arc::clone(&store),
             Arc::clone(&system),
@@ -1010,6 +1016,7 @@ impl AppState {
             media_pool,
             media_sessions,
             live_tv,
+            live_tv_peers,
             server_name,
             node_id,
             cluster_advertisement,

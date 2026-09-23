@@ -31,7 +31,7 @@ mod items;
 mod keys;
 mod libraries;
 pub(crate) mod library_channels;
-mod live_tv;
+pub(crate) mod live_tv;
 mod network;
 mod offline;
 pub(crate) mod peer_transport;
