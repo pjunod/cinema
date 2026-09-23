@@ -120,6 +120,11 @@ async function libraryView(o){
   document.getElementById("libbody").insertAdjacentHTML("beforebegin",libraryBrowseTools(viewLibs));
 
   let all=[], total=0;
+  // How many cards the grid in #libbody currently holds, and 0 whenever what is
+  // on screen is not the head of `page` — an empty state, a filtered view, a
+  // rebuild. Only a draw that can prove the next page begins with exactly these
+  // cards may append to them.
+  let painted=0;
   const draw=(done)=>{
     const body=document.getElementById("libbody"); if(!body) return;
     let items=all;
@@ -145,7 +150,29 @@ async function libraryView(o){
     const m={kind:"library", title:o.title, href:o.href, sort, filter:LIB_FILTER,
       per:LIB_PER, pageAt:LIB_PAGE_AT, pages, from, items:page,
       loaded:all.length, shown, total, done, reload:o.reload};
-    body.innerHTML=layoutRegion("library","items",m);
+    // The one place a batch can extend the grid instead of replacing it
+    // (F-web-11). Everything that can reorder or hide what is already painted
+    // keeps the rebuild, because appending is only correct when the page that
+    // exists is a PREFIX of the page that should exist:
+    //   o.resort      a category re-sorts the merged set, so batch 3 of a
+    //                 four-library category may belong before batch 1's cards
+    //   sort          resolution renders sections, not one flat grid
+    //   filter/scope/find   change which items are visible, not just how many
+    //   LIB_PER       a page slice moves its window as the list grows
+    // The alpha rail, the count and the pager still redraw from the whole page;
+    // only the cards are spared. Keeping the existing nodes is the point: an
+    // innerHTML rebuild drops the reader's focus and every decoded poster.
+    const extendable=!o.resort && sort!=="resolution" && LIB_FILTER==="all"
+      && !LIB_SCOPE && !LIB_FIND.trim() && LIB_PER==="all";
+    const grown=extendable && painted>0 && page.length>=painted
+      ? body.querySelector(".grid") : null;
+    if(grown){
+      if(page.length>painted)
+        grown.insertAdjacentHTML("beforeend", page.slice(painted).map(i=>card(i)).join(""));
+      // `grid()` did not run, so the lightbox's photo set is this draw's job.
+      rememberGridPhotos(page);
+    }else body.innerHTML=layoutRegion("library","items",m);
+    painted=extendable? page.length : 0;
     const pager=document.getElementById("libpager");
     if(pager) pager.innerHTML = done? pagerHtml(shown) : "";
     // The A–Z rail maps to what is on screen, so it describes this page. Its
