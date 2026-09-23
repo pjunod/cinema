@@ -1,0 +1,90 @@
+version = 1
+
+[[coverage]]
+commits = ["84316357"]
+points = [
+  "cluster.auth",
+  "persistence.upgrades",
+  "operations.packaging",
+  "validation.framework",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "hiqlite-vendor-clippy",
+  "operations-contract",
+  "catalog-contract",
+]
+reason = """
+Corrective, and the direct consequence of `c7721be7`'s predecessor gating \
+`cryptr/s3`. Taking `s3-simple` out of the workspace graph also took out a \
+second `reqwest` whose provider feature Cargo had been unifying onto the one \
+the fork declares. The fork declares that one with `rustls-no-provider`, so \
+`ClientBuilder::build` reads `rustls::crypto::CryptoProvider::get_default()` \
+and panics outright when nothing installed one — for every client it builds, \
+not only the ones that go on to speak TLS, because the TLS config is assembled \
+during `build`. This commit installs `ring` once per process in \
+`vendor/hiqlite/src/http_client.rs::ensure_rustls_crypto_provider` and routes \
+every client construction in the fork through it, as patch 18 of the ledger.
+
+`crates/plurx-core/tests/hiqlite_tls_provider.rs` is what pins it. \
+`hiqlite_client_construction_installs_the_ring_crypto_provider` builds a real \
+`HiqliteClient::remote` — the same constructor `cluster::migration::status` \
+uses for a remote maintenance client — and then asserts that \
+`CryptoProvider::get_default()` is populated and that its cipher suites are \
+`rustls::crypto::ring::default_provider()`'s. Removing the \
+`ensure_rustls_crypto_provider()` call from `build_http_client` fails it at \
+`reqwest-0.13.4/src/async_impl/client.rs:2484` with "No rustls crypto provider \
+is configured", verified by reverting exactly that line and re-running \
+(`0 passed; 1 failed`), then restoring the file byte-identically.
+
+The `ring` assertion is a second, independent failure mode, and on this branch \
+it is the more important one. `reqwest` 0.13 offers exactly two provider \
+features, `rustls-no-provider` and `rustls` — and `rustls` means `aws-lc-rs`. \
+Declaring it would also stop the panic while quietly moving the process onto a \
+second provider and adding a fourth deliberate edge to `aws-lc-rs`, which is \
+the edge §3.6 option A of \
+`docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md` exists to retire \
+(`cargo tree -i aws-lc-sys` empty). The test fails on that change too. \
+Verified rather than assumed: `cargo tree -p plurx-core --features \
+hiqlite-store -i aws-lc-sys` is identical before and after this commit, \
+`rustls feature "aws-lc-rs"` keeps exactly its three pre-existing parents \
+(`axum-server`'s `tls-rustls`, `rustls`'s `prefer-post-quantum` and \
+`tokio-rustls`'s default), and `__rustls-aws-lc-rs` appears zero times in the \
+feature tree.
+
+The test owns its own test binary deliberately, and the file says so. The \
+provider is process-global and idempotent, so a test sharing a binary with \
+anything that calls `install_default_crypto_provider` — which \
+`cluster::migration` does in ten places — would pass whether or not the fork \
+installs anything. That is precisely how this defect hid: `plurxd`'s `main` \
+reaches `install_default_crypto_provider`, so `-p plurxd --bin plurxd` stayed \
+green while `cargo test --workspace` did not. Alone in its binary the test \
+starts from the state a fresh process is in, and its first assertion fails \
+loudly if that ever stops being true.
+
+`rust-gate` (`make rust-check`) and `rust-gate-ci` (`make ci-rust-gate`) both \
+run `cargo test --workspace --locked --exclude plurx-cluster-check`, which is \
+the lane that caught the defect and the lane that executes the new test: \
+plurxd depends on `plurx-core` with `hiqlite-store`, so feature unification \
+compiles the `#![cfg(feature = "hiqlite-store")]` test target, and the gate log \
+shows `Running tests/hiqlite_tls_provider.rs ... 1 passed`. The pre-existing \
+`cluster::migration::status::tests::remote_client_cannot_construct_local_raft_observers` \
+is the second witness in the same lane: it went 44/1 failed to 45/0 passed. \
+`hiqlite-vendor-clippy` covers the fork edit itself, which also adds the \
+provider call ahead of the three `reqwest::Client` constructions in the fork's \
+own `#[cfg(test)]` modules, so the vendor-manifest lanes keep building clients \
+that work. `operations-contract` holds \
+`tests/operations/test_hiqlite_patch_ledger.py`, whose `LEDGERS` count this \
+commit moves from 17 to 18 and whose `ForkBackupGraphPolicyCase` still judges \
+an unchanged `vendor/hiqlite/Cargo.lock` — the addition reuses the `rustls` \
+dependency and `ring` feature the fork already declares, so it resolves no new \
+crate and trips no `deny.toml` ban rather than asserting anything different \
+about that graph. `catalog-contract` holds the one-line \
+`validation/points.toml` change that attributes the new test file to \
+`cluster.auth`.
+
+`Cargo.lock`, `vendor/hiqlite/Cargo.lock` and `THIRD-PARTY-NOTICES.md` are all \
+untouched: no dependency moved. Ported from plan/K-01 `213b3aea`, which \
+reached the same defect by removing the same edge from the other direction.
+"""
