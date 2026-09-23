@@ -3427,14 +3427,31 @@ The pass keeps tracks only while **all** of these hold, checked per pass:
   the configured `ffmpeg` runs the index argv plus the tee over a four-second
   synthetic file with one corrupted PGS track, and must exit 0, leave the index
   output byte-identical, judge the tracks `kept` and `malformed`, and print the
-  slave-failure line the scan reads. `PLURX_FFMPEG` can name a build this was
-  never measured on; if it fails, the log line
+  slave-failure line the scan reads — and the `framecrc` byte arithmetic must
+  judge the corrupted track `malformed` on its own, with no stderr line to lean
+  on. It also requires `ffprobe` (`PLURX_FFPROBE`) to report the same version
+  as `ffmpeg` (`PLURX_FFMPEG`): the ordinals come from one and the hard maps are
+  resolved by the other. If it fails, the log line
   `PGS ride-along self-test failed` carries the reason and the Developer row
   shows it;
 - `<cache>` is on a **local filesystem** (`statfs`: NFS, SMB/CIFS, FUSE, 9p,
   Ceph and AFS are refused, and every non-Linux platform is treated as not
   local), because a blocked stage write would stall the demuxer the index
-  shares.
+  shares;
+- `<cache>` has **free space** of at least 1 GiB or 2% of its filesystem,
+  whichever is larger (`statvfs`), because stage writes share the disk with
+  the index blob the pass is about to publish.
+
+A riding pass that does not build its index is remembered (in memory, per
+file and source) and that file's next pass is a plain index pass, so the
+ride-along can cost a file its stored subtitles but never its index. The
+Developer row counts such files; a restart asks again. The verdict and the
+publication run after the pass's own future has returned, so a preemption can
+no longer discard a finished index while tracks are being judged. A stored
+track whose file has gone missing is re-extracted on the file's next pass.
+An HDR delivery that asks to burn a track the store holds as `empty` is not
+refused (there is nothing to burn): a copy stays a copy, and a transcode
+chooses its grade without the burn.
 
 | Runtime setting | Default | Meaning |
 |---|---:|---|
@@ -3448,10 +3465,15 @@ directory whose file row is gone or whose size/mtime moved is deleted, a
 catalog read that fails stops the sweep without deleting, a size cap evicts
 whole directories least recently used first, and stage directories
 (`.stage-*`) an interrupted pass left behind are removed after an hour (and all
-of them at startup). Lookups are counted in
+of them at startup), and stored tracks a manifest no longer names — what a
+publish interrupted between its steps leaves — are removed once older than an
+hour. Lookups are counted in
 `plurx_subtitle_source_lookups_total{consumer,outcome}`, misses by reason
 (`absent`, `stale`, `disabled`, `mpegts`, `hash_mismatch`, `never_indexed`,
-`hydrated_only`) in `plurx_subtitle_source_misses_total{consumer,reason}`, burn
+`hydrated_only`, `empty_track`) in
+`plurx_subtitle_source_misses_total{consumer,reason}` — a lookup that finds no
+directory is answered at once and classified afterwards, off the request
+path, from this node's own index table and the cluster's location rows — burn
 derivations that fell back to the source in
 `plurx_subtitle_source_fallbacks_total{reason}`, and the producer in
 `plurx_subtitle_ride_along_tracks_total`,
