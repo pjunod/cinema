@@ -1513,6 +1513,25 @@ than a burn: `overlay.json` answers `202 {"state":"preparing"}` while the
 build runs, and objects are immutable and addressed by content hash, so they
 cache indefinitely.
 
+A preparation that fails is remembered for 120 s, and asking inside that
+window replays the failure rather than starting another. The answers a client
+must tell apart are typed, so the status alone never decides whether to keep
+polling:
+
+| Code | Status | Retry-After | Means |
+|---|---|---|---|
+| `pgs_overlay_prepare_failed` | 500 | — | The preparation ran and failed: demux, I/O, a timeout, a source without a duration. Terminal; stop polling |
+| `pgs_overlay_prepare_failed` | 422 | — | The PGS stream is malformed or exceeds a safety limit. Terminal. The body keeps the older `error` and `detail` fields beside `code` and `message` |
+| `pgs_overlay_capacity` | 503 | 5 | Both preparation slots are busy. The one overlay refusal worth waiting out |
+
+A 409 means the source changed while it was being prepared, a 404 that the
+overlay is switched off or the file, track or generation does not exist, and a
+415 that the track is not PGS. A codeless 503 on the object route means the
+generation vanished and is being rebuilt. Before these codes, a remembered
+failure was a plain 503, which both native clients read as "still preparing"
+and polled for ten minutes while showing nothing. Clients keep treating a
+codeless 503 on `overlay.json` as a wait, for older servers.
+
 ---
 
 ## 12. Offline packages
