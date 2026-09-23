@@ -1,7 +1,11 @@
 # PGS subtitles on the start path — why a 79.5 GB read blocks playback, and the three fixes
 
-**Status:** §4 merged (PR #445, `5c605768`), not deployed · §5 and §6 proposed and unbuilt · reviewed — see [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
-**Reviewer:** Fable, adversarial · **Written:** 2026-09-22 ·
+**Status:** §4 merged (PR #445, `5c605768`) · §5's B1 and most of B5 merged
+(PR #447, `883cf4d42`); B2 was built and deliberately reverted; B3 and B4 open
+· the overlay gate is still **off** pending §5.5's two-device check · §6
+proposed and unbuilt · **nothing here is deployed** · reviewed — see
+[PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
+**Reviewer:** Fable, adversarial · **Written:** 2026-09-22, revised 2026-09-23 ·
 **Reported by:** Paul, 2026-09-21 ~18:50 ET, Android on the TCL tablet
 
 Companion to [PGS_OVERLAY_PLAN.md](PGS_OVERLAY_PLAN.md) (the overlay's own
