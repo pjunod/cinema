@@ -474,11 +474,10 @@ async function pollSessionHealth(force){
     if(current()) {
       p.health=h;
       p.healthObservedAt=performance.now();
-      // This used to repaint the buffering overlay with the server's wait
-      // count. It is gone: a fault is raised by the event that caused it, not
-      // restated every two seconds by a poll that only runs while the Playback
-      // info panel is open — and that panel's own HTTP wait row is where the
-      // number belongs.
+      // No surface is raised or restated here: a fault is raised by the event
+      // that caused it. A live media wait reads this sample through the
+      // sampling tick (playbackWaitLiveDetail), which is why the poll also
+      // runs while one is on screen.
       updateStats();
     }
   }catch(e){

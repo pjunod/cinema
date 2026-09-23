@@ -345,9 +345,11 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
 test("the health poll runs for a live media wait as well as for the panel", async () => {
   const build = (waitLive) => {
     const calls = [];
+    // The slice carries the module's own 2 s `setInterval` beside the
+    // function; a real timer there would keep this process alive forever.
     const poll = new Function(
       "PLAYER", "playbackOwnsAttachedMedia", "document", "playbackWaitSurfaceLive", "api",
-      "updateStats", "performance",
+      "updateStats", "performance", "setInterval",
       `${shippedSource("pollSessionHealth")}\nreturn pollSessionHealth;`,
     )(
       { sessionId: "s1", streamId: null, mediaAttachment: 1 },
@@ -357,6 +359,7 @@ test("the health poll runs for a live media wait as well as for the panel", asyn
       async (url) => { calls.push(url); return { http_wait_count: 1 }; },
       () => {},
       { now: () => 0 },
+      () => 0,
     );
     return { poll, calls };
   };
