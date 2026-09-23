@@ -11,7 +11,19 @@ and the client gets a delivery it cannot play with nothing anywhere saying so.
 
 So this asserts the opposite of the usual thing. It does not check that the
 ports agree on a schema; it checks that a capability one of them claims is
-spelled the way the server reads it.
+spelled the way the server reads it, and — for the two ports whose claim is a
+constant rather than a runtime answer — that the claim actually reaches the
+wire.
+
+**What this cannot catch, and what does.** It reads source text; it never
+encodes a document. So it cannot see a key strategy changed in `PlurxAPI.swift`
+(it asserts the property Apple's *current* strategy needs, and the strategy is
+named in a comment below, not verified), a `@Serializable` dropped from
+`CapsPolicy`, a caller that builds its own document instead of using these
+types, or a renderer that stops working while the claim stays. The end-to-end
+proof of any of that is a real PGS title played on a real device — §5.5 of the
+RCA, not this file. What this file does catch is the silent-drop class, which
+is the one that produces no error anywhere.
 """
 
 from __future__ import annotations
@@ -38,6 +50,34 @@ def read(path: pathlib.Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def strip_js_line_comments(source: str) -> tuple[str, str]:
+    """Split JavaScript into (code, comments) on `//` line comments.
+
+    Deliberately crude — it is not a parser and does not need to be. It skips a
+    `//` that follows a colon so a `https://` in a string is not mistaken for a
+    comment, which is the only false positive this file has ever had to care
+    about. It is used to ask one question: does the web player *mention* the
+    field in prose while *not* emitting it as a key. Both halves of that stay
+    true through reformatting, reordering and renamed neighbours, which a
+    fixed-offset window around a sibling key does not.
+    """
+    code_lines: list[str] = []
+    comment_lines: list[str] = []
+    for line in source.splitlines():
+        cut = None
+        for match in re.finditer(r"//", line):
+            if match.start() > 0 and line[match.start() - 1] == ":":
+                continue
+            cut = match.start()
+            break
+        if cut is None:
+            code_lines.append(line)
+        else:
+            code_lines.append(line[:cut])
+            comment_lines.append(line[cut:])
+    return "\n".join(code_lines), "\n".join(comment_lines)
+
+
 class CapsWireConformance(unittest.TestCase):
     def test_the_server_reads_the_snake_case_name(self) -> None:
         source = read(SERVER)
@@ -46,22 +86,38 @@ class CapsWireConformance(unittest.TestCase):
             source,
             f"the server's field is what defines the wire name {FIELD!r}",
         )
-        self.assertIn(
-            "#[serde(default)]\n    pub subtitle_overlays",
+        self.assertRegex(
             source,
+            rf"#\[serde\(default\)\]\s*\n\s*pub {FIELD}\b",
             "an absent claim must default rather than refuse: absent is never a claim",
         )
 
-    def test_apple_spells_it_so_the_key_strategy_produces_the_wire_name(self) -> None:
+    def test_apple_declares_the_property_its_key_strategy_turns_into_the_wire_name(
+        self,
+    ) -> None:
         source = read(APPLE)
         # Apple encodes with `.convertToSnakeCase` (PlurxAPI.swift), so the
         # Swift property must be the camelCase of the wire name and nothing
         # else. `subtitleOverlays` -> `subtitle_overlays`.
         camel = re.sub(r"_([a-z])", lambda m: m.group(1).upper(), FIELD)
-        self.assertRegex(
-            source,
-            rf"var\s+{camel}\s*:\s*\[String\]",
+        declaration = re.search(
+            rf"var\s+{camel}\s*:\s*\[String\]\s*=\s*(?P<default>.+)", source
+        )
+        self.assertIsNotNone(
+            declaration,
             f"Apple must declare {camel!r} so convertToSnakeCase emits {FIELD!r}",
+        )
+        # The type alone proves nothing: `= []` compiles, encodes, and reads on
+        # the server as "this client cannot draw a bitmap" — which would send
+        # an Apple TV off to burn a whole film while `PGSOverlay.swift` sits
+        # compiled in and unused. The claim is unconditional, so its default is
+        # the claim, and the default is what this asserts.
+        default = declaration.group("default")
+        self.assertIn(
+            "PGSOverlayPolicy.protocolName",
+            default,
+            "Apple's renderer is compiled in, so the property's DEFAULT must "
+            f"carry the claim; found {default.strip()!r}",
         )
 
     def test_android_spells_the_wire_name_directly_and_always_encodes_it(self) -> None:
@@ -73,28 +129,34 @@ class CapsWireConformance(unittest.TestCase):
             rf"val\s+{FIELD}\s*:\s*List<String>",
             f"Android must declare {FIELD!r} verbatim — this file uses no @SerialName",
         )
-        # kotlinx omits a property equal to its default. A constant claim with
-        # a default would therefore never reach the wire.
-        index = source.index(f"val {FIELD}")
-        preceding = source[max(0, index - 400):index]
-        self.assertIn(
-            "@EncodeDefault(EncodeDefault.Mode.ALWAYS)",
-            preceding,
-            "a constant claim needs EncodeDefault.ALWAYS or kotlinx drops it",
+        # kotlinx omits a property equal to its default, so a constant claim
+        # with a default never reaches the wire without this annotation.
+        #
+        # Bound to the property rather than to a window of preceding text: a
+        # neighbouring property that carries the annotation for its own reasons
+        # would satisfy a window and prove nothing about this one. Comments and
+        # blank lines may sit between the two, nothing else.
+        self.assertRegex(
+            source,
+            r"@EncodeDefault\(EncodeDefault\.Mode\.ALWAYS\)"
+            r"(?:\s|//[^\n]*)*"
+            rf"val\s+{FIELD}\b",
+            "EncodeDefault.ALWAYS must annotate this property specifically, or "
+            "kotlinx drops the claim and the server reads it as 'cannot draw'",
         )
 
     def test_every_port_that_claims_the_protocol_names_the_same_string(self) -> None:
-        # The server and Apple carry the literal. Android names it once in a
-        # constant and references that — which is why this follows the
-        # constant to its definition rather than grepping for the string: a
-        # port that de-duplicates a magic string is doing the right thing and
-        # must not be failed for it.
+        # The server carries the literal; the clients name it once in a
+        # constant and reference that — which is why this follows each constant
+        # to its definition rather than grepping for the string: a port that
+        # de-duplicates a magic string is doing the right thing and must not be
+        # failed for it.
         self.assertIn(PROTOCOL, read(SERVER), "the server names the protocol it serves")
+
+        android_constant = read(ANDROID.parent.parent / "player" / "PGSOverlay.kt")
         self.assertIn(
-            f'protocolName = "{PROTOCOL}"',
-            read(ANDROID.parent.parent / "player" / "PGSOverlay.kt").replace(
-                f'PGS_OVERLAY_PROTOCOL = "{PROTOCOL}"', f'protocolName = "{PROTOCOL}"'
-            ),
+            f'PGS_OVERLAY_PROTOCOL = "{PROTOCOL}"',
+            android_constant,
             "Android's constant must be the protocol the server serves",
         )
         self.assertIn(
@@ -102,6 +164,7 @@ class CapsWireConformance(unittest.TestCase):
             read(ANDROID),
             "Android's caps document must claim the protocol by its constant",
         )
+
         self.assertIn(
             f'protocolName = "{PROTOCOL}"',
             read(APPLE.parent / "PGSOverlay.swift"),
@@ -114,19 +177,19 @@ class CapsWireConformance(unittest.TestCase):
         )
 
     def test_the_web_claims_nothing_and_says_why(self) -> None:
-        source = read(WEB)
-        builder = source[source.index("transports:[\"progressive\",\"hls\"]"):][:1200]
+        code, comments = strip_js_line_comments(read(WEB))
         self.assertNotIn(
-            f"{FIELD}:",
-            builder,
-            "the web player has no PGS renderer; claiming one would earn it "
-            "a delivery it cannot paint",
+            FIELD,
+            code,
+            "the web player has no PGS renderer; claiming one would earn it a "
+            "delivery it cannot paint. Delete this assertion the day "
+            "`decode-tiers.js` gains a renderer — not before.",
         )
         self.assertIn(
             FIELD,
-            builder,
+            comments,
             "the absence must be deliberate and commented, not an oversight — "
-            "name the field in a comment saying why it is not claimed",
+            f"name {FIELD!r} in a comment saying why it is not claimed",
         )
 
 

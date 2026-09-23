@@ -299,8 +299,13 @@ impl DeviceCaps {
             })
             .collect();
         Self {
-            // A legacy query has no slot for an overlay claim, and a client
-            // old enough to be on this path has no renderer. Empty is right.
+            // A legacy query has no slot for an overlay claim, so this is
+            // empty — but a reader must not take that as a refusal. The
+            // legacy path is a MIXED-FLEET path, not an old-client one: both
+            // native clients fall back to it on any 400/404/405, so a client
+            // that can paint the overlay arrives here routinely. `/decision`
+            // distinguishes "no document at all" from "a document claiming
+            // nothing"; see the binding in `stream.rs`.
             subtitle_overlays: Vec::new(),
             v: Self::VERSION,
             client: None,
@@ -333,9 +338,6 @@ impl DeviceCaps {
         }
     }
 
-    /// True when this document claims nothing at all — the shape a client
-    /// that sent only a named profile produces, which must keep taking the
-    /// named-profile path rather than being read as "decodes nothing".
     /// Whether this client claims it can draw `protocol` itself.
     ///
     /// Deliberately an exact match on the protocol name. A client that says
@@ -346,6 +348,9 @@ impl DeviceCaps {
         self.subtitle_overlays.iter().any(|named| named == protocol)
     }
 
+    /// True when this document claims nothing at all — the shape a client
+    /// that sent only a named profile produces, which must keep taking the
+    /// named-profile path rather than being read as "decodes nothing".
     pub fn is_empty(&self) -> bool {
         self.video.is_empty()
             && self.audio.is_empty()

@@ -477,29 +477,33 @@ fn playback_defaults(
     audio: &[AudioStream],
     subtitles: &[SubtitleStream],
     prefs: &LangPrefs,
-    overlay_enabled: bool,
 ) -> PlaybackDefaultsDto {
     // Item detail has no plan to judge against — nobody has asked how this
     // file would be delivered yet — so the HDR term is omitted and a forced
     // bitmap track stays eligible. `/decision` is what the clients act on,
     // and it refines this with the base grade it actually computed.
     //
-    // The overlay term is this server's switch, threaded in by the caller.
-    // It used to be hardcoded `false` because this surface had no access to
-    // the setting, which made item detail and `/decision` disagree about the
-    // same file and left Apple hedging the copy ("Unless this server draws PGS
-    // subtitles as an overlay...").
+    // The overlay term is `false` here, and it has to stay that way.
     //
-    // It is the SERVER's answer, not a per-client one: item detail has no
-    // capabilities document to judge against. Each client knows its own
-    // renderer and narrows this locally, the same way it reads `overlay` on a
-    // track.
+    // A previous revision threaded this server's switch in, on the theory that
+    // each client narrows it locally. That is not true of the web player:
+    // nothing under `web/detail/` consults a renderer, `track-facts.js` stamps
+    // the chip "plays by default" straight from `selected_index`, and its only
+    // narrowing — `prePlayBurnNeeded` — is reached solely for an explicit
+    // viewer pick. With the switch on, that surface would promise a browser a
+    // PGS track it will never draw, on the exact chip where a viewer takes the
+    // server at its word. Old native builds would read it the same way.
+    //
+    // Since the default became per-client (`/decision` ANDs the switch with
+    // the caller's `subtitle_overlays` claim), the honest answer needs a
+    // capabilities document, and item detail has none. Too narrow for a
+    // capable client is a missing convenience; confidently wrong is a lie.
     let selected = select_tracks_with(
         audio,
         subtitles,
         prefers_original_audio(audio),
         prefs,
-        |track| deliverable_as_default(&track.codec, track.forced, overlay_enabled, false),
+        |track| deliverable_as_default(&track.codec, track.forced, false, false),
     );
     defaults_from_selection(audio, subtitles, prefs, selected)
 }
@@ -564,16 +568,8 @@ fn defaults_from_selection(
 }
 
 impl FileDto {
-    /// `overlay_enabled` is this server's `subtitles.pgs_overlay` switch. It
-    /// is a parameter rather than a read because this is a pure DTO
-    /// conversion; the handler that has `AppState` does the reading.
-    pub fn from_media_file(f: MediaFile, prefs: &LangPrefs, overlay_enabled: bool) -> Self {
-        let playback_defaults = playback_defaults(
-            &f.audio_streams,
-            &f.subtitle_streams,
-            prefs,
-            overlay_enabled,
-        );
+    pub fn from_media_file(f: MediaFile, prefs: &LangPrefs) -> Self {
+        let playback_defaults = playback_defaults(&f.audio_streams, &f.subtitle_streams, prefs);
         let reader = crate::reader_formats::capability(&f.path, f.container.as_deref());
         let reader_revision = reader.map(|_| RevisionDto {
             size: f.size,
