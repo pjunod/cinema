@@ -209,7 +209,10 @@ pattern = "tokio::spawn\\("
 # task is `#[cfg(unix)]` test-only, its `JoinHandle` is awaited by the test
 # before any assertion, and its whole body is one `std::fs::write` — it owns no
 # producer, no process and no timer, and it decides nothing about recovery.
-expected_occurrences = 85
+# +2 for the HTTP wait ledger tests (#444): each spawns one segment request
+# against an unpublished segment, then aborts and joins it before asserting.
+# Test-only; they own no producer.
+expected_occurrences = 87
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
 
@@ -266,7 +269,9 @@ pattern = "tokio::time::sleep\\("
 # `all-detached-tokio-tasks` above. It only orders the fixture's rewrite after
 # the source has been bound; it is awaited together with the task that holds
 # it, and it owns no producer, process or timer.
-expected_occurrences = 42
+# +2 for the same two #444 tests: a bounded 10 ms poll (5 s deadline that
+# asserts) until the parked request shows in the ledger. Test-only.
+expected_occurrences = 44
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -1683,7 +1688,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # test, and it owns no producer, process or timer. 547 rather than 546 is the
 # base this branch now sits on: C-05's fragment-index validation loop, reviewed
 # directly above, reached main first.
-expected_occurrences = 548
+# +2: the two #444 HTTP wait ledger tests' joined `tokio::spawn` requests.
+expected_occurrences = 550
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2187,7 +2193,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # record it, so the sample can only appear once the slow reap has finished. It
 # waits on an owner the fixture already started; it starts no producer, process
 # or timer, and the deadline it carries is the test's, not a caller's.
-expected_occurrences = 843
+# +3 for #444: the two ledger tests' 10 ms polls and one `std::thread::sleep`
+# that ages the first ledger entry. All test-only; production waits are
+# unchanged (the guard is taken inside the existing publication loop).
+expected_occurrences = 846
 
 [[module_structures]]
 id = "bare-time-constructor"
