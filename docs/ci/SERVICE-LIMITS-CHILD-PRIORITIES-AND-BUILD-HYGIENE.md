@@ -180,6 +180,92 @@ value and its "validate" column with a dated result; the assessment's
 "missing explicit limits does not establish the fleet's inherited limits or
 measured exhaustion threshold" is why the table has those two columns.
 
+### 3.1.1 What the fleet actually inherits — observed 2026-09-23
+
+M1's measurement, as far as this session could take it. Every number below
+was read, not proposed. The hosts reachable from the executing session were
+**nuc3** (192.168.4.7), **nuc4** (192.168.4.8) and **nynuc** (192.168.5.236);
+no host named `media1` or `lab1` was reachable, and **every reading is idle**
+— see "What is still unobserved" below.
+
+All three run the container path. `systemctl show plurxd -p LoadState`
+answered `LoadState=not-found` on all three, so `deploy/plurxd.service` is
+installed nowhere on them; that answers open question 1 for this slice of the
+fleet (§7.1).
+
+```text
+$ ssh <host> "docker exec plurxd sh -c 'cat /proc/1/limits'"     # 2026-09-23
+Limit                     Soft Limit           Hard Limit           Units
+Max open files            1024                 524288               files
+Max processes             unlimited            unlimited            processes
+Max stack size            8388608              unlimited            bytes
+Max locked memory         8388608              8388608              bytes
+```
+
+Identical on nuc3, nuc4 and nynuc. The pair is systemd's own default handed
+through Docker unchanged — `systemctl show -p DefaultLimitNOFILE
+-p DefaultLimitNOFILESoft` reads `524288` / `1024` on all three hosts — and
+`docker inspect plurxd` confirms nothing in the Compose file narrows or
+widens it:
+
+```text
+$ ssh <host> 'docker inspect plurxd --format "Ulimits={{.HostConfig.Ulimits}} PidsLimit={{.HostConfig.PidsLimit}} OomScoreAdj={{.HostConfig.OomScoreAdj}}"'
+Ulimits=[] PidsLimit=<nil> OomScoreAdj=0
+```
+
+| Reading | nuc3 | nuc4 | nynuc | Command |
+|---|---|---|---|---|
+| `/proc/1/limits` open files (soft / hard) | 1024 / 524288 | 1024 / 524288 | 1024 / 524288 | `docker exec plurxd cat /proc/1/limits` |
+| pid 1 descriptors held (idle, two samples) | 45–46 | 56–61 | 46–47 | `docker exec plurxd sh -c 'ls /proc/1/fd \| wc -l'` |
+| pid 1 threads (idle) | 28 | 32 | 28 | `docker exec plurxd sh -c 'ls /proc/1/task \| wc -l'` |
+| pid 1 `oom_score_adj` | 0 | 0 | 0 | `docker exec plurxd cat /proc/1/oom_score_adj` |
+| cgroup `pids.current` / `pids.max` | 30 / 37262 | 34 / 37300 | 30 / 74782 | `docker exec plurxd cat /sys/fs/cgroup/pids.current /sys/fs/cgroup/pids.max` |
+| cgroup `memory.max` | `max` | `max` | `max` | `docker exec plurxd cat /sys/fs/cgroup/memory.max` |
+| cgroup `memory.current` | 833658880 (795 MiB) | 21234450432 (19.8 GiB) | 9531957248 (8.9 GiB) | `docker exec plurxd cat /sys/fs/cgroup/memory.current` |
+| host `DefaultTasksMax` | 37262 | 37300 | 74782 | `systemctl show -p DefaultTasksMax` |
+| `docker.service` own limits | `LimitNOFILE=infinity`, `TasksMax=infinity`, `OOMScoreAdjust=-500` | same | same | `systemctl show docker.service -p LimitNOFILE -p TasksMax -p OOMScoreAdjust` |
+
+`memory.current` is the cgroup's charge, page cache included, not the
+daemon's resident set; it is here because §3.1's `MemoryHigh` row asks for
+a week of it, and one idle sample is not that.
+
+Three things follow.
+
+1. **The soft limit is the one that runs out, and it is 512× lower than the
+   ceiling the deployment actually chose.** Nothing narrowed the hard limit:
+   524288 is available on every one of these hosts today, and the daemon may
+   have it for the asking. That is §3.3, and it is implemented — it needs no
+   deployment-file change and no peak-load number to justify, because it
+   cannot lower anything.
+2. **`pids.max` is the host's slice default, not a decision.** It varies with
+   host RAM (37262 on the two NUCs, 74782 on nynuc) because systemd derives
+   `DefaultTasksMax` from the pid limit. A `pids_limit` in Compose would be
+   the first deliberate value; §3.1's row still needs its peak number first.
+3. **The OOM killer has no preference to act on.** pid 1 sits at
+   `oom_score_adj=0` and Docker resets the container to 0 regardless of
+   `docker.service`'s own `-500`. Whatever ffmpeg children inherit is also 0,
+   so under memory pressure the kernel is as free to take the daemon — and
+   every session with it — as one wedged x265. That is §3.2's case, and this
+   session did not implement it; see §3.2.1.
+
+#### What is still unobserved
+
+- **Every reading above is idle.** A `/proc` walk inside each container found
+  exactly two processes — `plurxd` and the healthcheck's `sh` — so no
+  transcode, no DVR recording and no ffmpeg child was running when these were
+  taken. The peak descriptor count §3.1's first row is gated on, and the peak
+  `pids.current` the second is gated on, are **not** in this document.
+- **No `media1` or `lab1`.** The three hosts above are the ones this session
+  could reach. If those names are other machines, their limits are unread.
+- **`EMFILE` history is a weak negative.** `docker logs plurxd | grep -ciE
+  'too many open files|EMFILE'` returned 0 on all three, but the containers
+  had been up 2 h, 11 h and 2 h respectively, which is nothing like the week
+  §3.1 asks for, and `docker logs` only covers the current container.
+- **No child `oom_score_adj` or `nice` reading**, because no child existed.
+
+M1's GPT prompt in §5.1 remains the way to close all four. It is unchanged
+and still needs running on a busy evening.
+
 ### 3.2 Child priorities and the `pre_exec` contract
 
 ```rust
@@ -240,6 +326,66 @@ Rules with reasons:
   whole unit; the `+500` child is the pick. Document that `OOMPolicy=kill`
   would kill the daemon along with it and is not set.
 
+### 3.2.1 Flagged, not taken: the child priorities need a decision first
+
+The standing instruction at the head of this plan says that a step which
+seems to require changing the process-supervision contract must be stopped
+and flagged rather than decided by the executing session, and the work
+board's rule 4 says the same. §3.2 is such a step. It is flagged here and in
+[PR #457](http://192.168.4.7:3000/noirr/plurx/pulls/457); nothing in §3.2 or
+its `OOMScoreAdjust` companion row in §3.1 is implemented.
+
+**The wiring §3.2 prescribes does not cover the tree.** §3.2 says to add the
+call "at each `Command::new(ffmpeg_bin())` site" and to have "a test [grep]
+that every `ffmpeg_bin()` command passes through it". A survey of every
+`Command::new(` in `crates/plurxd/src` outside test modules (2026-09-23)
+finds fourteen sites that name `ffmpeg_bin()` literally — in `ffmpeg.rs`,
+`subtitles.rs`, `fragindex.rs`, `pgs_overlay.rs` and `pipeprobe.rs` — and
+these, which spawn ffmpeg through a value instead:
+
+| Site | Program expression | Why the grep misses it |
+|---|---|---|
+| `producer_spawn.rs:182` | `Command::new(program)` | the copy-HLS and transcode producers, the two longest-lived ffmpeg children there are, reach this through a `&Path` argument |
+| `live_tv.rs:6083` | `Command::new(&system.ffmpeg)` | the probed system binary, resolved at boot |
+| `http/images.rs:863` | `Command::new(ffmpeg_bin)` | a parameter that happens to share the function's name |
+| `ffmpeg.rs:2115` | `Command::new(&bin)` | `let bin = ffmpeg_bin();` three lines earlier |
+| `dv_disk.rs:5752,5805,5853` | `Command::new(program)` | the Dolby Vision conversion tools |
+| `decode_facts.rs:3095,3219,…` | `Command::new(snapshot_execution_path(…))` | a snapshotted executable path |
+
+A test keyed on the literal `ffmpeg_bin()` would be green while the producer
+that carries realtime playback spawns unadjusted children. That is a test
+which proves nothing, and this campaign does not land those.
+
+**The seam that does cover the tree is the one the instruction protects.**
+Every child in the tree reaches `plurx_core::process::spawn_job_owned`,
+directly or through `output_job_owned` / `status_job_owned` / `bounded`. One
+`pre_exec` registration there would be complete by construction and provable
+by one test. It would also mean editing the shared, cross-platform,
+audited supervision contract, and applying an OOM preference to every child
+the daemon owns rather than to ffmpeg specifically — a widening the plan did
+not ask for. Both are decisions above an executing session's pay grade.
+
+**Independently, §3.2's own acceptance is out of reach here.** The `nice` and
+`ioprio` values are explicitly proposals that §3.2's realtime cadence
+measurement on a busy media host is supposed to settle, up to and including
+settling on "none". No such host was reachable from this session, and §4's
+guardrail ("do not keep child priorities that measurably slow realtime
+delivery — the measurement decides") is not satisfiable without it.
+
+**So the `OOMScoreAdjust` row in §3.1 also stays out**, under §4's guardrail
+that it must not be set without the child `pre_exec`: alone it would make
+every ffmpeg exactly as protected as the daemon, which inverts the intent.
+
+What the next session needs, in order:
+
+1. A decision on the seam — §4.1's spawn unification first, or an accepted
+   `pre_exec` inside `spawn_job_owned` with its audit test.
+2. Whether a second `pre_exec` registration on one `Command` composes with
+   `inherit_file_descriptors` or replaces it. `ffmpeg.rs:84-115` is the only
+   `pre_exec` in the tree today, so the tree does not answer this; establish
+   it with a test before relying on either answer.
+3. §3.2's measurement, on a host running real sessions.
+
 ### 3.3 Raise soft `NOFILE` at startup
 
 In `main.rs` before the runtime starts: `getrlimit(RLIMIT_NOFILE)`, set
@@ -249,6 +395,32 @@ not raise it; raising it is free and makes `LimitNOFILE`'s hard value the
 operative one on every install path (including the Windows service, where
 the call is a no-op). A unit test with `ulimit -n 256` in a child process
 asserts the log line shows `256 → <hard>`.
+
+**Landed 2026-09-23** (`claude-opus-5`). The raise is
+`plurx_core::process::rlimit::raise_open_file_limit`, called from `run()` in
+`crates/plurxd/src/main.rs` immediately after `init_logging()` and reported by
+`report_open_file_limit` beside it. Two departures from the paragraph above,
+both deliberate:
+
+- **Not "before the runtime starts".** `#[tokio::main]` builds the runtime
+  before any of `main`'s body runs, so that position does not exist. The
+  limit is consulted when a descriptor is opened, and the call runs before
+  store activation, the system probe and every listener open theirs.
+- **The child lowers its own soft limit rather than inheriting `ulimit -n
+  256` from a shell.** The test re-execs the test binary — the pattern the
+  sibling process-ownership tests already use — and the child calls
+  `setrlimit` on itself, so the test needs no shell and cannot disturb the
+  shared test process. It asserts the raise both as the function reports it
+  and as an independent `getrlimit` reads it back, and it fails loudly rather
+  than vacuously on a host whose hard limit is too low to demonstrate
+  anything.
+
+The `LimitNOFILE` / `ulimits.nofile` row in §3.1 did **not** land with it, and
+deliberately: the observed hard limit is already 524288, so the raise takes
+the fleet from 1024 to 524288 with no deployment-file change at all, while
+writing `65536:65536` into Compose would *lower* that ceiling eightfold on
+the strength of a number nobody has measured. That row still waits on §3.1.1's
+peak descriptor count.
 
 ### 3.4 CI unit tests on jellyfin-ffmpeg 8
 
@@ -275,6 +447,45 @@ retired and VALIDATION.md says why; if something does, that test moves to a
 RUST-TEST-EXECUTION-POLICY.md §7.1 chooses; if `make unit` joins the fast
 lane, the fast lane's `rust_compile` gets the same action and label.
 
+**Audit result, 2026-09-23** (`claude-opus-5`; read-only, no `ci.yml` change
+in this slice). Five jobs carry the `ffmpeg-6` label and `major: "6"`:
+`check` (`ci.yml:267,278`), `cluster_daemon` (`:848,861`), `web_layout`
+(`:882,902`), `vod_web` (`:930,955`) and `coverage` (`:1228,1255`).
+
+Nothing found in `crates/`, `tests/` or `validation/` *asserts* ffmpeg-6
+behaviour — but one test quietly *loses* coverage on 8, which the audit
+question as §3.4 words it would have missed:
+
+- The one test that asserts a runtime capability,
+  `nightly_runner_has_ffmpeg_readrate` (`crates/plurxd/src/ffmpeg.rs:5189`,
+  `#[ignore = "nightly runner capability contract"]`), requires only
+  `-readrate`, which landed in 5.1 and is present in 8.
+- Most of what names `-readrate_initial_burst` either builds an argument list
+  and asserts on the strings (`plurx-core/src/transcode/mod.rs:3959`,
+  `plurxd/src/ffmpeg.rs:5034,5077`) or exercises the daemon's own capability
+  detection against a stub (`ffmpeg.rs:4971,5006,5148`). Those are
+  major-independent and stay green on 8.
+- **The exception, and it matters.** The live session test in
+  `crates/plurxd/src/transcode/tests/chunk_05.rs` branches on
+  `pacing_caps().await.initial_burst` at `:1337`: on a build that declares
+  the option without honouring it — which the comment at `:1331` names as
+  ffmpeg 8 — it prints `INFO: … does not honour -readrate_initial_burst` and
+  **skips** the ahead-window and suspend-resume assertions (`:1346-1352`).
+  It does not fail, so moving every lane to 8 would retire that coverage
+  silently, with a green suite and an INFO line nobody reads.
+
+So the answer to §3.4's audit question is neither of the two it offers. No
+test *requires* ffmpeg 6, so no lane has to be retained to keep the suite
+green; but one test *is* weaker on 8, so retiring the last burst-honouring
+runner is a real coverage decision, not bookkeeping. Whoever executes M5
+should either keep one lane on a burst-honouring build for that test, or
+change `chunk_05.rs` to assert the paced-rate behaviour on 8 instead of
+skipping — and say which in VALIDATION.md, as §3.4 requires.
+
+This is a source audit only. It does **not** establish that `make unit` is
+green on a jellyfin-ffmpeg 8 runner, which is M5's actual acceptance and
+needs the runner-provisioning change in `plurx-agent` first.
+
 ### 3.5 Dockerfile base pin and the release profile
 
 Pin: `FROM rust:1-bookworm@sha256:<digest> AS build` and
@@ -298,7 +509,38 @@ overflow-checks = true      # PR 4: changes runtime behaviour (a wrapped counter
                             #       run make test-full and a week on lab1 before the fleet
 ```
 
-No semicolons, no `strip = "debuginfo"` (assessment 18). PR 1's acceptance
+No semicolons, no `strip = "debuginfo"` (assessment 18).
+
+**Pin landed 2026-09-23** (`claude-opus-5`); **the release profile is
+untouched.** `Dockerfile:9` and `:35` now read:
+
+```dockerfile
+FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime-assets
+```
+
+Both are **index** digests (`application/vnd.oci.image.index.v1+json`), not
+per-platform manifest digests, because the image is built for amd64 and arm64
+from the same `FROM`. They were read with `docker buildx imagetools inspect`
+on nuc3 on 2026-09-23, and each was verified to be the SHA-256 of the
+manifest bytes `--raw` returns. `tests/operations/test_contracts.py`'s
+`test_dockerfile_base_images_are_pinned_by_digest` rejects any registry
+`FROM` in `Dockerfile` that carries no digest, and
+`test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` pins the
+drift report onto `rust-audit.yml`'s weekly `scheduled` job, where
+`scripts/image-base-drift` prints each pinned digest beside the current
+upstream one under `continue-on-error`. That step has **not** been observed
+running on a CI runner; it is non-gating by construction, but the claim here
+is only that it is wired, not that it has reported.
+
+`Dockerfile.store-shard:8` pins `rust:1.97.1-bookworm` by version tag and is
+left alone: the contract test covers `Dockerfile`, which is what ships.
+
+The profile block above — `lto`, `codegen-units`, `debug`, `strip`,
+`overflow-checks` — is **unchanged in `Cargo.toml`**. Each of PRs 1-4 is
+gated on a measurement (image size delta, a symbolicated backtrace from a
+release build, cold build time on the `high-cpu` runner, seven days of lab1
+journal) and none of those was run here. PR 1's acceptance
 is a symbolicated backtrace from a deliberate `panic!` behind a hidden CLI
 flag on the release binary; PR 2 (`split-debuginfo = "packed"` plus
 uploading the `.dwp` beside the image) only if PR 1's size delta on the
@@ -387,6 +629,11 @@ labelled busy/idle.
 Acceptance: §3.1's "observe first" column has media1 and lab1 values with a
 date.
 
+**Partial, 2026-09-23** (`claude-opus-5`). §3.1.1 records idle values for
+nuc3, nuc4 and nynuc with the command that produced each. No busy-evening
+sample and no host named media1 or lab1; the prompt above is unchanged and
+still has to be run.
+
 ### 5.2 M2 — `NOFILE` raise at startup and the `ulimits`/`LimitNOFILE` rows
 
 Per §3.3 and the first table row, values from M1.
@@ -395,6 +642,14 @@ Acceptance: `cargo test -p plurxd rlimit` (the `ulimit -n 256` child test);
 after deploy, `docker exec plurxd cat /proc/1/limits | grep 'open files'`
 shows the new soft = hard; a week of journal with no `EMFILE`/`Too many
 open files`.
+
+**The startup raise landed 2026-09-23** (`claude-opus-5`); **the table row
+did not** — see §3.3. The test is `cargo test -p plurx-core rlimit`, not
+`-p plurxd`: the raise lives in `plurx_core::process::rlimit`, and
+`cargo test -p plurxd open_file_limit` covers the daemon's reporting of it.
+The two post-deploy halves of the acceptance — `/proc/1/limits` showing soft
+= hard, and a week without `EMFILE` — are **outstanding**, because this
+session deployed nothing.
 
 ### 5.3 M3 — child priorities behind a measurement
 
@@ -443,6 +698,13 @@ dockerfile_base_is_pinned`; `docker build` reproduces; `plurxd
 --diagnostic-panic` (hidden) on the release binary prints a backtrace with
 `crates/plurxd/src/…:<line>` frames; image size delta recorded.
 
+**Digest half landed 2026-09-23** (`claude-opus-5`), with the drift step; the
+test is `-k dockerfile_base_images` (§3.5 names both new tests). **The
+release-profile half did not land at all**: no `debug = "line-tables-only"`,
+no `strip = "none"`, no hidden panic flag, no image-size delta, and no
+`docker build` was run from the pinned Dockerfile. Those are the parts that
+need a release build to mean anything.
+
 ### 5.7 M7 — release profile PRs 2–4 (each by its numbers)
 
 Split debug only if M6's delta > 15 %; fat LTO / CGU 1 with the build-time
@@ -481,9 +743,12 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
 
 ## 7. Open questions
 
-1. **Which node is bare-metal, if any.** The unit is maintained but the
-   fleet is containers; if nothing runs the unit, M4's validation is on a
-   lab VM and the doc says so.
+1. **Which node is bare-metal, if any.** **Answered 2026-09-23, for the
+   three reachable hosts: none.** `systemctl show plurxd -p LoadState`
+   returns `LoadState=not-found` on nuc3, nuc4 and nynuc, all of which run
+   the container (§3.1.1). `deploy/plurxd.service` is an install path with
+   no node behind it today, so M4's validation is a lab VM, as the question
+   anticipated. Hosts outside those three are unchecked.
 2. **`nice`/`ioprio` values.** 10 and BE/7 are proposals; §3.2's
    measurement may settle on 5 and BE/4 or on none.
 3. **Runner provisioning ownership.** The Ansible runner role lives in
@@ -507,4 +772,9 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 (partial) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | Idle limits read on nuc3, nuc4 and nynuc and recorded in §3.1.1 with their commands: `/proc/1/limits` open files **1024 soft / 524288 hard** on all three, `Ulimits=[] PidsLimit=<nil> OomScoreAdj=0`, `pids.max` = the host slice default, `memory.max` unset. `plurxd.service` is `LoadState=not-found` on all three, answering §7.1. **No busy-evening sample and no media1/lab1**; §5.1's prompt still has to be run. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 (§3.3 only) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | `plurx_core::process::rlimit::raise_open_file_limit` raises soft to hard and never touches hard; `run()` reports both values at `info`. Proof it is load-bearing: with the `setrlimit` call removed from the function, `cargo test -p plurx-core rlimit` fails `left: 256, right: 524288`; with the reporter's message and error arm reverted, both `cargo test -p plurxd open_file_limit` tests fail. The §3.1 `LimitNOFILE`/`ulimits` row deliberately did **not** land: the observed hard limit is already 524288, and the plan's 65536 would lower it. Post-deploy `/proc/1/limits` evidence outstanding. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 (audit only) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | §3.4's audit run read-only; `ci.yml` unchanged. Five `ffmpeg-6` jobs listed; no test *requires* ffmpeg 6, but `transcode/tests/chunk_05.rs:1337` **skips** its ahead-window and suspend-resume assertions on a build that ignores `-readrate_initial_burst`, so moving every lane to 8 silently retires that coverage. Recorded as a decision M5 owes, not as a clean bill. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 (digest half) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | Both `Dockerfile` bases pinned to their index digests, read on nuc3 and each verified against the SHA-256 of `imagetools inspect --raw`. `test_dockerfile_base_images_are_pinned_by_digest` fails on the unpinned Dockerfile (`[('rust:1-bookworm', 'build')] != []`) and `test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` fails with the workflow step removed. `scripts/image-base-drift` exits 1 on an unpinned base. The release profile is untouched; the drift step has not been observed on a runner. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — **flagged, not implemented** | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | §3.2.1. §3.2's prescribed wiring (each `Command::new(ffmpeg_bin())` site plus a grep test) does not reach the producers that carry realtime playback, which spawn through a value; the seam that does is `spawn_job_owned`, which the plan's standing instruction says to stop and flag rather than change. §3.2's realtime measurement is also unreachable from here, so the `OOMScoreAdjust` row stays out under §4's guardrail. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4, M7, M8 — not started | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | M4 needs a lab VM playback matrix and a GPU-selection check under the new unit; M7's three PRs are each gated on a measurement; M8's four fuzz targets need the nightly toolchain and generated corpora. None was attempted, and nothing in the branch pretends otherwise. |
