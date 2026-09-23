@@ -374,7 +374,10 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       shippedSource("subtitleStoredSourcesCard"),
       shippedSource("seekScratchReservationsCard"),
       shippedSource("liveTvGuideCard"), shippedSource("liveTvDeinterlaceCard"),
-      shippedConst("DEV_READINESS_LABEL"),
+      // `clusterBackupCard`'s extracted source runs to the next function and
+      // so already carries `DEV_READINESS_LABEL`; composing both declares it
+      // twice.
+      shippedSource("clusterBackupCard"),
       shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
       shippedSource("devReadinessEvidence"), shippedSource("devReq"),
       shippedSource("devStaticReq"), shippedSource("clusterTransportRecoveryCard"),
