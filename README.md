@@ -1,8 +1,7 @@
 # noirr cinema
 
-[![ci](../badges-ci/ci.svg)](docs/VALIDATION.md)
-[![lint](../badges-lint/lint.svg)](docs/VALIDATION.md)
-[![unit coverage](../badges/coverage.svg)](docs/VALIDATION.md)
+Ready pull requests run the [Main promotion gate](docs/DEVELOPMENT_PIPELINE.md).
+See [validation](docs/VALIDATION.md) for the checks it covers.
 
 A self-hosted media server for movies, TV, anime, ebooks, audiobooks, home
 videos, and photos. Cinema combines a Rust server, a browser player and admin
