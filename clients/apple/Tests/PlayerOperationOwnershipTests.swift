@@ -980,6 +980,92 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         controller.stop()
     }
 
+    func testNativeSeekDeadlineRecoversASeekThatNeverCompletes() async throws {
+        let (path, url) = try makeOfflineAudio()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let seekEntered = expectation(description: "native seek suspended")
+        let deadlineEntered = expectation(description: "seek deadline suspended")
+        var finishSeek: CheckedContinuation<Bool, Never>?
+        var fireDeadline: CheckedContinuation<Void, Error>?
+        var preparation = PlayerController.MediaSelectionPreparation()
+        preparation.audio = { _, _ in nil }
+        preparation.native = { _, _, _ in .init(hasSubtitleOptions: true, apply: { true }) }
+        let controller = PlayerController(
+            mediaSelectionPreparation: preparation,
+            nativeSeek: { _, _ in
+                await withCheckedContinuation {
+                    finishSeek = $0
+                    seekEntered.fulfill()
+                }
+            },
+            waitNativeSeekDeadline: {
+                try await withCheckedThrowingContinuation {
+                    fireDeadline = $0
+                    deadlineEntered.fulfill()
+                }
+            },
+            canPlayOffline: { _ in true }
+        )
+        defer {
+            controller.stop()
+            finishSeek?.resume(returning: false)
+        }
+        let model = AppModel()
+        controller.startOffline(model: model, item: offlineItem(path: path))
+        await controller.loadingTask?.value
+        let predecessor = try XCTUnwrap(controller.player.currentItem)
+        controller.seek(toMs: 2_000)
+        await fulfillment(of: [seekEntered, deadlineEntered], timeout: 3)
+        try XCTUnwrap(fireDeadline).resume()
+        try await waitUntil("native seek repair attached a fresh item") {
+            controller.player.currentItem !== predecessor
+        }
+        XCTAssertEqual(controller.currentMs, 2_000)
+    }
+
+    func testSupersededNativeSeekDeadlineCannotReplaceTheNewerItem() async throws {
+        let (path, url) = try makeOfflineAudio()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var finishSeeks: [CheckedContinuation<Bool, Never>] = []
+        var fireDeadlines: [CheckedContinuation<Void, Error>] = []
+        var preparation = PlayerController.MediaSelectionPreparation()
+        preparation.audio = { _, _ in nil }
+        preparation.native = { _, _, _ in .init(hasSubtitleOptions: true, apply: { true }) }
+        let controller = PlayerController(
+            mediaSelectionPreparation: preparation,
+            nativeSeek: { _, _ in
+                await withCheckedContinuation { finishSeeks.append($0) }
+            },
+            waitNativeSeekDeadline: {
+                try await withCheckedThrowingContinuation { fireDeadlines.append($0) }
+            },
+            canPlayOffline: { _ in true }
+        )
+        defer {
+            controller.stop()
+            for continuation in finishSeeks { continuation.resume(returning: false) }
+            for continuation in fireDeadlines { continuation.resume() }
+        }
+        let model = AppModel()
+        controller.startOffline(model: model, item: offlineItem(path: path))
+        await controller.loadingTask?.value
+        let item = try XCTUnwrap(controller.player.currentItem)
+        let generation = controller.openGenerationForTesting
+        controller.seek(toMs: 2_000)
+        try await waitUntil("first native seek started") {
+            finishSeeks.count == 1 && fireDeadlines.count == 1
+        }
+        controller.seek(toMs: 4_000)
+        try await waitUntil("newer native seek started") {
+            finishSeeks.count == 2 && fireDeadlines.count == 2
+        }
+        fireDeadlines.removeFirst().resume()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(controller.player.currentItem === item)
+        XCTAssertEqual(controller.openGenerationForTesting, generation)
+        XCTAssertEqual(controller.currentMs, 4_000)
+    }
+
     func testCancelledOfflineStartCannotAttachIntoANewerOnlineTitle() async throws {
         var offlineLoads = 0
         let controller = PlayerController(canPlayOffline: { _ in offlineLoads += 1; return true })

@@ -1686,6 +1686,8 @@ final class PlayerController: ObservableObject {
     private let reportPlaybackIntent: @MainActor (PlaybackControlSession) async -> UInt64?
     private let mediaSelectionPreparation: MediaSelectionPreparation
     private let itemPreparation: ItemPreparation
+    private let nativeSeek: @MainActor (AVPlayer, Int) async -> Bool
+    private let waitNativeSeekDeadline: @MainActor () async throws -> Void
     private let canPlayOffline: (AVURLAsset) -> Bool
     private let waitInitialDecisionDeadline: @MainActor () async throws -> Void
     /// M5's only clock. It is both the backoff between rungs and the absolute
@@ -1707,6 +1709,15 @@ final class PlayerController: ObservableObject {
         },
         mediaSelectionPreparation: MediaSelectionPreparation = MediaSelectionPreparation(),
         itemPreparation: ItemPreparation = ItemPreparation(),
+        nativeSeek: @escaping @MainActor (AVPlayer, Int) async -> Bool = { player, ms in
+            await player.seek(
+                to: CMTime(seconds: Double(ms) / 1000.0, preferredTimescale: 600),
+                toleranceBefore: .zero, toleranceAfter: .zero
+            )
+        },
+        waitNativeSeekDeadline: @escaping @MainActor () async throws -> Void = {
+            try await Task.sleep(for: .seconds(PlayerController.seekPresentationDeadlineSeconds))
+        },
         canPlayOffline: @escaping (AVURLAsset) -> Bool = { $0.assetCache?.isPlayableOffline == true },
         waitInitialDecisionDeadline: @escaping @MainActor () async throws -> Void = {
             try await Task.sleep(for: .seconds(20))
@@ -1737,6 +1748,8 @@ final class PlayerController: ObservableObject {
         self.requestPlaybackDecision = requestPlaybackDecision
         self.mediaSelectionPreparation = mediaSelectionPreparation
         self.itemPreparation = itemPreparation
+        self.nativeSeek = nativeSeek
+        self.waitNativeSeekDeadline = waitNativeSeekDeadline
         self.canPlayOffline = canPlayOffline
         self.waitInitialDecisionDeadline = waitInitialDecisionDeadline
         self.waitCreateRetry = waitCreateRetry
@@ -2039,6 +2052,7 @@ final class PlayerController: ObservableObject {
     private weak var model: AppModel?
     private var timeObserver: Any?
     private var interactiveSeekTask: Task<Void, Never>?
+    private var nativeSeekDeadlineTask: Task<Void, Never>?
     private var seekPresentationTask: Task<Void, Never>?
     private var resumeIntentTask: Task<Void, Never>?
     private var resumePresentationTask: Task<Void, Never>?
@@ -3488,7 +3502,8 @@ final class PlayerController: ObservableObject {
         playbackRecoveryMonitor.reset()
         deliveryStarvation.reset()
         interactiveSeekTask?.cancel()
-        interactiveSeekTask = Task {
+        nativeSeekDeadlineTask?.cancel()
+        interactiveSeekTask = Task { [self] in
             // Coalesce native and replacement seeks alike. Executing every
             // scrub event makes AVPlayer and the server race old destinations.
             if !intentAlreadyPublished {
@@ -3521,11 +3536,35 @@ final class PlayerController: ObservableObject {
             case .native(let itemMs):
                 let item = player.currentItem
                 let itemGeneration = openGeneration
-                _ = await player.seek(
-                    to: CMTime(seconds: Double(itemMs) / 1000.0, preferredTimescale: 600),
-                    toleranceBefore: .zero,
-                    toleranceAfter: .zero
-                )
+                let deadlineTask = Task { [weak self, weak item] in
+                    guard let self else { return }
+                    do { try await self.waitNativeSeekDeadline() }
+                    catch { return }
+                    guard !Task.isCancelled,
+                          let item, self.player.currentItem === item,
+                          self.openGeneration == itemGeneration,
+                          self.viewerActionEpoch == actionEpoch,
+                          self.seekState.generation == generation,
+                          self.seekState.pendingMs == target,
+                          self.wantsPlayback, !self.isPlaybackBlocked, !self.finished,
+                          !self.isChangingStream,
+                          !(UIApplication.shared.applicationState == .background
+                            && self.decision?.source?.videoCodec != nil),
+                          self.seekState.markExecuted(generation: generation, targetMs: target)
+                    else { return }
+                    // AVPlayer can leave its seek suspended. Admit the existing
+                    // bounded recovery; replacing the item fences a late result.
+                    await self.retrySameDeliveryAfterStall(
+                        PlaybackStallEvent(
+                            kind: .buffering, action: .reopen, positionMs: target,
+                            durationMs: Int(Self.seekPresentationDeadlineSeconds * 1_000)
+                        ),
+                        consultControl: false
+                    )
+                }
+                nativeSeekDeadlineTask = deadlineTask
+                let completed = await nativeSeek(player, itemMs)
+                deadlineTask.cancel()
                 // Only the newest seek may publish or escalate; an older
                 // completion arriving after AVPlayer cancelled it must not.
                 guard generation == seekState.generation,
@@ -3533,6 +3572,17 @@ final class PlayerController: ObservableObject {
                       openGeneration == itemGeneration,
                       player.currentItem === item
                 else { return }
+                if !completed {
+                    guard seekState.markExecuted(generation: generation, targetMs: target) else { return }
+                    await retrySameDeliveryAfterStall(
+                        PlaybackStallEvent(
+                            kind: .buffering, action: .reopen, positionMs: target,
+                            durationMs: 0
+                        ),
+                        consultControl: false
+                    )
+                    return
+                }
                 // A seek or Pause may have invalidated an awaited native
                 // subtitle choice. Reconcile that retained choice on the
                 // same item before acknowledging the new destination.
@@ -4109,6 +4159,8 @@ final class PlayerController: ObservableObject {
         }
         interactiveSeekTask?.cancel()
         interactiveSeekTask = nil
+        nativeSeekDeadlineTask?.cancel()
+        nativeSeekDeadlineTask = nil
         resumeIntentTask?.cancel()
         resumeIntentTask = nil
         invalidateResumeAttempt(outcome: "stopped")
