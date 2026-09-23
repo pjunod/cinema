@@ -1530,6 +1530,11 @@ async fn probe_completion_expectation_inner(
 /// `budget` bounds the whole pass. An index is background work; a NAS read
 /// that has gone pathological should give the slot back rather than hold it
 /// until the process restarts.
+///
+/// Never rides along: production indexes through [`build_riding`], and this
+/// is the entry point fixtures and tests use to build an index and nothing
+/// else.
+#[allow(dead_code)]
 pub async fn build(
     file: &MediaFile,
     video: transcode::CopyVideoOptions,
@@ -1611,6 +1616,7 @@ pub async fn build_from_attested_file(
 /// The cluster worker's build: progress reported, and the file's PGS tracks
 /// kept when `ride_along` allows. The worker publishes the harvest only after
 /// its own `source_still_matches` and `still_current` checks.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_from_attested_file_with_progress<F>(
     file: &MediaFile,
     source: &std::fs::File,
