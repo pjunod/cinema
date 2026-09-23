@@ -21,6 +21,7 @@ use crate::media_pool::{
     local_offer, local_snapshot, MediaDirectoryDiagnostics, MediaOffer, MediaOfferRequest,
     PlacementDiagnostics, OFFERS_PATH, SNAPSHOT_PATH,
 };
+use crate::media_sessions::MEDIA_BODY_READ_BUFFER;
 use crate::state::AppState;
 
 /// Authenticated peers are still fallible. Bound verified descriptor streams
@@ -113,7 +114,7 @@ pub(crate) async fn fragment_index(
     match crate::fragment_index_cluster::open_verified_local_blob(&root, &artifact).await {
         Ok(Some(file)) => {
             let stream = FragmentIndexStream {
-                inner: tokio_util::io::ReaderStream::with_capacity(file, 256 * 1024),
+                inner: tokio_util::io::ReaderStream::with_capacity(file, MEDIA_BODY_READ_BUFFER),
                 _global_permit: read_permit,
                 _peer_permit: peer_permit,
             };

@@ -269,9 +269,23 @@ pattern = "tokio::time::sleep\\("
 # `all-detached-tokio-tasks` above. It only orders the fixture's rewrite after
 # the source has been bound; it is awaited together with the task that holds
 # it, and it owns no producer, process or timer.
+# 42 -> 43 with S-02's review disposition: the 10 ms poll inside
+# `a_large_read_at_the_event_boundary_emits_no_storage_stall_warning`
+# (`crates/plurxd/src/transcode.rs`), bounded by the two-second
+# `tokio::time::timeout` reviewed under `namespaced-time-constructor` below --
+# same test, counted once in each sentinel. `SegmentDelivery::emit` persists
+# its telemetry through the store rather than returning it, so the test has to
+# let that already-started write land before it can read the
+# `segment_delivery_wait` row back. `#[cfg(test)]`-only, and it decides
+# nothing: it waits for a row the call under test has already produced, and
+# the timeout asserts rather than hangs. It owns no producer, process or
+# timer.
 # +2 for the same two #444 tests: a bounded 10 ms poll (5 s deadline that
 # asserts) until the parked request shows in the ledger. Test-only.
-expected_occurrences = 44
+# This row's value is the whole integration tree re-measured after every plan
+# in this wave was merged together, so it is the sum of all of their deltas and
+# will not equal any single branch's arithmetic.
+expected_occurrences = 45
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -2266,6 +2280,22 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # record it, so the sample can only appear once the slow reap has finished. It
 # waits on an owner the fixture already started; it starts no producer, process
 # or timer, and the deadline it carries is the test's, not a caller's.
+# 843 -> 845 with S-02's review disposition, both test-only, both in
+# `a_large_read_at_the_event_boundary_emits_no_storage_stall_warning`
+# (`crates/plurxd/src/transcode.rs`). One is a
+# `tokio::time::timeout(Duration::from_secs(2), ...)` bounding that test's
+# wait for its own `segment_delivery_wait` telemetry row; the other is the
+# 10 ms `tokio::time::sleep` between its store probes, reviewed under
+# `all-async-sleeps` above -- same call, counted once in each sentinel. The
+# test drives `SegmentDelivery::note_storage_read` twice and asserts which of
+# the two reads the single stall warning names; neither call starts a
+# producer, a process or a clock any shipped code reads, and the deadline is
+# the test's own bound on a write the fixture already caused. The S-02
+# production change beside them adds no time constructor at all: the two pump
+# loops now split one storage read into acknowledgement-sized pieces, and the
+# `sleep_until(body_deadline)` / `sleep_until(downstream_deadline)` arms they
+# carry are the same six select arms as before, re-indented inside the inner
+# loop rather than added to it.
 # 851 -> 855 with S-04: four test-only bounds, two per blocking-pool fixture.
 # Each of `a_current_engine_is_current_on_the_blocking_pool` and
 # `a_stale_executable_is_detected_on_the_blocking_pool` uses one
@@ -2310,7 +2340,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # base that branch was written on. This row's value is the whole integration
 # tree re-measured after every plan in this wave was merged together, so it is
 # the sum of all of them and will not equal any single branch's arithmetic.
-expected_occurrences = 862
+# This row's value is the whole integration tree re-measured after every plan
+# in this wave was merged together, so it is the sum of all of their deltas and
+# will not equal any single branch's arithmetic.
+expected_occurrences = 864
 
 [[module_structures]]
 id = "bare-time-constructor"

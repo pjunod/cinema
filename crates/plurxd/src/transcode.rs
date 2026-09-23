@@ -406,6 +406,17 @@ impl Drop for HttpWaitGuard {
         self.session.http_waits.leave(self.id);
     }
 }
+
+/// Below this sustained storage rate, a material segment read is a stall.
+/// Normalizing by bytes keeps the signal comparable when body read buffers
+/// change size.
+const SEGMENT_STALL_BYTES_PER_SECOND: f64 = (1024 * 1024) as f64;
+
+fn storage_read_is_slow(bytes: u64, elapsed: Duration) -> bool {
+    elapsed >= SEGMENT_WAIT_EVENT_MIN
+        && bytes as f64 / elapsed.as_secs_f64() < SEGMENT_STALL_BYTES_PER_SECOND
+}
+
 /// Hold the first live transcode playlist until it has both two complete
 /// segments and this much published media. The first playlist used to expose
 /// one ~2 s segment while ffmpeg was already writing the rest; hls.js reached
@@ -9789,12 +9800,24 @@ impl SegmentDelivery {
         );
     }
 
-    pub(crate) fn note_read(&mut self, bytes: u64, elapsed: Duration) {
+    /// Credit bytes the consumer has acknowledged taking. The caller owns the
+    /// acknowledgement fence; this is the accounting that follows it.
+    pub(crate) fn note_delivered(&mut self, bytes: u64) {
         self.delivered_bytes = self.delivered_bytes.saturating_add(bytes);
         if self.purpose == DeliveryPurpose::ClientResponse {
             self.session.delivery.note(bytes);
         }
-        if elapsed < SEGMENT_WAIT_EVENT_MIN || self.slow_read_reported {
+    }
+
+    /// Report one storage read's size and duration for the stall signal.
+    ///
+    /// Separate from `note_delivered` because the two have different units: a
+    /// body is delivered in `MEDIA_BODY_ACK_GRANULARITY` pieces but read from
+    /// storage in `MEDIA_BODY_READ_BUFFER` ones, and a rate computed from the
+    /// acknowledgement size against the whole read's duration would report
+    /// every healthy large read as a stall.
+    pub(crate) fn note_storage_read(&mut self, bytes: u64, elapsed: Duration) {
+        if !storage_read_is_slow(bytes, elapsed) || self.slow_read_reported {
             return;
         }
         self.slow_read_reported = true;
@@ -9817,6 +9840,13 @@ impl SegmentDelivery {
                 "expected_bytes": self.expected_bytes
             }),
         );
+    }
+
+    /// One read whose whole size is also the delivery unit: the buffered
+    /// init/probe paths, which hand the complete body over at once.
+    pub(crate) fn note_read(&mut self, bytes: u64, elapsed: Duration) {
+        self.note_delivered(bytes);
+        self.note_storage_read(bytes, elapsed);
     }
 
     /// Finish delivery and report whether every advertised byte was read.
@@ -38241,6 +38271,103 @@ pub(crate) mod tests {
                 .as_deref()
                 .is_some_and(|extra| extra.contains("\"purpose\":\"client_response\"")),
             "every delivery event names who was reading"
+        );
+    }
+
+    /// The observable is the emitted warning, not the predicate.
+    ///
+    /// `segment_storage_stall_signal_is_normalized_by_read_size` below pins
+    /// `storage_read_is_slow` itself, which is necessary but not sufficient:
+    /// it passes with the guard in `SegmentDelivery::note_storage_read` left
+    /// at the old duration-only test, because it never calls it. This one
+    /// drives the guard. Both reads sit exactly on the 250 ms event boundary,
+    /// so duration alone cannot tell them apart; only the normalized rate
+    /// can. The discriminator is *which* read is named: a duration-only guard
+    /// reports the first (healthy 1 MiB/s) read and then latches
+    /// `slow_read_reported`, so the single event carries
+    /// `delivered_bytes: 262144` instead of the 266240 that means "the 4 KiB
+    /// read at 16 KiB/s is the one that stalled".
+    #[tokio::test]
+    async fn a_large_read_at_the_event_boundary_emits_no_storage_stall_warning() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let dir = crate::test_tempdir().expect("segment-stall directory");
+        let mut raw_session = test_session(dir.path().to_path_buf());
+        raw_session.file_id = file_id;
+        let session = Arc::new(raw_session);
+        let mut delivery = SegmentDelivery::new(
+            SegmentDeliveryContext {
+                store: Arc::clone(&store),
+                session: Arc::clone(&session),
+                producer_attempt: session.control.current_producer_attempt(),
+                session_id: "stall-warning-test".to_owned(),
+                segment: "seg00001.m4s".to_owned(),
+                segment_start_ms: Some(2_000),
+                segment_duration_ms: Some(2_000),
+                encoder: "test".to_owned(),
+            },
+            266_240,
+            None,
+        );
+        let boundary = Duration::from_millis(250);
+
+        // 256 KiB in 250 ms is 1 MiB/s: an ordinary NAS read, not a stall.
+        delivery.note_read(256 * 1024, boundary);
+        // 4 KiB in the same 250 ms is 16 KiB/s: that is a stall.
+        delivery.note_read(4 * 1024, boundary);
+
+        let events = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = store
+                    .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                        since_ms: None,
+                        event: None,
+                        limit: 20,
+                    })
+                    .await
+                    .expect("segment-stall telemetry query");
+                if events
+                    .iter()
+                    .any(|event| event.event == "segment_delivery_wait")
+                {
+                    return events;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the slow read is reported");
+
+        let waits: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "segment_delivery_wait")
+            .collect();
+        assert_eq!(waits.len(), 1, "one storage stall warning per body");
+        assert_eq!(waits[0].reason.as_deref(), Some("storage_read_slow"));
+        assert!(
+            waits[0]
+                .extra
+                .as_deref()
+                .is_some_and(|extra| extra.contains("\"delivered_bytes\":266240")),
+            "the warning names the 4 KiB read, not the healthy 256 KiB one: {:?}",
+            waits[0].extra
+        );
+        assert_eq!(session.delivery.total_bytes(), 266_240);
+    }
+
+    #[test]
+    fn segment_storage_stall_signal_is_normalized_by_read_size() {
+        let boundary = Duration::from_millis(250);
+
+        assert!(
+            !storage_read_is_slow(256 * 1024, boundary),
+            "a 1 MiB/s body read is healthy even at the event duration boundary"
+        );
+        assert!(
+            storage_read_is_slow(4 * 1024, boundary),
+            "the same duration at 16 KiB/s is a storage stall"
         );
     }
 

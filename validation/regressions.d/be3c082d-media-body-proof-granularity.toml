@@ -1,0 +1,115 @@
+version = 1
+
+[[coverage]]
+commits = ["be3c082d"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+The correction and its tests landed together in `crates/plurxd`. The \
+preceding commit `ed98c6ab` raised the four default media body readers from \
+`ReaderStream::new` (4 KiB) to `ReaderStream::with_capacity(reader, \
+MEDIA_BODY_READ_BUFFER)` (256 KiB). Both HLS pumps \
+(`vod_segment_response_before` and `segment_local_before`, \
+`crates/plurxd/src/http/hls.rs`) sent exactly one `DrivenLocalChunk` per \
+`reader.next()` and waited for one acknowledgement per chunk, so the storage \
+read size was also the granularity of the pump's delivery proof: \
+`driven_local_body` acknowledges a chunk before yielding it, and everything \
+downstream of that acknowledgement -- `Meter::note` / \
+`SegmentDelivery::note_read`, `delivered == len`, and the \
+`settle_streamed_response_completion` that feeds `commit_media` with \
+`fetched_segment` and `fetched_end_ms` -- runs per acknowledgement. Raising \
+the read 64x therefore raised that granularity 64x, and every media object at \
+or below 256 KiB (`init.mp4`, subtitle segments, audio-only and low-bitrate \
+renditions) became a single chunk whose first and only body poll completed \
+the response. A client that opened such a response and disconnected had the \
+whole object credited to the session's delivery meter, its playback lease \
+renewed, and the consumed/ahead frontier that pacing and scratch reclamation \
+read advanced, for bytes it never took. This commit adds \
+`MEDIA_BODY_ACK_GRANULARITY = 4 * 1024` \
+(`crates/plurxd/src/media_sessions.rs`), beside `MEDIA_BODY_READ_BUFFER` and \
+explicitly not equal to it, and makes both pump loops split each read with \
+`Bytes::split_to(bytes.len().min(MEDIA_BODY_ACK_GRANULARITY))` into one \
+chunk and one acknowledgement per piece. The read count is unchanged, so the \
+64x reduction in blocking-pool hops that `ed98c6ab` exists for is kept; the \
+acknowledgement rate returns to exactly what it was before `ed98c6ab`. \
+It also splits `SegmentDelivery::note_read` \
+(`crates/plurxd/src/transcode.rs`) into `note_delivered`, called per \
+acknowledged piece, and `note_storage_read`, called once per read with the \
+read's real byte count and duration after that read's first piece is \
+acknowledged -- because feeding a 4 KiB piece and a whole 256 KiB read's \
+elapsed time to the same rate guard would report every healthy large read as \
+a stall. `note_read` remains as the composition of the two for the buffered \
+init and probe callers (`hls.rs` init inspection and range arm, \
+`transcode.rs` segment probe), where one read is the whole body.
+
+Four tests pin the granularity, and each fails with the split reverted -- \
+proved by restoring `bytes.len().min(MEDIA_BODY_READ_BUFFER)` at both split \
+sites and rerunning. \
+`http::hls::tests::a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units` \
+is the direct pin added here: it asserts \
+`MEDIA_BODY_ACK_GRANULARITY < MEDIA_BODY_READ_BUFFER`, serves a 64 KiB VOD \
+object that fits inside one storage read, takes exactly one chunk, and \
+asserts the chunk is `MEDIA_BODY_ACK_GRANULARITY`, that the metered total is \
+exactly that, and that `fetched_segment` is still `None`. Reverted it fails \
+`left: 65536, right: 4096`. The other three existed before `ed98c6ab` and \
+failed at its merged head, which is how this defect was found: \
+`http::hls::tests::an_abandoned_segment_body_is_recorded_as_response_dropped` \
+writes a 64 KiB segment, takes one chunk and asserts `first.len() < \
+body.len()`, that the drop emits `segment_delivery_incomplete` with reason \
+`response_dropped` and `cut_class` `unclassified_drop`, that \
+`delivered_bytes` equals that first chunk, and that the playback lease \
+renewal kind did not change; \
+`http::hls::tests::an_abandoned_vod_body_counts_nothing_it_did_not_hand_over` \
+takes two chunks of a 512 KiB object, asserts they are a strict prefix, and \
+asserts the meter equals the prefix exactly rather than the object; \
+`http::hls::tests::vod_stream_finalizer_commits_only_exact_live_response_bodies` \
+polls a 64 KiB object once, drops it, and asserts both that \
+`vod_last_touch_for_test` is unchanged and that `fetched_segment` is `None` \
+-- reverted it fails `left: Some(5), right: None`, which is the frontier \
+moving for a response the client abandoned after one poll. The same test's \
+other three cases (exact EOF commits and reaches `Some(3)`, a strict-subset \
+Range renews the lease without claiming the object, a short source \
+terminates the body with an error and commits nothing) are unaffected by the \
+split and keep the boundaries either side of it.
+
+One test pins the normalised slow-read guard through its observable, and it \
+is new here because the guard `ed98c6ab` added was not pinned by anything \
+that exercised it. \
+`transcode::tests::a_large_read_at_the_event_boundary_emits_no_storage_stall_warning` \
+builds a real `SegmentDelivery` over an in-memory store, calls `note_read(256 \
+* 1024, 250ms)` -- 1 MiB/s, an ordinary NAS read -- then `note_read(4 * 1024, \
+250ms)` -- 16 KiB/s, a stall -- and asserts exactly one \
+`segment_delivery_wait` event with reason `storage_read_slow` whose `extra` \
+carries `"delivered_bytes":266240`. Both reads sit exactly on the 250 ms \
+`SEGMENT_WAIT_EVENT_MIN` boundary, so duration alone cannot separate them; \
+only the rate can. Restoring the old duration-only guard (`if elapsed < \
+SEGMENT_WAIT_EVENT_MIN || self.slow_read_reported`) makes the first read warn \
+and latch `slow_read_reported`, so the one emitted event reads \
+`"delivered_bytes":262144` and the assertion fails. The pre-existing \
+`transcode::tests::segment_storage_stall_signal_is_normalized_by_read_size` \
+is kept but is deliberately not credited as the pin: it calls the free \
+function `storage_read_is_slow` directly rather than the \
+`SegmentDelivery` guard, and it passes with that guard reverted -- verified \
+in the same revert run. \
+`transcode::tests::segment_delivery_counts_reads_and_names_incomplete_storage` \
+continues to pin the surrounding shape (two slow reads produce one wait \
+event, `finish()` under the advertised length emits \
+`segment_delivery_incomplete` with `storage_unexpected_eof`, \
+`source_eof` and `"purpose":"client_response"`) and confirms `note_read` \
+still composes both halves for its callers. All six tests are `crates/plurxd` \
+unit tests in the `plurxd` binary target, run by `make rust-check` under \
+`rust-gate` and by `make ci-rust-gate` under `rust-gate-ci`; none of them \
+needs ffmpeg or a real media fixture. The whole `cargo test -p plurxd --bin \
+plurxd` target is green at this commit (2539 passed, 0 failed, 11 ignored); \
+it reported 3 failed at `ed98c6ab`'s merged head.
+
+Not covered by these checks: the resident-memory consequence of the 256 KiB \
+reservation itself. `ReaderStream::with_capacity` allocates its `BytesMut` \
+eagerly and tokio sizes its blocking read buffer to match, so every \
+`serve_file_range` response -- including photo originals, Plex parts, \
+`/download` and tiny `206` probe ranges -- now reserves about 512 KiB \
+regardless of how many bytes it carries. That is a measurement, not a unit \
+test; the protocol for it is §5.1 of \
+`docs/streaming/MEDIA-BODY-BUFFERS.md`, which this branch amends to add a \
+small-object concurrency group, and it remains pending lab4 evidence.
+"""

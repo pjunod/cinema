@@ -26,11 +26,11 @@ use tokio::io::AsyncReadExt;
 
 use super::error::ApiError;
 use super::extract::AuthUser;
+use crate::media_sessions::MEDIA_BODY_READ_BUFFER;
 use crate::offline::OfflineQuota;
 use crate::state::AppState;
 
 const PACKAGE_TTL_SECS: i64 = 7 * 24 * 60 * 60;
-const TRANSFER_STREAM_BUFFER: usize = 256 * 1024;
 const TRANSFER_METRIC_FLUSH_BYTES: usize = 1024 * 1024;
 pub(crate) const DEFAULT_GLOBAL_GB: i64 = 25;
 pub(crate) const DEFAULT_USER_GB: i64 = 15;
@@ -1197,7 +1197,7 @@ fn hls_stream_response(
     let stream = MeteredOfflineStream {
         inner: tokio_util::io::ReaderStream::with_capacity(
             file.take(bytes),
-            TRANSFER_STREAM_BUFFER,
+            MEDIA_BODY_READ_BUFFER,
         ),
         offline: std::sync::Arc::clone(&state.offline),
         package_id: package.id.clone(),
