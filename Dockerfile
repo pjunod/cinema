@@ -1,6 +1,12 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1-bookworm AS build
+# Pinned by digest: `1-bookworm` floats, and what floats with it is this
+# image's Debian system libraries and its own rustup. The compiler is not
+# pinned here -- `COPY . .` below puts rust-toolchain.toml in the build
+# context and rustup honours it -- so this digest is the system-library
+# pin, nothing more. `scripts/image-base-drift` prints this digest beside
+# the current upstream one; the weekly Rust dependency audit runs it.
+FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
 # `.git` is not in the build context (see .dockerignore), so the build script
 # can't derive the commit itself — CI passes it in, e.g.
 #   docker build --build-arg PLURX_BUILD_REF="$(git describe --tags --always --dirty)"
@@ -23,7 +29,10 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
     && CARGO_TARGET_DIR=/src/target-cluster-check cargo build --locked --release -p plurx-cluster-check \
     && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check
 
-FROM debian:bookworm-slim AS runtime-assets
+# Pinned by digest for the same reason, and with more at stake: this layer
+# is the shipped image's entire userland, and `bookworm-slim` moves under
+# the same tag on every Debian point release.
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime-assets
 ARG TARGETARCH
 ARG DOVI_TOOL_VERSION=2.3.3
 ARG MKVTOOLNIX_VERSION=74.0.0-1
