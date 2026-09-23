@@ -1238,6 +1238,8 @@ pub(crate) fn footprint() -> Option<Footprint> {
 pub struct StoreDiagnostics {
     /// `None` until the store's sweep has walked it once in this process.
     pub footprint: Option<Footprint>,
+    /// How long ago that walk was, by this node's clock.
+    pub footprint_age_ms: Option<i64>,
     pub cap_bytes: u64,
     pub riding: Vec<crate::subtitle_ride_along::ActiveRide>,
     pub tracks_attempted: u64,
@@ -1250,13 +1252,39 @@ pub struct StoreDiagnostics {
     /// Files whose riding pass did not build its index, indexed without the
     /// ride-along until the next restart.
     pub files_not_riding: usize,
+    /// Finished riding passes whose tracks were not published because the
+    /// switch was turned off while they ran.
+    pub discarded_switch_off: u64,
+    /// Whether the next index pass on this node would keep PGS tracks.
+    pub gate: GateState,
 }
 
-pub(crate) fn diagnostics() -> StoreDiagnostics {
+/// The ride-along gate as the Maintenance card shows it: open, or closed with
+/// the reason — the switch, the self-test, the filesystem or the free space.
+#[derive(Clone, Debug, Serialize)]
+pub struct GateState {
+    pub open: bool,
+    pub reason: Option<String>,
+}
+
+pub(crate) fn diagnostics(switch_on: bool, runtime_cache: &Path) -> StoreDiagnostics {
+    let gate = match crate::subtitle_ride_along::gate_verdict(switch_on, runtime_cache) {
+        Ok(()) => GateState {
+            open: true,
+            reason: None,
+        },
+        Err(reason) => GateState {
+            open: false,
+            reason: Some(reason),
+        },
+    };
     let (attempted, [kept, empty, malformed, transient], written, published) =
         crate::subtitle_ride_along::snapshot();
+    let footprint = footprint();
     StoreDiagnostics {
-        footprint: footprint(),
+        footprint_age_ms: footprint
+            .map(|footprint| unix_ms().saturating_sub(footprint.measured_at_ms).max(0)),
+        footprint,
         cap_bytes: MAX_STORE_BYTES,
         riding: crate::subtitle_ride_along::active_rides(),
         tracks_attempted: attempted,
@@ -1267,6 +1295,10 @@ pub(crate) fn diagnostics() -> StoreDiagnostics {
         bytes_written: written,
         manifests_published: published,
         files_not_riding: crate::subtitle_ride_along::failed_ride_count(),
+        discarded_switch_off: crate::subtitle_ride_along::discarded(
+            crate::subtitle_ride_along::Discard::SwitchOff,
+        ),
+        gate,
     }
 }
 

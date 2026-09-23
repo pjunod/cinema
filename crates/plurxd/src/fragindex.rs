@@ -58,7 +58,7 @@ const PACKET_PROBE_AGGREGATE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const PACKET_PROBE_TAIL_OFFSETS_SECS: [i64; 3] = [128, 512, 2_048];
 
 type IndexProgress = dyn Fn(u64, i64, usize) + Send + Sync;
-type SharedIndexProgress = Arc<dyn Fn(&PassProgress) + Send + Sync>;
+pub(crate) type SharedIndexProgress = Arc<dyn Fn(&PassProgress) + Send + Sync>;
 
 /// One progress report from a running index pass, as its caller sees it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1563,7 +1563,7 @@ pub async fn build(
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
-    build_riding(file, video, runtime_cache, budget, None)
+    build_riding(file, video, runtime_cache, budget, None, None)
         .await
         .outcome
 }
@@ -1580,6 +1580,7 @@ pub(crate) async fn build_riding(
     runtime_cache: &Path,
     budget: Duration,
     ride_along: Option<&RideAlongGate>,
+    progress: Option<SharedIndexProgress>,
 ) -> IndexBuild {
     let source = match crate::fragment_index_cluster::open_source_fence(file, None).await {
         Ok(source) => source,
@@ -1596,7 +1597,7 @@ pub(crate) async fn build_riding(
         video,
         runtime_cache,
         budget,
-        None,
+        progress,
         ride_along,
     )
     .await;

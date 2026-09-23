@@ -16,8 +16,26 @@ const SET_TABS=SET_GROUPS.flatMap(([,tabs])=>tabs);
 // address bar names the section and the back button walks between them.
 function isSettingsRoute(h){ return h==="#/settings"||h==="#/admin"||(typeof h==="string"&&h.startsWith("#/settings/")); }
 function settingsRouteTab(h){
-  const m=/^#\/settings\/([a-z]+)$/.exec(h||"");
+  const m=/^#\/settings\/([a-z]+)(?:\/[a-z0-9-]+)?$/.exec(h||"");
   return m&&SET_TABS.some(x=>x[0]===m[1])?m[1]:null;
+}
+// A section route may name one element after it —
+// #/settings/developer/enable-subtitle-sources — so a link from another page
+// lands on the card it means rather than the top of a long section.
+function settingsRouteAnchor(h){
+  const m=/^#\/settings\/[a-z]+\/([a-z0-9-]+)$/.exec(h||"");
+  return m?m[1]:null;
+}
+// Once: after the section paints, scroll to the anchor and rewrite the address
+// to the bare section, so a repaint (every refresh timer) does not scroll the
+// page back under the reader.
+function revealSettingsAnchor(tab){
+  const anchor=settingsRouteAnchor(location.hash);
+  if(!anchor) return;
+  const target=document.getElementById(anchor);
+  if(!target) return;
+  try{ history.replaceState(null,"",`#/settings/${tab}`); }catch(e){}
+  if(target.scrollIntoView) target.scrollIntoView({block:"start"});
 }
 function settingsTab(){
   const routed=settingsRouteTab(location.hash);
@@ -48,6 +66,7 @@ function renderSettings(){
   const manifest=SETTINGS_MANIFEST[tab];
   if(!manifest.required.every(key=>SETTINGS_LOADED.has(key))) return;
   document.getElementById("main").innerHTML=`<div class="setlayout"><nav class="settabs" aria-label="Settings sections">${settingsTabsHtml(tab)}</nav><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody">${settingsPanel(tab,d)}</div></div>`;
+  revealSettingsAnchor(tab);
   if(tab==="system") return refreshLogs(); // its initial loading row is part of settled
   if(tab==="cluster"){ applyClusterFolds(); return refreshClusterLogs(); }
 }
@@ -160,24 +179,44 @@ function precachePanel(settings){
 // Stored subtitle tracks: the subtitle-source store's footprint on this node,
 // and what its producer — the fragment-index pass keeping each PGS track it
 // reads — is doing now. Background work on real disks says here what it is,
-// why it chose the work, what it costs, and where to turn it off. Read-only:
-// the switch lives on Developer beside its readiness rows.
+// why it chose the work, what it costs, whether it can run, and where to turn
+// it off. Read-only: the switch lives on Developer beside its readiness rows,
+// and the link lands on it.
 function subtitleStorePanel(settings){
+  const SUBSRC_SWITCH_LINK=`<a href="#/settings/developer/enable-subtitle-sources">Developer → Stored subtitle tracks</a>`;
   const d=settings.subtitle_store||{};
   const on=settings.subtitle_stored_sources!==false;
+  const gate=d.gate||{open:true};
+  const blocked=on&&gate.open===false;
   const fp=d.footprint;
   const plural=(n,word)=>`${n} ${word}${n===1?"":"s"}`;
   const size=fp?`${fmtBytes(fp.bytes)||"0 B"} · ${plural(fp.directories,"file")}`:"not measured yet";
+  const pill=!on?`<span class="pill">off</span>`
+    :blocked?`<span class="pill bad">not keeping tracks</span>`
+    :`<span class="pill ok">${esc(size)}</span>`;
+  const why=blocked?`<div class="setwarn">⚠ <b>The index pass on this node keeps no PGS tracks:</b> ${esc(gate.reason||"a requirement is not met")}. Each requirement is checked on ${SUBSRC_SWITCH_LINK}.</div>`:"";
+  const ago=d.footprint_age_ms!=null?` (measured ${fmtDur(d.footprint_age_ms)||"just now"}${d.footprint_age_ms>=1000?" ago":""})`:"";
+  const measured=fp
+    ? `<p class="hint">On this node the store holds <b>${esc(size)}</b>${esc(ago)}, of a ${fmtBytes(d.cap_bytes)||"—"} cap; the least recently used files go first.</p>`
+    : Number(settings.vod_index_mins)===0
+      ? `<p class="hint">The store's size on this node is not measured: background analysis is paused (Settings → Analysis), and the sweep that measures the store runs with each analysis pass. The store is capped at ${fmtBytes(d.cap_bytes)||"—"}.</p>`
+      : `<p class="hint">The store's size on this node is not measured yet: the next background analysis pass's sweep measures it. The store is capped at ${fmtBytes(d.cap_bytes)||"—"}.</p>`;
   const riding=d.riding||[];
+  const rideTitle=r=>{
+    const name=esc(r.title||`File ${r.file_id}`);
+    return r.item_id?`<a href="#/item/${esc(r.item_id)}">${name}</a>`:name;
+  };
   const rides=riding.length
-    ? `<ul class="subsrc-rides">${riding.map(r=>`<li>File ${esc(r.file_id)}: keeping ${plural(r.tracks,"PGS track")}, ${fmtBytes(r.bytes_written)||"0 B"} written so far</li>`).join("")}</ul>`
-    : `<p class="hint">No index pass is keeping PGS tracks right now.</p>`;
-  const since=`Since this process started: ${plural(d.tracks_attempted||0,"track")} attempted — ${d.kept||0} kept, ${d.empty||0} with no cues, ${d.malformed||0} malformed, ${d.transient||0} to retry — and ${fmtBytes(d.bytes_written)||"0 B"} written${d.files_not_riding?`; ${plural(d.files_not_riding,"file")} indexed without it after a riding pass failed`:""}.`;
-  return setCard(`${cardHead("Stored subtitle tracks","While a file is indexed, the index pass also keeps each PGS subtitle track it reads, so a burned or overlaid PGS subtitle never has to read the whole file again.",`<span class="pill${on?" ok":""}">${esc(on?size:"off")}</span>`)}
-    <div class="hint"><b>Why this work:</b> the index pass already reads every packet of the file, so keeping the subtitle packets costs a few megabytes of disk per film and no extra read. The store is capped at ${fmtBytes(d.cap_bytes)||"—"}; the least recently used files go first.</div>
+    ? `<ul class="subsrc-rides">${riding.map(r=>`<li><b>${rideTitle(r)}</b>: keeping ${plural(r.tracks,"PGS track")}, ${fmtBytes(r.bytes_written)||"0 B"} written so far · running ${fmtDur(r.running_ms)||"just now"}</li>`).join("")}</ul>`
+    : `<p class="hint">No index pass on this node is keeping PGS tracks right now.</p>`;
+  const since=`Since this process started: ${plural(d.tracks_attempted||0,"track")} attempted — ${d.kept||0} kept, ${d.empty||0} with no cues, ${d.malformed||0} malformed, ${d.transient||0} to retry — and ${fmtBytes(d.bytes_written)||"0 B"} written${d.files_not_riding?`; ${plural(d.files_not_riding,"file")} indexed without it after a riding pass failed`:""}${d.discarded_switch_off?`; ${d.discarded_switch_off} riding pass${d.discarded_switch_off===1?"":"es"} finished after it was turned off and kept nothing`:""}.`;
+  return setCard(`${cardHead("Stored subtitle tracks","While a file is indexed on this node, the index pass also keeps each PGS subtitle track it reads, so a burned or overlaid PGS subtitle never has to read the whole file again.",pill)}
+    ${why}
+    <div class="hint"><b>Why this work:</b> the index pass already reads every packet of the file, so keeping the subtitle packets costs a few megabytes of disk per film and no extra read.</div>
+    ${measured}
     ${rides}
-    <p class="hint">${esc(since)}${fp?"":" The store's size is measured by its next sweep."}</p>
-    <div class="hint"><b>To turn it off:</b> <a href="#/settings/developer">Developer → Stored subtitle tracks</a> stops the index pass keeping tracks and makes playback ignore what is stored.</div>`,{id:"subsrcstore"});
+    <p class="hint">${esc(since)}</p>
+    <div class="hint"><b>To turn it off:</b> ${SUBSRC_SWITCH_LINK}. Off takes effect at once: playback stops reading stored tracks, a pass already running finishes its index but publishes none of the tracks it kept, and later passes keep none. What is already stored stays on disk until the size cap or the sweep removes it.</div>`,{id:"subsrcstore"});
 }
 function telemetryPanel(settings){
   return setCard(`${cardHead("Playback telemetry","Bounded, node-local playback measurements behind the Playback (7 days) card on System.")}

@@ -1827,6 +1827,25 @@ pub struct SettingsDto {
     pub genre_backfill_last: Option<GenreBackfillReport>,
 }
 
+/// The subtitle-source store's diagnostics for the Maintenance card, with each
+/// running ride-along named by its title: the producer knows only file ids.
+/// A handful of keyed reads — one ride per running index pass.
+async fn subtitle_store_diagnostics(
+    state: &AppState,
+    switch_on: bool,
+) -> crate::subtitle_source::StoreDiagnostics {
+    let mut diagnostics = crate::subtitle_source::diagnostics(switch_on, &state.runtime_cache_dir);
+    let mut titles = HashMap::new();
+    for ride in &mut diagnostics.riding {
+        let Ok(Some(file)) = state.store.get_file(ride.file_id).await else {
+            continue;
+        };
+        ride.item_id = file.item_id;
+        ride.title = title_of(state, file.item_id, &mut titles).await;
+    }
+    diagnostics
+}
+
 async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     // This page renders the settings as one administrative snapshot. On the
     // clustered backend, reading each field independently turns one response
@@ -2114,7 +2133,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
             true,
         ),
-        subtitle_store: crate::subtitle_source::diagnostics(),
+        subtitle_store: subtitle_store_diagnostics(
+            state,
+            plurx_core::store::stored_switch(
+                setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
+                true,
+            ),
+        )
+        .await,
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,

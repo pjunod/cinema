@@ -212,12 +212,13 @@ function analysisSummaryCard(value,context="activity"){
     </div>${latest&&attention?`<div class="analysis-sub">Latest problem: <b>${esc(latest.title)}</b></div>`:""}</div>`;
 }
 // The index pass is also keeping this file's PGS tracks for the stored
-// subtitle tracks: the row says so, with what it has written, and where that
-// work is turned off — background work is attributable from where it shows.
+// subtitle tracks: the row says so, with what it has written, and links to the
+// switch — background work is attributable from where it shows. Turned off,
+// this pass still finishes its index but publishes none of the tracks.
 function analysisRideAlong(row){
   const tracks=Number(row.pgs_tracks||0);
   if(!tracks) return "";
-  return `<div class="analysis-sub">Also keeping ${tracks} PGS track${tracks===1?"":"s"} · ${fmtBytes(row.pgs_bytes_written)||"0 B"} written · <a href="#/settings/developer">turn off</a></div>`;
+  return `<div class="analysis-sub">Also keeping ${tracks} PGS track${tracks===1?"":"s"} · ${fmtBytes(row.pgs_bytes_written)||"0 B"} written · <a href="#/settings/developer/enable-subtitle-sources" title="Turning stored subtitle tracks off lets this pass finish its index and discards the tracks it kept">stored subtitle tracks setting</a></div>`;
 }
 function analysisLiveProgress(value,names){
   const rows=(value&&value.progress)||[];

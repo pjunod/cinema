@@ -353,7 +353,8 @@ test("a live index row names the PGS tracks its pass is also keeping", () => {
     elapsed_ms: 1000, throughput_bps: 1000, node_id: OWNER,
   };
   const riding = live({ progress: [{ ...base, pgs_tracks: 2, pgs_bytes_written: 18866 }] }, {});
-  assert.match(riding, /Also keeping 2 PGS tracks · 19 KB written · <a href="#\/settings\/developer">turn off<\/a>/);
+  assert.match(riding, /Also keeping 2 PGS tracks · 19 KB written · <a href="#\/settings\/developer\/enable-subtitle-sources"[^>]*>stored subtitle tracks setting<\/a>/,
+    "the link lands on the switch itself");
   const plain = live({ progress: [{ ...base, pgs_tracks: 0, pgs_bytes_written: 0 }] }, {});
   assert.doesNotMatch(plain, /PGS/, "a pass that is not riding says nothing about it");
   const older = live({ progress: [base] }, {});
