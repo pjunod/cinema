@@ -1928,7 +1928,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # base that branch was written on. This row's value is the whole integration
 # tree re-measured after every plan in this wave was merged together, so it is
 # the sum of all of them and will not equal any single branch's arithmetic.
-expected_occurrences = 567
+# 567 -> 569 with Fix C PR 1 (the subtitle-source store's readers): two
+# `tokio::task::spawn_blocking` calls in `subtitle_source.rs`, `open_verified`
+# and `copy_verified`. Each opens one stored `.sup`, hashes it (and for the
+# overlay copies it into the stage it already owns), and returns; the caller
+# awaits the handle before going on. Bounded by the store's 256 MiB track cap,
+# no timer, no process, no producer. The two `spawn_blocking` calls in
+# `pgs_overlay::prepare_stage` moved with the function's split into
+# `prepare_stage_with` and `demux_track`; they are the same two calls.
+expected_occurrences = 569
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2548,7 +2556,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # base that branch was written on. This row's value is the whole integration
 # tree re-measured after every plan in this wave was merged together, so it is
 # the sum of all of them and will not equal any single branch's arithmetic.
-expected_occurrences = 868
+# 868 -> 869 with Fix C PR 1: one test-only `tokio::time::sleep` (20 ms) in
+# `subtitle_source::tests::over_the_cap_the_least_recently_accessed_directory_
+# goes_first`, spacing three `.access` writes so their mtimes order. It owns no
+# producer, no process and no timer beyond the test's own await.
+expected_occurrences = 869
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2695,7 +2707,22 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 135
+# 135 -> 146 with Fix C PR 1. One production construction: the burn path's
+# `ffmpeg` derivation from a stored `.sup` (`subtitles::run_burn_derivation`),
+# spawned through `BoundedDiagnosticChild::spawn_piped_output` with
+# `kill_on_drop`, fed the verified descriptor as fd 3 and written through
+# `output_to_bounded_file` under the burn sidecar's 64 MiB bound. It runs only
+# inside the existing single flight's owned task, under that flight's
+# `EXTRACTION_TIMEOUT`, and exits before the flight answers — the same owner as
+# the source extraction it stands in for, which moved unchanged into
+# `extract_burn_from_source` (a move, not a new site). Ten test-only fixture
+# renderers, each `std::process::Command` run to completion with `.output()`
+# before its test proceeds: in `subtitles::stored_source_tests` the `mkpgs`
+# author, the fixture mux, the ride-along extraction, `ffprobe`, and the
+# `-start_at_zero` variant (5); in `pgs_overlay::stored_source_tests` the
+# author, the mux and the ride-along (3); in `vodencode_manager_tests.rs` the
+# author and the mux (2).
+expected_occurrences = 146
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2956,7 +2983,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # pattern, but the callee is `std::thread::Scope::spawn` with a closure that
 # only pushes onto a bounded in-process queue. No child process is created and
 # nothing survives the scope.
-expected_occurrences = 343
+# 343 -> 347 with Fix C PR 1: four test-only `.output()` launches, the ones
+# that run the fixture renderers counted in the command-construction row above
+# — one shared `run` helper each in `subtitles::stored_source_tests` and
+# `pgs_overlay::stored_source_tests`, and two in `vodencode_manager_tests.rs`.
+# Every one is waited to completion before its test continues; none owns a
+# producer.
+expected_occurrences = 347
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

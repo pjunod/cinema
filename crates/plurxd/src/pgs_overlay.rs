@@ -199,13 +199,24 @@ pub async fn record_access(generation_dir: &Path) {
 }
 
 /// Return current readiness, registering one detached preparation on a miss.
+///
+/// `stored` is where a stored copy of the track may be read from instead of
+/// the source; see [`crate::subtitle_source`].
 pub async fn prepare(
     subs_dir: &Path,
     file: &MediaFile,
     index: i64,
+    stored: crate::subtitle_source::StoreAccess,
 ) -> Result<PrepareState, OverlayError> {
-    let runner: PrepareRunner = Arc::new(|root, final_dir, file, index, generation| {
-        Box::pin(prepare_once(root, final_dir, file, index, generation))
+    let runner: PrepareRunner = Arc::new(move |root, final_dir, file, index, generation| {
+        Box::pin(prepare_once(
+            root,
+            final_dir,
+            file,
+            index,
+            generation,
+            stored.clone(),
+        ))
     });
     prepare_with(subs_dir, file, index, runner, PREPARE_TIMEOUT, true).await
 }
@@ -387,6 +398,7 @@ async fn prepare_once(
     file: MediaFile,
     index: i64,
     generation: String,
+    stored: crate::subtitle_source::StoreAccess,
 ) -> Result<(), OverlayError> {
     tokio::fs::create_dir_all(&root)
         .await
@@ -397,7 +409,7 @@ async fn prepare_once(
     })?;
     let mut staging = StagingDir::new(stage);
 
-    prepare_stage(staging.path(), &file, index, &generation).await?;
+    prepare_stage_with(staging.path(), &file, index, &generation, &stored).await?;
 
     match tokio::fs::rename(staging.path(), &final_dir).await {
         Ok(()) => {
@@ -494,55 +506,36 @@ impl Drop for StagingDir {
     }
 }
 
+/// [`prepare_stage_with`] with the store ignored.
+#[cfg(test)]
 async fn prepare_stage(
     stage: &Path,
     file: &MediaFile,
     index: i64,
     generation: &str,
 ) -> Result<(), OverlayError> {
+    prepare_stage_with(
+        stage,
+        file,
+        index,
+        generation,
+        &crate::subtitle_source::StoreAccess::off(),
+    )
+    .await
+}
+
+async fn prepare_stage_with(
+    stage: &Path,
+    file: &MediaFile,
+    index: i64,
+    generation: &str,
+    stored: &crate::subtitle_source::StoreAccess,
+) -> Result<(), OverlayError> {
     let mut cancellation = CancellationFlag::new();
     source_is_current(file).await?;
-    let source = crate::fragment_index_cluster::open_source_fence(file, None)
-        .await
-        .map_err(OverlayError::Unavailable)?;
-    #[cfg(unix)]
-    let input = PathBuf::from("/dev/fd/3");
-    #[cfg(windows)]
-    let input =
-        crate::ffmpeg::windows_source_path(&source.handle).map_err(OverlayError::Unavailable)?;
     let sup = stage.join("track.sup");
-    let maximum_demux_bytes = MAX_TRACK_BYTES.to_string();
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
-    command
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-        .arg(&input)
-        .args([
-            "-map",
-            &format!("0:s:{index}"),
-            "-c:s",
-            "copy",
-            "-f",
-            "sup",
-            "-fs",
-            &maximum_demux_bytes,
-        ])
-        .arg(&sup)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    crate::ffmpeg::verify_windows_source_path(&source.handle, &input)
-        .map_err(OverlayError::Unavailable)?;
-    let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn(&mut command)
-        .map_err(|error| OverlayError::Unavailable(format!("starting PGS demux: {error}")))?
-        .output()
-        .await
-        .map_err(|error| OverlayError::Unavailable(format!("waiting for PGS demux: {error}")))?;
-    if !status.success() {
-        return Err(OverlayError::Unavailable(format!(
-            "PGS demux failed: {}",
-            diagnostics.trim()
-        )));
+    if !stored_track_into_stage(stored, file, index, &sup).await {
+        demux_track(file, index, &sup).await?;
     }
 
     let sup_for_worker = sup.clone();
@@ -581,6 +574,76 @@ async fn prepare_stage(
         cancellation.disarm();
     }
     result
+}
+
+/// Use a current stored copy of the track as this stage's `track.sup`, in
+/// place of the demux. `false` means there is none, and the caller demuxes.
+///
+/// Byte-identical to what the demux writes (§6.2 fact 9 of the design), so
+/// everything after it — the normaliser, the PNG compile, the
+/// `source_is_current` re-check and the generation validation — runs on it
+/// unchanged. Only `kept` is used; every other state is today's demux.
+async fn stored_track_into_stage(
+    stored: &crate::subtitle_source::StoreAccess,
+    file: &MediaFile,
+    index: i64,
+    sup: &Path,
+) -> bool {
+    use crate::subtitle_source::{copy_verified, lookup, Consumer, Lookup};
+    let live = match tokio::fs::metadata(&file.path).await {
+        Ok(metadata) => crate::fragment_index_cluster::source_stamp(&metadata),
+        Err(_) => return false,
+    };
+    match lookup(stored, Consumer::Overlay, file, index, &live).await {
+        Lookup::Kept(kept) => copy_verified(&kept, sup).await,
+        Lookup::Empty(_) | Lookup::Miss(_) => false,
+    }
+}
+
+/// Today's overlay extraction: one full read of the source into `sup`.
+async fn demux_track(file: &MediaFile, index: i64, sup: &Path) -> Result<(), OverlayError> {
+    let source = crate::fragment_index_cluster::open_source_fence(file, None)
+        .await
+        .map_err(OverlayError::Unavailable)?;
+    #[cfg(unix)]
+    let input = PathBuf::from("/dev/fd/3");
+    #[cfg(windows)]
+    let input =
+        crate::ffmpeg::windows_source_path(&source.handle).map_err(OverlayError::Unavailable)?;
+    let maximum_demux_bytes = MAX_TRACK_BYTES.to_string();
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
+    command
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&input)
+        .args([
+            "-map",
+            &format!("0:s:{index}"),
+            "-c:s",
+            "copy",
+            "-f",
+            "sup",
+            "-fs",
+            &maximum_demux_bytes,
+        ])
+        .arg(sup)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    crate::ffmpeg::verify_windows_source_path(&source.handle, &input)
+        .map_err(OverlayError::Unavailable)?;
+    let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn(&mut command)
+        .map_err(|error| OverlayError::Unavailable(format!("starting PGS demux: {error}")))?
+        .output()
+        .await
+        .map_err(|error| OverlayError::Unavailable(format!("waiting for PGS demux: {error}")))?;
+    if !status.success() {
+        return Err(OverlayError::Unavailable(format!(
+            "PGS demux failed: {}",
+            diagnostics.trim()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1714,5 +1777,221 @@ mod tests {
         })
         .await
         .expect("staging cleanup");
+    }
+}
+
+/// The overlay consumer of the subtitle-source store.
+#[cfg(test)]
+mod stored_source_tests {
+    use super::*;
+    use crate::subtitle_source::testing::{kept, stamp_of, write_manifest};
+    use crate::subtitle_source::{self as store, StoreAccess};
+
+    fn run(command: &mut std::process::Command, what: &str) {
+        let output = command
+            .output()
+            .unwrap_or_else(|error| panic!("{what}: {error}"));
+        assert!(
+            output.status.success(),
+            "{what} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The deterministic PGS fixture `ffmpeg_demux_to_published_manifest_…`
+    /// uses, with the authored track delayed by `offset` seconds.
+    fn source(dir: &Path, offset: &str) -> PathBuf {
+        let sup = dir.join(format!("authored-{offset}.sup"));
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/mkpgs");
+        run(
+            std::process::Command::new(script)
+                .args(["1920", "1080"])
+                .arg(&sup),
+            "author the PGS track",
+        );
+        let source = dir.join(format!("source-{offset}.mkv"));
+        run(
+            std::process::Command::new(ffmpeg_bin())
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=320x180:r=1:d=16",
+                    "-itsoffset",
+                    offset,
+                    "-i",
+                ])
+                .arg(&sup)
+                .args([
+                    "-map", "0:v:0", "-map", "1:s:0", "-c:v", "mpeg4", "-c:s", "copy", "-t", "16",
+                ])
+                .arg(&source),
+            "mux the fixture",
+        );
+        source
+    }
+
+    /// The producer's `.sup` for a source: `-c:s copy -f sup`, no `-copyts`.
+    fn ride_along(dir: &Path, source: &Path) -> Vec<u8> {
+        let sup = dir.join("ride-along.sup");
+        let _ = std::fs::remove_file(&sup);
+        run(
+            std::process::Command::new(ffmpeg_bin())
+                .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+                .arg(source)
+                .args(["-map", "0:s:0", "-c:s", "copy", "-f", "sup"])
+                .arg(&sup),
+            "the ride-along extraction",
+        );
+        std::fs::read(sup).expect("ride-along bytes")
+    }
+
+    fn media(id: i64, path: PathBuf) -> MediaFile {
+        let metadata = std::fs::metadata(&path).expect("source metadata");
+        MediaFile {
+            id,
+            item_id: 1,
+            size: metadata.len() as i64,
+            mtime: metadata_mtime(&metadata),
+            path,
+            duration_ms: Some(16_000),
+            container: Some("mkv".into()),
+            video_codec: Some("mpeg4".into()),
+            video_codec_tag: None,
+            field_order: None,
+            video_profile: None,
+            width: Some(320),
+            height: Some(180),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
+            bitrate: None,
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 0,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        }
+    }
+
+    async fn cues(
+        dir: &Path,
+        name: &str,
+        file: &MediaFile,
+        stored: &StoreAccess,
+    ) -> Vec<(i64, i64)> {
+        let stage = dir.join(name);
+        tokio::fs::create_dir(&stage).await.expect("stage");
+        prepare_stage_with(&stage, file, 0, &generation(file, 0), stored)
+            .await
+            .expect("overlay preparation");
+        assert!(
+            tokio::fs::metadata(stage.join("track.sup")).await.is_err(),
+            "the staged track is consumed either way"
+        );
+        let manifest: OverlayManifest = serde_json::from_slice(
+            &tokio::fs::read(stage.join("manifest.json"))
+                .await
+                .expect("manifest"),
+        )
+        .expect("manifest schema");
+        manifest
+            .cues
+            .iter()
+            .map(|cue| (cue.start_ms, cue.end_ms))
+            .collect()
+    }
+
+    /// A kept track stands in for the demux, and everything after it — the
+    /// normaliser, the compile, the validation — runs on it unchanged.
+    ///
+    /// The route is proved by content: the stored copy is a *different*
+    /// valid track, two seconds later than the source's own, so the cue
+    /// times say which one the overlay read. Off, a hash mismatch and a
+    /// stale source all read the source's own again.
+    #[tokio::test]
+    async fn a_kept_stored_track_replaces_the_overlay_demux() {
+        crate::transcode::require_ffmpeg();
+        let base = crate::test_tempdir().expect("fixture");
+        let own = source(base.path(), "1");
+        let later = source(base.path(), "2");
+        let file = media(92_001, own.clone());
+        let root = base.path().join("runtime").join(store::STORE_DIR);
+        let dir = store::file_dir(&root, file.id);
+        let on = StoreAccess::new(root.clone(), true);
+
+        let demuxed = vec![(1000, 7000), (9000, 15000)];
+        assert_eq!(
+            cues(base.path(), "baseline", &file, &StoreAccess::off()).await,
+            demuxed,
+            "today's demux of the fixture"
+        );
+
+        // The source's own ride-along is byte-identical to the demux (§6.2
+        // fact 9), so a hit changes nothing a viewer can see.
+        let entry = kept(&dir, 0, &ride_along(base.path(), &own));
+        write_manifest(&root, file.id, stamp_of(&own), vec![entry]);
+        let before = store::hits_for_test(store::Consumer::Overlay);
+        assert_eq!(cues(base.path(), "identical", &file, &on).await, demuxed);
+        assert!(store::hits_for_test(store::Consumer::Overlay) > before);
+
+        // A different stored track proves which one was read.
+        let entry = kept(&dir, 0, &ride_along(base.path(), &later));
+        let stored_name = entry.file.clone().expect("name");
+        write_manifest(&root, file.id, stamp_of(&own), vec![entry]);
+        assert_eq!(
+            cues(base.path(), "stored", &file, &on).await,
+            vec![(2000, 8000), (10000, 16000)],
+            "the overlay read the stored track, not the source"
+        );
+
+        // Off ignores the same valid store entirely.
+        assert_eq!(
+            cues(
+                base.path(),
+                "off",
+                &file,
+                &StoreAccess::new(root.clone(), false)
+            )
+            .await,
+            demuxed
+        );
+
+        // The store's word for a different source identity is not taken.
+        let mut moved = stamp_of(&own);
+        moved.mtime += 1;
+        write_manifest(
+            &root,
+            file.id,
+            moved,
+            vec![kept(&dir, 0, &ride_along(base.path(), &later))],
+        );
+        assert_eq!(cues(base.path(), "stale", &file, &on).await, demuxed);
+
+        // Bytes that no longer hash to the manifest are a miss, not an error.
+        write_manifest(
+            &root,
+            file.id,
+            stamp_of(&own),
+            vec![kept(&dir, 0, &ride_along(base.path(), &later))],
+        );
+        std::fs::write(dir.join(&stored_name), b"PG tampered").expect("tamper");
+        let before =
+            store::misses_for_test(store::Consumer::Overlay, store::MissReason::HashMismatch);
+        assert_eq!(cues(base.path(), "tampered", &file, &on).await, demuxed);
+        assert!(
+            store::misses_for_test(store::Consumer::Overlay, store::MissReason::HashMismatch)
+                > before
+        );
     }
 }

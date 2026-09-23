@@ -806,6 +806,21 @@ impl AppState {
         )
     }
 
+    /// Whether the PGS consumers read the subtitle-source store. On by
+    /// default; an unreadable setting ignores the store, which is the
+    /// behaviour that shipped before it existed.
+    pub(crate) async fn subtitle_stored_sources_enabled(&self) -> bool {
+        crate::subtitle_source::enabled(self.store.as_ref()).await
+    }
+
+    /// The store as a consumer on this node sees it right now.
+    pub(crate) async fn subtitle_source_access(&self) -> crate::subtitle_source::StoreAccess {
+        crate::subtitle_source::StoreAccess::new(
+            crate::subtitle_source::store_root(&self.runtime_cache_dir),
+            self.subtitle_stored_sources_enabled().await,
+        )
+    }
+
     /// `node_id` is this server's stable id — the `node_id` a cache location
     /// is recorded against, so a cluster can tell whose copy is whose.
     #[cfg(test)]
@@ -1408,6 +1423,9 @@ pub struct JobManager {
     /// Stable local cursor for the content-addressed index cache. Without a
     /// cursor each bounded pass would revisit the same legitimate head page.
     fragment_index_sweep_cursor: Mutex<Option<String>>,
+    /// The subtitle-source store's own sweep cursor: `f<id>` of the last
+    /// directory examined, or empty once a walk has wrapped.
+    subtitle_source_sweep_cursor: Mutex<Option<String>>,
     /// A genre-backfill pass is running. Same reasoning as `producing`: the
     /// question is "may another one start", not "wait for this one" — two
     /// passes would read the same cursor, fetch the same titles and double
@@ -2912,6 +2930,7 @@ impl JobManager {
             fragment_index_refusals: Mutex::new(HashMap::new()),
             last_pretranscode_cache_sweep_ms: AtomicI64::new(0),
             fragment_index_sweep_cursor: Mutex::new(None),
+            subtitle_source_sweep_cursor: Mutex::new(None),
             backfilling_genres: std::sync::atomic::AtomicBool::new(false),
             retrying_artwork: std::sync::atomic::AtomicBool::new(false),
             book_cover_workers: metadata::book::CoverMaterializationWorkers::default(),
@@ -6748,6 +6767,41 @@ impl JobManager {
         );
     }
 
+    /// One bounded page of the subtitle-source store's sweep.
+    ///
+    /// Its own rule and cursor: `sweep_local_orphans` considers only index
+    /// blobs, and the subtitle cache's LRU never sees this directory. A catalog
+    /// read that fails stops the page and keeps the cursor, exactly as the
+    /// index sweep does, so the same directories are asked about next tick.
+    async fn sweep_subtitle_sources(&self, transcode: &TranscodeManager) {
+        let root = crate::subtitle_source::store_root(transcode.runtime_cache_dir());
+        let cursor = self.subtitle_source_sweep_cursor.lock().await.clone();
+        match crate::subtitle_source::sweep(
+            self.store.as_ref(),
+            &root,
+            cursor.as_deref(),
+            crate::subtitle_source::SWEEP_PAGE,
+            crate::subtitle_source::MAX_STORE_BYTES,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                if outcome.removed + outcome.evicted + outcome.deferred > 0 {
+                    tracing::info!(
+                        removed = outcome.removed,
+                        evicted = outcome.evicted,
+                        deferred = outcome.deferred,
+                        "reconciled stored subtitle sources"
+                    );
+                }
+                *self.subtitle_source_sweep_cursor.lock().await = Some(outcome.next);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "reconciling stored subtitle sources");
+            }
+        }
+    }
+
     async fn build_fragment_indexes(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         if self.indexing.swap(true, Ordering::Relaxed) {
             return;
@@ -6759,6 +6813,10 @@ impl JobManager {
         // the node that ran the delete -- and never a node that was down at
         // the time. Each node asking, on its own tick, converges everywhere.
         self.sweep_orphaned_vod_rows().await;
+        // Node-local like the rows above, and on both the cluster and the
+        // non-cluster path: every node reconciles its own store on its own
+        // tick, whether or not it holds a discovery slot.
+        self.sweep_subtitle_sources(&transcode).await;
 
         let cluster_cache_enabled =
             match self.store.get_setting(keys::VOD_INDEX_CLUSTER_CACHE).await {
