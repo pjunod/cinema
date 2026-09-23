@@ -4,8 +4,11 @@
 (PR #447, `883cf4d42`); B2 was built and deliberately reverted; B3 and B4 open
 · the overlay gate is still **off** pending §5.5's two-device check · §6
 approved as v3.1 (branch `docs/fix-c-design`); its PR 1 of 3 — the store's
-readers, with nothing producing into it — is built, as a draft · **nothing here
-is deployed** · reviewed — see
+readers — and PR 2 — the producer riding the index pass, with its latch, stage
+guard, per-track verdict, local-filesystem check, startup self-test and the
+switch's producer half — are built, as stacked drafts; PR 3 (progress-row
+attribution and cache diagnostics) is unbuilt · **nothing here is deployed** ·
+reviewed — see
 [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
 **Reviewer:** Fable, adversarial · **Written:** 2026-09-22, revised 2026-09-23 ·
 **Reported by:** Paul, 2026-09-21 ~18:50 ET, Android on the TCL tablet
