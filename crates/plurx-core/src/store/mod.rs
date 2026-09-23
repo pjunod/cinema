@@ -3999,6 +3999,23 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
 #[async_trait]
 pub trait PlaybackTelemetryStore: Send + Sync + 'static {
     async fn record_playback_event(&self, event: &PlaybackEvent) -> Result<i64, StoreError>;
+    /// Persist retained events AND fold network-prior observations using one
+    /// node-local connection lease and transaction.
+    ///
+    /// Both subjects live in the same node-local sidecar behind the same
+    /// `Mutex<Connection>`, so a writer that batched its events and then
+    /// called [`NetworkPriorStore::observe_network_prior`] once per event
+    /// would take one lease for the batch and another for every event in it.
+    /// The two opt-ins stay independent: retention off is an empty `events`,
+    /// the prior opt-in off is an empty `observations`, and either alone
+    /// still costs one lease. Returns the number of retained rows written,
+    /// which is `events.len()` — folded observations update at most one prior
+    /// row each and are not rows this count describes.
+    async fn record_playback_batch(
+        &self,
+        events: &[PlaybackEvent],
+        observations: &[NetworkPriorObservation],
+    ) -> Result<u64, StoreError>;
     async fn prune_playback_events(&self, before_ms: i64, limit: i64) -> Result<u64, StoreError>;
     async fn playback_events(
         &self,

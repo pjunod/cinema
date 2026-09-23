@@ -1682,6 +1682,23 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
+# +5 for C-06's telemetry queue review: `crates/plurxd/src/telemetry.rs` now
+# spawns the supervised bounded writer from three places instead of one --
+# `ensure_sink` (production), the test-only `install_test_sink`, and four
+# focused tests that drive a scripted Store that sleeps, fails or panics. Each
+# is `tokio::spawn(supervise_writer(..))` of THE SAME single writer per sink:
+# the sink is registered once per Store in `SINKS` under a lock, so production
+# still has exactly one writer per node, and `drain_for_shutdown` retires it
+# within its two-second bound. Nothing here owns a process, a producer or a
+# tuner; the writer owns one node-local sidecar batch at a time and hands that
+# ownership to the drain or the supervisor rather than dropping it silently.
+# +1 more for the `std::thread::spawn` in
+# `an_unregistered_store_registers_its_sink_without_relocking`. It is
+# test-only and deliberately detached: the failure it guards is a deadlock in
+# `sink_for`, and a deadlock cannot be observed from the thread it blocks, so
+# the assertion is a ten-second `recv_timeout` on the main thread. It builds a
+# current-thread runtime, emits one event and reports; it owns no producer, no
+# process and no tuner.
 # 547 -> 548 with S-13: the same `tokio::spawn` in
 # `source_change_refuses_bound_plan` that `all-detached-tokio-tasks` above
 # counts. One call, counted once in each sentinel. Test-only, joined inside the
@@ -1725,7 +1742,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # no producer and no process. Which voter actually publishes a given UTC day
 # is decided by the cluster-wide `backup:cluster` job lease, not by this
 # task; its own waits are the sleeps counted in `namespaced-time-constructor`.
-expected_occurrences = 558
+# The `<old> -> <new>` figures in the notes above are each stated against the
+# base that branch was written on. This row's value is the whole integration
+# tree re-measured after every plan in this wave was merged together, so it is
+# the sum of all of them and will not equal any single branch's arithmetic.
+expected_occurrences = 564
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1804,7 +1825,13 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 46
+# +1 for C-06's telemetry queue review: one `std::thread::scope` spawn in the
+# `concurrent_producers_cannot_overrun_the_reserve` test. It is a scoped OS
+# thread that only calls `JobQueue::push`, it is joined by the scope before the
+# test returns, and it owns no producer, process, child, timer or lease. The
+# sentinel still sees it, which is the point: the one thing this module may not
+# do is start a rolling owner nobody joins.
+expected_occurrences = 47
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2217,6 +2244,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
+# +7 for C-06's telemetry queue review. Two are shipped and both are bounds
+# this plan exists to state: `tokio::time::timeout(BATCH_WINDOW, ..)` is the
+# writer's batch window, and `tokio::time::timeout(DRAIN, ..)` is the whole of
+# the two-second shutdown bound -- it is now the ONLY owner of that bound, so
+# the remainder is transferred exactly once instead of inferred from queue
+# occupancy. The other five are test-only sleeps: one yields to the writer in
+# the existing retention-off regression, and four drive the scripted Store that
+# sleeps (the wedged-writer and emit-latency cases) or wait for a batch to
+# cross the Store boundary. None selects a recipe, starts a process or owns a
+# producer.
 # 841 -> 843 with S-13, both test-only and both awaited. One is the
 # `tokio::time::sleep` in `source_change_refuses_bound_plan`
 # (`crates/plurxd/src/transcode.rs`), reviewed under `all-async-sleeps` above —
@@ -2269,7 +2306,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # scheduler tick, and the 5-second pause before the same owner retries a
 # failed attempt while its scheduled UTC minute is still open. None of the
 # three owns a producer, a process, or a replacement policy.
-expected_occurrences = 855
+# The `<old> -> <new>` figures in the notes above are each stated against the
+# base that branch was written on. This row's value is the whole integration
+# tree re-measured after every plan in this wave was merged together, so it is
+# the sum of all of them and will not equal any single branch's arithmetic.
+expected_occurrences = 862
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2654,7 +2695,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 333
+# +1 for C-06's telemetry queue review: the same `scope.spawn(` the
+# `method-spawn` entry above describes. `.spawn(` is launch-shaped to this
+# pattern, but the callee is `std::thread::Scope::spawn` with a closure that
+# only pushes onto a bounded in-process queue. No child process is created and
+# nothing survives the scope.
+expected_occurrences = 334
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

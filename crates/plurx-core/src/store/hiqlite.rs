@@ -3340,6 +3340,16 @@ impl PlaybackTelemetryStore for HiqliteAuthStore {
         self.telemetry.record(event.clone()).await
     }
 
+    async fn record_playback_batch(
+        &self,
+        events: &[PlaybackEvent],
+        observations: &[NetworkPriorObservation],
+    ) -> Result<u64, StoreError> {
+        self.telemetry
+            .record_batch_with_priors(events.to_vec(), observations.to_vec())
+            .await
+    }
+
     async fn prune_playback_events(&self, before_ms: i64, limit: i64) -> Result<u64, StoreError> {
         self.telemetry.prune(before_ms, limit).await
     }

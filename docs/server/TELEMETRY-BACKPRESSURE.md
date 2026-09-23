@@ -15,9 +15,9 @@ everything else attaches to it; M2 (cached settings) cannot land first
 because it needs a task to own the refresh; M3 (counters out of the
 retention branch) is two lines and one test but must come **after** M1 so
 that the metric is recorded on the emit side of the queue; M4 (policy,
-drops, drain) closes it. One draft PR per milestone into `main` under the
-fast lane. Every `file:line` is from `0f02b7ea`; re-verify by function
-name.
+drops, drain) closes it. One draft PR owns the full plan, with one logical
+commit and Execution-log row per milestone, under the fast lane. Every
+`file:line` is from `0f02b7ea`; re-verify by function name.
 
 **If a step seems to require replicating a playback event, making `emit`
 async or fallible at its call sites, letting a terminal outcome be
@@ -349,6 +349,18 @@ terminal to a sample.
 `Sample` are refused once `len() > QUEUE - TERMINAL_RESERVE`. The reserve
 is what "room reserved for terminal outcomes" means in the remedy.
 
+Two corrections from C-06's sole adversarial review, both in the built code.
+First, the decision and the enqueue have to be **one** step: a depth snapshot
+followed by a separate send lets concurrent non-terminal producers all read
+the same sub-reserve depth and all send, spending the reserve exactly when it
+is needed. Admission therefore happens inside the queue's own lock. Second, a
+reserve alone is not the stated priority: 896 samples plus 128 terminals is a
+full queue, and the next terminal would be refused with 896 samples queued
+ahead of it. So a terminal arriving at a full queue **displaces the oldest
+non-terminal**, which is counted `queue_full`. Occupancy still never exceeds
+`QUEUE`, and the only queue that can refuse a terminal is one already holding
+`QUEUE` terminals.
+
 **Coalescing** happens in the writer, over the batch it has just taken, not
 in the queue: consecutive `Sample` jobs with the same
 `(session_id, event)` collapse to the newest, and the collapsed ones count
@@ -362,22 +374,36 @@ than at enqueue keeps `emit` free of a map lookup.
 | Metric | Labels |
 |---|---|
 | `plurx_telemetry_enqueued_total` | `class="terminal\|lifecycle\|sample"` |
-| `plurx_telemetry_dropped_total` | `reason="queue_full\|coalesced\|writer_degraded\|shutdown"` |
+| `plurx_telemetry_dropped_total` | `reason="queue_full\|coalesced\|writer_degraded\|writer_panic\|shutdown"` |
 | `plurx_telemetry_written_total` | `outcome="ok\|error"` |
 | `plurx_telemetry_queue_depth` | none (gauge) |
 | `plurx_telemetry_batch_size` | none (histogram; 1,2,4,8,16,32,64,+Inf) |
 | `plurx_telemetry_batch_seconds` | none (histogram; 0.001,0.01,0.05,0.25,1,5,+Inf) |
 | `plurx_telemetry_setting_refresh_failures_total` | none |
 
-Three classes × one label each: twelve series in total, all fixed. No
+Three classes × one label each: thirteen series in total, all fixed. No
 session ids, no file ids, no user ids, no paths — the same rule
 [OPERATIONS.md](../OPERATIONS.md) §"Health & metrics" already states for
 the cluster counters.
 
+**`writer_panic` is a fifth reason this plan did not ask for.** It was added
+during C-06's sole adversarial review, which found that a store future
+panicking after the writer had taken its batch off the queue destroyed that
+batch without incrementing any reason at all. The four reasons above are all
+deliberate discards; this one is not, and labelling it `writer_degraded`
+would have conflated "refused at the door because this node's sidecar keeps
+dying" with "already accepted and then lost". The cardinality is still
+fixed.
+
 **Shutdown.** `const DRAIN: Duration = Duration::from_secs(2);` On the
 drain signal the sink refuses `Sample`, the writer finishes the batch it
 holds and drains the queue for at most `DRAIN`, then counts the remainder
-as `reason="shutdown"` and returns. Two seconds sits inside the 10 s
+as `reason="shutdown"` and returns. The remainder is **transferred, not
+inferred from occupancy** — the review's third finding. Closing the queue
+and taking the writer's in-flight batch each yield their contents to exactly
+one caller, so a writer still wedged in a store call cannot afterwards report
+as written the jobs the drain has already reported lost, and the in-flight
+batch is part of the remainder instead of invisible to it. Two seconds sits inside the 10 s
 restart-preparation window `main.rs:1505-1512` already opens before Live TV
 shutdown, so this adds no wall time to a deploy. It is bounded because an
 unbounded drain against a wedged sidecar would hold the process open
@@ -610,7 +636,7 @@ lines of journalctl -u plurxd.
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per logical milestone in the plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
@@ -618,4 +644,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | Claim | pending | Claimed `plan/C-06` for one four-milestone implementation PR; implementation evidence follows milestone by milestone. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Added the 1,024-slot synchronous admission path, single supervised batching writer, one-transaction batch Store contract on both backends, bounded fixed-label queue metrics, boot registration, and an executable 64-row sidecar batch regression. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Seeded the paired effective settings before listener acceptance, cached them for 30 seconds, preserved the last good values on refresh failure, and invalidated the cache immediately after either local telemetry setting changes; focused tests cover seed, cache window, and invalidation. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Moved bounded playback metric recording ahead of queue admission and retention decisions. The focused regression disables retention, emits TTFF, proves the metric rises, and proves no raw playback row is stored. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Added the 128-slot terminal reserve, exhaustive current durable-outcome/error classification, consecutive-sample coalescing, all four fixed drop reasons, and a two-second shutdown drain wired before Live TV cleanup. Focused tests cover classification, terminal non-coalescing, sample replacement, and the drain bound. Fleet restart timing and injected real-playback sidecar-stall evidence remain pending under §6.3. |

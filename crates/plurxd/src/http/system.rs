@@ -3613,6 +3613,9 @@ pub async fn update_settings(
             )
             .await?;
     }
+    if req.telemetry_retain_days.is_some() || req.playback_network_priors.is_some() {
+        crate::telemetry::invalidate_settings(&state.store);
+    }
     if let Some(enabled) = req.playback_auto_abr {
         state
             .store
