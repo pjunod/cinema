@@ -76,6 +76,9 @@ const REMOTE_RELEASE_ATTEMPTS: usize = 3;
 const REMOTE_RELEASE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const REQUEST_CLAIM_SETTLEMENT_BUDGET: Duration = Duration::from_secs(5);
 const REQUEST_CLAIM_SETTLEMENT_RETRY_DELAY: Duration = Duration::from_millis(100);
+/// What a client is told to wait before re-posting a start that was refused
+/// because something it needs is still being produced.
+const SIDECAR_PENDING_RETRY_AFTER_SECS: u64 = 5;
 const PREDECESSOR_PROJECTION_FAST_WINDOW: Duration = Duration::from_secs(5);
 const PREDECESSOR_PROJECTION_RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -2461,6 +2464,18 @@ async fn create_with_purpose(
                         // Dropping a successful output drops its armed guard.
                         let _ = start_task.await;
                     });
+                    // Deliberately still codeless, i.e. still not retried.
+                    //
+                    // Both 50-second failures on m6 came through here rather
+                    // than through `session_start_error`, so naming it was
+                    // tempting. But with the burn sidecar bounded above, a cold
+                    // sidecar no longer reaches this arm at all — what does is
+                    // a start that spent 50 s queuing for an encoder slot, and
+                    // there the codeless 503 is correct back-pressure. Making
+                    // it retryable would add three more create posts per viewer
+                    // at exactly the moment the node is saturated, and the
+                    // abandoned start is detached rather than aborted, so the
+                    // node still pays for every one of them.
                     Err(ApiError::ServiceUnavailable(
                         "local media worker exceeded the placement deadline".to_owned(),
                     ))
@@ -3909,6 +3924,20 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
         return ApiError::Conflict(error);
     }
     tracing::warn!(file = file_id, "session create failed: {error}");
+    // A sidecar this start needs is still being produced. Nothing is wrong and
+    // nothing about the request should change — the only useful answer is
+    // "ask again", which is what `startup_timeout` already means to every
+    // client's create-retry ladder ("initialization media is not ready yet").
+    // Before this it fell through to the generic arm as a codeless 503, so the
+    // viewer got a terminal overlay for a file that was merely still loading.
+    if crate::subtitles::is_sidecar_pending_error(&error) {
+        return ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "startup_timeout",
+            message: error,
+            retry_after_seconds: SIDECAR_PENDING_RETRY_AFTER_SECS,
+        };
+    }
     // This player's previous start has not let go yet — a wait, and a bounded
     // one, so name it. Left as a bare `{error}` sentence this was a codeless
     // 503, which every client correctly refuses to retry because a 503 nobody
@@ -25415,6 +25444,40 @@ mod tests {
             0,
             "a failed internal read is not a partial delivery"
         );
+    }
+
+    #[test]
+    /// Both 503s a viewer hit on 2026-09-21 were codeless, so every client
+    /// correctly refused to retry them and showed a terminal overlay for a
+    /// title that was merely still loading. Neither is a failure; both are
+    /// "ask again", which is what `startup_timeout` means to the ladder all
+    /// three clients already run. This pins the sidecar half; the placement
+    /// deadline's arm is inside the start handler and is covered by the
+    /// integration path rather than here.
+    fn a_pending_sidecar_is_a_named_not_yet_answer() {
+        let pending = format!(
+            "{}the source is still being read for this track",
+            crate::subtitles::SIDECAR_PENDING_PREFIX
+        );
+        match session_start_error(5208, pending) {
+            ApiError::TypedRetry {
+                status,
+                code,
+                retry_after_seconds,
+                ..
+            } => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(code, "startup_timeout");
+                assert_eq!(retry_after_seconds, SIDECAR_PENDING_RETRY_AFTER_SECS);
+            }
+            _ => panic!("a pending sidecar must be a named not-yet answer"),
+        }
+        // An extraction that genuinely failed is NOT a not-yet: it is about
+        // this track, the negative memo already remembers it, and retrying it
+        // three times would just replay the same failure at the viewer.
+        assert!(!crate::subtitles::is_sidecar_pending_error(
+            "text subtitle extraction failed; suppressing retries for now"
+        ));
     }
 
     #[test]

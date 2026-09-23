@@ -587,9 +587,17 @@ The server side of `pgs-v1` is implemented behind Settings → Developer →
 off by default while physical-device HDR/Dolby Vision acceptance remains
 incomplete. Apple and Android have automated application renderers, but that
 does not make the server capability production-ready. When off,
-`/decision` omits `overlay` and the
-overlay routes return 404. Enabling the gate changes subtitle delivery only;
-it does not select an overlay automatically and does not alter video bytes.
+`/decision` omits `overlay` and the overlay routes return 404.
+
+Enabling the gate changes subtitle delivery only and never alters video bytes.
+It **does** let `/decision` select a PGS track as the default — but only for a
+client that claimed it can draw one. A client advertises that in its
+capabilities document as `subtitle_overlays: ["pgs-v1"]`; absent or empty is
+not a claim, so a client that has not been taught to render bitmaps is offered
+no PGS default, is told no `overlay` protocol, and is told that selecting a PGS
+track requires a burn-in — which for that client is true. (This paragraph said
+the opposite until 2026-09-22: it claimed the gate "does not select an overlay
+automatically", which `stream.rs` has contradicted since the selection landed.)
 
 The manifest route is:
 

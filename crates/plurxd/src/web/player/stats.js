@@ -251,7 +251,38 @@ function playbackWaitCopy(runwaySeconds,httpWaitCount){
   const waits=httpWaitCount==null?null:Math.max(0,Math.trunc(Number(httpWaitCount)||0));
   const waitText=waits==null?"server wait state unavailable":waits===0?"no server HTTP waits":
     `${waits} server HTTP ${waits===1?"wait":"waits"}`;
-  return {title:"Presentation waiting…",detail:`${runway.toFixed(1)} s client loaded · ${waitText}`};
+  return {title:"Buffering…",detail:`${runway.toFixed(1)} s client loaded · ${waitText}`};
+}
+// The wait sentence as it is NOW. The raise can only say what was true the
+// instant the wait began — which is always "0.0 s client loaded", and on a
+// cold open "server wait state unavailable" too — so the sampling tick hands
+// the render a fresh one twice a second. Null when this player does not own
+// the attached element: a predecessor's runway is not this wait's runway.
+//
+// The server count is only a reading while it is fresh: health is polled every
+// two seconds while the Playback info panel is open or a media wait is live,
+// and a sample older than PLAYBACK_WAIT_HEALTH_MAX_AGE_MS says "unavailable"
+// rather than repeating a count from before the wait began.
+const PLAYBACK_WAIT_HEALTH_MAX_AGE_MS=5000;
+function playbackWaitLiveDetail(v,p,now){
+  if(!v||!p||PLAYER!==p||!playbackOwnsAttachedMedia(p)) return null;
+  let runway=0;
+  try{ runway=bufferRunway(v); }catch(e){}
+  const at=now==null?performance.now():now;
+  const fresh=p.health&&p.healthObservedAt!=null&&at-p.healthObservedAt<=PLAYBACK_WAIT_HEALTH_MAX_AGE_MS;
+  return playbackWaitCopy(runway,fresh?p.health.http_wait_count:null).detail;
+}
+// Is a media wait on screen? The health poll runs for it as well as for the
+// panel, so the wait's server count is a current one.
+function playbackWaitSurfaceLive(){
+  const surface=PLAYBACK_SURFACE.surface;
+  return !!(surface&&surface.source==="media_waiting");
+}
+// The half-second sampling tick: resample the wait sentence, then run the
+// presenter step that paints it.
+function playbackSamplingTick(v,p){
+  renderPlaybackSurface.waitDetail=playbackWaitLiveDetail(v,p);
+  playbackProgressTick(v,p);
 }
 function playbackStatsTelemetry(){
   const p=PLAYER||{},v=playbackOwnsAttachedMedia(PLAYER)?document.getElementById("video"):null,s=p.source||{},h=p.health||null;
@@ -425,7 +456,7 @@ async function pollSessionHealth(force){
   const current=()=>playbackOwnsAttachedMedia(p)&&p.sessionId===session&&p.streamId===stream
     &&p.mediaAttachment===attachment;
   const ov=document.getElementById("statsov");
-  if(!force&&(!ov||!ov.classList.contains("on"))) return;
+  if(!force&&(!ov||!ov.classList.contains("on"))&&!playbackWaitSurfaceLive()) return;
   // Two shapes of stream, one question. An HLS session answers from the
   // transcode manager; a progressive remux answers from its own registry (see
   // progressive.rs) — that path is Chrome's whole remux experience, and until
@@ -443,11 +474,10 @@ async function pollSessionHealth(force){
     if(current()) {
       p.health=h;
       p.healthObservedAt=performance.now();
-      // This used to repaint the buffering overlay with the server's wait
-      // count. It is gone: a fault is raised by the event that caused it, not
-      // restated every two seconds by a poll that only runs while the Playback
-      // info panel is open — and that panel's own HTTP wait row is where the
-      // number belongs.
+      // No surface is raised or restated here: a fault is raised by the event
+      // that caused it. A live media wait reads this sample through the
+      // sampling tick (playbackWaitLiveDetail), which is why the poll also
+      // runs while one is on screen.
       updateStats();
     }
   }catch(e){

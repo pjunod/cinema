@@ -684,7 +684,13 @@ async fn encoded_vod_burn_sidecar_cannot_reuse_replaced_source_captions() {
             .len()
     );
     let cache = base.path().join("subtitles");
-    let mut old = crate::subtitles::ensure_burn_file(&cache, &file, 0, None)
+    let mut old = crate::subtitles::ensure_burn_file(
+        &cache,
+        &file,
+        0,
+        None,
+        crate::subtitles::SIDECAR_JOIN_UNBOUNDED,
+    )
         .await
         .expect("first burn extraction");
     let mut bytes = Vec::new();
@@ -697,7 +703,13 @@ async fn encoded_vod_burn_sidecar_cannot_reuse_replaced_source_captions() {
         .expect("replacement handle")
         .set_times(std::fs::FileTimes::new().set_modified(modified))
         .expect("preserve exact mtime");
-    let mut new = crate::subtitles::ensure_burn_file(&cache, &file, 0, None)
+    let mut new = crate::subtitles::ensure_burn_file(
+        &cache,
+        &file,
+        0,
+        None,
+        crate::subtitles::SIDECAR_JOIN_UNBOUNDED,
+    )
         .await
         .expect("new source burn extraction");
     bytes.clear();
@@ -766,7 +778,13 @@ async fn burn_extractor_physically_caps_oversized_matroska_attachment() {
         .expect("unix mtime")
         .as_secs() as i64;
     let cache = base.path().join("subtitles");
-    let error = crate::subtitles::ensure_burn_file(&cache, &file, 0, None)
+    let error = crate::subtitles::ensure_burn_file(
+        &cache,
+        &file,
+        0,
+        None,
+        crate::subtitles::SIDECAR_JOIN_UNBOUNDED,
+    )
         .await
         .expect_err("oversized attachment must be stopped before publication");
     assert!(error.contains("disk bound"), "{error}");
@@ -1560,7 +1578,13 @@ async fn encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing()
         ..Default::default()
     }];
     let subtitle =
-        crate::subtitles::ensure_burn_file(&base.path().join("subtitles"), &file, 0, None)
+        crate::subtitles::ensure_burn_file(
+            &base.path().join("subtitles"),
+            &file,
+            0,
+            None,
+            crate::subtitles::SIDECAR_JOIN_UNBOUNDED,
+        )
             .await
             .expect("production bitmap extraction");
     let frozen = Arc::get_mut(&mut encoding).expect("unique recipe");

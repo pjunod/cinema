@@ -274,17 +274,124 @@ test("playback info keeps readiness unknown distinct from measured zero", () => 
     { value: "2 active", note: "oldest 1450 ms · segment 37" },
   );
   assert.deepEqual(telemetry.playbackWaitCopy(0, 0), {
-    title: "Presentation waiting…",
+    title: "Buffering…",
     detail: "0.0 s client loaded · no server HTTP waits",
   });
   assert.deepEqual(telemetry.playbackWaitCopy(3.25, 1), {
-    title: "Presentation waiting…",
+    title: "Buffering…",
     detail: "3.3 s client loaded · 1 server HTTP wait",
   });
   assert.equal(
     telemetry.playbackWaitCopy(0, null).detail,
     "0.0 s client loaded · server wait state unavailable",
   );
+});
+
+// The wait sentence used to be composed once, when `waiting` fired, and so it
+// always read "0.0 s client loaded" for the whole wait. The sampling tick now
+// recomputes it, and only for the player that owns the attached element.
+test("the wait detail is sampled live and only for the owning player", () => {
+  const live = new Function(
+    "bufferRunway", "playbackOwnsAttachedMedia", "performance",
+    `let PLAYER=null;\n${shippedSource("playbackWaitCopy")}\n` +
+      `${shippedBinding("const", "PLAYBACK_WAIT_HEALTH_MAX_AGE_MS")}\n${shippedSource("playbackWaitLiveDetail")}\n` +
+      "return {own(p){PLAYER=p;}, playbackWaitLiveDetail};",
+  )(() => 4.26, () => true, { now: () => 10_000 });
+  const player = { health: { http_wait_count: 2 }, healthObservedAt: 9_000 };
+  live.own(player);
+  assert.equal(live.playbackWaitLiveDetail({}, player), "4.3 s client loaded · 2 server HTTP waits");
+  player.healthObservedAt = 1_000;
+  assert.equal(live.playbackWaitLiveDetail({}, player), "4.3 s client loaded · server wait state unavailable",
+    "a count from before the wait began is not a reading");
+  assert.equal(live.playbackWaitLiveDetail({}, { health: null }), null,
+    "a player that is not PLAYER has no runway to report");
+  assert.equal(live.playbackWaitLiveDetail(null, player), null);
+});
+
+test("the sampling tick resamples the wait sentence before the presenter paints", () => {
+  const order = [];
+  const render = function renderPlaybackSurface() {};
+  const tick = new Function(
+    "renderPlaybackSurface", "playbackWaitLiveDetail", "playbackProgressTick",
+    `${shippedSource("playbackSamplingTick")}\nreturn playbackSamplingTick;`,
+  )(
+    render,
+    () => { order.push("sample"); return "1.5 s client loaded · 1 server HTTP wait"; },
+    () => { order.push(`paint:${render.waitDetail}`); },
+  );
+  tick({}, {});
+  assert.deepEqual(order, ["sample", "paint:1.5 s client loaded · 1 server HTTP wait"]);
+  // Both places that arm the half-second tick use it: a cold attach and a
+  // prepared handoff's adoption of the successor element.
+  const intervals = [];
+  const arm = new Function(
+    "setInterval", "clearInterval", "playbackSamplingTick", "PlaybackPolicy",
+    `${shippedSource("armPlaybackSampling")}\nreturn armPlaybackSampling;`,
+  )(
+    (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
+    () => {},
+    (v, p) => order.push(["sampled", v, p]),
+    { AUTO_DEFAULTS: { sampleMs: 1000 } },
+  );
+  const v = { id: "v" }, p = { id: "p" };
+  arm(v, p);
+  const half = intervals.find((entry) => entry.ms === 500);
+  assert.ok(half, "armPlaybackSampling no longer arms a 500 ms tick");
+  half.fn();
+  assert.deepEqual(order.at(-1), ["sampled", v, p]);
+  assert.match(shippedSource("adoptPlaybackMediaElement"), /setInterval\(\(\)=>playbackSamplingTick\(v,p\),500\)/);
+});
+
+test("the health poll runs for a live media wait as well as for the panel", async () => {
+  const build = (waitLive) => {
+    const calls = [];
+    // The slice carries the module's own 2 s `setInterval` beside the
+    // function; a real timer there would keep this process alive forever.
+    const poll = new Function(
+      "PLAYER", "playbackOwnsAttachedMedia", "document", "playbackWaitSurfaceLive", "api",
+      "updateStats", "performance", "setInterval",
+      `${shippedSource("pollSessionHealth")}\nreturn pollSessionHealth;`,
+    )(
+      { sessionId: "s1", streamId: null, mediaAttachment: 1 },
+      () => true,
+      { getElementById: () => ({ classList: { contains: () => false } }) },
+      () => waitLive,
+      async (url) => { calls.push(url); return { http_wait_count: 1 }; },
+      () => {},
+      { now: () => 0 },
+      () => 0,
+    );
+    return { poll, calls };
+  };
+  const waiting = build(true);
+  await waiting.poll();
+  assert.deepEqual(waiting.calls, ["/hls/s1/status"]);
+  const idle = build(false);
+  await idle.poll();
+  assert.deepEqual(idle.calls, [], "with the panel closed and no wait, nothing polls");
+});
+
+test("a media wait renders the live detail; every other fault renders its own", () => {
+  const { render, elements } = buildShippedSurfaceRender();
+  const fn = render;
+  fn.waitDetail = "7.5 s client loaded · 1 server HTTP wait";
+  fn({ kind: "blocking", class: "buffering", source: "media_waiting", title: "Buffering…",
+    detail: "0.0 s client loaded · server wait state unavailable", actions: [] });
+  assert.equal(elements.ploadText.textContent, "Buffering…");
+  assert.equal(elements.ploadSub.textContent, "7.5 s client loaded · 1 server HTTP wait");
+  fn({ kind: "indicator", class: "buffering", source: "media_waiting", title: "Buffering…",
+    detail: null, actions: [] });
+  assert.equal(elements.pindText.textContent, "Buffering… · 7.5 s client loaded · 1 server HTTP wait",
+    "the in-chrome indicator carries the reading too");
+  fn({ kind: "blocking", class: "preparing", source: "client_preparing", title: "Loading…",
+    detail: "owner detail", actions: [] });
+  assert.equal(elements.ploadSub.textContent, "owner detail",
+    "only a media wait's sentence is replaced");
+  fn.waitDetail = null;
+  fn({ kind: "blocking", class: "buffering", source: "media_waiting", title: "Buffering…",
+    detail: "raised detail", actions: [] });
+  assert.equal(elements.ploadSub.textContent, "raised detail",
+    "with no live sample the raise's own sentence stands");
 });
 
 // `openSession` reaches two more shipped helpers than it used to, and every

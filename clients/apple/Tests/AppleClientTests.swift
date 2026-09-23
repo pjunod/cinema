@@ -6013,14 +6013,14 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(
             PlaybackWaitPresentation.make(runwaySeconds: 0, httpWaitCount: 0),
             PlaybackWaitPresentation(
-                title: "Presentation waiting…",
+                title: "Buffering…",
                 detail: "0.0 s client loaded · no server HTTP waits"
             )
         )
         XCTAssertEqual(
             PlaybackWaitPresentation.make(runwaySeconds: 3.25, httpWaitCount: 1),
             PlaybackWaitPresentation(
-                title: "Presentation waiting…",
+                title: "Buffering…",
                 detail: "3.2 s client loaded · 1 server HTTP wait"
             )
         )
@@ -6028,6 +6028,46 @@ final class AppleClientTests: XCTestCase {
             PlaybackWaitPresentation.make(runwaySeconds: 0, httpWaitCount: nil).detail,
             "0.0 s client loaded · server wait state unavailable"
         )
+        XCTAssertEqual(
+            PlaybackWaitPresentation.make(
+                runwaySeconds: 0, httpWaitCount: nil, source: "client_preparing"
+            ).title,
+            "Loading…",
+            "a wait before the first frame is the open, not a stall"
+        )
+    }
+
+    func testPlaybackWaitDetailIsLiveForWaitsAndOwnedByTheRaiserOtherwise() {
+        func surface(_ source: String, title: String?, detail: String?) -> PlaybackSurface {
+            PlaybackSurface(
+                kind: .blocking,
+                fault: PlaybackFault(
+                    cls: source == "media_waiting" ? .buffering : .preparing,
+                    source: source,
+                    attached: 1,
+                    intent: nil,
+                    raisedAt: ContinuousClock.now,
+                    positionMs: nil,
+                    title: title,
+                    detail: detail,
+                    actions: [],
+                    playerStopped: false
+                )
+            )
+        }
+        let live = "7.5 s client loaded · 1 server HTTP wait"
+        let buffering = surface("media_waiting", title: "Buffering…", detail: "0.0 s client loaded · no server HTTP waits")
+        XCTAssertEqual(PlaybackWaitPresentation.detail(for: buffering, live: live), live)
+        XCTAssertEqual(
+            PlaybackWaitPresentation.detail(for: buffering, live: nil),
+            "0.0 s client loaded · no server HTTP waits",
+            "with no live sample the raised sentence stands"
+        )
+        let loading = surface("client_preparing", title: "Loading…", detail: "0.0 s client loaded · server wait state unavailable")
+        XCTAssertEqual(PlaybackWaitPresentation.detail(for: loading, live: live), live)
+        let stagedOpen = surface("client_preparing", title: nil, detail: nil)
+        XCTAssertFalse(PlaybackWaitPresentation.isWait(stagedOpen), "the bare staged open is not a wait")
+        XCTAssertNil(PlaybackWaitPresentation.detail(for: stagedOpen, live: live))
     }
 
     func testLiveCopyRecoverySeeksPastThePrecedingKeyframe() {

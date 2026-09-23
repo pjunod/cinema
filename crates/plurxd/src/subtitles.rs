@@ -48,6 +48,49 @@ const NEGATIVE_TTL: Duration = Duration::from_secs(120);
 /// bytes: a library full of broken tracks must not turn the memo into a leak.
 const MAX_NEGATIVE_ENTRIES: usize = 128;
 
+/// How long a caller **that has a deadline of its own** waits for a sidecar
+/// another task is producing.
+///
+/// Deliberately far below any start budget, because the two outcomes are far
+/// apart and there is nothing in between: a published sidecar resolves on the
+/// first poll, and a cold one needs a full demux of the source. Extracting one
+/// PGS track from file 5208 — a 79.5 GB remux whose subtitle packets are
+/// interleaved across 116 minutes — read the entire file to produce 18,866
+/// bytes, measured at 402 s on m6, which is just the disk's read speed. No
+/// start budget can contain that, so a start must not spend its budget
+/// discovering it.
+///
+/// **Only the session start uses this.** The other callers of this module —
+/// offline restore, offline package production, and the subtitle VTT endpoint
+/// — have no deadline to protect and map any error to something terminal
+/// (410 Gone, a failed download, 500). For them a slow success must stay a
+/// success, so they keep [`SIDECAR_JOIN_UNBOUNDED`].
+pub(crate) const SIDECAR_JOIN_BUDGET: Duration = Duration::from_secs(5);
+
+/// The budget of a caller with nothing to protect: long enough that it can
+/// only be reached after the extraction's own [`EXTRACTION_TIMEOUT`] has
+/// already published an answer, so these callers wait exactly as long as they
+/// did before the budget existed.
+pub(crate) const SIDECAR_JOIN_UNBOUNDED: Duration =
+    Duration::from_secs(EXTRACTION_TIMEOUT.as_secs() + 60);
+
+/// Marks a refusal that means "this artifact is being built; ask again".
+///
+/// It is a distinct class from an extraction *failure* on purpose. A failure
+/// is about this track and is remembered by the negative memo; this says
+/// nothing is wrong at all, and the only honest response is to wait. The HTTP
+/// layer maps it to the `startup_timeout` code the create-retry ladder on
+/// every client already knows.
+pub(crate) const SIDECAR_PENDING_PREFIX: &str = "subtitle sidecar is still being built: ";
+
+fn sidecar_pending_error(message: impl AsRef<str>) -> String {
+    format!("{SIDECAR_PENDING_PREFIX}{}", message.as_ref())
+}
+
+pub(crate) fn is_sidecar_pending_error(error: &str) -> bool {
+    error.starts_with(SIDECAR_PENDING_PREFIX)
+}
+
 /// The largest sidecar publish will accept. Real WebVTT is kilobytes — a
 /// dense SDH track for a three-hour film lands near 200 KB — and this file is
 /// re-read whole for every subtitle segment request, so the cap is chosen to
@@ -65,6 +108,10 @@ struct ExtractionLimits {
     timeout: Duration,
     negative_ttl: Duration,
     max_sidecar_bytes: u64,
+    /// How long a caller waits for a flight before taking its budget back.
+    /// In here with the others so a suite can shrink it. Defaults to
+    /// [`SIDECAR_JOIN_UNBOUNDED`]; only the session start narrows it.
+    join_budget: Duration,
 }
 
 impl Default for ExtractionLimits {
@@ -73,6 +120,7 @@ impl Default for ExtractionLimits {
             timeout: EXTRACTION_TIMEOUT,
             negative_ttl: NEGATIVE_TTL,
             max_sidecar_bytes: MAX_SIDECAR_BYTES,
+            join_budget: SIDECAR_JOIN_UNBOUNDED,
         }
     }
 }
@@ -976,11 +1024,15 @@ pub async fn ensure_vtt_file(
 /// Matroska. Restarting video must not discard a cue that began before its
 /// seek landing. The existing cache owns one bounded extraction per identity,
 /// including cancellation, negative memo, atomic publication, and pruning.
+/// `join_budget` is the caller's, not this module's: a session start passes
+/// [`SIDECAR_JOIN_BUDGET`] because it has 50 s to spend on everything, and a
+/// caller with no deadline passes [`SIDECAR_JOIN_UNBOUNDED`].
 pub(crate) async fn ensure_burn_file(
     dir: &Path,
     file: &MediaFile,
     index: i64,
     expected_object_version: Option<&str>,
+    join_budget: Duration,
 ) -> Result<std::fs::File, String> {
     const MAX_BURN_BYTES: u64 = 64 * 1024 * 1024;
     use sha2::{Digest, Sha256};
@@ -991,6 +1043,7 @@ pub(crate) async fn ensure_burn_file(
     let cached = dir.join(format!("f{}-s{index}-{version}-burn-v2.mks", file.id));
     let limits = ExtractionLimits {
         max_sidecar_bytes: MAX_BURN_BYTES,
+        join_budget,
         ..Default::default()
     };
     let extractor_source = Arc::clone(&source);
@@ -1232,11 +1285,28 @@ where
         });
     }
 
-    join_flight(&flight).await
+    join_flight(&flight, limits.join_budget).await
 }
 
-/// Wait for whoever owns this key to publish an answer.
-async fn join_flight(flight: &Extraction) -> Result<PathBuf, String> {
+/// Wait for whoever owns this key to publish an answer, or give the caller
+/// back its budget.
+///
+/// The wait used to be unbounded, and the owning task is deliberately detached
+/// so that a cancelled caller does not abandon a running ffmpeg — which meant
+/// a caller inherited the extraction's whole runtime whether or not it had
+/// that long to give. Timing out here abandons only the *waiting*: the
+/// extraction keeps going, publishes as it always did, and the next caller
+/// finds it ready.
+async fn join_flight(flight: &Extraction, budget: Duration) -> Result<PathBuf, String> {
+    match tokio::time::timeout(budget, join_flight_unbounded(flight)).await {
+        Ok(result) => result,
+        Err(_) => Err(sidecar_pending_error(
+            "the source is still being read for this track",
+        )),
+    }
+}
+
+async fn join_flight_unbounded(flight: &Extraction) -> Result<PathBuf, String> {
     loop {
         // Register before inspecting the result so a publish between the two
         // operations cannot become a lost notification.
@@ -1319,7 +1389,7 @@ where
         return tokio::select! {
             biased;
             _ = cancel => WindowExtractionOutcome::Aborted,
-            result = join_flight(&flight) => WindowExtractionOutcome::Complete(result),
+            result = join_flight_unbounded(&flight) => WindowExtractionOutcome::Complete(result),
         };
     }
 
@@ -2624,6 +2694,84 @@ mod tests {
             negative_ttl: Duration::from_secs(60),
             ..ExtractionLimits::default()
         }
+    }
+
+    /// A cold sidecar on a large source is not a failure and must not be paid
+    /// for by whoever asked first.
+    ///
+    /// The extraction reads the whole container — 79.5 GB for file 5208, 402 s
+    /// measured, to produce 18,866 bytes — so a caller that waits for it
+    /// inherits a runtime no start budget can contain. The wait is bounded and
+    /// the *extraction* is not: it must still finish, publish, and be there
+    /// for the next caller.
+    #[tokio::test]
+    async fn a_cold_sidecar_gives_the_caller_its_budget_back_and_keeps_extracting() {
+        let dir = crate::test_tempdir().expect("cache");
+        let file = media_file(dir.path().join("source.mkv"));
+        let limits = || ExtractionLimits {
+            join_budget: Duration::from_millis(50),
+            ..ExtractionLimits::default()
+        };
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let finished_for_run = Arc::clone(&finished);
+        let slow = ensure_vtt_bounded(
+            dir.path(),
+            &file,
+            0,
+            limits(),
+            move |tmp, _, _| async move {
+                // Longer than the join budget, shorter than the extraction's own.
+                let _ = release_rx.await;
+                tokio::fs::write(&tmp, b"WEBVTT\n\ncold\n")
+                    .await
+                    .map_err(|error| error.to_string())?;
+                finished_for_run.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+
+        let why = slow.expect_err("a caller must not inherit a full-source read");
+        assert!(
+            is_sidecar_pending_error(&why),
+            "the refusal names a pending artifact rather than a failure, got {why}"
+        );
+
+        // Nothing was cancelled: releasing the extraction still publishes.
+        release_tx.send(()).expect("release the extraction");
+        for _ in 0..200 {
+            if finished.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "bounding the wait must not abandon the extraction"
+        );
+
+        // And the next caller finds it warm, which is the whole point of
+        // letting the detached extraction run on. This one waits on the
+        // unbounded budget on purpose: it is asserting that the work was not
+        // abandoned, not racing the publish that proves it.
+        let warm = ensure_vtt_bounded(
+            dir.path(),
+            &file,
+            0,
+            ExtractionLimits::default(),
+            move |_, _, _| async move {
+                Err("a published sidecar must not be re-extracted".into())
+            },
+        )
+        .await
+        .expect("the published sidecar is served to the next caller");
+        assert_eq!(
+            tokio::fs::read(&warm).await.expect("published sidecar"),
+            b"WEBVTT\n\ncold\n"
+        );
     }
 
     /// P1-4: a stalled NAS read used to park every waiter forever on

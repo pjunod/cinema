@@ -892,6 +892,21 @@ fn audio_tracks(file: &MediaFile) -> Vec<AudioTrackDto> {
         .collect()
 }
 
+/// Whether THIS caller gets the PGS overlay, given that this server serves it.
+///
+/// A caps document is how a client says what it can paint, so a document that
+/// does not claim the protocol is a client that cannot. **No document at all
+/// is not the same answer.** The legacy `GET /decision` query has no slot for
+/// a claim, and that path is a mixed-fleet one rather than an old-client one —
+/// both native clients fall back to it on any 400/404/405, and Android's
+/// fallback has no refusal-code exemption at all. Reading silence as "cannot"
+/// would take a client that can paint the overlay and send it off to re-encode
+/// a whole film, losing the grade on an HDR source on the way. Silence keeps
+/// the answer this server gave before the claim existed: the switch alone.
+fn overlay_for_caller(served: bool, caps: Option<&plurx_core::playback::DeviceCaps>) -> bool {
+    served && caps.is_none_or(|caps| caps.renders_subtitle_overlay(crate::pgs_overlay::PROTOCOL))
+}
+
 fn sub_tracks(file: &MediaFile, overlay_enabled: bool) -> Vec<SubTrackDto> {
     file.subtitle_streams
         .iter()
@@ -2168,11 +2183,21 @@ pub async fn decision(
     .audio_index;
     let selected_audio = effective_audio_selection(&file, q.audio, policy_audio)?;
     let selection_requested = q.audio.is_some() || q.subtitle.is_some();
-    // One read for both uses below: whether a PGS track is offered to the
-    // client and whether selecting one forces a burn-in are the same question
-    // asked twice, and answering them from two reads would let a switch flip
-    // between them inside one request.
-    let pgs_overlay = state.pgs_overlay_enabled().await?;
+    // One read, two answers. `overlay_served` is this process: can a PGS track
+    // be delivered as `pgs-v1` here at all. `pgs_overlay` narrows that by the
+    // caller's own claim: will THIS client paint one. Reading the switch twice
+    // would let it flip between the two inside a single request.
+    //
+    // The switch alone used to answer both, which made `/decision` issue a
+    // plan the caller could not execute: a browser — which has no PGS
+    // renderer at all — was offered a PGS default, told the delivery needed
+    // no burn, and had to override the server's plan locally to get a picture.
+    // The narrowed answer governs the two claims a client acts on: it is not
+    // offered the track as a default, and it IS told that selecting it burns
+    // the video. The `overlay` field on the track itself deliberately keeps
+    // the wider answer; see the comment where `sub_tracks` is called.
+    let overlay_served = state.pgs_overlay_enabled().await?;
+    let pgs_overlay = overlay_for_caller(overlay_served, q.caps_v2.as_ref());
     let container_default_audio = container_default_audio_index(&file.audio_streams);
     // The policy subtitle is chosen against the plan, so the plan has to exist
     // first — and the audio rules are what the subtitle rules read, so the
@@ -2340,7 +2365,15 @@ pub async fn decision(
 
     // DTO defaults and the verdict now come from the same selection above.
     let audio = audio_tracks(&file);
-    let mut subtitles = sub_tracks(&file, pgs_overlay);
+    // Deliberately the server's switch, not the narrowed answer. `overlay`
+    // describes the track and this process — "could this be delivered as
+    // pgs-v1 here" — and it is the only surface that answers it. A client
+    // that did not claim the protocol simply does not read the field, while
+    // an operator checking the Developer switch, or a client on an older
+    // build, has nowhere else to look. What that client must not be told is
+    // that the delivery needs no burn, and that is `subtitle_requires_burn_in`
+    // and `subtitle_route`, both of which stay narrowed.
+    let mut subtitles = sub_tracks(&file, overlay_served);
     for s in &mut subtitles {
         s.default = selected_subtitle == Some(s.index);
     }
@@ -5965,6 +5998,42 @@ mod tests {
         assert!(!tracks[3].text && !tracks[3].native);
         assert!(subtitle_requires_burn_in(&file, Some(3), false));
         assert!(!subtitle_requires_burn_in(&file, Some(0), false));
+
+        // The three answers the capability governs. A client that posted a
+        // document and did not claim the protocol cannot paint one; a client
+        // that posted no document at all has said nothing, and the legacy GET
+        // path — which both native clients fall back to on any 400/404/405 —
+        // is exactly that case. Reading silence as a refusal is what would
+        // send a capable client off to re-encode a whole film.
+        let capable = plurx_core::playback::DeviceCaps {
+            subtitle_overlays: vec![crate::pgs_overlay::PROTOCOL.to_owned()],
+            ..Default::default()
+        };
+        let silent = plurx_core::playback::DeviceCaps::default();
+        assert!(
+            !silent.renders_subtitle_overlay(crate::pgs_overlay::PROTOCOL),
+            "absent is never a claim"
+        );
+        assert!(capable.renders_subtitle_overlay(crate::pgs_overlay::PROTOCOL));
+        assert!(
+            !capable.renders_subtitle_overlay("pgs-v2"),
+            "claiming one protocol claims nothing about its successor"
+        );
+
+        assert!(overlay_for_caller(true, Some(&capable)));
+        assert!(
+            !overlay_for_caller(true, Some(&silent)),
+            "a document that claims nothing is a client that cannot paint it"
+        );
+        assert!(
+            overlay_for_caller(true, None),
+            "no document at all is silence, not a refusal — the legacy GET \
+             fallback must not turn an overlay into a whole-film burn"
+        );
+        assert!(
+            !overlay_for_caller(false, Some(&capable)),
+            "the client's claim never overrides an operator switch that is off"
+        );
 
         // Default-off and old servers remain wire-compatible: the additive
         // field is absent rather than null.
