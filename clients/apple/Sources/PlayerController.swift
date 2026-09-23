@@ -4205,6 +4205,31 @@ final class PlayerController: ObservableObject {
         started && lifecycleGeneration == generation
     }
 
+    /// The nine epochs and the attached item, read in one turn on the main
+    /// actor, so a continuation about to `await` can record which state it
+    /// depends on and compare only that subset when it wakes.
+    ///
+    /// Taking all nine costs nine integer reads and answers the question a
+    /// caller actually has, which is "did the thing *I* depend on move?" —
+    /// `Attempt.stillCurrent(_:scopes:)` is where the subset is named. Reading
+    /// them together also makes the pair of snapshots comparable: both are
+    /// taken with no suspension inside them, so neither can be half of one
+    /// state and half of another.
+    func snapshotAttempt() -> Attempt {
+        Attempt(
+            lifecycle: lifecycleGeneration,
+            open: openGeneration,
+            viewerAction: viewerActionEpoch,
+            initialDecision: initialDecisionGeneration,
+            createRetry: createRetryEpoch,
+            preparedAlignment: preparedAlignmentGeneration,
+            seek: seekState.generation,
+            pgsSelection: pgsOverlaySelectionGeneration,
+            pgsItem: pgsOverlayItemGeneration,
+            item: player.currentItem.map(ObjectIdentifier.init)
+        )
+    }
+
     private func restartInitialDecision(lifecycle: Int) {
         guard isCurrentLifecycle(lifecycle), decision == nil else { return }
         loadingTask?.cancel()
@@ -5406,8 +5431,7 @@ final class PlayerController: ObservableObject {
         // spend — so an ask placed after it would let a server `hold`
         // permanently retire the one same-delivery reopen this client had,
         // which is the exact failure a hold exists to avoid.
-        let generation = openGeneration
-        let actionEpoch = viewerActionEpoch
+        let stallAttempt = snapshotAttempt()
         let deferralDeadline = shouldConsultControl
             ? ProcessInfo.processInfo.systemUptime
                 + Double(max(0, Self.controlStallDeferralDeadlineMs - event.durationMs)) / 1_000
@@ -5419,8 +5443,7 @@ final class PlayerController: ObservableObject {
             verdict = nil
         }
         // Everything the caller checked may have changed across that await.
-        guard openGeneration == generation,
-              viewerActionEpoch == actionEpoch,
+        guard stallAttempt.stillCurrent(snapshotAttempt(), scopes: [.open, .viewerAction]),
               started,
               stallRecoveryStillEligible
         else { return }
@@ -6880,16 +6903,21 @@ final class PlayerController: ObservableObject {
                     // cancels this monitor, so awaiting it here would cancel
                     // the recovery halfway through its own open.
                     self.currentMs = targetMs
-                    let recoveryGeneration = self.openGeneration
-                    let recoveryActionEpoch = self.viewerActionEpoch
+                    // The three epochs this recovery depends on, named. The
+                    // seek scope is this monitor's own `generation`: the loop
+                    // guard above already required
+                    // `seekState.generation == generation` and nothing has
+                    // suspended since, so `recovery.seek` is that same value.
+                    let recovery = self.snapshotAttempt()
                     Task { [weak self] in
                         guard let self,
-                              self.openGeneration == recoveryGeneration,
-                              self.viewerActionEpoch == recoveryActionEpoch,
+                              recovery.stillCurrent(
+                                  self.snapshotAttempt(),
+                                  scopes: [.open, .viewerAction, .seek]
+                              ),
                               self.wantsPlayback, !self.isPlaybackBlocked, !self.finished,
                               !(self.seekPresentationBackgrounded && hasVideo),
-                              self.seekState.pendingMs == targetMs,
-                              self.seekState.generation == generation
+                              self.seekState.pendingMs == targetMs
                         else { return }
                         await self.retrySameDeliveryAfterStall(
                             PlaybackStallEvent(
@@ -6971,11 +6999,20 @@ final class PlayerController: ObservableObject {
                     hasVideoSource: self.decision?.source?.videoCodec != nil,
                     playing: isActuallyPlaying
                 ) {
-                    let actionEpoch = self.viewerActionEpoch
+                    // `started` and `lifecycleGeneration == lifecycle` both
+                    // hold here — the observer's own opening guard is
+                    // `isCurrentLifecycle(lifecycle)` and there has been no
+                    // suspension since — so the lifecycle scope below compares
+                    // against the same generation the old conjunction did.
+                    let attempt = self.snapshotAttempt()
                     Task { @MainActor [weak self] in
-                        guard let self, self.isCurrentLifecycle(lifecycle),
-                              self.player.currentItem === item, !self.isChangingStream,
-                              self.viewerActionEpoch == actionEpoch else { return }
+                        guard let self, self.started,
+                              attempt.stillCurrent(
+                                  self.snapshotAttempt(),
+                                  scopes: [.lifecycle, .viewerAction]
+                              ),
+                              self.player.currentItem === item,
+                              !self.isChangingStream else { return }
                         await self.handleBlackFrameDecodeFailure(at: observedPosition)
                     }
                 }
@@ -7235,10 +7272,9 @@ final class PlayerController: ObservableObject {
         // govern the compatibility fallback below it, which changes the
         // recipe. A `hold` or a `retry_resource` governs nothing at all: on a
         // dead item they would leave a player with no path forward.
-        let generation = openGeneration
-        let actionEpoch = viewerActionEpoch
+        let failureAttempt = snapshotAttempt()
         _ = await controlVerdictForItemFailure(item)
-        guard openGeneration == generation, viewerActionEpoch == actionEpoch,
+        guard failureAttempt.stillCurrent(snapshotAttempt(), scopes: [.open, .viewerAction]),
               player.currentItem === item,
               !isChangingStream else { return }
         var reportedFailure = false

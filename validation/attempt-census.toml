@@ -1,0 +1,73 @@
+# The hand-written epoch comparisons `PlayerController.swift` still carries.
+#
+# Every row is one continuation fence that compares an epoch counter by hand
+# instead of naming the scopes it depends on with
+# `Attempt.stillCurrent(_:scopes:)`. The audit in `validation/attempt_census.py`
+# reads this file, counts what the source actually contains, and fails on any
+# difference in either direction: a comparison that is not here, an extra copy
+# of one that is, or a row whose fence has already been migrated. So the list
+# can only shrink, and it shrinks by a commit that both migrates a fence and
+# lowers its row — which is also what stops the next `Task {}` from quietly
+# adding a fifty-ninth conjunction.
+#
+# The key is `<enclosing function>::<the comparison as written>`; the value is
+# how many times that exact comparison still appears in that function.
+#
+# Two rows are not migration debt and are expected to stay:
+#
+#   isCurrentLifecycle::lifecycleGeneration == generation
+#   isSuperseded::generation != openGeneration
+#
+# Those two ARE the named comparison helpers - `isCurrentLifecycle` also
+# carries the `started` predicate, which is not an epoch and so is not a scope.
+# Everything else is a fence waiting for milestone 5.1's successors.
+#
+# Counted by `python3 -m validation.attempt_census`.
+
+version = 1
+
+[allowed]
+"applyNativeSubtitleSelection::expectedActionEpoch == viewerActionEpoch" = 1
+"applyPreferredAudioSelection::expectedActionEpoch == viewerActionEpoch" = 2
+"applySubtitleSelection::expectedActionEpoch == viewerActionEpoch" = 1
+"awaitPreparedAlignment::self.preparedAlignmentGeneration == generation" = 1
+"beginSeekPresentationMonitor::self.seekState.generation == generation" = 1
+"createRetryingNotYet::createRetryEpoch == epoch" = 3
+"createRetryingNotYet::createRetryExpiredEpoch != epoch" = 1
+"createRetryingNotYet::createRetryExpiredEpoch == epoch" = 2
+"expireCreateRetry::createRetryEpoch == epoch" = 1
+"expireCreateRetry::createRetryExpiredEpoch != epoch" = 1
+"fallBackToInPlaceReplacement::self.viewerActionEpoch == actionEpoch" = 1
+"isCurrentLifecycle::lifecycleGeneration == generation" = 1
+"isSuperseded::generation != openGeneration" = 1
+"issueSeek::actionEpoch == viewerActionEpoch" = 4
+"issueSeek::generation == seekState.generation" = 4
+"issueSeek::openGeneration == itemGeneration" = 2
+"load::initialDecisionGeneration == generation" = 3
+"offerPreparedQualityChange::self.viewerActionEpoch != actionEpoch" = 1
+"reconcileNativeMediaSelections::actionEpoch != viewerActionEpoch" = 1
+"reconcileNativeMediaSelections::actionEpoch == viewerActionEpoch" = 1
+"refreshPGSOverlayWindow::self.pgsOverlayItemGeneration == itemGeneration" = 1
+"refreshPGSOverlayWindow::self.pgsOverlaySelectionGeneration == selectionGeneration" = 2
+"restartInitialDecision::initialDecisionGeneration == generation" = 2
+"retryNativeSubtitleAfterReadiness::self.viewerActionEpoch == actionEpoch" = 2
+"seekWhenReady::self.seekState.generation == owner.seekGeneration" = 1
+"seekWhenReady::self.viewerActionEpoch == owner.actionEpoch" = 1
+"selectAudio::actionEpoch == viewerActionEpoch" = 1
+"selectAudio::destination.generation == seekState.generation" = 1
+"selectOriginalQuality::actionEpoch == viewerActionEpoch" = 1
+"selectQuality::actionEpoch == viewerActionEpoch" = 1
+"selectSubtitle::actionEpoch == viewerActionEpoch" = 1
+"selectSubtitle::destination.generation == seekState.generation" = 1
+"setPlaybackRequested::attempt.viewerActionEpoch == actionEpoch" = 1
+"setPlaybackRequested::resumeAttempt?.viewerActionEpoch == actionEpoch" = 1
+"setPlaybackRequested::self.lifecycleGeneration == lifecycle" = 2
+"setPlaybackRequested::self.openGeneration == attachmentGeneration" = 2
+"setPlaybackRequested::self.seekState.generation == seekGeneration" = 1
+"setPlaybackRequested::self.viewerActionEpoch == actionEpoch" = 3
+"settleInPlaceSubtitleDestination::destination.generation == seekState.generation" = 1
+"startResumePresentationMonitor::attempt.attachmentGeneration == self.openGeneration" = 1
+"startResumePresentationMonitor::self.lifecycleGeneration == attempt.lifecycleGeneration" = 1
+"startResumePresentationMonitor::self.viewerActionEpoch == attempt.viewerActionEpoch" = 1
+"startStatusPolling::self.openGeneration == generation" = 1
+"updatePGSOverlaySelection::self.pgsOverlaySelectionGeneration == selectionGeneration" = 3
