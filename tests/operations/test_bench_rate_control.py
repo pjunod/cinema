@@ -2,10 +2,12 @@
 
 import contextlib
 import hashlib
+import inspect
 import io
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 from types import SimpleNamespace
 import tempfile
@@ -41,6 +43,7 @@ def write_corpus(
     classes=("easy", "hard"),
     pinned=True,
     dynamic_range="sdr",
+    output_grade="sdr",
 ):
     fixtures = []
     references = {}
@@ -54,6 +57,7 @@ def write_corpus(
             "identity": f"{content_class}-{index}",
             "class": content_class,
             "dynamic_range": dynamic_range,
+            "output_grade": output_grade,
             "filename": filename,
             "reference": filename,
             "reference_sha256": file_sha(reference) if pinned else None,
@@ -360,6 +364,7 @@ class RateControlBenchCase(unittest.TestCase):
             self.assertEqual([fixture["class"] for fixture in loaded["fixtures"]], ["easy", "hard"])
             self.assertTrue(all(fixture["reference_sha256_pinned"] for fixture in loaded["fixtures"]))
             self.assertTrue(all(fixture["dynamic_range"] == "sdr" for fixture in loaded["fixtures"]))
+            self.assertTrue(all(fixture["output_grade"] == "sdr" for fixture in loaded["fixtures"]))
 
     def test_full_manifest_rejects_minimal_unbalanced_and_null_hash_corpora(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -415,6 +420,30 @@ class RateControlBenchCase(unittest.TestCase):
             with self.assertRaisesRegex(BENCH["BenchError"], "mismatch"):
                 BENCH["load_rate_control_corpus"](path)
 
+    def test_hdr_source_is_refused_until_the_scorer_tone_maps(self):
+        """`score_vmaf` has no tone-map on either leg.
+
+        `format=yuv420p` converts depth and chroma, not transfer or primaries,
+        so an admitted HDR10 reference would be compared against BT.709 SDR
+        output. Both modes would then score the same meaningless number and the
+        VMAF and benefit gates would compare noise while the byte gates kept
+        working -- a gate passing for the wrong reason. The manifest has to
+        refuse the source until the scorer can handle it.
+        """
+        self.assertNotIn("tonemap", inspect.getsource(BENCH["score_vmaf"]))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path, _ = write_corpus(root, dynamic_range="hdr10", output_grade="sdr")
+            with self.assertRaisesRegex(BENCH["BenchError"], "not scorable"):
+                BENCH["load_rate_control_corpus"](path)
+
+            document = json.loads(path.read_text())
+            document["fixtures"][0]["dynamic_range"] = "sdr"
+            document["fixtures"][0]["output_grade"] = "hdr10"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(BENCH["BenchError"], "output_grade"):
+                BENCH["load_rate_control_corpus"](path)
+
     def test_manifest_rejects_nonfinite_trim_numbers(self):
         for field, value, message in (
             ("start_seconds", float("nan"), "start_seconds"),
@@ -450,8 +479,13 @@ class RateControlBenchCase(unittest.TestCase):
         self.assertEqual(
             [fixture["reference_sha256"] for fixture in document["fixtures"]],
             [
-                "6a3539090d77f8e465178c8c66b190f6aade705cf42b4c512ae7bdd7c22341a9",
-                "2c6924d0fa6f5ebcc230e9020e209831aa08adbcfc8584517d71de539332cd54",
+                # Re-pinned when the two inherited fixtures gained the
+                # bit-exact, seeded, single-threaded recipe the other four
+                # already had. The previous pair was generated from a recipe
+                # that produced different bytes on every run, so it could
+                # never be reproduced by `scripts/bench fixtures`.
+                "8e4f356daf8a64c989c0ca6d01ba3accf81edfbc23bb257ab1b1f8382f5f9513",
+                "d0b373626dad2cd41566da858ff713f0f90a540096491e68310765bc508c308d",
             ],
         )
         self.assertEqual(
@@ -460,6 +494,79 @@ class RateControlBenchCase(unittest.TestCase):
         )
         self.assertTrue(all(fixture["dynamic_range"] == "sdr" for fixture in document["fixtures"]))
         self.assertNotIn("ffmpeg_args", path.read_text())
+
+    def test_n2_manifest_names_the_balanced_representative_corpus(self):
+        path = ROOT / "scripts/perf2-rate-control-n2-corpus.json"
+        document = json.loads(path.read_text())
+        self.assertEqual(document["purpose"], "n1_acceptance")
+        self.assertEqual(
+            [fixture["identity"] for fixture in document["fixtures"]],
+            [
+                "easy-1080p-h264",
+                "easy-1080p-animation",
+                "easy-720p-web",
+                "hard-1080p-grain",
+                "hard-1080p-dark-gradient",
+                "hard-1080p-sport",
+            ],
+        )
+        self.assertEqual(
+            [fixture["class"] for fixture in document["fixtures"]],
+            ["easy", "easy", "easy", "hard", "hard", "hard"],
+        )
+        self.assertTrue(all(fixture["dynamic_range"] == "sdr" for fixture in document["fixtures"]))
+        self.assertTrue(all(fixture["output_grade"] == "sdr" for fixture in document["fixtures"]))
+        self.assertTrue(all(
+            re.fullmatch(r"[0-9a-f]{64}", fixture["reference_sha256"])
+            for fixture in document["fixtures"]
+        ))
+        self.assertEqual(
+            len({fixture["reference_sha256"] for fixture in document["fixtures"]}),
+            6,
+        )
+        self.assertNotIn("ffmpeg_args", path.read_text())
+
+    def test_pinned_corpus_fixtures_have_reproducible_recipes(self):
+        """A pinned manifest is only materialisable if its recipes repeat.
+
+        `scripts/bench fixtures` skips a file that already exists, so a pinned
+        `reference_sha256` is only reachable on a host that does not already
+        hold the bytes when the recipe produces the same bytes every time.
+        That needs three things, and none of them is checked by comparing the
+        pinned hashes to each other: bit-exact muxing (Matroska writes a random
+        SegmentUID and Lavf tags without it), a seed on anything random (the
+        grain fixture's noise changes the pixels), and a fixed thread count
+        (libx264 partitions frame threads by the host's core count, so the same
+        recipe produces different bytes on a 16-core and a 2-core machine).
+        """
+        for manifest in (
+            "scripts/perf2-rate-control-n1-corpus.json",
+            "scripts/perf2-rate-control-n2-corpus.json",
+        ):
+            document = json.loads((ROOT / manifest).read_text())
+            self.assertEqual(document["purpose"], "n1_acceptance")
+            for fixture in document["fixtures"]:
+                name = Path(fixture["filename"]).stem
+                with self.subTest(manifest=manifest, fixture=name):
+                    self.assertIsNotNone(
+                        fixture.get("reference_sha256"),
+                        "n1_acceptance pins every fixture",
+                    )
+                    spec = BENCH["FIXTURES"][name]
+                    command = BENCH["fixture_command"](f"{name}.mkv", spec)
+                    self.assertIn("+bitexact", command)
+                    self.assertEqual(
+                        command[command.index("-threads") + 1],
+                        "1",
+                        "a pinned fixture must not depend on the host core count",
+                    )
+                    for argument in command:
+                        if "noise=" in argument:
+                            self.assertIn(
+                                "all_seed=",
+                                argument,
+                                "unseeded noise changes the pixels on every run",
+                            )
 
     def test_server_sha256_manifest_is_fail_closed_and_self_identifying(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -604,8 +711,8 @@ class RateControlBenchCase(unittest.TestCase):
         cases = (
             (SessionApi(vod=True), "cached"),
             (SessionApi(unsafe=True), "unsafe"),
-            (SessionApi(dynamic_range=None), "prove SDR"),
-            (SessionApi(dynamic_range="hdr10"), "prove SDR"),
+            (SessionApi(dynamic_range=None), "declared output grade"),
+            (SessionApi(dynamic_range="hdr10"), "declared output grade"),
             (SessionApi(status_encoder="software-h264"), "encoder changed"),
         )
         for api, message in cases:
@@ -754,17 +861,18 @@ class RateControlBenchCase(unittest.TestCase):
             self.assertIn("producing=yes", report["failures"][0]["detail"])
             self.assertEqual(api.puts, [])
 
-    def test_server_source_hdr_is_fail_closed_when_unknown_or_non_sdr(self):
+    def test_server_source_dynamic_range_must_match_the_corpus(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             corpus, references = write_corpus(root)
             fixtures = BENCH["load_rate_control_corpus"](corpus)["fixtures"]
-            for hdr, message in ((MISSING, "unknown"), ("hdr10", "not SDR")):
+            for hdr, message in ((MISSING, "unknown"), ("hdr10", "differs")):
                 with self.subTest(hdr=hdr):
                     with self.assertRaisesRegex(BENCH["BenchError"], message):
                         BENCH["resolve_fixture_file_ids"](
                             FullApi(references, hdr=hdr), fixtures, None
                         )
+
 
     def test_server_source_requires_real_probed_available_video_facts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1053,6 +1161,37 @@ class RateControlBenchCase(unittest.TestCase):
             "encoder_identity_mismatch", "vmaf_regression", "easy_bytes_regression",
             "speed_regression", "advertised_peak_exceeded",
         })
+
+    def test_benefit_gate_accepts_only_the_two_recorded_paths(self):
+        easy = {
+            "identity": "easy", "class": "easy",
+            "modes": {
+                "vbr": passing_measurement("vbr"),
+                "qvbr": passing_measurement("qvbr"),
+            },
+        }
+        hard = {
+            "identity": "hard", "class": "hard",
+            "modes": {
+                "vbr": passing_measurement("vbr"),
+                "qvbr": passing_measurement("qvbr"),
+            },
+        }
+        benefit, failures = BENCH["evaluate_rate_control_benefit"]([easy, hard])
+        self.assertEqual(failures, [])
+        self.assertTrue(benefit["bytes_benefit_path"])
+
+        for fixture in (easy, hard):
+            fixture["modes"]["qvbr"]["bytes"] = fixture["modes"]["vbr"]["bytes"]
+        hard["modes"]["qvbr"]["vmaf"] = hard["modes"]["vbr"]["vmaf"] + 1.0
+        benefit, failures = BENCH["evaluate_rate_control_benefit"]([easy, hard])
+        self.assertEqual(failures, [])
+        self.assertTrue(benefit["quality_benefit_path"])
+
+        hard["modes"]["qvbr"]["vmaf"] = hard["modes"]["vbr"]["vmaf"] + 0.999
+        benefit, failures = BENCH["evaluate_rate_control_benefit"]([easy, hard])
+        self.assertFalse(benefit["passed"])
+        self.assertEqual([failure["code"] for failure in failures], ["benefit_gate_not_met"])
 
     def test_advertised_peak_exact_boundary_passes_and_each_mode_overshoot_fails(self):
         def fixture():

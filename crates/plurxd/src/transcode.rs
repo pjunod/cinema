@@ -13687,7 +13687,10 @@ fn available_cache_scratch_bytes(path: &std::path::Path) -> Option<i64> {
 /// its lifetime.
 #[derive(Debug, Clone, Copy)]
 struct RateControlSnapshot {
-    requested_mode: RateMode,
+    /// `None` means the operator has not chosen a mode, so the encoder
+    /// family's evidence-backed code default applies. `Some(Bitrate)` is an
+    /// explicit override and must remain VBR even if that family later flips.
+    requested_mode: Option<RateMode>,
     requested_quality: Option<u8>,
     quality_rc: QualityRc,
 }
@@ -13700,7 +13703,7 @@ const RATE_CONTROL_REFRESH: Duration = Duration::from_secs(2);
 pub(crate) fn normalize_rate_control_request(
     raw_mode: Option<&str>,
     raw_quality: Option<&str>,
-) -> (RateMode, Option<u8>, bool) {
+) -> (Option<RateMode>, Option<u8>, bool) {
     let mode_text = raw_mode.map(str::trim).filter(|value| !value.is_empty());
     let mode = mode_text.and_then(RateMode::parse);
     let quality_text = raw_quality.map(str::trim).filter(|value| !value.is_empty());
@@ -13708,9 +13711,9 @@ pub(crate) fn normalize_rate_control_request(
     let corrupt =
         mode_text.is_some() && mode.is_none() || quality_text.is_some() && quality.is_none();
     if corrupt {
-        (RateMode::Bitrate, None, true)
+        (Some(RateMode::Bitrate), None, true)
     } else {
-        (mode.unwrap_or_default(), quality, false)
+        (mode, quality, false)
     }
 }
 
@@ -13740,14 +13743,17 @@ impl From<plurx_core::error::StoreError> for ApplyRateControlError {
 impl RateControlSnapshot {
     fn bitrate(boot_caps: QualityRc) -> Self {
         Self {
-            requested_mode: RateMode::Bitrate,
+            requested_mode: Some(RateMode::Bitrate),
             requested_quality: None,
             quality_rc: boot_caps,
         }
     }
 
     fn effective_for(self, encoder: Encoder) -> EffectiveRateControl {
-        if self.requested_mode == RateMode::Quality && self.quality_rc.supported_by(encoder) {
+        let requested_mode = self
+            .requested_mode
+            .unwrap_or_else(|| encoder.default_rate_mode());
+        if requested_mode == RateMode::Quality && self.quality_rc.supported_by(encoder) {
             EffectiveRateControl::Qvbr {
                 quality: self
                     .requested_quality
@@ -15085,7 +15091,23 @@ impl TranscodeManager {
             format!("recipe:{CACHE_RECIPE_VERSION}"),
             "contract:hls-mpegts-v1".to_owned(),
             format!("requested-encoder:{requested_encoder}"),
-            format!("requested:{}", snapshot.requested_mode.as_str()),
+            // Unset spells exactly what explicit `bitrate` spells. This is a
+            // durable dedupe key: it is stored on every speculative queue row
+            // and a mismatch is a hard `cancel_job(.., "policy_changed")`, not
+            // a yield. Every `Encoder::default_rate_mode()` is Bitrate, so the
+            // two requests resolve to the same effective policy and the key
+            // must not move because the internal type gained a third state —
+            // it would re-queue every speculative row at deploy and flip again
+            // mid-boot on every restart, when the manager's initial
+            // `RateControlSnapshot::bitrate` is replaced by the absent pair.
+            // A PR that flips a family default moves this spelling
+            // deliberately, with the artefact §3.4 requires.
+            format!(
+                "requested:{}",
+                snapshot
+                    .requested_mode
+                    .map_or_else(|| RateMode::Bitrate.as_str(), RateMode::as_str)
+            ),
             format!("quality:{:?}", snapshot.requested_quality),
             format!("audio-lang:{audio_lang}"),
             format!("subtitle-lang:{sub_lang}"),
@@ -21126,7 +21148,7 @@ impl TranscodeManager {
         quality_rc.set_supported(encoder, true);
         self.publish_rate_control(
             RateControlSnapshot {
-                requested_mode: RateMode::Quality,
+                requested_mode: Some(RateMode::Quality),
                 requested_quality: Some(quality),
                 quality_rc,
             },
@@ -21137,11 +21159,23 @@ impl TranscodeManager {
 
     async fn validate_rate_control_snapshot(
         &self,
-        mode: RateMode,
+        mode: Option<RateMode>,
         quality: Option<u8>,
         policy: RateControlProbePolicy,
     ) -> RateControlValidation {
-        if mode == RateMode::Bitrate {
+        let needs_quality_probe = [
+            Encoder::Software,
+            Encoder::Nvenc,
+            Encoder::Qsv,
+            Encoder::Vaapi,
+            Encoder::VideoToolbox,
+        ]
+        .into_iter()
+        .any(|encoder| {
+            self.caps.available(encoder)
+                && mode.unwrap_or_else(|| encoder.default_rate_mode()) == RateMode::Quality
+        });
+        if !needs_quality_probe {
             return RateControlValidation::Complete(RateControlSnapshot {
                 requested_mode: mode,
                 requested_quality: quality,
@@ -21173,6 +21207,9 @@ impl TranscodeManager {
             Encoder::VideoToolbox,
         ] {
             if !self.caps.available(encoder) {
+                continue;
+            }
+            if mode.unwrap_or_else(|| encoder.default_rate_mode()) == RateMode::Bitrate {
                 continue;
             }
             let q = quality.unwrap_or_else(|| encoder.default_quality());
@@ -21255,7 +21292,9 @@ impl TranscodeManager {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
         tracing::info!(
-            requested_mode = snapshot.requested_mode.as_str(),
+            requested_mode = snapshot
+                .requested_mode
+                .map_or("family_default", RateMode::as_str),
             requested_quality = snapshot.requested_quality,
             encoder = selected.label(),
             effective = %effective.snapshot_value(),
@@ -21265,7 +21304,7 @@ impl TranscodeManager {
 
     async fn requested_rate_control(
         &self,
-    ) -> Result<(RateMode, Option<u8>), plurx_core::error::StoreError> {
+    ) -> Result<(Option<RateMode>, Option<u8>), plurx_core::error::StoreError> {
         let (raw_mode, raw_quality) = self
             .store
             .get_setting_pair(keys::TRANSCODE_RATE_MODE, keys::TRANSCODE_QUALITY)
@@ -21393,7 +21432,7 @@ impl TranscodeManager {
         let _serial = self.rate_control_update.lock().await;
         let snapshot = match self
             .validate_rate_control_snapshot(
-                mode,
+                Some(mode),
                 quality,
                 RateControlProbePolicy::YieldingBackground,
             )
@@ -21409,7 +21448,7 @@ impl TranscodeManager {
                 (keys::TRANSCODE_RATE_MODE, mode.as_str()),
             ])
             .await?;
-        if self.requested_rate_control().await? == (mode, quality) {
+        if self.requested_rate_control().await? == (Some(mode), quality) {
             let selected = self.encoder().await;
             self.publish_rate_control(snapshot, selected);
         } else {
@@ -32514,27 +32553,35 @@ pub(crate) mod tests {
     #[test]
     fn durable_quality_distinguishes_unset_default_from_corruption() {
         assert_eq!(
+            normalize_rate_control_request(None, None),
+            (None, None, false)
+        );
+        assert_eq!(
+            normalize_rate_control_request(Some("  "), None),
+            (None, None, false)
+        );
+        assert_eq!(
             normalize_rate_control_request(Some("quality"), None),
-            (RateMode::Quality, None, false)
+            (Some(RateMode::Quality), None, false)
         );
         assert_eq!(
             normalize_rate_control_request(Some("quality"), Some("  ")),
-            (RateMode::Quality, None, false)
+            (Some(RateMode::Quality), None, false)
         );
         assert_eq!(
             normalize_rate_control_request(Some("quality"), Some("22")),
-            (RateMode::Quality, Some(22), false)
+            (Some(RateMode::Quality), Some(22), false)
         );
         for corrupt in ["256", "garbage", "-1"] {
             assert_eq!(
                 normalize_rate_control_request(Some("quality"), Some(corrupt)),
-                (RateMode::Bitrate, None, true),
+                (Some(RateMode::Bitrate), None, true),
                 "{corrupt} must fail the pair closed rather than aliasing the family default"
             );
         }
         assert_eq!(
             normalize_rate_control_request(Some("cq"), Some("22")),
-            (RateMode::Bitrate, None, true)
+            (Some(RateMode::Bitrate), None, true)
         );
     }
 
@@ -32555,7 +32602,7 @@ pub(crate) mod tests {
         mgr.initialize_rate_control().await.expect("boot fallback");
         assert_eq!(
             mgr.rate_control_snapshot().requested_mode,
-            RateMode::Bitrate
+            Some(RateMode::Bitrate)
         );
         assert_eq!(
             mgr.effective_rate_control(Encoder::Software),
@@ -32568,7 +32615,7 @@ pub(crate) mod tests {
         let mut supported = QualityRc::default();
         supported.set_supported(Encoder::Qsv, true);
         let snapshot = RateControlSnapshot {
-            requested_mode: RateMode::Quality,
+            requested_mode: Some(RateMode::Quality),
             requested_quality: Some(21),
             quality_rc: supported,
         };
@@ -32583,7 +32630,7 @@ pub(crate) mod tests {
         );
 
         let defaults = RateControlSnapshot {
-            requested_mode: RateMode::Quality,
+            requested_mode: Some(RateMode::Quality),
             requested_quality: None,
             quality_rc: supported,
         };
@@ -32598,7 +32645,7 @@ pub(crate) mod tests {
         cross_family.set_supported(Encoder::Software, true);
         cross_family.set_supported(Encoder::VideoToolbox, true);
         let defaults = RateControlSnapshot {
-            requested_mode: RateMode::Quality,
+            requested_mode: Some(RateMode::Quality),
             requested_quality: None,
             quality_rc: cross_family,
         };
@@ -32615,6 +32662,36 @@ pub(crate) mod tests {
             RateControlSnapshot::bitrate(supported).effective_for(Encoder::Qsv),
             EffectiveRateControl::Vbr
         );
+
+        let mut every_family_supported = QualityRc::default();
+        for encoder in [
+            Encoder::Software,
+            Encoder::Nvenc,
+            Encoder::Qsv,
+            Encoder::Vaapi,
+            Encoder::VideoToolbox,
+        ] {
+            every_family_supported.set_supported(encoder, true);
+        }
+        let unset = RateControlSnapshot {
+            requested_mode: None,
+            requested_quality: None,
+            quality_rc: every_family_supported,
+        };
+        let explicit_bitrate = RateControlSnapshot::bitrate(every_family_supported);
+        for encoder in [
+            Encoder::Software,
+            Encoder::Nvenc,
+            Encoder::Qsv,
+            Encoder::Vaapi,
+            Encoder::VideoToolbox,
+        ] {
+            assert_eq!(unset.effective_for(encoder), EffectiveRateControl::Vbr);
+            assert_eq!(
+                explicit_bitrate.effective_for(encoder),
+                EffectiveRateControl::Vbr
+            );
+        }
     }
 
     #[tokio::test]
@@ -32629,7 +32706,7 @@ pub(crate) mod tests {
         let mut supported = QualityRc::default();
         supported.set_supported(encoder, true);
         let captured = RateControlSnapshot {
-            requested_mode: RateMode::Quality,
+            requested_mode: Some(RateMode::Quality),
             requested_quality: Some(21),
             quality_rc: supported,
         };
@@ -32640,7 +32717,7 @@ pub(crate) mod tests {
         *mgr.rate_control
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = RateControlSnapshot {
-            requested_mode: RateMode::Quality,
+            requested_mode: Some(RateMode::Quality),
             requested_quality: Some(29),
             quality_rc: supported,
         };
@@ -32722,7 +32799,7 @@ pub(crate) mod tests {
 
         let speculative_q22 = mgr.speculative_producer_options(
             RateControlSnapshot {
-                requested_mode: RateMode::Quality,
+                requested_mode: Some(RateMode::Quality),
                 requested_quality: Some(22),
                 quality_rc: supported,
             },
@@ -32802,7 +32879,7 @@ pub(crate) mod tests {
             *mgr.rate_control
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = RateControlSnapshot {
-                requested_mode: RateMode::Quality,
+                requested_mode: Some(RateMode::Quality),
                 requested_quality: Some(quality),
                 quality_rc: supported,
             };
@@ -33369,7 +33446,7 @@ pub(crate) mod tests {
         supported.set_supported(Encoder::Software, true);
         peer.publish_rate_control(
             RateControlSnapshot {
-                requested_mode: RateMode::Quality,
+                requested_mode: Some(RateMode::Quality),
                 requested_quality: Some(21),
                 quality_rc: supported,
             },
@@ -33453,7 +33530,7 @@ pub(crate) mod tests {
         ));
         assert_eq!(
             mgr.requested_rate_control().await.expect("requested pair"),
-            (RateMode::Bitrate, None),
+            (None, None),
             "a deferred validation must not durably publish an unvalidated request"
         );
         assert_eq!(
@@ -33477,7 +33554,7 @@ pub(crate) mod tests {
         ));
         assert_eq!(
             mgr.requested_rate_control().await.expect("requested pair"),
-            (RateMode::Bitrate, None),
+            (None, None),
             "validation must defer before writing while offline/speculative encoding owns the lane"
         );
     }
@@ -33495,12 +33572,12 @@ pub(crate) mod tests {
         supported.set_supported(Encoder::VideoToolbox, true);
         supported.set_supported(Encoder::Software, true);
         let captured = RateControlSnapshot {
-            requested_mode: RateMode::Quality,
+            requested_mode: Some(RateMode::Quality),
             requested_quality: None,
             quality_rc: supported,
         };
         let later = RateControlSnapshot {
-            requested_mode: RateMode::Quality,
+            requested_mode: Some(RateMode::Quality),
             requested_quality: Some(31),
             quality_rc: supported,
         };
@@ -46579,6 +46656,58 @@ pub(crate) mod tests {
             )
             .await
             .is_none());
+    }
+
+    /// The speculative dedupe key is durable: it is stored on every queue
+    /// row (`domain.rs` `policy_generation`), compared before production,
+    /// and a mismatch is turned into a hard `cancel_job(.., "policy_changed")`
+    /// rather than a yield. An unset pair and an explicit `bitrate` resolve
+    /// to the same effective policy on every family, so they must hash to the
+    /// same generation. If the tri-state spelled "unset" differently, every
+    /// queued speculative row would be cancelled and rediscovered at deploy,
+    /// and the generation would flip again mid-boot on every restart — the
+    /// manager's first snapshot is `RateControlSnapshot::bitrate`, and
+    /// `initialize_rate_control` then republishes the absent pair as `None`.
+    #[test]
+    fn an_unset_rate_control_pair_keeps_the_explicit_bitrate_policy_generation() {
+        let prefs = plurx_core::tracks::LangPrefs::default();
+        let unset = RateControlSnapshot {
+            requested_mode: None,
+            requested_quality: None,
+            quality_rc: QualityRc::default(),
+        };
+        let explicit = RateControlSnapshot {
+            requested_mode: Some(RateMode::Bitrate),
+            ..unset
+        };
+        let quality = RateControlSnapshot {
+            requested_mode: Some(RateMode::Quality),
+            ..unset
+        };
+
+        let generation =
+            TranscodeManager::pretranscode_policy_generation_for(unset, "auto", &prefs);
+        assert_eq!(
+            generation,
+            TranscodeManager::pretranscode_policy_generation_for(explicit, "auto", &prefs),
+            "an unset pair and an explicit bitrate request are the same policy and must \
+             not enqueue replacement work against each other"
+        );
+        assert_ne!(
+            generation,
+            TranscodeManager::pretranscode_policy_generation_for(quality, "auto", &prefs),
+            "an explicit quality request is a different policy"
+        );
+
+        // The durable value itself, unchanged since before `requested_mode`
+        // became an `Option`. A PR that flips a family default moves this
+        // deliberately, with its artefact; nothing else may move it.
+        assert_eq!(
+            generation,
+            "speculative-auto-v2:\
+             08494ca183d08fdddf67791b5c47a324dbf4dd32544694dc2fd12589a6c67723",
+            "the speculative dedupe key for an unset pair is durable state"
+        );
     }
 
     #[tokio::test]

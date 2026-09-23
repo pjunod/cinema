@@ -7261,6 +7261,17 @@ mod tests {
             body["encoders"]["quality_rc"].is_object(),
             "the fleet census must expose each family's behavioral quality-mode verdict: {body}"
         );
+        assert_eq!(
+            body["encoders"]["quality_rc"]["default_rate_mode"],
+            serde_json::json!({
+                "software": "bitrate",
+                "nvenc": "bitrate",
+                "qsv": "bitrate",
+                "vaapi": "bitrate",
+                "videotoolbox": "bitrate",
+            }),
+            "each reported family default must remain independently inspectable: {body}"
+        );
         assert_eq!(body["replication"]["backend"], "sqlite");
         assert_eq!(body["replication"]["health"], "single_node");
         assert_eq!(body["replication"]["clustered"], false);
