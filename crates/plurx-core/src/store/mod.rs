@@ -1794,10 +1794,8 @@ pub mod keys {
     /// first response; this value cannot change their presentation contract.
     pub const HLS_TYPELESS_SLIDING: &str = "playback.hls_typeless_sliding";
     /// How often, in minutes, to build fragment indexes for files that have
-    /// none. `0` is off, and off is the default until M0-P1's media1 numbers
-    /// say what a full read of a library costs over NFS — the whole point of
-    /// that probe is to size this job, and turning it on before the numbers
-    /// return would be guessing with the operator's disks.
+    /// none. Absent is every 15 minutes — the default the settings API
+    /// reports — and `0` is an explicit pause.
     ///
     /// Nothing reads an index yet; a file without one keeps today's
     /// presentation, so this job is invisible to every client either way.
