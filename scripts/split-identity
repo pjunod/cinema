@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Reassemble Rust splits and compare them with a Git revision.
+
+Usage: split-identity BASE SOURCE PIECE [PIECE ...]
+       split-identity BASE --plan
+
+PIECE files are concatenated in source order. Lines inside a
+``// split: header`` / ``// split: end header`` pair are split-only module
+plumbing and are omitted. Passing SOURCE as the only piece is the M0
+unchanged-file self-test.
+
+``--plan`` proves the M1 and M2/T2 subsection moves. It replaces explicit
+markers in each current parent with the children named below, removes only
+the module plumbing represented by those markers, and compares the complete
+reconstructed parent byte-for-byte with BASE. The segment-index recipe also
+checks the exact count of parent-visibility additions before removing them.
+This one-shot helper is deleted before the plan PR is promoted.
+"""
+
+from __future__ import annotations
+
+import difflib
+import pathlib
+import subprocess
+import sys
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def read(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def without_split_headers(path: pathlib.Path) -> list[str]:
+    lines: list[str] = []
+    inside_header = False
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(keepends=True), start=1
+    ):
+        if line.rstrip("\r\n") == "// split: header":
+            if inside_header:
+                raise SystemExit(f"{path}:{line_number}: nested split header")
+            inside_header = True
+            continue
+        if line.rstrip("\r\n") == "// split: end header":
+            if not inside_header:
+                raise SystemExit(f"{path}:{line_number}: unmatched split header end")
+            inside_header = False
+            continue
+        if not inside_header:
+            lines.append(line)
+    if inside_header:
+        raise SystemExit(f"{path}: unterminated split header")
+    return lines
+
+
+def chunks(manifest: str) -> str:
+    manifest_path = ROOT / manifest
+    result: list[str] = []
+    for line_number, line in enumerate(
+        manifest_path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        prefix = 'include!("'
+        suffix = '");'
+        if not line.startswith(prefix) or not line.endswith(suffix):
+            raise SystemExit(
+                f"{manifest}:{line_number}: expected a plain include! manifest"
+            )
+        child = manifest_path.parent / line[len(prefix) : -len(suffix)]
+        result.append(child.read_text(encoding="utf-8"))
+    return "".join(result)
+
+
+def replace_marker(parent: str, marker: str, replacement: str) -> str:
+    begin = f"// split: begin {marker}\n"
+    end = f"// split: end {marker}\n"
+    if parent.count(begin) != 1 or parent.count(end) != 1:
+        raise SystemExit(f"expected exactly one {marker!r} marker pair")
+    before, marked = parent.split(begin, 1)
+    _plumbing, after = marked.split(end, 1)
+    return before + replacement + after
+
+
+def indented_child(path: str) -> str:
+    lines = read(path).splitlines(keepends=True)
+    return "".join(("    " + line) if line.strip() else line for line in lines)
+
+
+def plan_reconstructions() -> dict[str, str]:
+    transcode_path = "crates/plurxd/src/transcode.rs"
+    transcode = read(transcode_path)
+
+    segment = read("crates/plurxd/src/transcode/rolling/segment_index.rs")
+    header = "use super::*;\n\n"
+    if not segment.startswith(header):
+        raise SystemExit("segment-index child lost its exact structural header")
+    segment = segment[len(header) :]
+    visibility = "pub(super) "
+    expected_visibility_additions = 40
+    actual_visibility_additions = segment.count(visibility)
+    if actual_visibility_additions != expected_visibility_additions:
+        raise SystemExit(
+            "segment-index visibility additions: "
+            f"expected {expected_visibility_additions}, got {actual_visibility_additions}"
+        )
+    segment = segment.replace(visibility, "")
+    transcode = replace_marker(transcode, "segment-index", segment)
+
+    renewal = (
+        "#[cfg(test)]\n"
+        "mod pretranscode_renewal_tests {\n"
+        + indented_child("crates/plurxd/src/transcode/tests/pretranscode_renewal.rs")
+        + "}\n"
+    )
+    transcode = replace_marker(transcode, "pretranscode-renewal-tests", renewal)
+    transcode_tests = chunks("crates/plurxd/src/transcode/tests.rs")
+    relocated_include = 'include!("../../vodencode_manager_tests.rs");'
+    if transcode_tests.count(relocated_include) != 1:
+        raise SystemExit("expected the one declared vodencode test include relocation")
+    transcode_tests = transcode_tests.replace(
+        relocated_include, 'include!("vodencode_manager_tests.rs");'
+    )
+    tests = (
+        "#[cfg(test)]\n"
+        "pub(crate) mod tests {\n"
+        + transcode_tests
+        + "}\n"
+    )
+    transcode = replace_marker(transcode, "transcode-tests", tests)
+
+    hls_tests = chunks("crates/plurxd/src/http/hls/tests.rs")
+    hls_relocated_source = 'include_str!("../../hls.rs")'
+    if hls_tests.count(hls_relocated_source) != 3:
+        raise SystemExit("expected the three declared hls source include relocations")
+    hls_tests = hls_tests.replace(hls_relocated_source, 'include_str!("hls.rs")')
+    hls_path = "crates/plurxd/src/http/hls.rs"
+    hls = replace_marker(
+        read(hls_path),
+        "hls-tests",
+        "#[cfg(test)]\nmod tests {\n"
+        + hls_tests
+        + "}\n",
+    )
+
+    vod_tests = chunks("crates/plurxd/src/vod/tests.rs")
+    vod_relocated_include = 'include!("../../vodencode_tests.rs");'
+    if vod_tests.count(vod_relocated_include) != 1:
+        raise SystemExit("expected the one declared vodencode test include relocation")
+    vod_tests = vod_tests.replace(
+        vod_relocated_include, 'include!("vodencode_tests.rs");'
+    )
+    vod_path = "crates/plurxd/src/vodserve.rs"
+    vod = replace_marker(
+        read(vod_path),
+        "vod-tests",
+        "#[cfg(test)]\nmod tests {\n"
+        + vod_tests
+        + "}\n",
+    )
+    return {transcode_path: transcode, hls_path: hls, vod_path: vod}
+
+
+def baseline(base: str, source: str) -> str:
+    return subprocess.run(
+        ["git", "show", f"{base}:{source}"],
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout.decode("utf-8")
+
+
+def compare(base: str, source: str, current: str, description: str) -> bool:
+    original = baseline(base, source)
+    if current == original:
+        print(f"{source}: OK against {base} ({description})")
+        return True
+    diff = difflib.unified_diff(
+        original.splitlines(),
+        current.splitlines(),
+        fromfile=f"{base}:{source}",
+        tofile=description,
+        n=3,
+        lineterm="",
+    )
+    for line in diff:
+        print(line)
+    return False
+
+
+def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[2] == "--plan":
+        base = sys.argv[1]
+        reconstructions = plan_reconstructions()
+        return (
+            0
+            if all(
+                compare(base, source, current, "marker-expanded split tree")
+                for source, current in reconstructions.items()
+            )
+            else 1
+        )
+
+    if len(sys.argv) < 4:
+        print(
+            "usage: split-identity BASE SOURCE PIECE [PIECE ...]\n"
+            "       split-identity BASE --plan",
+            file=sys.stderr,
+        )
+        return 2
+
+    base, source, *piece_names = sys.argv[1:]
+    assembled: list[str] = []
+    counts: list[tuple[str, int]] = []
+    for piece_name in piece_names:
+        piece = pathlib.Path(piece_name)
+        lines = without_split_headers(piece)
+        assembled.extend(lines)
+        counts.append((piece_name, len(lines)))
+    current = "".join(assembled)
+
+    if not compare(base, source, current, " + ".join(piece_names)):
+        return 1
+
+    for piece_name, count in counts:
+        print(f"{piece_name}: {count} lines")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

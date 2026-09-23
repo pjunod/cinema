@@ -542,6 +542,7 @@ paths = [
   "crates/plurxd/src/media_pool.rs",
   "crates/plurxd/src/playstart.rs",
   "crates/plurxd/src/transcode.rs",
+  "crates/plurxd/src/transcode/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
@@ -573,6 +574,7 @@ paths = [
   "crates/plurxd/src/playstart.rs",
   "crates/plurxd/src/state.rs",
   "crates/plurxd/src/transcode.rs",
+  "crates/plurxd/src/transcode/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries"]
 depends_on = ["cluster.membership", "cluster.auth", "identity.access"]
@@ -714,10 +716,13 @@ paths = [
   "crates/plurx-pgs/**",
   "fuzz/**",
   "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,scratch_ledger,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
+  "crates/plurxd/src/transcode/**",
+  "crates/plurxd/src/vod/**",
   "crates/plurxd/src/manifest_cache.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/http/internal_media_sessions.rs",
   "crates/plurxd/src/http/{hls,network,pgs_overlay,stream}.rs",
+  "crates/plurxd/src/http/hls/**",
   "crates/plurxd/src/web/playback-policy.js",
   "crates/plurxd/src/web/playback-control.js",
   "docs/PLAYBACK.md",
@@ -1022,6 +1027,7 @@ paths = [
   "scripts/prove-fix",
   "scripts/prove-tombstone-offline-fence",
   "scripts/require-test-count",
+  "scripts/split-identity",
   "scripts/validate",
   "tests/client-fixes.toml",
   "tests/validation/**",
