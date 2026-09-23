@@ -228,6 +228,7 @@ pub(crate) async fn readiness(
                 false,
             )),
             dolby_vision_convert(convert_on),
+            chapter_thumbnails(&state).await,
             source_probe_comparison().await,
         ],
     }))
@@ -1312,6 +1313,116 @@ fn prepared_quality_handoff(enabled: bool) -> DeveloperEnableItem {
 /// AVPlayer, Media3 and hls.js running on real devices, not a fact a server
 /// process can read off itself. An operator who has run the physical
 /// verification may turn this on over three grey rows.
+// Chapter thumbnails.
+//
+// The watch view's chapter rail shows a frame per chapter, made on request by
+// one ffmpeg seek and kept under the runtime cache. The switch is the enable
+// path; the rows say what an extraction needs and what this process has done
+// so far, and never turn the switch.
+async fn chapter_thumbnails(state: &AppState) -> DeveloperEnableItem {
+    use crate::http::chapter_thumbs;
+    use crate::subtitle_ride_along as ride_along;
+
+    let enabled = chapter_thumbs::enabled(state).await;
+    let counts = chapter_thumbs::snapshot();
+    let root = chapter_thumbs::cache_root(&state.runtime_cache_dir);
+    let checked = if root.is_dir() {
+        root.clone()
+    } else {
+        state.runtime_cache_dir.clone()
+    };
+    let (files, bytes) = chapter_thumbs::cache_footprint(&state.runtime_cache_dir);
+    let (ffmpeg_status, ffmpeg_evidence) = match state.system.ffmpeg_version.as_deref() {
+        Some(version) if !version.trim().is_empty() => (
+            RequirementStatus::Met,
+            format!(
+                "{} answered `-version` at startup: {}.",
+                state.system.ffmpeg,
+                version.trim()
+            ),
+        ),
+        _ => (
+            RequirementStatus::Unmet,
+            format!(
+                "{} did not answer `-version` at startup, so every extraction will fail \
+                 and the rail shows numbered tiles.",
+                state.system.ffmpeg
+            ),
+        ),
+    };
+    let (space_status, space_evidence) = match ride_along::free_space(&checked) {
+        Ok(evidence) => (
+            RequirementStatus::Met,
+            format!("{}: {evidence}.", checked.display()),
+        ),
+        Err(reason) => (
+            RequirementStatus::Unmet,
+            format!(
+                "{}: {reason}. A thumbnail is tens of kilobytes, but a cache with no room \
+                 fails every write.",
+                checked.display()
+            ),
+        ),
+    };
+    DeveloperEnableItem {
+        id: "chapter_thumbnails",
+        title: "Make chapter thumbnails for the watch view",
+        enabled: Some(enabled),
+        setting: Some("chapter_thumbnails"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "chapter_thumbs_ffmpeg",
+                title: "ffmpeg can decode a frame",
+                status: ffmpeg_status,
+                evidence: ffmpeg_evidence,
+            },
+            DeveloperRequirement {
+                id: "chapter_thumbs_cache_space",
+                title: "The runtime cache has room",
+                status: space_status,
+                evidence: space_evidence,
+            },
+            DeveloperRequirement {
+                id: "chapter_thumbs_work",
+                title: "What this process has extracted",
+                // Counters read from this process, so always answerable.
+                status: RequirementStatus::Met,
+                evidence: format!(
+                    "Since this process started: {} thumbnail(s) made, {} served from the \
+                     cache, {} extraction(s) failed, {} running now, {} request(s) refused \
+                     while the switch was off. Each extraction is one ffmpeg seek and one \
+                     decoded frame, CPU only, bounded to {} at a time and 15 seconds each; \
+                     nothing runs unless a watch page asks for that chapter. On disk: {files} \
+                     thumbnail(s), {} under {}.",
+                    counts.generated,
+                    counts.served_cached,
+                    counts.failed,
+                    counts.in_flight,
+                    counts.refused_off,
+                    2,
+                    human_bytes(bytes),
+                    root.display()
+                ),
+            },
+        ],
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 fn subtitle_not_ready_503(enabled: bool) -> DeveloperEnableItem {
     let engine = |id: &'static str, title: &'static str, detail: String| DeveloperRequirement {
         id,
