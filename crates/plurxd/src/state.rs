@@ -806,20 +806,15 @@ impl AppState {
         )
     }
 
-    /// Whether the PGS consumers read the subtitle-source store. On by
-    /// default; an unreadable setting ignores the store, which is the
-    /// behaviour that shipped before it existed.
-    pub(crate) async fn subtitle_stored_sources_enabled(&self) -> bool {
-        crate::subtitle_source::enabled(self.store.as_ref()).await
-    }
-
-    /// The store as a consumer on this node sees it right now.
-    pub(crate) async fn subtitle_source_access(&self) -> crate::subtitle_source::StoreAccess {
-        crate::subtitle_source::StoreAccess::new(
-            crate::subtitle_source::store_root(&self.runtime_cache_dir),
-            self.subtitle_stored_sources_enabled().await,
+    /// The subtitle-source store as a consumer on this node sees it. Nothing
+    /// is read here: `subtitles.stored_sources` is read by a lookup, and only
+    /// once one is going to consult the store, so a manifest poll for a warm
+    /// overlay generation pays nothing for it.
+    pub(crate) fn subtitle_source_access(&self) -> crate::subtitle_source::StoreAccess {
+        crate::subtitle_source::StoreAccess::from_setting(
+            Arc::clone(&self.store),
+            &self.runtime_cache_dir,
         )
-        .classifying(Arc::clone(&self.store), Some(&self.node_id))
     }
 
     /// `node_id` is this server's stable id — the `node_id` a cache location

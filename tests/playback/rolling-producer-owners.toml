@@ -2570,7 +2570,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `subtitle_source::tests::over_the_cap_the_least_recently_accessed_directory_
 # goes_first`, spacing three `.access` writes so their mtimes order. It owns no
 # producer, no process and no timer beyond the test's own await.
-# 869 -> 872 with Fix C PR 2. Two production `tokio::time::timeout`s in
+# 869 -> 870 with the #456 review: one production `tokio::time::timeout` in
+# `subtitles::derive_burn_from_store`, the derivation's own 30 s bound. It
+# runs inside the burn flight's owned task and under that flight's
+# `EXTRACTION_TIMEOUT`; expiry drops the derivation future, whose
+# `BoundedDiagnosticChild` kills and reaps the ffmpeg child, and the same task
+# goes on to the source extraction. It owns no new producer and elects no
+# recovery; it exists so a hung derivation cannot run the flight's timeout out
+# and have that memoised.
+# 870 -> 873 with Fix C PR 2, merged over the #456 review's 869 -> 870. Two
+# production `tokio::time::timeout`s in
 # `subtitle_ride_along.rs`: the self-test's whole 60 s budget around
 # `run_self_test`, and the 20 s bound on each of its three `ffmpeg` runs
 # (`run_ffmpeg`), whose child is `kill_on_drop`, so a run that times out is
@@ -2578,7 +2587,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `fragindex::ride_along_tests::dropping_the_build_future_mid_pass_removes_the_
 # stage`, polling the paced pass until its slaves exist so the test can drop
 # the future mid-pass. None owns a producer.
-expected_occurrences = 872
+expected_occurrences = 873
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2740,7 +2749,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # `-start_at_zero` variant (5); in `pgs_overlay::stored_source_tests` the
 # author, the mux and the ride-along (3); in `vodencode_manager_tests.rs` the
 # author and the mux (2).
-# 146 -> 148 with Fix C PR 2. One production construction:
+# 146 -> 149 with the #456 review, all test-only fixture renderers run to
+# completion before their test proceeds: the no-subtitle source mux in
+# `a_double_failure_remembers_the_source_error_and_runs_neither_again`, and the
+# `mkpgs` author and the mux in
+# `a_source_encoder_selection_refuses_is_refused_before_any_burn_extraction`.
+# 149 -> 151 with Fix C PR 2, merged over the #456 review's 146 -> 149. One
+# production construction:
 # `subtitle_ride_along::run_ffmpeg`, the self-test's bounded `ffmpeg` runner
 # (the synthetic-source mux, the baseline index run and the run with the tee),
 # `kill_on_drop`, stdin null, awaited with `.output()` under a 20 s timeout
@@ -2748,7 +2763,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # `subtitle_ride_along::testing::run_ffmpeg_to_completion`, a
 # `std::process::Command` run to completion through `testfixtures::run`
 # before its test proceeds.
-expected_occurrences = 148
+expected_occurrences = 151
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3015,11 +3030,17 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `pgs_overlay::stored_source_tests`, and two in `vodencode_manager_tests.rs`.
 # Every one is waited to completion before its test continues; none owns a
 # producer.
-# 347 -> 348 with Fix C PR 2: the `.output()` in
+# 347 -> 349 with the #456 review: the two test-only `.output()` launches of
+# the fixture renderers in
+# `a_source_encoder_selection_refuses_is_refused_before_any_burn_extraction`,
+# each waited to completion. (The double-failure test's mux goes through the
+# existing `run` helper, already counted.)
+# 349 -> 350 with Fix C PR 2, merged over the #456 review's 347 -> 349: the
+# `.output()` in
 # `subtitle_ride_along::run_ffmpeg`, which spawns, drains and reaps the
 # self-test's child in one await under the 20 s timeout; `kill_on_drop` covers
 # the timeout.
-expected_occurrences = 348
+expected_occurrences = 350
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
