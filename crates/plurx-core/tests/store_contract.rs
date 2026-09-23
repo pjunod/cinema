@@ -567,6 +567,11 @@ const FRAGMENT_INDEX_METHODS: &[&str] = &[
     // `delete_files`.
     "vod_row_file_ids",
     "surviving_file_ids",
+    // Fix C's subtitle-source store asks it, off the lookup path, why a
+    // lookup found no directory: an index this node built for the same
+    // source means the pass that keeps PGS tracks ran here. Node-local and
+    // read-only.
+    "holds_fragment_index_for_source",
 ];
 const RENDITION_PLAN_METHODS: &[&str] = &[
     "put_rendition_plan",
@@ -16518,7 +16523,14 @@ fn contract_inventory_matches_every_store_method() {
     // above, both exist on SQLite and hiqlite, and neither adds a trait or a
     // supertrait of `Store`. C-06's telemetry method and C-04's two user
     // methods are independent additions, so the wave total is the sum.
-    assert_eq!(declared.len(), 383, "review the Store method count");
+    //
+    // 383 -> 384 for the one `FragmentIndexStore` method Fix C's producer
+    // adds, `holds_fragment_index_for_source`, a node-local read the
+    // subtitle-source store uses to classify a missing directory. It is named
+    // in `FRAGMENT_INDEX_METHODS` above; no new trait and no new supertrait of
+    // `Store`. Its sibling `fragment_index_builders_held_by` is on the cluster
+    // trait, which this inventory does not walk.
+    assert_eq!(declared.len(), 384, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
