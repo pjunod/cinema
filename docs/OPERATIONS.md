@@ -3401,23 +3401,85 @@ content-named `s<ordinal>-<sha256 prefix>.sup` per kept track — and use a trac
 only when the manifest matches a live `fstat` of the source (size and mtime;
 the burn path also its device and inode) and the stored bytes hash to the
 manifest. Anything else is a miss that runs the extraction as before. The burn
-path never uses the store for an MPEG-TS source. **Nothing produces into the
-store yet** — the fragment-index ride-along that fills it ships separately — so
-today every lookup misses.
+path never uses the store for an MPEG-TS source.
+
+**What fills it.** The fragment-index pass already demuxes every file from
+byte zero. When it runs on a node, it also keeps every PGS track the held-fd
+probe finds: one extra `tee` output after the index pipe — a `sup` and a
+`framecrc` slave per track, each `onfail=ignore`, and a `null` sentinel — so a
+subtitle failure can cost the tracks and never the index. The index's exit
+code, row check and cache key are exactly what they were. After the child is
+reaped, and only when the index was built, each track is judged: **kept** when
+a walk of the `.sup` agrees byte for byte with the `framecrc` total and the PGS
+parser accepts it; **empty** for a track with no cues; **transient** for an OS
+error (disk full, I/O, permissions) or no evidence, retried on up to three
+passes; **malformed** otherwise. Tracks are published — renamed into place,
+then the manifest swapped atomically, then replaced tracks deleted — only after
+the pass's freshness checks. A file rides once per source identity; a node that
+hydrates its index from a peer never runs the pass, so it has no stored tracks
+for that file (`hydrated_only` below). Nothing re-indexes a library to fill the
+store.
+
+The pass keeps tracks only while **all** of these hold, checked per pass:
+
+- the switch below is on;
+- the **startup self-test** passed: once per process, off the startup path,
+  the configured `ffmpeg` runs the index argv plus the tee over a four-second
+  synthetic file with one corrupted PGS track, and must exit 0, leave the index
+  output byte-identical, judge the tracks `kept` and `malformed`, and print the
+  slave-failure line the scan reads — and the `framecrc` byte arithmetic must
+  judge the corrupted track `malformed` on its own, with no stderr line to lean
+  on. It also requires `ffprobe` (`PLURX_FFPROBE`) to report the same version
+  as `ffmpeg` (`PLURX_FFMPEG`): the ordinals come from one and the hard maps are
+  resolved by the other. If it fails, the log line
+  `PGS ride-along self-test failed` carries the reason and the Developer row
+  shows it;
+- `<cache>` is on a **local filesystem** (`statfs`: NFS, SMB/CIFS, FUSE, 9p,
+  Ceph and AFS are refused, and every non-Linux platform is treated as not
+  local), because a blocked stage write would stall the demuxer the index
+  shares;
+- `<cache>` has **free space** of at least 1 GiB or 2% of its filesystem,
+  whichever is larger (`statvfs`), because stage writes share the disk with
+  the index blob the pass is about to publish.
+
+A riding pass that does not build its index is remembered (in memory, per
+file and source) and that file's next pass is a plain index pass, so the
+ride-along can cost a file its stored subtitles but never its index. The
+Developer row counts such files; a restart asks again. The verdict and the
+publication run after the pass's own future has returned, so a preemption can
+no longer discard a finished index while tracks are being judged. A stored
+track whose file has gone missing is re-extracted on the file's next pass.
+An HDR delivery that asks to burn a track the store holds as `empty` is not
+refused (there is nothing to burn): a copy stays a copy, and a transcode
+chooses its grade without the burn.
 
 | Runtime setting | Default | Meaning |
 |---|---:|---|
-| `subtitles.stored_sources` | on | Let both consumers read the store. Off makes them ignore it entirely, so a wrong stored track is taken out of service without a redeploy |
+| `subtitles.stored_sources` | on | One switch for both halves: the index pass keeps PGS tracks, and both consumers read them. Off stops the next pass keeping tracks and makes both consumers ignore what is stored, so a wrong stored track is taken out of service without a redeploy |
 
-The switch is **Settings → Developer → *Read stored PGS tracks instead of the
-source*** (`subtitle_stored_sources` in the settings API). The store is swept on
-each fragment-index tick: a directory whose file row is gone or whose size/mtime
-moved is deleted, a catalog read that fails stops the sweep without deleting,
-and a size cap evicts whole directories least recently used first. Lookups are
-counted in `plurx_subtitle_source_lookups_total{consumer,outcome}`, misses by
-reason in `plurx_subtitle_source_misses_total{consumer,reason}`, and burn
+The switch is **Settings → Developer → *Keep PGS tracks during indexing and
+read them instead of the source*** (`subtitle_stored_sources` in the settings
+API); its rows show the self-test result, the filesystem check and the
+counters, and never gate it. The store is swept on each fragment-index tick: a
+directory whose file row is gone or whose size/mtime moved is deleted, a
+catalog read that fails stops the sweep without deleting, a size cap evicts
+whole directories least recently used first, and stage directories
+(`.stage-*`) an interrupted pass left behind are removed after an hour (and all
+of them at startup), and stored tracks a manifest no longer names — what a
+publish interrupted between its steps leaves — are removed once older than an
+hour. Lookups are counted in
+`plurx_subtitle_source_lookups_total{consumer,outcome}`, misses by reason
+(`absent`, `stale`, `disabled`, `mpegts`, `hash_mismatch`, `never_indexed`,
+`hydrated_only`, `empty_track`) in
+`plurx_subtitle_source_misses_total{consumer,reason}` — a lookup that finds no
+directory is answered at once and classified afterwards, off the request
+path, from this node's own index table and the cluster's location rows — burn
 derivations that fell back to the source in
-`plurx_subtitle_source_fallbacks_total{reason}`.
+`plurx_subtitle_source_fallbacks_total{reason}`, and the producer in
+`plurx_subtitle_ride_along_tracks_total`,
+`plurx_subtitle_ride_along_verdicts_total{verdict}`,
+`plurx_subtitle_ride_along_written_bytes_total` and
+`plurx_subtitle_ride_along_published_total`.
 
 ### Playback telemetry
 

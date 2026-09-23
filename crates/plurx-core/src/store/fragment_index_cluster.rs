@@ -1603,6 +1603,22 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         cache_key: &str,
     ) -> Result<Vec<ClusterFragmentIndexLocation>, StoreError>;
 
+    /// Who built the fragment-index artifacts `node_id` holds a location
+    /// for, for one file's source at `source_size`/`source_mtime`: the
+    /// distinct `built_by_node_id` values, empty when this node holds none.
+    ///
+    /// The subtitle-source store reads it to say why a lookup missed. A node
+    /// that only hydrated a peer's index never ran the pass that keeps PGS
+    /// tracks, so its miss is `hydrated_only`, not `absent`; a node holding no
+    /// index at all is `never_indexed`.
+    async fn fragment_index_builders_held_by(
+        &self,
+        node_id: &str,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+    ) -> Result<Vec<String>, StoreError>;
+
     async fn forget_cluster_fragment_index_location(
         &self,
         cache_key: &str,

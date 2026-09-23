@@ -7071,12 +7071,26 @@ mod tests {
         // test in this binary may have populated, so it is met on a run that
         // probed FFprobe and unobservable on one that did not. Both are honest;
         // neither belongs in an exact set. It is asserted on its own below.
+        // `stored_source_self_test` reads the process-wide self-test state,
+        // which a ride-along test in this binary may have driven either way.
         let green = seen
             .iter()
             .filter(|(_, status)| status.as_str() == "met")
             .map(|(id, _)| id.as_str())
-            .filter(|id| *id != "probe_reporter_named")
+            .filter(|id| {
+                !matches!(
+                    *id,
+                    "probe_reporter_named" | "stored_source_self_test" | "stored_source_free_space"
+                )
+            })
             .collect::<Vec<_>>();
+        // The free-space row reads this host's disk, so it is either.
+        for id in ["stored_source_self_test", "stored_source_free_space"] {
+            assert!(
+                seen.contains_key(id),
+                "the ride-along's {id} row is reported: {seen:?}"
+            );
+        }
         assert!(
             matches!(
                 seen.get("probe_reporter_named").map(String::as_str),
@@ -7094,6 +7108,8 @@ mod tests {
                 "server_preparation_is_real",
                 "source_fencing",
                 "sources_match_their_scan_whole",
+                "stored_source_local_cache",
+                "stored_source_producer",
                 "tuner_reserve"
             ]
         );
@@ -15682,6 +15698,69 @@ mod tests {
         assert_eq!(
             still_refused["code"], "hdr_subtitle_burn_refused",
             "a client's word about the grade is not evidence about the grade: {still_refused}"
+        );
+    }
+
+    /// #456's review, findings A and B, reachable once the ride-along fills
+    /// the store: an HDR copy asking to burn a track the store holds as a
+    /// real track with no cues is not refused as an HDR downgrade — there is
+    /// nothing to burn — and it stays the copy it asked for rather than
+    /// becoming a full re-encode. On this fixture the encoded path answers
+    /// `vod_source_rescan_required` (it holds and re-probes the source); the
+    /// copy path does not.
+    #[tokio::test]
+    async fn an_hdr_burn_of_a_track_stored_as_empty_is_the_copy_it_asked_for() {
+        use crate::subtitle_source::testing::{settled, stamp_of, write_manifest};
+
+        crate::transcode::require_ffmpeg();
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+            .await
+            .expect("pin the refusal policy");
+        let file = seed_mixed_subtitles(&state, Some("hdr10")).await;
+        let request = || {
+            post(
+                &format!("/api/v1/files/{file}/hls/sessions"),
+                Some(&admin),
+                json!({
+                    "playback_id": "hdr-burn-of-an-empty-track",
+                    "subtitle_burn": 2,
+                    "copy": true,
+                    "preserve_dolby_vision": true
+                }),
+            )
+        };
+
+        let (status, body) = call(&app, request()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(
+            body["code"], "hdr_subtitle_burn_refused",
+            "without the store's word"
+        );
+
+        let row = state
+            .store
+            .get_file(file)
+            .await
+            .expect("read")
+            .expect("file");
+        write_manifest(
+            &crate::subtitle_source::store_root(&state.runtime_cache_dir),
+            file,
+            stamp_of(&row.path),
+            vec![settled(2, crate::subtitle_source::Verdict::Empty)],
+        );
+        let (status, body) = call(&app, request()).await;
+        assert_ne!(
+            body["code"], "hdr_subtitle_burn_refused",
+            "an empty track has nothing to burn: {status} {body}"
+        );
+        assert_ne!(
+            body["code"], "vod_source_rescan_required",
+            "the copy stays a copy, not an encode: {status} {body}"
         );
     }
 

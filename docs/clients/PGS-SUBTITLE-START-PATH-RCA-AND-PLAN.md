@@ -5,8 +5,14 @@
 built in PR #453 (`fix/pgs-overlay-seek-and-failure`, not yet merged)
 · the overlay gate is still **off** pending §5.5's two-device check · §6
 approved as v3.1 (branch `docs/fix-c-design`); its PR 1 of 3 — the store's
-readers, with nothing producing into it — is built, as a draft · **nothing here
-is deployed** · reviewed — see
+readers — and PR 2 — the producer riding the index pass, with its latch, stage
+guard, per-track verdict, local-filesystem check, startup self-test and the
+switch's producer half — are built (#456; #460, stacked on it, reviewed
+approve-with-changes and the changes made: a failed riding pass stops riding,
+ffprobe/ffmpeg must match, a free-space margin, the verdict outside the
+cancellable build, the latch re-checks kept files); PR 3 (progress-row
+attribution and cache diagnostics) is in progress · **nothing here is deployed** ·
+reviewed — see
 [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
 **Reviewer:** Fable, adversarial · **Written:** 2026-09-22, revised 2026-09-23 ·
 **Reported by:** Paul, 2026-09-21 ~18:50 ET, Android on the TCL tablet
