@@ -125,21 +125,40 @@ internal enum class PGSOverlayStatus(val label: String?) {
 
 internal enum class PGSOverlayManifestDisposition { Ready, Preparing, Terminal }
 
+/** What a player event does to the overlay's window. */
+internal enum class PGSOverlaySeekAction {
+    /** Start loading [PGSOverlaySeekPlan.window]. */
+    Load,
+
+    /** The in-flight load covers the position and will publish it. */
+    Await,
+
+    /** The loaded window covers the position: publish from it now. */
+    Publish,
+
+    /** Nothing covers the position and a failure backoff is running. */
+    Hold,
+}
+
 /**
- * What a seek, or any other playback discontinuity, does to the overlay.
+ * What a seek, or any other player event, does to the overlay.
  *
- * [clearNow] is the part a refresh used to get wrong: a refresh publishes only
- * once its new window has loaded, so whatever is on screen stays there until
+ * [clearNow] is the part a refresh used to get wrong: a load publishes only
+ * once its window has loaded, so whatever is on screen stays there until
  * then. That was right only when the shown cue is still the one due; after a
  * forward seek into the loaded window's last 20 s it was usually a cue that
- * had already ended.
+ * had already ended. [window] is the window that will serve the position:
+ * the one to load, the one loading, or the one loaded.
  */
 internal data class PGSOverlaySeekPlan(
-    val refresh: Boolean,
+    val action: PGSOverlaySeekAction,
     val clearNow: Boolean,
     val activeCueId: String?,
-    val window: PGSOverlayTimeWindow,
-)
+    val window: PGSOverlayTimeWindow?,
+) {
+    val refresh: Boolean
+        get() = action == PGSOverlaySeekAction.Load
+}
 
 /** A non-2xx overlay answer, read for its code rather than its status alone. */
 internal sealed interface PGSOverlayRefusal {
@@ -226,31 +245,70 @@ internal object PGSOverlayPolicy {
             sourceTimeMs < loaded.lowerMs ||
             sourceTimeMs >= loaded.upperExclusiveMs - refreshMarginMs
 
+    /** After a failed window: retry after 5 s, then 30 s, then wait for the viewer. */
+    val windowRetryDelaysMs = listOf(5_000L, 30_000L)
+
+    fun windowRetryDelayMs(failures: Int): Long? = windowRetryDelaysMs.getOrNull(failures - 1)
+
+    /**
+     * Whether a player event starts a window load. The same rule as Apple's
+     * `shouldRefresh(sourceTimeMs:loadedRange:loadingRange:windowFailures:msSinceFailure:)`,
+     * held to the shared fixture's `tick_cases` and `seek_cases`: a load that
+     * covers the position is never cancelled, and after a failure only the
+     * bounded backoff retries. A seek passes zero failures.
+     */
+    fun refreshDecision(
+        positionMs: Long,
+        loadedWindow: PGSOverlayTimeWindow?,
+        loadingWindow: PGSOverlayTimeWindow?,
+        windowFailures: Int = 0,
+        msSinceFailure: Long = 0,
+    ): Boolean {
+        if (loadedWindow != null && !shouldRefresh(positionMs, loadedWindow)) return false
+        if (loadingWindow != null && !shouldRefresh(positionMs, loadingWindow)) return false
+        if (windowFailures <= 0) return true
+        val delay = windowRetryDelayMs(windowFailures) ?: return false
+        return msSinceFailure >= delay
+    }
+
     /**
      * Held to `tests/playback/pgs-overlay-cases.json` `seek_cases`, the same
-     * rows the Apple suite reads.
+     * rows the Apple suite reads, and driven through the controller by
+     * `PGSOverlayControllerTest`.
      */
     fun seekPlan(
         positionMs: Long,
         loadedWindow: PGSOverlayTimeWindow?,
+        loadingWindow: PGSOverlayTimeWindow?,
         shownCueId: String?,
         cues: List<PGSOverlayCue>,
         durationMs: Long,
+        windowFailures: Int = 0,
+        msSinceFailure: Long = 0,
     ): PGSOverlaySeekPlan {
-        val refresh = shouldRefresh(positionMs, loadedWindow)
         val active = activeCueIndex(cues, positionMs)?.let { cues[it].id }
+        val loadedCovers = loadedWindow != null && !shouldRefresh(positionMs, loadedWindow)
+        val loadingCovers = loadingWindow != null && !shouldRefresh(positionMs, loadingWindow)
+        val action = when {
+            loadedCovers -> PGSOverlaySeekAction.Publish
+            loadingCovers -> PGSOverlaySeekAction.Await
+            refreshDecision(positionMs, null, null, windowFailures, msSinceFailure) ->
+                PGSOverlaySeekAction.Load
+            else -> PGSOverlaySeekAction.Hold
+        }
         return PGSOverlaySeekPlan(
-            refresh = refresh,
-            // Without a refresh the active cue is published at once, which
-            // replaces whatever is shown. With one, nothing is published until
-            // the new window loads, so a shown cue that is not the one due at
-            // the new position has to go now.
-            clearNow = refresh && shownCueId != null && shownCueId != active,
+            action = action,
+            // Publishing replaces whatever is shown at once. A load or an
+            // awaited load publishes only when its window arrives, so a shown
+            // cue that is not the one due at the new position has to go now.
+            clearNow = (action == PGSOverlaySeekAction.Load || action == PGSOverlaySeekAction.Await) &&
+                shownCueId != null && shownCueId != active,
             activeCueId = active,
-            window = if (refresh || loadedWindow == null) {
-                windowAt(positionMs, durationMs)
-            } else {
-                loadedWindow
+            window = when (action) {
+                PGSOverlaySeekAction.Load -> windowAt(positionMs, durationMs)
+                PGSOverlaySeekAction.Await -> loadingWindow
+                PGSOverlaySeekAction.Publish -> loadedWindow
+                PGSOverlaySeekAction.Hold -> null
             },
         )
     }
