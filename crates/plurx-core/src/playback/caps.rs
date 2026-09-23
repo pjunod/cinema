@@ -198,11 +198,23 @@ pub struct DeviceCaps {
     /// carries that string rather than a yes.
     ///
     /// Empty is the conservative answer and the only one an older client can
-    /// give: absent is never a claim, so a client that has not been taught to
-    /// draw bitmaps is told a PGS track needs burning in, which is true for
-    /// it. Whether the *server* can serve the protocol is a separate question
-    /// held by the `subtitles.pgs_overlay` setting; a track is only offered as
-    /// an overlay when both are yes.
+    /// give: absent *within a document* is never a claim, so a client that has
+    /// not been taught to draw bitmaps is told a PGS track needs burning in,
+    /// which is true for it. An absent *document* is a different answer
+    /// entirely — see `overlay_for_caller` in `http/stream.rs`, which reads
+    /// silence as the server's own answer rather than as a refusal, because
+    /// the legacy query path is a mixed-fleet one.
+    ///
+    /// Getting that backwards is cheap in one direction and expensive in the
+    /// other. A claim that is dropped — misspelled, or lost to a key strategy
+    /// — costs a needless burn: the viewer still sees subtitles, but an HDR
+    /// source has been re-encoded to SDR to draw pictures the device could
+    /// have drawn itself. A refusal read as a claim is what leaves a viewer
+    /// with no subtitles at all.
+    ///
+    /// Whether the *server* can serve the protocol is a separate question held
+    /// by the `subtitles.pgs_overlay` setting; a track is only offered as an
+    /// overlay when both are yes.
     #[serde(default)]
     pub subtitle_overlays: Vec<String>,
     /// `hls` when preserved Dolby Vision has to ride the copy-video HLS

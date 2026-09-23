@@ -592,12 +592,30 @@ does not make the server capability production-ready. When off,
 Enabling the gate changes subtitle delivery only and never alters video bytes.
 It **does** let `/decision` select a PGS track as the default — but only for a
 client that claimed it can draw one. A client advertises that in its
-capabilities document as `subtitle_overlays: ["pgs-v1"]`; absent or empty is
-not a claim, so a client that has not been taught to render bitmaps is offered
-no PGS default, is told no `overlay` protocol, and is told that selecting a PGS
-track requires a burn-in — which for that client is true. (This paragraph said
-the opposite until 2026-09-22: it claimed the gate "does not select an overlay
-automatically", which `stream.rs` has contradicted since the selection landed.)
+capabilities document as `subtitle_overlays: ["pgs-v1"]`.
+
+Two absences, read as opposites, and the distinction is the contract:
+
+- **The field is absent or empty in a document the client sent.** That is a
+  client saying what it can do and not naming this. It is offered no PGS
+  default, and it is told that selecting a PGS track requires a burn-in — which
+  for that client is true.
+- **No capabilities document at all**, i.e. the legacy `GET /decision` query,
+  which has no slot for the claim. That is silence, not a refusal, and it is a
+  *mixed-fleet* path rather than an old-client one: both native clients fall
+  back to it on any 400/404/405. It gets the answer this server gave before the
+  claim existed — the gate alone.
+
+`overlay` on the track itself is **not** narrowed either way. It answers what
+this process can deliver — "could this track be served as `pgs-v1` here" — and
+it is the only surface that answers it, so an operator checking the Developer
+switch and a client on an older build both have somewhere to look. What a
+client acts on is the default and `subtitle_requires_burn_in`, and those are
+narrowed.
+
+(The first of those paragraphs said the opposite until 2026-09-22: it claimed
+the gate "does not select an overlay automatically", which `stream.rs` has
+contradicted since the selection landed.)
 
 The manifest route is:
 
