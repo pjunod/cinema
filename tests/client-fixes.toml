@@ -2257,31 +2257,64 @@ test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testToneMapPeakSummaryKeepsPolicyDistinctFromSourceTruth()"
 
 [[fixes]]
-# Two defects, one commit. A forward seek into the loaded window's 20 s
-# refresh margin refreshed without clearing, because the position was still
-# inside the loaded window, so the pre-seek cue (often one that had ended)
-# stayed up until the new window loaded; the clear is now keyed on the cue
-# due. And Retrofit leaves body() null for every non-2xx, so a refused overlay
-# read "empty PGS overlay response" and a remembered failure never stopped the
-# poll; manifestResponsesFromSharedFixture holds that half.
+# A forward seek into the loaded window's 20 s refresh margin refreshed without
+# clearing, because the position was still inside the loaded window, so the
+# pre-seek cue (often one that had ended) stayed up until the new window
+# loaded. The anchored line is where the controller acts on seekPlan's
+# clearNow; aSeekIntoTheRefreshMarginDropsTheStaleFrameAtOnce drives a real
+# PGSOverlayController through that seek and fails with "expected null, but
+# was <c2>" when the old window-containment rule is put back. The same commit
+# read refusals from errorBody(): manifestResponsesFromSharedFixture feeds
+# readPGSOverlayManifestResponse real retrofit2.Response objects, which is the
+# function the controller's source calls. The code of this commit was
+# restructured by af514df1; the anchors name where the behaviour lives now.
 id = "android.pgs-overlay-seek-clears-a-stale-frame"
 commits = ["d7553793"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/AndroidPGSOverlay.kt"
-source_anchor = "clearFrame = if (forceWindow) shownCueId != plan.activeCueId else plan.clearNow,"
-test = "clients/android/app/src/test/java/tv/plurx/app/player/PGSOverlayTest.kt"
-test_anchor = "fun seekCasesFromSharedFixture()"
+source_anchor = "loadWindow(ready, index, position, checkNotNull(plan.window), clearFrame = plan.clearNow)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PGSOverlayControllerTest.kt"
+test_anchor = "fun aSeekIntoTheRefreshMarginDropsTheStaleFrameAtOnce()"
 
 [[fixes]]
-# Three defects, one commit. The 1 s periodic observer cancelled and restarted
-# the in-flight window load for as long as the position was outside the
-# published window, so a slow window after an out-of-window seek never
-# arrived. After a window failure every tick refetched it and raised another
-# notice once a second (testPGSOverlayFailedWindowIsNotRetriedOrRenoticedByTheTick).
-# And a typed refusal was thrown as .http(status), so a remembered preparation
-# failure could not be told apart (testPGSOverlayManifestResponsesFromSharedFixture).
+# Every non-seek player event restarted the window load after an out-of-window
+# seek, and a failed window was said again on the next play or pause. The
+# anchored line is the controller acting on an Await plan; the test drives
+# reconcile() three times during a covering load and fails with 4 requests
+# instead of 1 when the in-flight window is ignored.
+# aFailedWindowIsSaidOnceAndRetriedOnABoundedBackoff holds the backoff half
+# (4 notices instead of 1 without it).
+id = "android.pgs-overlay-keeps-a-covering-load-and-backs-off"
+commits = ["af514df1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/AndroidPGSOverlay.kt"
+source_anchor = "PGSOverlaySeekAction.Await -> if (plan.clearNow) show(null)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PGSOverlayControllerTest.kt"
+test_anchor = "fun aPlayerEventDoesNotCancelTheLoadThatCoversItsPosition()"
+
+[[fixes]]
+# The 1 s periodic observer cancelled and restarted the in-flight window load
+# for as long as the position was outside the published window, so a slow
+# window after an out-of-window seek never arrived. The anchored line is the
+# tick's refresh decision reading the in-flight range; the test drives
+# PlayerController's pgsOverlayPeriodicTick during a covering load and fails
+# with 7 requests instead of 2 when that range is ignored. The same commit read
+# typed refusals (testPGSOverlayManifestResponsesFromSharedFixture). Its
+# "never retry after a failure" rule was replaced by 8ea36557.
 id = "apple.pgs-overlay-tick-keeps-a-covering-load"
 commits = ["ca639dbb"]
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "loadingRange: pgsOverlayLoadingRange,"
 test = "clients/apple/Tests/AppleClientTests.swift"
-test_anchor = "func testPGSOverlayTickDoesNotCancelCoveringLoad()"
+test_anchor = "func testPGSOverlayTickDoesNotCancelCoveringLoad() async"
+
+[[fixes]]
+# A load that returned early (the viewer had moved to another track) kept its
+# range, so reselecting the first track loaded nothing. The anchored line gives
+# the range back on every exit; the test abandons a load, reselects, and never
+# settles without it. testPGSOverlayFailedWindowIsSaidOnceAndRetriedOnABoundedBackoff
+# holds the other half of the commit, the 5 s / 30 s retry after one notice.
+id = "apple.pgs-overlay-load-range-is-given-back"
+commits = ["8ea36557"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "defer { self?.finishPGSOverlayLoad(loadGeneration) }"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testPGSOverlayReselectionAfterAnAbandonedLoadLoadsAgain() async"

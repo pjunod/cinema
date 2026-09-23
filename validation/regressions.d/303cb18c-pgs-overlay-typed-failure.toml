@@ -12,15 +12,13 @@ capacity-full was the same 503.
 
 `http::pgs_overlay::tests::a_remembered_preparation_failure_is_a_typed_terminal_answer_not_a_503`
 pins that every `Unavailable` is a typed 500 `pgs_overlay_prepare_failed`
-with no Retry-After; reverting the mapping to `ServiceUnavailable` fails it.
+with no Retry-After. Reverting the `Unavailable` arm to the old
+`ServiceUnavailable` fails it; that revert was run on 2026-09-23.
 `capacity_full_is_the_only_retryable_503` pins the TypedRetry 503
 `pgs_overlay_capacity` with Retry-After 5, and
 `a_malformed_or_over_limit_stream_keeps_its_422_and_gains_the_code` pins the
 422 bodies keeping their legacy `error` and `detail` fields beside the code.
-In crates/plurxd/src/pgs_overlay.rs,
-`preparation_capacity_refuses_a_third_cold_generation` now requires the
-capacity refusal to be `OverlayError::Capacity`, and
-`a_failed_preparation_is_remembered_as_a_failure_not_as_capacity` requires a
-failed runner to be replayed as `Unavailable` three times with one run.
-Run `cargo test -p plurxd pgs_overlay`.
+`preparation_capacity_refuses_a_third_cold_generation` in
+crates/plurxd/src/pgs_overlay.rs requires the capacity refusal to be
+`OverlayError::Capacity`. Run `cargo test -p plurxd pgs_overlay`.
 """
