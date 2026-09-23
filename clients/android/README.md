@@ -20,8 +20,10 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `119` — native viewer parity across phone, foldable,
-> and TV. Build 110 executes a server-required copy-HLS remux on initial play,
+> Status: **v0.3.0**, build `120` — native viewer parity across phone, foldable,
+> and TV. Build 120 stops walking the whole ingress list for playback failures
+> no other node would answer differently: a 4xx on a segment or playlist is
+> terminal, and only a connection-level failure or a 5xx tries a peer. Build 110 executes a server-required copy-HLS remux on initial play,
 > seek, reopen, track change, recovery and prepared handoff, so Profile 7 → 8.1
 > conversion never falls back into the progressive copy path that cannot run
 > it. Older servers omit the requirement and retain progressive behavior.

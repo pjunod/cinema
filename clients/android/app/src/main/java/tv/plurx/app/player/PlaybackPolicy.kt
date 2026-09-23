@@ -103,11 +103,50 @@ internal fun isTransportPlaybackError(errorCode: Int): Boolean = errorCode in se
     2001, // ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
     2002, // ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT
     2003, // ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE
-    2004, // ERROR_CODE_IO_BAD_HTTP_STATUS — only 5xx reaches this in practice;
-          // a 4xx capability answer is terminal and is filtered at the call site
+    2004, // ERROR_CODE_IO_BAD_HTTP_STATUS — ANY non-2xx, 4xx included. Which
+          // of them is worth another node is `nodeFailoverEligible`'s
+          // question, not this set's.
     2007, // ERROR_CODE_IO_NO_PERMISSION
     2008, // ERROR_CODE_IO_CLEARTEXT_NOT_PERMITTED
 )
+
+/**
+ * Whether another ingress is worth trying, given the status the failure carried.
+ *
+ * `isTransportPlaybackError` answers "is this the kind of error a different
+ * node could answer differently". For every code but 2004 that is the whole
+ * question. 2004 is `ERROR_CODE_IO_BAD_HTTP_STATUS`, which Media3 raises for
+ * any non-2xx response, and the status decides:
+ *
+ * - **no status** — the failure never got a response (connection refused,
+ *   reset, timed out). Another ingress may well answer, so try it. This is the
+ *   case the failover exists for.
+ * - **5xx** — the node is unwell; a peer is plausibly healthy. Except 501 and
+ *   505, which are statements about what the *software* implements and about
+ *   the HTTP version the client spoke; every node runs the same build, so both
+ *   are the same answer everywhere and walking the list only delays the error.
+ * - **anything else (4xx)** — the same answer on every node. A 401 or 403 is a
+ *   credential the peers share; a 404 or 410 is a session that ended
+ *   everywhere, and the ladder's existing session-gone handling owns it; a 409
+ *   is a control conflict; a 416 is a range this file does not have. Trying
+ *   peers for those amplifies load by one full player prepare per node and
+ *   hides the real cause behind whichever error the last node produced.
+ *
+ * Until this existed the call site ran a failover for every 2004, so an ended
+ * session's 404 walked the whole ingress list before the viewer saw it — which
+ * is what the comment on 2004 above used to claim was "filtered at the call
+ * site" while nothing filtered anything.
+ *
+ * Extracting the status from the exception needs Media3 types and therefore
+ * lives at the call site; this file stays pure so the table above is one screen
+ * and testable on the JVM.
+ */
+internal fun nodeFailoverEligible(errorCode: Int, responseCode: Int?): Boolean = when {
+    !isTransportPlaybackError(errorCode) -> false
+    responseCode == null -> true
+    responseCode in 500..599 -> responseCode != 501 && responseCode != 505
+    else -> false
+}
 
 internal fun isCompatibilityPlaybackError(errorCode: Int): Boolean = errorCode in setOf(
     3001, // ERROR_CODE_PARSING_CONTAINER_MALFORMED
