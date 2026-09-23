@@ -1,7 +1,7 @@
 # Font attestation and blocking I/O — stat off the runtime now, freeze the font environment per recipe next
 
-**Status:** M1 built in draft PR #413 · M2 blocked by deployed config-closure
-evidence · **Executes:** §2.7, F-stream-7, assessment
+**Status:** M1 built in draft PR #413, not deployed · M2 unbuilt, blocked by
+deployed config-closure evidence · **Executes:** §2.7, F-stream-7, assessment
 correction 6, §5.1 item 7 and §5.2 "frozen font environment per recipe" from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a` · **Updated:**
