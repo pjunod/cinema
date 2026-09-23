@@ -370,3 +370,258 @@ async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
     assert!(error.contains("vod_source_rescan_required"), "{error}");
     assert!(manager.vod.session_ids().await.is_empty());
 }
+
+/// A stored track that is `empty` means there is nothing to burn: the session
+/// start builds its pipeline without the subtitle overlay, and the recipe is
+/// the one a session that never asked for a burn gets. With no store the same
+/// request reads the source and burns, which is the control.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
+    use plurx_core::store::SqliteStore;
+    let base = crate::test_tempdir().expect("manager fixture");
+    let video = plurx_core::testfixtures::source("h264");
+    let authored = base.path().join("authored.sup");
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/mkpgs");
+    let status = std::process::Command::new(script)
+        .args(["1920", "1080"])
+        .arg(&authored)
+        .output()
+        .expect("author the PGS track");
+    assert!(status.status.success());
+    let source = base.path().join("with-pgs.mkv");
+    let muxed = std::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+        .arg(&video)
+        .args(["-itsoffset", "1", "-i"])
+        .arg(&authored)
+        .args(["-map", "0", "-map", "1:s:0", "-c", "copy"])
+        .arg(&source)
+        .output()
+        .expect("mux the fixture");
+    assert!(
+        muxed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&muxed.stderr)
+    );
+    let probe = plurx_core::scan::probe::probe(&source)
+        .await
+        .expect("real source probe");
+    let metadata = std::fs::metadata(&source).expect("source metadata");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id =
+        seed_file_with_probe_at(&store, source.to_str().expect("path"), probe.clone()).await;
+    let seeded = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("seeded");
+    store
+        .upsert_file(
+            seeded.item_id,
+            source.to_str().expect("path"),
+            metadata.len() as i64,
+            crate::fragment_index_cluster::source_stamp(&metadata).mtime,
+            &probe,
+        )
+        .await
+        .expect("attested source metadata");
+    let file = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("attested");
+    assert!(
+        file.subtitle_streams
+            .first()
+            .is_some_and(|stream| plurx_core::tracks::is_bitmap_subtitle(&stream.codec)),
+        "the fixture carries a PGS track: {:?}",
+        file.subtitle_streams
+    );
+    let manager = TranscodeManager::new(
+        store,
+        base.path().join("manager"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let req = SessionRequest {
+        request_id: Some("stored-empty-burn".into()),
+        previous_session_id: None,
+        reopen_reason: None,
+        presentation: Presentation::Vod,
+        automatic: false,
+        start_seconds: 0.0,
+        kind: SessionKind::Transcode { height: 240 },
+        subtitle_burn: Some(0),
+        ..reopen_request(file_id, "stored-empty", "unused", "unused")
+    };
+
+    // First, while the burn cache is cold: a published sidecar is served as
+    // it always was, so the store is only asked when there is a read to save.
+    let root = crate::subtitle_source::store_root(manager.runtime_cache_dir());
+    let dir = crate::subtitle_source::testing::write_manifest(
+        &root,
+        file_id,
+        crate::subtitle_source::testing::stamp_of(&source),
+        vec![crate::subtitle_source::testing::settled(
+            0,
+            crate::subtitle_source::Verdict::Empty,
+        )],
+    );
+    let bare = manager
+        .prepare_vod_encoding(&req, &file)
+        .await
+        .expect("an empty track starts")
+        .expect("still an encoded recipe");
+    assert!(bare.options.subtitle_burn.is_none(), "nothing is burned");
+    assert!(bare.options.subtitle_file.is_none());
+    assert!(bare.subtitle.is_none() && bare.subtitle_digest.is_none());
+    let bare_args = bare.args(&file, 0.0, 2.0);
+    assert!(
+        !bare_args.iter().any(|arg| arg == "/dev/fd/5" || arg.contains("overlay")),
+        "no subtitle input and no overlay filter: {bare_args:?}"
+    );
+    let plain = manager
+        .prepare_vod_encoding(
+            &SessionRequest {
+                request_id: Some("stored-empty-plain".into()),
+                subtitle_burn: None,
+                ..req.clone()
+            },
+            &file,
+        )
+        .await
+        .expect("a plain start")
+        .expect("an encoded recipe");
+    assert_eq!(
+        bare_args,
+        plain.args(&file, 0.0, 2.0),
+        "nothing to burn is exactly a session without a burn"
+    );
+
+    // The control: the store taken away, the same request burns.
+    std::fs::remove_dir_all(&dir).expect("empty the store");
+    let burned = manager
+        .prepare_vod_encoding(
+            &SessionRequest {
+                request_id: Some("stored-empty-control".into()),
+                ..req.clone()
+            },
+            &file,
+        )
+        .await
+        .expect("the control burns")
+        .expect("an encoded recipe");
+    assert!(burned.options.subtitle_burn.is_some());
+    assert!(burned.subtitle.is_some());
+    let burned_args = burned.args(&file, 0.0, 2.0);
+    assert!(
+        burned_args.iter().any(|arg| arg == "/dev/fd/5"),
+        "the control reads its sidecar: {burned_args:?}"
+    );
+    assert!(
+        burned_args.iter().any(|arg| arg.contains("overlay")),
+        "and overlays it: {burned_args:?}"
+    );
+}
+
+/// The burn sidecar is fetched only after the encoder and grade are chosen,
+/// because that choice can refuse the source outright. A refusal must be
+/// immediate and final — not a detached full-source extraction answered
+/// "pending" for as long as it takes, followed by the same refusal. Here the
+/// source is labelled Dolby Vision with no profile, which encoder selection
+/// refuses; the subtitle cache must still be untouched afterwards.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extraction() {
+    use plurx_core::store::SqliteStore;
+    let base = crate::test_tempdir().expect("manager fixture");
+    let video = plurx_core::testfixtures::source("h264");
+    let authored = base.path().join("authored.sup");
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/mkpgs");
+    let status = std::process::Command::new(script)
+        .args(["1920", "1080"])
+        .arg(&authored)
+        .output()
+        .expect("author the PGS track");
+    assert!(status.status.success());
+    let source = base.path().join("with-pgs.mkv");
+    let muxed = std::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+        .arg(&video)
+        .args(["-itsoffset", "1", "-i"])
+        .arg(&authored)
+        .args(["-map", "0", "-map", "1:s:0", "-c", "copy"])
+        .arg(&source)
+        .output()
+        .expect("mux the fixture");
+    assert!(
+        muxed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&muxed.stderr)
+    );
+    let probe = plurx_core::scan::probe::probe(&source)
+        .await
+        .expect("real source probe");
+    let metadata = std::fs::metadata(&source).expect("source metadata");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id =
+        seed_file_with_probe_at(&store, source.to_str().expect("path"), probe.clone()).await;
+    let seeded = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("seeded");
+    store
+        .upsert_file(
+            seeded.item_id,
+            source.to_str().expect("path"),
+            metadata.len() as i64,
+            crate::fragment_index_cluster::source_stamp(&metadata).mtime,
+            &probe,
+        )
+        .await
+        .expect("attested source metadata");
+    let mut file = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("attested");
+    // What encoder selection refuses: Dolby Vision whose profile is unknown.
+    file.hdr = Some("dolby_vision".into());
+    file.hdr_format = None;
+    file.dolby_vision = Default::default();
+    let manager = TranscodeManager::new(
+        store,
+        base.path().join("manager"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let req = SessionRequest {
+        request_id: Some("refused-before-burn".into()),
+        previous_session_id: None,
+        reopen_reason: None,
+        presentation: Presentation::Vod,
+        automatic: false,
+        start_seconds: 0.0,
+        kind: SessionKind::Transcode { height: 240 },
+        subtitle_burn: Some(0),
+        ..reopen_request(file_id, "refused-before-burn", "unused", "unused")
+    };
+    let refusal = match manager.prepare_vod_encoding(&req, &file).await {
+        Err(refusal) => refusal,
+        Ok(_) => panic!("encoder selection refuses an unknown Dolby Vision profile"),
+    };
+    assert!(refusal.contains("Dolby Vision"), "{refusal}");
+    // Had the fetch run first, the fixture's tiny track would have been
+    // extracted and published inside the call, before the refusal returned.
+    let cache = manager.subtitle_cache_dir();
+    let touched = std::fs::read_dir(cache)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(
+        touched, 0,
+        "a refused start must not have started a burn extraction in {}",
+        cache.display()
+    );
+}

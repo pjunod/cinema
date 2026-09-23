@@ -285,6 +285,7 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-seek-scratch"><h2>Seek scratch accounting</h2><p>Recently shipped accounting and retention changes with unverified native-device behavior.</p></div>${seekScratchReservationsCard()}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}
+      <div class="setsection" id="enable-subtitle-sources"><h2>Stored subtitle tracks</h2><p>Read a PGS track kept during indexing instead of the whole source. Nothing produces stored tracks yet.</p></div>${subtitleStoredSourcesCard(settings,readiness)}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}`;
 }
 // Automatic decode recovery.
@@ -320,6 +321,30 @@ function subtitleNotReadyCard(s,readiness){
       </div></details>
       <div class="err" id="sub503err" role="alert"></div>
       ${setCardFoot("saveSubtitleNotReady")}`,{id:"sub503card"});
+}
+// Stored PGS tracks.
+//
+// The consumer half of the subtitle-source store: the overlay and the burn
+// path read a PGS track the fragment-index pass kept, instead of demuxing the
+// whole source again. On by default and inert until something produces into
+// the store — every lookup misses and both paths run the extraction they
+// always ran. Off makes both ignore the store entirely, which is how a wrong
+// stored artifact is taken out of service without a redeploy.
+function subtitleStoredSourcesCard(s,readiness){
+  const enabled=s.subtitle_stored_sources!==false;
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Read stored PGS tracks","Serve the PGS overlay and burned PGS subtitles from a track kept during indexing, instead of reading the whole source again.",state)}
+      ${togRow("subsrc",`Use stored PGS tracks <span class="pill">preview</span>`,`Applies immediately to new overlay preparations and burned sessions. This checkbox is authoritative: nothing below turns it on or off.`,enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> Off makes both consumers ignore the store and read the source as they always have. This build has no producer, so the store is empty and every lookup falls through either way.</div>
+      <details class="setdetails" open><summary>What it needs</summary><div class="setdetails-body">
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_producer","Something fills the store","The fragment-index pass keeps each PGS track as it reads the file. That ride-along ships separately; until it does, the store is empty.")}
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_lookups","Lookups answered from the store","How many overlay and burn lookups this process served from a stored track, answered as having no cues, or passed through to extraction.")}
+      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice.</p>
+      </div></details>
+      <div class="err" id="subsrcerr" role="alert"></div>
+      ${setCardFoot("saveSubtitleStoredSources")}`,{id:"subsrccard"});
 }
 function decodeRecoveryCard(s){
   const q=s.decoder_health_qualification||{};

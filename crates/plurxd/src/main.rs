@@ -44,6 +44,7 @@ mod shared_cache;
 mod state;
 mod store_result;
 mod storeprobe;
+mod subtitle_source;
 mod subtitles;
 mod telemetry;
 mod titlestore;

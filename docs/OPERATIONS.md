@@ -3392,6 +3392,33 @@ and never gate the switch, so the only evidence is a real title whose
 extraction genuinely fails — confirm the player comes back to the track rather
 than abandoning it.
 
+### Stored PGS tracks
+
+The PGS overlay and the PGS burn path each used to demux the whole source to
+read one subtitle track. Both now look first in a node-local store,
+`<cache>/runtime/subtitle-source-v1/f<file_id>/` — a `manifest.json` and one
+content-named `s<ordinal>-<sha256 prefix>.sup` per kept track — and use a track
+only when the manifest matches a live `fstat` of the source (size and mtime;
+the burn path also its device and inode) and the stored bytes hash to the
+manifest. Anything else is a miss that runs the extraction as before. The burn
+path never uses the store for an MPEG-TS source. **Nothing produces into the
+store yet** — the fragment-index ride-along that fills it ships separately — so
+today every lookup misses.
+
+| Runtime setting | Default | Meaning |
+|---|---:|---|
+| `subtitles.stored_sources` | on | Let both consumers read the store. Off makes them ignore it entirely, so a wrong stored track is taken out of service without a redeploy |
+
+The switch is **Settings → Developer → *Read stored PGS tracks instead of the
+source*** (`subtitle_stored_sources` in the settings API). The store is swept on
+each fragment-index tick: a directory whose file row is gone or whose size/mtime
+moved is deleted, a catalog read that fails stops the sweep without deleting,
+and a size cap evicts whole directories least recently used first. Lookups are
+counted in `plurx_subtitle_source_lookups_total{consumer,outcome}`, misses by
+reason in `plurx_subtitle_source_misses_total{consumer,reason}`, and burn
+derivations that fell back to the source in
+`plurx_subtitle_source_fallbacks_total{reason}`.
+
 ### Playback telemetry
 
 Performance II stores structured playback observations beside the local

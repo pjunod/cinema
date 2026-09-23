@@ -19317,6 +19317,50 @@ impl TranscodeManager {
         let (encoder, grade) = self
             .encoder_and_grade_for(file, req.hdr10, target_height, subtitle_burn.is_some())
             .await?;
+        // After the encoder and grade, deliberately. `encoder_and_grade_for`
+        // can refuse this source outright (an unknown Dolby Vision profile, an
+        // unproven Profile 5 renderer), and a refusal must not first start a
+        // detached full-source extraction and answer "pending" while it runs.
+        // A `Nothing` answer only has to reach the options: the grade chosen
+        // with the burn flag set is the one a burn-free session gets for every
+        // request the HTTP layer admits, because it already refuses a burn
+        // whose burn-free grade would be HDR10.
+        let (subtitle_burn, burn_file) = match subtitle_burn {
+            Some(burn) => {
+                // The only caller that passes the short budget. A start has 50 s
+                // for everything; a cold burn sidecar on a remux of this size needs
+                // 400. Refusing in seconds with a pending answer is the only thing
+                // that leaves the viewer better off — including on the speculative
+                // prepared-successor path, which would otherwise hold a preparation
+                // slot for the length of a full-film demux.
+                // Read lazily: a warm sidecar never reads the setting.
+                let stored = crate::subtitle_source::StoreAccess::from_setting(
+                    Arc::clone(&self.store),
+                    &self.runtime_cache,
+                );
+                match crate::subtitles::ensure_burn_source(
+                    &self.subtitle_cache,
+                    file,
+                    burn.subtitle_index,
+                    Some(&source_object_version),
+                    crate::subtitles::SIDECAR_JOIN_BUDGET,
+                    &stored,
+                )
+                .await?
+                {
+                    crate::subtitles::BurnSource::File(handle) => (Some(burn), Some(handle)),
+                    crate::subtitles::BurnSource::Nothing => {
+                        tracing::info!(
+                            file_id = file.id,
+                            subtitle_index = burn.subtitle_index,
+                            "the selected subtitle track has no cues; starting without an overlay"
+                        );
+                        (None, None)
+                    }
+                }
+            }
+            None => (None, None),
+        };
         let software_threads = Workload::of(file, target_height)
             .software_threads()
             .min(self.software_budget().await)
@@ -19332,21 +19376,7 @@ impl TranscodeManager {
             Some(software_threads),
             grade,
         );
-        let subtitle = if let Some(burn) = options.subtitle_burn.as_ref() {
-            // The only caller that passes the short budget. A start has 50 s
-            // for everything; a cold burn sidecar on a remux of this size needs
-            // 400. Refusing in seconds with a pending answer is the only thing
-            // that leaves the viewer better off — including on the speculative
-            // prepared-successor path, which would otherwise hold a preparation
-            // slot for the length of a full-film demux.
-            let subtitle = crate::subtitles::ensure_burn_file(
-                &self.subtitle_cache,
-                file,
-                burn.subtitle_index,
-                Some(&source_object_version),
-                crate::subtitles::SIDECAR_JOIN_BUDGET,
-            )
-            .await?;
+        let subtitle = if let Some(subtitle) = burn_file {
             #[cfg(unix)]
             {
                 options.subtitle_file = Some("/dev/fd/5".into());
