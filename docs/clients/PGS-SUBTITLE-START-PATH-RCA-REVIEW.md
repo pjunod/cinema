@@ -1,5 +1,8 @@
 # Review — PGS subtitles on the start path (RCA and plan)
 
+**Status:** adversarial review complete — verdict APPROVE WITH CHANGES; the
+rulings it asks Paul for are in §4, and the document it reviews stays `open`.
+
 **Reviewing:** `docs/clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md` as committed in
 `8b92b958` · **Evidence base:** `origin/main` = `5c605768` (the merge of PR #445,
 2026-09-23 00:48 UTC), a fresh Forgejo clone, PR #444/#445 via the API, and
