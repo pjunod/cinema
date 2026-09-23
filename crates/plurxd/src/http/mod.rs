@@ -7071,12 +7071,18 @@ mod tests {
         // test in this binary may have populated, so it is met on a run that
         // probed FFprobe and unobservable on one that did not. Both are honest;
         // neither belongs in an exact set. It is asserted on its own below.
+        // `stored_source_self_test` reads the process-wide self-test state,
+        // which a ride-along test in this binary may have driven either way.
         let green = seen
             .iter()
             .filter(|(_, status)| status.as_str() == "met")
             .map(|(id, _)| id.as_str())
-            .filter(|id| *id != "probe_reporter_named")
+            .filter(|id| *id != "probe_reporter_named" && *id != "stored_source_self_test")
             .collect::<Vec<_>>();
+        assert!(
+            seen.contains_key("stored_source_self_test"),
+            "the ride-along's self-test row is reported: {seen:?}"
+        );
         assert!(
             matches!(
                 seen.get("probe_reporter_named").map(String::as_str),
@@ -7094,6 +7100,8 @@ mod tests {
                 "server_preparation_is_real",
                 "source_fencing",
                 "sources_match_their_scan_whole",
+                "stored_source_local_cache",
+                "stored_source_producer",
                 "tuner_reserve"
             ]
         );
