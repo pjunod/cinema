@@ -189,6 +189,22 @@ pub struct DeviceCaps {
     /// `Some([])` is an explicit claim that no progressive label is admitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progressive_hevc_sample_entries: Option<Vec<String>>,
+    /// Bitmap-subtitle overlay protocols this client can draw, by name —
+    /// `pgs-v1` today.
+    ///
+    /// A list rather than a boolean, for the same reason `transports` is one:
+    /// it names the protocol, so a later `pgs-v2` is a new entry rather than a
+    /// second flag, and it lines up with `SubTrackDto.overlay`, which already
+    /// carries that string rather than a yes.
+    ///
+    /// Empty is the conservative answer and the only one an older client can
+    /// give: absent is never a claim, so a client that has not been taught to
+    /// draw bitmaps is told a PGS track needs burning in, which is true for
+    /// it. Whether the *server* can serve the protocol is a separate question
+    /// held by the `subtitles.pgs_overlay` setting; a track is only offered as
+    /// an overlay when both are yes.
+    #[serde(default)]
+    pub subtitle_overlays: Vec<String>,
     /// `hls` when preserved Dolby Vision has to ride the copy-video HLS
     /// envelope rather than a progressive MP4. Apple's AVPlayer can report a
     /// healthy Profile 8 pipeline, advance the raw file's timeline, and still
@@ -283,6 +299,9 @@ impl DeviceCaps {
             })
             .collect();
         Self {
+            // A legacy query has no slot for an overlay claim, and a client
+            // old enough to be on this path has no renderer. Empty is right.
+            subtitle_overlays: Vec::new(),
             v: Self::VERSION,
             client: None,
             video,
@@ -317,6 +336,16 @@ impl DeviceCaps {
     /// True when this document claims nothing at all — the shape a client
     /// that sent only a named profile produces, which must keep taking the
     /// named-profile path rather than being read as "decodes nothing".
+    /// Whether this client claims it can draw `protocol` itself.
+    ///
+    /// Deliberately an exact match on the protocol name. A client that says
+    /// `pgs-v1` has not claimed anything about a future revision, and reading
+    /// it as though it had is how a viewer ends up staring at a subtitle track
+    /// their player cannot paint.
+    pub fn renders_subtitle_overlay(&self, protocol: &str) -> bool {
+        self.subtitle_overlays.iter().any(|named| named == protocol)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.video.is_empty()
             && self.audio.is_empty()

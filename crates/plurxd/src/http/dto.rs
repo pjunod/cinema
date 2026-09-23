@@ -477,24 +477,29 @@ fn playback_defaults(
     audio: &[AudioStream],
     subtitles: &[SubtitleStream],
     prefs: &LangPrefs,
+    overlay_enabled: bool,
 ) -> PlaybackDefaultsDto {
     // Item detail has no plan to judge against — nobody has asked how this
     // file would be delivered yet — so the HDR term is omitted and a forced
     // bitmap track stays eligible. `/decision` is what the clients act on,
     // and it refines this with the base grade it actually computed.
     //
-    // The overlay is reported as *off*, and not because this surface knows it
-    // is: `FileDto::from_media_file` has no access to the setting, and the
-    // conservative answer is the right one either way. With the overlay off,
-    // claiming a non-forced PGS track as the default is the M1 defect on this
-    // surface. With it on, `/decision` offers the track anyway, so nothing is
-    // lost by not announcing it a step early.
+    // The overlay term is this server's switch, threaded in by the caller.
+    // It used to be hardcoded `false` because this surface had no access to
+    // the setting, which made item detail and `/decision` disagree about the
+    // same file and left Apple hedging the copy ("Unless this server draws PGS
+    // subtitles as an overlay...").
+    //
+    // It is the SERVER's answer, not a per-client one: item detail has no
+    // capabilities document to judge against. Each client knows its own
+    // renderer and narrows this locally, the same way it reads `overlay` on a
+    // track.
     let selected = select_tracks_with(
         audio,
         subtitles,
         prefers_original_audio(audio),
         prefs,
-        |track| deliverable_as_default(&track.codec, track.forced, false, false),
+        |track| deliverable_as_default(&track.codec, track.forced, overlay_enabled, false),
     );
     defaults_from_selection(audio, subtitles, prefs, selected)
 }
@@ -559,8 +564,16 @@ fn defaults_from_selection(
 }
 
 impl FileDto {
-    pub fn from_media_file(f: MediaFile, prefs: &LangPrefs) -> Self {
-        let playback_defaults = playback_defaults(&f.audio_streams, &f.subtitle_streams, prefs);
+    /// `overlay_enabled` is this server's `subtitles.pgs_overlay` switch. It
+    /// is a parameter rather than a read because this is a pure DTO
+    /// conversion; the handler that has `AppState` does the reading.
+    pub fn from_media_file(f: MediaFile, prefs: &LangPrefs, overlay_enabled: bool) -> Self {
+        let playback_defaults = playback_defaults(
+            &f.audio_streams,
+            &f.subtitle_streams,
+            prefs,
+            overlay_enabled,
+        );
         let reader = crate::reader_formats::capability(&f.path, f.container.as_deref());
         let reader_revision = reader.map(|_| RevisionDto {
             size: f.size,

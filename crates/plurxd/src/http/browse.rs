@@ -451,7 +451,11 @@ pub async fn item_detail(
                 "pending"
             })
         };
-        let mut dto = FileDto::from_media_file(f, &playback_prefs);
+        let mut dto = FileDto::from_media_file(
+            f,
+            &playback_prefs,
+            state.pgs_overlay_enabled().await?,
+        );
         dto.available = available;
         dto.vod_index_status = vod_index_status;
         dto.vod_index_refusal = vod_index_refusal.map(|(_, detail)| detail);

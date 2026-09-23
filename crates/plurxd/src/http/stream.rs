@@ -2168,11 +2168,25 @@ pub async fn decision(
     .audio_index;
     let selected_audio = effective_audio_selection(&file, q.audio, policy_audio)?;
     let selection_requested = q.audio.is_some() || q.subtitle.is_some();
-    // One read for both uses below: whether a PGS track is offered to the
-    // client and whether selecting one forces a burn-in are the same question
-    // asked twice, and answering them from two reads would let a switch flip
-    // between them inside one request.
-    let pgs_overlay = state.pgs_overlay_enabled().await?;
+    // One read for every use below: whether a PGS track is offered to the
+    // client, whether it is advertised as an overlay, and whether selecting one
+    // forces a burn-in are the same question asked three times, and answering
+    // them from separate reads would let a switch flip between them inside one
+    // request.
+    //
+    // It is the server's switch AND the caller's own claim. The switch alone
+    // described this process; it said nothing about whether the client on the
+    // other end can paint a bitmap. With the switch alone, a browser — which
+    // has no PGS renderer at all — was offered a PGS default, told the
+    // delivery needed no burn, and had to override the server's plan locally
+    // to get a picture. Narrowing all three answers together is what makes the
+    // plan true for the client that asked: a client that cannot draw the
+    // overlay is not offered the track as a default, is not told a protocol it
+    // cannot speak, and IS told that selecting it burns the video.
+    let pgs_overlay = state.pgs_overlay_enabled().await?
+        && q.caps_v2.as_ref().is_some_and(|caps| {
+            caps.renders_subtitle_overlay(crate::pgs_overlay::PROTOCOL)
+        });
     let container_default_audio = container_default_audio_index(&file.audio_streams);
     // The policy subtitle is chosen against the plan, so the plan has to exist
     // first — and the audio rules are what the subtitle rules read, so the
@@ -5965,6 +5979,26 @@ mod tests {
         assert!(!tracks[3].text && !tracks[3].native);
         assert!(subtitle_requires_burn_in(&file, Some(3), false));
         assert!(!subtitle_requires_burn_in(&file, Some(0), false));
+
+        // A client that cannot draw the overlay is told the truth on every
+        // one of the three answers that used to follow the switch alone. This
+        // is the whole point of the capability: before it, a browser with no
+        // PGS renderer was offered a PGS default, told the delivery needed no
+        // burn, and had to override the server locally to get a picture.
+        let incapable = plurx_core::playback::DeviceCaps::default();
+        assert!(
+            !incapable.renders_subtitle_overlay(crate::pgs_overlay::PROTOCOL),
+            "absent is never a claim"
+        );
+        let capable = plurx_core::playback::DeviceCaps {
+            subtitle_overlays: vec![crate::pgs_overlay::PROTOCOL.to_owned()],
+            ..Default::default()
+        };
+        assert!(capable.renders_subtitle_overlay(crate::pgs_overlay::PROTOCOL));
+        assert!(
+            !capable.renders_subtitle_overlay("pgs-v2"),
+            "claiming one protocol claims nothing about its successor"
+        );
 
         // Default-off and old servers remain wire-compatible: the additive
         // field is absent rather than null.
