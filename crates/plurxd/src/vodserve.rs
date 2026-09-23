@@ -7060,7 +7060,15 @@ async fn spawn_generation(
 
 async fn recipe_engine_is_current(recipe: &Recipe) -> bool {
     if let Some(encoding) = recipe.encoding.as_ref() {
-        if !encoding.executable.is_current() || !encoding.engine.is_current().await {
+        // One blocking batch for the whole encoding attestation. The
+        // executable used to be statted inline here, ahead of the batch and
+        // short-circuiting it, so every producer launch and every segment
+        // materialisation paid a synchronous `metadata` on a runtime worker.
+        if !encoding
+            .engine
+            .is_current_with_executable(&encoding.executable)
+            .await
+        {
             return false;
         }
     }

@@ -1688,6 +1688,29 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # test, and it owns no producer, process or timer. 547 rather than 546 is the
 # base this branch now sits on: C-05's fragment-index validation loop, reviewed
 # directly above, reached main first.
+# 552 -> 558 with S-04, two production owners and four test owners.
+# 552 rather than 548 is the base this integration branch sits on: K-01's two,
+# reviewed directly above, reached main first.
+# The two production additions are the bounded attestation batches this plan
+# exists to create: `engine_objects_are_current_batch` runs the captured
+# `(path, version)` comparison for one whole check in a single
+# `spawn_blocking`, and `font_object_versions_observed` runs the Fontconfig
+# stat loop for N paths in a single `spawn_blocking` rather than one per path.
+# Both are awaited by their caller — the `JoinHandle` is never detached — and
+# both fail closed, `unwrap_or(false)` and a `JoinError` arm that marks the
+# closure unusable, so a panicked or cancelled batch withdraws the recipe
+# rather than passing it. Neither owns a producer, a process or a timer: the
+# only work inside is `std::fs::metadata`. Their point is that the work is now
+# off the runtime worker that is also pumping segment bodies.
+# The four test additions are two blocking-pool fixtures, each a
+# `spawn_blocking` that occupies a one-thread pool plus a `tokio::spawn`
+# holding the check that must queue behind it.
+# `a_current_engine_is_current_on_the_blocking_pool` proves the captured-object
+# batch is on the pool; `a_stale_executable_is_detected_on_the_blocking_pool`
+# proves the recipe's encoder executable is attested inside that same batch
+# rather than inline on a runtime worker. Both fixtures release the blocker,
+# await it, and await the check through a bounded timeout before returning;
+# neither owns a shipped producer, process or timer.
 # +2: the two #444 HTTP wait ledger tests' joined `tokio::spawn` requests.
 # 550 -> 552 with K-01: one `tokio::task::spawn_blocking` in `backup.rs` and
 # one `tokio::spawn` in `main.rs`. The blocking call is where
@@ -1702,7 +1725,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # no producer and no process. Which voter actually publishes a given UTC day
 # is decided by the cluster-wide `backup:cluster` job lease, not by this
 # task; its own waits are the sleeps counted in `namespaced-time-constructor`.
-expected_occurrences = 552
+expected_occurrences = 558
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2206,6 +2229,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # record it, so the sample can only appear once the slow reap has finished. It
 # waits on an owner the fixture already started; it starts no producer, process
 # or timer, and the deadline it carries is the test's, not a caller's.
+# 851 -> 855 with S-04: four test-only bounds, two per blocking-pool fixture.
+# Each of `a_current_engine_is_current_on_the_blocking_pool` and
+# `a_stale_executable_is_detected_on_the_blocking_pool` uses one
+# `tokio::time::sleep(Duration::from_millis(25))` to let the runtime make what
+# progress it can while the one blocking thread is held — the sleep is how the
+# fixture observes that the check has *not* finished — and one
+# `tokio::time::timeout(Duration::from_secs(1), check)` so a regression that
+# leaves the check queued forever fails the test instead of hanging it. Both
+# deadlines are the fixture's own. They wait on owners the fixture already
+# started; they start no producer, process or timer, and no production path
+# gained a clock.
 # +3 for #444: the two ledger tests' 10 ms polls and one `std::thread::sleep`
 # that ages the first ledger entry. All test-only; production waits are
 # unchanged (the guard is taken inside the existing publication loop).
@@ -2235,7 +2269,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # scheduler tick, and the 5-second pause before the same owner retries a
 # failed attempt while its scheduled UTC minute is still open. None of the
 # three owns a producer, a process, or a replacement policy.
-expected_occurrences = 851
+expected_occurrences = 855
 
 [[module_structures]]
 id = "bare-time-constructor"
