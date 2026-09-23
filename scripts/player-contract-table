@@ -352,8 +352,8 @@ function renderSurfaceSourcesBlock(surface) {
   out.push("");
   out.push("Rows are evaluated in order; the first row whose `context` matches wins.");
   out.push("");
-  out.push("| # | Source | Context | Class | Requires a stopped player | Actions | Notes |");
-  out.push("|---|---|---|---|---|---|---|");
+  out.push("| # | Source | Context | Class | Requires a stopped player | Actions | Retired by override | Notes |");
+  out.push("|---|---|---|---|---|---|---|---|");
   surface.sources.forEach((row, index) => {
     const notes = [];
     if (row.codes) notes.push(`codes: ${row.codes.map((c) => `\`${c}\``).join(" · ")}`);
@@ -361,8 +361,9 @@ function renderSurfaceSourcesBlock(surface) {
     if (row.then_when_stopped) notes.push(`re-classes to \`${row.then_when_stopped}\` when the owner stops`);
     if (row.carries) notes.push(`carries ${row.carries.map((c) => `\`${c}\``).join(" · ")}`);
     const actions = (row.actions || []).map((a) => `\`${a}\``).join(" · ") || "class default";
+    const retiredBy = (row.retired_by || []).map((reason) => `\`${reason}\``).join(" · ") || "–";
     out.push(
-      `| ${index + 1} | \`${row.id}\` | ${row.context} | ${row.class === null ? "*(log only)*" : `\`${row.class}\``} | ${(row.requires && row.requires.player_stopped) || (row.class && surface.classes[row.class].requires_player_stopped) ? "yes" : "no"} | ${actions} | ${notes.join("; ")} |`,
+      `| ${index + 1} | \`${row.id}\` | ${row.context} | ${row.class === null ? "*(log only)*" : `\`${row.class}\``} | ${(row.requires && row.requires.player_stopped) || (row.class && surface.classes[row.class].requires_player_stopped) ? "yes" : "no"} | ${actions} | ${retiredBy} | ${notes.join("; ")} |`,
     );
   });
   out.push("");

@@ -1,9 +1,11 @@
 # Font attestation and blocking I/O — stat off the runtime now, freeze the font environment per recipe next
 
-**Status:** ready for review · **Executes:** §2.7, F-stream-7, assessment
+**Status:** M1 built in draft PR #413, not deployed · M2 unbuilt, blocked by
+deployed config-closure evidence · **Executes:** §2.7, F-stream-7, assessment
 correction 6, §5.1 item 7 and §5.2 "frozen font environment per recipe" from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-· **Written:** 2026-09-20 against `main` @ `88a3957a`
+· **Written:** 2026-09-20 against `main` @ `88a3957a` · **Updated:**
+2026-09-21
 
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
 
@@ -29,6 +31,20 @@ stat of the ffmpeg dependency closure (tens of files); for a **text-burn**
 rendition it is that plus `fc-list` + `fc-conflist` + a synchronous stat of
 every font file and config file. Both are on a tokio worker; only the
 second spawns.
+
+**Execution boundary, 2026-09-21.** M1 is built at `da0b96a7`. The required
+read-only media1 probe found the deployed Jellyfin FFmpeg 8.1.2 binary linked
+to its bundled `libfontconfig.so.1`, so `FONTCONFIG_FILE` is a relevant child
+boundary. The same inspection found that the active `fc-conflist` closure ends
+with `/etc/fonts/fonts.conf`. That file names `/usr/share/fonts`,
+`/usr/local/share/fonts`, XDG and home font directories, then includes
+`conf.d`; `50-user.conf` and `51-local.conf` add more live includes. Copying
+those bytes into the proposed private `conf.d` and including them from the new
+`fonts.conf` would reopen the mutable system and user closures. It cannot pass
+§5.2's two-font isolation test, so M2 is not safe to implement from this plan
+literally. The required correction must define how discovery directives are
+resolved into a closed snapshot while preserving font matching rules, then
+prove both isolation and glyph parity. A TTL remains forbidden.
 
 ## 1. Objective
 
@@ -177,6 +193,23 @@ blocking pool.
 
 `engine_path_version` is unchanged; it is the leaf.
 
+**The executable is in the batch, not in front of it.** `recipe_engine_is_current`
+(`vodserve.rs`) used to read `encoding.executable.is_current() ||
+encoding.engine.is_current().await`. `EncodedExecutable::is_current` was a
+synchronous `engine_path_version`, and `||` short-circuits left to right, so
+that stat ran inline on the runtime worker *before* either blocking batch, at
+all five call sites — every producer launch and every `materialize`, for
+non-burn renditions as well as burn ones. Moving the other stats does not help
+while this one is in front of them. `EncodedExecutable` now exposes
+`attestation_object()` and `EncodedEngine::is_current_with_executable` folds
+that `(path, version)` pair into the same `spawn_blocking` as the dependency
+closure, checked first inside the task. The answer is unchanged: the batch
+compares with `all`, which short-circuits on the executable exactly as the
+caller's `||` did. §2.2's cost table already listed `executable.is_current()`
+as part of what `recipe_engine_is_current` pays per segment, so it was always
+inside Objective 1 even though the first draft of this section enumerated only
+the other two functions.
+
 Cancellation: `spawn_blocking` work cannot be cancelled once started. The
 callers already tolerate that — `materialize` awaits the answer before the
 manifest lock, and a dropped `materialize` future (generation superseded)
@@ -303,13 +336,39 @@ Code: §3.1. Tests in `ffmpeg.rs`:
 | `a_current_engine_is_current_on_the_blocking_pool` | with `tokio::runtime::Builder::new_current_thread().max_blocking_threads(1)`, `is_current()` completes while a second `spawn_blocking` is queued behind it — proves the stat is on the pool, not the runtime thread |
 | `font_object_versions_are_computed_in_one_blocking_task` | instrument with a test-only counter of `spawn_blocking` calls inside `font_render_engine_inner`: exactly 1 for N paths |
 
+| `a_stale_executable_is_detected_on_the_blocking_pool` | with the one blocking thread held, a check whose executable has been replaced must not finish — an inline `std::fs::metadata` would answer `false` from the runtime thread |
+| `one_attestation_charges_each_series_once_by_what_it_stats` | a non-burn check charges `[(media, stat)]`; a burn check charges `[(font, spawn), (font, stat) × 3 batches, (media, stat)]` — its dependency closure under `media`, and its three internal font stat batches folded into one observation |
+
 Metric, rendered in `system::metrics` beside the VOD gauges:
 `plurx_engine_attestation_seconds{kind="media"|"font",phase="spawn"|"stat"}`
-— a histogram with the repo's existing bucket set, observed around the
-two `fc-*` spawns (`phase="spawn"`) and around the blocking stat task
-(`phase="stat"`). Four series. Reason: §2.7's cost is "real but
-unmeasured"; this is the measurement, and after M2 the `font`/`spawn`
-series must go to zero for frozen recipes.
+— a histogram with the repo's existing bucket set. Four series. Reason: §2.7's
+cost is "real but unmeasured"; this is the measurement, and after M2 the
+`font`/`spawn` series must go to zero for frozen recipes.
+
+**Two rules the series must obey to be readable as a before/after.** §2.7's
+cost is the sum of two separable things — the ffmpeg dependency closure, and
+for a text burn that plus the Fontconfig closure — so:
+
+1. **The label is what is statted, not what kind of recipe it is.** A burn
+   recipe's `objects` used to be the union of both closures and the whole
+   batch was labelled from `font_digest.is_some()`, so on a burn rendition the
+   dependency-closure stats were counted under `kind="font"` and
+   `kind="media",phase="stat"` recorded nothing at all. `EncodedEngine` now
+   keeps `objects` (the dependency closure) and `font_objects` apart and each
+   batch is charged to its own series.
+2. **One observation per attestation, not per internal batch.** One
+   `is_current()` on a burn recipe runs three font stat batches — the captured
+   font objects, the re-enumeration's own stat loop, and the enumerated
+   closure — and used to emit three `font,stat` observations. `_count` then
+   read 3× the number of checks, so `_sum / _count` was not the mean cost of a
+   check and M1's "before" was a 3×-inflated number against M2's 1× "after".
+   `EngineAttestationCharges` sums the batches per `(kind, phase)` and flushes
+   one observation each.
+
+Also worth knowing when reading them: `ENGINE_ATTESTATION_BUCKETS_MS` starts at
+100 ms, so every warm-cache stat lands in `le="0.1"` and the histogram carries
+no information about the regime that dominates. Only `_sum / _count` is usable,
+which is why rule 2 matters.
 
 Acceptance: `cargo test -p plurxd ffmpeg::tests::.*current.*
 ffmpeg::tests::.*font_object.*` green; `make unit` green; on lab4 with a
@@ -356,13 +415,15 @@ GPT prompt for the fleet check after deploy:
 
 - Focused: `cargo test -p plurxd ffmpeg::tests` (both), plus `make
   vodencode-restart-check` for M2 because it changes what a restart reads.
-- Lane: `make unit` on both PRs.
-- Rollout: two draft PRs under the fast lane. M1 has no identity change.
-  M2 changes the engine digest prefix (`v2`); the deploy's restart already
-  invalidates every encoded key, so the only visible effect is the
-  `fontenv/` directory appearing under the runtime cache. No setting; the
-  frozen environment is not optional because an optional one would mean two
-  attestation contracts.
+- Lane: the one plan PR's ready-state fast lane runs `make unit`; this
+  execution used focused tests only while the PR remained draft.
+- Rollout: one draft plan PR, with M1 and the M2 decision as logical commits
+  under the current workboard protocol. M1 has no identity change. When its
+  corrected design is implementable, M2 stays in that same PR and changes the
+  engine digest prefix (`v2`); the deploy's restart already invalidates every
+  encoded key, so the only visible effect is the `fontenv/` directory appearing
+  under the runtime cache. No setting; the frozen environment is not optional
+  because an optional one would mean two attestation contracts.
 - Rollback: revert; `fontenv/` directories are cleaned by the runtime-cache
   startup sweep. A rolled-back binary ignores them.
 - Dependency: M2's `FONTCONFIG_FILE` needs the VOD spawn to have a place to
@@ -371,32 +432,32 @@ GPT prompt for the fleet check after deploy:
   the one variable on the bare `Command` at `vodserve.rs:6778` and the
   unification moves it later. Proposed: after, so there is one env site.
 
-## 7. Open questions
+## 7. Decisions and the remaining M2 blocker
 
-1. Symlinks into the frozen `fonts/` directory: fontconfig's directory
-   cache records the symlink's *target* mtime; a target replaced in place
-   with the same size and mtime (a `cp -p`) would not invalidate
-   fontconfig's cache, though it would change the `ctime` and therefore the
-   version string the recipe checks. That is the same guarantee the media
-   closure has (`engine_object_version` includes `ctime`). Is that
-   sufficient, or should font files be copied (cost: disk per recipe
-   digest, shared across recipes with the same digest)?
-2. Does the deployed jellyfin-ffmpeg 8 build's libass use fontconfig or
-   the "coretext/directwrite-less" built-in provider? `ffmpeg -h
-   filter=subtitles` does not say; `ldd $(which ffmpeg) | grep fontconfig`
-   on media1 does. If libass is built without fontconfig, `FONTCONFIG_FILE`
-   is ignored and `fontsdir` plus an empty provider is the lever instead.
-   Check before M2 starts (a GPT one-liner).
-3. `fc-conflist` reports config files in load order, including ones under
-   `~/.config/fontconfig` if `HOME` is set for the daemon. Should the
-   frozen environment deliberately drop user-scope configs (the daemon has
-   no user) or copy them as seen? Proposed: copy as seen — the recipe
-   freezes what capture observed, and policy about what *should* be
-   observed is a different question.
-4. The `fontenv/` purge rule: tie it to the dormant-rendition purge (a
-   digest is removed when no rendition references it) or to a count/age
-   cap? Proposed: reference counting via the rendition registry, with a
-   startup sweep as the backstop.
+1. **Keep symlinks for font bytes.** The existing attestation includes target
+   `ctime`, so a same-size, preserved-mtime replacement withdraws the recipe
+   before another launch or publication. Copying hundreds of megabytes per
+   digest would hide replacement rather than report it.
+2. **Use fontconfig, but do not claim that linkage proves isolation.** On
+   media1, `/usr/lib/jellyfin-ffmpeg/ffmpeg` 8.1.2-Jellyfin resolves
+   `libfontconfig.so.1` from `/usr/lib/jellyfin-ffmpeg/lib/`. This settles the
+   provider question only.
+3. **Freeze every rule scope capture observed.** System and user rules both
+   affect pixels and may not be silently dropped. Their live `<dir>`,
+   `<include>` and `<cachedir>` discovery directives must not survive in the
+   child configuration, however. The corrected design needs an XML-aware
+   resolved snapshot or a proved fontconfig sysroot layout; line filtering is
+   not an acceptable parser.
+4. **Use reference ownership, not age, for cleanup.** The eventual
+   `fontenv/<digest>` owner is shared by recipes with that digest, released
+   with the last rendition reference, and backed by a new-process startup
+   sweep. A count/age cap could remove inputs from a live immutable recipe.
+5. **M2 remains blocked on the configuration representation.** Before code,
+   the amended design must demonstrate that a two-font source enumerates only
+   those two fonts while default and frozen `fc-match` and rendered glyph
+   hashes agree. This is the missing safety proof; S-05 spawn unification is
+   sequencing convenience because the one child-local variable can be moved
+   later without changing the contract.
 
 ---
 
@@ -410,4 +471,6 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#413](http://192.168.4.7:3000/noirr/plurx/pulls/413) | Built at `da0b96a7`: identical object-version comparison now runs in one blocking task per batch and fails closed; four attestation histogram series are rendered. Rust 1.97.1 check and Clippy passed; six focused currentness, blocking-task and metric tests passed. Broad `make unit` was deliberately not run. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 decision | [#413](http://192.168.4.7:3000/noirr/plurx/pulls/413) | Not implemented. media1 links fontconfig, but its captured config closure contains live system/user discovery directives, contradicting the proposed byte-copy isolation. Needs the §7.5 design correction and its two-font isolation proof. |
+| 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 review fixes | [#413](http://192.168.4.7:3000/noirr/plurx/pulls/413) | Both adversarial-review findings fixed. The recipe's encoder executable is folded into the engine's blocking batch instead of being statted inline ahead of it at all five `recipe_engine_is_current` call sites; the four attestation series are labelled by what each batch stats and charged once per attestation instead of once per batch. `a_stale_executable_is_detected_on_the_blocking_pool` and `one_attestation_charges_each_series_once_by_what_it_stats` both fail on revert. Full `cargo test -p plurxd --bin plurxd`: 2542 passed, 0 failed. |

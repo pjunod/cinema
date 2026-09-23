@@ -296,6 +296,9 @@ struct PlayerSurface: UIViewRepresentable {
         coordinator.pictureInPicture.detach(resetPublishedState: false)
         view.applyPGSOverlay(nil, to: nil)
         view.playerLayer.player = nil
+        #if os(tvOS)
+        PlaybackDisplayCriteria.activeManager()?.preferredDisplayCriteria = nil
+        #endif
     }
 
     final class Coordinator {

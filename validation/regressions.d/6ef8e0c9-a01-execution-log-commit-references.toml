@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["6ef8e0c9"]
+ignore = true
+reason = "Documentation-only: the M1/M2/M3 rows of the execution log in docs/clients/APPLE-DISPLAY-CRITERIA-AND-AUDIO-SESSION.md cited `c9b1acfd` and `7a67da0e`, which are pre-rebase SHAs that exist on no branch; the commit replaces them with `b1709dbc` and `3bbe3ea3`, the commits that actually carry that work on plan/A-01. No source, test, deploy or validation input changes, so there is no runtime behavior to pin. The history audit classifies the subject as corrective because it begins with the word Refresh, and this entry records it as intentionally non-runtime work."

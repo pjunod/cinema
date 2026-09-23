@@ -146,6 +146,9 @@ pub struct SystemDto {
     pub users: i64,
     pub libraries: usize,
     pub active_transcodes: usize,
+    /// Advisory only: recent login traffic looks like an untrusted reverse
+    /// proxy collapsed distinct clients onto one throttle address.
+    pub login_proxy_advisory: bool,
     /// Backend and watch-state convergence, projected without membership data.
     pub replication: plurx_core::cluster::migration::status::ReplicationStatus,
     /// Hardware encoder slots in use, and the cap
@@ -292,6 +295,8 @@ pub async fn system_info(
         users: state.store.count_users().await?,
         libraries: state.catalogue.list_libraries().await?.len(),
         active_transcodes: state.transcode.active_sessions().await,
+        login_proxy_advisory: state.trusted_proxies.is_empty()
+            && state.login_throttle.unconfigured_proxy_advisory(),
         replication,
         hw_slots_in_use: hw_in_use,
         hw_slots_max: hw_max,
@@ -1850,7 +1855,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             transcode_rate_mode.as_deref(),
             transcode_quality.as_deref(),
         );
-    let transcode_rate_mode = transcode_rate_mode.as_str().to_owned();
+    // The settings form keeps its existing compatibility value for an unset
+    // pair. The tri-state is an internal policy distinction: `/system`
+    // reports family defaults, while the form still presents the legacy
+    // bitrate choice until the operator explicitly changes it.
+    let transcode_rate_mode = transcode_rate_mode
+        .unwrap_or(plurx_core::transcode::RateMode::Bitrate)
+        .as_str()
+        .to_owned();
     let text = |v: Option<String>, default: &str| -> String {
         v.map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty())
@@ -3606,6 +3618,9 @@ pub async fn update_settings(
             )
             .await?;
     }
+    if req.telemetry_retain_days.is_some() || req.playback_network_priors.is_some() {
+        crate::telemetry::invalidate_settings(&state.store);
+    }
     if let Some(enabled) = req.playback_auto_abr {
         state
             .store
@@ -5145,7 +5160,7 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
         plurx_core::store::prometheus_store_operations(),
         crate::store_result::prometheus(),
@@ -5159,6 +5174,7 @@ pub(crate) async fn metrics(
         plurx_core::cluster::membership::prometheus_cluster_activity_authority(),
         super::internal_activity::prometheus_cluster_activity(),
         super::prometheus_handler_deadlines(),
+        crate::ffmpeg::engine_attestation_prometheus(),
         super::prometheus_http_store_attribution(),
         crate::state::fragment_index_validation_prometheus(),
     );
@@ -5198,7 +5214,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{codec_qualification_metrics}{decode_fact_metrics}{live_tv_metrics}{backup_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}",
+        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{codec_qualification_metrics}{decode_fact_metrics}{auth_revocation_metrics}{login_metrics}{live_tv_metrics}{backup_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}{artwork_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
@@ -5212,6 +5228,8 @@ pub(crate) async fn metrics(
         // two comparisons this server can make. Zero is the number that says
         // every scan in this library was written by the build serving it.
         probe_reporter_metrics = crate::ffmpeg::reporter_drift_prometheus(),
+        auth_revocation_metrics = super::extract::prometheus_auth_revocations(),
+        login_metrics = super::auth::prometheus_login_attempts(),
         interlace_metrics = crate::decode_facts::interlace_prometheus(),
         // Node-wide statics, so this reads no lock a live segment GET can
         // hold and no `VodServe` handle that a cluster boot may have replaced.
@@ -5219,6 +5237,7 @@ pub(crate) async fn metrics(
         codec_qualification_metrics = codec_qualification_metrics,
         live_tv_metrics = live_tv_metrics,
         library_channel_metrics = crate::http::library_channels::prometheus(),
+        artwork_metrics = crate::http::images::prometheus(),
     );
     (
         [(

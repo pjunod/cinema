@@ -60,6 +60,21 @@ slots, sixteen total admitted callers, and a two-second queue deadline; a
 cancelled request keeps its active permit until the blocking hash actually
 finishes.
 
+Failed login verification is also bounded in process memory by independent
+`(lowercase username, client IP)` and client-IP buckets. Five failures in ten
+minutes are free, then the retry delay doubles from one second to a sixty-second
+cap. Refused attempts do not extend it. There is deliberately no username-only
+bucket, so a botnet cannot lock out one named account. Forwarding headers affect
+this security key only when the socket peer is inside node-local
+`server.trusted_proxies`; the server then walks `X-Forwarded-For` from the right
+and selects the first untrusted hop. The default trusts no proxy.
+
+The devices APIs disclose only an eight-hex digest prefix plus the client's
+device label and timestamps, never a bearer or full digest. A prefix must match
+exactly one token for that user, and deletion runs inside the same Begin/Store/
+End cache-proof fence as logout. The current token is refused there so its
+client-visible lifecycle stays owned by `/auth/logout`.
+
 Sign Out attempts the authenticated server revocation for five seconds on web,
 Apple, and Android, then clears the local bearer on every outcome. Each request
 captures its origin, bearer, and credential generation, so its late completion

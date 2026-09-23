@@ -49,12 +49,6 @@ name = "s3_simple"
 path = "src/lib.rs"
 doctest = false
 
-[dependencies.aws-lc-rs]
-version = "1.16.2"
-
-[dependencies.aws-lc-sys]
-version = "0.39"
-
 [dependencies.base64]
 version = "0.22.0"
 
@@ -88,12 +82,6 @@ version = "2.3.1"
 [dependencies.quick-xml]
 version = "0.41"
 features = ["serialize"]
-
-[dependencies.quinn]
-version = "0.11.9"
-
-[dependencies.quinn-proto]
-version = "0.11.14"
 
 [dependencies.reqwest]
 version = "0.13"
