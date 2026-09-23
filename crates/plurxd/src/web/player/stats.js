@@ -283,6 +283,7 @@ function playbackWaitSurfaceLive(){
 function playbackSamplingTick(v,p){
   renderPlaybackSurface.waitDetail=playbackWaitLiveDetail(v,p);
   playbackProgressTick(v,p);
+  updatePlayerMediaSession(v,p);
 }
 function playbackStatsTelemetry(){
   const p=PLAYER||{},v=playbackOwnsAttachedMedia(PLAYER)?document.getElementById("video"):null,s=p.source||{},h=p.health||null;
@@ -499,6 +500,12 @@ async function pollSessionHealth(force){
   }
 }
 setInterval(()=>{ pollSessionHealth().catch(()=>{}); }, 2000);
+// How long a paused player may stay silent before it beats anyway, even with
+// nothing to report. Chosen from the shortest deadline any reader of this route
+// holds: Trakt removes a session whose last beat is older than `IDLE_PAUSE`
+// (150 s, `crates/plurxd/src/trakt.rs`) and its sweep runs once a minute, so a
+// floor of 60 s cannot let a session fall out of that map.
+const PAUSED_BEAT_FLOOR_MS=60000;
 async function reportProgress(fileId, ended, attachedOwner){
   const p=attachedOwner||PLAYER;
   if(!p||p.fileId!==fileId||(!attachedOwner&&!playbackOwnsAttachedMedia(p)))return;
@@ -535,7 +542,37 @@ async function reportProgress(fileId, ended, attachedOwner){
     || ((p.method==='direct_play' && video.duration && isFinite(video.duration))
         ? Math.round(video.duration*1000) : null);
   if(!ITEM_FOR_FILE[fileId]) return;
-  try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs}}); }catch(e){}
+  // F-web-12. A paused player beats every five seconds for as long as it is
+  // left open, repeating one position nobody has moved. What is dropped here is
+  // the REPEAT, not the beat, because three readers of this route care about
+  // when a beat arrives and not only about the number in it:
+  //
+  //   `crates/plurxd/src/delivery.rs` — a direct play has no session of its own
+  //     anywhere on the server, and `DirectPlays` prunes at `IDLE_TIMEOUT`
+  //     (30 s). A viewer who paused with the film already buffered issues no
+  //     further range requests, so this beat is the only thing keeping them on
+  //     the Activity page. Direct play is exempt and keeps every beat.
+  //   `crates/plurxd/src/trakt.rs` — `sweep_loop` REMOVES a session whose last
+  //     beat is older than `IDLE_PAUSE` (150 s) and scrobbles a pause; a
+  //     removed session never scrobbles its stop, so the watched flip would be
+  //     lost for anyone who paused for three minutes. `PAUSED_BEAT_FLOOR_MS`
+  //     keeps one beat a minute going out so that never happens.
+  //   `crates/plurxd/src/progress.rs` — the ten-second commit coalescer. It
+  //     bounds the STORE write, not the request, and is indifferent to cadence.
+  //
+  // The plan (§3.6 item 3) asked for an unconditional skip on an unchanged
+  // paused position. The Trakt sweep is why this one has a floor instead.
+  const beatAt=performance.now();
+  if(!ended && video && video.paused && p.method!=='direct_play'
+     && p.lastBeatMs===posMs && p.lastBeatAttachment===attachment
+     && p.lastBeatAt!=null && beatAt-p.lastBeatAt<PAUSED_BEAT_FLOOR_MS) return;
+  // Recorded before the await so two beats in one window do not both post, and
+  // UNrecorded if the post failed — a beat the server never received must not
+  // suppress the next one, or a close that follows a failed beat would take the
+  // resume point down with it.
+  p.lastBeatMs=posMs; p.lastBeatAt=beatAt; p.lastBeatAttachment=attachment;
+  try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs}}); }
+  catch(e){ p.lastBeatMs=null; p.lastBeatAt=null; }
 }
 function closePlayer(options={}){
   if(WATCH_CLOSE_PROMISE)return WATCH_CLOSE_PROMISE;
@@ -574,6 +611,9 @@ function closePlayer(options={}){
   // corner, and it reads as the app having hung. Every exit runs through here,
   // including the automatic one when a film ends with nothing queued after it.
   exitPresentationModes();
+  // The lock screen and the media keys belong to a player that is open. Left
+  // installed they would keep offering a transport for a film that is gone.
+  clearPlayerMediaSession();
   supersedePlaybackControlIntent(PLAYER);
   // Bump the generation so a seek or audio switch still awaiting its
   // hls/start finds itself superseded and doesn't attach a stream to a player
@@ -652,6 +692,15 @@ window.addEventListener("keydown",e=>{
 // player-input-adapter:begin — the only place in the player that reads e.key
 function playerContractInput(e,state){
   if(e.key==="Escape") return "back";
+  // Back, as a television sends it. Escape is a keyboard's answer and no TV
+  // remote produces it: Tizen reports 10009, webOS 461, and the Chromium-based
+  // TV browsers (Fire TV Silk, Android TV) name the key `GoBack`, with
+  // `BrowserBack` on desktop Chromium's own back key. Without these the page
+  // navigated away from the player instead of closing it, which on a TV means
+  // leaving the app. The two numeric codes have no `key` name of their own,
+  // which is why both spellings are read.
+  if(e.key==="GoBack"||e.key==="BrowserBack") return "back";
+  if(e.keyCode===10009||e.keyCode===461) return "back";
   if(e.key==="ArrowLeft") return "left";
   if(e.key==="ArrowRight") return "right";
   if(e.key==="ArrowUp") return "up";
@@ -817,6 +866,56 @@ document.getElementById("player").addEventListener("focusin",e=>{
   if(!PLAYER||!target||!target.id||!target.closest("#pbar,#ptimeline,#ptransport,#pskip")) return;
   PLAYER._lastFocusedControl=target.id;
 });
+// The other transport a viewer reaches for: the OS media keys, a headset
+// button, the lock screen, the notification shade. A browser delivers none of
+// those as keys — they arrive as MediaSession actions — so they are decoded
+// here beside the keyboard rather than in a second adapter.
+//
+// Feature-detected twice over: once for `mediaSession` itself, and once per
+// action, because setting a handler a browser does not implement throws
+// `NotSupportedError` and one unknown action would otherwise cost every
+// action after it.
+function setPlayerMediaAction(action,handler){
+  try{ navigator.mediaSession.setActionHandler(action,handler); }catch(e){}
+}
+function installPlayerMediaSession(){
+  if(!("mediaSession" in navigator)) return false;
+  const v=()=>document.getElementById("video");
+  // `play` and `pause` are separate handlers and each is idempotent. A remote
+  // that sends `play` to a film already playing must leave it playing;
+  // `togglePlay` would stop it, which is the defect this shape exists to
+  // avoid — the same reason the input contract has `play_pause` as a key and
+  // not as a command.
+  setPlayerMediaAction("play",()=>{ const e=v(); if(e&&e.paused) togglePlay(); });
+  setPlayerMediaAction("pause",()=>{ const e=v(); if(e&&!e.paused) togglePlay(); });
+  setPlayerMediaAction("seekbackward",d=>nudge(-Math.abs((d&&d.seekOffset)||10)));
+  setPlayerMediaAction("seekforward",d=>nudge(Math.abs((d&&d.seekOffset)||10)));
+  // Next is the next EPISODE, and only where the viewer has asked for one:
+  // autoplay-next is the feature this command belongs to, so a viewer who
+  // turned it off does not get it back through the remote.
+  setPlayerMediaAction("nexttrack",()=>{ if(autoNextOn()) playNextEpisode(); });
+  return true;
+}
+function clearPlayerMediaSession(){
+  if(!("mediaSession" in navigator)) return;
+  for(const action of ["play","pause","seekbackward","seekforward","nexttrack"])
+    setPlayerMediaAction(action,null);
+  if(navigator.mediaSession.playbackState!==undefined) navigator.mediaSession.playbackState="none";
+}
+// Position, from the sampling tick the player already runs (500 ms). No new
+// timer: a second clock for the lock screen is a second thing to keep in step
+// with the first. Everything here is guarded because `setPositionState` throws
+// on a non-finite duration or a position past it, which a stream whose
+// duration is still growing produces routinely.
+function updatePlayerMediaSession(v,p){
+  if(!v||!p||!("mediaSession" in navigator)) return;
+  if(navigator.mediaSession.playbackState!==undefined)
+    navigator.mediaSession.playbackState=v.paused?"paused":"playing";
+  if(!navigator.mediaSession.setPositionState) return;
+  const duration=pbTotalSec(),position=pbShownSec();
+  if(!(duration>0)||!isFinite(duration)||!(position>=0)||position>duration) return;
+  try{ navigator.mediaSession.setPositionState({duration,position,playbackRate:v.playbackRate||1}); }catch(e){}
+}
 // player-input-adapter:end
 // map fileId → itemId, filled by viewItem so progress posts to the right item
 const ITEM_FOR_FILE={};

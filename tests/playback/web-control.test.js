@@ -79,7 +79,10 @@ function fullOpenHarness() {
     "let now=0;const performance={now:()=>now},timers=new Map();let timerId=0;const window={}; function setTimeout(fn,ms){if(ms===100){Promise.resolve().then(fn);return 0;}const id=++timerId;timers.set(id,{fn,at:now+ms});return id;}function clearTimeout(id){timers.delete(id);} function setInterval(){return 0;} function clearInterval(){}",
     "function qualityForce(){return PlaybackPolicy.qualityForce(quality);} function playQuality(){return quality;} function qualityLabel(){return '720p';} function prePlaySelection(){return null;}",
     surfaceSeam(),
-    "const loading=[],posted=[],ITEM_FOR_FILE={film:'film-item','new-title':'new-item'};function api(path,{body}={}){posted.push({path,body});return Promise.resolve({});}function wirePlayer(){} function setLoading(...args){loading.push(args);} function toast(){} function closeMenu(){} const location={hash:'#/'};function exitPresentationModes(){}function cancelPendingSeek(){}",
+    "const loading=[],posted=[],ITEM_FOR_FILE={film:'film-item','new-title':'new-item'};function api(path,{body}={}){posted.push({path,body});return Promise.resolve({});}function wirePlayer(){} function setLoading(...args){loading.push(args);} function toast(){} function closeMenu(){} const location={hash:'#/'};function exitPresentationModes(){}function cancelPendingSeek(){}"
+    // The OS media keys are a seam here: this harness has no navigator, and
+    // `player-dom.test.js` is where the handlers themselves are driven.
+    + "function clearPlayerMediaSession(){}function installPlayerMediaSession(){}function updatePlayerMediaSession(){}",
     "function clientLog(){} function playbackContext(){return {};} function decodeLimits(){return {};} function playerPixelHeight(){return 1080;}",
     // Capability probing is a seam here; play retains this snapshot for routing.
     "function currentCapsDocument(){return {video:[],audio:[]};}",
@@ -166,7 +169,8 @@ function fullOpenHarness() {
     shippedSource("offsetLabel"), shippedSource("setSync"), shippedSource("togglePlay"),
     shippedSource("retryPlayback"),
     shippedSource("closePlayer"),
-    shippedSource("reportProgress"),
+    // The paused-repeat floor is shipped beside `reportProgress` and read by it.
+    shippedConst("PAUSED_BEAT_FLOOR_MS"), shippedSource("reportProgress"),
     "async function qualityMenuPick(q){setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();}",
     "const ttff=[];function reportTtff(){ttff.push(PLAYER.fileId);}function esc(x){return x;}function finishPlayback(){throw Error('unattached autoplay');}function clearStall(){}function bufferRunway(){return 0;}const PERSISTENT_STALL_MS=8000;",
     shippedSource("playbackMarkersUsable"),shippedSource("markerNowMs"),
@@ -1351,6 +1355,31 @@ async function main() {
     assert.equal(h.posted[0].path,'/items/film-item/progress');
     assert.equal(h.posted[0].body.position_ms,5_400_000,'Close attributes the shared media clock to its actual predecessor, never the pending next title');
     assert.deepEqual(h.released,['A']);
+  }
+  {
+    // F-web-12. A paused remux no longer repeats a position nobody moved, so
+    // the pause EDGE has to carry it — otherwise the server's last known
+    // position sits up to one five-second sample behind where the viewer
+    // actually stopped, for as long as they leave it there.
+    const h=fullOpenHarness(),p=fullPlayer();p.method='transcode';h.attach(p);
+    h.video.currentTime=100;h.video.paused=false;
+    h.togglePlay();
+    assert.equal(p.wantsPlayback,false,'the harness did not reach the pause edge');
+    assert.equal(h.posted.length,1,'pausing reported no position at all');
+    assert.equal(h.posted[0].path,'/items/film-item/progress');
+    assert.equal(h.posted[0].body.position_ms,100_000);
+    // The sampling beat that follows is the repeat the pause edge just made
+    // redundant, and it is dropped.
+    h.reportProgress('film');
+    assert.equal(h.posted.length,1,'the paused repeat was posted after the edge beat');
+    // Resuming is a transport change, not a position change; the next real
+    // beat is the one that carries the new position.
+    h.togglePlay();
+    assert.equal(p.wantsPlayback,true);
+    assert.equal(h.posted.length,1,'resuming posted a beat of its own');
+    h.video.currentTime=130;h.reportProgress('film');
+    assert.equal(h.posted.length,2);
+    assert.equal(h.posted[1].body.position_ms,130_000);
   }
   {
     const h=fullOpenHarness(),p=fullPlayer();p.sessionId='working';h.attach(p);

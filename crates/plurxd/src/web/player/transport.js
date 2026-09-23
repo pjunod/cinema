@@ -367,6 +367,13 @@ function togglePlay(){
     applyPlaybackTransportIntent(v,PLAYER);
   }
   if(PLAYER)playerActivity();
+  // The pause EDGE always beats (F-web-12). `reportProgress` now drops a paused
+  // REPEAT, so without one beat here the server's last known position would sit
+  // up to one five-second sample behind where the viewer actually stopped, for
+  // as long as they leave it paused. This is the viewer's own pause and nothing
+  // else: a teardown's internal pause is followed by `closePlayer`'s final
+  // report, which owns that moment.
+  if(PLAYER&&PLAYER.fileId!=null&&PLAYER.wantsPlayback===false) reportProgress(PLAYER.fileId);
   notifyPlaybackControl();
 }
 // Pointer nudges coalesce after a short quiet. Keyboard arrows use physical

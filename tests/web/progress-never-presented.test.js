@@ -21,18 +21,34 @@ function source(name){let at=html.indexOf(`async function ${name}(`);if(at<0)at=
 // per attach, and whatever offset the route gave it.
 function attach(p){ p.mediaAttachment={id:(p._mediaAttachmentOrdinal||0)+1}; p._mediaAttachmentOrdinal=p.mediaAttachment.id; return p; }
 
-function harness(video,player){
+// A clock the test drives, because the paused-repeat guard below is written in
+// terms of elapsed time and a real one would make it a race.
+function harness(video,player,options={}){
   const posts=[];
   const p=Object.assign({fileId:7,offset:0},player);
+  const clock={ms:0};
   const c=vm.createContext({
     PLAYER:p, ITEM_FOR_FILE:{7:'42'},
     playbackOwnsAttachedMedia:()=>true,
     document:{getElementById:()=>video},
-    api:async(url,req)=>{posts.push({url,...req});},
+    api:options.api||(async(url,req)=>{posts.push({url,...req});}),
+    performance:{now:()=>clock.ms},
     Math,
   });
+  vm.runInContext(shippedConst('PAUSED_BEAT_FLOOR_MS'),c);
   vm.runInContext(source('reportProgress'),c);
-  return {c,posts,p};
+  // A `const` run in a context is lexical, not a property of it, so the value
+  // is read back as an expression rather than off `c`.
+  const floorMs=vm.runInContext('PAUSED_BEAT_FLOOR_MS',c);
+  assert.equal(typeof floorMs,'number');
+  return {c,posts,p,clock,floorMs};
+}
+// The floor is a shipped constant, so the test reads it rather than repeating
+// the number: a change to it that broke a reader would otherwise pass here.
+function shippedConst(name){
+  const match=html.match(new RegExp(`\\nconst ${name}=[^;]*;`));
+  assert.ok(match,`the shell no longer declares const ${name}`);
+  return match[0];
 }
 
 test('a startup that never presented a frame reports nothing',async()=>{
@@ -95,4 +111,78 @@ test('a genuine start-over reports its zero',async()=>{
   await c.reportProgress(7,false);
   assert.equal(posts.length,1);
   assert.equal(posts[0].body.position_ms,0);
+});
+
+// ---------------------------------------------------------------------------
+// F-web-12: the paused repeat. A player left paused beat every five seconds
+// forever, reporting one position nobody had moved. What is dropped is the
+// repeat, and only where no reader of the route needs the cadence — which is
+// why direct play is exempt and why the repeats still go out once a minute.
+// (The plan named player-dom.test.js for these; they are here instead, because
+// the harness that drives the shipped `reportProgress` is this one.)
+
+const pausedElement=()=>({readyState:4,currentTime:900,paused:true});
+
+test('a paused remux repeats its position at most once a floor',async()=>{
+  const {c,posts,p,clock,floorMs}=harness(pausedElement(),{method:'transcode',knownDur:7_200_000});
+  attach(p);
+  await c.reportProgress(7,false);
+  assert.equal(posts.length,1,'the first paused beat is the one that carries the position');
+  clock.ms+=5_000; await c.reportProgress(7,false);
+  clock.ms+=5_000; await c.reportProgress(7,false);
+  assert.equal(posts.length,1,'a paused repeat at an unchanged position was posted again');
+  // Trakt removes a session quiet for 150 s and can never scrobble its stop
+  // afterwards, so the repeat is delayed, not abolished.
+  clock.ms+=floorMs; await c.reportProgress(7,false);
+  assert.equal(posts.length,2,'a paused player went silent past the floor every reader depends on');
+  assert.ok(floorMs<150_000,'the floor must stay under Trakt IDLE_PAUSE (crates/plurxd/src/trakt.rs)');
+});
+
+test('a paused DIRECT PLAY keeps every beat',async()=>{
+  // `DirectPlays` in crates/plurxd/src/delivery.rs prunes at IDLE_TIMEOUT
+  // (30 s) and this beat is its only signal: a viewer paused with the film
+  // buffered issues no further range requests.
+  const {c,posts,p,clock}=harness(pausedElement(),{method:'direct_play',knownDur:7_200_000});
+  attach(p);
+  await c.reportProgress(7,false);
+  clock.ms+=5_000; await c.reportProgress(7,false);
+  clock.ms+=5_000; await c.reportProgress(7,false);
+  assert.equal(posts.length,3,'suppressing a direct play would drop it off the Activity page');
+});
+
+test('a paused player that moves reports the move',async()=>{
+  const video={readyState:4,currentTime:900,paused:true};
+  const {c,posts,p,clock}=harness(video,{method:'transcode',knownDur:7_200_000});
+  attach(p);
+  await c.reportProgress(7,false);
+  clock.ms+=5_000; video.currentTime=1200;   // paused, then scrubbed
+  await c.reportProgress(7,false);
+  assert.equal(posts.length,2);
+  assert.equal(posts[1].body.position_ms,1_200_000,'a seek while paused is a new position, not a repeat');
+});
+
+test('a playing player is never suppressed',async()=>{
+  const {c,posts,p,clock}=harness({readyState:4,currentTime:900,paused:false},
+    {method:'transcode',knownDur:7_200_000});
+  attach(p);
+  await c.reportProgress(7,false);
+  clock.ms+=5_000; await c.reportProgress(7,false);
+  assert.equal(posts.length,2,'an unchanged position while PLAYING is a stall, which the server still wants to see');
+});
+
+test('a beat the server never received does not suppress the next one',async()=>{
+  // The close beat is the resume point. If a failed post counted as delivered,
+  // a close right after it would be dropped and the position lost for good.
+  let fail=true;
+  const posts=[];
+  const {c,p}=harness({readyState:4,currentTime:900,paused:true},
+    {method:'transcode',knownDur:7_200_000},
+    {api:async(url,req)=>{ if(fail) throw new Error('offline'); posts.push({url,...req}); }});
+  attach(p);
+  await c.reportProgress(7,false);
+  assert.deepEqual(posts,[],'the fixture refused the first beat');
+  fail=false;
+  await c.reportProgress(7,false);
+  assert.equal(posts.length,1,'a failed beat suppressed the one that would have replaced it');
+  assert.equal(posts[0].body.position_ms,900_000);
 });

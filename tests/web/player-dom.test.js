@@ -127,3 +127,141 @@ const originalAudio = info.playbackInfoOverview({method: "Transcode", source_aud
 assert.match(originalAudio, /Stream audio track[^]*?<strong>Not reported<\/strong>/);
 assert.match(originalAudio, /Original audio track[^]*?<strong>DTS · 5.1<\/strong>/);
 assert.match(source, /client_loaded:clientLoadedSeconds==null\?"Not reported"/);
+
+// ---------------------------------------------------------------------------
+// F-web-13: the two transports that are not a keyboard.
+//
+// Both live inside the `player-input-adapter` fence region in player/stats.js,
+// which `scripts/player-input-fence` keeps as the player's ONE key adapter.
+// These execute the shipped functions rather than matching their text.
+
+function shipped(name) {
+  let at = bodyScript.indexOf(`\nfunction ${name}(`);
+  if (at < 0) at = bodyScript.indexOf(`\nasync function ${name}(`);
+  assert.ok(at >= 0, `the shell no longer declares ${name}`);
+  const rest = bodyScript.slice(at + 1);
+  const ends = ["\nfunction ", "\nasync function ", "\nconst ", "\nlet ", "\nwindow.", "\ndocument."]
+    .map((kind) => rest.indexOf(kind, 1)).filter((where) => where !== -1);
+  return ends.length ? rest.slice(0, Math.min(...ends)) : rest;
+}
+
+// A television's Back button. Escape is a keyboard's answer and no remote
+// sends it; each TV platform has its own, and until these landed the page
+// navigated away from the player — on a TV, out of the app.
+{
+  const contractInput = new Function(`${shipped("playerContractInput")}\nreturn playerContractInput;`)();
+  for (const [event, why] of [
+    [{ key: "Escape" }, "a desktop keyboard"],
+    [{ key: "GoBack" }, "Fire TV Silk and Android TV name the key"],
+    [{ key: "BrowserBack" }, "desktop Chromium's own back key"],
+    [{ key: "Unidentified", keyCode: 10009 }, "Tizen"],
+    [{ key: "Unidentified", keyCode: 461 }, "webOS"],
+  ]) {
+    assert.equal(contractInput(event, "hidden"), "back", `${why} must reach the contract as back`);
+  }
+  // Nothing else became Back on the way.
+  assert.equal(contractInput({ key: "Unidentified", keyCode: 462 }, "hidden"), null);
+  assert.equal(contractInput({ key: "Backspace" }, "hidden"), null);
+  process.stdout.write("PASS every television's Back key reaches the contract as back\n");
+}
+
+// MediaSession: the OS media keys, a headset button, the lock screen.
+{
+  const build = (navigatorStub, video) => {
+    const toggles = [];
+    const nudges = [];
+    const run = new Function(
+      "navigator", "document", "togglePlay", "nudge", "autoNextOn", "playNextEpisode",
+      [
+        shipped("setPlayerMediaAction"),
+        shipped("installPlayerMediaSession"),
+        shipped("clearPlayerMediaSession"),
+        "return {installPlayerMediaSession, clearPlayerMediaSession};",
+      ].join("\n"),
+    )(
+      navigatorStub,
+      { getElementById: () => video },
+      () => toggles.push(video.paused ? "play" : "pause"),
+      (d) => nudges.push(d),
+      () => navigatorStub.autoNext !== false,
+      () => nudges.push("next"),
+    );
+    return { run, toggles, nudges };
+  };
+
+  // A browser without the API is asked for nothing at all.
+  {
+    const { run } = build({}, { paused: true });
+    assert.equal(run.installPlayerMediaSession(), false, "a browser with no mediaSession was still asked for handlers");
+  }
+
+  const handlers = {};
+  const navigatorStub = {
+    mediaSession: {
+      playbackState: "none",
+      setActionHandler(action, handler) {
+        // A browser throws NotSupportedError for an action it does not know.
+        if (action === "nexttrack") throw new Error("NotSupportedError");
+        handlers[action] = handler;
+      },
+      setPositionState() {},
+    },
+  };
+  const video = { paused: true, playbackRate: 1 };
+  const { run, toggles, nudges } = build(navigatorStub, video);
+  assert.equal(run.installPlayerMediaSession(), true);
+  // The unknown action did not take the ones after it down with it.
+  assert.deepEqual(Object.keys(handlers).sort(), ["pause", "play", "seekbackward", "seekforward"]);
+
+  // play and pause are separate and each is idempotent. A remote that sends
+  // `play` to a film already playing must leave it playing — togglePlay would
+  // stop it, which is exactly what one shared handler would have done.
+  handlers.play();
+  assert.deepEqual(toggles, ["play"], "play did not start a paused film");
+  video.paused = false;
+  handlers.play();
+  assert.deepEqual(toggles, ["play"], "play on a playing film toggled it off");
+  handlers.pause();
+  assert.deepEqual(toggles, ["play", "pause"]);
+  video.paused = true;
+  handlers.pause();
+  assert.deepEqual(toggles, ["play", "pause"], "pause on a paused film toggled it back on");
+
+  // Seek uses the browser's own offset when it sends one, and the player's
+  // ten seconds when it does not — and never in the wrong direction.
+  handlers.seekbackward({});
+  handlers.seekforward({});
+  handlers.seekbackward({ seekOffset: 30 });
+  handlers.seekforward({ seekOffset: 30 });
+  assert.deepEqual(nudges, [-10, 10, -30, 30]);
+
+  run.clearPlayerMediaSession();
+  assert.deepEqual(Object.values(handlers).filter(Boolean), [], "closing left a handler installed");
+  assert.equal(navigatorStub.mediaSession.playbackState, "none");
+  process.stdout.write("PASS the OS transport installs feature-detected, keeps play and pause apart, and is handed back on close\n");
+}
+
+// The position goes out on the tick the player already runs, not on a new one.
+{
+  const states = [];
+  const update = new Function(
+    "navigator", "pbTotalSec", "pbShownSec",
+    `${shipped("updatePlayerMediaSession")}\nreturn updatePlayerMediaSession;`,
+  );
+  const session = { playbackState: "none", setPositionState: (state) => states.push(state) };
+  const run = update({ mediaSession: session }, () => 7200, () => 900);
+  run({ paused: false, playbackRate: 1 }, {});
+  assert.equal(session.playbackState, "playing");
+  assert.deepEqual(states, [{ duration: 7200, position: 900, playbackRate: 1 }]);
+  run({ paused: true, playbackRate: 1 }, {});
+  assert.equal(session.playbackState, "paused");
+  assert.equal(states.length, 2, "a paused player still publishes where it is");
+
+  // A stream whose duration is still growing reports a position past the
+  // duration routinely, and setPositionState throws on it. Say nothing rather
+  // than throw out of the half-second tick.
+  const growing = update({ mediaSession: session }, () => 0, () => 900);
+  growing({ paused: false, playbackRate: 1 }, {});
+  assert.equal(states.length, 2, "an unknown duration was published as a position state");
+  process.stdout.write("PASS the OS transport takes its position from the sampling tick and refuses an impossible one\n");
+}
