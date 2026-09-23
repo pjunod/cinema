@@ -1,0 +1,31 @@
+# The merge-trailer audit's boundary, and its permanent errata.
+#
+# `enforce_after` is the boundary commit of §3.1 of
+# docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md. While it is unset the
+# repository is in phase A: every commit is judged by the legacy corrective
+# rule, `validation/regressions.d/` still accepts new fragments, and the
+# merge-trailer audit reports nothing. Setting it starts phase B for every
+# landing commit past it — those commits are judged by `CORRECTIVE_RE` and
+# carry their evidence as a `Regression-Test: <path>::<name>` trailer — and
+# phase C for everything at or before it, which keeps the rule and the
+# fragments it was written under, forever.
+#
+# It is deliberately unset here. The boundary has to be a commit that already
+# exists on `main` when the audit that reads it is running, and it must be no
+# earlier than the merge that introduces the audit: an earlier boundary would
+# demand trailers on landing commits that were made before the trailer
+# existed and that nobody can amend. The first landing commit on `main` after
+# this audit merges is therefore the boundary, and setting it is a one-line
+# PR made once that commit exists.
+#
+# `[[errata]]` rows are permanent. A landing commit cannot be amended, so a
+# trailer that reaches `main` wrong stays wrong; a row here is the only way to
+# record that and move on. Expect this list to stay empty. If it does not, the
+# pre-merge check in `validation/regression_field.py` is not doing its job and
+# that, not the typo, is the thing to fix.
+
+version = 1
+
+# enforce_after = "<the first landing commit on main after this audit merges>"
+
+errata = []

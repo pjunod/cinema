@@ -14,10 +14,12 @@ import sys
 import tomllib
 
 from validation.runner import Catalog, REPO_ROOT, load_catalog, matches
+from validation.test_markers import TEST_ADDITION_RE, defines_test
 
 
 DEFAULT_COVERAGE = REPO_ROOT / "validation" / "regressions.d"
 DEFAULT_CLIENT_FIXES = REPO_ROOT / "tests" / "client-fixes.toml"
+DEFAULT_MERGE_LEDGER = REPO_ROOT / "validation" / "merge-errata.toml"
 COVERAGE_FIELDS = frozenset({"commits", "points", "checks", "reason", "ignore"})
 ISSUE_RE = re.compile(
     r"(^fix(?:\b|[(:])|^(?:perf(?:\([^)]*\))?:|address|hide|align|bind|delay|do not|fit|"
@@ -34,11 +36,43 @@ ISSUE_RE = re.compile(
     r"^(?:roll back|revert unsupported|make .* fail|give .* back))",
     re.IGNORECASE,
 )
-TEST_ADDITION_RE = re.compile(
-    r"^\+.*(?:#\[test\]|func test|@Test|assert(?:_eq|_ne)?!|XCTAssert|expect\(|"
-    r"test\(|describe\(|it\(|\.golden)",
-    re.MULTILINE,
-)
+
+# The narrow rule, from §3.2 of
+# docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md: Conventional Commit
+# corrective prefixes and nothing else.
+#
+# READ THIS BEFORE WIDENING IT. The set above is what this replaces, and it
+# is wide on purpose-turned-accident: it matches body words, so a `docs:`
+# commit whose subject contains "keeps" is corrective, and that is what
+# produced the self-referential ledger fragments (a ledger-only commit mapped
+# to the validation framework so that the check which demanded it is
+# satisfied by it). Narrowing is not free. Measured over this repository's
+# whole history at `fad591a4`, `ISSUE_RE` matches 2,028 subjects and this
+# matches 1,241; 809 subjects stop being audited, and some of them really are
+# corrective — `feat(scan): add bounded identity repair` carries a repair and
+# `ci: restore complete watch integration preflight` restores a gate. A
+# behaviour fix mislabelled `chore(` or `refactor(` now passes with no
+# evidence. That escape is accepted, and AGENTS.md carries the rule that
+# answers it: if a change alters behaviour a user could observe, its subject
+# is `fix(` or `perf(`.
+#
+# The two rules are **not** nested. 22 subjects match this and not `ISSUE_RE`
+# — every `perf(<scope>):` commit in the repository, because `ISSUE_RE`'s
+# `perf` alternative is followed by a `\b` that a `:` and a space cannot
+# satisfy. Applying this rule to the whole history would therefore make 22
+# already-landed commits newly corrective and newly unevidenced. That is why
+# the rule is chosen per commit by `_corrective_rule_for`, at the boundary,
+# rather than swapped wholesale.
+CORRECTIVE_RE = re.compile(r"^(fix|perf)(\([^)]*\))?[:!]")
+# `Regression-Test: <path>::<name>` — the PR-level field of §3.1, carried onto
+# the landing commit as a trailer. Not a SHA, so a rebase cannot invalidate it.
+REGRESSION_TRAILER = "Regression-Test"
+# The two shapes a landing commit on `main` takes. Kept identical to
+# `tests/operations/test_status_pr_claims.py:87-90` so a squashed PR is
+# covered as well as a merge commit.
+MERGE_SUBJECT_RE = re.compile(r"^Merge pull request '(?P<title>.*)' \(#(?P<pull>\d+)\)")
+SQUASH_SUBJECT_RE = re.compile(r"^(?P<title>.*) \(#(?P<pull>\d+)\)$")
+
 
 
 class HistoryError(ValueError):
@@ -81,12 +115,49 @@ class ClientFixLedger:
 
 
 @dataclasses.dataclass(frozen=True)
+class MergeErratum:
+    """One landing commit whose trailer is wrong and can never be amended."""
+
+    commit: str
+    reason: str
+
+
+@dataclasses.dataclass(frozen=True)
+class MergeLedger:
+    """The boundary the freeze is measured from, and the permanent errata.
+
+    `enforce_after` is the boundary commit of §3.1's phase table. Unset means
+    phase A: every commit keeps the legacy corrective rule, `regressions.d/`
+    still accepts new fragments, and the merge-trailer audit reports nothing.
+    Set means phase B for everything past it, and phase C for everything at or
+    before it.
+    """
+
+    enforce_after: str | None
+    errata: tuple[MergeErratum, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class MergeRegression:
+    """A landing commit past the boundary, and what its trailers resolved to."""
+
+    landing: str
+    pull: str
+    title: str
+    corrective: bool
+    tests: tuple[str, ...]
+    resolved: bool
+
+
+@dataclasses.dataclass(frozen=True)
 class HistoryReport:
     issues: tuple[IssueCommit, ...]
     covered_by_entry: tuple[str, ...]
     covered_by_anchor: tuple[str, ...]
     ignored: tuple[str, ...]
     errors: tuple[str, ...]
+    merges: tuple[MergeRegression, ...] = ()
+
 
     @property
     def direct_count(self) -> int:
@@ -292,7 +363,69 @@ def load_client_fixes(path: Path) -> ClientFixLedger:
     return ClientFixLedger(enforce_after=enforce_after, fixes=tuple(entries))
 
 
+def load_merge_ledger(path: Path = DEFAULT_MERGE_LEDGER) -> MergeLedger:
+    """Read the boundary and the permanent errata.
+
+    A missing file is phase A, not an error: the freeze is a policy someone
+    turns on by writing a boundary down, and a checkout without the file is a
+    checkout from before that happened.
+    """
+
+    if not path.exists():
+        return MergeLedger(enforce_after=None, errata=())
+    try:
+        with path.open("rb") as handle:
+            raw = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise HistoryError(f"cannot read {path}: {exc}") from exc
+    if raw.get("version") != 1:
+        raise HistoryError(f"{path.name} version must be 1")
+    stray = set(raw) - {"version", "enforce_after", "errata"}
+    if stray:
+        raise HistoryError(f"{path.name} has unknown keys {', '.join(sorted(stray))}")
+    enforce_after = raw.get("enforce_after")
+    if enforce_after is not None and (
+        not isinstance(enforce_after, str)
+        or not re.fullmatch(r"[0-9a-f]{7,40}", enforce_after)
+    ):
+        raise HistoryError(f"{path.name} enforce_after must be a Git SHA prefix")
+
+    errata: list[MergeErratum] = []
+    for index, item in enumerate(raw.get("errata", [])):
+        where = f"{path.name} errata[{index}]"
+        if not isinstance(item, dict):
+            raise HistoryError(f"{where} must be a table")
+        if set(item) != {"commit", "reason"}:
+            raise HistoryError(f"{where} must contain exactly commit, reason")
+        commit = str(item["commit"])
+        if not re.fullmatch(r"[0-9a-f]{7,40}", commit):
+            raise HistoryError(f"{where}.commit must be a Git SHA prefix")
+        reason = str(item["reason"]).strip()
+        if not reason:
+            raise HistoryError(f"{where} has no reason")
+        errata.append(MergeErratum(commit=commit, reason=reason))
+    return MergeLedger(enforce_after=enforce_after, errata=tuple(errata))
+
+
+def landing_commit_title(subject: str) -> tuple[str, str] | None:
+    """The PR title and number a landing commit's subject carries, if any.
+
+    Both shapes, because `main` carries both: Forgejo's merge commit
+    (`Merge pull request '<title>' (#N) from <branch> into main`) and a
+    squashed PR (`<title> (#N)`).
+    """
+
+    merge = MERGE_SUBJECT_RE.match(subject)
+    if merge:
+        return merge.group("title"), merge.group("pull")
+    squash = SQUASH_SUBJECT_RE.match(subject)
+    if squash:
+        return squash.group("title"), squash.group("pull")
+    return None
+
+
 def _git(root: Path, *args: str) -> str:
+
     env = os.environ.copy()
     # Hooks export repository-local paths for the outer checkout. History may
     # intentionally inspect a linked worktree or a fixture repository, where
@@ -400,21 +533,156 @@ def _history_heads(root: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys(heads))
 
 
+def is_corrective(subject: str, sha: str, post_boundary: frozenset[str]) -> bool:
+    """Which corrective rule judges this commit — the legacy one, or §3.2's.
+
+    The boundary decides, per commit, and that is the whole of the freeze.
+    A commit at or before the boundary keeps the requirement it was written
+    under: its evidence is a `regressions.d/` fragment, those fragments are
+    the only evidence that range will ever have, and re-judging it under a
+    rule it never saw would either discard that evidence or demand new
+    evidence for a commit nobody can amend. A commit past the boundary is
+    judged by §3.2's prefix rule and carries its evidence as a
+    `Regression-Test:` trailer on its landing commit instead.
+    """
+
+    rule = CORRECTIVE_RE if sha in post_boundary else ISSUE_RE
+    return bool(rule.search(subject))
+
+
+def _regression_trailers(root: Path, sha: str) -> tuple[str, ...]:
+    raw = _git(
+        root,
+        "show",
+        "-s",
+        f"--format=%(trailers:key={REGRESSION_TRAILER},valueonly=true)",
+        sha,
+    )
+    return tuple(line.strip() for line in raw.splitlines() if line.strip())
+
+
+def _unresolved_trailer(root: Path, sha: str, value: str) -> str | None:
+    """Why this trailer does not resolve **in the landing commit's own tree**.
+
+    Not in the tree as it is today: a landing commit on `main` is immutable
+    and so is its tree, and that exact-tree binding is the entire reason the
+    field is a path and a name rather than a short SHA.
+    """
+
+    path, separator, name = value.partition("::")
+    if not separator or not path.strip() or not name.strip():
+        return f"carries {value!r}, which is not <path>::<name>"
+    path, name = path.strip(), name.strip()
+    try:
+        _git(root, "cat-file", "-e", f"{sha}:{path}")
+    except HistoryError:
+        return f"names {path}, which its own tree does not carry"
+    try:
+        blob = _git(root, "show", f"{sha}:{path}")
+    except HistoryError:
+        return f"names {path}, which its own tree does not carry"
+    if not defines_test(blob, name):
+        return f"names {name}, which {path} does not define as a test at that merge"
+    return None
+
+
+def audit_merge_regressions(
+    root: Path,
+    history_heads: tuple[str, ...],
+    ledger: MergeLedger,
+) -> tuple[tuple[MergeRegression, ...], tuple[str, ...]]:
+    """Audit `Regression-Test:` trailers on the landing commits past the boundary.
+
+    Returns the rows for the audit report and the errors. With no boundary set
+    there is nothing to audit and both are empty, which is phase A.
+    """
+
+    if not ledger.enforce_after:
+        return (), ()
+    try:
+        boundary = _git(
+            root, "rev-parse", "--verify", f"{ledger.enforce_after}^{{commit}}"
+        ).strip()
+    except HistoryError:
+        return (), (
+            f"merge ledger enforce_after does not resolve: {ledger.enforce_after}",
+        )
+
+    rows: list[MergeRegression] = []
+    errors: list[str] = []
+    log = _git(
+        root,
+        "log",
+        "--format=%H%x1f%s%x1e",
+        *history_heads,
+        "--not",
+        boundary,
+        "--",
+    )
+    for record in log.split("\x1e"):
+        record = record.strip("\n")
+        if not record:
+            continue
+        sha, subject = record.split("\x1f", 1)
+        landed = landing_commit_title(subject)
+        if landed is None:
+            continue
+        title, pull = landed
+        excuse = next(
+            (
+                erratum.reason
+                for erratum in ledger.errata
+                if sha.startswith(erratum.commit)
+            ),
+            None,
+        )
+        corrective = bool(CORRECTIVE_RE.match(title))
+        trailers = _regression_trailers(root, sha)
+        resolved = True
+        for trailer in trailers:
+            problem = _unresolved_trailer(root, sha, trailer)
+            if problem is None:
+                continue
+            resolved = False
+            if excuse is None:
+                errors.append(f"landing commit {sha[:8]} (#{pull}) {problem}")
+        if corrective and not trailers:
+            resolved = False
+            if excuse is None:
+                errors.append(
+                    f"corrective landing commit {sha[:8]} (#{pull}) has no "
+                    f"{REGRESSION_TRAILER}: trailer: {title}"
+                )
+        rows.append(
+            MergeRegression(
+                landing=sha,
+                pull=pull,
+                title=title,
+                corrective=corrective,
+                tests=trailers,
+                resolved=resolved,
+            )
+        )
+    return tuple(rows), tuple(errors)
+
+
 def discover_issues(
     root: Path,
     catalog: Catalog,
     explicit_prefixes: tuple[str, ...] = (),
     history_heads: tuple[str, ...] | None = None,
+    post_boundary: frozenset[str] = frozenset(),
 ) -> tuple[IssueCommit, ...]:
     issues: list[IssueCommit] = []
     heads = history_heads if history_heads is not None else _history_heads(root)
     history = _git(root, "log", "--no-merges", "--format=%H%x09%s", *heads, "--")
     for line in history.splitlines():
         sha, subject = line.split("\t", 1)
-        if not ISSUE_RE.search(subject) and not any(
+        if not is_corrective(subject, sha, post_boundary) and not any(
             sha.startswith(prefix) for prefix in explicit_prefixes
         ):
             continue
+
         paths = tuple(
             path
             for path in _git(
@@ -457,29 +725,65 @@ def audit_history(
     catalog: Catalog | None = None,
     coverage_path: Path = DEFAULT_COVERAGE,
     client_fixes_path: Path | None = None,
+    merge_ledger_path: Path | None = None,
 ) -> HistoryReport:
     entries = load_coverage(coverage_path)
     client_fixes = load_client_fixes(
         client_fixes_path or root / "tests" / "client-fixes.toml"
     )
+    merge_ledger = load_merge_ledger(
+        merge_ledger_path or root / "validation" / "merge-errata.toml"
+    )
     catalog = catalog or load_catalog()
     history_heads = _history_heads(root)
+    errors: list[str] = []
+    post_boundary: frozenset[str] = frozenset()
+    if merge_ledger.enforce_after:
+        try:
+            boundary = _git(
+                root, "rev-parse", "--verify", f"{merge_ledger.enforce_after}^{{commit}}"
+            ).strip()
+            post_boundary = frozenset(
+                _git(root, "rev-list", *history_heads, "--not", boundary, "--").split()
+            )
+        except HistoryError:
+            errors.append(
+                "merge ledger enforce_after does not resolve: "
+                f"{merge_ledger.enforce_after}"
+            )
     issues = discover_issues(
         root,
         catalog,
         tuple(prefix for entry in entries for prefix in entry.commits)
         + tuple(prefix for entry in client_fixes.fixes for prefix in entry.commits),
         history_heads,
+        post_boundary,
     )
-    errors: list[str] = []
+    merges, merge_errors = audit_merge_regressions(root, history_heads, merge_ledger)
+    errors.extend(merge_errors)
+
     by_sha = {issue.sha: issue for issue in issues}
     resolved: dict[str, CoverageEntry] = {}
     anchored: set[str] = set()
 
     for entry in entries:
         where = entry.origin
+        # The freeze, phase B. A fragment is evidence for the pre-boundary
+        # range and nothing else; a corrective commit past the boundary
+        # carries its evidence on its landing commit, where the tree it names
+        # can never change under it.
+        if entry.commits and post_boundary:
+            lead = entry.commits[0]
+            if any(sha.startswith(lead) for sha in post_boundary):
+                errors.append(
+                    f"{where} maps {lead}, which landed past the frozen "
+                    f"boundary {merge_ledger.enforce_after}: record a "
+                    f"`{REGRESSION_TRAILER}: <path>::<name>` trailer on its "
+                    f"landing commit instead of a regressions.d fragment"
+                )
         if not entry.commits:
             errors.append(f"{where} has no commits")
+
         if not entry.reason:
             errors.append(f"{where} has no reason")
         if entry.ignore and (entry.points or entry.checks):
@@ -613,7 +917,9 @@ def audit_history(
         covered_by_anchor=tuple(sorted(anchored)),
         ignored=tuple(sorted(sha for sha, entry in resolved.items() if entry.ignore)),
         errors=tuple(errors),
+        merges=merges,
     )
+
 
 
 def _write_report(path: Path, report: HistoryReport) -> None:
@@ -628,8 +934,22 @@ def _write_report(path: Path, report: HistoryReport) -> None:
             "explicit_check_mapping": report.mapped_count,
             "client_fix_anchor": report.anchored_count,
             "non_runtime_correction": report.ignored_count,
+            "landing_commits_past_boundary": len(report.merges),
             "errors": len(report.errors),
         },
+        # Generated, never tracked. The whole point of the merge trailer is
+        # that landing a PR adds no file to the repository.
+        "merges": [
+            {
+                "landing": merge.landing,
+                "pull": merge.pull,
+                "corrective": merge.corrective,
+                "tests": list(merge.tests),
+                "resolved": merge.resolved,
+            }
+            for merge in report.merges
+        ],
+
         "commits": [
             {
                 "commit": issue.sha,
@@ -687,8 +1007,10 @@ def main(argv: list[str] | None = None) -> int:
         f"{report.direct_count} direct test changes · "
         f"{report.mapped_count} explicit current-check mappings · "
         f"{report.anchored_count} client-fix anchors · "
-        f"{report.ignored_count} non-runtime corrections"
+        f"{report.ignored_count} non-runtime corrections · "
+        f"{len(report.merges)} landing commits past the boundary"
     )
+
     return 0
 
 

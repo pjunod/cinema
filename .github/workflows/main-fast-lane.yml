@@ -93,6 +93,24 @@ jobs:
           fetch-depth: 0
       - name: Audit corrective-history evidence
         run: make history-check
+      # Advisory, per M2 of docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md.
+      # The body is payload data on the `pull_request` event, so this needs no
+      # API call and no credential. The checkout for that event is the merge
+      # candidate, which is the tree the field has to be true of, so the two
+      # printed revisions below are what makes that claim checkable on a real
+      # run rather than asserted here.
+      - name: Check the pull request's Regression-Test fields
+        continue-on-error: true
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "checkout HEAD: $(git rev-parse HEAD)"
+          echo "checkout parents: $(git rev-parse HEAD^@ | tr '\n' ' ')"
+          python3 -m validation.regression_field
+
       - name: Check validation catalog and static contracts
         run: |
           make validation-lint

@@ -8,13 +8,17 @@ import textwrap
 import unittest
 
 from validation.history import (
+    CORRECTIVE_RE,
     ISSUE_RE,
     HistoryError,
     _audit_tips,
     audit_history,
+    landing_commit_title,
     load_coverage,
+    load_merge_ledger,
     verify_migration_fidelity,
 )
+
 from validation.runner import load_catalog
 
 
@@ -40,8 +44,15 @@ checks = ["baseline"]
 """
 
 
-class HistoryAuditCase(unittest.TestCase):
+class RepositoryFixture(unittest.TestCase):
+    """The fixture-repository harness, shared by every case in this file.
+
+    A base class with no tests of its own: subclassing a case that has tests
+    would re-run them under every subclass's name.
+    """
+
     def repository(self):
+
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -80,7 +91,10 @@ class HistoryAuditCase(unittest.TestCase):
             stdout=subprocess.PIPE
         ).stdout.strip()
 
+
+class HistoryAuditCase(RepositoryFixture):
     def test_fix_with_a_direct_regression_test_needs_no_ledger_entry(self):
+
         root, catalog, coverage = self.repository()
         (root / "src/app.rs").write_text("pub fn answer() -> u8 { 1 }\n", encoding="utf-8")
         self.commit(root, "feat: seed")
@@ -695,5 +709,324 @@ class CoverageDirectoryCase(unittest.TestCase):
         verify_migration_fidelity(legacy, root / "validation/regressions.d")
 
 
+class CorrectiveBoundaryCase(RepositoryFixture):
+
+    """The freeze of §3.1/§3.2, proved on both sides of the boundary.
+
+    Narrowing the corrective rule weakens the audit this repository has lived
+    under, so the narrowing is bounded by a commit rather than applied to the
+    whole history. Everything at or before the boundary keeps the rule it was
+    written under and the `regressions.d/` fragments that answer it;
+    everything past it is judged by `CORRECTIVE_RE` and answers with a
+    `Regression-Test:` trailer on its landing commit. Both halves of that
+    sentence need a test, because either one failing silently is the whole
+    audit going quiet.
+    """
+
+    def ledger(self, root: Path, enforce_after=None, errata=()) -> Path:
+        path = root / "merge-errata.toml"
+        lines = ["version = 1", ""]
+        if enforce_after:
+            lines.append(f'enforce_after = "{enforce_after}"')
+        if errata:
+            for commit, reason in errata:
+                lines.append("")
+                lines.append("[[errata]]")
+                lines.append(f'commit = "{commit}"')
+                lines.append(f'reason = "{reason}"')
+        else:
+            lines.append("errata = []")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    @staticmethod
+    def commit_with_trailers(root: Path, subject: str, *trailers: str) -> str:
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        message = subject + "\n\n" + "\n".join(trailers) + "\n"
+        subprocess.run(["git", "commit", "-q", "-m", message], cwd=root, check=True)
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True, text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+    @staticmethod
+    def branch(root: Path) -> str:
+        return subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=root, check=True,
+            text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+    def test_the_boundary_chooses_which_rule_judges_a_commit(self):
+        """A commit before the boundary keeps its requirement; one after does not.
+
+        `chore: keep the reader bounded` is corrective under `ISSUE_RE` -- the
+        body-word alternatives match "keep" and "bound" -- and is not
+        corrective under `CORRECTIVE_RE`. One such commit sits on each side of
+        the boundary, so a single audit says which rule judged which commit.
+        """
+
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 2 }\n", encoding="utf-8")
+        before = self.commit(root, "chore: keep the reader bounded")
+        (root / "docs/line.md").write_text("the boundary\n", encoding="utf-8")
+        boundary = self.commit(root, "docs: draw the boundary")
+        (root / "crates/other.rs").write_text("pub fn b() -> u8 { 1 }\n", encoding="utf-8")
+        after = self.commit(root, "chore: keep the writer bounded")
+
+        self.assertTrue(ISSUE_RE.search("chore: keep the reader bounded"))
+        self.assertIsNone(CORRECTIVE_RE.match("chore: keep the writer bounded"))
+
+        frozen = audit_history(
+            root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
+        )
+        self.assertTrue(
+            any(before[:8] in error for error in frozen.errors),
+            f"the pre-boundary commit lost its requirement: {frozen.errors}",
+        )
+        self.assertFalse(
+            any(after[:8] in error for error in frozen.errors),
+            f"the post-boundary commit was judged by the legacy rule: {frozen.errors}",
+        )
+
+        # Control: with no boundary the repository is in phase A and both
+        # commits are judged by the legacy rule, exactly as before this change.
+        phase_a = audit_history(root, catalog, coverage, merge_ledger_path=root / "absent.toml")
+        self.assertTrue(any(before[:8] in error for error in phase_a.errors))
+        self.assertTrue(any(after[:8] in error for error in phase_a.errors))
+
+    def test_a_fix_past_the_boundary_is_still_corrective(self):
+        """The narrow rule has to bite, or the freeze is just an amnesty."""
+
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "docs/line.md").write_text("the boundary\n", encoding="utf-8")
+        boundary = self.commit(root, "docs: draw the boundary")
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 2 }\n", encoding="utf-8")
+        after = self.commit(root, "fix(app): stop the reader stalling")
+
+        report = audit_history(
+            root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
+        )
+        self.assertTrue(
+            any(after[:8] in error for error in report.errors),
+            f"a fix( past the boundary escaped the audit: {report.errors}",
+        )
+
+    def test_a_fragment_for_a_commit_past_the_boundary_is_refused(self):
+        """Phase B: the directory is frozen, and the message says what replaces it."""
+
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 2 }\n", encoding="utf-8")
+        early = self.commit(root, "fix(app): stop the first stall")
+        self.write_coverage(
+            coverage,
+            f"{early[:8]}-app.toml",
+            f"""
+            commits = ["{early[:8]}"]
+            points = ["app"]
+            checks = ["baseline"]
+            reason = "The baseline exercises this behaviour."
+            """,
+        )
+        boundary = self.commit(root, "validation: map the first stall")
+        (root / "crates/other.rs").write_text("pub fn b() -> u8 { 2 }\n", encoding="utf-8")
+        late = self.commit(root, "fix(app): stop the second stall")
+        self.write_coverage(
+            coverage,
+            f"{late[:8]}-other.toml",
+            f"""
+            commits = ["{late[:8]}"]
+            points = ["app"]
+            checks = ["baseline"]
+            reason = "The baseline exercises this behaviour too."
+            """,
+        )
+        self.commit(root, "validation: map the second stall")
+
+        report = audit_history(
+            root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
+        )
+        frozen = [error for error in report.errors if "frozen boundary" in error]
+        self.assertTrue(frozen, f"the freeze did not fire: {report.errors}")
+        self.assertIn(late[:8], frozen[0])
+        self.assertIn("Regression-Test", frozen[0])
+        # The pre-boundary fragment is untouched: it is the only evidence that
+        # range will ever have.
+        self.assertFalse(
+            any(early[:8] in error and "frozen boundary" in error for error in report.errors),
+            f"the freeze reached back past the boundary: {report.errors}",
+        )
+
+    def test_a_corrective_landing_commit_past_the_boundary_needs_a_trailer(self):
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "docs/line.md").write_text("the boundary\n", encoding="utf-8")
+
+        boundary = self.commit(root, "docs: draw the boundary")
+        base = self.branch(root)
+
+        subprocess.run(["git", "checkout", "-q", "-b", "topic"], cwd=root, check=True)
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 2 }\n", encoding="utf-8")
+        self.commit(root, "fix(app): stop the stall")
+        subprocess.run(["git", "checkout", "-q", base], cwd=root, check=True)
+        subprocess.run(
+            ["git", "merge", "--no-ff", "-q", "-m",
+             "Merge pull request 'fix(app): stop the stall' (#7) from topic into main",
+             "topic"],
+            cwd=root, check=True,
+        )
+        landing = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True, text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+        report = audit_history(
+            root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
+        )
+        missing = [
+            error for error in report.errors
+            if landing[:8] in error and "Regression-Test" in error
+        ]
+        self.assertTrue(missing, f"the merge audit did not fire: {report.errors}")
+        self.assertIn("(#7)", missing[0])
+        row = next(merge for merge in report.merges if merge.landing == landing)
+        self.assertTrue(row.corrective)
+        self.assertFalse(row.resolved)
+        self.assertEqual(row.tests, ())
+
+    def test_a_trailer_is_judged_against_the_landing_commits_own_tree(self):
+        """The exact-tree binding, which is the reason the field is not a SHA.
+
+        The test the trailer names is deleted after the merge. The trailer
+        still resolves, because the tree it is judged against is the landing
+        commit's own and that tree is immutable. An audit that read today's
+        worktree would call this a broken trailer, and a rebase or a rename
+        would then invalidate evidence that was true when it was recorded.
+        """
+
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "docs/line.md").write_text("the boundary\n", encoding="utf-8")
+        boundary = self.commit(root, "docs: draw the boundary")
+        base = self.branch(root)
+
+        subprocess.run(["git", "checkout", "-q", "-b", "topic"], cwd=root, check=True)
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 2 }\n", encoding="utf-8")
+        (root / "tests/app_test.rs").write_text(
+            "#[test]\nfn the_reader_stops_stalling() { assert!(true); }\n",
+            encoding="utf-8",
+        )
+        self.commit(root, "fix(app): stop the stall")
+        subprocess.run(["git", "checkout", "-q", base], cwd=root, check=True)
+        subprocess.run(
+            ["git", "merge", "--no-ff", "-q", "-m",
+             "Merge pull request 'fix(app): stop the stall' (#8) from topic into main\n\n"
+             "Regression-Test: tests/app_test.rs::the_reader_stops_stalling\n",
+             "topic"],
+            cwd=root, check=True,
+        )
+        landing = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True, text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+        ledger = self.ledger(root, boundary)
+        report = audit_history(root, catalog, coverage, merge_ledger_path=ledger)
+        row = next(merge for merge in report.merges if merge.landing == landing)
+        self.assertEqual(row.tests, ("tests/app_test.rs::the_reader_stops_stalling",))
+        self.assertTrue(row.resolved, report.errors)
+        self.assertEqual(
+            [error for error in report.errors if landing[:8] in error], []
+        )
+
+        (root / "tests/app_test.rs").unlink()
+        self.commit(root, "chore: drop the suite")
+        after_deletion = audit_history(root, catalog, coverage, merge_ledger_path=ledger)
+        still = next(
+            merge for merge in after_deletion.merges if merge.landing == landing
+        )
+        self.assertTrue(
+            still.resolved,
+            "the trailer was judged against today's worktree, not its own tree",
+        )
+
+    def test_a_trailer_naming_a_test_its_tree_does_not_define_is_an_error(self):
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "docs/line.md").write_text("the boundary\n", encoding="utf-8")
+        boundary = self.commit(root, "docs: draw the boundary")
+        base = self.branch(root)
+
+        subprocess.run(["git", "checkout", "-q", "-b", "topic"], cwd=root, check=True)
+        (root / "tests/app_test.rs").write_text(
+            "#[test]\nfn the_reader_stops_stalling() { assert!(true); }\n",
+            encoding="utf-8",
+        )
+        self.commit(root, "fix(app): stop the stall")
+        subprocess.run(["git", "checkout", "-q", base], cwd=root, check=True)
+        subprocess.run(
+            ["git", "merge", "--no-ff", "-q", "-m",
+             "Merge pull request 'fix(app): stop the stall' (#9) from topic into main\n\n"
+             "Regression-Test: tests/app_test.rs::the_reader_stops_stallling\n",
+             "topic"],
+            cwd=root, check=True,
+        )
+        landing = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True, text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+        report = audit_history(
+            root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
+        )
+        misspelt = [error for error in report.errors if landing[:8] in error]
+        self.assertTrue(misspelt, f"the misspelt trailer passed: {report.errors}")
+        self.assertIn("does not define as a test", misspelt[0])
+
+        # And the erratum is the only remedy, because the landing commit can
+        # never be amended.
+        excused = audit_history(
+            root,
+            catalog,
+            coverage,
+            merge_ledger_path=self.ledger(
+                root, boundary, errata=((landing[:12], "trailer typo, PR #9"),)
+            ),
+        )
+        self.assertEqual([error for error in excused.errors if landing[:8] in error], [])
+
+    def test_both_landing_commit_shapes_are_recognised(self):
+        self.assertEqual(
+            landing_commit_title(
+                "Merge pull request 'fix(app): stop the stall' (#7) from topic into main"
+            ),
+            ("fix(app): stop the stall", "7"),
+        )
+        self.assertEqual(
+            landing_commit_title("fix(app): stop the stall (#7)"),
+            ("fix(app): stop the stall", "7"),
+        )
+        self.assertIsNone(landing_commit_title("fix(app): stop the stall"))
+
+    def test_the_merge_ledger_refuses_a_malformed_boundary(self):
+        root, _catalog, _coverage = self.repository()
+        path = root / "merge-errata.toml"
+        path.write_text('version = 1\nenforce_after = "not a sha"\n', encoding="utf-8")
+        with self.assertRaises(HistoryError) as raised:
+            load_merge_ledger(path)
+        self.assertIn("enforce_after", str(raised.exception))
+        self.assertIsNone(load_merge_ledger(root / "absent.toml").enforce_after)
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -61,6 +61,17 @@ test failures, or denied lints.
 - Run the smallest focused regression for changed behavior locally and record
   that command in the task pull request. The effort workflow deliberately
   defers the full suites.
+- **If the change alters behavior a user could observe, its subject is `fix(`
+  or `perf(`.** The corrective-history audit narrows to those two prefixes past
+  its boundary commit, so a behavior fix labelled `chore(` or `refactor(` is
+  not audited at all and its regression is not recorded anywhere. That is an
+  accepted escape and this rule is what answers it; see
+  [VALIDATION.md](docs/VALIDATION.md) "The boundary, and what replaces a
+  fragment past it".
+- Name the regression in the pull request description, one per line:
+  `Regression-Test: <path>::<test name>`. The fast lane checks it against the
+  merge candidate, and the landing commit carries the same line as a trailer.
+
 - A focused `plurx-core` regression that covers replicated storage must use
   `make unit-core` or pass `--features hiqlite-store`. Bare
   `cargo test -p plurx-core --lib` is not evidence for `store/hiqlite*` code.

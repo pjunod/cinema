@@ -921,6 +921,62 @@ file collides with nothing. The loader refuses to run while a shared
 [`validation/regressions.d/README.md`](../validation/regressions.d/README.md)
 carries the field-by-field format next to the entries themselves.
 
+### The boundary, and what replaces a fragment past it
+
+A short SHA is a poor key. Rebasing a branch changes it, the fragment has to
+be renamed to follow (the file name must begin with its first mapped commit),
+and the repository has paid for that in commits that change nothing else:
+1,081 of 5,399 non-merge commits at `fad591a4` touch
+`validation/regressions.d/`, and 925 fragments now hold 8,069 lines. So past a
+**boundary commit**, a corrective change records its regression as a trailer
+on the commit that lands it instead:
+
+```text
+Regression-Test: crates/plurxd/src/transcode.rs::the_producer_releases_on_late_arrival
+```
+
+A repository-relative path and a test name — never a SHA, so a rebase cannot
+invalidate it. `main` is never force-pushed, so a landing commit and its tree
+are immutable, and the audit resolves the path and the name **in that
+commit's own tree**, not in today's worktree. Before merge, the same line in
+the pull request description is checked against the merge candidate by
+`python3 -m validation.regression_field`, which runs in the fast lane's
+`preflight` job. That pre-merge check is what makes a typo fixable: once the
+commit lands it cannot be amended, and the only remaining remedy is a
+permanent row in [`validation/merge-errata.toml`](../validation/merge-errata.toml).
+
+The boundary lives in that same file as `enforce_after`, and it decides,
+**per commit**, which corrective rule applies:
+
+| | at or before the boundary | past the boundary |
+|---|---|---|
+| Corrective when | the legacy `ISSUE_RE` matches — `fix`, correction verbs, body words | `^(fix\|perf)(\(…\))?[:!]` matches |
+| Evidence is | a `validation/regressions.d/` fragment, a client-fix anchor, or a direct test change | a `Regression-Test:` trailer on the landing commit |
+| New fragments | already written; nothing is ever deleted | refused, naming the trailer that replaces them |
+
+Nothing is retired. The 925 existing fragments keep auditing the commits they
+were written for, because nothing else ever will, and the directory simply
+stops growing.
+
+**Narrowing the rule is not free, and the boundary is why it is bounded.**
+Measured over the whole history at `fad591a4`, `ISSUE_RE` matches 2,028
+subjects and the narrow rule matches 1,241; 809 subjects would stop being
+audited, and some of them carry real repairs. Worse, the two rules are not
+nested: 22 subjects match the narrow rule and not `ISSUE_RE` — every
+`perf(<scope>):` commit in the repository, because `ISSUE_RE`'s `perf`
+alternative is followed by a `\b` that a `:` and a space cannot satisfy — so
+applying the narrow rule to the whole history would make 22 already-landed
+commits newly corrective and newly unevidenced. Choosing the rule at the
+boundary avoids both: no commit loses evidence it already has, and no commit
+is asked for evidence nobody can now add. The accepted escape is only
+forward: a behavior fix mislabelled `chore(` or `refactor(` is not audited,
+and AGENTS.md's subject-prefix rule is what answers that.
+
+While `enforce_after` is unset, none of this is in force — every commit is
+judged by the legacy rule, fragments are still accepted, and the merge-trailer
+audit reports nothing.
+
+
 ```bash
 make history-check
 # history ok: 288 corrective commits · 213 direct test changes ·
