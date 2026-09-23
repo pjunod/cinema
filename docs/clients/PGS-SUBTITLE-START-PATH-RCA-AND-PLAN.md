@@ -546,7 +546,7 @@ is worth weighing:
 
 ---
 
-## 6. Fix C — ride the extraction on the index pass (proposed, v3)
+## 6. Fix C — ride the extraction on the index pass (approved design, v3.1)
 
 > **Revision history, kept because each round overturned something load-bearing.**
 > **v1** added plain file outputs to the index ffmpeg and rescued the index from
@@ -559,8 +559,12 @@ is worth weighing:
 > each track's first cue to zero), judged track completeness by parsing (a
 > truncated PGS stream is a valid shorter stream), and took track ordinals from
 > scan-time facts (a stale ordinal kills the index or files one track's cues
-> under another's number). **v3** is below. Every experiment cited was run on
-> nuc3 against synthetic sources muxed with `-copyts`, so cue times survive.
+> under another's number). **v3** fixed those; the third review approved it
+> with changes, folded in as **v3.1** below — exact `framecrc` arithmetic, a
+> complete verdict table, a latch that can actually retry, publish ordering, the
+> MPEG-TS exclusion v3 had dropped, and an off switch that also stops the
+> consumers. Every experiment cited was run on nuc3 against synthetic sources
+> muxed with `-copyts`, so cue times survive.
 
 ### 6.1 The finding that motivates it
 
@@ -636,12 +640,25 @@ the ride-along is therefore "no subtitle artifacts", never "no index".
 **Per-track verdict**, taken only after the child is reaped (a slave read early
 can be caught before its final flush):
 
+Slave numbering: track *i*'s `sup` slave is `#2i`, its `framecrc` companion is
+`#2i+1`, and the sentinel is last.
+
 | verdict | condition |
 |---|---|
-| **kept** | the `framecrc` packet-byte total equals the `.sup` size minus 10 bytes of header per segment; the `.sup` parses end to end with `plurx_pgs`; ≤ `MAX_TRACK_BYTES` (256 MiB); stderr did not report that slave failing; the index was `Built` |
-| **empty** | `framecrc` lists zero packets and no slave failure — a real track with no cues, e.g. a forced track on some discs |
-| **malformed** | the totals disagree, or the parse fails, with no I/O error reported |
-| **transient** | an open/write error for that slave (ENOSPC, EIO) |
+| **kept** | **all of:** walking the `.sup` as segments of `13 + len` bytes consumes the file exactly (`Σ(13 + lenᵢ) == size`, nothing left over); `Σ(3 + lenᵢ)` equals the sum of the `framecrc` size column (the **5th** comma-separated field of each non-`#` line, read by position — optional `F=`/`S=` fields follow it); the `.sup` parses end to end with `plurx_pgs`; ≤ `MAX_TRACK_BYTES` (256 MiB); stderr reported no failure for slave `#2i` or `#2i+1`; the index was `Built` |
+| **empty** | the `.crc` exists with its `#` header lines and lists **zero** packets, and stderr reported no failure for either slave — a real track with no cues, e.g. a forced track on some discs |
+| **transient** | stderr reported a failure for either slave that is an OS error (ENOSPC, EIO, EACCES, ENOENT), or the `.crc` is missing or never opened |
+| **malformed** | anything else — the totals disagree, the walk leaves bytes over, the parse fails, or stderr reported a non-OS failure for either slave. **Any** reported slave failure means the track is not kept, even when the totals happen to agree (a failure at close, after all data was written) |
+
+Why 10 and not 13 bytes of header per segment: a `.sup` segment on disk is
+`PG` (2) + PTS (4) + DTS (4) + type (1) + length (2) + payload, but type and
+length are already inside the packet ffmpeg carries, so the `sup` muxer adds
+only the first 10. The measured intact track (`3756` bytes, 24 segments, several
+per packet) equals its `framecrc` total of `3516` only at 10. The segment count
+must come from walking the `.sup`, never from the packet count. **Required
+test:** a multi-segment-per-packet fixture where the sums agree on the intact
+track, disagree on a corrupted-first-segment track, and where "minus 13" fails
+on the intact one.
 
 The `framecrc` count is the primary check because `framecrc` does not parse
 PGS — a bad segment cannot make it fail — so its total is every byte that
@@ -664,10 +681,30 @@ full scan and the existing bounded diagnostic tail share one reader.
 **Stage and publish.** A fresh private stage directory per attempt, on the
 same filesystem as the store so publishing is an atomic rename, removed by a
 drop guard on every exit route including `foreground_preempted` and lease loss.
-`-nostdin -y`. Stage paths escaped for the tee syntax (`\`, `|`, `[`, `]`, `'`,
-`:`), with a test using a stage path that contains a backslash. The stage must
+`-nostdin -y`. Stage paths escaped for the tee syntax (`\`, `|`, `[`, `]`, `'`),
+with a test using a stage path that contains a backslash. The stage must
 be on **local** disk — a blocked file output stalls the shared demuxer — so
-when `<cache>` is not a local filesystem the ride-along does not run.
+when `<cache>` is not a local filesystem the ride-along does not run: a
+`statfs` type check that rejects NFS, CIFS/SMB and FUSE. That same rule is why
+two nodes never write one store.
+
+**Publish order**, after the pass's existing freshness checks
+(`source_still_matches`, and the cluster worker's `still_current`) so a pass
+that raced a rescan cannot recreate a directory the sweep just removed:
+
+1. rename the new content-named `.sup` files into place;
+2. write the manifest to a temp file and rename it over the old one (atomic);
+3. only then delete `.sup` files the previous manifest named and this one does
+   not;
+4. write the first `.access`, so a new directory is not first in line under the
+   size cap.
+
+**Readers** read the manifest, then open the `.sup` it names. A missing file —
+swept or republished in between — is a miss that falls through, never an error.
+On open, a reader checks the `.sup`'s sha256 against the manifest. On Windows a
+delete fails while a reader holds the file without `FILE_SHARE_DELETE`; the
+sweep tolerates that and retries on its next pass. An on-demand consumer never
+writes into the store, so it cannot race the producer.
 
 **Home, key and latch.**
 
@@ -676,8 +713,8 @@ when `<cache>` is not a local filesystem the ride-along does not run.
 | directory | `<cache>/runtime/subtitle-source-v1/f<file_id>/` |
 | manifest | `manifest.json`: source `size`, `mtime`, `object_version`, the probed PGS ordinals, and per track the verdict and, when kept, the `.sup` file name and its sha256 |
 | artifacts | `s<ordinal>-<sha256-prefix>.sup` — content-named, so no field needs parsing out of a file name |
-| **latch** | the manifest is *current* when its `size`/`mtime` match a live `fstat` and it covers every probed ordinal. The ride-along runs on the first index pass this node actually runs for a file with no current manifest, on whichever identity that is; tracks marked `transient` are retried on a later pass, at most three times; `malformed` and `empty` are final for that source |
-| validity at use | re-checked against a **live** `fstat`. The overlay keeps its size+mtime rule. The burn path additionally requires the manifest's `object_version` to match the open file's — the name `ensure_burn_file` uses today is `sha256(object_version)`, and a file replaced in place with a new inode must not inherit its predecessor's cues on that path |
+| **latch** | the manifest keeps `attempts` per track. It is *current* when its `size`/`mtime` match a live `fstat` **and** every probed track is `kept`, `empty` or `malformed`, or `transient` with `attempts ≥ 3`. The check runs inside `fragindex::build_from_attested_file*`, **after** `probe_completion_expectation` — the one place both the cluster and non-cluster paths pass through, and the first point at which the ordinals exist — and hands `index_pass` a ride-along plan (ordinals + stage directory) or none. It rides on whichever identity's pass this node runs first. A transient track waits for the next pass this node runs for that file, which may be the next re-index |
+| validity at use | re-checked against a **live** `fstat`. The overlay keeps its size+mtime rule. The burn path additionally requires `(dev, ino, size, mtime)` to match the open file's — enough to reject a file replaced in place with a new inode, without the ctime that a hardlink or `chmod` from an importer would change, which would otherwise make the burn path miss on that file forever while the latch never re-rides |
 | access | an `.access` marker per `f<id>/`, written on each hit with failures ignored, copying `pgs_overlay::record_access` — atime is meaningless on relatime/noatime mounts |
 | sweep | its own rule and cursor, on both the cluster and non-cluster paths: delete a directory whose file row is gone or whose `size`/`mtime` no longer match; **stop, not delete**, when reading the row fails, as `sweep_local_orphans` already does |
 | bound | a total-size cap, evicting whole directories by `.access`, oldest first — a safety rail set well above any real library's PGS footprint |
@@ -688,14 +725,22 @@ a correctness requirement.
 
 - **Overlay** (`pgs_overlay::prepare_stage`): a `kept` track is used in place
   of the demux, on any container.
-- **Burn** (`subtitles::ensure_burn_file`):
+- **Burn** (`subtitles::ensure_burn_file`) — **only when the source container
+  is not MPEG-TS.** The ride-along has no `-copyts`, so on a timestamp
+  discontinuity it gets ffmpeg's correction and the source extraction does not;
+  continuous timelines agree (tested), discontinuous ones were never tested.
+  Until a discontinuous-m2ts fixture proves otherwise, an MPEG-TS source uses
+  today's extraction. The overlay has no such restriction.
   - `kept` → derive the `.mks` from the `.sup` with `-copyts` and **without**
     `-start_at_zero`, `-map 0:s:0 -c copy -avoid_negative_ts disabled -f
     matroska`, under the existing name
     `f{id}-s{n}-{sha256(object_version)}-burn-v2.mks` in `<cache>/subs`, which
     stays disposable in its LRU because it is cheap to rebuild. `-map 0:t?` is
     not carried; fonts mean nothing to a bitmap track.
-  - `empty` → answer "nothing to burn" without extracting, instead of reading
+  - `empty` → answer "nothing to burn" without extracting — a new return shape
+    (`Burn::File` / `Burn::Nothing`), with the session start at
+    `transcode.rs:19950` building its pipeline without a subtitle overlay for
+    `Nothing`, and its own test — instead of reading
     the whole source to publish an empty sidecar — which on file 5208 would be
     402 s spent to learn nothing.
   - if the derivation fails, or the derived `.mks` exceeds `MAX_BURN_BYTES`
@@ -703,6 +748,10 @@ a correctness requirement.
     today's source extraction **inside the same flight**, and never record the
     derivation failure in the negative memo — the memo would block the
     fallback for its TTL.
+
+**Off means off for both sides.** The Developer switch that stops the producer
+also makes both consumers ignore the store, so a wrong artifact published by a
+bad build can be taken out of service by one switch without a redeploy.
 
 **Capability gate — behaviour, not presence.** At startup, run the tee against a
 tiny synthetic source: one corrupted slave, one good slave, and the sentinel.
@@ -722,8 +771,9 @@ product:
   and the bytes written;
 - the cache diagnostics show the subtitle store's size and directory count;
 - counters for **lookups by outcome** — `hit`, `empty`, and misses by reason:
-  `absent`, `stale`, `never_indexed`, `hydrated_only` (read from the node's
-  fragment-index location rows: this node holds the index but never built it) —
+  `absent`, `stale`, `never_indexed`, `hydrated_only` (a named store query: a
+  fragment-index location row exists for this node and its `built_by_node_id`
+  is another node) —
   plus ride-along tracks attempted and verdicts by kind;
 - a Developer setting that turns the ride-along off, whose enable section
   states what it needs — the startup self-test, and a local cache filesystem —
@@ -759,13 +809,21 @@ seconds and the extraction continuing behind it.
 Three PRs, each shippable alone, each with its own review:
 
 1. **The store and the consumers**, with nothing producing into it yet:
-   manifest, key, latch, sweep, `.access`, the overlay and burn lookups, the
-   `.mks` derivation with its timestamp fixture, the `empty` short-circuit, the
-   fallback-inside-the-flight rule, and the lookup counters. Tested with
-   hand-written manifests. Changes no behaviour on a fleet with an empty store.
+   manifest format and reader, key, sweep, `.access`, the overlay and burn
+   lookups, the `.mks` derivation with its timestamp fixture (first cue at 60 s,
+   on a zero and a non-zero source start), the `empty` short-circuit and its
+   `Burn::Nothing` shape, the fallback-inside-the-flight rule, the MPEG-TS
+   exclusion, the lookup counters, and the consumer half of the off switch.
+   Tested with hand-written manifests. Changes no behaviour on a fleet with an
+   empty store — every lookup misses and falls through — but it refactors the
+   existing flight, memo and cancellation path to put the fallback inside the
+   flight, so the whole existing `subtitles.rs` suite runs unchanged as its
+   safety net. `fragment_index_cluster::object_version` (or a `(dev, ino)`
+   helper) becomes `pub(crate)`.
 2. **The producer, with its own safety**: probe ordinals, the tee argv
    downstream of the digest, the stage and drop guard, the per-track verdict,
-   publish, the startup self-test that switches the ride-along off when ffmpeg
+   publish (with its ordering), the latch and its test, the local-filesystem
+   check, the startup self-test that switches the ride-along off when ffmpeg
    does not behave, and the Developer switch with its enable section — a
    producer never ships without both. Tests: the digest pin, and fixtures for a
    corrupted-first-segment track, a stale ordinal, an empty track and a
