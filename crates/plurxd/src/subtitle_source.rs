@@ -6,12 +6,13 @@
 //! demux the whole source — `pgs_overlay::prepare_stage` for the overlay's
 //! `.sup`, and `subtitles::ensure_burn_file` for the burn sidecar — on a 79.5
 //! GB remux that is 402 s each to produce 18,866 bytes. The fragment-index
-//! pass already reads every one of those packets; the producer (a later
-//! change) keeps them here, and this module is everything that reads them.
+//! pass already reads every one of those packets; the producer,
+//! [`crate::subtitle_ride_along`], keeps them here, and this module is
+//! everything that reads them.
 //!
-//! **Nothing produces into this store yet.** Until the index ride-along ships,
-//! every lookup misses and both consumers fall through to the extraction they
-//! have always run, so this module changes no behaviour on a real fleet.
+//! A file whose index pass has not ridden on this node has no directory here,
+//! so every lookup for it misses and both consumers fall through to the
+//! extraction they have always run.
 //!
 //! The rules it keeps:
 //!
@@ -166,6 +167,17 @@ impl Consumer {
     }
 }
 
+impl TrackEntry {
+    /// Nothing more to do for this track: `kept`, `empty` or `malformed`, or
+    /// `transient` with its attempts used.
+    pub(crate) fn settled(&self) -> bool {
+        match self.verdict {
+            Verdict::Kept | Verdict::Empty | Verdict::Malformed => true,
+            Verdict::Transient => self.attempts >= TRANSIENT_ATTEMPTS,
+        }
+    }
+}
+
 impl Manifest {
     pub(crate) fn track(&self, ordinal: i64) -> Option<&TrackEntry> {
         self.tracks.iter().find(|track| track.ordinal == ordinal)
@@ -195,13 +207,9 @@ impl Manifest {
     /// Every probed track has a settled verdict: `kept`, `empty` or
     /// `malformed`, or `transient` that has used its attempts.
     pub(crate) fn latched(&self) -> bool {
-        self.ordinals.iter().all(|ordinal| {
-            self.track(*ordinal)
-                .is_some_and(|track| match track.verdict {
-                    Verdict::Kept | Verdict::Empty | Verdict::Malformed => true,
-                    Verdict::Transient => track.attempts >= TRANSIENT_ATTEMPTS,
-                })
-        })
+        self.ordinals
+            .iter()
+            .all(|ordinal| self.track(*ordinal).is_some_and(TrackEntry::settled))
     }
 
     /// The design's *current*: this build's version, this file, a source
@@ -233,20 +241,55 @@ pub(crate) fn parse_manifest(bytes: &[u8]) -> Result<Manifest, MissReason> {
 pub(crate) struct StoreAccess {
     root: PathBuf,
     enabled: bool,
+    /// Where a miss with no directory at all is classified, when the caller
+    /// can say which node it is. Without it such a miss is `absent`.
+    misses: Option<MissClassifier>,
+}
+
+/// The catalog read that splits a miss with no directory into
+/// `never_indexed`, `hydrated_only` and `absent`.
+#[derive(Clone)]
+pub(crate) struct MissClassifier {
+    store: std::sync::Arc<dyn plurx_core::store::Store>,
+    node_id: String,
+}
+
+impl std::fmt::Debug for MissClassifier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MissClassifier")
+            .field("node_id", &self.node_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StoreAccess {
     pub(crate) fn new(root: PathBuf, enabled: bool) -> Self {
-        Self { root, enabled }
+        Self {
+            root,
+            enabled,
+            misses: None,
+        }
+    }
+
+    /// Classify misses with no directory against this node's fragment-index
+    /// holdings. `None` for the node leaves them `absent`.
+    pub(crate) fn classifying(
+        mut self,
+        store: std::sync::Arc<dyn plurx_core::store::Store>,
+        node_id: Option<&str>,
+    ) -> Self {
+        self.misses = node_id.map(|node_id| MissClassifier {
+            store,
+            node_id: node_id.to_owned(),
+        });
+        self
     }
 
     /// The store ignored, as when the switch is off.
     #[cfg(test)]
     pub(crate) fn off() -> Self {
-        Self {
-            root: PathBuf::new(),
-            enabled: false,
-        }
+        Self::new(PathBuf::new(), false)
     }
 
     /// Read the switch and resolve the root for this node.
@@ -261,8 +304,13 @@ impl StoreAccess {
 }
 
 /// `subtitles.stored_sources`, parsed the way every other switch is. On by
-/// default: with no producer the store is empty, and once there is one, on is
-/// the point of it.
+/// default: keeping and reading the tracks is the point of the store.
+///
+/// One switch for both sides. It stops the producer
+/// ([`crate::subtitle_ride_along::RideAlongGate::open`]) and makes both
+/// consumers ignore what is already stored, so a wrong artifact a bad build
+/// published is out of service without a redeploy. An unreadable setting is
+/// off for both.
 pub(crate) async fn enabled(store: &dyn plurx_core::store::Store) -> bool {
     match store
         .get_setting(plurx_core::store::keys::SUBTITLE_STORED_SOURCES)
@@ -293,18 +341,13 @@ pub(crate) enum MissReason {
     Mpegts,
     /// The stored bytes do not hash to the manifest's sha256.
     HashMismatch,
-    /// The file has never been indexed on this node.
-    // TODO(PR 2, the ride-along producer): classify this. It needs a store
-    // query for this node's fragment index of the file, which the consumers
-    // do not hold today; until the producer exists every miss here is
-    // `absent` and this reads zero.
-    #[allow(dead_code)]
+    /// No directory, and this node holds no fragment index for the file's
+    /// current source: the pass that fills the store has never run here.
     NeverIndexed,
-    /// This node's index was hydrated from a peer, so the pass never ran here.
-    // TODO(PR 2, the ride-along producer): the design's query — a
-    // fragment-index location row for this node whose `built_by_node_id` is
-    // another node. Reads zero until then.
-    #[allow(dead_code)]
+    /// No directory, and every fragment index this node holds for the file's
+    /// current source was built by another node — a location row for this
+    /// node whose `built_by_node_id` is a peer. The node hydrated the index,
+    /// so the pass that keeps PGS tracks never ran here (§6.6).
     HydratedOnly,
 }
 
@@ -438,7 +481,7 @@ async fn classify(
     {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Lookup::Miss(MissReason::Absent)
+            return Lookup::Miss(absent_reason(access, file).await)
         }
         Err(_) => return Lookup::Miss(MissReason::Stale),
     };
@@ -473,6 +516,40 @@ async fn classify(
                 sha256: sha256.to_owned(),
             })
         }
+    }
+}
+
+/// Why a file has no directory here, from this node's fragment-index
+/// holdings for the file's current source. A catalog read that fails leaves
+/// the miss `absent`: the reason is a counter, never a decision.
+async fn absent_reason(access: &StoreAccess, file: &MediaFile) -> MissReason {
+    let Some(classifier) = &access.misses else {
+        return MissReason::Absent;
+    };
+    match classifier
+        .store
+        .fragment_index_builders_held_by(&classifier.node_id, file.id, file.size, file.mtime)
+        .await
+    {
+        Ok(builders) => absent_reason_from(&classifier.node_id, &builders),
+        Err(error) => {
+            tracing::debug!(file_id = file.id, %error, "classifying a stored-subtitle miss");
+            MissReason::Absent
+        }
+    }
+}
+
+/// `never_indexed` when this node holds no index for the source,
+/// `hydrated_only` when every one it holds was built by a peer, and `absent`
+/// when it built one itself — the pass ran here and kept nothing, or ran
+/// before the producer shipped or while the switch was off.
+fn absent_reason_from(node_id: &str, builders: &[String]) -> MissReason {
+    if builders.is_empty() {
+        MissReason::NeverIndexed
+    } else if builders.iter().any(|builder| builder == node_id) {
+        MissReason::Absent
+    } else {
+        MissReason::HydratedOnly
     }
 }
 
@@ -707,6 +784,7 @@ pub(crate) fn prometheus() -> String {
             FALLBACKS[reason as usize].load(Ordering::Relaxed)
         );
     }
+    out.push_str(&crate::subtitle_ride_along::prometheus());
     out
 }
 
@@ -845,7 +923,7 @@ async fn list_file_dirs(root: &Path) -> std::io::Result<Vec<i64>> {
     Ok(ids)
 }
 
-async fn read_manifest(dir: &Path) -> Option<Manifest> {
+pub(crate) async fn read_manifest(dir: &Path) -> Option<Manifest> {
     let bytes =
         plurx_core::fs_secure::read_bounded_regular(&dir.join(MANIFEST_NAME), MAX_MANIFEST_BYTES)
             .await
@@ -929,8 +1007,8 @@ async fn directory_bytes(dir: &Path) -> u64 {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    //! Hand-written manifests, as PR 1's tests need them: nothing in this
-    //! build writes a store, so a test that wants one has to author it.
+    //! Hand-written manifests, for the readers' tests: a test that wants a
+    //! particular store state authors it rather than running a pass.
 
     use super::*;
 
@@ -1320,6 +1398,58 @@ mod tests {
             miss(lookup(&on, Consumer::Overlay, &file, 0, &live).await),
             MissReason::Stale
         );
+    }
+
+    /// A miss with no directory says why, from the node's own holdings.
+    #[test]
+    fn a_miss_with_no_directory_is_classified_by_who_built_the_index() {
+        let here = "node-a".to_owned();
+        assert_eq!(absent_reason_from(&here, &[]), MissReason::NeverIndexed);
+        assert_eq!(
+            absent_reason_from(&here, &["node-b".to_owned()]),
+            MissReason::HydratedOnly,
+            "every index this node holds came from a peer"
+        );
+        assert_eq!(
+            absent_reason_from(&here, &["node-a".to_owned(), "node-b".to_owned()]),
+            MissReason::Absent,
+            "the pass ran here at least once"
+        );
+    }
+
+    /// The classification reaches the counters through a real catalog read
+    /// (the query itself, with peers' artifacts, is pinned in `plurx-core`'s
+    /// `fragment_index_builders_held_by_names_who_built_what_a_node_holds`).
+    #[tokio::test]
+    async fn a_lookup_with_no_directory_counts_never_indexed() {
+        let base = crate::test_tempdir().expect("store");
+        let root = base.path().join(STORE_DIR);
+        let source = base.path().join("source.mkv");
+        std::fs::write(&source, b"source bytes").expect("source");
+        let live = stamp_of(&source);
+        let file = media_file(31, source.clone(), live.size as i64, live.mtime);
+        let catalog =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
+        let access = StoreAccess::new(root, true).classifying(catalog.clone(), Some("node-a"));
+        let before = misses_for_test(Consumer::Overlay, MissReason::NeverIndexed);
+        assert!(matches!(
+            lookup(&access, Consumer::Overlay, &file, 0, &live).await,
+            Lookup::Miss(MissReason::NeverIndexed)
+        ));
+        assert!(misses_for_test(Consumer::Overlay, MissReason::NeverIndexed) > before);
+
+        // Without a node to ask about, the same miss stays `absent`.
+        assert!(matches!(
+            lookup(
+                &access.clone().classifying(catalog, None),
+                Consumer::Burn,
+                &file,
+                0,
+                &live
+            )
+            .await,
+            Lookup::Miss(MissReason::Absent)
+        ));
     }
 
     #[test]

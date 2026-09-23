@@ -19330,7 +19330,11 @@ impl TranscodeManager {
                     self.store.as_ref(),
                     &self.runtime_cache,
                 )
-                .await;
+                .await
+                .classifying(
+                    Arc::clone(&self.store),
+                    self.cache_location().map(|(_, node_id)| node_id),
+                );
                 match crate::subtitles::ensure_burn_source(
                     &self.subtitle_cache,
                     file,

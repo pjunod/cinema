@@ -819,6 +819,7 @@ impl AppState {
             crate::subtitle_source::store_root(&self.runtime_cache_dir),
             self.subtitle_stored_sources_enabled().await,
         )
+        .classifying(Arc::clone(&self.store), Some(&self.node_id))
     }
 
     /// `node_id` is this server's stable id — the `node_id` a cache location
@@ -2284,6 +2285,22 @@ fn lease_time_remaining(expires_at_unix_ms: i64) -> std::time::Duration {
 /// that never happened.
 #[must_use]
 pub(crate) struct HeartbeatRetired;
+
+/// Publish a pass's kept PGS tracks into the subtitle-source store. Called
+/// only after the pass's freshness checks; a failed publish is logged and
+/// leaves the store as it was, so the next pass for the file rides again.
+async fn publish_ride_along_harvest(harvest: crate::subtitle_ride_along::RideAlongHarvest) {
+    let file_id = harvest.file_id();
+    let verdicts: Vec<_> = harvest
+        .outcomes()
+        .iter()
+        .map(|outcome| (outcome.ordinal, outcome.verdict))
+        .collect();
+    match harvest.publish().await {
+        Ok(_) => tracing::info!(file_id, ?verdicts, "published the pass's PGS tracks"),
+        Err(error) => tracing::warn!(file_id, %error, "publishing the pass's PGS tracks"),
+    }
+}
 
 /// Retire a spawned heartbeat and hand back the proof.
 async fn retire_heartbeat(
@@ -6800,6 +6817,41 @@ impl JobManager {
                 tracing::warn!(%error, "reconciling stored subtitle sources");
             }
         }
+        // Stages a crashed or killed pass left behind. A live pass's stage is
+        // minutes old at most; an hour is a leftover.
+        let stale = crate::subtitle_ride_along::sweep_stale_stages(
+            &root,
+            crate::subtitle_ride_along::STALE_STAGE_AGE,
+        )
+        .await;
+        if stale > 0 {
+            tracing::info!(stale, "removed abandoned PGS ride-along stages");
+        }
+    }
+
+    /// Publish a non-cluster pass's kept PGS tracks, after the same catalog
+    /// check the cluster worker makes (`still_current`): a pass that raced a
+    /// rescan must not recreate a directory the store's sweep just removed.
+    async fn publish_ride_along(
+        &self,
+        file: &MediaFile,
+        harvest: crate::subtitle_ride_along::RideAlongHarvest,
+    ) {
+        let still_current = self
+            .store
+            .get_file(file.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
+        if !still_current {
+            tracing::info!(
+                file_id = file.id,
+                "the catalog moved during the pass; its PGS ride-along is discarded"
+            );
+            return;
+        }
+        publish_ride_along_harvest(harvest).await;
     }
 
     async fn build_fragment_indexes(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
@@ -6958,14 +7010,25 @@ impl JobManager {
                     }
                 }
                 attempted += 1;
-                let refusal = match crate::fragindex::build(
+                // Asked per pass, so the switch turning off stops the next
+                // pass from riding without a restart.
+                let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
+                    self.store.as_ref(),
+                    &runtime_cache,
+                )
+                .await;
+                let crate::fragindex::IndexBuild {
+                    outcome,
+                    ride_along: harvest,
+                } = crate::fragindex::build_riding(
                     &file,
                     video,
                     &runtime_cache,
                     index_file_budget(file.duration_ms),
+                    ride_along.as_ref(),
                 )
-                .await
-                {
+                .await;
+                let refusal = match outcome {
                     crate::fragindex::IndexOutcome::Built(index) => {
                         if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
                             tracing::warn!(file_id, error = %error, "storing a fragment index");
@@ -6974,6 +7037,9 @@ impl JobManager {
                             if built_file_ids.last() != Some(&file_id) {
                                 built_file_ids.push(file_id);
                             }
+                        }
+                        if let Some(harvest) = harvest {
+                            self.publish_ride_along(&file, harvest).await;
                         }
                         continue;
                     }
@@ -8656,8 +8722,17 @@ impl JobManager {
         let progress_jobs = Arc::clone(&self);
         let progress_key = job.cache_key.clone();
         let progress_target = job.target_node_id.clone();
+        // Asked per job: the switch, the self-test and the filesystem, now.
+        let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
+            self.store.as_ref(),
+            transcode.runtime_cache_dir(),
+        )
+        .await;
+        // A dropped build future — `foreground_preempted`, or the lease lost
+        // — drops the pass's ride-along plan with it, and the plan's guard
+        // removes its stage.
         let (outcome, preempted) = tokio::select! {
-            outcome = crate::fragindex::build_from_attested_file_with_progress(
+            built = crate::fragindex::build_from_attested_file_with_progress(
                 &file,
                 &attested.handle,
                 &attested.observation.object_version,
@@ -8674,7 +8749,8 @@ impl JobManager {
                         fragments,
                     );
                 },
-            ) => (Some(outcome), false),
+                ride_along.as_ref(),
+            ) => (Some(built), false),
             () = lost.cancelled() => (None, false),
             () = self.wait_for_cluster_fragment_index_stop(
                 transcode.as_ref(),
@@ -8695,7 +8771,11 @@ impl JobManager {
             .await;
             return false;
         }
-        let Some(outcome) = outcome else {
+        let Some(crate::fragindex::IndexBuild {
+            outcome,
+            ride_along: harvest,
+        }) = outcome
+        else {
             // The lease was lost mid-build. The row stays `running` until a
             // sweep reclaims it; writing an outcome on a claim we no longer
             // hold is exactly what the fence forbids.
@@ -8747,6 +8827,13 @@ impl JobManager {
             )
             .await;
             return false;
+        }
+        // Both freshness checks passed: the held source is the object the
+        // pass read, and the catalog still describes it. The PGS tracks the
+        // pass kept are a statement about exactly that source, whatever
+        // happens to the index publication below.
+        if let Some(harvest) = harvest {
+            publish_ride_along_harvest(harvest).await;
         }
         let index = match outcome {
             crate::fragindex::IndexOutcome::Built(index) => index,
