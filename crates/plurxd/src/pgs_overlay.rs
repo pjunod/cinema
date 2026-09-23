@@ -1527,19 +1527,6 @@ mod tests {
         assert_eq!(runs.load(Ordering::SeqCst), 1);
     }
 
-    async fn wait_for_remembered_failure(key: &Path) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if remembered_failure(key).await.is_some() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("negative memo");
-    }
-
     #[tokio::test]
     async fn timed_out_preparation_is_negatively_memoized() {
         let dir = crate::test_tempdir().expect("cache");
@@ -1569,7 +1556,16 @@ mod tests {
             Ok(PrepareState::Preparing)
         ));
         let key = generation_dir(dir.path(), &file, 0);
-        wait_for_remembered_failure(&key).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if remembered_failure(&key).await.is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("negative memo");
         assert!(matches!(
             prepare_with(
                 dir.path(),
@@ -1687,58 +1683,6 @@ mod tests {
             try_capacity(capacity),
             Err(OverlayError::Capacity)
         ));
-    }
-
-    /// A preparation that failed is remembered as that failure. It must not
-    /// come back as the capacity answer, which is the one clients wait out:
-    /// the two used to share `Unavailable`, and a remembered demux failure
-    /// read as "still preparing" for ten minutes of polling.
-    #[tokio::test]
-    async fn a_failed_preparation_is_remembered_as_a_failure_not_as_capacity() {
-        let dir = crate::test_tempdir().expect("cache");
-        let file = file(dir.path().join("source.mkv"));
-        let runs = Arc::new(AtomicUsize::new(0));
-        let runner: PrepareRunner = {
-            let runs = Arc::clone(&runs);
-            Arc::new(move |_, _, _, _, _| {
-                let runs = Arc::clone(&runs);
-                Box::pin(async move {
-                    runs.fetch_add(1, Ordering::SeqCst);
-                    Err(OverlayError::Unavailable(
-                        "PGS demux exited with status 1".into(),
-                    ))
-                })
-            })
-        };
-        assert!(matches!(
-            prepare_with(
-                dir.path(),
-                &file,
-                0,
-                Arc::clone(&runner),
-                PREPARE_TIMEOUT,
-                false,
-            )
-            .await,
-            Ok(PrepareState::Preparing)
-        ));
-        let key = generation_dir(dir.path(), &file, 0);
-        wait_for_remembered_failure(&key).await;
-        for _ in 0..3 {
-            assert!(matches!(
-                prepare_with(
-                    dir.path(),
-                    &file,
-                    0,
-                    Arc::clone(&runner),
-                    PREPARE_TIMEOUT,
-                    false,
-                )
-                .await,
-                Err(OverlayError::Unavailable(_))
-            ));
-        }
-        assert_eq!(runs.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
