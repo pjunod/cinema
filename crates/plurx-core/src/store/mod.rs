@@ -1827,6 +1827,12 @@ pub mod keys {
     /// observed per engine before this can flip. The Developer tab reports
     /// what has been observed, advisory only; it never blocks the switch.
     pub const SUBTITLE_NOT_READY_503: &str = "playback.subtitle_not_ready_503";
+    /// Let the two PGS consumers — the overlay's stage and the burn sidecar —
+    /// read a track the subtitle-source store kept, instead of demuxing the
+    /// whole source. On when absent. Off makes both ignore the store entirely,
+    /// so a wrong artifact a producer published is taken out of service with
+    /// one switch and no redeploy.
+    pub const SUBTITLE_STORED_SOURCES: &str = "subtitles.stored_sources";
     /// VOD availability kill switch. Absent/on accepts immutable VOD session
     /// creation; `0` refuses it. It never selects the removed live HLS path.
     pub const VOD_PRESENTATION: &str = "playback.vod_presentation";
