@@ -818,6 +818,21 @@ pub(crate) fn vod_row_file_ids(conn: &Connection, limit: i64) -> Result<Vec<i64>
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// [`crate::store::FragmentIndexStore::holds_fragment_index_for_source`].
+pub(crate) fn holds_for_source(
+    conn: &Connection,
+    file_id: i64,
+    source_size: i64,
+    source_mtime: i64,
+) -> Result<bool, StoreError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM fragment_indexes
+                          WHERE file_id = ?1 AND source_size = ?2 AND source_mtime = ?3)",
+        params![file_id, source_size, source_mtime],
+        |row| row.get::<_, bool>(0),
+    )?)
+}
+
 pub(crate) fn forget(conn: &Connection, file_id: i64) -> Result<bool, StoreError> {
     let affected = conn.execute(
         "DELETE FROM fragment_indexes WHERE file_id = ?1",
@@ -907,6 +922,19 @@ mod tests {
             .query_map(params![file_id], |row| row.get::<_, String>(0))
             .expect("query");
         rows.collect::<rusqlite::Result<Vec<_>>>().expect("collect")
+    }
+
+    /// Any pipeline's index for this exact source counts; another source or
+    /// another file does not.
+    #[test]
+    fn holds_for_source_answers_for_any_pipeline_of_that_source() {
+        let conn = conn();
+        assert!(!holds_for_source(&conn, 7, 4_096, 11).expect("empty"));
+        put(&conn, 7, &index_with("strip", 4_096, 11), 1).expect("put");
+        assert!(holds_for_source(&conn, 7, 4_096, 11).expect("held"));
+        assert!(!holds_for_source(&conn, 7, 4_097, 11).expect("another size"));
+        assert!(!holds_for_source(&conn, 7, 4_096, 12).expect("another mtime"));
+        assert!(!holds_for_source(&conn, 8, 4_096, 11).expect("another file"));
     }
 
     #[test]

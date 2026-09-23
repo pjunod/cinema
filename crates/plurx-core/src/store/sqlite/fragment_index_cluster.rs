@@ -3192,6 +3192,40 @@ impl ClusterFragmentIndexStore for SqliteStore {
         .await
     }
 
+    async fn fragment_index_builders_held_by(
+        &self,
+        node_id: &str,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+    ) -> Result<Vec<String>, StoreError> {
+        let node_id = node_id.to_owned();
+        self.with_read(move |conn| {
+            // The locations primary key and the artifacts' file index make
+            // this two keyed reads.
+            let builders = conn
+                .prepare(
+                    "SELECT DISTINCT artifacts.built_by_node_id
+                       FROM cluster_fragment_index_locations AS locations
+                       JOIN cluster_fragment_index_artifacts AS artifacts
+                         ON artifacts.cache_key = locations.cache_key
+                      WHERE locations.node_id = ?1
+                        AND artifacts.file_id = ?2
+                        AND artifacts.source_size = ?3
+                        AND artifacts.source_mtime = ?4
+                      ORDER BY artifacts.built_by_node_id
+                      LIMIT 16",
+                )?
+                .query_map(
+                    params![node_id, file_id, source_size, source_mtime],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(builders)
+        })
+        .await
+    }
+
     async fn forget_cluster_fragment_index_location(
         &self,
         cache_key: &str,
@@ -5412,5 +5446,68 @@ mod tests {
         assert_eq!(receipts, 1);
         assert_eq!(successors, 1);
         assert_eq!(predecessor_state, "failed");
+    }
+
+    /// The subtitle-source store's miss reason reads this: which nodes built
+    /// the artifacts a node holds for one file's current source.
+    #[tokio::test]
+    async fn fragment_index_builders_held_by_names_who_built_what_a_node_holds() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        store
+            .with_conn(|conn| {
+                for (key, file_id, size, mtime, builder) in [
+                    ("k-built-here", 7_i64, 100_i64, 10_i64, "node-a"),
+                    ("k-hydrated", 7, 100, 10, "node-b"),
+                    ("k-older-source", 7, 99, 9, "node-c"),
+                    ("k-other-file", 8, 100, 10, "node-d"),
+                ] {
+                    conn.execute(
+                        "INSERT INTO cluster_fragment_index_artifacts
+                          (cache_key, file_id, source_size, source_mtime, source_sha256,
+                           pipeline_sha256, blob_sha256, bytes, built_by_node_id, built_at_ms)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5, 10, ?6, 10)",
+                        params![key, file_id, size, mtime, "e".repeat(64), builder],
+                    )?;
+                }
+                for (key, node) in [
+                    ("k-built-here", "node-a"),
+                    ("k-hydrated", "node-a"),
+                    ("k-older-source", "node-a"),
+                    ("k-other-file", "node-a"),
+                    ("k-hydrated", "node-z"),
+                ] {
+                    conn.execute(
+                        "INSERT INTO cluster_fragment_index_locations
+                          (cache_key, node_id, bytes, verified_at_ms, last_seen_at_ms)
+                         VALUES (?1, ?2, 10, 10, 10)",
+                        params![key, node],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .expect("seed artifacts and locations");
+
+        assert_eq!(
+            store
+                .fragment_index_builders_held_by("node-a", 7, 100, 10)
+                .await
+                .expect("read"),
+            vec!["node-a".to_owned(), "node-b".to_owned()],
+            "this source only, built here and hydrated from node-b"
+        );
+        assert_eq!(
+            store
+                .fragment_index_builders_held_by("node-z", 7, 100, 10)
+                .await
+                .expect("read"),
+            vec!["node-b".to_owned()],
+            "a node that only hydrated"
+        );
+        assert!(store
+            .fragment_index_builders_held_by("node-q", 7, 100, 10)
+            .await
+            .expect("read")
+            .is_empty());
     }
 }

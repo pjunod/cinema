@@ -4970,6 +4970,19 @@ pub trait FragmentIndexStore: Send + Sync + 'static {
     /// Drop one file's index. `true` when a row was there.
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError>;
 
+    /// Whether this node's own index table holds any index — for any video
+    /// pipeline — for the file's source at `source_size`/`source_mtime`.
+    ///
+    /// Node-local, like every row here. The subtitle-source store reads it to
+    /// say why a lookup found no directory: an index built on this node means
+    /// the pass that keeps PGS tracks ran here.
+    async fn holds_fragment_index_for_source(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+    ) -> Result<bool, StoreError>;
+
     /// Record that this identity could not be indexed, and answer when it may
     /// be attempted again.
     ///

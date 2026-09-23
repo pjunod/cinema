@@ -960,6 +960,8 @@
   .setgrid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;align-items:start}
   #dv-recovery-guards h3.section{font-size:12px;margin:14px 0 4px;padding:0;border:0;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
   #dv-recovery-guards>div{font-size:13px}
+  .subsrc-rides{margin:8px 0;padding-left:18px;font-size:13px;line-height:1.6}
+  .subsrc-rides li{margin:2px 0;overflow-wrap:anywhere}
   .chk{display:inline-flex;align-items:center;gap:8px;font-size:13.5px;color:var(--text);margin:0;padding:8px 0}
   .chk input[type=checkbox]{width:18px;min-width:0;height:18px;margin:0;accent-color:var(--accent)}
   @media(min-width:900px){ .adminwrap td.rowactions{white-space:nowrap} .adminwrap td.rowactions>.row{flex-wrap:nowrap!important} }
