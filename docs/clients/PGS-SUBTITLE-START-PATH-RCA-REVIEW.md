@@ -1,5 +1,10 @@
 # Review — PGS subtitles on the start path (RCA and plan)
 
+**Status:** done — a review of [PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md](PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md)
+at `5c605768`, finished when it was written. Its findings were folded into
+that document; what shipped from them is #447 and its follow-ups. ·
+**Reviewer:** Fable, adversarial · **Written:** 2026-09-22
+
 **Reviewing:** `docs/clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md` as committed in
 `8b92b958` · **Evidence base:** `origin/main` = `5c605768` (the merge of PR #445,
 2026-09-23 00:48 UTC), a fresh Forgejo clone, PR #444/#445 via the API, and
