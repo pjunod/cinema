@@ -815,6 +815,7 @@ impl AppState {
             Arc::clone(&self.store),
             &self.runtime_cache_dir,
         )
+        .on_node(Some(&self.node_id))
     }
 
     /// `node_id` is this server's stable id — the `node_id` a cache location
@@ -2280,22 +2281,6 @@ fn lease_time_remaining(expires_at_unix_ms: i64) -> std::time::Duration {
 /// that never happened.
 #[must_use]
 pub(crate) struct HeartbeatRetired;
-
-/// Publish a pass's kept PGS tracks into the subtitle-source store. Called
-/// only after the pass's freshness checks; a failed publish is logged and
-/// leaves the store as it was, so the next pass for the file rides again.
-async fn publish_ride_along_harvest(harvest: crate::subtitle_ride_along::RideAlongHarvest) {
-    let file_id = harvest.file_id();
-    let verdicts: Vec<_> = harvest
-        .outcomes()
-        .iter()
-        .map(|outcome| (outcome.ordinal, outcome.verdict))
-        .collect();
-    match harvest.publish().await {
-        Ok(_) => tracing::info!(file_id, ?verdicts, "published the pass's PGS tracks"),
-        Err(error) => tracing::warn!(file_id, %error, "publishing the pass's PGS tracks"),
-    }
-}
 
 /// Retire a spawned heartbeat and hand back the proof.
 async fn retire_heartbeat(
@@ -6798,11 +6783,12 @@ impl JobManager {
         .await
         {
             Ok(outcome) => {
-                if outcome.removed + outcome.evicted + outcome.deferred > 0 {
+                if outcome.removed + outcome.evicted + outcome.deferred + outcome.unnamed > 0 {
                     tracing::info!(
                         removed = outcome.removed,
                         evicted = outcome.evicted,
                         deferred = outcome.deferred,
+                        unnamed = outcome.unnamed,
                         "reconciled stored subtitle sources"
                     );
                 }
@@ -6824,14 +6810,30 @@ impl JobManager {
         }
     }
 
-    /// Publish a non-cluster pass's kept PGS tracks, after the same catalog
-    /// check the cluster worker makes (`still_current`): a pass that raced a
-    /// rescan must not recreate a directory the store's sweep just removed.
-    async fn publish_ride_along(
+    /// Judge and publish a pass's PGS tracks — both paths, cluster and not.
+    ///
+    /// Called after the build future has returned, so a preemption can no
+    /// longer race the verdict, and only after the pass's freshness checks:
+    /// `source_still_matches` is the caller's reading of the held source
+    /// (the cluster worker's `source_still_matches`, the non-cluster fence's
+    /// `unchanged()`), and the catalog check here is the cluster worker's
+    /// `still_current`. A pass that raced a rescan must not recreate a
+    /// directory the store's sweep just removed. A failed publish is logged
+    /// and leaves the store as it was, so the next pass rides again.
+    pub(crate) async fn settle_ride_along(
         &self,
         file: &MediaFile,
-        harvest: crate::subtitle_ride_along::RideAlongHarvest,
-    ) {
+        pending: crate::subtitle_ride_along::PendingRideAlong,
+        source_still_matches: bool,
+    ) -> Option<crate::subtitle_source::Manifest> {
+        let file_id = pending.file_id();
+        if !source_still_matches {
+            tracing::info!(
+                file_id,
+                "the source moved during the pass; its PGS ride-along is discarded"
+            );
+            return None;
+        }
         let still_current = self
             .store
             .get_file(file.id)
@@ -6841,12 +6843,27 @@ impl JobManager {
             .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
         if !still_current {
             tracing::info!(
-                file_id = file.id,
+                file_id,
                 "the catalog moved during the pass; its PGS ride-along is discarded"
             );
-            return;
+            return None;
         }
-        publish_ride_along_harvest(harvest).await;
+        let harvest = pending.judge().await;
+        let verdicts: Vec<_> = harvest
+            .outcomes()
+            .iter()
+            .map(|outcome| (outcome.ordinal, outcome.verdict))
+            .collect();
+        match harvest.publish().await {
+            Ok(manifest) => {
+                tracing::info!(file_id, ?verdicts, "published the pass's PGS tracks");
+                Some(manifest)
+            }
+            Err(error) => {
+                tracing::warn!(file_id, %error, "publishing the pass's PGS tracks");
+                None
+            }
+        }
     }
 
     async fn build_fragment_indexes(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
@@ -7015,6 +7032,7 @@ impl JobManager {
                 let crate::fragindex::IndexBuild {
                     outcome,
                     ride_along: harvest,
+                    source_unchanged,
                 } = crate::fragindex::build_riding(
                     &file,
                     video,
@@ -7033,8 +7051,9 @@ impl JobManager {
                                 built_file_ids.push(file_id);
                             }
                         }
-                        if let Some(harvest) = harvest {
-                            self.publish_ride_along(&file, harvest).await;
+                        if let Some(pending) = harvest {
+                            self.settle_ride_along(&file, pending, source_unchanged)
+                                .await;
                         }
                         continue;
                     }
@@ -8769,6 +8788,7 @@ impl JobManager {
         let Some(crate::fragindex::IndexBuild {
             outcome,
             ride_along: harvest,
+            ..
         }) = outcome
         else {
             // The lease was lost mid-build. The row stays `running` until a
@@ -8827,8 +8847,10 @@ impl JobManager {
         // pass read, and the catalog still describes it. The PGS tracks the
         // pass kept are a statement about exactly that source, whatever
         // happens to the index publication below.
-        if let Some(harvest) = harvest {
-            publish_ride_along_harvest(harvest).await;
+        if let Some(pending) = harvest {
+            // `true`: the `source_still_matches` refusal above has returned
+            // already for a source that moved.
+            self.settle_ride_along(&file, pending, true).await;
         }
         let index = match outcome {
             crate::fragindex::IndexOutcome::Built(index) => index,
@@ -11577,6 +11599,188 @@ mod tests {
             "a boot tick before library creation must stay due for the first scan"
         );
         assert!(!jobs.indexing.load(Ordering::Relaxed));
+    }
+
+    /// Catalogue a ride-along fixture: a library, an item and a file row
+    /// whose size and mtime are the fixture's own, so freshness checks pass.
+    async fn catalogued_fixture(
+        store: &Arc<SqliteStore>,
+        fixture: &crate::subtitle_ride_along::testing::Fixture,
+    ) -> MediaFile {
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("Ride {}", fixture.file.id),
+                kind: LibraryKind::Movies,
+                paths: vec![fixture.dir.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Ride along".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let probe = ProbeResult {
+            duration_ms: Some(16_000),
+            container: Some("matroska".into()),
+            video_codec: Some("h264".into()),
+            width: Some(64),
+            height: Some(64),
+            ..Default::default()
+        };
+        let file_id = store
+            .upsert_file(
+                item,
+                &fixture.source.to_string_lossy(),
+                fixture.file.size,
+                fixture.file.mtime,
+                &probe,
+            )
+            .await
+            .expect("file");
+        store.get_file(file_id).await.expect("read").expect("file")
+    }
+
+    /// Review finding 7: the decision both index paths make before a pass's
+    /// PGS tracks reach the store. A pass whose held source moved publishes
+    /// nothing; a pass whose catalog row moved publishes nothing; a current
+    /// pass publishes.
+    #[tokio::test]
+    async fn a_riding_pass_publishes_only_while_its_source_and_its_row_are_current() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(0, &[Sub::Pgs]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let jobs = manager(store.clone(), artwork.path());
+        let cache = crate::test_tempdir().expect("cache");
+        let root = crate::subtitle_source::store_root(cache.path());
+        let gate = crate::subtitle_ride_along::RideAlongGate::for_test(root.clone());
+        let video = plurx_core::transcode::CopyVideoOptions::new(false, false);
+        let dir = crate::subtitle_source::file_dir(&root, file.id);
+        let pass = || async {
+            let source = std::fs::File::open(&fixture.source).expect("held source");
+            crate::fragindex::build_from_attested_file_with_progress(
+                &file,
+                &source,
+                "fixture-object-v1",
+                video,
+                cache.path(),
+                std::time::Duration::from_secs(60),
+                |_, _, _| {},
+                Some(&gate),
+            )
+            .await
+            .ride_along
+            .expect("the pass rode along")
+        };
+
+        assert!(
+            jobs.settle_ride_along(&file, pass().await, false)
+                .await
+                .is_none(),
+            "the held source moved"
+        );
+        assert!(!dir.exists());
+
+        let rescanned = ProbeResult {
+            duration_ms: Some(16_000),
+            container: Some("matroska".into()),
+            video_codec: Some("h264".into()),
+            width: Some(64),
+            height: Some(64),
+            ..Default::default()
+        };
+        store
+            .upsert_file(
+                file.item_id,
+                &fixture.source.to_string_lossy(),
+                file.size + 1,
+                file.mtime,
+                &rescanned,
+            )
+            .await
+            .expect("a rescan moves the row");
+        assert!(
+            jobs.settle_ride_along(&file, pass().await, true)
+                .await
+                .is_none(),
+            "the catalog row moved"
+        );
+        assert!(!dir.exists());
+
+        store
+            .upsert_file(
+                file.item_id,
+                &fixture.source.to_string_lossy(),
+                file.size,
+                file.mtime,
+                &rescanned,
+            )
+            .await
+            .expect("and back");
+        let manifest = jobs
+            .settle_ride_along(&file, pass().await, true)
+            .await
+            .expect("a current pass publishes");
+        assert_eq!(manifest.ordinals, vec![0]);
+        assert!(dir.join(crate::subtitle_source::MANIFEST_NAME).is_file());
+    }
+
+    /// Review finding 7, end to end on the non-cluster path: with the gate
+    /// open (on this test's thread only), the background index pass over a
+    /// file with a PGS track builds its index and publishes the track.
+    #[tokio::test]
+    async fn the_non_cluster_index_pass_rides_and_publishes() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+        use plurx_core::store::FragmentIndexStore as _;
+
+        let fixture = fixture(0, &[Sub::Pgs]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let transcode_dir = crate::test_tempdir().expect("transcode");
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            transcode_dir.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let _open = crate::subtitle_ride_along::force_gate_open_on_this_thread();
+
+        Arc::clone(&jobs)
+            .build_fragment_indexes(Arc::clone(&transcode))
+            .await;
+
+        assert!(
+            store
+                .holds_fragment_index_for_source(file.id, file.size, file.mtime)
+                .await
+                .expect("read"),
+            "the index was built"
+        );
+        let dir = crate::subtitle_source::file_dir(
+            &crate::subtitle_source::store_root(transcode.runtime_cache_dir()),
+            file.id,
+        );
+        let manifest = crate::subtitle_source::read_manifest(&dir)
+            .await
+            .expect("the pass published its PGS track");
+        assert_eq!(manifest.ordinals, vec![0]);
+        assert_eq!(
+            manifest.track(0).map(|track| track.verdict),
+            Some(crate::subtitle_source::Verdict::Kept)
+        );
     }
 
     /// A file the indexer cannot index is asked once, not once per pass.

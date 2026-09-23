@@ -40,7 +40,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::ffmpeg::ffmpeg_bin;
-use crate::subtitle_ride_along::{RideAlongGate, RideAlongHarvest, RideAlongPlan, StderrScan};
+use crate::subtitle_ride_along::{PendingRideAlong, RideAlongGate, RideAlongPlan, StderrScan};
 
 #[cfg(unix)]
 type SourceFd = std::os::fd::RawFd;
@@ -1373,12 +1373,17 @@ pub(crate) fn index_argv(
 
 /// What an index build produced: the index outcome, exactly as it always
 /// was, and — only when the index was built and the pass rode along — the
-/// PGS tracks it kept, judged and waiting for the caller's freshness checks
-/// before they are published.
+/// PGS tracks it wrote, not yet judged. The caller judges them after its own
+/// cancellation race and freshness checks, then publishes.
 #[derive(Debug)]
 pub(crate) struct IndexBuild {
     pub(crate) outcome: IndexOutcome,
-    pub(crate) ride_along: Option<RideAlongHarvest>,
+    pub(crate) ride_along: Option<PendingRideAlong>,
+    /// Whether the held source was still the object the pass read when the
+    /// pass ended, as far as this function could tell: [`build_riding`]
+    /// reads its fence; the attested paths leave it to their caller, who
+    /// holds the observation, and say `true`.
+    pub(crate) source_unchanged: bool,
 }
 
 impl IndexBuild {
@@ -1386,6 +1391,7 @@ impl IndexBuild {
         Self {
             outcome,
             ride_along: None,
+            source_unchanged: true,
         }
     }
 }
@@ -1548,10 +1554,10 @@ pub async fn build(
 
 /// [`build`], also keeping the file's PGS tracks when `ride_along` allows.
 ///
-/// The non-cluster path's caller. The harvest is handed back only when the
-/// held source is still the object the pass read — the same `fstat`
-/// identity the cluster worker's `source_still_matches` compares — so the
-/// caller's own freshness check is the only one left before publishing.
+/// The non-cluster path's caller. `source_unchanged` reports whether the
+/// held source is still the object the pass read — the same `fstat` identity
+/// the cluster worker's `source_still_matches` compares — and the caller
+/// publishes only when it is (`JobManager::settle_ride_along`).
 pub(crate) async fn build_riding(
     file: &MediaFile,
     video: transcode::CopyVideoOptions,
@@ -1578,13 +1584,7 @@ pub(crate) async fn build_riding(
         ride_along,
     )
     .await;
-    if built.ride_along.is_some() && !source.unchanged() {
-        tracing::info!(
-            file_id = file.id,
-            "the source moved during the pass; its PGS ride-along is discarded"
-        );
-        built.ride_along = None;
-    }
+    built.source_unchanged = source.unchanged();
     built
 }
 
@@ -1941,16 +1941,23 @@ async fn build_with_args(
             "built a fragment index"
         );
     }
-    // The verdict is taken here: the child has been reaped (a `Built`
-    // outcome means it exited 0 within the grace), so no slave can still be
-    // flushing. Any other outcome discards the stage with the plan.
+    // The child has been reaped (a `Built` outcome means it exited 0 within
+    // the grace), so no slave can still be flushing; the verdict itself is
+    // the caller's, outside this future. Any other outcome discards the stage
+    // with the plan, and the file's next pass does not ride: a riding pass
+    // that failed must not be able to fail the same way on every retry.
     let ride_along = match (ride_along, &outcome) {
-        (Some(plan), IndexOutcome::Built(_)) => Some(RideAlongHarvest::take(plan, scan).await),
-        _ => None,
+        (Some(plan), IndexOutcome::Built(_)) => Some(PendingRideAlong::new(plan, scan)),
+        (Some(plan), _) => {
+            crate::subtitle_ride_along::record_failed_ride(&plan);
+            None
+        }
+        (None, _) => None,
     };
     IndexBuild {
         outcome,
         ride_along,
+        source_unchanged: true,
     }
 }
 
@@ -3329,11 +3336,16 @@ mod ride_along_tests {
         .expect("a describable pass")
     }
 
-    /// (f) A file already sitting where a slave will write cannot turn the
-    /// pass into an exit-0, zero-byte index: `-y` overwrites it, the index
-    /// is the baseline's, and the track is judged on what this pass wrote.
-    /// The other half is that a stage is never reused: every attempt gets a
-    /// directory of its own.
+    /// (f) A regression for the tee's own truncation: a file already sitting
+    /// where a slave will write — a stale `.sup` and a stale `.crc` whose
+    /// packet count would pass for a verdict — is truncated by the slave that
+    /// opens it, so the track is judged on what this pass wrote, and the index
+    /// is the baseline's. The tee opens its slaves itself (`avio_open`), with
+    /// or without `-y`; the index output is `pipe:1`, so the leftover-file
+    /// refusal ffmpeg applies to a named output (§6.2 fact 4) cannot reach it.
+    /// This test therefore does not prove `-y` necessary — it pins the
+    /// truncation the verdict relies on. The fresh stage per attempt is the
+    /// other half: every attempt gets a directory of its own.
     #[tokio::test]
     async fn a_leftover_in_the_stage_cannot_empty_the_index() {
         let fixture = fixture(72_001, &[Sub::Pgs]);
@@ -3393,13 +3405,74 @@ mod ride_along_tests {
             riding.outcome, baseline.outcome,
             "the same index, not an empty one"
         );
-        let harvest = riding.ride_along.expect("a harvest");
+        let harvest = riding.ride_along.expect("a harvest").judge().await;
         assert_eq!(
             harvest.outcomes()[0].verdict,
             Verdict::Kept,
             "{:?}",
             harvest.outcomes()
         );
+    }
+
+    /// Review finding 1: a riding pass whose own argv breaks the index — here
+    /// a hard map to a subtitle ordinal the file does not have, as an
+    /// `ffprobe` of another build could produce — is remembered, and the
+    /// file's next attempt is a plain index pass that builds.
+    #[tokio::test]
+    async fn after_a_riding_pass_fails_the_next_attempt_does_not_ride() {
+        let fixture = fixture(72_003, &[Sub::Pgs]);
+        let cache = crate::test_tempdir().expect("cache");
+        let root = crate::subtitle_source::store_root(cache.path());
+        let plan = RideAlongPlan::standalone(
+            &root,
+            fixture.file.id,
+            stamp_of(&fixture.source),
+            vec![0, 5],
+        )
+        .expect("plan");
+        let broken = build_with_args(
+            &fixture.file,
+            pass_over(&fixture.source, &fixture.file, Some(plan)),
+            None,
+            None,
+            cache.path(),
+            Duration::from_secs(60),
+            Instant::now(),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(broken.outcome, IndexOutcome::Failed(_)),
+            "a map to a missing ordinal fails the pass: {:?}",
+            broken.outcome
+        );
+        assert!(broken.ride_along.is_none());
+
+        let gate = crate::subtitle_ride_along::RideAlongGate::for_test(root.clone());
+        let source = std::fs::File::open(&fixture.source).expect("held source");
+        assert!(
+            crate::subtitle_ride_along::plan(&gate, fixture.file.id, &source, &[0])
+                .await
+                .is_none(),
+            "the file does not ride again on the same source"
+        );
+        let retry = build_from_attested_file_with_progress(
+            &fixture.file,
+            &source,
+            "fixture-object-v1",
+            VIDEO,
+            cache.path(),
+            Duration::from_secs(60),
+            |_, _, _| {},
+            Some(&gate),
+        )
+        .await;
+        assert!(
+            matches!(retry.outcome, IndexOutcome::Built(_)),
+            "the plain retry builds the index: {:?}",
+            retry.outcome
+        );
+        assert!(retry.ride_along.is_none(), "and did not ride");
     }
 
     /// (g) The cluster worker `select!`s the build against lease loss and

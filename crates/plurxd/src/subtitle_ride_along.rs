@@ -136,11 +136,51 @@ pub(crate) fn pgs_ordinals_from_probe(raw: &str) -> Vec<i64> {
 pub(crate) enum SelfTest {
     NotRun,
     Running,
-    Passed { elapsed_ms: u64, engine: String },
-    Failed { reason: String },
+    Passed {
+        elapsed_ms: u64,
+        /// `ffmpeg -version`'s version token, which the self-test found equal
+        /// to `ffprobe`'s.
+        version: String,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
 static SELF_TEST: Mutex<SelfTest> = Mutex::new(SelfTest::NotRun);
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own answer for every gate condition but the switch, on its
+    /// own thread only: a test that needs a riding pass through the real
+    /// entry points cannot race the process-wide self-test state other tests
+    /// read.
+    static GATE_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Open the gate's self-test, filesystem and free-space conditions on this
+/// thread until the guard drops. Test-only; the switch is still read.
+#[cfg(test)]
+pub(crate) fn force_gate_open_on_this_thread() -> impl Drop {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            GATE_OVERRIDE.with(|cell| cell.set(false));
+        }
+    }
+    GATE_OVERRIDE.with(|cell| cell.set(true));
+    Reset
+}
+
+#[cfg(test)]
+fn gate_overridden() -> bool {
+    GATE_OVERRIDE.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn gate_overridden() -> bool {
+    false
+}
 
 pub(crate) fn self_test_state() -> SelfTest {
     SELF_TEST
@@ -174,18 +214,24 @@ impl RideAlongGate {
     ) -> Option<Self> {
         let switch_on = crate::subtitle_source::enabled(store).await;
         let root = store::store_root(runtime_cache);
+        if switch_on && gate_overridden() {
+            return Some(Self { root });
+        }
         let self_test = self_test_state();
         // Checked only when the cheaper conditions hold, and after the root
-        // exists: the check is of the directory the stage will be made in.
-        let filesystem = if switch_on && matches!(self_test, SelfTest::Passed { .. }) {
+        // exists: the checks are of the directory the stage will be made in.
+        let (filesystem, space) = if switch_on && matches!(self_test, SelfTest::Passed { .. }) {
             match tokio::fs::create_dir_all(&root).await {
-                Ok(()) => local_filesystem(&root),
-                Err(error) => Err(format!("creating {}: {error}", root.display())),
+                Ok(()) => (local_filesystem(&root), free_space(&root)),
+                Err(error) => {
+                    let reason = format!("creating {}: {error}", root.display());
+                    (Err(reason.clone()), Err(reason))
+                }
             }
         } else {
-            Err("not checked".to_owned())
+            (Err("not checked".to_owned()), Err("not checked".to_owned()))
         };
-        match gate_from(switch_on, &self_test, filesystem, root) {
+        match gate_from(switch_on, &self_test, filesystem, space, root) {
             Ok(gate) => Some(gate),
             Err(reason) => {
                 tracing::debug!(%reason, "the PGS ride-along is off for this pass");
@@ -207,6 +253,7 @@ pub(crate) fn gate_from(
     switch_on: bool,
     self_test: &SelfTest,
     filesystem: Result<String, String>,
+    space: Result<String, String>,
     root: PathBuf,
 ) -> Result<RideAlongGate, String> {
     if !switch_on {
@@ -222,6 +269,7 @@ pub(crate) fn gate_from(
         }
     }
     filesystem.map_err(|reason| format!("the cache is not usable for the ride-along: {reason}"))?;
+    space.map_err(|reason| format!("the cache is too full for the ride-along: {reason}"))?;
     Ok(RideAlongGate { root })
 }
 
@@ -263,6 +311,73 @@ pub(crate) fn local_filesystem(path: &Path) -> Result<String, String> {
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn local_filesystem(_path: &Path) -> Result<String, String> {
     Err("the local-filesystem check is implemented for Linux only".to_owned())
+}
+
+/// The free space the cache keeps before a pass may ride: the larger of one
+/// gibibyte and two percent of the filesystem. Stage writes share the disk
+/// with the index blob a pass is about to publish, so near full the ride
+/// must give way before it can turn a pass the index would have finished into
+/// an `ENOSPC` on every retry.
+pub(crate) fn free_space_margin(total_bytes: u64) -> u64 {
+    (1_u64 << 30).max(total_bytes / 50)
+}
+
+/// Whether the cache's filesystem has [`free_space_margin`] available to an
+/// unprivileged writer, by `statvfs`. `Ok` says how much; `Err` says why not.
+#[cfg(target_os = "linux")]
+pub(crate) fn free_space(path: &Path) -> Result<String, String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("{} contains a NUL byte", path.display()))?;
+    let mut info = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `c_path` is NUL-terminated and outlives the call; `info` is a
+    // valid out-pointer for exactly one `statvfs`.
+    let status = unsafe { libc::statvfs(c_path.as_ptr(), info.as_mut_ptr()) };
+    if status != 0 {
+        return Err(format!(
+            "statvfs {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `statvfs` returned 0, so it filled the structure.
+    let info = unsafe { info.assume_init() };
+    #[allow(clippy::unnecessary_cast)]
+    let (fragment, available, blocks) = (
+        info.f_frsize as u64,
+        info.f_bavail as u64,
+        info.f_blocks as u64,
+    );
+    free_space_verdict(
+        available.saturating_mul(fragment),
+        blocks.saturating_mul(fragment),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn free_space(_path: &Path) -> Result<String, String> {
+    Err("the free-space check is implemented for Linux only".to_owned())
+}
+
+fn free_space_verdict(available: u64, total: u64) -> Result<String, String> {
+    let margin = free_space_margin(total);
+    let gib = |bytes: u64| bytes as f64 / f64::from(1_u32 << 30);
+    if available >= margin {
+        Ok(format!(
+            "{:.1} GiB free of {:.1} GiB, above the {:.1} GiB margin",
+            gib(available),
+            gib(total),
+            gib(margin)
+        ))
+    } else {
+        Err(format!(
+            "{:.1} GiB free of {:.1} GiB, below the {:.1} GiB margin",
+            gib(available),
+            gib(total),
+            gib(margin)
+        ))
+    }
 }
 
 /// Network and userspace filesystems, by `statfs` magic. The design names
@@ -338,20 +453,23 @@ impl Drop for StageDir {
 /// Files with a ride-along in flight on this node. The latch rides on
 /// whichever identity's pass runs first; a second pass for the same file
 /// while the first is running simply does not ride.
-static IN_FLIGHT: Mutex<BTreeSet<i64>> = Mutex::new(BTreeSet::new());
+/// Keyed by store root and file id: one process has one root, and a test
+/// with its own cache cannot collide with another's claim on the same id.
+static IN_FLIGHT: Mutex<BTreeSet<(PathBuf, i64)>> = Mutex::new(BTreeSet::new());
 
 #[derive(Debug)]
-struct FileClaim(i64);
+struct FileClaim((PathBuf, i64));
 
 impl FileClaim {
-    fn take(file_id: i64) -> Option<Self> {
+    fn take(root: &Path, file_id: i64) -> Option<Self> {
+        let key = (root.to_owned(), file_id);
         // The guard is released before a claim exists: a claim's drop takes
         // the same lock.
         let inserted = IN_FLIGHT
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(file_id);
-        inserted.then(|| Self(file_id))
+            .insert(key.clone());
+        inserted.then(|| Self(key))
     }
 }
 
@@ -362,6 +480,49 @@ impl Drop for FileClaim {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.0);
     }
+}
+
+/// Files whose last riding pass did not build its index, with the source
+/// identity that pass read.
+///
+/// The only way the ride-along's own argv can fail the index is a hard
+/// `-map 0:s:N` this `ffmpeg` cannot find — an `ffprobe` of another build
+/// counting subtitle streams differently, say. A failed riding pass leaves no
+/// manifest, so without this every retry would rebuild the same argv, fail
+/// the same way and charge the same retry, and the title's index would never
+/// arrive: the ride-along's worst case must be "no subtitle artifacts", never
+/// "no index". So the next pass on the file is a plain index pass. Any
+/// non-`Built` outcome counts — a riding pass cannot tell whose fault a
+/// failure was, and the cost of being wrong is one pass that does not ride.
+///
+/// In memory, deliberately. The startup self-test refuses a mismatched
+/// `ffprobe`/`ffmpeg` pair outright, so a failure that survives it is rare,
+/// and a restart — a new build, a new `PLURX_FFMPEG` — is exactly when the
+/// question deserves asking again. A persistent record would outlive the
+/// thing it describes.
+/// Keyed by store root and file id, as [`IN_FLIGHT`] is.
+static FAILED_RIDES: Mutex<BTreeMap<(PathBuf, i64), SourceStamp>> = Mutex::new(BTreeMap::new());
+
+fn failed_rides() -> std::sync::MutexGuard<'static, BTreeMap<(PathBuf, i64), SourceStamp>> {
+    FAILED_RIDES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Remember that a riding pass over this plan's source did not build its
+/// index.
+pub(crate) fn record_failed_ride(plan: &RideAlongPlan) {
+    tracing::warn!(
+        file_id = plan.file_id,
+        tracks = ?plan.tracks,
+        "a riding fragment-index pass did not build its index; this file's next pass will not ride"
+    );
+    failed_rides().insert((plan.root.clone(), plan.file_id), plan.source);
+}
+
+/// Files that ride no more in this process because a riding pass failed.
+pub(crate) fn failed_ride_count() -> usize {
+    failed_rides().len()
 }
 
 /// One pass's ride-along: the ordinals it extracts, in `-map` order, and the
@@ -405,6 +566,21 @@ pub(crate) async fn plan(
         return None;
     }
     let live = crate::fragment_index_cluster::source_stamp(&source.metadata().ok()?);
+    {
+        let key = (gate.root.clone(), file_id);
+        let mut failed = failed_rides();
+        match failed.get(&key) {
+            Some(stamp) if *stamp == live => {
+                tracing::debug!(file_id, "the last riding pass on this source failed; not riding");
+                return None;
+            }
+            // Another source identity is another question.
+            Some(_) => {
+                failed.remove(&key);
+            }
+            None => {}
+        }
+    }
     let dir = store::file_dir(&gate.root, file_id);
     let previous = store::read_manifest(&dir).await.filter(|manifest| {
         manifest.version == MANIFEST_VERSION
@@ -419,7 +595,12 @@ pub(crate) async fn plan(
             .as_ref()
             .and_then(|manifest| manifest.track(*ordinal))
         {
-            Some(entry) if entry.settled() => carried.push(entry.clone()),
+            // A `kept` entry is settled only while its file is there: after a
+            // power loss or a deletion the manifest can name a track the disk
+            // no longer has, and trusting it would miss for good.
+            Some(entry) if entry.settled() && kept_file_present(&dir, entry).await => {
+                carried.push(entry.clone())
+            }
             Some(entry) => {
                 prior_attempts.insert(*ordinal, entry.attempts);
                 tracks.push(*ordinal);
@@ -433,7 +614,7 @@ pub(crate) async fn plan(
     if tracks.is_empty() {
         return None;
     }
-    let claim = FileClaim::take(file_id)?;
+    let claim = FileClaim::take(&gate.root, file_id)?;
     let stage = match StageDir::create(&gate.root, STAGE_PREFIX) {
         Ok(stage) => stage,
         Err(error) => {
@@ -455,6 +636,20 @@ pub(crate) async fn plan(
         stage,
         _claim: Some(claim),
     })
+}
+
+/// A `kept` entry's stored file exists as a regular file; any other verdict
+/// has no file to check.
+async fn kept_file_present(dir: &Path, entry: &TrackEntry) -> bool {
+    if entry.verdict != Verdict::Kept {
+        return true;
+    }
+    match entry.file.as_deref() {
+        Some(name) => tokio::fs::metadata(dir.join(name))
+            .await
+            .is_ok_and(|metadata| metadata.is_file()),
+        None => false,
+    }
 }
 
 impl RideAlongPlan {
@@ -896,6 +1091,37 @@ fn judge(
 // ---------------------------------------------------------------------------
 // Harvest and publish.
 
+/// A reaped pass's ride-along, not yet judged: the plan (and its stage) and
+/// the stderr scan. The build hands this back so the verdict — which walks,
+/// hashes and parses every track — runs outside the build future, which the
+/// cluster worker races against lease loss and foreground preemption. A
+/// preemption during the verdict must not discard a finished index.
+#[derive(Debug)]
+pub(crate) struct PendingRideAlong {
+    plan: RideAlongPlan,
+    scan: Option<StderrScan>,
+}
+
+impl PendingRideAlong {
+    pub(crate) fn new(plan: RideAlongPlan, scan: Option<StderrScan>) -> Self {
+        Self { plan, scan }
+    }
+
+    pub(crate) fn file_id(&self) -> i64 {
+        self.plan.file_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stage(&self) -> &Path {
+        self.plan.stage()
+    }
+
+    /// Take the verdicts.
+    pub(crate) async fn judge(self) -> RideAlongHarvest {
+        RideAlongHarvest::take(self.plan, self.scan).await
+    }
+}
+
 /// A finished pass's ride-along: verdicts taken, nothing published yet. The
 /// stage is still held; dropping this removes it.
 #[derive(Debug)]
@@ -939,10 +1165,6 @@ impl RideAlongHarvest {
 
     pub(crate) fn outcomes(&self) -> &[TrackOutcome] {
         &self.outcomes
-    }
-
-    pub(crate) fn file_id(&self) -> i64 {
-        self.plan.file_id
     }
 
     /// The manifest this harvest would publish, with every `kept` track under
@@ -1030,7 +1252,18 @@ impl RideAlongHarvest {
             {
                 continue;
             }
-            match tokio::fs::rename(self.plan.sup_path(track.ordinal), dir.join(&name)).await {
+            // Durable before it is named: a manifest that survives a power
+            // loss must not name bytes that did not.
+            let staged = self.plan.sup_path(track.ordinal);
+            let synced = match tokio::fs::File::open(&staged).await {
+                Ok(file) => file.sync_all().await,
+                Err(error) => Err(error),
+            };
+            let placed_now = match synced {
+                Ok(()) => tokio::fs::rename(&staged, dir.join(&name)).await,
+                Err(error) => Err(error),
+            };
+            match placed_now {
                 Ok(()) => placed.push(name),
                 Err(error) => {
                     tracing::warn!(file_id = self.plan.file_id, ordinal = track.ordinal, %error, "placing a stored PGS track");
@@ -1055,6 +1288,8 @@ impl RideAlongHarvest {
             }
             return Err(error);
         }
+
+        sync_directory(&dir).await;
 
         // (3)
         if let Some(replaced) = replaced {
@@ -1086,6 +1321,18 @@ fn names(manifest: &Manifest, name: &str) -> bool {
         .tracks
         .iter()
         .any(|track| track.file.as_deref() == Some(name))
+}
+
+/// Make a directory's entries — the renames just done — durable. Best effort:
+/// a platform that cannot open a directory for sync loses only the
+/// durability, and the latch re-checks every `kept` file before trusting it.
+async fn sync_directory(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(handle) = tokio::fs::File::open(dir).await {
+        let _ = handle.sync_all().await;
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 async fn write_manifest(dir: &Path, manifest: &Manifest) -> Result<(), String> {
@@ -1156,6 +1403,8 @@ pub(crate) async fn sweep_stale_stages(root: &Path, older_than: Duration) -> usi
 #[derive(Debug)]
 pub(crate) struct SelfTestReport {
     pub(crate) elapsed: Duration,
+    /// The version both `ffmpeg` and `ffprobe` report.
+    pub(crate) version: String,
 }
 
 /// The self-test, once, off the startup path. The ride-along stays off until
@@ -1176,9 +1425,10 @@ pub(crate) async fn startup_self_test(
         );
     }
     let bin = crate::ffmpeg::ffmpeg_bin();
+    let prober = crate::ffmpeg::ffprobe_bin();
     let started = Instant::now();
     let result = tokio::select! {
-        result = tokio::time::timeout(SELF_TEST_BUDGET, run_self_test(&bin, &root, &runtime_cache)) => {
+        result = tokio::time::timeout(SELF_TEST_BUDGET, run_self_test(&bin, &prober, &root, &runtime_cache)) => {
             result.unwrap_or_else(|_| Err(format!("did not finish within {}s", SELF_TEST_BUDGET.as_secs())))
         }
         () = shutdown.cancelled() => {
@@ -1188,15 +1438,14 @@ pub(crate) async fn startup_self_test(
     };
     match result {
         Ok(report) => {
-            let engine = crate::ffmpeg::ffmpeg_build().await;
             tracing::info!(
                 elapsed_ms = report.elapsed.as_millis() as u64,
-                %engine,
+                version = %report.version,
                 "PGS ride-along self-test passed; the fragment-index pass may keep PGS tracks"
             );
             set_self_test_state(SelfTest::Passed {
                 elapsed_ms: u64::try_from(report.elapsed.as_millis()).unwrap_or(u64::MAX),
-                engine,
+                version: report.version,
             });
         }
         Err(reason) => {
@@ -1219,16 +1468,25 @@ pub(crate) async fn startup_self_test(
 /// - verdicts `kept` for the intact track and `malformed` for the corrupted
 ///   one, by the `framecrc` rule;
 /// - the stderr failure line for the corrupted track's `sup` slave
-///   recognised.
+///   recognised, **and** the corrupted track `malformed` by the byte
+///   arithmetic alone, with no stderr failure to lean on — the `framecrc`
+///   rule is the primary check and must be shown to catch it by itself;
+/// - `ffprobe` (`prober`) reporting the same version as `ffmpeg`. The
+///   ride-along's ordinals come from `ffprobe` and its hard maps are resolved
+///   by `ffmpeg`; two builds that count subtitle streams differently — an
+///   older prober reading a newer subtitle codec as `data` — would map a
+///   track `ffmpeg` cannot find and fail the index pass itself.
 ///
 /// `PLURX_FFMPEG` can name a build the design was never measured on, and a
 /// muxer list proves neither the isolation nor the wording.
 pub(crate) async fn run_self_test(
     bin: &str,
+    prober: &str,
     root: &Path,
     runtime_cache: &Path,
 ) -> Result<SelfTestReport, String> {
     let started = Instant::now();
+    let version = matching_versions(bin, prober, runtime_cache).await?;
     let work = StageDir::create(root, SELF_TEST_PREFIX)
         .map_err(|error| format!("creating the self-test directory: {error}"))?;
     let source = synthetic_source(bin, work.path(), runtime_cache).await?;
@@ -1278,9 +1536,25 @@ pub(crate) async fn run_self_test(
         tracks: plan.tracks.clone(),
         stage: plan.stage().to_owned(),
     };
-    let outcomes = tokio::task::spawn_blocking(move || verdicts(&input, Some(&scan)))
-        .await
-        .map_err(|error| format!("the self-test verdict task failed: {error}"))?;
+    let (corrupted_sup, corrupted_crc) = (plan.sup_path(1), plan.crc_path(1));
+    let (outcomes, by_arithmetic) = tokio::task::spawn_blocking(move || {
+        (
+            verdicts(&input, Some(&scan)),
+            judge(&corrupted_sup, &corrupted_crc, [None, None]),
+        )
+    })
+    .await
+    .map_err(|error| format!("the self-test verdict task failed: {error}"))?;
+    let arithmetic = by_arithmetic
+        .2
+        .as_deref()
+        .is_some_and(|reason| reason.contains("framecrc counted"));
+    if by_arithmetic.0 != Verdict::Malformed || !arithmetic {
+        return Err(format!(
+            "the framecrc rule alone judged the corrupted track {:?}, not malformed ({:?})",
+            by_arithmetic.0, by_arithmetic.2
+        ));
+    }
     let got: Vec<Verdict> = outcomes.iter().map(|outcome| outcome.verdict).collect();
     if got != [Verdict::Kept, Verdict::Malformed] {
         return Err(format!(
@@ -1293,7 +1567,34 @@ pub(crate) async fn run_self_test(
     }
     Ok(SelfTestReport {
         elapsed: started.elapsed(),
+        version,
     })
+}
+
+/// The version token of `bin -version`'s first line (`ffmpeg version 8.0.1-3
+/// Copyright …` → `8.0.1-3`), for both executables, and the one both report.
+async fn matching_versions(bin: &str, prober: &str, runtime_cache: &Path) -> Result<String, String> {
+    let version_of = |run: &FfmpegRun, name: &str| -> Result<String, String> {
+        let text = String::from_utf8_lossy(&run.stdout);
+        version_token(&text).ok_or_else(|| format!("{name} -version printed no version: {}", run.stderr_text()))
+    };
+    let arg = ["-version".to_owned()];
+    let engine = version_of(&run_ffmpeg(bin, &arg, runtime_cache).await?, bin)?;
+    let probe = version_of(&run_ffmpeg(prober, &arg, runtime_cache).await?, prober)?;
+    if engine != probe {
+        return Err(format!(
+            "ffprobe ({prober}) is version {probe} and ffmpeg ({bin}) is version {engine}: \
+             the ride-along takes its subtitle ordinals from one and hands them to the other"
+        ));
+    }
+    Ok(engine)
+}
+
+fn version_token(text: &str) -> Option<String> {
+    let line = text.lines().find(|line| !line.trim().is_empty())?;
+    let mut words = line.split_whitespace();
+    words.find(|word| *word == "version")?;
+    words.next().map(str::to_owned)
 }
 
 struct FfmpegRun {
@@ -1657,7 +1958,7 @@ mod tests {
     use super::*;
     use crate::fragindex::{IndexBuild, IndexOutcome};
     use crate::subtitle_source::testing::{settled as settled_entry, stamp_of, write_manifest};
-    use crate::subtitle_source::{Lookup, TRANSIENT_ATTEMPTS};
+    use crate::subtitle_source::{Live, Lookup, TRANSIENT_ATTEMPTS};
 
     const VIDEO: plurx_core::transcode::CopyVideoOptions =
         plurx_core::transcode::CopyVideoOptions::new(false, false);
@@ -1956,12 +2257,16 @@ mod tests {
     fn the_gate_needs_the_switch_the_self_test_and_a_local_cache() {
         let passed = SelfTest::Passed {
             elapsed_ms: 1,
-            engine: "ffmpeg".into(),
+            version: "8.0.1".into(),
         };
         let local = || Ok::<_, String>("ext4".to_owned());
+        let roomy = || Ok::<_, String>("plenty".to_owned());
         let root = PathBuf::from("/cache/runtime/subtitle-source-v1");
-        assert!(gate_from(true, &passed, local(), root.clone()).is_ok());
-        assert!(gate_from(false, &passed, local(), root.clone()).is_err());
+        assert!(gate_from(true, &passed, local(), roomy(), root.clone()).is_ok());
+        assert!(gate_from(false, &passed, local(), roomy(), root.clone()).is_err());
+        let full = gate_from(true, &passed, local(), Err("0.2 GiB free".into()), root.clone())
+            .expect_err("a full cache does not ride");
+        assert!(full.contains("too full"), "{full}");
         for state in [
             SelfTest::NotRun,
             SelfTest::Running,
@@ -1969,11 +2274,37 @@ mod tests {
                 reason: "boom".into(),
             },
         ] {
-            let refused =
-                gate_from(true, &state, local(), root.clone()).expect_err("off until it passes");
+            let refused = gate_from(true, &state, local(), roomy(), root.clone())
+                .expect_err("off until it passes");
             assert!(refused.contains("self-test"), "{refused}");
         }
-        assert!(gate_from(true, &passed, Err("NFS (0x6969)".into()), root).is_err());
+        assert!(gate_from(true, &passed, Err("NFS (0x6969)".into()), roomy(), root).is_err());
+    }
+
+    /// Review finding 8: the margin is one gibibyte or two percent of the
+    /// filesystem, whichever is larger.
+    #[test]
+    fn the_free_space_margin_is_the_larger_of_a_gibibyte_and_two_percent() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(free_space_margin(10 * GIB), GIB);
+        assert_eq!(free_space_margin(1000 * GIB), 20 * GIB);
+        assert!(free_space_verdict(2 * GIB, 10 * GIB).is_ok());
+        assert!(free_space_verdict(GIB - 1, 10 * GIB).is_err());
+        assert!(free_space_verdict(19 * GIB, 1000 * GIB).is_err());
+        assert!(free_space_verdict(21 * GIB, 1000 * GIB).is_ok());
+    }
+
+    #[test]
+    fn a_version_token_is_read_from_the_banner() {
+        assert_eq!(
+            version_token("ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025\n").as_deref(),
+            Some("8.0.1-3ubuntu2")
+        );
+        assert_eq!(
+            version_token("\nffprobe version n7.1 Copyright").as_deref(),
+            Some("n7.1")
+        );
+        assert_eq!(version_token("no banner"), None);
     }
 
     #[cfg(target_os = "linux")]
@@ -2046,19 +2377,27 @@ mod tests {
         drop(fresh);
         assert!(!stage.exists(), "the guard removes an unused stage");
 
+        let dir = store::file_dir(&case.root, id);
+        let stored = crate::subtitle_source::testing::kept(&dir, 0, b"PG kept");
         write_manifest(
             &case.root,
             id,
             case.stamp,
-            vec![
-                settled_entry(0, Verdict::Kept),
-                settled_entry(2, Verdict::Malformed),
-            ],
+            vec![stored.clone(), settled_entry(2, Verdict::Malformed)],
         );
         assert!(
             plan(&gate, id, &case.source, &[0, 2]).await.is_none(),
             "latched"
         );
+        // Review finding 4: a `kept` entry whose file is gone — a power loss
+        // before the rename was durable, a deletion — is not settled. That
+        // track alone rides again, rather than missing for good.
+        std::fs::remove_file(dir.join(stored.file.as_deref().expect("name"))).expect("lose it");
+        let lost = plan(&gate, id, &case.source, &[0, 2])
+            .await
+            .expect("a kept track with no file rides again");
+        assert_eq!(lost.tracks(), &[0]);
+        drop(lost);
 
         // A transient track rides again, alone, until it has used its tries.
         for attempts in 1..TRANSIENT_ATTEMPTS {
@@ -2239,9 +2578,22 @@ mod tests {
         crate::test_tempdir().expect("runtime cache")
     }
 
-    async fn pass(fixture: &Fixture, cache: &Path, gate: Option<&RideAlongGate>) -> IndexBuild {
+    /// A pass, judged as the callers judge it: after the build has returned.
+    struct Judged {
+        outcome: IndexOutcome,
+        ride_along: Option<RideAlongHarvest>,
+        /// Each track judged again with no stderr failures at all — what the
+        /// byte arithmetic says on its own.
+        by_arithmetic: Vec<(i64, Verdict, Option<String>)>,
+    }
+
+    async fn pass(fixture: &Fixture, cache: &Path, gate: Option<&RideAlongGate>) -> Judged {
         let source = std::fs::File::open(&fixture.source).expect("held source");
-        crate::fragindex::build_from_attested_file_with_progress(
+        let IndexBuild {
+            outcome,
+            ride_along,
+            ..
+        } = crate::fragindex::build_from_attested_file_with_progress(
             &fixture.file,
             &source,
             "fixture-object-v1",
@@ -2251,10 +2603,31 @@ mod tests {
             |_, _, _| {},
             gate,
         )
-        .await
+        .await;
+        let mut by_arithmetic = Vec::new();
+        if let Some(pending) = &ride_along {
+            for ordinal in pending.plan.tracks() {
+                let stage = pending.stage();
+                let (verdict, _, reason) = judge(
+                    &stage.join(format!("s{ordinal}.sup")),
+                    &stage.join(format!("s{ordinal}.crc")),
+                    [None, None],
+                );
+                by_arithmetic.push((*ordinal, verdict, reason));
+            }
+        }
+        let ride_along = match ride_along {
+            Some(pending) => Some(pending.judge().await),
+            None => None,
+        };
+        Judged {
+            outcome,
+            ride_along,
+            by_arithmetic,
+        }
     }
 
-    fn verdicts_of(build: &IndexBuild) -> Vec<(i64, Verdict)> {
+    fn verdicts_of(build: &Judged) -> Vec<(i64, Verdict)> {
         build
             .ride_along
             .as_ref()
@@ -2292,6 +2665,22 @@ mod tests {
         assert_eq!(
             verdicts_of(&riding),
             vec![(0, Verdict::Kept), (1, Verdict::Malformed)]
+        );
+        // Review finding 2: stderr reported the corrupted track's failure, and
+        // `judge` stops there. The framecrc rule is the primary check, so it
+        // must catch the track by itself: with no stderr failure at all, the
+        // byte arithmetic alone says `malformed` (0 bytes in the `.sup`
+        // against the 2344 packet bytes framecrc counted), and the intact
+        // track is still `kept`.
+        assert_eq!(riding.by_arithmetic[0].1, Verdict::Kept);
+        assert_eq!(riding.by_arithmetic[1].1, Verdict::Malformed);
+        assert!(
+            riding.by_arithmetic[1]
+                .2
+                .as_deref()
+                .is_some_and(|reason| reason.contains("framecrc counted")),
+            "{:?}",
+            riding.by_arithmetic[1]
         );
 
         // The pipe itself, byte for byte, with the same argv.
@@ -2332,7 +2721,7 @@ mod tests {
         let access = store::StoreAccess::new(root, true);
         let live = stamp_of(&fixture.source);
         let Lookup::Kept(kept) =
-            store::lookup(&access, Consumer::Overlay, &fixture.file, 0, &live).await
+            store::lookup(&access, Consumer::Overlay, &fixture.file, 0, Live::Stamp(live)).await
         else {
             panic!("the intact track is kept");
         };
@@ -2359,7 +2748,7 @@ mod tests {
             "byte-identical to the demux"
         );
         assert!(matches!(
-            store::lookup(&access, Consumer::Overlay, &fixture.file, 1, &live).await,
+            store::lookup(&access, Consumer::Overlay, &fixture.file, 1, Live::Stamp(live)).await,
             Lookup::Miss(_)
         ));
     }
@@ -2384,6 +2773,7 @@ mod tests {
             .plan
             .stage()
             .to_owned();
+        assert!(riding.by_arithmetic.iter().all(|row| row.1 == Verdict::Kept));
         let sup = std::fs::read(stage.join("s0.sup")).expect("sup");
         let totals = crc_totals(&std::fs::read_to_string(stage.join("s0.crc")).expect("crc"))
             .expect("totals");
@@ -2599,7 +2989,9 @@ mod tests {
                     );
                     checks += 1;
                 }
-                match store::lookup(&access, Consumer::Overlay, &file, 0, &case.stamp).await {
+                match store::lookup(&access, Consumer::Overlay, &file, 0, Live::Stamp(case.stamp))
+                    .await
+                {
                     Lookup::Kept(kept) => {
                         if let Some(mut opened) = store::open_verified(&kept).await {
                             let mut bytes = Vec::new();
@@ -2625,10 +3017,16 @@ mod tests {
         plurx_core::testfixtures::require_ffmpeg();
         let cache = fresh_cache();
         let root = store::store_root(cache.path());
-        let report = run_self_test(&plurx_core::testfixtures::ffmpeg(), &root, cache.path())
-            .await
-            .expect("the self-test passes");
+        let report = run_self_test(
+            &plurx_core::testfixtures::ffmpeg(),
+            &plurx_core::testfixtures::ffprobe(),
+            &root,
+            cache.path(),
+        )
+        .await
+        .expect("the self-test passes");
         assert!(report.elapsed < SELF_TEST_BUDGET);
+        assert!(!report.version.is_empty());
         let leftovers: Vec<_> = std::fs::read_dir(&root)
             .expect("root")
             .filter_map(Result::ok)
@@ -2643,34 +3041,53 @@ mod tests {
 
         let cache = fresh_cache();
         let root = store::store_root(cache.path());
-        // Exits 0 and does nothing: it "muxes" no source.
-        let silent = cache.path().join("silent-ffmpeg");
-        std::fs::write(&silent, "#!/bin/sh\nexit 0\n").expect("fake");
-        std::fs::set_permissions(&silent, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        let reason = run_self_test(&silent.to_string_lossy(), &root, cache.path())
+        let real = plurx_core::testfixtures::ffmpeg();
+        let prober = plurx_core::testfixtures::ffprobe();
+        let script = |name: &str, body: String| {
+            let path = cache.path().join(name);
+            std::fs::write(&path, body).expect("fake");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+            path.to_string_lossy().into_owned()
+        };
+        // Answers `-version` as the real build does, then exits 0 and does
+        // nothing: it "muxes" no source.
+        let silent = script(
+            "silent-ffmpeg",
+            format!("#!/bin/sh\ncase \"$1\" in -version) exec {real} \"$@\" ;; esac\nexit 0\n"),
+        );
+        let reason = run_self_test(&silent, &prober, &root, cache.path())
             .await
             .expect_err("nothing was produced");
         assert!(reason.contains("synthetic source"), "{reason}");
         // Real ffmpeg for the source, a build whose tee never writes a slave
         // for the second track: the verdicts are not the expected pair.
-        let partial = cache.path().join("partial-ffmpeg");
-        std::fs::write(
-            &partial,
+        let partial = script(
+            "partial-ffmpeg",
             format!(
-                "#!/bin/sh\ncase \"$*\" in *\"-f tee \"*) exec {} \"$@\" 2>/dev/null ;; *) exec {} \"$@\" ;; esac\n",
-                plurx_core::testfixtures::ffmpeg(),
-                plurx_core::testfixtures::ffmpeg()
+                "#!/bin/sh\ncase \"$*\" in *\"-f tee \"*) exec {real} \"$@\" 2>/dev/null ;; *) exec {real} \"$@\" ;; esac\n"
             ),
-        )
-        .expect("fake");
-        std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        let reason = run_self_test(&partial.to_string_lossy(), &root, cache.path())
+        );
+        let reason = run_self_test(&partial, &prober, &root, cache.path())
             .await
             .expect_err("the stderr line is not recognised when it never arrives");
         assert!(reason.contains("not recognised"), "{reason}");
-        assert!(run_self_test("/nonexistent/ffmpeg", &root, cache.path())
+        assert!(
+            run_self_test("/nonexistent/ffmpeg", &prober, &root, cache.path())
+                .await
+                .is_err()
+        );
+        // Review finding 1: an ffprobe of another build is refused before
+        // anything runs, and the reason names both versions.
+        let other_prober = script(
+            "old-ffprobe",
+            "#!/bin/sh\necho \"ffprobe version 4.4.2-0ubuntu0 Copyright (c) 2007-2021\"\n"
+                .to_owned(),
+        );
+        let reason = run_self_test(&real, &other_prober, &root, cache.path())
             .await
-            .is_err());
+            .expect_err("mismatched builds");
+        assert!(reason.contains("4.4.2-0ubuntu0"), "{reason}");
     }
 
     /// The gate is closed until the startup self-test passes, and open after.

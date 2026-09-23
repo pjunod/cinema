@@ -246,6 +246,10 @@ pub(crate) fn parse_manifest(bytes: &[u8]) -> Result<Manifest, MissReason> {
 pub(crate) struct StoreAccess {
     root: PathBuf,
     switch: Switch,
+    /// This node's id, when the caller knows it: a miss with no directory is
+    /// then classified (`never_indexed`, `hydrated_only`, `absent`) off the
+    /// request path. Without it such a miss is `absent`.
+    node_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -263,6 +267,7 @@ impl StoreAccess {
         Self {
             root,
             switch: Switch::Fixed(enabled),
+            node_id: None,
         }
     }
 
@@ -286,7 +291,15 @@ impl StoreAccess {
         Self {
             root: store_root(runtime_cache),
             switch: Switch::Setting(store),
+            node_id: None,
         }
+    }
+
+    /// Name the node this access serves, so a miss with no directory can be
+    /// classified — in a detached task, never on the request path.
+    pub(crate) fn on_node(mut self, node_id: Option<&str>) -> Self {
+        self.node_id = node_id.map(str::to_owned);
+        self
     }
 
     async fn is_enabled(&self) -> bool {
@@ -486,12 +499,18 @@ pub(crate) async fn lookup(
     ordinal: i64,
     live: Live<'_>,
 ) -> Lookup {
-    let result = match classify(access, consumer, file, ordinal, live).await {
+    let mut no_directory = false;
+    let result = match classify(access, consumer, file, ordinal, live, &mut no_directory).await {
         Lookup::Empty(_) if consumer == Consumer::Overlay => {
             Lookup::Miss(MissReason::EmptyForOverlay)
         }
         other => other,
     };
+    if no_directory {
+        // Answered at once; why there is no directory is counted later.
+        classify_no_directory_later(access, consumer, file);
+        return result;
+    }
     match &result {
         Lookup::Kept(_) => {}
         Lookup::Empty(_) => record_empty(consumer),
@@ -500,12 +519,91 @@ pub(crate) async fn lookup(
     result
 }
 
+/// Whether the store holds `ordinal` as a real track with no cues, for the
+/// burn path's rule — the HTTP HDR guard's question, asked only when it is
+/// about to refuse. Nothing is counted: this is not a consumer's lookup.
+pub(crate) async fn stored_as_empty(
+    access: &StoreAccess,
+    file: &MediaFile,
+    ordinal: i64,
+    live: Live<'_>,
+) -> bool {
+    matches!(
+        classify(access, Consumer::Burn, file, ordinal, live, &mut false).await,
+        Lookup::Empty(_)
+    )
+}
+
+/// Classifications in flight. Past the bound a miss with no directory is
+/// simply `absent`: the reason is a counter, and a burst of misses must not
+/// become a burst of catalog reads.
+static CLASSIFYING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_CLASSIFYING: usize = 8;
+
+/// Count a miss with no directory under the reason it deserves, without the
+/// request waiting for it. The catalog read runs in a detached task, bounded
+/// in number; when there is no store or no node to ask about, or the bound is
+/// reached, the miss is counted `absent` at once.
+fn classify_no_directory_later(access: &StoreAccess, consumer: Consumer, file: &MediaFile) {
+    let (Switch::Setting(store), Some(node_id)) = (&access.switch, access.node_id.clone()) else {
+        record_miss(consumer, MissReason::Absent);
+        return;
+    };
+    if CLASSIFYING.fetch_add(1, Ordering::AcqRel) >= MAX_CLASSIFYING {
+        CLASSIFYING.fetch_sub(1, Ordering::AcqRel);
+        record_miss(consumer, MissReason::Absent);
+        return;
+    }
+    let store = std::sync::Arc::clone(store);
+    let (file_id, size, mtime) = (file.id, file.size, file.mtime);
+    tokio::spawn(async move {
+        let reason = classify_no_directory(store.as_ref(), &node_id, file_id, size, mtime).await;
+        record_miss(consumer, reason);
+        CLASSIFYING.fetch_sub(1, Ordering::AcqRel);
+    });
+}
+
+/// Why a file has no directory here, from this node's own holdings for the
+/// file's current source: an index in this node's own table (built here, by
+/// either path) is `absent` — the pass ran and kept nothing, or ran before the
+/// producer shipped or while the switch was off; otherwise the cluster's
+/// location rows say whether this node only hydrated a peer's index
+/// (`hydrated_only`) or holds none at all (`never_indexed`). A read that fails
+/// is `absent`: the reason is a counter, never a decision.
+pub(crate) async fn classify_no_directory(
+    store: &dyn plurx_core::store::Store,
+    node_id: &str,
+    file_id: i64,
+    size: i64,
+    mtime: i64,
+) -> MissReason {
+    match store.holds_fragment_index_for_source(file_id, size, mtime).await {
+        Ok(true) => return MissReason::Absent,
+        Ok(false) => {}
+        Err(error) => {
+            tracing::debug!(file_id, %error, "classifying a stored-subtitle miss");
+            return MissReason::Absent;
+        }
+    }
+    match store
+        .fragment_index_builders_held_by(node_id, file_id, size, mtime)
+        .await
+    {
+        Ok(builders) => absent_reason_from(node_id, &builders),
+        Err(error) => {
+            tracing::debug!(file_id, %error, "classifying a stored-subtitle miss");
+            MissReason::Absent
+        }
+    }
+}
+
 async fn classify(
     access: &StoreAccess,
     consumer: Consumer,
     file: &MediaFile,
     ordinal: i64,
     live: Live<'_>,
+    no_directory: &mut bool,
 ) -> Lookup {
     if !access.is_enabled().await {
         return Lookup::Miss(MissReason::Disabled);
@@ -522,7 +620,8 @@ async fn classify(
     {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Lookup::Miss(absent_reason(access, file).await)
+            *no_directory = true;
+            return Lookup::Miss(MissReason::Absent);
         }
         Err(_) => return Lookup::Miss(MissReason::Stale),
     };
@@ -563,17 +662,8 @@ async fn classify(
     }
 }
 
-/// Why a file has no directory here, from this node's fragment-index
-/// holdings for the file's current source. A catalog read that fails leaves
-/// the miss `absent`: the reason is a counter, never a decision.
-async fn absent_reason(_access: &StoreAccess, _file: &MediaFile) -> MissReason {
-    // #456 replaced the access this classifier read (`misses`) with the lazy
-    // switch; the classification is rebuilt, off the request path, in the
-    // commit after this merge.
-    MissReason::Absent
-}
-
-/// `never_indexed` when this node holds no index for the source,
+/// From the cluster's rows alone: `never_indexed` when this node holds no
+/// index for the source,
 /// `hydrated_only` when every one it holds was built by a peer, and `absent`
 /// when it built one itself — the pass ran here and kept nothing, or ran
 /// before the producer shipped or while the switch was off.
@@ -800,7 +890,7 @@ pub(crate) fn prometheus() -> String {
         }
     }
     out.push_str(
-        "# HELP plurx_subtitle_source_misses_total Stored-subtitle lookups that fell through to extraction, by reason.\n\
+        "# HELP plurx_subtitle_source_misses_total Stored-subtitle lookups that fell through to extraction, by reason. never_indexed and hydrated_only split the lookups that found no directory by this node's own fragment-index holdings (none at all, or only a peer's), classified after the request has moved on.\n\
          # TYPE plurx_subtitle_source_misses_total counter\n",
     );
     for consumer in Consumer::ALL {
@@ -844,6 +934,10 @@ pub(crate) struct SweepOutcome {
     /// Deletes that failed and are left for the next pass — on Windows, a
     /// reader holding a stored file without `FILE_SHARE_DELETE`.
     pub(crate) deferred: usize,
+    /// Stored tracks no manifest names, removed from directories that stay:
+    /// what a publish interrupted between its rename and its manifest swap
+    /// leaves behind.
+    pub(crate) unnamed: usize,
     /// Where the next call starts: `f<id>` of the last directory examined,
     /// or empty once the walk has wrapped.
     pub(crate) next: String,
@@ -914,7 +1008,12 @@ where
             Some(manifest) => match row(file_id).await? {
                 None => true,
                 Some((size, mtime)) => {
-                    manifest.source.size != size.max(0) as u64 || manifest.source.mtime != mtime
+                    let moved = manifest.source.size != size.max(0) as u64
+                        || manifest.source.mtime != mtime;
+                    if !moved {
+                        outcome.unnamed += remove_unnamed_tracks(&dir, &manifest).await;
+                    }
+                    moved
                 }
             },
             // No manifest this build can read. A publish writes its `.sup`
@@ -971,6 +1070,35 @@ pub(crate) async fn read_manifest(dir: &Path) -> Option<Manifest> {
             .await
             .ok()?;
     parse_manifest(&bytes).ok()
+}
+
+/// Remove `.sup` files the manifest does not name and that are older than
+/// the abandonment grace — never a young one, which may be a publish between
+/// its rename and its manifest swap. Returns how many went.
+async fn remove_unnamed_tracks(dir: &Path, manifest: &Manifest) -> usize {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return 0;
+    };
+    let mut removed = 0;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.ends_with(".sup")
+            || manifest
+                .tracks
+                .iter()
+                .any(|track| track.file.as_deref() == Some(name))
+        {
+            continue;
+        }
+        let path = entry.path();
+        if older_than(&path, ABANDONED_GRACE).await && tokio::fs::remove_file(&path).await.is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 async fn older_than(path: &Path, age: Duration) -> bool {
@@ -1544,6 +1672,166 @@ mod tests {
             miss(lookup(&access, Consumer::Overlay, &file, 0, Live::Path(&gone)).await),
             MissReason::Absent
         );
+    }
+
+    /// A miss with no directory says why, from the cluster's rows.
+    #[test]
+    fn a_miss_with_no_directory_is_classified_by_who_built_the_index() {
+        let here = "node-a".to_owned();
+        assert_eq!(absent_reason_from(&here, &[]), MissReason::NeverIndexed);
+        assert_eq!(
+            absent_reason_from(&here, &["node-b".to_owned()]),
+            MissReason::HydratedOnly,
+            "every index this node holds came from a peer"
+        );
+        assert_eq!(
+            absent_reason_from(&here, &["node-a".to_owned(), "node-b".to_owned()]),
+            MissReason::Absent,
+            "the pass ran here at least once"
+        );
+    }
+
+    async fn counted(consumer: Consumer, reason: MissReason, above: u64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while misses_for_test(consumer, reason) <= above {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{reason:?} was never counted"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// The request is answered before the catalog is asked: the lookup
+    /// returns `absent` at once and the reason is counted by a detached task.
+    /// A node whose own index table holds an index for the source — the
+    /// non-cluster path's only record — is `absent`, not `never_indexed`.
+    #[tokio::test]
+    async fn a_miss_with_no_directory_is_classified_off_the_request_path() {
+        use plurx_core::store::Store;
+
+        let base = crate::test_tempdir().expect("store");
+        let runtime = base.path().join("runtime");
+        let source = base.path().join("source.mkv");
+        std::fs::write(&source, b"source bytes").expect("source");
+        let live = stamp_of(&source);
+        let file = media_file(31, source.clone(), live.size as i64, live.mtime);
+        let catalog: std::sync::Arc<dyn Store> = std::sync::Arc::new(
+            plurx_core::store::SqliteStore::open_in_memory().expect("catalog"),
+        );
+        let access = StoreAccess::from_setting(std::sync::Arc::clone(&catalog), &runtime)
+            .on_node(Some("node-a"));
+
+        let before = misses_for_test(Consumer::Overlay, MissReason::NeverIndexed);
+        assert!(matches!(
+            lookup(&access, Consumer::Overlay, &file, 0, Live::Stamp(live)).await,
+            Lookup::Miss(MissReason::Absent)
+        ));
+        counted(Consumer::Overlay, MissReason::NeverIndexed, before).await;
+
+        // An index this node built itself.
+        let index = plurx_core::segplan::FragmentIndex::new(
+            16_000,
+            vec![plurx_core::segplan::IndexRow {
+                dts: 0,
+                duration: 28_016,
+                bytes: 104_452,
+                video_bytes: 103_836,
+                class: plurx_core::fmp4::CutClass::CleanIdr,
+            }],
+            "abc123",
+            // The index keys its source by the scanner's size and mtime.
+            plurx_core::segplan::SourceIdentity::new(live.size, live.mtime, "fingerprint"),
+        );
+        catalog
+            .put_fragment_index(file.id, &index)
+            .await
+            .expect("local index");
+        assert_eq!(
+            classify_no_directory(catalog.as_ref(), "node-a", file.id, file.size, file.mtime).await,
+            MissReason::Absent
+        );
+
+        // Without a node to ask about, the miss is counted `absent` at once.
+        let before = misses_for_test(Consumer::Burn, MissReason::Absent);
+        assert!(matches!(
+            lookup(
+                &access.clone().on_node(None),
+                Consumer::Burn,
+                &file,
+                0,
+                Live::Stamp(live)
+            )
+            .await,
+            Lookup::Miss(MissReason::Absent)
+        ));
+        assert!(misses_for_test(Consumer::Burn, MissReason::Absent) > before);
+    }
+
+    /// The HDR guard's question: only an `empty` entry for a current source
+    /// answers yes, and nothing is counted.
+    #[tokio::test]
+    async fn stored_as_empty_is_yes_only_for_a_current_empty_track() {
+        let base = crate::test_tempdir().expect("store");
+        let root = base.path().join(STORE_DIR);
+        let source = base.path().join("source.mkv");
+        std::fs::write(&source, b"source bytes").expect("source");
+        let live = stamp_of(&source);
+        let file = media_file(41, source.clone(), live.size as i64, live.mtime);
+        let on = StoreAccess::new(root.clone(), true);
+        assert!(!stored_as_empty(&on, &file, 1, Live::Stamp(live)).await, "no directory");
+        let dir = file_dir(&root, 41);
+        write_manifest(
+            &root,
+            41,
+            live,
+            vec![kept(&dir, 0, b"PG"), settled(1, Verdict::Empty)],
+        );
+        assert!(stored_as_empty(&on, &file, 1, Live::Stamp(live)).await);
+        assert!(!stored_as_empty(&on, &file, 0, Live::Stamp(live)).await, "kept");
+        assert!(
+            !stored_as_empty(&StoreAccess::new(root.clone(), false), &file, 1, Live::Stamp(live))
+                .await,
+            "off"
+        );
+        let moved = SourceStamp {
+            size: live.size + 1,
+            ..live
+        };
+        assert!(!stored_as_empty(&on, &file, 1, Live::Stamp(moved)).await, "stale");
+    }
+
+    /// A publish interrupted between placing a track and swapping the
+    /// manifest leaves a `.sup` nothing names. The sweep removes it once it
+    /// is older than the grace, and never a young one or a named one.
+    #[tokio::test]
+    async fn the_sweep_removes_old_tracks_the_manifest_does_not_name() {
+        let base = crate::test_tempdir().expect("store");
+        let root = base.path().join(STORE_DIR);
+        let dir = file_dir(&root, 1);
+        let named = kept(&dir, 0, b"PG named");
+        write_manifest(&root, 1, stamp(10, 1, None, None), vec![named.clone()]);
+        let old = dir.join("s0-0123456789abcdef.sup");
+        let young = dir.join("s1-fedcba9876543210.sup");
+        std::fs::write(&old, b"PG orphan").expect("orphan");
+        std::fs::write(&young, b"PG in flight").expect("young");
+        let long_ago = std::time::SystemTime::now() - ABANDONED_GRACE - Duration::from_secs(60);
+        for path in [&old, &dir.join(named.file.as_deref().expect("name"))] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .expect("open")
+                .set_modified(long_ago)
+                .expect("backdate");
+        }
+        static KNOWN: [(i64, i64, i64); 1] = [(1, 10, 1)];
+        let outcome = sweep_with(&root, None, 256, u64::MAX, rows(&KNOWN))
+            .await
+            .expect("sweep");
+        assert_eq!(outcome.unnamed, 1, "{outcome:?}");
+        assert!(!old.exists(), "the old orphan goes");
+        assert!(young.exists(), "a young one may be a publish in flight");
+        assert!(dir.join(named.file.as_deref().expect("name")).exists());
     }
 
     #[test]

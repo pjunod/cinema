@@ -1946,7 +1946,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # the same verdict inside the self-test. Each reads the stage's few files,
 # walks and parses a `.sup` bounded by the 256 MiB track cap, and returns; the
 # caller awaits the handle. No timer, no process, no producer.
-expected_occurrences = 572
+# 572 -> 573 with #460's review: one `tokio::spawn` in
+# `subtitle_source::classify_no_directory_later`. A stored-subtitle lookup that
+# finds no directory is answered at once, and why (`never_indexed`,
+# `hydrated_only`, `absent`) is counted by this detached task: two keyed store
+# reads, one counter increment, then it returns. At most eight run at once (an
+# atomic in-flight count); past that the miss is counted `absent` inline. No
+# timer, no process, no producer, and no request waits on it.
+expected_occurrences = 573
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the

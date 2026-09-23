@@ -704,12 +704,16 @@ fn subtitle_stored_sources(enabled: bool, runtime_cache: &std::path::Path) -> De
     let (attempted, [kept, no_cues, malformed, transient], written, published) =
         ride_along::snapshot();
     let (self_test_status, self_test_evidence) = match ride_along::self_test_state() {
-        SelfTest::Passed { elapsed_ms, engine } => (
+        SelfTest::Passed {
+            elapsed_ms,
+            version,
+        } => (
             RequirementStatus::Met,
             format!(
-                "Passed in {elapsed_ms} ms against {engine}: the tee kept the intact track, \
-                 judged the corrupted one malformed, recognised its stderr failure and left the \
-                 index output byte-identical."
+                "Passed in {elapsed_ms} ms: ffprobe and ffmpeg are the same build ({version}); \
+                 the tee left the index output byte-identical, kept the intact track, recognised \
+                 the corrupted track's stderr failure, and the framecrc byte arithmetic alone \
+                 judged the corrupted track malformed."
             ),
         ),
         SelfTest::Failed { reason } => (
@@ -746,6 +750,18 @@ fn subtitle_stored_sources(enabled: bool, runtime_cache: &std::path::Path) -> De
             ),
         ),
     };
+    let (space_status, space_evidence) = match ride_along::free_space(&checked) {
+        Ok(evidence) => (RequirementStatus::Met, format!("{}: {evidence}.", checked.display())),
+        Err(reason) => (
+            RequirementStatus::Unmet,
+            format!(
+                "{}: {reason}. The index pass keeps no PGS tracks until there is room: stage \
+                 writes share the disk with the index blob the pass is about to publish.",
+                checked.display()
+            ),
+        ),
+    };
+    let failed = ride_along::failed_ride_count();
     DeveloperEnableItem {
         id: "subtitle_stored_sources",
         title: "Keep PGS tracks during indexing and read them instead of the source",
@@ -761,7 +777,9 @@ fn subtitle_stored_sources(enabled: bool, runtime_cache: &std::path::Path) -> De
                     "The fragment-index pass keeps every PGS track it reads. Since this process \
                      started: {attempted} track(s) attempted — {kept} kept, {no_cues} with no \
                      cues, {malformed} malformed, {transient} transient — {written} byte(s) \
-                     written to stages, {published} manifest(s) published. Process-local."
+                     written to stages, {published} manifest(s) published; {failed} file(s) \
+                     whose riding pass did not build its index are indexed without the \
+                     ride-along until the next restart. Process-local."
                 ),
             },
             DeveloperRequirement {
@@ -775,6 +793,12 @@ fn subtitle_stored_sources(enabled: bool, runtime_cache: &std::path::Path) -> De
                 title: "The cache is on a local filesystem",
                 status: filesystem_status,
                 evidence: filesystem_evidence,
+            },
+            DeveloperRequirement {
+                id: "stored_source_free_space",
+                title: "The cache has room for the stage",
+                status: space_status,
+                evidence: space_evidence,
             },
             DeveloperRequirement {
                 id: "stored_source_lookups",
