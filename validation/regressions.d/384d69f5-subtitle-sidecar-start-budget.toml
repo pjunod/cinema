@@ -1,0 +1,21 @@
+version = 1
+
+[[coverage]]
+commits = ["384d69f5", "6468cc66"]
+points = ["core.media", "playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+A session start awaited a subtitle sidecar through an unbounded join, so a
+cold burn sidecar on a large source spent the whole 50 s START_DEADLINE and
+then answered a codeless 503 no client retries. Measured on m6 2026-09-21:
+file 5208 is a 79.5 GB remux and extracting one PGS track read all of it,
+402 s, to publish 18,866 bytes.
+
+The regression is proved by two tests in the same commits.
+`subtitles::tests::a_cold_sidecar_gives_the_caller_its_budget_back_and_keeps_extracting`
+pins that the caller is refused with a pending answer, that the detached
+extraction still publishes, and that the next caller is served warm.
+`http::hls::tests::a_pending_sidecar_is_a_named_not_yet_answer` pins the
+wire answer (503, `startup_timeout`, Retry-After) and that a genuine
+extraction failure stays outside that class.
+"""

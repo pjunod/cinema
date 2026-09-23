@@ -19845,11 +19845,18 @@ impl TranscodeManager {
             grade,
         );
         let subtitle = if let Some(burn) = options.subtitle_burn.as_ref() {
+            // The only caller that passes the short budget. A start has 50 s
+            // for everything; a cold burn sidecar on a remux of this size needs
+            // 400. Refusing in seconds with a pending answer is the only thing
+            // that leaves the viewer better off — including on the speculative
+            // prepared-successor path, which would otherwise hold a preparation
+            // slot for the length of a full-film demux.
             let subtitle = crate::subtitles::ensure_burn_file(
                 &self.subtitle_cache,
                 file,
                 burn.subtitle_index,
                 Some(&source_object_version),
+                crate::subtitles::SIDECAR_JOIN_BUDGET,
             )
             .await?;
             #[cfg(unix)]
