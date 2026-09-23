@@ -141,12 +141,22 @@ overflow-checks = true
 lto = "thin"
 strip = "symbols"
 
-# Patch Hiqlite's sparse-membership and WAL-recovery compatibility plus unused
-# optional dependency edges without advisory ignores. Path packages are
+# Patch Hiqlite's sparse-membership, WAL-recovery, and optional-dependency
+# compatibility without advisory ignores. Path packages are
 # skipped by cargo-audit, so rust-audit.yml also scans a synthesized
 # registry-provenance lockfile built by scripts/vendor-audit-lock.
+#
+# `s3-simple` is deliberately NOT overridden here. plurx builds hiqlite without
+# `backup`/`s3`, so the workspace graph contains no s3-simple at all and a
+# patch row for it would be an unused patch -- a warning on every cargo
+# invocation and evidence of nothing. The override that keeps the *fork's*
+# advertised backup/S3 graph advisory-clean lives in
+# vendor/hiqlite/Cargo.toml, which is the manifest cargo honours when that
+# feature is enabled. If plurx ever enables `hiqlite/backup` from here, the
+# registry s3-simple 0.8.0 returns with quick-xml 0.39.4 and aws-lc-sys
+# 0.39.1; `deny.toml`'s ban on that aws-lc-sys version is the tripwire, and
+# this row has to come back with it.
 [patch.crates-io]
 hiqlite = { path = "vendor/hiqlite" }
 hiqlite-wal = { path = "vendor/hiqlite-wal" }
-s3-simple = { path = "vendor/s3-simple" }
 rust_decimal = { path = "vendor/rust_decimal" }

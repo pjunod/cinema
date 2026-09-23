@@ -9,15 +9,18 @@ use std::time::Duration;
 /// the ones that go on to speak TLS, because the TLS config is assembled during
 /// `build`.
 ///
-/// Until the `backup` feature stopped implying `s3`, a provider arrived here by
-/// accident and nobody had asked for it: `backup -> s3 -> cryptr/s3` pulled a
-/// second `reqwest` with the provider feature on, and Cargo unified that feature
-/// onto this dependency. Removing that edge removed the provider, which turned
-/// every client this fork builds — the peer/management transport, the init
-/// probes, the split-brain check — into a panic. So the provider is named here
-/// instead of inherited, and a future dependency tidy-up (see
-/// `docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md`) cannot take it away
-/// again by accident.
+/// The provider used to arrive here by accident and nobody had asked for it: an
+/// ungated `cryptr/s3` pulled `s3-simple`, and with it a second `reqwest` whose
+/// provider feature Cargo unified onto this dependency. Two plans removed that
+/// edge from opposite directions — K-01 stopped `backup` implying `s3` and made
+/// `cryptr` `default-features = false`, and K-08's patch 16 gated `cryptr/s3`
+/// behind this crate's own `s3` feature, which plurx does not select. Either
+/// way the provider went with it, and every client this fork builds — the
+/// peer/management transport, the init probes, the split-brain check — became a
+/// panic. So the provider is named here rather than inherited, and the remaining
+/// cuts in `docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md` cannot take it
+/// away again: §3.6's option A retires `aws-lc-sys` entirely, and this call site
+/// survives that because it asks for `ring`.
 ///
 /// `ring` is the provider the rest of this fork already asks for
 /// (`[dependencies.rustls] features = [..., "ring"]`, `axum-server`'s
