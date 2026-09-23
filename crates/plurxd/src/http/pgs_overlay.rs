@@ -211,25 +211,141 @@ async fn reprepare(
     Ok(())
 }
 
+/// A preparation that ran and failed. Terminal for this request: the failure
+/// is remembered server-side, so polling again only replays it.
+pub(crate) const PREPARE_FAILED: &str = "pgs_overlay_prepare_failed";
+/// Both preparation slots are busy. The one overlay refusal worth waiting out.
+pub(crate) const CAPACITY: &str = "pgs_overlay_capacity";
+/// How long a client should wait before asking again when capacity is full.
+pub(crate) const CAPACITY_RETRY_AFTER_SECS: u64 = 5;
+
+/// The overlay's failures, on the wire.
+///
+/// Before this, every `Unavailable` was a plain 503, and 503 is what both
+/// native clients read as "still preparing": a remembered demux failure or
+/// timeout was polled for ten minutes and showed nothing, and capacity-full
+/// — the one case that really is a wait — looked exactly the same. The plan's
+/// error table (docs/clients/PGS_OVERLAY_PLAN.md §10.5) says 500 for a failed
+/// extraction and 503 only for capacity; this is that table, with codes.
 fn map_overlay_error(error: OverlayError) -> ApiError {
     match error {
-        OverlayError::Malformed(why) => ApiError::Unprocessable(serde_json::json!({
-            "error": "malformed PGS stream",
-            "detail": why
-        })),
-        OverlayError::Limit(why) => ApiError::Unprocessable(serde_json::json!({
-            "error": "PGS safety limit exceeded",
-            "detail": why
-        })),
+        // The legacy `{error, detail}` fields stay beside the code, so a
+        // reader of either shape still gets its answer.
+        OverlayError::Malformed(why) => ApiError::typed_detail(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            PREPARE_FAILED,
+            "PGS overlay preparation failed: the PGS stream is malformed",
+            serde_json::json!({ "error": "malformed PGS stream", "detail": why }),
+        ),
+        OverlayError::Limit(why) => ApiError::typed_detail(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            PREPARE_FAILED,
+            "PGS overlay preparation failed: the PGS stream exceeds a safety limit",
+            serde_json::json!({ "error": "PGS safety limit exceeded", "detail": why }),
+        ),
         OverlayError::SourceChanged => {
             ApiError::Conflict("media source changed while its PGS overlay was preparing".into())
         }
         OverlayError::Unavailable(why) => {
-            tracing::warn!(error = %why, "PGS overlay preparation is unavailable");
-            ApiError::ServiceUnavailable(
-                "PGS overlay preparation is temporarily unavailable".into(),
+            tracing::warn!(error = %why, "PGS overlay preparation failed");
+            ApiError::typed(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                PREPARE_FAILED,
+                "PGS overlay preparation failed",
             )
         }
-        OverlayError::Internal(why) => ApiError::Internal(why),
+        OverlayError::Capacity => ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: CAPACITY,
+            message: "PGS overlay preparation capacity is full".into(),
+            retry_after_seconds: CAPACITY_RETRY_AFTER_SECS,
+        },
+        // Remembered like any other failed preparation (the cache could not be
+        // created or synced), so it is terminal in the same words. The detail
+        // is logged, never returned.
+        OverlayError::Internal(why) => {
+            tracing::error!(error = %why, "PGS overlay preparation failed internally");
+            ApiError::typed(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                PREPARE_FAILED,
+                "PGS overlay preparation failed",
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_remembered_preparation_failure_is_a_typed_terminal_answer_not_a_503() {
+        for failure in [
+            OverlayError::Unavailable("PGS demux exited with status 1".into()),
+            OverlayError::Unavailable("PGS overlay preparation timed out after 600.000s".into()),
+            OverlayError::Unavailable("media duration is required for a PGS manifest".into()),
+            OverlayError::Internal("creating PGS staging directory: permission denied".into()),
+        ] {
+            match map_overlay_error(failure) {
+                ApiError::Typed { status, code, .. } => {
+                    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                    assert_eq!(code, PREPARE_FAILED);
+                }
+                other => panic!("a failed preparation must be typed, got {other:?}"),
+            }
+        }
+        let (wire, _) = map_overlay_error(OverlayError::Unavailable("x".into()))
+            .into_response()
+            .into_parts();
+        assert_ne!(wire.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(wire.headers.get(header::RETRY_AFTER).is_none());
+    }
+
+    #[test]
+    fn a_malformed_or_over_limit_stream_keeps_its_422_and_gains_the_code() {
+        for failure in [
+            OverlayError::Malformed("bad segment".into()),
+            OverlayError::Limit("too many objects".into()),
+        ] {
+            match map_overlay_error(failure) {
+                ApiError::TypedDetail {
+                    status,
+                    code,
+                    detail,
+                    ..
+                } => {
+                    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+                    assert_eq!(code, PREPARE_FAILED);
+                    assert!(detail.contains_key("error"));
+                    assert!(detail.contains_key("detail"));
+                }
+                other => panic!("a rejected stream must be typed, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn capacity_full_is_the_only_retryable_503() {
+        match map_overlay_error(OverlayError::Capacity) {
+            ApiError::TypedRetry {
+                status,
+                code,
+                retry_after_seconds,
+                ..
+            } => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(code, CAPACITY);
+                assert_eq!(retry_after_seconds, CAPACITY_RETRY_AFTER_SECS);
+            }
+            other => panic!("capacity must be a retryable 503, got {other:?}"),
+        }
+        let (wire, _) = map_overlay_error(OverlayError::Capacity)
+            .into_response()
+            .into_parts();
+        assert_eq!(wire.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            wire.headers.get(header::RETRY_AFTER),
+            Some(&HeaderValue::from_static("5"))
+        );
     }
 }

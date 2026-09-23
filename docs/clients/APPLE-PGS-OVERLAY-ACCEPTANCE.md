@@ -45,16 +45,15 @@ the matrix against another build and do not report device evidence.
 
 ## 2. Enable the staged server capability
 
-On the operator's own server, set this exact environment value in the server's
-normal deployment configuration and restart the server:
+On the operator's own server, open **Settings → Developer** and turn on
+**Serve PGS subtitles as an overlay** (`subtitles.pgs_overlay`).
 
-```bash
-PLURX_PGS_OVERLAY=1          # advertise and serve the staged pgs-v1 protocol
-```
-
-The value is read at server startup. Setting it without a restart leaves the
-capability off. Changing the environment and restarting the operator's server
-are operator actions; this document does not authorize an agent to do either.
+The setting is read per request, so it takes effect without a restart. It
+replaced the `PLURX_PGS_OVERLAY` environment gate this step used to name; that
+variable now only seeds the setting once on a node that has never been told
+either way, and setting it on a configured node does nothing
+(`docs/OPERATIONS.md`). Changing the setting on the operator's server is an
+operator action; this document does not authorize an agent to do it.
 
 ## 3. Use a real HDR/Dolby Vision title with a real PGS track
 

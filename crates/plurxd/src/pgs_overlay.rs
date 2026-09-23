@@ -38,7 +38,13 @@ pub enum OverlayError {
     Malformed(String),
     Limit(String),
     SourceChanged,
+    /// The preparation itself failed: demux, I/O, cancellation, a timeout, a
+    /// source without a duration. Remembered for `NEGATIVE_TTL`, so asking
+    /// again inside that window gets the same answer, never a new attempt.
     Unavailable(String),
+    /// Both preparation slots are busy. The only overlay failure a client
+    /// should wait out: nothing about this track went wrong.
+    Capacity,
     Internal(String),
 }
 
@@ -49,6 +55,7 @@ impl std::fmt::Display for OverlayError {
             Self::Limit(why) => write!(f, "PGS safety limit exceeded: {why}"),
             Self::SourceChanged => f.write_str("source changed while overlay was preparing"),
             Self::Unavailable(why) => f.write_str(why),
+            Self::Capacity => f.write_str("PGS overlay preparation capacity is full"),
             Self::Internal(why) => f.write_str(why),
         }
     }
@@ -133,7 +140,7 @@ fn try_capacity(
 ) -> Result<tokio::sync::OwnedSemaphorePermit, OverlayError> {
     semaphore
         .try_acquire_owned()
-        .map_err(|_| OverlayError::Unavailable("PGS overlay preparation capacity is full".into()))
+        .map_err(|_| OverlayError::Capacity)
 }
 
 type PrepareFuture = Pin<Box<dyn Future<Output = Result<(), OverlayError>> + Send>>;
@@ -1674,7 +1681,7 @@ mod tests {
         let _second = try_capacity(Arc::clone(&capacity)).expect("second producer");
         assert!(matches!(
             try_capacity(capacity),
-            Err(OverlayError::Unavailable(_))
+            Err(OverlayError::Capacity)
         ));
     }
 

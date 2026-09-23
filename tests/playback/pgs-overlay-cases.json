@@ -1,0 +1,523 @@
+{
+  "about": "One fixture for the PGS overlay's seek, tick and manifest-response decisions, read by the Android JVM suite (PGSOverlayTest) and both Apple test targets (AppleClientTests). Windows are [lower_ms, upper_exclusive_ms] in source time, or null. The loaded window in most seek cases is what windowAt(100000) gives: look-behind 5 s, look-ahead 90 s, so its last 20 s (the refresh margin) starts at 170000. seek_cases: `refresh` is whether a seek starts a window load on both clients (Apple's seek and Android's discontinuity apply the same rule, with any failure backoff ended by the seek); `window` is the window that serves the new position (the one to load, the one loading, or the one loaded); `clear_now` is Android's alone, because Apple's cues are timed layers and cannot go stale. tick_cases: whether Apple's 1 s tick, or any Android player event that is not a seek, starts a load; a load covering the position is never replaced, and after window_failures consecutive failures the retry waits 5 s, then 30 s, then stops until a seek. docs/clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md §5.4, B3 and B4.",
+  "manifest": {
+    "duration_ms": 600000,
+    "cues": [
+      {
+        "id": "c1",
+        "start_ms": 10000,
+        "end_ms": 12000
+      },
+      {
+        "id": "c2",
+        "start_ms": 100000,
+        "end_ms": 104000
+      },
+      {
+        "id": "c3",
+        "start_ms": 150000,
+        "end_ms": 152000
+      },
+      {
+        "id": "c4",
+        "start_ms": 160000,
+        "end_ms": 175000
+      },
+      {
+        "id": "c5",
+        "start_ms": 176000,
+        "end_ms": 180000
+      },
+      {
+        "id": "c6",
+        "start_ms": 300000,
+        "end_ms": 302000
+      }
+    ]
+  },
+  "seek_cases": [
+    {
+      "name": "backward below the window start",
+      "loaded_window": [
+        95000,
+        190000
+      ],
+      "loading_window": null,
+      "shown_cue": "c2",
+      "to_ms": 11000,
+      "expect": {
+        "refresh": true,
+        "clear_now": true,
+        "active_cue": "c1",
+        "window": [
+          6000,
+          101000
+        ]
+      }
+    },
+    {
+      "name": "inside the window, same cue",
+      "loaded_window": [
+        95000,
+        190000
+      ],
+      "loading_window": null,
+      "shown_cue": "c2",
+      "to_ms": 102000,
+      "expect": {
+        "refresh": false,
+        "clear_now": false,
+        "active_cue": "c2",
+        "window": [
+          95000,
+          190000
+        ]
+      }
+    },
+    {
+      "name": "inside the window, into a gap",
+      "loaded_window": [
+        95000,
+        190000
+      ],
+      "loading_window": null,
+      "shown_cue": "c2",
+      "to_ms": 130000,
+      "expect": {
+        "refresh": false,
+        "clear_now": false,
+        "active_cue": null,
+        "window": [
+          95000,
+          190000
+        ]
+      }
+    },
+    {
+      "name": "into the refresh margin, into a gap after the shown cue ended (the Android stale frame)",
+      "loaded_window": [
+        95000,
+        190000
+      ],
+      "loading_window": null,
+      "shown_cue": "c2",
+      "to_ms": 175500,
+      "expect": {
+        "refresh": true,
+        "clear_now": true,
+        "active_cue": null,
+        "window": [
+          170500,
+          265500
+        ]
+      }
+    },
+    {
+      "name": "into the refresh margin, into a different cue",
+      "loaded_window": [
+        95000,
+        190000
+      ],
+      "loading_window": null,
+      "shown_cue": "c2",
+      "to_ms": 177000,
+      "expect": {
+        "refresh": true,
+        "clear_now": true,
+        "active_cue": "c5",
+        "window": [
+          172000,
+          267000
+        ]
+      }
+    },
+    {
+      "name": "into the refresh margin, still inside the shown cue",
+      "loaded_window": [
+        95000,
+        190000
+      ],
+      "loading_window": null,
+      "shown_cue": "c4",
+      "to_ms": 172000,
+      "expect": {
+        "refresh": true,
+        "clear_now": false,
+        "active_cue": "c4",
+        "window": [
+          167000,
+          262000
+        ]
+      }
+    },
+    {
+      "name": "beyond the window end",
+      "loaded_window": [
+        95000,
+        190000
+      ],
+      "loading_window": null,
+      "shown_cue": "c2",
+      "to_ms": 301000,
+      "expect": {
+        "refresh": true,
+        "clear_now": true,
+        "active_cue": "c6",
+        "window": [
+          296000,
+          391000
+        ]
+      }
+    },
+    {
+      "name": "out of the window, into the window already loading",
+      "loaded_window": [
+        95000,
+        190000
+      ],
+      "loading_window": [
+        296000,
+        391000
+      ],
+      "shown_cue": "c2",
+      "to_ms": 301000,
+      "expect": {
+        "refresh": false,
+        "clear_now": true,
+        "active_cue": "c6",
+        "window": [
+          296000,
+          391000
+        ]
+      }
+    },
+    {
+      "name": "into the middle of a cue inside the window",
+      "loaded_window": [
+        95000,
+        190000
+      ],
+      "loading_window": null,
+      "shown_cue": "c3",
+      "to_ms": 165000,
+      "expect": {
+        "refresh": false,
+        "clear_now": false,
+        "active_cue": "c4",
+        "window": [
+          95000,
+          190000
+        ]
+      }
+    },
+    {
+      "name": "into a gap just after a cue ended, inside the window",
+      "loaded_window": [
+        95000,
+        190000
+      ],
+      "loading_window": null,
+      "shown_cue": "c3",
+      "to_ms": 153000,
+      "expect": {
+        "refresh": false,
+        "clear_now": false,
+        "active_cue": null,
+        "window": [
+          95000,
+          190000
+        ]
+      }
+    },
+    {
+      "name": "nothing loaded yet",
+      "loaded_window": null,
+      "loading_window": null,
+      "shown_cue": null,
+      "to_ms": 50000,
+      "expect": {
+        "refresh": true,
+        "clear_now": false,
+        "active_cue": null,
+        "window": [
+          45000,
+          140000
+        ]
+      }
+    }
+  ],
+  "tick_cases": [
+    {
+      "name": "a tick inside the published window",
+      "position_ms": 120000,
+      "loaded_window": [
+        95000,
+        190000
+      ],
+      "loading_window": null,
+      "window_failures": 0,
+      "ms_since_failure": 0,
+      "expect": {
+        "refresh": false
+      }
+    },
+    {
+      "name": "a tick while a load covering the position is in flight must not cancel it",
+      "position_ms": 301000,
+      "loaded_window": [
+        95000,
+        190000
+      ],
+      "loading_window": [
+        296000,
+        391000
+      ],
+      "window_failures": 0,
+      "ms_since_failure": 0,
+      "expect": {
+        "refresh": false
+      }
+    },
+    {
+      "name": "a tick while the first covering load is in flight must not cancel it",
+      "position_ms": 52000,
+      "loaded_window": null,
+      "loading_window": [
+        45000,
+        140000
+      ],
+      "window_failures": 0,
+      "ms_since_failure": 0,
+      "expect": {
+        "refresh": false
+      }
+    },
+    {
+      "name": "a tick outside an in-flight load that no longer covers the position",
+      "position_ms": 500000,
+      "loaded_window": null,
+      "loading_window": [
+        296000,
+        391000
+      ],
+      "window_failures": 0,
+      "ms_since_failure": 0,
+      "expect": {
+        "refresh": true
+      }
+    },
+    {
+      "name": "a tick in the refresh margin with nothing loading",
+      "position_ms": 175000,
+      "loaded_window": [
+        95000,
+        190000
+      ],
+      "loading_window": null,
+      "window_failures": 0,
+      "ms_since_failure": 0,
+      "expect": {
+        "refresh": true
+      }
+    },
+    {
+      "name": "a tick with nothing loaded and nothing failed",
+      "position_ms": 120000,
+      "loaded_window": null,
+      "loading_window": null,
+      "window_failures": 0,
+      "ms_since_failure": 0,
+      "expect": {
+        "refresh": true
+      }
+    },
+    {
+      "name": "one failure, 1 s later: no retry yet, and no second notice",
+      "position_ms": 120000,
+      "loaded_window": null,
+      "loading_window": null,
+      "window_failures": 1,
+      "ms_since_failure": 1000,
+      "expect": {
+        "refresh": false
+      }
+    },
+    {
+      "name": "one failure, 5 s later: the first retry",
+      "position_ms": 120000,
+      "loaded_window": null,
+      "loading_window": null,
+      "window_failures": 1,
+      "ms_since_failure": 5000,
+      "expect": {
+        "refresh": true
+      }
+    },
+    {
+      "name": "two failures, 10 s later: still waiting",
+      "position_ms": 120000,
+      "loaded_window": null,
+      "loading_window": null,
+      "window_failures": 2,
+      "ms_since_failure": 10000,
+      "expect": {
+        "refresh": false
+      }
+    },
+    {
+      "name": "two failures, 30 s later: the second and last retry",
+      "position_ms": 120000,
+      "loaded_window": null,
+      "loading_window": null,
+      "window_failures": 2,
+      "ms_since_failure": 30000,
+      "expect": {
+        "refresh": true
+      }
+    },
+    {
+      "name": "three failures: retries spent until a seek",
+      "position_ms": 120000,
+      "loaded_window": null,
+      "loading_window": null,
+      "window_failures": 3,
+      "ms_since_failure": 600000,
+      "expect": {
+        "refresh": false
+      }
+    },
+    {
+      "name": "a failure never cancels a load that covers the position",
+      "position_ms": 301000,
+      "loaded_window": null,
+      "loading_window": [
+        296000,
+        391000
+      ],
+      "window_failures": 1,
+      "ms_since_failure": 0,
+      "expect": {
+        "refresh": false
+      }
+    }
+  ],
+  "manifest_responses": [
+    {
+      "name": "a published manifest",
+      "status": 200,
+      "retry_after": null,
+      "body": {
+        "schema": 1,
+        "generation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "file_id": 42,
+        "track_index": 3,
+        "kind": "pgs",
+        "timebase": "source_ms",
+        "duration_ms": 600000,
+        "cues": [
+          {
+            "id": "c1",
+            "start_ms": 10000,
+            "end_ms": 12000,
+            "canvas_width": 1920,
+            "canvas_height": 1080,
+            "objects": []
+          }
+        ]
+      },
+      "expect": {
+        "disposition": "ready"
+      }
+    },
+    {
+      "name": "a cold preparation",
+      "status": 202,
+      "retry_after": "1",
+      "body": {
+        "state": "preparing",
+        "retry_after_ms": 1000
+      },
+      "expect": {
+        "disposition": "preparing",
+        "retry_after_ms": 1000
+      }
+    },
+    {
+      "name": "capacity full is the one refusal worth waiting out",
+      "status": 503,
+      "retry_after": "5",
+      "body": {
+        "code": "pgs_overlay_capacity",
+        "message": "PGS overlay preparation capacity is full"
+      },
+      "expect": {
+        "disposition": "preparing",
+        "retry_after_ms": 5000
+      }
+    },
+    {
+      "name": "a codeless 503 from an older server is still a wait",
+      "status": 503,
+      "retry_after": null,
+      "body": {
+        "error": "PGS overlay preparation is temporarily unavailable"
+      },
+      "expect": {
+        "disposition": "preparing",
+        "retry_after_ms": 1000
+      }
+    },
+    {
+      "name": "a remembered preparation failure is terminal",
+      "status": 500,
+      "retry_after": null,
+      "body": {
+        "code": "pgs_overlay_prepare_failed",
+        "message": "PGS overlay preparation failed"
+      },
+      "expect": {
+        "disposition": "terminal",
+        "notice": "That subtitle could not be prepared. Video playback was kept unchanged."
+      }
+    },
+    {
+      "name": "a malformed stream is terminal and keeps its legacy fields",
+      "status": 422,
+      "retry_after": null,
+      "body": {
+        "error": "malformed PGS stream",
+        "detail": "bad segment",
+        "code": "pgs_overlay_prepare_failed",
+        "message": "PGS overlay preparation failed: the PGS stream is malformed"
+      },
+      "expect": {
+        "disposition": "terminal",
+        "notice": "That subtitle could not be prepared. Video playback was kept unchanged."
+      }
+    },
+    {
+      "name": "the failure code wins over a 503 status",
+      "status": 503,
+      "retry_after": "1",
+      "body": {
+        "code": "pgs_overlay_prepare_failed",
+        "message": "PGS overlay preparation failed"
+      },
+      "expect": {
+        "disposition": "terminal",
+        "notice": "That subtitle could not be prepared. Video playback was kept unchanged."
+      }
+    },
+    {
+      "name": "an overlay that is switched off",
+      "status": 404,
+      "retry_after": null,
+      "body": {
+        "error": "PGS overlay not found"
+      },
+      "expect": {
+        "disposition": "terminal"
+      }
+    }
+  ]
+}
