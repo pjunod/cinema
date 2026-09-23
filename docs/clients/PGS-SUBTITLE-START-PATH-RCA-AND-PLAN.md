@@ -13,7 +13,7 @@ ffprobe/ffmpeg must match, a free-space margin, the verdict outside the
 cancellable build, the latch re-checks kept files); PR 3 — the analysis
 progress row names the PGS tracks a pass is keeping and the bytes written, and
 Maintenance shows the store's size, file count and running ride-alongs with the
-switch that stops them — is built as a draft stacked on #460 · **nothing here
+switch that stops them — is built as #463, a draft stacked on #460, with its review's changes made (the local index loop's progress row, titles, the switch discarding a running pass's tracks, the gate state on the card) · **nothing here
 is deployed** ·
 reviewed — see
 [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·

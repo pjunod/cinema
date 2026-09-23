@@ -3455,7 +3455,7 @@ chooses its grade without the burn.
 
 | Runtime setting | Default | Meaning |
 |---|---:|---|
-| `subtitles.stored_sources` | on | One switch for both halves: the index pass keeps PGS tracks, and both consumers read them. Off stops the next pass keeping tracks and makes both consumers ignore what is stored, so a wrong stored track is taken out of service without a redeploy |
+| `subtitles.stored_sources` | on | One switch for both halves: the index pass keeps PGS tracks, and both consumers read them. Off makes both consumers ignore what is stored at once, discards the tracks of a pass still running when it finishes, and stops later passes keeping any, so a wrong stored track is taken out of service without a redeploy |
 
 The switch is **Settings → Developer → *Keep PGS tracks during indexing and
 read them instead of the source*** (`subtitle_stored_sources` in the settings
@@ -3486,22 +3486,41 @@ full sweep walk measured it, is in `plurx_subtitle_source_store_bytes` and
 **Where it shows while it runs.** The work is attributable from inside the
 product, not only from metrics:
 
-- **Content analysis → live progress.** A fragment-index row whose pass is
-  also keeping PGS tracks says *Also keeping N PGS tracks · X written*, with a
-  *turn off* link to the Developer switch. The byte count is the stage's size,
-  re-measured at most once a second (the muxer writes a track out in I/O-buffer
-  blocks, so a small track can read 0 B until the pass ends); a pass that is
-  not riding says nothing,
-  and a row from a peer that predates the fields reads as not riding.
-- **Settings → Maintenance → Stored subtitle tracks.** What the store occupies
-  on this node (bytes and file count from the last full sweep walk — *not
-  measured yet* until one has run in this process), its cap, each ride-along
-  running now with its file, track count and bytes written, and since the
-  process started: tracks attempted and their verdicts, bytes written, and
-  files indexed without the ride-along after a riding pass failed. It says why
-  the pass does this work (it already reads every packet) and links to the
-  switch that stops it. The same data is `subtitle_store` in
-  `GET /api/v1/settings`.
+- **Content analysis → live progress.** Every fragment-index pass has a
+  progress row: the queue worker's (`playback.vod_index_cluster_cache` on) and,
+  since #463's review, the local background loop's as well — the default on a
+  single-node install — keyed `local-index:<file>:<pipeline>` on this node. A
+  row whose pass is also keeping PGS tracks says *Also keeping N PGS tracks · X
+  written*, with a link that lands on the switch on Developer. The byte count is
+  the stage's size, re-measured at most once a second (the muxer writes a track
+  out in I/O-buffer blocks, so a small track can read 0 B until the pass ends);
+  a pass that is not riding says nothing, and a row from a peer that predates
+  the fields reads as not riding.
+- **Settings → Maintenance → Stored subtitle tracks.** On this node:
+  - whether the next index pass would keep tracks — a red *not keeping tracks*
+    pill with the reason (self-test, filesystem, free space) when the switch is
+    on and the gate is closed, *off* when the switch is off;
+  - what the store occupies (bytes and file count from the last full sweep
+    walk, and how long ago that was), and its cap. Until a sweep has run in
+    this process it says *not measured yet*; with background analysis paused
+    (`vod_index_mins` = 0) it says the sweep does not run;
+  - each ride-along running now, by title (linked to the item), with its track
+    count, bytes written and how long it has run;
+  - since the process started: tracks attempted and their verdicts, bytes
+    written, files indexed without the ride-along after a riding pass failed,
+    and passes that finished after the switch was turned off.
+
+  It says why the pass does this work (it already reads every packet) and
+  links to the switch (`#/settings/developer/enable-subtitle-sources`, which
+  scrolls to it). The same data is `subtitle_store` in `GET /api/v1/settings`.
+
+**What the switch stops.** Off takes effect at once: both consumers stop
+reading the store; a pass already running finishes its index — the index is
+never the price — but publishes none of the tracks it kept
+(`JobManager::settle_ride_along` reads the switch again before publishing,
+counted in `plurx_subtitle_ride_along_discarded_total{reason="switch_off"}`,
+beside `source_moved` and `catalog_moved`); and later passes keep none. What
+is already stored stays on disk until the size cap or the sweep removes it.
 
 ### Playback telemetry
 
