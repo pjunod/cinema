@@ -325,6 +325,10 @@ impl ActivationFailpoint {
 /// A prior interrupted attempt consumes exactly one SQLite recovery boot: its
 /// incoming target is removed, the attempt marker is fsynced away, and the
 /// unchanged legacy store is returned. A completed atomic target always wins.
+///
+/// Each startup branch (join, reopen, first activation) is boxed. Inlined,
+/// their state machines were summed into this one future, and a debug build
+/// of a caller that awaits it overflowed a 2 MiB test thread's stack.
 #[cfg(feature = "hiqlite-store")]
 pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, StoreError> {
     install_default_crypto_provider();
@@ -339,11 +343,11 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
             && path_exists(&config.cluster.join_token_file)?
             && !path_exists(&active.join(ACTIVATION_MARKER_FILENAME))?;
         if pending_join {
-            return join_fresh_store(config, daemon_lock).await;
+            return Box::pin(join_fresh_store(config, daemon_lock)).await;
         }
         readdress_single_voter_if_needed(config)?;
-        let selected = open_active_store(config, daemon_lock).await?;
-        finalize_pending_join_best_effort(config, &selected).await;
+        let selected = Box::pin(open_active_store(config, daemon_lock)).await?;
+        Box::pin(finalize_pending_join_best_effort(config, &selected)).await;
         // A crash immediately after rename may expose the target before its
         // parent-directory entry is durable. Observing it on recovery lets us
         // finish that durability boundary before clearing attempt artifacts.
@@ -377,7 +381,7 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
     }
 
     if !config.cluster.join_token_file.as_os_str().is_empty() {
-        return join_fresh_store(config, daemon_lock).await;
+        return Box::pin(join_fresh_store(config, daemon_lock)).await;
     }
 
     ensure_sqlite_source(&config.storage.data_dir)?;
@@ -421,7 +425,15 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
     let credential_key = legacy.credential_key;
     drop(legacy.store);
 
-    match activate_fresh_store(config, failpoint, daemon_lock, identity, credential_key).await {
+    match Box::pin(activate_fresh_store(
+        config,
+        failpoint,
+        daemon_lock,
+        identity,
+        credential_key,
+    ))
+    .await
+    {
         Ok(store) => Ok(store),
         Err(error) => Err(activation_failure(&config.storage.data_dir, error)),
     }
@@ -605,7 +617,11 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     let credential_key = open_active_credential_key(config, &store).await?;
     let concrete_store = Arc::new(store);
     let store: Arc<dyn Store> = concrete_store.clone();
-    let replication = status::ReplicationMonitor::replicated(client.clone());
+    let replication = status::ReplicationMonitor::replicated(
+        client.clone(),
+        active.clone(),
+        HIQLITE_DATABASE_FILENAME,
+    );
     let catalogue = CatalogueReader::replicated(
         Arc::clone(&store),
         concrete_store,
@@ -1608,7 +1624,11 @@ async fn open_active_store_with_key(
         };
         let concrete_store = Arc::new(store);
         let store: Arc<dyn Store> = concrete_store.clone();
-        let replication = status::ReplicationMonitor::replicated(client.clone());
+        let replication = status::ReplicationMonitor::replicated(
+            client.clone(),
+            active.clone(),
+            HIQLITE_DATABASE_FILENAME,
+        );
         let catalogue = CatalogueReader::replicated(
             Arc::clone(&store),
             concrete_store,
@@ -4595,6 +4615,32 @@ mod tests {
     /// token file, public redeem/finalize wire, local membership state, and
     /// fully-TLS voter startup. The in-process membership harness alone cannot
     /// cover any of these pre-store decisions.
+    /// 496 bytes with every branch boxed (debug, 2026-09-22). With the join,
+    /// reopen and finalize branches awaited inline it measured 9,984, so the
+    /// limit leaves room for ordinary growth and still refuses a branch
+    /// awaited inline again.
+    #[cfg(feature = "hiqlite-store")]
+    const SELECT_DAEMON_STORE_FUTURE_LIMIT: usize = 2048;
+
+    /// `select_daemon_store` is awaited inline by daemon startup and by the
+    /// join tests, so its future lives on the caller's stack. Its branches are
+    /// boxed to keep it small; awaiting one inline again summed every branch's
+    /// state machine into it and overflowed a 2 MiB debug test thread.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn select_daemon_store_future_stays_small() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let config = membership_test_config(data_dir.path());
+        let future = select_daemon_store(&config);
+        let size = std::mem::size_of_val(&future);
+        drop(future);
+        println!("select_daemon_store future: {size} bytes");
+        assert!(
+            size <= SELECT_DAEMON_STORE_FUTURE_LIMIT,
+            "select_daemon_store's future grew to {size} bytes; box the branch that grew it"
+        );
+    }
+
     #[cfg(feature = "hiqlite-store")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {
@@ -6270,6 +6316,7 @@ pub mod status {
 
     use std::collections::BTreeSet;
     use std::future::Future;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -6378,6 +6425,15 @@ pub mod status {
         pub apply_lag_entries: Option<u64>,
     }
 
+    /// Fixed-cardinality sizes sampled from this process's local Hiqlite tree.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct StateMachineBytes {
+        pub db: u64,
+        pub wal: u64,
+        pub snapshots: u64,
+        pub logs: u64,
+    }
+
     /// Store-free view consumed by the Prometheus handler.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct PassiveRaftMetricsView {
@@ -6400,6 +6456,7 @@ pub mod status {
         pub watermark_local_reads_supported: bool,
         pub watermark_errors: u64,
         pub snapshot_metrics: Option<DbSnapshotMetricsSnapshot>,
+        pub state_machine_bytes: Option<StateMachineBytes>,
     }
 
     /// One quorum proof, captured while this node was eligible to serve on it.
@@ -6503,6 +6560,11 @@ pub mod status {
         watermark_local_epoch: AtomicU64,
         watermark_errors: AtomicU64,
         watermark_invalidated: AtomicBool,
+        state_machine_bytes_present: AtomicBool,
+        state_machine_db_bytes: AtomicU64,
+        state_machine_wal_bytes: AtomicU64,
+        state_machine_snapshots_bytes: AtomicU64,
+        state_machine_logs_bytes: AtomicU64,
         sampler_started: AtomicBool,
     }
 
@@ -6515,6 +6577,8 @@ pub mod status {
         watermark_source: bool,
         watermark_requires_local_binding: bool,
         snapshot_metrics: Option<LocalDbSnapshotMetrics>,
+        state_machine_path: Option<PathBuf>,
+        state_machine_filename: Option<String>,
     }
 
     impl PassiveRaftMetrics {
@@ -6526,6 +6590,8 @@ pub mod status {
                 watermark_source: local_source,
                 watermark_requires_local_binding: local_source,
                 snapshot_metrics: None,
+                state_machine_path: None,
+                state_machine_filename: None,
             }
         }
 
@@ -6540,12 +6606,51 @@ pub mod status {
                 watermark_source: true,
                 watermark_requires_local_binding: false,
                 snapshot_metrics: None,
+                state_machine_path: None,
+                state_machine_filename: None,
             }
         }
 
         fn with_snapshot_metrics(mut self, metrics: Option<LocalDbSnapshotMetrics>) -> Self {
             self.snapshot_metrics = metrics;
             self
+        }
+
+        fn with_state_machine_path(
+            mut self,
+            data_dir: PathBuf,
+            filename: impl Into<String>,
+        ) -> Self {
+            self.state_machine_path = Some(data_dir);
+            self.state_machine_filename = Some(filename.into());
+            self
+        }
+
+        fn sample_state_machine_bytes(&self) -> std::io::Result<()> {
+            let (Some(data_dir), Some(filename)) =
+                (&self.state_machine_path, &self.state_machine_filename)
+            else {
+                return Ok(());
+            };
+            let sample = state_machine_bytes(data_dir, filename)?;
+            let sequence = self.begin_write();
+            self.inner
+                .state_machine_db_bytes
+                .store(sample.db, Ordering::Relaxed);
+            self.inner
+                .state_machine_wal_bytes
+                .store(sample.wal, Ordering::Relaxed);
+            self.inner
+                .state_machine_snapshots_bytes
+                .store(sample.snapshots, Ordering::Relaxed);
+            self.inner
+                .state_machine_logs_bytes
+                .store(sample.logs, Ordering::Relaxed);
+            self.inner
+                .state_machine_bytes_present
+                .store(true, Ordering::Relaxed);
+            self.end_write(sequence);
+            Ok(())
         }
 
         /// Construct one current local/quorum proof for deterministic Store
@@ -6872,6 +6977,20 @@ pub mod status {
                 let watermark_errors = self.inner.watermark_errors.load(Ordering::Relaxed);
                 let watermark_invalidated =
                     self.inner.watermark_invalidated.load(Ordering::Relaxed);
+                let state_machine_bytes_present = self
+                    .inner
+                    .state_machine_bytes_present
+                    .load(Ordering::Relaxed);
+                let state_machine_db_bytes =
+                    self.inner.state_machine_db_bytes.load(Ordering::Relaxed);
+                let state_machine_wal_bytes =
+                    self.inner.state_machine_wal_bytes.load(Ordering::Relaxed);
+                let state_machine_snapshots_bytes = self
+                    .inner
+                    .state_machine_snapshots_bytes
+                    .load(Ordering::Relaxed);
+                let state_machine_logs_bytes =
+                    self.inner.state_machine_logs_bytes.load(Ordering::Relaxed);
                 let after = self.inner.sequence.load(Ordering::Acquire);
                 if before == after {
                     let age_seconds =
@@ -6925,6 +7044,14 @@ pub mod status {
                                 == hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION,
                         watermark_errors,
                         snapshot_metrics: self.snapshot_metrics.map(|metrics| metrics.snapshot()),
+                        state_machine_bytes: state_machine_bytes_present.then_some(
+                            StateMachineBytes {
+                                db: state_machine_db_bytes,
+                                wal: state_machine_wal_bytes,
+                                snapshots: state_machine_snapshots_bytes,
+                                logs: state_machine_logs_bytes,
+                            },
+                        ),
                     };
                 }
             }
@@ -7148,6 +7275,46 @@ pub mod status {
         u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
     }
 
+    fn state_machine_bytes(data_dir: &Path, filename: &str) -> std::io::Result<StateMachineBytes> {
+        let state_machine = data_dir.join("state_machine");
+        let database = state_machine.join("db").join(filename);
+        let wal = database.with_file_name(format!("{filename}-wal"));
+        Ok(StateMachineBytes {
+            db: regular_file_bytes(&database)?,
+            wal: regular_file_bytes(&wal)?,
+            snapshots: directory_bytes(&state_machine.join("snapshots"))?,
+            logs: directory_bytes(&data_dir.join("logs"))?,
+        })
+    }
+
+    fn regular_file_bytes(path: &Path) -> std::io::Result<u64> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => Ok(metadata.len()),
+            Ok(_) => Ok(0),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn directory_bytes(path: &Path) -> std::io::Result<u64> {
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        let mut bytes = 0_u64;
+        for entry in entries {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_file() {
+                bytes = bytes.saturating_add(entry.metadata()?.len());
+            } else if file_type.is_dir() {
+                bytes = bytes.saturating_add(directory_bytes(&entry.path())?);
+            }
+        }
+        Ok(bytes)
+    }
+
     #[async_trait::async_trait]
     trait PassiveRaftSource: Send {
         fn snapshot(&self) -> LocalDbRaftSnapshot;
@@ -7241,6 +7408,9 @@ pub mod status {
         S: PassiveRaftSource,
         F: Future<Output = ()> + Send,
     {
+        if let Err(error) = metrics.sample_state_machine_bytes() {
+            tracing::debug!(%error, "local Raft state-machine size sample failed");
+        }
         let initial = source.snapshot();
         if !metrics.publish(&initial) {
             return;
@@ -7250,7 +7420,7 @@ pub mod status {
         refresh.tick().await;
         tokio::pin!(shutdown);
         loop {
-            tokio::select! {
+            let refresh_sizes = tokio::select! {
                 biased;
                 _ = &mut shutdown => return,
                 changed = source.wait_for_change() => {
@@ -7258,8 +7428,14 @@ pub mod status {
                         metrics.record_error();
                         return;
                     }
+                    false
                 }
-                _ = refresh.tick() => {}
+                _ = refresh.tick() => true,
+            };
+            if refresh_sizes {
+                if let Err(error) = metrics.sample_state_machine_bytes() {
+                    tracing::debug!(%error, "local Raft state-machine size sample failed");
+                }
             }
             let sample = source.snapshot();
             if !metrics.publish(&sample) {
@@ -7302,13 +7478,18 @@ pub mod status {
 
         /// Monitor a local Hiqlite voter through the same client the Store uses.
         #[must_use]
-        pub fn replicated(client: Client) -> Self {
+        pub fn replicated(
+            client: Client,
+            data_dir: impl Into<PathBuf>,
+            filename: impl Into<String>,
+        ) -> Self {
             let local_metrics = client.local_db_raft_metrics().ok();
             let snapshot_metrics = client.local_db_snapshot_metrics().ok();
             let wal_status = client.local_db_wal_status().ok();
             let local_transport = client.local_snapshot_transport_status().ok();
             let passive_metrics = PassiveRaftMetrics::new(local_metrics.is_some())
-                .with_snapshot_metrics(snapshot_metrics);
+                .with_snapshot_metrics(snapshot_metrics)
+                .with_state_machine_path(data_dir.into(), filename);
             Self {
                 backend: ReplicationBackend::Replicated,
                 client: Some(client),
@@ -7691,6 +7872,37 @@ pub mod status {
                 committed_index,
                 local_read_protocol_version,
             }
+        }
+
+        #[test]
+        fn state_machine_size_sample_uses_the_fixed_local_components() {
+            let data = tempfile::tempdir().expect("temporary Hiqlite root");
+            let db_dir = data.path().join("state_machine/db");
+            let snapshots = data.path().join("state_machine/snapshots/nested");
+            let logs = data.path().join("logs");
+            std::fs::create_dir_all(&db_dir).expect("database directory");
+            std::fs::create_dir_all(&snapshots).expect("snapshot directory");
+            std::fs::create_dir_all(&logs).expect("log directory");
+            std::fs::write(db_dir.join("plurx.db"), [0_u8; 11]).expect("database fixture");
+            std::fs::write(db_dir.join("plurx.db-wal"), [0_u8; 13]).expect("WAL fixture");
+            std::fs::write(snapshots.join("snapshot"), [0_u8; 17]).expect("snapshot fixture");
+            std::fs::write(logs.join("segment"), [0_u8; 19]).expect("log fixture");
+
+            let metrics = PassiveRaftMetrics::new(true)
+                .with_state_machine_path(data.path().to_owned(), "plurx.db");
+            metrics
+                .sample_state_machine_bytes()
+                .expect("sample state-machine files");
+
+            assert_eq!(
+                metrics.snapshot().state_machine_bytes,
+                Some(StateMachineBytes {
+                    db: 11,
+                    wal: 13,
+                    snapshots: 17,
+                    logs: 19,
+                })
+            );
         }
 
         #[test]

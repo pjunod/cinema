@@ -1998,6 +1998,11 @@ final class PlayerController: ObservableObject {
     /// writer now raises a typed fault; the presenter decides what is drawn
     /// (docs/clients/PLAYBACK-SURFACE-CONTRACT.md §3).
     @Published private(set) var surface = PlaybackSurfaceModel()
+    /// The wait sentence as it is now — runway and the server's parked-request
+    /// count — refreshed on the surface clock. The fault keeps the sentence
+    /// from the instant its wait began, which is always "0.0 s client loaded";
+    /// the view draws this instead for a wait (`PlaybackWaitPresentation`).
+    @Published private(set) var waitDetail: String?
     @Published private(set) var finished = false
     @Published private(set) var pgsOverlayWindow: PGSOverlayWindow?
     @Published private(set) var pgsOverlayStatus: PGSOverlayStatus = .off
@@ -6157,6 +6162,8 @@ final class PlayerController: ObservableObject {
         surfaceHasPresented = false
         streamChangePreparingIntent = nil
         surfaceLogOnlyReasons.removeAll()
+        // The last playback's wait reading is not this one's.
+        waitDetail = nil
     }
 
     /// The ledger ring and the four client-log events of the contract's §3.6.
@@ -6444,7 +6451,8 @@ final class PlayerController: ObservableObject {
         guard !hasLiveSurfaceFault(source: source) else { return }
         let waiting = PlaybackWaitPresentation.make(
             runwaySeconds: bufferedRunwaySeconds(),
-            httpWaitCount: sessionStatus?.httpWaitCount
+            httpWaitCount: sessionStatus?.httpWaitCount,
+            source: source
         )
         raiseSurfaceNotice(
             source: source,
@@ -6509,6 +6517,7 @@ final class PlayerController: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(Self.surfaceClockIntervalMs))
                 guard !Task.isCancelled, let self, self.started else { return }
+                self.refreshWaitDetail()
                 self.noteMediaWaiting()
                 self.present(.tick)
             }
@@ -6516,6 +6525,16 @@ final class PlayerController: ObservableObject {
     }
 
     static let surfaceClockIntervalMs = 500
+
+    /// Resample the wait sentence. Published only on change, so a steady
+    /// reading does not redraw the player twice a second.
+    private func refreshWaitDetail() {
+        let detail = PlaybackWaitPresentation.make(
+            runwaySeconds: bufferedRunwaySeconds(),
+            httpWaitCount: sessionStatus?.httpWaitCount
+        ).detail
+        if waitDetail != detail { waitDetail = detail }
+    }
 
     /// Contract §3.3 row 18: prepared-successor abandonment, `session_gone` on
     /// a successor's first exchange, and telemetry/reporter/stats failures.

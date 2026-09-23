@@ -87,7 +87,7 @@ CREATE INDEX network_priors_by_updated
     ON network_priors(updated_at_ms, user_id, client_class);";
 
 #[cfg(any(test, feature = "hiqlite-store"))]
-const SIDECAR_SCHEMA_VERSION: i64 = 9;
+const SIDECAR_SCHEMA_VERSION: i64 = 10;
 const MAX_QUERY_ROWS: i64 = 2_000;
 const MAX_PRUNE_ROWS: i64 = 10_000;
 const MAX_PRIORS_PER_USER_CLIENT: i64 = 64;
@@ -508,6 +508,15 @@ impl NodeLocalTelemetry {
                 migration.push_str(crate::store::fragindex::FRAGMENT_INDEX_TYPED_OUTCOMES_SCHEMA);
                 migration.push('\n');
             }
+            // v10: publication-time structural validation for metadata-only
+            // detail status. The historical create/re-key constants remain
+            // frozen, so a fresh sidecar needs the ALTER in this same batch
+            // just like an upgraded one.
+            if creating_indexes || !column_exists(&conn, "fragment_indexes", "validated_revision")?
+            {
+                migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_VALIDATION_COLUMN);
+                migration.push('\n');
+            }
             migration.push_str(&format!(
                 "PRAGMA user_version = {SIDECAR_SCHEMA_VERSION};\nCOMMIT;"
             ));
@@ -620,6 +629,14 @@ impl NodeLocalTelemetry {
         identity: crate::segplan::SourceIdentity,
     ) -> Result<Option<crate::segplan::FragmentIndex>, StoreError> {
         self.with_conn(move |conn| crate::store::fragindex::get(conn, file_id, &identity))
+            .await
+    }
+
+    pub(crate) async fn validate_fragment_index_page(
+        &self,
+        limit: u32,
+    ) -> Result<crate::store::FragmentIndexValidationBackfill, StoreError> {
+        self.with_conn(move |conn| crate::store::fragindex::validate_page(conn, limit))
             .await
     }
 
@@ -1080,7 +1097,7 @@ mod tests {
         // `SIDECAR_SCHEMA_VERSION`, so an assertion built from the same
         // constant can never fail on a bump. Update it by hand, deliberately,
         // exactly as the single-node backend's `assert_eq!(version, 37)` is.
-        assert!(error.to_string().contains("only knows v9"), "{error}");
+        assert!(error.to_string().contains("only knows v10"), "{error}");
     }
 
     #[tokio::test]
@@ -1361,6 +1378,11 @@ mod tests {
             SIDECAR_SCHEMA_VERSION
         );
         assert!(table_exists(&conn, "fragment_index_outcomes").expect("table check"));
+        assert!(
+            column_exists(&conn, "fragment_indexes", "validated_revision")
+                .expect("validation-column check"),
+            "an upgraded sidecar must gain the M1 validation marker"
+        );
     }
 
     #[tokio::test]

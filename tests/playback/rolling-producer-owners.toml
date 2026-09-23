@@ -201,7 +201,18 @@ pattern = "tokio::spawn\\("
 # converts the conservative reservation to measured bytes exactly once, then
 # exits. It carries the ledger key rather than the session, so it cannot keep a
 # retired session alive.
-expected_occurrences = 84
+# 84 -> 85 with S-13's bound-source refusal regression. The added `tokio::spawn`
+# is in `source_change_refuses_bound_plan` in `crates/plurxd/src/transcode.rs`:
+# it waits 100 ms and then rewrites the held source file, so the decode-fact
+# collection binds a source that changes underneath it and the final identity
+# check refuses the bound plan instead of falling back to catalogue facts. The
+# task is `#[cfg(unix)]` test-only, its `JoinHandle` is awaited by the test
+# before any assertion, and its whole body is one `std::fs::write` — it owns no
+# producer, no process and no timer, and it decides nothing about recovery.
+# +2 for the HTTP wait ledger tests (#444): each spawns one segment request
+# against an unpublished segment, then aborts and joins it before asserting.
+# Test-only; they own no producer.
+expected_occurrences = 87
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
 
@@ -252,7 +263,15 @@ pattern = "tokio::time::sleep\\("
 # publication-clock test no longer manufactures the retired inferred-ahead
 # suspend/resume path. Its fixed hold sleep and three progress/event polls were
 # removed; all four were test-only and owned no producer.
-expected_occurrences = 41
+# 41 -> 42 with S-13's bound-source refusal regression: the one
+# `tokio::time::sleep(Duration::from_millis(100))` inside the mutation task of
+# `source_change_refuses_bound_plan`, reviewed under
+# `all-detached-tokio-tasks` above. It only orders the fixture's rewrite after
+# the source has been bound; it is awaited together with the task that holds
+# it, and it owns no producer, process or timer.
+# +2 for the same two #444 tests: a bounded 10 ms poll (5 s deadline that
+# asserts) until the parked request shows in the ledger. Test-only.
+expected_occurrences = 44
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -1652,10 +1671,25 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # leased catalogue job that walks a node-local cursor and writes MaxCLL,
 # MaxFALL, mastering peak and provenance columns. It owns no producer, no
 # process and no timer of its own.
+# 546 -> 547 with C-05: `spawn_background_loops` spawns one more per-node
+# background loop, `fragment_index_validation_loop`, beside the shared-cache
+# and media-session loops already there. Fragment indexes are node-local for
+# both storage backends, so this runs on every node rather than behind a
+# leadership check; it walks one bounded page of legacy rows per tick and
+# writes the validation marker. It owns no producer and no process, and its
+# only timer is the shared 30-second tick recorded in the time-constructor
+# row below.
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 546
+# 547 -> 548 with S-13: the same `tokio::spawn` in
+# `source_change_refuses_bound_plan` that `all-detached-tokio-tasks` above
+# counts. One call, counted once in each sentinel. Test-only, joined inside the
+# test, and it owns no producer, process or timer. 547 rather than 546 is the
+# base this branch now sits on: C-05's fragment-index validation loop, reviewed
+# directly above, reached main first.
+# +2: the two #444 HTTP wait ledger tests' joined `tokio::spawn` requests.
+expected_occurrences = 550
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2139,10 +2173,30 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # pass in `decode_facts.rs` against the caller's remaining budget, and three are
 # `#[cfg(test)]` bounds in the cancellation fixture beside it. None of them owns
 # a producer; the idet bound is the caller's deadline, not a new one.
+# 840 -> 841 with C-05: `FRAGMENT_INDEX_VALIDATION_INTERVAL` is one
+# `Duration::from_secs(30)` const, the sleep between bounded validation pages
+# in the loop added to the task-spawn row above. It is a pacing interval for a
+# node-local backfill, not a deadline, a lease or a producer's clock, and
+# nothing reads it but that loop.
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 840
+# 841 -> 843 with S-13, both test-only and both awaited. One is the
+# `tokio::time::sleep` in `source_change_refuses_bound_plan`
+# (`crates/plurxd/src/transcode.rs`), reviewed under `all-async-sleeps` above —
+# same call, counted once in each sentinel. The other is a
+# `tokio::time::timeout(Duration::from_millis(250), ...)` in
+# `pidfd_read_failure_retains_source_ownership_until_reap`
+# (`crates/plurxd/src/decode_facts.rs`). It bounds that test's own
+# `yield_now` poll for the collection phase sample, which the detached
+# collection task now records itself rather than having the abandoned waiter
+# record it, so the sample can only appear once the slow reap has finished. It
+# waits on an owner the fixture already started; it starts no producer, process
+# or timer, and the deadline it carries is the test's, not a caller's.
+# +3 for #444: the two ledger tests' 10 ms polls and one `std::thread::sleep`
+# that ages the first ledger entry. All test-only; production waits are
+# unchanged (the guard is taken inside the existing publication loop).
+expected_occurrences = 846
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2519,10 +2573,15 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 326 -> 327 with S-08: the added `.status()` belongs to the `#[cfg(test)]`
 # fixture renderer in `decode_facts.rs`, which is awaited to completion before
 # the test that built it proceeds.
+# 332 -> 333 with K-04: the added `.status()` reads the `Response` an Axum
+# `oneshot` returned in `metrics_route_attribution_renders_fixed_labels_and_
+# scoped_store_counts`, which drives one in-process request through the
+# attribution middleware. It is an HTTP status read, not a command launch,
+# and the test owns no process and no producer.
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 332
+expected_occurrences = 333
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
