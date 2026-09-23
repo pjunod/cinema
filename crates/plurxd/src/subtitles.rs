@@ -2716,15 +2716,21 @@ mod tests {
         let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let finished_for_run = Arc::clone(&finished);
-        let slow = ensure_vtt_bounded(dir.path(), &file, 0, limits(), move |tmp, _, _| async move {
-            // Longer than the join budget, shorter than the extraction's own.
-            let _ = release_rx.await;
-            tokio::fs::write(&tmp, b"WEBVTT\n\ncold\n")
-                .await
-                .map_err(|error| error.to_string())?;
-            finished_for_run.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        })
+        let slow = ensure_vtt_bounded(
+            dir.path(),
+            &file,
+            0,
+            limits(),
+            move |tmp, _, _| async move {
+                // Longer than the join budget, shorter than the extraction's own.
+                let _ = release_rx.await;
+                tokio::fs::write(&tmp, b"WEBVTT\n\ncold\n")
+                    .await
+                    .map_err(|error| error.to_string())?;
+                finished_for_run.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
         .await;
 
         let why = slow.expect_err("a caller must not inherit a full-source read");

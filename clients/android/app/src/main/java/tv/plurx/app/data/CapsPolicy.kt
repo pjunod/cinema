@@ -1,6 +1,8 @@
 package tv.plurx.app.data
 
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
+import tv.plurx.app.player.PGS_OVERLAY_PROTOCOL
 
 /**
  * The pure half of [Caps] — what the device's probes *mean*, with no Android
@@ -30,6 +32,12 @@ data class DeviceCaps(
     val transports: List<String>,
     val display: DisplayCaps,
     val learned_limits: List<LearnedLimit> = emptyList(),
+    // ALWAYS, because kotlinx omits a property equal to its default and an
+    // omitted claim reads as "cannot draw an overlay" on the server. The list
+    // is constant — `AndroidPGSOverlay` is compiled in — so without this the
+    // claim would never reach the wire at all.
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS)
+    val subtitle_overlays: List<String> = listOf(PGS_OVERLAY_PROTOCOL),
 )
 
 @Serializable

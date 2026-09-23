@@ -14,6 +14,10 @@ struct DeviceCaps: Codable, Equatable {
     let containers: [String]
     let transports: [String]
     var progressiveHevcSampleEntries: [String]? = nil
+    /// Overlay protocols this client can draw. `PGSOverlay.swift` implements
+    /// `pgs-v1`, so it is claimed unconditionally — the renderer is compiled
+    /// in, not a runtime capability.
+    var subtitleOverlays: [String] = [PGSOverlayPolicy.protocolName]
     let dvTransport: String
     let display: DisplayCaps
     var learnedLimits: [LearnedLimit] = []

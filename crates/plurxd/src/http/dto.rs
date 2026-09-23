@@ -483,12 +483,21 @@ fn playback_defaults(
     // bitmap track stays eligible. `/decision` is what the clients act on,
     // and it refines this with the base grade it actually computed.
     //
-    // The overlay is reported as *off*, and not because this surface knows it
-    // is: `FileDto::from_media_file` has no access to the setting, and the
-    // conservative answer is the right one either way. With the overlay off,
-    // claiming a non-forced PGS track as the default is the M1 defect on this
-    // surface. With it on, `/decision` offers the track anyway, so nothing is
-    // lost by not announcing it a step early.
+    // The overlay term is `false` here, and it has to stay that way.
+    //
+    // A previous revision threaded this server's switch in, on the theory that
+    // each client narrows it locally. That is not true of the web player:
+    // nothing under `web/detail/` consults a renderer, `track-facts.js` stamps
+    // the chip "plays by default" straight from `selected_index`, and its only
+    // narrowing — `prePlayBurnNeeded` — is reached solely for an explicit
+    // viewer pick. With the switch on, that surface would promise a browser a
+    // PGS track it will never draw, on the exact chip where a viewer takes the
+    // server at its word. Old native builds would read it the same way.
+    //
+    // Since the default became per-client (`/decision` ANDs the switch with
+    // the caller's `subtitle_overlays` claim), the honest answer needs a
+    // capabilities document, and item detail has none. Too narrow for a
+    // capable client is a missing convenience; confidently wrong is a lie.
     let selected = select_tracks_with(
         audio,
         subtitles,

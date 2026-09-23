@@ -4,6 +4,49 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## PGS subtitles stopped blocking the start path
+
+Three pieces, from one report: *Bad Boys: Ride or Die* would not play on the
+TCL tablet on 2026-09-21, and the overlay the viewer saw was the least
+interesting of three failures that night. Diagnosis, measurements and the plan:
+[docs/clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md](docs/clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md),
+reviewed by Fable (APPROVE WITH CHANGES, folded in).
+
+The measurement that explains all of it: file 5208 is a **79.5 GB** remux whose
+PGS subtitle packets are interleaved across 116 minutes, so extracting one
+track read the whole film — **402 s to produce 18,866 bytes**, which is just
+the array at 198 MB/s.
+
+- **#437** (`5c48ed5ab`, merged) — the cluster replacement gate is reclaimed on
+  evidence, not on a clock: a hold that declared itself abandoned, or one past
+  a 120 s ceiling, loses its player. Fixed the refusal the viewer quoted.
+- **#445** (`5c605768`, merged) — a session start no longer awaits a full-film
+  demux, and a pending sidecar is a named `startup_timeout` rather than a
+  codeless 503 no client retries. Bounded for the start path **only**: offline
+  restore, the VTT endpoint and package production keep their unbounded wait,
+  because for them a slow success must stay a success.
+- **#447** (open) — the PGS overlay capability. `/decision` now narrows on the
+  server switch **and** the caller's own `subtitle_overlays` claim, so a client
+  that cannot paint a bitmap is not offered a PGS default and is told the truth
+  that selecting one burns the video. Two deliberate limits, both from the
+  adversarial review: **no caps document at all** falls back to the switch
+  alone, because the legacy query is a mixed-fleet path both native clients
+  reach on any 400/404/405 and reading silence as a refusal would send a
+  capable client off to re-encode a whole film; and the `overlay` field on the
+  track keeps the server's own answer, because it describes what this process
+  can deliver rather than what this caller can paint. Item detail keeps
+  answering `false` for the same reason it always did — it has no capabilities
+  document, and the web's detail surface does no narrowing of its own.
+  `tests/validation/test_caps_wire_conformance.py` pins the field name across
+  all four ports, because `DeviceCaps` has no `deny_unknown_fields` and a
+  misspelled claim is silently dropped rather than refused.
+
+**Not deployed, and nothing has run on hardware.** Still open: the overlay's
+enablement check (two devices, one DV title each, a seek each way), and
+building the `.sup` as a ride-along on the fragment-index pass — which Fable
+confirmed is already one sequential demux of the whole file, so every PGS track
+can come out of it at zero added I/O.
+
 ## The full Rust suite and the release build are clean again
 
 `PR #443`, branch `fix/red-suite-2026-09-22`. Nothing here changes runtime
