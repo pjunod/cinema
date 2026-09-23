@@ -426,6 +426,6 @@ test_anchor = "hdrSubtitleGuardKeepsTheCurrentPictureForBurnOnlyTracks"
 [[decisions]]
 id = "android.pgs-overlay"
 source = "clients/android/app/src/main/java/tv/plurx/app/player/AndroidPGSOverlay.kt"
-source_anchor = "internal class AndroidPGSOverlayController("
+source_anchor = "internal class PGSOverlayController<I : Any>("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PGSOverlayTest.kt"
 test_anchor = "timelineUsesSourcePositionAndSchedulesExactBoundaries"
