@@ -571,7 +571,10 @@ pub(crate) async fn plan(
         let mut failed = failed_rides();
         match failed.get(&key) {
             Some(stamp) if *stamp == live => {
-                tracing::debug!(file_id, "the last riding pass on this source failed; not riding");
+                tracing::debug!(
+                    file_id,
+                    "the last riding pass on this source failed; not riding"
+                );
                 return None;
             }
             // Another source identity is another question.
@@ -1573,10 +1576,15 @@ pub(crate) async fn run_self_test(
 
 /// The version token of `bin -version`'s first line (`ffmpeg version 8.0.1-3
 /// Copyright …` → `8.0.1-3`), for both executables, and the one both report.
-async fn matching_versions(bin: &str, prober: &str, runtime_cache: &Path) -> Result<String, String> {
+async fn matching_versions(
+    bin: &str,
+    prober: &str,
+    runtime_cache: &Path,
+) -> Result<String, String> {
     let version_of = |run: &FfmpegRun, name: &str| -> Result<String, String> {
         let text = String::from_utf8_lossy(&run.stdout);
-        version_token(&text).ok_or_else(|| format!("{name} -version printed no version: {}", run.stderr_text()))
+        version_token(&text)
+            .ok_or_else(|| format!("{name} -version printed no version: {}", run.stderr_text()))
     };
     let arg = ["-version".to_owned()];
     let engine = version_of(&run_ffmpeg(bin, &arg, runtime_cache).await?, bin)?;
@@ -2264,8 +2272,14 @@ mod tests {
         let root = PathBuf::from("/cache/runtime/subtitle-source-v1");
         assert!(gate_from(true, &passed, local(), roomy(), root.clone()).is_ok());
         assert!(gate_from(false, &passed, local(), roomy(), root.clone()).is_err());
-        let full = gate_from(true, &passed, local(), Err("0.2 GiB free".into()), root.clone())
-            .expect_err("a full cache does not ride");
+        let full = gate_from(
+            true,
+            &passed,
+            local(),
+            Err("0.2 GiB free".into()),
+            root.clone(),
+        )
+        .expect_err("a full cache does not ride");
         assert!(full.contains("too full"), "{full}");
         for state in [
             SelfTest::NotRun,
@@ -2720,8 +2734,14 @@ mod tests {
         assert_eq!(manifest.ordinals, vec![0, 1]);
         let access = store::StoreAccess::new(root, true);
         let live = stamp_of(&fixture.source);
-        let Lookup::Kept(kept) =
-            store::lookup(&access, Consumer::Overlay, &fixture.file, 0, Live::Stamp(live)).await
+        let Lookup::Kept(kept) = store::lookup(
+            &access,
+            Consumer::Overlay,
+            &fixture.file,
+            0,
+            Live::Stamp(live),
+        )
+        .await
         else {
             panic!("the intact track is kept");
         };
@@ -2748,7 +2768,14 @@ mod tests {
             "byte-identical to the demux"
         );
         assert!(matches!(
-            store::lookup(&access, Consumer::Overlay, &fixture.file, 1, Live::Stamp(live)).await,
+            store::lookup(
+                &access,
+                Consumer::Overlay,
+                &fixture.file,
+                1,
+                Live::Stamp(live)
+            )
+            .await,
             Lookup::Miss(_)
         ));
     }
@@ -2773,7 +2800,10 @@ mod tests {
             .plan
             .stage()
             .to_owned();
-        assert!(riding.by_arithmetic.iter().all(|row| row.1 == Verdict::Kept));
+        assert!(riding
+            .by_arithmetic
+            .iter()
+            .all(|row| row.1 == Verdict::Kept));
         let sup = std::fs::read(stage.join("s0.sup")).expect("sup");
         let totals = crc_totals(&std::fs::read_to_string(stage.join("s0.crc")).expect("crc"))
             .expect("totals");
@@ -2989,8 +3019,14 @@ mod tests {
                     );
                     checks += 1;
                 }
-                match store::lookup(&access, Consumer::Overlay, &file, 0, Live::Stamp(case.stamp))
-                    .await
+                match store::lookup(
+                    &access,
+                    Consumer::Overlay,
+                    &file,
+                    0,
+                    Live::Stamp(case.stamp),
+                )
+                .await
                 {
                     Lookup::Kept(kept) => {
                         if let Some(mut opened) = store::open_verified(&kept).await {
@@ -3046,8 +3082,7 @@ mod tests {
         let script = |name: &str, body: String| {
             let path = cache.path().join(name);
             std::fs::write(&path, body).expect("fake");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
             path.to_string_lossy().into_owned()
         };
         // Answers `-version` as the real build does, then exits 0 and does

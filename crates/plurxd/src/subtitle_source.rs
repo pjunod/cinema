@@ -577,7 +577,10 @@ pub(crate) async fn classify_no_directory(
     size: i64,
     mtime: i64,
 ) -> MissReason {
-    match store.holds_fragment_index_for_source(file_id, size, mtime).await {
+    match store
+        .holds_fragment_index_for_source(file_id, size, mtime)
+        .await
+    {
         Ok(true) => return MissReason::Absent,
         Ok(false) => {}
         Err(error) => {
@@ -1716,9 +1719,8 @@ mod tests {
         std::fs::write(&source, b"source bytes").expect("source");
         let live = stamp_of(&source);
         let file = media_file(31, source.clone(), live.size as i64, live.mtime);
-        let catalog: std::sync::Arc<dyn Store> = std::sync::Arc::new(
-            plurx_core::store::SqliteStore::open_in_memory().expect("catalog"),
-        );
+        let catalog: std::sync::Arc<dyn Store> =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
         let access = StoreAccess::from_setting(std::sync::Arc::clone(&catalog), &runtime)
             .on_node(Some("node-a"));
 
@@ -1779,7 +1781,10 @@ mod tests {
         let live = stamp_of(&source);
         let file = media_file(41, source.clone(), live.size as i64, live.mtime);
         let on = StoreAccess::new(root.clone(), true);
-        assert!(!stored_as_empty(&on, &file, 1, Live::Stamp(live)).await, "no directory");
+        assert!(
+            !stored_as_empty(&on, &file, 1, Live::Stamp(live)).await,
+            "no directory"
+        );
         let dir = file_dir(&root, 41);
         write_manifest(
             &root,
@@ -1788,17 +1793,28 @@ mod tests {
             vec![kept(&dir, 0, b"PG"), settled(1, Verdict::Empty)],
         );
         assert!(stored_as_empty(&on, &file, 1, Live::Stamp(live)).await);
-        assert!(!stored_as_empty(&on, &file, 0, Live::Stamp(live)).await, "kept");
         assert!(
-            !stored_as_empty(&StoreAccess::new(root.clone(), false), &file, 1, Live::Stamp(live))
-                .await,
+            !stored_as_empty(&on, &file, 0, Live::Stamp(live)).await,
+            "kept"
+        );
+        assert!(
+            !stored_as_empty(
+                &StoreAccess::new(root.clone(), false),
+                &file,
+                1,
+                Live::Stamp(live)
+            )
+            .await,
             "off"
         );
         let moved = SourceStamp {
             size: live.size + 1,
             ..live
         };
-        assert!(!stored_as_empty(&on, &file, 1, Live::Stamp(moved)).await, "stale");
+        assert!(
+            !stored_as_empty(&on, &file, 1, Live::Stamp(moved)).await,
+            "stale"
+        );
     }
 
     /// A publish interrupted between placing a track and swapping the

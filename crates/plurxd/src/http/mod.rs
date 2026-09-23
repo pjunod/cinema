@@ -15736,7 +15736,10 @@ mod tests {
 
         let (status, body) = call(&app, request()).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-        assert_eq!(body["code"], "hdr_subtitle_burn_refused", "without the store's word");
+        assert_eq!(
+            body["code"], "hdr_subtitle_burn_refused",
+            "without the store's word"
+        );
 
         let row = state
             .store

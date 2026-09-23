@@ -751,7 +751,10 @@ fn subtitle_stored_sources(enabled: bool, runtime_cache: &std::path::Path) -> De
         ),
     };
     let (space_status, space_evidence) = match ride_along::free_space(&checked) {
-        Ok(evidence) => (RequirementStatus::Met, format!("{}: {evidence}.", checked.display())),
+        Ok(evidence) => (
+            RequirementStatus::Met,
+            format!("{}: {evidence}.", checked.display()),
+        ),
         Err(reason) => (
             RequirementStatus::Unmet,
             format!(
