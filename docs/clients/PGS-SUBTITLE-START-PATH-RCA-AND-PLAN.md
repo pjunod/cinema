@@ -1,21 +1,12 @@
 # PGS subtitles on the start path — why a 79.5 GB read blocks playback, and the three fixes
 
-**Status:** §4 merged (PR #445, `5c605768`) · §5's B1 and most of B5 merged
-(PR #447, `883cf4d42`); B2 was built and deliberately reverted; B3 and B4
-built in PR #453 (`fix/pgs-overlay-seek-and-failure`, not yet merged)
-· the overlay gate is still **off** pending §5.5's two-device check · §6
-approved as v3.1 (branch `docs/fix-c-design`); its PR 1 of 3 — the store's
-readers — and PR 2 — the producer riding the index pass, with its latch, stage
-guard, per-track verdict, local-filesystem check, startup self-test and the
-switch's producer half — are built (#456; #460, stacked on it, reviewed
-approve-with-changes and the changes made: a failed riding pass stops riding,
-ffprobe/ffmpeg must match, a free-space margin, the verdict outside the
-cancellable build, the latch re-checks kept files); PR 3 — the analysis
-progress row names the PGS tracks a pass is keeping and the bytes written, and
-Maintenance shows the store's size, file count and running ride-alongs with the
-switch that stops them — is built as #463, a draft stacked on #460, with its review's changes made (the local index loop's progress row, titles, the switch discarding a running pass's tracks, the gate state on the card) · **nothing here
-is deployed** ·
-reviewed — see
+**Status:** every fix planned here has merged; **nothing here is deployed** ·
+§3 #437 · §4 #445 · §5: B1 and most of B5 in #447, B2 built and deliberately
+reverted, B3 and B4 in #453 · §6 (Fix C, the subtitle ride-along on the index
+pass) in #456 (the store's readers), #466 (the producer; first merged as #460,
+which the forge did not keep — see `STATUS.md`) and #463 (attribution) · the
+overlay gate `subtitles.pgs_overlay` is still **off** pending §5.5's
+two-device check · reviewed — see
 [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
 **Reviewer:** Fable, adversarial · **Written:** 2026-09-22, revised 2026-09-23 ·
 **Reported by:** Paul, 2026-09-21 ~18:50 ET, Android on the TCL tablet
@@ -27,8 +18,8 @@ what to do about it*.
 
 Read §2 before anything else: the reported symptom is the least interesting of
 the three failures in the incident, and fixing it — already merged — does not
-make the title play. §4 is in flight. **§5 and §6 are the parts worth
-reviewing before they are built.**
+make the title play. §4, §5 and §6 are the fixes that do, and all three
+have merged; what is left is hardware, in §5.5.
 
 What review is being asked for is in §9. Everything before it is evidence and
 proposal.
