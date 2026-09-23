@@ -9,7 +9,7 @@
       "output_grade": "sdr",
       "filename": "1080p-h264.mkv",
       "reference": "../bench-media/1080p-h264.mkv",
-      "reference_sha256": "6a3539090d77f8e465178c8c66b190f6aade705cf42b4c512ae7bdd7c22341a9",
+      "reference_sha256": "8e4f356daf8a64c989c0ca6d01ba3accf81edfbc23bb257ab1b1f8382f5f9513",
       "trim": {
         "start_seconds": 0,
         "duration_seconds": 30
@@ -23,7 +23,7 @@
       "output_grade": "sdr",
       "filename": "1080p-animation.mkv",
       "reference": "../bench-media/1080p-animation.mkv",
-      "reference_sha256": "be21757af6b35761e5f521512abdb1181ed3ff4ec9bfc898df637e3fd7973398",
+      "reference_sha256": "3cc8f1460a285e5e329bb22955e37fa27e0bb292b276fbcedc9649a6276ab785",
       "trim": {
         "start_seconds": 0,
         "duration_seconds": 30
@@ -37,7 +37,7 @@
       "output_grade": "sdr",
       "filename": "720p-web.mkv",
       "reference": "../bench-media/720p-web.mkv",
-      "reference_sha256": "22e39b063da8e6ba7a68ef08bbfc3244f49380836c0e6c88124a6d6058afd876",
+      "reference_sha256": "546de636bafc7d4552f439db9d8816aa8f2358759f160bdcf6be06e6d35f5ab2",
       "trim": {
         "start_seconds": 0,
         "duration_seconds": 30
@@ -51,7 +51,7 @@
       "output_grade": "sdr",
       "filename": "grainy.mkv",
       "reference": "../bench-media/grainy.mkv",
-      "reference_sha256": "2c6924d0fa6f5ebcc230e9020e209831aa08adbcfc8584517d71de539332cd54",
+      "reference_sha256": "d0b373626dad2cd41566da858ff713f0f90a540096491e68310765bc508c308d",
       "trim": {
         "start_seconds": 0,
         "duration_seconds": 30
@@ -65,7 +65,7 @@
       "output_grade": "sdr",
       "filename": "dark-gradient.mkv",
       "reference": "../bench-media/dark-gradient.mkv",
-      "reference_sha256": "bcc652272ab218d1be167a5c901598ec3ee1f83badf459ded54e5e51335983c6",
+      "reference_sha256": "1092fc1e267b45938502f7fc5d1da23f955538a026a4bc2ee1d6e46e68d8fbe3",
       "trim": {
         "start_seconds": 0,
         "duration_seconds": 30
@@ -79,7 +79,7 @@
       "output_grade": "sdr",
       "filename": "sport.mkv",
       "reference": "../bench-media/sport.mkv",
-      "reference_sha256": "39118ff202ecf87ed1214bd57cdde827f1c831dc9441ab8b0b1f5f0915eabb17",
+      "reference_sha256": "430cd8394d4c2dbf477424f93d4967466646d86a614037335ed4e239bc7fd372",
       "trim": {
         "start_seconds": 0,
         "duration_seconds": 30

@@ -3577,6 +3577,18 @@ path, and pinned SHA-256. Relabeling the same clip as both easy and hard is not
 a corpus. `scripts/perf2-rate-control-smoke-corpus.json` remains VBR-smoke-only
 and is not D5 calibration or full acceptance.
 
+Every fixture a pinned manifest names is generated bit-exactly, from a seeded
+source, with `-threads 1`. All three are needed for `scripts/bench fixtures` to
+reproduce the pinned SHA-256 on a controller that does not already hold the
+bytes: without bit-exact muxing Matroska writes a random SegmentUID, without a
+seed the grain fixture's pixels change on every run, and without a fixed thread
+count libx264 partitions frame threads by the host's core count, so a 16-core
+and a 2-core machine produce different bytes from the same recipe. The pins
+checked in were regenerated on `ffmpeg 8.0.1-3ubuntu2`; a controller on a
+different x264 build will not reproduce them, and re-pinning is a PR that
+states the build it used. `scripts/bench fixtures` skips a file that already
+exists, so delete a fixture before expecting a changed recipe to rebuild it.
+
 Capture server hashes from the exact files in media1's fixture library, then
 produce the same ordered list locally and compare it before running. Replace
 the server directory below with the library's real path; do not hash a second

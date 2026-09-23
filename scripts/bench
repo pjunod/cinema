@@ -56,6 +56,7 @@ FIXTURES = {
     # The baseline everything else is compared against: direct-playable.
     "1080p-h264": dict(
         size="1920x1080", codec="libx264", extra=["-g", "48"], hdr=None,
+        bitexact=True,
         why="direct play / cheap remux baseline",
     ),
     # Flat fills and hard edges reward encoders that do not spend a fixed
@@ -108,7 +109,7 @@ FIXTURES = {
     # bounded (PERF-PLAN S4.6).
     "grainy": dict(
         size="1920x1080", codec="libx264", extra=["-g", "48"], hdr=None,
-        grain=True, why="rate-control overshoot",
+        grain=True, bitexact=True, why="rate-control overshoot",
     ),
     # Dark values leave little room for quantiser pumping before banding is
     # visible; a slow rotating gradient exercises more than one static frame.
@@ -278,14 +279,26 @@ def load_rate_control_corpus(path):
         if content_class not in ("easy", "hard"):
             raise BenchError(f"{where}.class must be 'easy' or 'hard'")
         dynamic_range = fixture.get("dynamic_range")
-        if dynamic_range not in ("sdr", "hdr10"):
-            raise BenchError(f"{where}.dynamic_range must be 'sdr' or 'hdr10'")
-        output_grade = fixture.get("output_grade", "sdr")
-        if output_grade != "sdr":
+        if dynamic_range != "sdr":
+            # `score_vmaf` builds its graph with no tone-map on either leg:
+            # `format=yuv420p` converts depth and chroma, not transfer or
+            # primaries. An HDR10 reference would therefore be compared
+            # against a BT.709 SDR distorted stream, and both modes would
+            # score the same meaningless number — `vmaf_regression` and
+            # `quality_benefit_path` would compare noise while the byte gates
+            # kept working, which is a gate passing for the wrong reason
+            # rather than one failing loudly. The source is admissible once
+            # the scorer tone-maps the reference leg, not before.
             if dynamic_range == "hdr10":
                 raise BenchError(
-                    f"{where}.output_grade must be 'sdr' for an HDR source comparison"
+                    f"{where}.dynamic_range 'hdr10' is not scorable yet: score_vmaf has no "
+                    "tone-map, so an HDR reference would be scored against SDR output"
                 )
+            raise BenchError(f"{where}.dynamic_range must be 'sdr'")
+        # Declared for the manifest's record and for the day the scorer can
+        # tone-map; today every admitted source is already SDR.
+        output_grade = fixture.get("output_grade", "sdr")
+        if output_grade != "sdr":
             raise BenchError(f"{where}.output_grade must be 'sdr'")
         filename = fixture.get("filename")
         if not isinstance(filename, str) or Path(filename).name != filename:
@@ -1757,6 +1770,26 @@ def build_fixture(out_dir, name, spec):
     if os.path.exists(path):
         print(f"  {name:14s} exists")
         return path
+    cmd = fixture_command(path, spec)
+    print(f"  {name:14s} building… ({spec['why']})", flush=True)
+    r = sh(cmd)
+    if r.returncode != 0:
+        print(f"  {name:14s} FAILED: {r.stderr.strip().splitlines()[-1:]}")
+        return None
+    return path
+
+
+def fixture_command(path, spec):
+    """The exact ffmpeg argv `build_fixture` runs.
+
+    Separate from the build so the reproducibility contract a pinned corpus
+    depends on can be asserted without encoding anything: `bitexact` means the
+    bytes are repeatable, which takes bit-exact muxing, a seeded source for
+    anything random, *and* a fixed thread count. libx264 partitions frame
+    threads by the host's core count, so the same recipe on a 16-core and a
+    2-core machine produces different bytes; `-threads 1` is what makes a
+    pinned SHA-256 mean the same thing on another host.
+    """
     source = spec.get("source")
     src = (
         source.format(size=spec["size"], duration=DURATION)
@@ -1765,8 +1798,10 @@ def build_fixture(out_dir, name, spec):
     )
     if spec.get("grain"):
         # Real grain, not a synthetic pattern: noise is what makes an encoder
-        # spend its bit budget unevenly.
-        src += ",noise=alls=40:allf=t+u"
+        # spend its bit budget unevenly. The seed is what makes the *pixels*
+        # repeatable — without it the same recipe produces different frames on
+        # every run and no corpus can pin the result.
+        src += ",noise=alls=40:allf=t+u:all_seed=4242"
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
            "-f", "lavfi", "-i", src,
            "-f", "lavfi", "-i", f"sine=frequency=440:duration={DURATION}",
@@ -1777,6 +1812,7 @@ def build_fixture(out_dir, name, spec):
             "-fflags", "+bitexact",
             "-flags:v", "+bitexact",
             "-flags:a", "+bitexact",
+            "-threads", "1",
         ]
     if spec["hdr"]:
         cmd += ["-color_primaries", "bt2020",
@@ -1785,12 +1821,7 @@ def build_fixture(out_dir, name, spec):
     else:
         cmd += ["-pix_fmt", "yuv420p"] if "-pix_fmt" not in spec["extra"] else []
     cmd += ["-c:a", "aac", "-shortest", "-y", path]
-    print(f"  {name:14s} building… ({spec['why']})", flush=True)
-    r = sh(cmd)
-    if r.returncode != 0:
-        print(f"  {name:14s} FAILED: {r.stderr.strip().splitlines()[-1:]}")
-        return None
-    return path
+    return cmd
 
 
 class Api:
