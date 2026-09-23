@@ -159,7 +159,10 @@ console.log(JSON.stringify({
             text=True,
         )
         observed = json.loads(result.stdout)
-        self.assertEqual(46, observed["rowCount"])
+        # 47 board rows: the 46 the review opened with, plus A-05, the build
+        # plan A-04 produced as its D4. A count that moves without a row
+        # being added to the board is the parser having stopped reading it.
+        self.assertEqual(47, observed["rowCount"])
         self.assertEqual([10], observed["cellCounts"])
         # A distinctive phrase from the S-04 row's live Notes cell: this
         # pins that the parser reads a real row's last column, and it moves
