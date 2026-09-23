@@ -371,6 +371,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
+      shippedSource("subtitleStoredSourcesCard"),
       shippedSource("seekScratchReservationsCard"),
       shippedSource("liveTvGuideCard"), shippedSource("liveTvDeinterlaceCard"),
       shippedConst("DEV_READINESS_LABEL"),
@@ -441,8 +442,15 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503"])
+  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503", "subsrc"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
+  // Absent from the settings document is on: the store's switch defaults on.
+  assert.match(html, /TOG:subsrc\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(html, /FOOT:saveSubtitleStoredSources/);
+  assert.match(
+    panels.developerPanel({ ...settings, subtitle_stored_sources: false }, readiness),
+    /TOG:subsrc\|[^|]*\|[^|]*\|checked=false/,
+  );
   assert.doesNotMatch(html, /HDHomeRun Live TV|CARDHEAD:Programme guide/);
   for (const route of ["livetv", "playback", "cluster"])
     assert.ok(html.includes(`href="#/settings/${route}"`), `${route} has a destination link`);

@@ -158,6 +158,14 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         false,
     );
+    // Absent is on: with no producer the store is empty, and once there is
+    // one, reading it is the point.
+    let stored_sources_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::SUBTITLE_STORED_SOURCES)
+            .map(String::as_str),
+        true,
+    );
 
     // Absent is on, unlike every other switch here, because a Profile 7 title
     // reaching a Dolby Vision client as HDR10 is what the conversion exists to
@@ -212,6 +220,7 @@ pub(crate) async fn readiness(
             content_analysis_repair(&state, content_analysis_on).await,
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
+            subtitle_stored_sources(stored_sources_on),
             subtitle_not_ready_503(plurx_core::store::stored_switch(
                 settings
                     .get(plurx_core::store::keys::SUBTITLE_NOT_READY_503)
@@ -674,6 +683,47 @@ fn pgs_overlay(enabled: bool) -> DeveloperEnableItem {
                            the right moment is judged on a screen. The daemon never receives that \
                            receipt, and a green unit suite is not it."
                     .to_owned(),
+            },
+        ],
+    }
+}
+
+/// Stored PGS tracks read in place of a whole-source extraction.
+///
+/// The consumer half of the subtitle-source store
+/// (`docs/clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md` §6). On by default
+/// and inert while nothing produces into the store: every lookup misses and
+/// both the overlay and the burn path run the extraction they always did. The
+/// switch is here so that, once a producer ships, a wrong artifact it wrote
+/// can be taken out of service without a redeploy.
+fn subtitle_stored_sources(enabled: bool) -> DeveloperEnableItem {
+    let (hits, empty, misses) = crate::subtitle_source::lookup_snapshot();
+    DeveloperEnableItem {
+        id: "subtitle_stored_sources",
+        title: "Read stored PGS tracks instead of the source",
+        enabled: Some(enabled),
+        setting: Some("subtitle_stored_sources"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "stored_source_producer",
+                title: "Something fills the store",
+                // A statement about this build, read from this build: it has
+                // readers and no writer.
+                status: RequirementStatus::Unmet,
+                evidence: "No producer yet: this build reads the store but nothing writes it. \
+                           The store stays empty until the fragment-index ride-along ships, so \
+                           every lookup falls through to the extraction that has always run."
+                    .to_owned(),
+            },
+            DeveloperRequirement {
+                id: "stored_source_lookups",
+                title: "Lookups are answered from the store",
+                status: RequirementStatus::Unobservable,
+                evidence: format!(
+                    "Since this process started: {hits} lookup(s) served a stored track, {empty} \
+                     answered that the track has no cues, and {misses} fell through to \
+                     extraction. Process-local; a restart returns them to zero."
+                ),
             },
         ],
     }

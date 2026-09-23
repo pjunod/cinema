@@ -171,6 +171,18 @@ async function saveSubtitleNotReady(btn){
     if(card) card.outerHTML=subtitleNotReadyCard(saved,DEVELOPER_READINESS);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
+async function saveSubtitleStoredSources(btn){
+  const err=document.getElementById("subsrcerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    const saved=await api("/settings",{method:"PUT",body:{
+      subtitle_stored_sources:document.getElementById("subsrc").checked}});
+    cacheSettings(saved);
+    toast("Stored subtitle track setting saved"); if(btn) setCardSaved(btn);
+    const card=document.getElementById("subsrccard");
+    if(card) card.outerHTML=subtitleStoredSourcesCard(saved,DEVELOPER_READINESS);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
 async function saveAutomaticDecoderRecovery(btn){
   const err=document.getElementById("adrerr"); err.textContent="";
   if(btn) btn.disabled=true;

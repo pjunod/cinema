@@ -7033,6 +7033,7 @@ mod tests {
                 "content_analysis_repair",
                 "live_hls_recovery",
                 "pgs_overlay",
+                "subtitle_stored_sources",
                 "subtitle_not_ready_503",
                 "dolby_vision_convert",
                 "source_probe_comparison"

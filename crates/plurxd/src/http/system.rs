@@ -1733,6 +1733,10 @@ pub struct SettingsDto {
     /// `503` + `Retry-After` rather than an empty track. Off by default; the
     /// Developer tab's readiness rows are advisory and never override it.
     pub subtitle_not_ready_503: bool,
+    /// Let the PGS overlay and burn paths read a track the subtitle-source
+    /// store kept instead of the whole source. On by default; off makes both
+    /// ignore the store entirely.
+    pub subtitle_stored_sources: bool,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
     /// readiness bit is true only while the replicated flag is enabled and
     /// every committed voter publishes the current media protocol.
@@ -2100,6 +2104,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::SUBTITLE_NOT_READY_503).as_deref(),
             false,
         ),
+        subtitle_stored_sources: plurx_core::store::stored_switch(
+            setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
+            true,
+        ),
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
@@ -2330,6 +2338,7 @@ pub struct UpdateSettings {
     pub analysis_backoff_max_secs: Option<i64>,
     pub subtitle_window_secs: Option<i64>,
     pub subtitle_not_ready_503: Option<bool>,
+    pub subtitle_stored_sources: Option<bool>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -2484,6 +2493,7 @@ impl UpdateSettings {
             || self.analysis_backoff_max_secs.is_some()
             || self.subtitle_window_secs.is_some()
             || self.subtitle_not_ready_503.is_some()
+            || self.subtitle_stored_sources.is_some()
             || self.live_tv_deinterlace_output.is_some()
             || self.default_audio_lang.is_some()
             || self.default_sub_lang.is_some()
@@ -3257,6 +3267,12 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::SUBTITLE_NOT_READY_503, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.subtitle_stored_sources {
+        state
+            .store
+            .put_setting(keys::SUBTITLE_STORED_SOURCES, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(name) = server_name {
@@ -5160,7 +5176,7 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
         plurx_core::store::prometheus_store_operations(),
         crate::store_result::prometheus(),
@@ -5177,6 +5193,7 @@ pub(crate) async fn metrics(
         crate::ffmpeg::engine_attestation_prometheus(),
         super::prometheus_http_store_attribution(),
         crate::state::fragment_index_validation_prometheus(),
+        crate::subtitle_source::prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus();
