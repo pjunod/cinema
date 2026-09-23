@@ -1,7 +1,8 @@
 # PGS subtitles on the start path — why a 79.5 GB read blocks playback, and the three fixes
 
 **Status:** §4 merged (PR #445, `5c605768`) · §5's B1 and most of B5 merged
-(PR #447, `883cf4d42`); B2 was built and deliberately reverted; B3 and B4 open
+(PR #447, `883cf4d42`); B2 was built and deliberately reverted; B3 and B4
+built in PR #453 (`fix/pgs-overlay-seek-and-failure`, not yet merged)
 · the overlay gate is still **off** pending §5.5's two-device check · §6
 proposed and unbuilt · **nothing here is deployed** · reviewed — see
 [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
@@ -283,8 +284,8 @@ play until the extraction lands on its own. §5 and §6 are the fix.
 
 **The consensus answer in this problem space, already most of the way built in
 this repo, and switched off.** #447 closed B1 and most of B5; B2 was tried and
-deliberately reverted; B3 and B4 are open, and the gate does not flip until
-§5.5's check runs.
+deliberately reverted; B3 and B4 are built in PR #453 (not yet merged), and
+the gate does not flip until §5.5's check runs.
 
 ### 5.1 Why this is the fix
 
@@ -399,9 +400,9 @@ proposed:
 |---|---|---|
 | **B1** capability negotiation | a boolean the server ANDs in | built, as a **list** of protocol names, with two limits the review added |
 | **B2** thread the switch into item detail | do it | **implemented, reviewed, reverted** — the proposal rested on a claim that is false for the web |
-| **B3** seek test on each native client | — | **built** (PR `fix/pgs-overlay-seek-and-failure`): seek, tick and cue-due decisions extracted into pure policy on both clients and held to `tests/playback/pgs-overlay-cases.json`; fixed Android's stale frame after a seek into the refresh margin and Apple's tick that cancelled its own covering load |
-| **B4** overlay-failure guardrail | — | **built** (same PR): a remembered preparation failure is a typed terminal `pgs_overlay_prepare_failed`, capacity a retryable 503 `pgs_overlay_capacity`; both clients read the code, stop polling and raise the existing `degraded_notice`, and Apple no longer refetches a failed window every second |
-| **B5** correct the documentation | three docs | `PLAYBACK.md` done; the acceptance doc's retired env gate done in the B3/B4 PR; the missing Android equivalent still open |
+| **B3** seek test on each native client | — | **built** (PR #453, not yet merged): one refresh rule on both clients, held to `tests/playback/pgs-overlay-cases.json`, and driven through each controller (`PGSOverlayControllerTest` on Android; the `PlayerController` overlay tests on Apple). Fixed Android's stale frame after a seek into the refresh margin, and a tick or player event that cancelled the load covering it on both |
+| **B4** overlay-failure guardrail | — | **built** (PR #453): a failed preparation is a typed terminal `pgs_overlay_prepare_failed`, capacity a retryable 503 `pgs_overlay_capacity`; both clients read the code, stop polling and raise the existing `degraded_notice` once, and a failed window is retried silently after 5 s and 30 s, then left for a seek |
+| **B5** correct the documentation | three docs | `PLAYBACK.md` done; the acceptance doc's retired env gate done in PR #453; the missing Android equivalent still open |
 
 Each proposal is kept verbatim below, with what actually landed beneath it.
 
@@ -489,7 +490,7 @@ equivalent.
 
 > **Built** for `PLAYBACK.md`, with the correction dated in the text so the
 > next reader can see the paragraph used to say the opposite. The acceptance
-> doc's retired env gate is corrected by the B3/B4 PR; the missing Android
+> doc's retired env gate is corrected by PR #453; the missing Android
 > equivalent is still open.
 
 ### 5.5 The proof bar — deliberately not a matrix
