@@ -316,6 +316,11 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
             "playbackControlSummary", "preparedFallbackInterruptionMs",
             "selectedAudio", "selectedHeight", "selectedQualityIsOriginal",
             "selectedSubtitle", "sessionStatus", "surface",
+            # Not a second surface: the live wait sentence the view draws
+            # INSIDE the one surface, for a wait only (#444). It raises,
+            # retires and routes nothing; `PlaybackWaitPresentation.detail`
+            # falls back to the fault's own detail for every other class.
+            "waitDetail",
         ])
 
     def test_the_android_player_carries_no_pre_contract_surface_write(self):
