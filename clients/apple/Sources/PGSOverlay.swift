@@ -230,27 +230,47 @@ enum PGSOverlayPolicy {
             || sourceTimeMs >= loadedRange.upperBound - refreshMarginMs
     }
 
-    /// The unforced refresh the 1 s periodic observer asks for.
+    /// After a failed window: retry once after 5 s, once more after 30 s,
+    /// then wait for a seek or a reselection.
+    static let windowRetryDelaysMs = [5_000, 30_000]
+
+    /// The wait before the next retry after `failures` consecutive failed
+    /// window loads, or nil once the retries are spent.
+    static func windowRetryDelayMs(afterFailures failures: Int) -> Int? {
+        guard failures >= 1, failures <= windowRetryDelaysMs.count else { return nil }
+        return windowRetryDelaysMs[failures - 1]
+    }
+
+    /// Whether a tick or a seek starts a window load. Held to
+    /// `tests/playback/pgs-overlay-cases.json` (`seek_cases`, `tick_cases`),
+    /// the rows Android's `PGSOverlayPolicy.refreshDecision` reads too.
     ///
-    /// Two things it used to get wrong. While the position was outside the
-    /// *published* window, which is the whole load after any out-of-window
-    /// seek, every tick cancelled and restarted the in-flight load, so a window
-    /// whose PNGs took over a second never arrived and nothing was shown. And
-    /// after a window failed, the next tick fetched it again and raised
-    /// another notice, every second, for as long as playback ran. A seek, an
-    /// item change or a reselection still forces a refresh.
+    /// Two things the periodic tick used to get wrong. While the position was
+    /// outside the *published* window, which is the whole load after any
+    /// out-of-window seek, every tick cancelled and restarted the in-flight
+    /// load, so a window whose PNGs took over a second never arrived. And
+    /// after a window failed, every tick fetched it again and raised another
+    /// notice. A load that covers the position is now left alone, and a
+    /// failure is retried on a bounded backoff. A seek passes zero failures:
+    /// the viewer's move ends the backoff.
     static func shouldRefresh(
         sourceTimeMs: Int,
         loadedRange: Range<Int>?,
         loadingRange: Range<Int>?,
-        windowFailed: Bool = false
+        windowFailures: Int = 0,
+        msSinceFailure: Int = 0
     ) -> Bool {
-        if windowFailed { return false }
+        if let loadedRange,
+           !shouldRefresh(sourceTimeMs: sourceTimeMs, loadedRange: loadedRange) {
+            return false
+        }
         if let loadingRange,
            !shouldRefresh(sourceTimeMs: sourceTimeMs, loadedRange: loadingRange) {
             return false
         }
-        return shouldRefresh(sourceTimeMs: sourceTimeMs, loadedRange: loadedRange)
+        guard windowFailures > 0 else { return true }
+        guard let delay = windowRetryDelayMs(afterFailures: windowFailures) else { return false }
+        return msSinceFailure >= delay
     }
 
     static func windowFitsDecodedBudget(_ cues: [PGSOverlayCue]) -> Bool {
@@ -290,6 +310,36 @@ enum PGSOverlayPolicy {
             y: originY + CGFloat(object.y) * scale,
             width: CGFloat(object.width) * scale,
             height: CGFloat(object.height) * scale
+        )
+    }
+}
+
+/// Where the overlay's bytes come from. Production reads through the model;
+/// XCTest supplies its own to drive the controller's load, tick, seek and
+/// failure paths without a server.
+struct PGSOverlayFetcher {
+    var manifest: @MainActor (_ fileId: Int, _ trackIndex: Int) async throws -> PGSOverlayManifestFetch
+    var object: @MainActor (
+        _ fileId: Int,
+        _ trackIndex: Int,
+        _ generation: String,
+        _ path: String
+    ) async throws -> Data
+}
+
+extension PGSOverlayFetcher {
+    @MainActor
+    init(model: AppModel) {
+        self.init(
+            manifest: { try await model.pgsOverlayManifest(fileId: $0, trackIndex: $1) },
+            object: {
+                try await model.pgsOverlayObject(
+                    fileId: $0,
+                    trackIndex: $1,
+                    generation: $2,
+                    path: $3
+                )
+            }
         )
     }
 }
