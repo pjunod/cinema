@@ -25,27 +25,34 @@ the array at 198 MB/s.
   codeless 503 no client retries. Bounded for the start path **only**: offline
   restore, the VTT endpoint and package production keep their unbounded wait,
   because for them a slow success must stay a success.
-- **#447** (open) — the PGS overlay capability. `/decision` now narrows on the
-  server switch **and** the caller's own `subtitle_overlays` claim, so a client
-  that cannot paint a bitmap is not offered a PGS default and is told the truth
-  that selecting one burns the video. Two deliberate limits, both from the
-  adversarial review: **no caps document at all** falls back to the switch
-  alone, because the legacy query is a mixed-fleet path both native clients
-  reach on any 400/404/405 and reading silence as a refusal would send a
-  capable client off to re-encode a whole film; and the `overlay` field on the
-  track keeps the server's own answer, because it describes what this process
-  can deliver rather than what this caller can paint. Item detail keeps
-  answering `false` for the same reason it always did — it has no capabilities
-  document, and the web's detail surface does no narrowing of its own.
-  `tests/validation/test_caps_wire_conformance.py` pins the field name across
-  all four ports, because `DeviceCaps` has no `deny_unknown_fields` and a
-  misspelled claim is silently dropped rather than refused.
+- **#447** (`883cf4d42`, merged) — the PGS overlay is offered per caller rather
+  than per node. `/decision` narrows on the server switch **and** the caller's
+  own `subtitle_overlays` claim, so a client that cannot paint a bitmap is not
+  offered a PGS default and is told the truth that selecting one burns the
+  video. **This is what makes the gate safe to flip.** Before it, turning the
+  gate on would have burned web direct-plays: the server stamped the PGS track
+  `default`, and the web applies the server's default 400 ms after open, which
+  for a bitmap track means a burn — or, on HDR, a degraded notice instead of a
+  subtitle. Two deliberate limits, both from the adversarial review: **no caps
+  document at all** falls back to the switch alone, because the legacy query is
+  a mixed-fleet path both native clients reach on any 400/404/405 and reading
+  silence as a refusal would send a capable client off to re-encode a whole
+  film; and the `overlay` field on the track keeps the server's own answer,
+  because it describes what this process can deliver rather than what this
+  caller can paint. Item detail keeps answering `false`: it has no capabilities
+  document, and the web's detail surface does not narrow the default by a
+  renderer. `tests/validation/test_caps_wire_conformance.py` pins the field
+  name across all four ports, because `DeviceCaps` has no
+  `deny_unknown_fields`, so a misspelled claim is silently dropped rather than
+  refused — costing a needless burn and, on an HDR source, the grade with it.
 
 **Not deployed, and nothing has run on hardware.** Still open: the overlay's
-enablement check (two devices, one DV title each, a seek each way), and
-building the `.sup` as a ride-along on the fragment-index pass — which Fable
-confirmed is already one sequential demux of the whole file, so every PGS track
-can come out of it at zero added I/O.
+enablement check (two devices — one Android, one Apple — one playing a DV
+title and one an HDR10 title, a seek each way), the seek tests on both native
+clients, the overlay-failure guardrail, and building the `.sup` as a ride-along
+on the fragment-index pass — confirmed in review to be already one sequential
+demux of the whole file, so every PGS track can come out of it at zero added
+I/O.
 
 ## The full Rust suite and the release build are clean again
 

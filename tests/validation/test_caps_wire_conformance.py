@@ -6,8 +6,16 @@ in practice — a snake_case key spelled camelCase by a key strategy, a
 spelling. The capabilities document had no equivalent guard, and it is more
 dangerous than the control wire in one specific way: `DeviceCaps` has no
 `deny_unknown_fields` and every field is `#[serde(default)]`, so a misspelled
-claim does not fail. It is silently dropped, the server reads "not claimed",
-and the client gets a delivery it cannot play with nothing anywhere saying so.
+claim does not fail. It is silently dropped and the server reads "not claimed",
+with nothing anywhere saying so.
+
+What that costs, stated precisely, because an earlier wording here had it
+backwards: a dropped claim is a **needless burn**, not an unplayable delivery.
+The client is told the track needs burning in, the server burns it, and the
+viewer sees subtitles — having spent a full re-encode, and on an HDR source the
+grade along with it, to draw pictures the device could have drawn itself. The
+delivery always plays. It is just expensive and quietly worse, which is exactly
+the kind of failure that never generates a report.
 
 So this asserts the opposite of the usual thing. It does not check that the
 ports agree on a schema; it checks that a capability one of them claims is

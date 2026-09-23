@@ -486,13 +486,14 @@ fn playback_defaults(
     // The overlay term is `false` here, and it has to stay that way.
     //
     // A previous revision threaded this server's switch in, on the theory that
-    // each client narrows it locally. That is not true of the web player:
-    // nothing under `web/detail/` consults a renderer, `track-facts.js` stamps
-    // the chip "plays by default" straight from `selected_index`, and its only
-    // narrowing — `prePlayBurnNeeded` — is reached solely for an explicit
-    // viewer pick. With the switch on, that surface would promise a browser a
-    // PGS track it will never draw, on the exact chip where a viewer takes the
-    // server at its word. Old native builds would read it the same way.
+    // each client narrows it locally. That is not true of the web player *for
+    // the default*: nothing under `web/detail/` narrows the default by a
+    // renderer, `track-facts.js` stamps the chip "plays by default" straight
+    // from `selected_index`, and the one renderer check there —
+    // `prePlayBurnNeeded` — is reached solely for an explicit viewer pick.
+    // With the switch on, that surface would promise a browser a PGS track it
+    // will never draw, on the exact chip where a viewer takes the server at
+    // its word. Old native builds would read it the same way.
     //
     // Since the default became per-client (`/decision` ANDs the switch with
     // the caller's `subtitle_overlays` claim), the honest answer needs a
