@@ -10,8 +10,11 @@ guard, per-track verdict, local-filesystem check, startup self-test and the
 switch's producer half — are built (#456; #460, stacked on it, reviewed
 approve-with-changes and the changes made: a failed riding pass stops riding,
 ffprobe/ffmpeg must match, a free-space margin, the verdict outside the
-cancellable build, the latch re-checks kept files); PR 3 (progress-row
-attribution and cache diagnostics) is in progress · **nothing here is deployed** ·
+cancellable build, the latch re-checks kept files); PR 3 — the analysis
+progress row names the PGS tracks a pass is keeping and the bytes written, and
+Maintenance shows the store's size, file count and running ride-alongs with the
+switch that stops them — is built as a draft stacked on #460 · **nothing here
+is deployed** ·
 reviewed — see
 [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
 **Reviewer:** Fable, adversarial · **Written:** 2026-09-22, revised 2026-09-23 ·

@@ -3479,7 +3479,29 @@ derivations that fell back to the source in
 `plurx_subtitle_ride_along_tracks_total`,
 `plurx_subtitle_ride_along_verdicts_total{verdict}`,
 `plurx_subtitle_ride_along_written_bytes_total` and
-`plurx_subtitle_ride_along_published_total`.
+`plurx_subtitle_ride_along_published_total`; the store's own size, as its last
+full sweep walk measured it, is in `plurx_subtitle_source_store_bytes` and
+`plurx_subtitle_source_store_directories`.
+
+**Where it shows while it runs.** The work is attributable from inside the
+product, not only from metrics:
+
+- **Content analysis → live progress.** A fragment-index row whose pass is
+  also keeping PGS tracks says *Also keeping N PGS tracks · X written*, with a
+  *turn off* link to the Developer switch. The byte count is the stage's size,
+  re-measured at most once a second (the muxer writes a track out in I/O-buffer
+  blocks, so a small track can read 0 B until the pass ends); a pass that is
+  not riding says nothing,
+  and a row from a peer that predates the fields reads as not riding.
+- **Settings → Maintenance → Stored subtitle tracks.** What the store occupies
+  on this node (bytes and file count from the last full sweep walk — *not
+  measured yet* until one has run in this process), its cap, each ride-along
+  running now with its file, track count and bytes written, and since the
+  process started: tracks attempted and their verdicts, bytes written, and
+  files indexed without the ride-along after a riding pass failed. It says why
+  the pass does this work (it already reads every packet) and links to the
+  switch that stops it. The same data is `subtitle_store` in
+  `GET /api/v1/settings`.
 
 ### Playback telemetry
 
