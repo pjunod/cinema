@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries seventeen compatibility patches for clustered
+Apache-2.0. Plurx carries eighteen compatibility patches for clustered
 deployments:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
@@ -27,6 +27,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 15 | Validation apply counters and controls | plurx policy | — | Never; Plurx's separate-process validation harness consumes this surface. |
 | 16 | Gate `cryptr/s3` behind Hiqlite `s3` | generic bug | pending M6 | Upstream release no longer enables S3 dependencies when backup and S3 are off. |
 | 17 | Scope the vendored `s3-simple` override to this manifest | dependency-only | — | Upstream cryptr accepts `s3-simple` 0.9 or newer, which already carries these dependency-only corrections. |
+| 18 | Install the `ring` rustls provider for the HTTP clients | generic bug | pending M6 | Upstream release installs or declares a rustls crypto provider for its `rustls-no-provider` Reqwest clients. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -170,8 +171,26 @@ made-up URL and prevents the fork from being declared fully tracked.
   patch. `tests/operations/test_hiqlite_patch_ledger.py` resolves this
   directory's lockfile against `deny.toml` and the advisory floor, so the
   advertised backup/S3 graph cannot regress unnoticed.
+- `http_client::ensure_rustls_crypto_provider` installs the `ring` rustls
+  provider once per process, and every `reqwest::Client` this crate builds goes
+  through it. `reqwest` is declared with `rustls-no-provider`, so
+  `ClientBuilder::build` reads the process-wide default and panics when there is
+  none — for any client, TLS or not, because the TLS config is assembled during
+  `build`. Upstream never sees this because upstream enables `cryptr/s3`
+  unconditionally, which pulls a second `reqwest` whose provider feature Cargo
+  unifies onto this one; the patch above gates that edge, so the provider has to
+  be asked for rather than inherited. `ring` is what this crate's own `rustls`
+  dependency and `axum-server`'s `tls-rustls-no-provider` already select and what
+  `plurx-core`'s `install_default_crypto_provider` installs, so one provider
+  stays in the process and no `aws-lc-rs` edge is added — which
+  `docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md` §3.6 option A needs to
+  remain available. Naming it at client construction rather than in a `main` is
+  deliberate: a test binary or a library consumer runs no `main` of ours, which
+  is how the accidental inheritance went unnoticed.
+  `crates/plurx-core/tests/hiqlite_tls_provider.rs` builds a real client in a
+  binary of its own and fails if the install goes away.
 
-Remove this vendor when an upstream Hiqlite release contains all seventeen
+Remove this vendor when an upstream Hiqlite release contains all eighteen
 patches and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
 and the snapshot RPC error-boundary plus queue-saturated reset tests above keep

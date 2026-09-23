@@ -1,10 +1,53 @@
+use std::sync::Once;
 use std::time::Duration;
+
+/// Name the rustls crypto provider this crate's HTTP clients run on.
+///
+/// `reqwest` is declared here with `rustls-no-provider` (see `Cargo.toml`), so
+/// `ClientBuilder::build` takes `rustls::crypto::CryptoProvider::get_default()`
+/// and panics outright when no provider was installed — every client, not only
+/// the ones that go on to speak TLS, because the TLS config is assembled during
+/// `build`.
+///
+/// Until patch 16 gated `cryptr/s3` behind this crate's own `s3` feature, a
+/// provider arrived here by accident and nobody had asked for it: an
+/// ungated `cryptr/s3` pulled `s3-simple` and with it a second `reqwest` whose
+/// provider feature Cargo unified onto this dependency. Plurx builds this crate
+/// without `backup`/`s3`, so that edge is gone from the workspace graph — and
+/// with it the provider, which turned every client this fork builds (the
+/// peer/management transport, the init probes, the split-brain check) into a
+/// panic. Naming the provider here is what stops the remaining cuts in
+/// `docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md` from taking it away
+/// again: §3.6's option A retires `aws-lc-sys` entirely, and this call site is
+/// unaffected by that because it does not depend on `aws-lc-rs`.
+///
+/// `ring` is the provider the rest of this fork already asks for
+/// (`[dependencies.rustls] features = [..., "ring"]`, `axum-server`'s
+/// `tls-rustls-no-provider`) and the one `plurx-core`'s
+/// `install_default_crypto_provider` installs, so naming it keeps a single
+/// provider in the process rather than introducing `aws-lc-rs` as a second one.
+///
+/// It lives at the point of client construction rather than in a `main`: a test
+/// binary, an integration harness or a library consumer has no `main` of ours to
+/// run, and that is exactly how the missing provider stayed hidden until the
+/// workspace test lane hit it. `plurx-core`'s `tests/hiqlite_tls_provider.rs`
+/// pins this.
+pub fn ensure_rustls_crypto_provider() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        // An `Err` means the embedding process already chose a provider. That is
+        // a legitimate choice and `reqwest` will use it, so there is nothing to
+        // report here.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 
 // not really dead code
 // It will be used in any (real) scenario. This is only to get rid of a warning during some
 // `clippy` checks.
 #[allow(dead_code)]
 pub fn build_http_client(tls_no_verify: bool) -> reqwest::Client {
+    ensure_rustls_crypto_provider();
     #[allow(unused_mut)]
     let mut builder = reqwest::Client::builder()
         .http2_prior_knowledge()

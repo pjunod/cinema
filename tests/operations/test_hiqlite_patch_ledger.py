@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LEDGERS = (
-    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 17),
+    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 18),
     (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 3),
 )
 
