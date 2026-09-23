@@ -319,14 +319,30 @@ routes around it — `crates/plurxd/src/web/player/decode-tiers.js:955`:
 
 so it force-overrides `initialRoute` to `'transcode_hls'`.
 
-**Consequence: turning the gate on today silently downgrades every web
-direct-play to a full transcode**, because `/decision` auto-selects a PGS track
-for every client (`http/stream.rs:2205`, via `deliverable_as_default` at
-`crates/plurx-core/src/tracks.rs:235`) including the one that cannot draw it.
+An earlier revision of this section said the consequence was that **turning
+the gate on silently downgrades every web direct-play to a full transcode**.
+**That is false, and the review was right to knock it down.** The web never
+reads the server's policy pick in the first place —
+`web/player/preplay-selection.js:135`: *"reading that echo as a choice would
+burn a track nobody asked for"* — so `/decision` selecting a PGS default is a
+no-op on that client. There is no regression waiting behind the gate.
 
-That is the work. It is a code-provable regression, not ceremony.
+The defect is narrower, and it is a defect about honesty rather than about
+bytes: `/decision` auto-selects a PGS track for **every** caller
+(`http/stream.rs:2205`, via `deliverable_as_default` at
+`crates/plurx-core/src/tracks.rs:235`), including callers with no renderer, and
+then tells that caller the delivery needs no burn-in. The server issues a plan
+the client cannot execute and describes it in terms that are untrue for that
+client. The web's local override is what keeps a viewer from seeing the
+consequence — which is a client working around its server, not a server that
+is right.
 
-### 5.4 Proposed shape
+### 5.4 Shape — B1, B2 and B5 merged as #447
+
+B1, B2 and B5 are **built** (#447, `883cf4d42`). Two of the three merged in a
+different shape than proposed below, both times because the adversarial review
+found the proposed shape told a client something untrue. The proposals are kept
+verbatim, with what actually landed beneath each.
 
 **B1 — client capability negotiation.** Add an overlay capability to the caps
 the client already sends, thread it into `decide`, and make
@@ -336,10 +352,49 @@ the client already sends, thread it into `decide`, and make
 (`clients/apple/Sources/AppModel.swift`,
 `clients/android/.../data/PlurxApi.kt`, `web/player/session.js`).
 
+> **Built**, as `DeviceCaps.subtitle_overlays: Vec<String>` — a list of
+> protocol names shaped like `transports`, so a later `pgs-v2` is a new entry
+> rather than a second flag and it lines up with `SubTrackDto.overlay`, which
+> already carries the string. Apple and Android claim `["pgs-v1"]`; the web
+> claims nothing and says why in a comment. `overlay_for_caller` in
+> `http/stream.rs` is the single place the switch and the claim meet.
+>
+> Two limits the review added, both deliberate. **No caps document at all is
+> not a refusal**: the legacy `GET /decision` query has no slot for a claim and
+> is a *mixed-fleet* path rather than an old-client one — both native clients
+> fall back to it on any 400/404/405 — so silence keeps the answer this server
+> gave before the claim existed, the switch alone. Reading it as "cannot" would
+> have sent a capable Apple TV off to re-encode a whole film. And **the
+> `overlay` field on the track keeps the server's own answer**, because it
+> describes what this process can deliver rather than what this caller can
+> paint, and it is the only surface that answers that question; what a client
+> must not be told is that the delivery needs no burn, and that is
+> `subtitle_requires_burn_in` and `subtitle_route`, both narrowed.
+>
+> `tests/validation/test_caps_wire_conformance.py` pins the field name across
+> all four ports. `DeviceCaps` has no `deny_unknown_fields` and every field is
+> `#[serde(default)]`, so a misspelled claim is not refused — it is silently
+> dropped, the server reads "not claimed", and the client gets a delivery it
+> cannot play with nothing anywhere saying so.
+
 **B2 — `dto.rs:497` hardcodes overlay-off.** `FileDto::from_media_file` passes
 `false` because it "has no access to the setting", so pre-play and `/decision`
 disagree and Apple papers over it with hedged copy
 (`clients/apple/Sources/TrackFacts.swift:223`). Thread the setting in.
+
+> **Not built, on purpose — this proposal was wrong.** It was implemented,
+> reviewed, and reverted inside #447. Threading the switch in rests on the
+> claim that each client narrows it locally, and that claim is false for the
+> web: nothing under `web/detail/` consults a renderer, `track-facts.js` stamps
+> the chip "plays by default" straight from `selected_index`, and its only
+> narrowing (`prePlayBurnNeeded`) is reached solely for an explicit viewer
+> pick. With the switch on, item detail would promise a browser a PGS track it
+> will never draw, on the exact chip where a viewer takes the server at its
+> word; old native builds would read it the same way. Now that the default is
+> per-client, an honest answer needs a capabilities document and this surface
+> has none. Too narrow for a capable client is a missing convenience;
+> confidently wrong is a lie. Apple's hedged copy stays until item detail
+> learns to ask.
 
 **B3 — a seek test on each native client.** Both have seek-reconciliation code
 (`AndroidPGSOverlay.kt:113` `reconcile`,
@@ -358,6 +413,10 @@ that enabling the gate "does not select an overlay automatically", which
 names the retired `PLURX_PGS_OVERLAY` env gate, and there is no Android
 equivalent.
 
+> **Built** for `PLAYBACK.md`, with the correction dated in the text so the
+> next reader can see the paragraph used to say the opposite. The acceptance
+> doc's retired env gate and the missing Android equivalent are still open.
+
 ### 5.5 The proof bar — deliberately not a matrix
 
 The plan's M4/M5 acceptance asks for an "executed compatibility matrix" and a
@@ -366,11 +425,22 @@ bitmap overlay can be wrong in exactly three ways a screen reveals: a cue lands
 at the wrong time, it lands in the wrong place, or decoding 4K-canvas bitmaps
 costs too much on the weakest device. So the bar proposed here is:
 
-> One real PGS title played on each of Android, Apple and web, with a mid-film
-> seek, confirming cues appear at the right time and position and that playback
-> does not degrade. Plus B3's automated seek test on both native clients.
+> **Two devices — one Android, one Apple — each playing one real PGS title,
+> one of them DV and one HDR10, with a seek in each direction.** Confirm cues
+> appear at the right time and in the right place, and that playback does not
+> degrade. Plus B3's automated seek test on both native clients.
 
-Fifteen minutes on hardware, not a program.
+Fifteen minutes on hardware, not a program. The review tightened this from
+"three surfaces" to two devices with a specified grade each, for a reason worth
+keeping: the web has no renderer, so playing a PGS title there proves only that
+the local override still works — and the HDR path is where an overlay can fail
+in a way a 4K SDR title will never show, so leaving the grade unspecified is
+how a check passes without testing anything.
+
+The gate stays off until this runs. `overlay_for_caller` makes the switch safe
+to flip in the sense that no client is now told something untrue about a
+delivery — it does not make the renderers proven on real hardware, and only one
+of those is a code question.
 
 ### 5.6 The stated reason the gate is off
 
