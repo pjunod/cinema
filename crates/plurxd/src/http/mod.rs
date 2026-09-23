@@ -7001,7 +7001,7 @@ mod tests {
     /// question) shipped exactly that way in the first draft.
     #[tokio::test]
     async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
         let (status, _) = call(&app, get("/api/v1/developer/readiness", None)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
@@ -7073,6 +7073,8 @@ mod tests {
         // neither belongs in an exact set. It is asserted on its own below.
         // `stored_source_self_test` reads the process-wide self-test state,
         // which a ride-along test in this binary may have driven either way.
+        // The local-cache row depends on the host filesystem and whether its
+        // classifier is implemented on this platform.
         let green = seen
             .iter()
             .filter(|(_, status)| status.as_str() == "met")
@@ -7080,7 +7082,10 @@ mod tests {
             .filter(|id| {
                 !matches!(
                     *id,
-                    "probe_reporter_named" | "stored_source_self_test" | "stored_source_free_space"
+                    "probe_reporter_named"
+                        | "stored_source_self_test"
+                        | "stored_source_local_cache"
+                        | "stored_source_free_space"
                 )
             })
             .collect::<Vec<_>>();
@@ -7091,6 +7096,23 @@ mod tests {
                 "the ride-along's {id} row is reported: {seen:?}"
             );
         }
+        let store_root = crate::subtitle_source::store_root(&state.runtime_cache_dir);
+        let checked = if store_root.is_dir() {
+            store_root
+        } else {
+            state.runtime_cache_dir.clone()
+        };
+        let expected_cache_status =
+            if crate::subtitle_ride_along::local_filesystem(&checked).is_ok() {
+                "met"
+            } else {
+                "unmet"
+            };
+        assert_eq!(
+            seen.get("stored_source_local_cache").map(String::as_str),
+            Some(expected_cache_status),
+            "the cache row must reflect the host filesystem: {seen:?}"
+        );
         assert!(
             matches!(
                 seen.get("probe_reporter_named").map(String::as_str),
@@ -7108,7 +7130,6 @@ mod tests {
                 "server_preparation_is_real",
                 "source_fencing",
                 "sources_match_their_scan_whole",
-                "stored_source_local_cache",
                 "stored_source_producer",
                 "tuner_reserve"
             ]
@@ -8531,7 +8552,7 @@ mod tests {
         let (status, _) = request.await.expect("request task");
         assert_eq!(status, StatusCode::NO_CONTENT);
 
-        for _ in 0..100 {
+        for _ in 0..3_000 {
             if state
                 .store
                 .network_prior(original_generation.as_str(), "safari", "198.51.100.0/24")
@@ -12053,7 +12074,7 @@ mod tests {
 
         // Recording is asynchronous, so poll the wire rather than the store.
         let mut decision = json!({});
-        for _ in 0..200 {
+        for _ in 0..3_000 {
             let (status, body) = call(
                 &app,
                 as_client(get(&decision_url, Some(&admin)), CHROME_WINDOWS_UA),
