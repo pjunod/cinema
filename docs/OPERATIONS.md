@@ -2974,6 +2974,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_MDNS_ADVERTISE` | — | `true` | Run Bonjour inside the server process; Compose sets this to `false` because its host-network companion advertises instead |
 | `PLURX_DISCOVERY_SERVER_URL` | — | `http://127.0.0.1:32400` | Server URL read by `plurxd advertise`; normally only the Compose companion uses it |
 | `PLURX_LOG` | — | `info` | Log filter (`tracing` EnvFilter syntax, e.g. `plurxd=debug`) |
+| `PLURX_LOG_FORMAT` | — | `text` | Console log shape: `text` or `json`. Anything else is `text`. A property of how *this process's* stdout is consumed, not a cluster setting — a node whose journal is scraped by a log pipeline wants `json` and its neighbour may not. Under `json` the ANSI colouring is off whatever the terminal is, because an escape sequence inside a JSON string field is a parse hazard, not a colour |
 | `PLURX_CLUSTER_ACTIVATION_FAILPOINT` | — | — | Test-only activation exit: `after-quiescence` · `after-incoming` · `after-marker` · `after-rename`; each exits `86` |
 | `PLURX_HLS_FORCED_AUTOSELECT` | — | off | **Experiment.** Puts `AUTOSELECT=YES` on forced subtitle renditions. Set `1` to enable |
 | `PLURX_PGS_OVERLAY` | — | off | **Retired as a gate.** The switch is now Settings → Developer → *Serve PGS subtitles as an overlay* (`subtitles.pgs_overlay`). This variable seeds that setting once, on a node that has never been told either way, and does nothing afterwards. Still keep it off until native-client and physical HDR/DV acceptance is complete |
@@ -4713,6 +4714,38 @@ they never label a session, file, user, network, or path.
 The compact Prometheus alert shape is: membership sample valid · leader known ·
 heartbeat quorum available · apply lag zero. `/readyz` remains the final active
 serving check because the metrics are deliberately passive and cached.
+
+### HTTP requests, bodies and panics
+
+Bounded by construction: the route label is the same nine-value
+`route_group` classification the Store attribution uses, never a URI, an id, a
+session, a title or a path. Nothing here names content.
+
+| Metric | How to read it |
+|---|---|
+| `plurx_http_requests_total{route_group,method,status}` | Every request's outcome, counted outside the cluster capacity gate — so a learner, fenced or maintenance 503 is counted, which is the point. `status` is the class (`2xx`…`5xx`, `other`), not a code: a node that has turned every request into `5xx` or every request into a `503` shows up here and nowhere else. |
+| `plurx_http_route_seconds{route_group,role}` | **Response-header** latency: it stops when the handler returns its response, before a byte of the body is read. This is the number to alert on for JSON pages, and the number a two-hour direct play would otherwise ruin. |
+| `plurx_http_body_seconds{route_group}` | **Body delivery** time, from the handler's response to the body's last frame or its drop. A different scale from the line above — seconds to hours rather than milliseconds — which is why it is a separate family rather than more buckets. It is per **response body**, so a direct play answered as ten range requests is ten observations, not one viewing. |
+| `plurx_http_bodies_total{route_group,outcome="complete\|aborted"}` | How bodies ended. **`aborted` is not an error rate.** On a media route a consumer that goes away is the ordinary end of a seek, and a healthy node serving rolling HLS aborts bodies constantly. Read it against `complete` on the *same* route group, and read a change in the ratio rather than its level. |
+| `plurx_panics_total{subsystem}` | Panics the process hook saw, by a fixed allowlist of module names with `other` for everything else, including dependencies. Any movement at all is worth the daemon log: the matching line is at ERROR on target `plurxd::panic` with the panic's location and a redacted message. The counter reports a panic; it does not repair whatever the panicking task left behind. |
+
+Every 5xx also writes one `WARN` line on target `plurxd::http` carrying the
+route group, the status, the latency, the redacted target and the request id.
+Successful requests are deliberately **not** logged: the in-memory ring behind
+Settings → System → Logs is bounded, and one line per HLS segment per viewer
+would evict everything else in it inside a minute. The counters carry the
+volume; the ring carries the exceptions.
+
+### Request ids
+
+Every response carries `x-request-id`. An inbound one is adopted when it is at
+most 64 characters of `[A-Za-z0-9_-]`, and otherwise replaced by a minted uuid
+— replaced rather than refused, because a correlation aid must never be able to
+fail a request. **A discarded value is never logged, echoed or stored**: a
+client that puts a bearer token in that header does not get it written into the
+journal. The id is on the `http_request` span, so every log line inside a
+request carries it, and it is deliberately not a metric label.
+
 
 ### Reading the index queue's verdict
 

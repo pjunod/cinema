@@ -728,6 +728,79 @@ Report exact values. Do not restart anything except in step 4.
    different name first, this document is the one that changes, not the
    metric — and §3.5's row should be updated in the same PR.
 
+### 7.6 Decisions taken while executing, 2026-09-23
+
+This plan was written against `0f02b7ea`. Five things it says are no longer
+true at `1d21b184e`, and one thing it asked for turned out to be a hazard.
+Each is a deviation from the plan as written and is recorded here rather than
+left for a reader to discover from the diff.
+
+1. **K-04 landed a matched-route latency histogram after this plan was
+   written, so §3.1's `plurx_http_request_seconds` was not built.**
+   `http_store_attribution` (`http/mod.rs`) times `next.run(request)` by
+   bounded `route_group` and serving role and renders
+   `plurx_http_route_seconds`. That timer stops when the handler returns its
+   `Response`, which is exactly response-header latency. Adding a second
+   header-latency histogram would have been the same measurement under a
+   second name. F-core-12's distinction is still delivered, and is now the
+   distinction between `plurx_http_route_seconds` (header) and the new
+   `plurx_http_body_seconds` (delivery).
+2. **The route label is `route_group`, not the `MatchedPath` template.** §3.1
+   specified 192 template labels built from the router's own route list. Axum
+   exposes no route list at runtime, so that table would have to be maintained
+   by hand — and `http_route_group` is already this repository's one
+   exhaustive inventory of registered templates, held closed by
+   `registered_routes_reach_every_non_other_attribution_family` and by the
+   unclassified-pattern assertion in the route inventory test. A second table
+   would be a second spelling of the same fact with no test holding the two
+   in step. **The cost is real and is not hidden**: a 5xx on one item route
+   and a 5xx on another are one series, and §3.1's two reserved labels
+   (`<unmatched>`, `<fallback>`) collapse into the existing `other`. The 5xx
+   access line carries the redacted target and the request id, and that is
+   what takes an operator from a series to a request.
+3. **The 5xx access line is throttled to one per route group per second.**
+   §3.3 asked for an `on_response` that logs every 5xx at WARN. On a fenced
+   node, a learner outside its eligible routes, or a node in maintenance,
+   `cluster_capacity_gate` refuses **every** request with 503 — so "every 5xx"
+   is one ring entry per request at full request rate, and the ring is the
+   only log the product can show. That is the same eviction hazard §3.3 cites
+   as its reason for refusing an INFO access log, arriving through the door it
+   left open. The line now carries `also_suppressed`, the number of lines it
+   stands for, and the counters remain exact.
+4. **§3.7's dependency table is stale in two rows.** `uuid` is a real
+   dependency of `plurxd` at this commit, not a dev-dependency, so M2 needed
+   no manifest change for it and no hand-rolled id source. `http-body-util`
+   is still dev-only, but M1 does not need it: the body wrapper implements
+   `http_body::Body` directly so it can delegate `size_hint`, and `http-body`
+   is named as a workspace dependency instead — a crate already compiled in
+   the tree under hyper and axum, so the build gains nothing new. The one
+   genuinely new crate in the shipped binary is **`tracing-serde 0.2.0`**,
+   pulled in by `tracing-subscriber`'s `json` feature, and it is recorded in
+   `THIRD-PARTY-NOTICES.md`.
+5. **Open question 4 — does the 5xx WARN line duplicate existing error
+   logging? Partly, and it stays.** `ApiError::Internal` already logs the
+   failure detail at ERROR (`http/error.rs`), with no route, no status, no
+   latency and no request id; the access line has all four and not the detail.
+   They are complementary halves of one report, so a 500 raised through
+   `ApiError::Internal` costs two ring entries. The alternative — dropping the
+   access line for that path — would leave every 5xx that does **not** come
+   from `ApiError::Internal` (a panic turned into a 500, a typed
+   `ServiceUnavailable`, the capacity gate's refusals, hyper's own errors)
+   with no line at all. The throttle in point 3 is what bounds the cost.
+6. **Open question 3 — body accounting for range requests — is answered as
+   §7 anticipated and is written into the operator documentation.**
+   `plurx_http_body_seconds` is per **response body**, so a direct play
+   answered as ten range requests is ten observations, not one viewing.
+   `docs/OPERATIONS.md` says so where the metric is described, so nobody reads
+   it as time-to-watch.
+
+**M5 was not started.** It is the largest milestone and the plan splits it
+into three PRs of its own; two of its open questions (§7.1 the `client` label's
+vocabulary, §7.2 where `plurx_watched_seconds_total` is incremented without
+double-counting) are research this session did not do, and §7.2 says plainly
+that if no single call site can answer honestly the metric is not ready. M1's
+series exist now, which is the dependency M5 was waiting on.
+
 ---
 
 ## Execution log
@@ -740,4 +813,9 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 — RED on the matched route | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | `plurx_http_requests_total{route_group,method,status}`, `plurx_http_body_seconds{route_group}` and `plurx_http_bodies_total{route_group,outcome}`, recorded by a layer outside `cluster_capacity_gate` so its 503s are counted. Header latency was **not** re-implemented: K-04's `plurx_http_route_seconds` already is it (§7.6.1). The route label is `route_group`, not the template (§7.6.2). Six tests, each shown failing with its change reverted. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 — request ids | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | `x-request-id` adopted when it is at most 64 characters of `[A-Za-z0-9_-]` and minted otherwise, on the request, on the `http_request` span and on the response; never a metric label. Hand-written layer, no `tower-http` feature added; `uuid` was already a real dependency (§7.6.4). Three tests, one of which asserts the discarded value reaches neither the response nor the log. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — log format and ANSI | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | `PLURX_LOG_FORMAT=json\|text`; `with_ansi` set explicitly from `std::io::stdout().is_terminal()` and forced off under JSON. **Confirmed on the fleet before the change**: `docker logs plurxd` on nuc4 carries `ESC[2m` / `ESC[31m` escape bytes in every line, so the plan's §2.3 claim was not only true of the vendored source but true of a running node. The 5xx access line is throttled (§7.6.3). Four tests; the ANSI one asserts the flag is load-bearing in both directions. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 — panic hook | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | `crates/plurxd/src/panics.rs` and `crates/plurxd/src/redact.rs`; `redact_operator_text` lifted out of `http/cluster_operations.rs` unchanged and reused for panic payloads; recursion guard, opt-in path-free bounded backtrace, chained previous hook, `plurx_panics_total{subsystem}` over a fixed 13-name allowlist. Five tests, one of which installs the real hook and panics for real. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — release-evidence set | — | **Not started**, deliberately. See §7.6. |
+| | | | | | `needs:` the §6.3 fleet observations. Nothing in this branch has been deployed or scraped on a node; the exposition-size, label-hygiene, journald-ANSI-after, JSON-mode and RED-sanity steps are all unrun. |

@@ -2548,7 +2548,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # base that branch was written on. This row's value is the whole integration
 # tree re-measured after every plan in this wave was merged together, so it is
 # the sum of all of them and will not equal any single branch's arithmetic.
-expected_occurrences = 868
+# 868 -> 869 with C-08 M1: one test-only `tokio::time::sleep(100 ms)` inside
+# `streaming_test_handler`, the fixture body that the HTTP observability tests
+# stream three frames out of. It exists so the test can tell response-header
+# latency from body delivery — the response head returns at once and the body
+# takes 300 ms — and it is exactly the distinction F-core-12 asked for, so the
+# wait is the assertion rather than a wait for somebody else's work. It sits
+# inside `mod tests`, it is bounded, and it owns no producer, no process, no
+# child and no recovery decision.
+expected_occurrences = 869
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2956,7 +2964,24 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # pattern, but the callee is `std::thread::Scope::spawn` with a closure that
 # only pushes onto a bounded in-process queue. No child process is created and
 # nothing survives the scope.
-expected_occurrences = 343
+# 343 -> 350 with C-08 M1/M2/M3: seven `.status(` reads, every one of them
+# `axum::response::Response::status()` on an in-process response, and **not one
+# of them launches a child**. This sentinel's pattern counts `.spawn(`,
+# `.output(` and `.status(` together, and `Response::status()` is the third
+# spelling; no `Command` is constructed anywhere on this branch, and
+# `process-command-construction` is unchanged by it.
+# One is production: `http_request_metrics` reads the response's status to pick
+# the counter cell for `plurx_http_requests_total{route_group,method,status}`
+# and to decide whether the request earns a 5xx access line. It is a read of
+# HTTP metadata on a response the inner layers already produced; it starts
+# nothing, owns nothing, and cannot change the response.
+# The other six are assertions in the new observability tests — a 200 on a
+# matched route, a 404 on an unmatched one, a 200 whose body is then abandoned,
+# a 500, a second 200 beside it, and a 503 in the refusal-storm test. Each
+# asserts the wire answer the middleware saw, which is the only way to pin the
+# status classification the counter depends on. All in-process; they create no
+# task, timer, process or rolling-producer owner.
+expected_occurrences = 350
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
