@@ -1470,6 +1470,14 @@ pub struct AnalysisProgress {
     pub media_ms_examined: i64,
     pub total_media_ms: i64,
     pub fragments_indexed: usize,
+    /// PGS tracks the pass is also keeping for the subtitle-source store;
+    /// zero when it is not riding along. Defaulted for a peer that predates
+    /// the field.
+    #[serde(default)]
+    pub pgs_tracks: usize,
+    /// Bytes the ride-along has written so far.
+    #[serde(default)]
+    pub pgs_bytes_written: u64,
     pub started_at_ms: i64,
     pub updated_at_ms: i64,
     pub elapsed_ms: i64,
@@ -1495,6 +1503,8 @@ impl AnalysisProgress {
             media_ms_examined: 1,
             total_media_ms: 2,
             fragments_indexed: 1,
+            pgs_tracks: 0,
+            pgs_bytes_written: 0,
             started_at_ms: 1,
             updated_at_ms: 1,
             elapsed_ms: 1,
@@ -4197,6 +4207,8 @@ impl JobManager {
                 media_ms_examined: 0,
                 total_media_ms: total_media_ms.max(0),
                 fragments_indexed: 0,
+                pgs_tracks: 0,
+                pgs_bytes_written: 0,
                 started_at_ms: now,
                 updated_at_ms: now,
                 elapsed_ms: 0,
@@ -4248,6 +4260,25 @@ impl JobManager {
         };
         value.fragments_indexed = fragments_indexed;
         value.updated_at_ms = now;
+    }
+
+    /// Record what a running index pass's PGS ride-along is doing on its
+    /// progress row: how many tracks it keeps and the bytes written so far.
+    fn update_analysis_ride_along(
+        &self,
+        job_id: &str,
+        target_node_id: &str,
+        pgs_tracks: usize,
+        pgs_bytes_written: u64,
+    ) {
+        let mut progress = self
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(value) = progress.get_mut(&(job_id.to_owned(), target_node_id.to_owned())) {
+            value.pgs_tracks = pgs_tracks;
+            value.pgs_bytes_written = pgs_bytes_written;
+        }
     }
 
     fn set_analysis_progress_totals(
@@ -6792,6 +6823,9 @@ impl JobManager {
                         "reconciled stored subtitle sources"
                     );
                 }
+                if let Some(footprint) = outcome.footprint {
+                    crate::subtitle_source::record_footprint(footprint);
+                }
                 *self.subtitle_source_sweep_cursor.lock().await = Some(outcome.next);
             }
             Err(error) => {
@@ -8753,14 +8787,23 @@ impl JobManager {
                 video,
                 transcode.runtime_cache_dir(),
                 index_file_budget(file.duration_ms),
-                move |bytes_read, media_ms, fragments| {
+                move |progress: &crate::fragindex::PassProgress| {
                     progress_jobs.update_analysis_progress(
                         &progress_key,
                         &progress_target,
                         "fragment_index",
-                        bytes_read,
-                        media_ms,
-                        fragments,
+                        progress.bytes_read,
+                        progress.media_ms,
+                        progress.fragments,
+                    );
+                    // The pass is also keeping PGS tracks: the row says so,
+                    // with what it has written, so the work is attributable
+                    // from inside the product while it runs.
+                    progress_jobs.update_analysis_ride_along(
+                        &progress_key,
+                        &progress_target,
+                        progress.pgs_tracks,
+                        progress.pgs_bytes_written,
                     );
                 },
                 ride_along.as_ref(),
@@ -11676,7 +11719,7 @@ mod tests {
                 video,
                 cache.path(),
                 std::time::Duration::from_secs(60),
-                |_, _, _| {},
+                |_: &crate::fragindex::PassProgress| {},
                 Some(&gate),
             )
             .await
@@ -11781,6 +11824,47 @@ mod tests {
             manifest.track(0).map(|track| track.verdict),
             Some(crate::subtitle_source::Verdict::Kept)
         );
+    }
+
+    /// PR 3: the analysis row of a pass that rides along says how many PGS
+    /// tracks it keeps and what it has written.
+    #[tokio::test]
+    async fn an_analysis_row_carries_its_ride_along() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let jobs = manager(store.clone(), artwork.path());
+        let _guard = jobs.start_analysis_progress(
+            ("job-ride", "node-a"),
+            7,
+            "fragment_index",
+            "fragment_index",
+            1_000,
+            60_000,
+        );
+        let row = |jobs: &JobManager| {
+            jobs.analysis_progress_snapshot()
+                .into_iter()
+                .find(|row| row.job_id == "job-ride")
+                .expect("row")
+        };
+        assert_eq!(
+            (row(&jobs).pgs_tracks, row(&jobs).pgs_bytes_written),
+            (0, 0)
+        );
+        jobs.update_analysis_ride_along("job-ride", "node-a", 2, 18_866);
+        assert_eq!(
+            (row(&jobs).pgs_tracks, row(&jobs).pgs_bytes_written),
+            (2, 18_866)
+        );
+        // A peer that predates the fields still parses, as not riding.
+        let mut value = serde_json::to_value(row(&jobs)).expect("json");
+        value.as_object_mut().expect("object").remove("pgs_tracks");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("pgs_bytes_written");
+        let parsed: AnalysisProgress = serde_json::from_value(value).expect("old row");
+        assert_eq!((parsed.pgs_tracks, parsed.pgs_bytes_written), (0, 0));
     }
 
     /// A file the indexer cannot index is asked once, not once per pass.

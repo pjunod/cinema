@@ -919,6 +919,18 @@ pub(crate) fn prometheus() -> String {
             FALLBACKS[reason as usize].load(Ordering::Relaxed)
         );
     }
+    if let Some(footprint) = footprint() {
+        let _ = write!(
+            out,
+            "# HELP plurx_subtitle_source_store_bytes Bytes the subtitle-source store occupies on this node, as its last sweep walk measured.\n\
+             # TYPE plurx_subtitle_source_store_bytes gauge\n\
+             plurx_subtitle_source_store_bytes {}\n\
+             # HELP plurx_subtitle_source_store_directories Files the subtitle-source store holds a directory for on this node.\n\
+             # TYPE plurx_subtitle_source_store_directories gauge\n\
+             plurx_subtitle_source_store_directories {}\n",
+            footprint.bytes, footprint.directories
+        );
+    }
     out.push_str(&crate::subtitle_ride_along::prometheus());
     out
 }
@@ -944,6 +956,9 @@ pub(crate) struct SweepOutcome {
     /// Where the next call starts: `f<id>` of the last directory examined,
     /// or empty once the walk has wrapped.
     pub(crate) next: String,
+    /// What the store occupies after this call, measured when the walk
+    /// wrapped (and the cap was enforced); `None` on a page that did not.
+    pub(crate) footprint: Option<Footprint>,
 }
 
 /// Reconcile one page of the store with the catalog, and enforce the size cap
@@ -1036,7 +1051,8 @@ where
         }
     }
     if exhausted {
-        let (evicted, deferred) = enforce_cap(root, max_bytes).await;
+        let (evicted, deferred, footprint) = enforce_cap(root, max_bytes).await;
+        outcome.footprint = Some(footprint);
         outcome.evicted = evicted;
         outcome.deferred += deferred;
         outcome.next = String::new();
@@ -1121,10 +1137,19 @@ async fn remove_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Evict whole directories, least recently accessed first, until the store is
-/// at or under `max_bytes`. Returns `(evicted, deferred)`.
-async fn enforce_cap(root: &Path, max_bytes: u64) -> (usize, usize) {
+/// at or under `max_bytes`. Returns `(evicted, deferred, footprint)`.
+/// Also measures the store as it walks, so the footprint the product shows
+/// costs no second walk.
+async fn enforce_cap(root: &Path, max_bytes: u64) -> (usize, usize, Footprint) {
     let Ok(ids) = list_file_dirs(root).await else {
-        return (0, 0);
+        return (
+            0,
+            0,
+            Footprint {
+                measured_at_ms: unix_ms(),
+                ..Footprint::default()
+            },
+        );
     };
     let mut dirs = Vec::with_capacity(ids.len());
     for file_id in ids {
@@ -1140,8 +1165,14 @@ async fn enforce_cap(root: &Path, max_bytes: u64) -> (usize, usize) {
         dirs.push((accessed, size, dir));
     }
     let mut total: u64 = dirs.iter().map(|(_, size, _)| *size).sum();
+    let mut remaining = dirs.len() as u64;
+    let footprint = |total: u64, remaining: u64| Footprint {
+        bytes: total,
+        directories: remaining,
+        measured_at_ms: unix_ms(),
+    };
     if total <= max_bytes {
-        return (0, 0);
+        return (0, 0, footprint(total, remaining));
     }
     dirs.sort_by_key(|(accessed, _, _)| *accessed);
     let (mut evicted, mut deferred) = (0, 0);
@@ -1152,6 +1183,7 @@ async fn enforce_cap(root: &Path, max_bytes: u64) -> (usize, usize) {
         match remove_dir(&dir).await {
             Ok(()) => {
                 evicted += 1;
+                remaining = remaining.saturating_sub(1);
                 total = total.saturating_sub(size);
             }
             // Still counted against the cap, so the next-oldest goes instead
@@ -1159,7 +1191,83 @@ async fn enforce_cap(root: &Path, max_bytes: u64) -> (usize, usize) {
             Err(_) => deferred += 1,
         }
     }
-    (evicted, deferred)
+    (evicted, deferred, footprint(total, remaining))
+}
+
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
+/// What the store occupies on this node's disk, as the last full sweep walk
+/// measured it: the bytes of every `f<id>/` directory and how many there are.
+/// Stages in flight are not counted; [`crate::subtitle_ride_along::active_rides`]
+/// reports those.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Footprint {
+    pub bytes: u64,
+    pub directories: u64,
+    pub measured_at_ms: i64,
+}
+
+static FOOTPRINT: std::sync::Mutex<Option<Footprint>> = std::sync::Mutex::new(None);
+
+/// Remember the footprint a completed sweep walk measured.
+pub(crate) fn record_footprint(footprint: Footprint) {
+    *FOOTPRINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(footprint);
+}
+
+/// The footprint the last completed sweep walk measured, if one has run.
+pub(crate) fn footprint() -> Option<Footprint> {
+    *FOOTPRINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Everything the product shows about the store and its producer on this
+/// node: what it occupies, its cap, what is being kept right now, and what
+/// the ride-along has done since this process started. For the Maintenance
+/// card, which is where background work says what it costs and where to turn
+/// it off.
+#[derive(Clone, Debug, Serialize)]
+pub struct StoreDiagnostics {
+    /// `None` until the store's sweep has walked it once in this process.
+    pub footprint: Option<Footprint>,
+    pub cap_bytes: u64,
+    pub riding: Vec<crate::subtitle_ride_along::ActiveRide>,
+    pub tracks_attempted: u64,
+    pub kept: u64,
+    pub empty: u64,
+    pub malformed: u64,
+    pub transient: u64,
+    pub bytes_written: u64,
+    pub manifests_published: u64,
+    /// Files whose riding pass did not build its index, indexed without the
+    /// ride-along until the next restart.
+    pub files_not_riding: usize,
+}
+
+pub(crate) fn diagnostics() -> StoreDiagnostics {
+    let (attempted, [kept, empty, malformed, transient], written, published) =
+        crate::subtitle_ride_along::snapshot();
+    StoreDiagnostics {
+        footprint: footprint(),
+        cap_bytes: MAX_STORE_BYTES,
+        riding: crate::subtitle_ride_along::active_rides(),
+        tracks_attempted: attempted,
+        kept,
+        empty,
+        malformed,
+        transient,
+        bytes_written: written,
+        manifests_published: published,
+        files_not_riding: crate::subtitle_ride_along::failed_ride_count(),
+    }
 }
 
 /// A file directory is flat — a manifest, `.sup` files and `.access`.
@@ -1913,6 +2021,13 @@ mod tests {
             .expect("sweep");
         assert_eq!(outcome.removed, 3, "{outcome:?}");
         assert_eq!(outcome.next, "", "a short store is walked whole and wraps");
+        // PR 3: a walk that wraps measures what is left, for the product.
+        let footprint = outcome.footprint.expect("measured when the walk wrapped");
+        assert_eq!(footprint.directories, 2, "f1 and the young f5 remain");
+        assert_eq!(
+            footprint.bytes,
+            directory_bytes(&file_dir(&root, 1)).await + directory_bytes(&file_dir(&root, 5)).await
+        );
         assert!(file_dir(&root, 1).exists(), "a current directory is kept");
         for gone in [2, 3, 4] {
             assert!(!file_dir(&root, gone).exists(), "f{gone} should be gone");

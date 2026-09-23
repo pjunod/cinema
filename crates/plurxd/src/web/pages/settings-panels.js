@@ -138,7 +138,7 @@ function maintenancePanel(settings,dv,readiness){
     ${togRow("job-boot","Scan every library at startup","About 30 seconds after the server starts — a server switched off while files landed doesn't notice them until its next scheduled run.",settings.scan_on_startup)}
     ${setCardFoot("saveMaintenance")}`);
   return `${setHead("Maintenance","Background work this node does on its own: what is scheduled, what it costs, and where to turn it off.")}
-    <div class="setgrid2">${jobs}${precachePanel(settings)}${dvDiskPanel(settings,dv)}${windowsServerCard(settings,readiness)}${telemetryPanel(settings)}</div>`;
+    <div class="setgrid2">${jobs}${precachePanel(settings)}${subtitleStorePanel(settings)}${dvDiskPanel(settings,dv)}${windowsServerCard(settings,readiness)}${telemetryPanel(settings)}</div>`;
 }
 const PRODUCE_EVERY=[[0,"Never"],[360,"6 hours"],[720,"12 hours"],[1440,"Daily"]];
 const CACHE_SIZES=[0,10,25,50,100,250,500,1000];
@@ -156,6 +156,28 @@ function precachePanel(settings){
     </div>
     <div class="hint"><b>It shares the encoder with live playback and always loses:</b> the moment anyone presses play it stops and hands the hardware over, picking up later from where it stopped. Only sources nothing plays natively are worth it (4K, HDR, HEVC); an ordinary 1080p file is skipped. A budget of <b>Off</b> stops production and clears what's stored. What it is doing right now is on Activity.</div>
     ${setCardFoot("savePrecache")}`);
+}
+// Stored subtitle tracks: the subtitle-source store's footprint on this node,
+// and what its producer — the fragment-index pass keeping each PGS track it
+// reads — is doing now. Background work on real disks says here what it is,
+// why it chose the work, what it costs, and where to turn it off. Read-only:
+// the switch lives on Developer beside its readiness rows.
+function subtitleStorePanel(settings){
+  const d=settings.subtitle_store||{};
+  const on=settings.subtitle_stored_sources!==false;
+  const fp=d.footprint;
+  const plural=(n,word)=>`${n} ${word}${n===1?"":"s"}`;
+  const size=fp?`${fmtBytes(fp.bytes)||"0 B"} · ${plural(fp.directories,"file")}`:"not measured yet";
+  const riding=d.riding||[];
+  const rides=riding.length
+    ? `<ul class="subsrc-rides">${riding.map(r=>`<li>File ${esc(r.file_id)}: keeping ${plural(r.tracks,"PGS track")}, ${fmtBytes(r.bytes_written)||"0 B"} written so far</li>`).join("")}</ul>`
+    : `<p class="hint">No index pass is keeping PGS tracks right now.</p>`;
+  const since=`Since this process started: ${plural(d.tracks_attempted||0,"track")} attempted — ${d.kept||0} kept, ${d.empty||0} with no cues, ${d.malformed||0} malformed, ${d.transient||0} to retry — and ${fmtBytes(d.bytes_written)||"0 B"} written${d.files_not_riding?`; ${plural(d.files_not_riding,"file")} indexed without it after a riding pass failed`:""}.`;
+  return setCard(`${cardHead("Stored subtitle tracks","While a file is indexed, the index pass also keeps each PGS subtitle track it reads, so a burned or overlaid PGS subtitle never has to read the whole file again.",`<span class="pill${on?" ok":""}">${esc(on?size:"off")}</span>`)}
+    <div class="hint"><b>Why this work:</b> the index pass already reads every packet of the file, so keeping the subtitle packets costs a few megabytes of disk per film and no extra read. The store is capped at ${fmtBytes(d.cap_bytes)||"—"}; the least recently used files go first.</div>
+    ${rides}
+    <p class="hint">${esc(since)}${fp?"":" The store's size is measured by its next sweep."}</p>
+    <div class="hint"><b>To turn it off:</b> <a href="#/settings/developer">Developer → Stored subtitle tracks</a> stops the index pass keeping tracks and makes playback ignore what is stored.</div>`,{id:"subsrcstore"});
 }
 function telemetryPanel(settings){
   return setCard(`${cardHead("Playback telemetry","Bounded, node-local playback measurements behind the Playback (7 days) card on System.")}

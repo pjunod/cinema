@@ -388,7 +388,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       shippedSource("searchSettingsCard"), shippedSource("windowsServerCard"),
       shippedSource("maintenancePanel"), shippedSource("presetOpts"),
       "const SERVER=null, RETRY_EVERY=[], ART_EVERY=[], CLEAN_EVERY=[];",
-      "const langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'';",
+      "const langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',subtitleStorePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'';",
       // `directedChangeDeveloperRows` reads the live player and returns ""
       // when there is none, which is exactly the state a settings page is in.
       shippedSource("directedChangeDeveloperRows"),
@@ -921,9 +921,42 @@ test("Automatic recovery is directly enabled and coverage remains advisory", () 
   assert.match(legacy, /checked=true/);
 });
 
+// Fix C PR 3: the subtitle-source store's footprint and its producer's work,
+// on the card where background work says what it costs and where it stops.
+test("Maintenance shows the stored subtitle tracks: size, what is riding now, and where to turn it off", () => {
+  const render = new Function(
+    "esc",
+    `const setCard=(html,o)=>"CARD["+o.id+"]"+html;
+     const cardHead=(t,d,s)=>"HEAD:"+t+"|"+s+"|";
+     const fmtBytes=(n)=>n?n+" B":"";
+     ${shippedSource("subtitleStorePanel")}
+     return subtitleStorePanel;`,
+  )(esc);
+  const html = render({
+    subtitle_stored_sources: true,
+    subtitle_store: {
+      footprint: { bytes: 18866, directories: 3, measured_at_ms: 1 },
+      cap_bytes: 34359738368,
+      riding: [{ file_id: 5208, tracks: 2, bytes_written: 4096, started_at_ms: 1 }],
+      tracks_attempted: 5, kept: 3, empty: 1, malformed: 1, transient: 0,
+      bytes_written: 9000, manifests_published: 2, files_not_riding: 1,
+    },
+  });
+  assert.match(html, /CARD\[subsrcstore\]/);
+  assert.match(html, /18866 B · 3 files/, "the store's size and file count");
+  assert.match(html, /File 5208: keeping 2 PGS tracks, 4096 B written so far/, "what is riding now");
+  assert.match(html, /5 tracks attempted — 3 kept, 1 with no cues, 1 malformed, 0 to retry/);
+  assert.match(html, /1 file indexed without it after a riding pass failed/);
+  assert.match(html, /href="#\/settings\/developer"/, "where to turn it off");
+  const idle = render({ subtitle_stored_sources: false, subtitle_store: { riding: [] } });
+  assert.match(idle, /HEAD:Stored subtitle tracks\|<span class="pill">off<\/span>/);
+  assert.match(idle, /No index pass is keeping PGS tracks right now/);
+  assert.match(idle, /measured by its next sweep/);
+});
+
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {
   const panel = shippedSource("maintenancePanel");
-  for (const card of ["precachePanel", "dvDiskPanel", "telemetryPanel"]) assert.match(panel, new RegExp(`${card}\\(`));
+  for (const card of ["precachePanel", "subtitleStorePanel", "dvDiskPanel", "telemetryPanel"]) assert.match(panel, new RegExp(`${card}\\(`));
   for (const id of ["job-probe", "job-art", "job-clean", "job-boot"]) assert.match(panel, new RegExp(`"${id}"`));
   const libraries = shippedSource("librariesPanel");
   for (const gone of ["maintenancePanel", "dvDiskPanel", "precachePanel", "telemetry"])

@@ -32,7 +32,7 @@
 //!   self-test proved this `ffmpeg` behaves as the design measured, and the
 //!   cache is on a local filesystem.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -455,7 +455,72 @@ impl Drop for StageDir {
 /// while the first is running simply does not ride.
 /// Keyed by store root and file id: one process has one root, and a test
 /// with its own cache cannot collide with another's claim on the same id.
-static IN_FLIGHT: Mutex<BTreeSet<(PathBuf, i64)>> = Mutex::new(BTreeSet::new());
+///
+/// The value says what the ride is doing, for the product to show while it
+/// runs: which tracks, into which stage, since when. It is filled in once the
+/// stage exists.
+static IN_FLIGHT: Mutex<BTreeMap<(PathBuf, i64), Option<RideInFlight>>> =
+    Mutex::new(BTreeMap::new());
+
+#[derive(Clone, Debug)]
+struct RideInFlight {
+    tracks: usize,
+    stage: PathBuf,
+    started_at_ms: i64,
+}
+
+/// One ride-along running on this node now, as the Maintenance card and the
+/// analysis row show it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ActiveRide {
+    pub file_id: i64,
+    /// PGS tracks this pass is keeping.
+    pub tracks: usize,
+    /// Bytes written into the stage so far — the `.sup` and `.crc` files.
+    pub bytes_written: u64,
+    pub started_at_ms: i64,
+}
+
+/// Every ride-along in flight on this node, with what each has written so
+/// far. Measured now: a stage is a handful of files.
+pub(crate) fn active_rides() -> Vec<ActiveRide> {
+    let rides: Vec<(i64, RideInFlight)> = IN_FLIGHT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter_map(|((_, file_id), ride)| ride.clone().map(|ride| (*file_id, ride)))
+        .collect();
+    rides
+        .into_iter()
+        .map(|(file_id, ride)| ActiveRide {
+            file_id,
+            tracks: ride.tracks,
+            bytes_written: stage_bytes(&ride.stage),
+            started_at_ms: ride.started_at_ms,
+        })
+        .collect()
+}
+
+/// The bytes a stage's files hold now.
+pub(crate) fn stage_bytes(stage: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(stage) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(std::fs::Metadata::is_file)
+        .map(|metadata| metadata.len())
+        .sum()
+}
+
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
+}
 
 #[derive(Debug)]
 struct FileClaim((PathBuf, i64));
@@ -465,11 +530,33 @@ impl FileClaim {
         let key = (root.to_owned(), file_id);
         // The guard is released before a claim exists: a claim's drop takes
         // the same lock.
-        let inserted = IN_FLIGHT
+        let inserted = {
+            let mut in_flight = IN_FLIGHT
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if in_flight.contains_key(&key) {
+                false
+            } else {
+                in_flight.insert(key.clone(), None);
+                true
+            }
+        };
+        inserted.then(|| Self(key))
+    }
+
+    /// Say what the claimed ride is doing, once its stage exists.
+    fn describe(&self, tracks: usize, stage: &Path) {
+        if let Some(entry) = IN_FLIGHT
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key.clone());
-        inserted.then(|| Self(key))
+            .get_mut(&self.0)
+        {
+            *entry = Some(RideInFlight {
+                tracks,
+                stage: stage.to_owned(),
+                started_at_ms: unix_ms(),
+            });
+        }
     }
 }
 
@@ -628,6 +715,7 @@ pub(crate) async fn plan(
     // The tee spec carries the stage path as text; a path that is not UTF-8
     // cannot be written into it faithfully.
     stage.path().to_str()?;
+    claim.describe(tracks.len(), stage.path());
     Some(RideAlongPlan {
         file_id,
         root: gate.root.clone(),
@@ -2481,6 +2569,31 @@ mod tests {
         }
     }
 
+    /// PR 3: a ride in flight is listed with its tracks and what its stage
+    /// holds, and is gone once its plan is.
+    #[tokio::test]
+    async fn a_ride_in_flight_is_listed_until_its_plan_ends() {
+        let case = latch_case();
+        let gate = RideAlongGate::for_test(case.root.clone());
+        let id = 70_020;
+        let riding = plan(&gate, id, &case.source, &[0, 3]).await.expect("rides");
+        std::fs::write(riding.stage().join("s0.sup"), [0_u8; 1234]).expect("written");
+        let listed = active_rides()
+            .into_iter()
+            .find(|ride| ride.file_id == id)
+            .expect("listed while it runs");
+        assert_eq!(listed.tracks, 2);
+        assert_eq!(listed.bytes_written, 1234);
+        let diagnostics = crate::subtitle_source::diagnostics();
+        assert!(diagnostics.riding.iter().any(|ride| ride.file_id == id));
+        assert_eq!(
+            diagnostics.cap_bytes,
+            crate::subtitle_source::MAX_STORE_BYTES
+        );
+        drop(riding);
+        assert!(!active_rides().iter().any(|ride| ride.file_id == id));
+    }
+
     /// A file with no PGS track has nothing to latch, and never rides.
     #[tokio::test]
     async fn a_file_with_no_pgs_track_never_rides() {
@@ -2614,7 +2727,7 @@ mod tests {
             VIDEO,
             cache,
             Duration::from_secs(60),
-            |_, _, _| {},
+            |_: &crate::fragindex::PassProgress| {},
             gate,
         )
         .await;
