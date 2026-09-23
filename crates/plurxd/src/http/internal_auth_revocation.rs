@@ -15,7 +15,10 @@ use plurx_core::store::CacheAdminMutationClaim;
 use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
-use super::extract::CacheOnlyAdminRevocation;
+use super::extract::{
+    record_revocation_complete, record_revocation_propagation_failed, CacheOnlyAdminRevocation,
+    RevocationAdmission,
+};
 use super::peer_transport::{deadline_after, exact_auth_from_headers, PeerAuthMode, PeerTransport};
 use crate::state::AppState;
 
@@ -67,17 +70,14 @@ struct StableBeginRoster {
 /// only after Drop cleanup becomes a no-op rather than crossing the exclusion.
 struct CacheAdminMembershipExclusion {
     lease: Option<CacheAdminRevocationLease>,
-    operation_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    operation_guard: Option<RevocationAdmission>,
     membership: MembershipManager,
     shutdown: tokio_util::sync::CancellationToken,
     release_runtime: tokio::runtime::Handle,
 }
 
 impl CacheAdminMembershipExclusion {
-    fn prepare(
-        state: &AppState,
-        operation_guard: tokio::sync::OwnedMutexGuard<()>,
-    ) -> Result<Self, ApiError> {
+    fn prepare(state: &AppState, operation_guard: RevocationAdmission) -> Result<Self, ApiError> {
         let lease = state
             .membership
             .is_replicated()
@@ -252,8 +252,9 @@ impl ClusterCacheRevocation {
         }
         let operation_guard = state
             .cache_only_admin_proofs
-            .try_acquire_revocation_operation()
-            .map_err(|_| propagation_error())?;
+            .acquire_revocation_operation()
+            .await
+            .map_err(|_| admission_error())?;
         let local = state.cache_only_admin_proofs.begin_global_revocation();
         Self::begin(state, local, operation_guard)
             .await?
@@ -265,8 +266,9 @@ impl ClusterCacheRevocation {
     pub(crate) async fn begin_digest(state: &AppState, digest: &str) -> Result<Self, ApiError> {
         let operation_guard = state
             .cache_only_admin_proofs
-            .try_acquire_revocation_operation()
-            .map_err(|_| propagation_error())?;
+            .acquire_revocation_operation()
+            .await
+            .map_err(|_| admission_error())?;
         let local = state
             .cache_only_admin_proofs
             .begin_digest_revocation(digest);
@@ -285,8 +287,9 @@ impl ClusterCacheRevocation {
     pub(crate) async fn begin_user(state: &AppState, user_id: i64) -> Result<Self, ApiError> {
         let operation_guard = state
             .cache_only_admin_proofs
-            .try_acquire_revocation_operation()
-            .map_err(|_| propagation_error())?;
+            .acquire_revocation_operation()
+            .await
+            .map_err(|_| admission_error())?;
         let local = state.cache_only_admin_proofs.begin_user_revocation(user_id);
         Self::begin(state, local, operation_guard).await
     }
@@ -294,7 +297,7 @@ impl ClusterCacheRevocation {
     async fn begin(
         state: &AppState,
         mut local: CacheOnlyAdminRevocation,
-        operation_guard: tokio::sync::OwnedMutexGuard<()>,
+        operation_guard: RevocationAdmission,
     ) -> Result<Self, ApiError> {
         let mut membership_exclusion =
             CacheAdminMembershipExclusion::prepare(state, operation_guard)?;
@@ -433,6 +436,7 @@ impl ClusterCacheRevocation {
             .take()
             .expect("cluster cache revocation owns its local fence")
             .complete();
+        record_revocation_complete();
         Ok(())
     }
 
@@ -632,6 +636,11 @@ async fn fanout(
 }
 
 fn propagation_error() -> ApiError {
+    record_revocation_propagation_failed();
+    admission_error()
+}
+
+fn admission_error() -> ApiError {
     ApiError::typed(
         StatusCode::SERVICE_UNAVAILABLE,
         "admin_revocation_propagation_failed",
@@ -826,7 +835,7 @@ mod tests {
                 .find("cache_admin_revocation_activation_ready()")
                 .expect("marker-aware quorum preflight")
                 < source
-                    .find("try_acquire_revocation_operation()")
+                    .find("acquire_revocation_operation()")
                     .expect("local operation gate")
         );
     }
@@ -868,8 +877,8 @@ mod tests {
             .0;
         assert!(
             digest_entry
-                .find("try_acquire_revocation_operation()")
-                .expect("fail-fast process gate")
+                .find("acquire_revocation_operation()")
+                .expect("bounded process gate")
                 < digest_entry
                     .find("begin_digest_revocation(digest)")
                     .expect("local invalidation"),

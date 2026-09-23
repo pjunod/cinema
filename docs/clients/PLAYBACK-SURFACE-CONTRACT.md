@@ -425,33 +425,34 @@ _Generated from [`tests/playback/playback-surface-contract.json`](../../tests/pl
 
 Rows are evaluated in order; the first row whose `context` matches wins.
 
-| # | Source | Context | Class | Requires a stopped player | Actions | Notes |
-|---|---|---|---|---|---|---|
-| 1 | `owner_stopped` | any | `stopped` | yes | class default |  |
-| 2 | `owner_exhausted` | any | `exhausted` | yes | class default |  |
-| 3 | `startup_exhausted` | any | `exhausted` | yes | `close` · `retry` |  |
-| 4 | `hls_init_invalid` | start | `stopped` | yes | class default |  |
-| 5 | `hls_init_unsupported` | start | `stopped` | yes | class default |  |
-| 6 | `auth_401_403` | any | `stopped` | yes | `sign_in` · `close` |  |
-| 7 | `vod_source_rescan_required` | start | `stopped` | yes | class default |  |
-| 8 | `vod_source_unsupported` | start | `stopped` | yes | class default |  |
-| 9 | `vod_transcode_unavailable` | start | `stopped` | yes | class default |  |
-| 10 | `vod_subtitle_burn_unavailable` | start | `stopped` | yes | class default |  |
-| 11 | `vod_disabled` | start | `stopped` | yes | class default |  |
-| 12 | `create_503_not_yet` | start | `preparing` | no | class default | codes: `startup_timeout` · `media_owner_transition` · `vod_index_pending` · `vod_engine_unattested` · `transcode_capacity_pending`; retryable by the owner (M5) |
-| 13 | `client_preparing` | any | `preparing` | no | class default |  |
-| 14 | `change_failed` | change | `refused` | no | `retry` |  |
-| 15 | `segment_503_not_yet` | attached | `recovering` | no | class default | codes: `startup_timeout` · `playlist_state_changed` · `segment_pending` · `segment_wait_busy` · `node_wait_capacity` · `media_owner_transition` · `vod_resurrection_unavailable` · `response_owner_transition` · `response_state_changed` · `response_owner_reclassification_unavailable` · `response_publication_timeout` · `response_completion_capacity` · `response_snapshot_capacity` · `node_maintenance` · `node_removal_fenced` · `learner_route_ineligible` |
-| 16 | `media_owner_lost_410` | any | `recovering` | no | class default | re-classes to `stopped` when the owner stops; carries `position_ms` |
-| 17 | `control_hold` | attached | `hold` | no | class default |  |
-| 18 | `media_waiting` | attached | `buffering` | no | class default |  |
-| 19 | `owner_recovery_step` | any | `recovering` | no | class default |  |
-| 20 | `readiness_deadline_rungs_left` | any | `recovering` | no | class default |  |
-| 21 | `decoder_failed` | any | `stopped` | yes | class default |  |
-| 22 | `black_frame_ladder_spent` | start | `exhausted` | yes | `close` · `retry` |  |
-| 23 | `repeated_early_end` | attached | `stopped` | yes | class default |  |
-| 24 | `degraded_notice` | any | `degraded` | no | class default |  |
-| 25 | `log_only` | any | *(log only)* | no | class default |  |
+| # | Source | Context | Class | Requires a stopped player | Actions | Retired by override | Notes |
+|---|---|---|---|---|---|---|---|
+| 1 | `owner_stopped` | any | `stopped` | yes | class default | – |  |
+| 2 | `owner_exhausted` | any | `exhausted` | yes | class default | – |  |
+| 3 | `startup_exhausted` | any | `exhausted` | yes | `close` · `retry` | – |  |
+| 4 | `hls_init_invalid` | start | `stopped` | yes | class default | – |  |
+| 5 | `hls_init_unsupported` | start | `stopped` | yes | class default | – |  |
+| 6 | `auth_401_403` | any | `stopped` | yes | `sign_in` · `close` | – |  |
+| 7 | `vod_source_rescan_required` | start | `stopped` | yes | class default | – |  |
+| 8 | `vod_source_unsupported` | start | `stopped` | yes | class default | – |  |
+| 9 | `vod_transcode_unavailable` | start | `stopped` | yes | class default | – |  |
+| 10 | `vod_subtitle_burn_unavailable` | start | `stopped` | yes | class default | – |  |
+| 11 | `vod_disabled` | start | `stopped` | yes | class default | – |  |
+| 12 | `create_503_not_yet` | start | `preparing` | no | class default | – | codes: `startup_timeout` · `media_owner_transition` · `vod_index_pending` · `vod_engine_unattested` · `transcode_capacity_pending`; retryable by the owner (M5) |
+| 13 | `client_preparing` | any | `preparing` | no | class default | – |  |
+| 14 | `change_failed` | change | `refused` | no | `retry` | – |  |
+| 15 | `segment_503_not_yet` | attached | `recovering` | no | class default | – | codes: `startup_timeout` · `playlist_state_changed` · `segment_pending` · `segment_wait_busy` · `node_wait_capacity` · `media_owner_transition` · `vod_resurrection_unavailable` · `response_owner_transition` · `response_state_changed` · `response_owner_reclassification_unavailable` · `response_publication_timeout` · `response_completion_capacity` · `response_snapshot_capacity` · `node_maintenance` · `node_removal_fenced` · `learner_route_ineligible` |
+| 16 | `media_owner_lost_410` | any | `recovering` | no | class default | – | re-classes to `stopped` when the owner stops; carries `position_ms` |
+| 17 | `control_hold` | attached | `hold` | no | class default | – |  |
+| 18 | `system_interruption` | attached | `hold` | no | class default | `system_resumed` |  |
+| 19 | `media_waiting` | attached | `buffering` | no | class default | – |  |
+| 20 | `owner_recovery_step` | any | `recovering` | no | class default | – |  |
+| 21 | `readiness_deadline_rungs_left` | any | `recovering` | no | class default | – |  |
+| 22 | `decoder_failed` | any | `stopped` | yes | class default | – |  |
+| 23 | `black_frame_ladder_spent` | start | `exhausted` | yes | `close` · `retry` | – |  |
+| 24 | `repeated_early_end` | attached | `stopped` | yes | class default | – |  |
+| 25 | `degraded_notice` | any | `degraded` | no | class default | – |  |
+| 26 | `log_only` | any | *(log only)* | no | class default | – |  |
 
 | Fixture error | Meaning |
 |---|---|
@@ -462,7 +463,7 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 - A fault about the ATTACHED media carries `attached` and no `intent`; it is retired by that media's presentation evidence.
 - A fault about a PENDING DESTINATION carries an `intent`. Evidence never retires it, with one exception the class table states outright: `refused` also retires on `refused_progress_ms` of continuous presentation, because a viewer whose picture has been fine for that long has been told.
 - A fault whose `attached` generation is retired stops being about anything and is dropped (`surface_cleared {by: attached_retired}`). That is identity, not one of the class's `retired_by` rules, so it applies to blocking faults too — otherwise a `stopped` prompt would outlive the attempt it described and sit over the next one.
-- Each retirement reason is a property of the CLASS, not of the event: `intent_settled` retires only classes whose `retired_by` names it, so a prompt the viewer has to answer is not swept away by a seek landing underneath it. `attached_retired` is the one exception, and the note above says why.
+- A retirement reason normally comes from the CLASS, but a source may declare an explicit `retired_by` override when its lifecycle is narrower. `system_interruption` uses that override because `system_resumed` retires that hold without retiring unrelated holds. `attached_retired` is an identity rule rather than either kind of retirement declaration, and the note above says why.
 - `owner_success: G` is the recovery owner reporting that its recovery produced attached generation G. There is one recovery owner per player, so it retires every `recovering` fault, not only the ones about the generation it replaced.
 - `playback_not_requested` is the viewer no longer wanting media. A `buffering` fault is about a player that WANTS it — the wait is only a wait while something is trying to play — so a pause makes the fault about nothing and it is retired. It is on `buffering` and on no other class: a `preparing` start has not been paused by a viewer who has not seen it yet, and a blocking prompt is answered by the viewer rather than by a transport change. Resuming raises nothing back; the raise sites decide what comes back, which is the same rule every other retirement follows.
 

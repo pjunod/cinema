@@ -34,6 +34,20 @@ Vision investigation are recorded in
 > publishing plus the broader real-hardware/offline matrix remain release
 > gates.
 
+**Display matching and audio-session implementation (2026-09-20).** Apple
+build 175 restores the `AVPlayerLayer` behavior that `AVPlayerViewController`
+normally supplies: the finite and Live TV players now apply the committed
+asset's preferred display criteria to the active tvOS window when the viewer's
+Match Content setting permits it, and clear the criteria on every teardown.
+All three player stacks distinguish a system interruption from viewer pause,
+keep stall recovery idle during the interruption, resume only when both iOS
+and the retained viewer intent permit it, and turn loss of the old audio route
+into a real pause. Simulator policy tests and iOS/tvOS compilation pass. The
+physical HDMI observations for the Library-channel inline `VideoPlayer` and
+fullscreen surface have **not** been made; the plan's Apple TV prompt remains
+the required evidence, so this paragraph records implementation and the open
+measurement rather than asserting that either surface switches modes.
+
 ## What parity means
 
 - **P0 — correct playback.** A person can find a server, sign in once, browse,

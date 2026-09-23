@@ -2938,6 +2938,7 @@ membership addresses and token-file paths are intentionally file-only:
 | Env var | TOML | Default | What it does |
 |---|---|---|---|
 | `PLURX_BIND` | `server.bind` | `0.0.0.0:32400` | Address the HTTP API binds to |
+| `PLURX_TRUSTED_PROXIES` | `server.trusted_proxies` | empty | Comma-separated proxy CIDRs whose appended `X-Forwarded-For` hops the login throttle may trust. Keep empty unless those peers overwrite or append the header correctly |
 | `PLURX_SERVER_NAME` | `server.name` | `plurx` | Bootstrap seed for the human-visible server name. The replicated setting is authoritative after first boot; rename it through the admin API |
 | `PLURX_NODE_HOSTNAME` | — | OS hostname | Short physical-machine name shown in Settings → Cluster. Native installs normally leave this unset; containers set it explicitly so a generated container id is not mistaken for the host |
 | `PLURX_DATA_DIR` | `storage.data_dir` | `./data` | Authoritative database, identity, secrets, migration markers, and compatibility root |
@@ -3455,8 +3456,8 @@ and falls back to the log ring when pointed at an older server.
 
 ### Quality-bounded transcodes
 
-N1 adds two admin runtime settings. `transcode.rate_mode` is `bitrate` by
-default and preserves the pre-N1 encoder arguments and cache identity.
+N1 adds two admin runtime settings. An explicit `transcode.rate_mode` of
+`bitrate` preserves the pre-N1 encoder arguments and cache identity.
 `quality` requests the family-specific quality mode below. An optional
 `transcode.quality` integer overrides the family default; JSON `null` clears
 that override. The server validates the complete production argument list on
@@ -3470,6 +3471,21 @@ sessions.
 | VA-API | `-rc_mode QVBR -global_quality q`, with target bitrate and caps |
 | NVIDIA NVENC | `-rc vbr -cq q`, with target bitrate and caps |
 | Apple VideoToolbox | `-q:v q`, with target bitrate and caps |
+
+When no mode is stored, the server resolves the selected encoder's code
+default; this is distinct from an operator explicitly choosing `bitrate`.
+Every family default remains Bitrate as of S-06 PR #414. Admin diagnostics
+report the map at `encoders.quality_rc.default_rate_mode`; the settings form
+keeps presenting `bitrate` for an absent legacy pair.
+
+Read-only census at deployed revision `882862e8` on 2026-09-21 found QSV
+selected on `nynuc`, `nuc4` and `nuc3`, and VA-API selected on `m6`. The fresh
+process counters were zero for QSV, VA-API, software, NVENC and VideoToolbox
+on every node (m6 had three copy sessions and one VOD session). This does not
+qualify a default: QSV and software still need separate n2 corpus captures;
+VA-API now has a selectable node but needs a non-zero week and its own n2
+comparison; NVENC is unusable on the four Linux daemons; VideoToolbox has no
+deployed daemon. Do not infer calibration from the 15-frame boot probe.
 
 The request and the effective result are deliberately different facts. A
 driver that refuses its quality arguments remains usable for bitrate mode; new
@@ -3619,6 +3635,18 @@ halves. Every fixture must have a unique server filename, resolved controller
 path, and pinned SHA-256. Relabeling the same clip as both easy and hard is not
 a corpus. `scripts/perf2-rate-control-smoke-corpus.json` remains VBR-smoke-only
 and is not D5 calibration or full acceptance.
+
+Every fixture a pinned manifest names is generated bit-exactly, from a seeded
+source, with `-threads 1`. All three are needed for `scripts/bench fixtures` to
+reproduce the pinned SHA-256 on a controller that does not already hold the
+bytes: without bit-exact muxing Matroska writes a random SegmentUID, without a
+seed the grain fixture's pixels change on every run, and without a fixed thread
+count libx264 partitions frame threads by the host's core count, so a 16-core
+and a 2-core machine produce different bytes from the same recipe. The pins
+checked in were regenerated on `ffmpeg 8.0.1-3ubuntu2`; a controller on a
+different x264 build will not reproduce them, and re-pinning is a PR that
+states the build it used. `scripts/bench fixtures` skips a file that already
+exists, so delete a fixture before expecting a changed recipe to rebuild it.
 
 Capture server hashes from the exact files in media1's fixture library, then
 produce the same ordered list locally and compare it before running. Replace
@@ -4669,6 +4697,18 @@ Hiqlite operation.
 | `plurx_cluster_removals_pending` | Nonzero means a durable removal fence still needs an operator retry or resolution. |
 | `plurx_raft_current_term`, `plurx_raft_leader_known`, `plurx_raft_is_leader` | Local Raft leadership state from the cached watch. A known leader is required but does not by itself prove this node is caught up. |
 | `plurx_raft_applied_index`, `plurx_raft_commit_index`, `plurx_raft_apply_lag_entries` | Local apply progress against the quorum-confirmed commit watermark. Healthy readiness requires zero lag. |
+
+Playback telemetry writer metrics are also node-local and fixed-cardinality;
+they never label a session, file, user, network, or path.
+
+| Metric | How to read it |
+|---|---|
+| `plurx_telemetry_enqueued_total{class="terminal|lifecycle|sample"}` | Jobs admitted to the bounded 1,024-slot writer queue. |
+| `plurx_telemetry_dropped_total{reason="queue_full|coalesced|writer_degraded|writer_panic|shutdown"}` | Work deliberately discarded by the bounded policy, plus the one loss that is not deliberate. A growing `queue_full` or `writer_degraded` series needs the daemon log and sidecar health inspected; `coalesced` is expected snapshot replacement. **Any** `writer_panic` is a batch the node-local store destroyed mid-write and is always worth the daemon log — it is counted so the loss cannot be silent, not because it is normal. `shutdown` carries what a drain that reached its two-second bound gave up on, including the batch the writer was still holding; those rows may or may not have landed, and the counter states the pessimistic answer once. |
+| `plurx_telemetry_written_total{outcome="ok|error"}` | Raw rows offered successfully or unsuccessfully to the node-local Store batch path. |
+| `plurx_telemetry_queue_depth` | Current queue occupancy, never above 1,024. Non-terminal work stops at 896 so 128 slots remain for terminal outcomes, and a terminal arriving at a full queue displaces the oldest non-terminal rather than being refused — so a rise in `queue_full` alongside a flat `enqueued_total{class="terminal"}` is samples losing to terminals, which is the intended trade. |
+| `plurx_telemetry_batch_size`, `plurx_telemetry_batch_seconds` | Fixed-bucket histograms for batch occupancy and processing time. Use them to decide whether a second sidecar connection or different batch constants are warranted; do not infer that from queue depth alone. |
+| `plurx_telemetry_setting_refresh_failures_total` | Paired effective-setting refreshes that failed while the last good values remained active. |
 
 The compact Prometheus alert shape is: membership sample valid · leader known ·
 heartbeat quorum available · apply lag zero. `/readyz` remains the final active

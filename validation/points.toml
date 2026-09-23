@@ -477,6 +477,7 @@ paths = [
   "crates/plurx-core/src/metadata/**",
   "crates/plurx-core/src/scan/**",
   "crates/plurx-core/src/store/hiqlite.rs",
+  "crates/plurx-core/src/store/mod.rs",
   "crates/plurx-core/src/store/hiqlite_catalog.rs",
   "crates/plurx-core/src/store/hiqlite_classification.rs",
   "crates/plurx-core/src/store/hiqlite_coordination.rs",
@@ -499,6 +500,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/pretranscode.rs",
   "crates/plurx-core/src/store/sqlite/sessions.rs",
   "crates/plurx-core/src/store/sqlite/trakt.rs",
+  "crates/plurx-core/src/store/sqlite/users.rs",
   "crates/plurx-core/src/store/sqlite/watch.rs",
   "crates/plurx-core/src/store/publication.rs",
   "crates/plurx-core/src/store/sql_source.rs",
@@ -512,6 +514,7 @@ paths = [
   "crates/plurxd/src/shared_cache.rs",
   "crates/plurxd/src/store_result.rs",
   "crates/plurxd/src/http/{cluster,internal_media_sessions,peer_transport}.rs",
+  "crates/plurxd/src/http/{auth,extract,internal_auth_revocation,users}.rs",
   "crates/plurxd/src/http/items.rs",
   "scripts/vendor-audit-lock",
   "scripts/cluster-named-runner",
@@ -539,6 +542,7 @@ paths = [
   "crates/plurxd/src/media_pool.rs",
   "crates/plurxd/src/playstart.rs",
   "crates/plurxd/src/transcode.rs",
+  "crates/plurxd/src/transcode/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
@@ -570,6 +574,7 @@ paths = [
   "crates/plurxd/src/playstart.rs",
   "crates/plurxd/src/state.rs",
   "crates/plurxd/src/transcode.rs",
+  "crates/plurxd/src/transcode/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries"]
 depends_on = ["cluster.membership", "cluster.auth", "identity.access"]
@@ -711,10 +716,13 @@ paths = [
   "crates/plurx-pgs/**",
   "fuzz/**",
   "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,scratch_ledger,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
+  "crates/plurxd/src/transcode/**",
+  "crates/plurxd/src/vod/**",
   "crates/plurxd/src/manifest_cache.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/http/internal_media_sessions.rs",
   "crates/plurxd/src/http/{hls,network,pgs_overlay,stream}.rs",
+  "crates/plurxd/src/http/hls/**",
   "crates/plurxd/src/web/playback-policy.js",
   "crates/plurxd/src/web/playback-control.js",
   "docs/PLAYBACK.md",
@@ -981,7 +989,7 @@ paths = [
   "scripts/ci-runner-cache-audit",
   "scripts/release-package-candidate",
   "scripts/package-windows",
-  "scripts/{bench,dv-evidence,gop-census,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
+  "scripts/{bench,dv-evidence,gop-census,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
   "scripts/container-smoke",
   "scripts/windows-smoke.ps1",
   "scripts/decoder-diagnostic-qualification",
@@ -1019,6 +1027,7 @@ paths = [
   "scripts/prove-fix",
   "scripts/prove-tombstone-offline-fence",
   "scripts/require-test-count",
+  "scripts/split-identity",
   "scripts/validate",
   "tests/client-fixes.toml",
   "tests/validation/**",

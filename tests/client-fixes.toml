@@ -1294,10 +1294,14 @@ source_anchor = "notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKe
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testLibraryChannelCapturesFailureNotificationError"
 [[fixes]]
+# A-01 widened the reported pause to `paused || systemPaused`: a system audio
+# interruption is a real pause of the transport, while a zero decoder rate
+# still is not. The anchor follows the current expression so a return to a
+# rate-derived `isPaused` is still caught here.
 id = "apple.library-channel-buffering-demand"
 commits = ["323eaf77"]
 source = "clients/apple/Sources/LibraryChannels.swift"
-source_anchor = "isPaused: paused,"
+source_anchor = "isPaused: paused || systemPaused,"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testLibraryChannelBufferingKeepsProductionActive"
 [[fixes]]
@@ -2318,3 +2322,36 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "defer { self?.finishPGSOverlayLoad(loadGeneration) }"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testPGSOverlayReselectionAfterAnAbandonedLoadLoadsAgain() async"
+
+[[fixes]]
+# A finite interruption that ended without `.shouldResume` cleared
+# `systemPaused` and stopped there: the transport stayed paused while
+# `wantsPlayback` still claimed playback, so the control read Pause and the
+# viewer's first press only withdrew the stale intent. A second press was
+# needed to hear anything. The guarded arm below makes the visible intent
+# agree with the paused transport, so one Play is one real resume. The same
+# commit also holds tvOS display-criteria application back until the item is
+# `.readyToPlay`, pinned by the `itemIsReady: false` case of
+# `testDisplayCriteriaRequiresMatchingCurrentItemAndCurrentOpen` in the same
+# test file.
+id = "apple.finite-interruption-without-resume-needs-one-play"
+commits = ["c5ca81f7"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "guard wasSystemPaused, wantsPlayback else { return }"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testFiniteInterruptionWithoutResumeNeedsExactlyOnePlay()"
+
+[[fixes]]
+# `systemPaused` was `@Published`, which gave the player a second published
+# surface for a fact the one surface already states — every transition is
+# announced beside the assignment as `present(.systemPaused(_))`, and the only
+# reads are plain conditionals inside the controller. The fence test pins the
+# exact list of `@Published` fields in PlayerController.swift, so the
+# correction was to stop publishing the flag rather than widen the pin; the
+# anchored comment is what a revert to `@Published` would have to delete.
+id = "apple.interruption-flag-is-not-a-second-published-surface"
+commits = ["89970483"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "/// Interruption state, deliberately NOT `@Published`."
+test = "tests/operations/test_playback_surface_fence.py"
+test_anchor = "def test_the_player_controllers_published_surface_inventory_is_pinned(self):"

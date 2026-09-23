@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 217
+One binary serves everything on one port (`:32400` by default). plurx has 221
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -299,10 +299,14 @@ families. No `/api/v1/cluster/*` path matches either.
 | POST | `/api/v1/auth/login` | public | Verifies credentials, mints a token |
 | POST | `/api/v1/auth/logout` | bearer | Deletes this token's digest, cluster-wide |
 | GET | `/api/v1/me` | bearer | The caller's own user record |
+| GET | `/api/v1/me/devices` | bearer | This account's bounded token inventory; eight-hex digest prefixes only |
+| DELETE | `/api/v1/me/devices/{prefix}` | bearer | Revokes one other device through the cluster revocation fence; the current device must use logout |
 | GET | `/api/v1/users` | admin | Every user; never any password hash |
 | POST | `/api/v1/users` | admin | Creates a user |
 | PUT | `/api/v1/users/{id}` | admin | Sets password and/or admin flag |
 | DELETE | `/api/v1/users/{id}` | admin | Deletes a user; tokens and watch state cascade |
+| GET | `/api/v1/users/{id}/devices` | admin | One user's bounded token inventory; eight-hex digest prefixes only |
+| DELETE | `/api/v1/users/{id}/devices/{prefix}` | admin | Revokes one uniquely matched device token through the user-wide cluster fence |
 | GET | `/api/v1/keys` | admin | Lists API keys; never the hash or the secret |
 | POST | `/api/v1/keys` | admin | Creates a key, returning the secret **once** |
 | DELETE | `/api/v1/keys/{id}` | admin | Revokes a key |
@@ -333,6 +337,18 @@ user is always an admin.
 Login takes `{"username", "password", "device"?}` and returns
 `{"token", "user"}`. Unknown user, wrong password, and a password changed
 between the read and the token write are all the same 401.
+
+Three sizes are stated rather than inherited. The whole request body is capped
+at **8 KiB** by the route itself, so a large body is refused before it is
+parsed, hashed or read against the Store. `password` is capped at **1024
+bytes**. `device` — the label this session will carry in the inventory above —
+is capped at **256 bytes** and a longer one is a 400 `device label must be at
+most 256 bytes`, with no token minted: the label is bounded where it is
+created, because `/me/devices` bounds rows (256) and not bytes, so an unbounded
+label would make one devices read as large as the account cared to make it. A
+label stored before this bound existed is truncated at a character boundary
+where the inventory is projected, never dropped — a device you cannot see is a
+device you cannot revoke.
 
 Logout takes both the validated user and the raw token — the first so an
 invalid token 401s rather than silently succeeding, the second so there is a
