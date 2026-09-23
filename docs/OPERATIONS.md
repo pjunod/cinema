@@ -348,11 +348,66 @@ command in its error. Once `<PLURX_DATA>/hiqlite/activation.json` exists, the
 replicated target is authoritative; do not replace `plurx.db` and assume you
 have restored current state.
 
-There is no automated quorum-aware backup, restore, or permanent-majority
-recovery path for an activated cluster. No active milestone owns one. A
-post-activation code rollback therefore means rolling forward with a binary
-that supports the active replicated schema, against the retained Hiqlite
-target. The commands below are only for the pre-activation SQLite case.
+Activated clusters have a portable, consistent-cut backup and an offline
+fresh-cluster restore. It is a disaster-recovery path, not a way to roll back
+one voter or merge writes from a surviving minority. A post-activation code
+rollback still means rolling forward with a binary that supports the active
+replicated schema, against the retained Hiqlite target. The SQLite commands
+below are only for the pre-activation case.
+
+### Backing up and restoring an activated cluster
+
+Set `backup.destination`, `backup.schedule_utc` (UTC `HH:MM`, default `02:30`),
+and `backup.keep` in Settings → Developer. Use a destination on a separately
+protected mount with at least twice the current state-machine image size free.
+The readiness rows are advisory: an empty destination is what disables the
+schedule, and no missing observation prevents an explicit save or backup.
+
+Run an immediate backup through the voter API when validating or before risky
+maintenance:
+
+```bash
+plurxd cluster backup \
+  --server http://127.0.0.1:32400 \
+  --token-file /run/secrets/plurx-admin-token \
+  --output /mnt/nas/plurx-backups
+```
+
+The printed directory contains `manifest.json`, `plurx.db`, `SHA256SUMS`, and,
+when the cluster uses one, owner-only `credentials.key`. Copying a voter's
+`hiqlite/logs` or `state_machine/snapshots` directory is not this backup and is
+not a supported restore source. Verify the archive without writing a target:
+
+```bash
+plurxd restore --verify --archive /mnt/nas/plurx-backups/plurx-backup-...
+```
+
+Restore to an empty, isolated data directory first. If media is mounted at a
+new prefix, repeat `--remap OLD=NEW`; each rewrite is transactional and resets
+the affected library's root fingerprint:
+
+```bash
+plurxd restore \
+  --archive /mnt/nas/plurx-backups/plurx-backup-... \
+  --data-dir /srv/plurx-restore \
+  --advertise-host 10.42.0.14 \
+  --remap /srv/media=/mnt/nas/media
+```
+
+Start that directory on a loopback-bound lab instance. Require `/readyz` 200,
+log in with a restored admin token, open Home and one title, inspect DVR
+schedules and Trakt link status, and run `restore --verify` again. Record the
+archive age at failure as RPO and time from restore start to readiness plus
+rejoin completion as RTO.
+
+Before directing production clients at the restored voter, stop every
+surviving old voter and rename its `hiqlite/` directory to
+`hiqlite.retired-<UTC>`. The restore keeps `instance.id` for clients but mints a
+new node id and new Raft/API/signing secrets; retiring the old directories is
+the procedural half of that fence. Start the restored voter, check `/readyz`,
+then issue fresh join tokens and rejoin the other machines. Never start an old
+directory beside the restored lineage and never restore over a live or
+existing `hiqlite/` target.
 
 ### Upgrading an activated v5, v6, v7, or v8 cluster to v9
 
@@ -395,10 +450,10 @@ of import, so each new snapshot is another copy of the same pre-activation
 state — the redeploy captures nothing written since. Restoring one does not
 roll the node back; it only makes a stale database sit beside the authoritative
 target, and `plurxd` refuses to import it precisely so that mistake cannot pass
-silently (see the refusal below). Capturing current replicated state as a
-portable backup does not exist. Treat each node's
-`<PLURX_DATA>/hiqlite/` directory as evidence to preserve while that daemon is
-stopped; do not treat one copied directory as a supported single-node restore.
+silently (see the refusal below). Use the portable backup procedure above for
+current replicated state. Treat each node's `<PLURX_DATA>/hiqlite/` directory
+as evidence to preserve while that daemon is stopped; do not treat one copied
+directory as a supported single-node restore.
 
 `plurxd` records `<PLURX_DATA>/hiqlite-activated.json` when it activates. If the
 replicated target is missing while that file is present, startup refuses rather
@@ -2396,8 +2451,11 @@ The shared cache, node-local transcode scratch, and session directories are
 rebuildable accelerators and must not be treated as the authoritative backup;
 the media sources remain external inputs. Do not restore one voter's copied
 Raft state as a fresh cluster or start two restored copies with the same node
-identity. Until quorum-aware restore is shipped, disaster recovery means
-restoring enough original voters to recover the original majority.
+identity. When the original majority can be recovered, restoring those
+original voter backups remains the least-loss path. When it cannot, use the
+portable archive procedure above and accept that committed writes newer than
+its recorded Raft cut are outside the recovered lineage; do not attempt to
+merge a surviving minority into it.
 
 **Let artwork converge before relying on a voter for failover.** Item rows name
 poster and backdrop files through Raft, while the image bytes remain in each

@@ -189,6 +189,34 @@ pub struct DeviceCaps {
     /// `Some([])` is an explicit claim that no progressive label is admitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progressive_hevc_sample_entries: Option<Vec<String>>,
+    /// Bitmap-subtitle overlay protocols this client can draw, by name —
+    /// `pgs-v1` today.
+    ///
+    /// A list rather than a boolean, for the same reason `transports` is one:
+    /// it names the protocol, so a later `pgs-v2` is a new entry rather than a
+    /// second flag, and it lines up with `SubTrackDto.overlay`, which already
+    /// carries that string rather than a yes.
+    ///
+    /// Empty is the conservative answer and the only one an older client can
+    /// give: absent *within a document* is never a claim, so a client that has
+    /// not been taught to draw bitmaps is told a PGS track needs burning in,
+    /// which is true for it. An absent *document* is a different answer
+    /// entirely — see `overlay_for_caller` in `http/stream.rs`, which reads
+    /// silence as the server's own answer rather than as a refusal, because
+    /// the legacy query path is a mixed-fleet one.
+    ///
+    /// Getting that backwards is cheap in one direction and expensive in the
+    /// other. A claim that is dropped — misspelled, or lost to a key strategy
+    /// — costs a needless burn: the viewer still sees subtitles, but an HDR
+    /// source has been re-encoded to SDR to draw pictures the device could
+    /// have drawn itself. A refusal read as a claim is what leaves a viewer
+    /// with no subtitles at all.
+    ///
+    /// Whether the *server* can serve the protocol is a separate question held
+    /// by the `subtitles.pgs_overlay` setting; a track is only offered as an
+    /// overlay when both are yes.
+    #[serde(default)]
+    pub subtitle_overlays: Vec<String>,
     /// `hls` when preserved Dolby Vision has to ride the copy-video HLS
     /// envelope rather than a progressive MP4. Apple's AVPlayer can report a
     /// healthy Profile 8 pipeline, advance the raw file's timeline, and still
@@ -283,6 +311,14 @@ impl DeviceCaps {
             })
             .collect();
         Self {
+            // A legacy query has no slot for an overlay claim, so this is
+            // empty — but a reader must not take that as a refusal. The
+            // legacy path is a MIXED-FLEET path, not an old-client one: both
+            // native clients fall back to it on any 400/404/405, so a client
+            // that can paint the overlay arrives here routinely. `/decision`
+            // distinguishes "no document at all" from "a document claiming
+            // nothing"; see the binding in `stream.rs`.
+            subtitle_overlays: Vec::new(),
             v: Self::VERSION,
             client: None,
             video,
@@ -312,6 +348,16 @@ impl DeviceCaps {
             legacy_blanket_dolby_vision: legacy.dv && !legacy.dv_profiles_sent,
             max_height: legacy.max_height,
         }
+    }
+
+    /// Whether this client claims it can draw `protocol` itself.
+    ///
+    /// Deliberately an exact match on the protocol name. A client that says
+    /// `pgs-v1` has not claimed anything about a future revision, and reading
+    /// it as though it had is how a viewer ends up staring at a subtitle track
+    /// their player cannot paint.
+    pub fn renders_subtitle_overlay(&self, protocol: &str) -> bool {
+        self.subtitle_overlays.iter().any(|named| named == protocol)
     }
 
     /// True when this document claims nothing at all — the shape a client

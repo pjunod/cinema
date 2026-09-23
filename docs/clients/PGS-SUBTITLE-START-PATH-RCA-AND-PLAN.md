@@ -1,7 +1,11 @@
 # PGS subtitles on the start path — why a 79.5 GB read blocks playback, and the three fixes
 
-**Status:** §4 merged (PR #445, `5c605768`), not deployed · §5 and §6 proposed and unbuilt · reviewed — see [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
-**Reviewer:** Fable, adversarial · **Written:** 2026-09-22 ·
+**Status:** §4 merged (PR #445, `5c605768`) · §5's B1 and most of B5 merged
+(PR #447, `883cf4d42`); B2 was built and deliberately reverted; B3 and B4 open
+· the overlay gate is still **off** pending §5.5's two-device check · §6
+proposed and unbuilt · **nothing here is deployed** · reviewed — see
+[PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
+**Reviewer:** Fable, adversarial · **Written:** 2026-09-22, revised 2026-09-23 ·
 **Reported by:** Paul, 2026-09-21 ~18:50 ET, Android on the TCL tablet
 
 Companion to [PGS_OVERLAY_PLAN.md](PGS_OVERLAY_PLAN.md) (the overlay's own
@@ -196,6 +200,15 @@ the reason the title would not play — are untouched by it.
 Full write-up:
 [../playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md](../playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md).
 
+**PR #445** (`5c605768`, merged 2026-09-22) — Fix A, §4. A session start no
+longer awaits a full-film demux, and a pending sidecar is a named
+`startup_timeout` rather than a codeless 503 no client retries. Bounded for the
+start path **only**.
+
+**PR #447** (`883cf4d42`, merged 2026-09-22) — Fix B's first half, §5.4. The
+PGS overlay is now offered per caller rather than per node. It changes nothing
+while the gate is off; it is what makes turning the gate on safe.
+
 ---
 
 ## 4. Fix A — stop spending the start budget to learn nothing
@@ -266,10 +279,12 @@ play until the extraction lands on its own. §5 and §6 are the fix.
 
 ---
 
-## 5. Fix B — finish the PGS overlay (proposed)
+## 5. Fix B — finish the PGS overlay (B1 merged, gate still off)
 
-**The consensus answer in this problem space, already three-fifths built in
-this repo, and switched off.**
+**The consensus answer in this problem space, already most of the way built in
+this repo, and switched off.** #447 closed B1 and most of B5; B2 was tried and
+deliberately reverted; B3 and B4 are open, and the gate does not flip until
+§5.5's check runs.
 
 ### 5.1 Why this is the fix
 
@@ -304,29 +319,91 @@ moves it off the play path. That is why §6 exists.
 
 ### 5.3 The real blocker, and it is not a matrix
 
-The plan's M4 says *"enable default/forced PGS overlay selection for approved
-clients"*. **There is no notion of an approved client anywhere in the tree.**
-The gate is a single node-wide boolean; nothing in a request says whether the
-caller can render `pgs-v1`. Both native clients read the `overlay` field off
-the response (`clients/apple/Sources/Models.swift:746`,
-`clients/android/.../Models.kt:427`) and neither declares a capability.
+**This section is written as it stood before #447, because it is the argument
+for #447.** Every "there is no" below was true when it was written and is not
+true now; §5.4 says what replaced each one.
 
-And **the web client has no renderer at all.** It knows the overlay exists and
-routes around it — `crates/plurxd/src/web/player/decode-tiers.js:955`:
+The plan's M4 says *"enable default/forced PGS overlay selection for approved
+clients"*. **There was no notion of an approved client anywhere in the tree.**
+The gate was a single node-wide boolean; nothing in a request said whether the
+caller could render `pgs-v1`. Both native clients read the `overlay` field off
+the response (`clients/apple/Sources/Models.swift`,
+`clients/android/.../Models.kt`) and neither declared a capability.
+
+And **the web client has no renderer at all** — that part is still true. It
+knows the overlay exists and routes around it (`decode-tiers.js`, the `preBurn`
+override):
 
 > "The server's plan is a remux (or a direct play) when the PGS application
 > overlay is enabled — a delivery this player does not implement"
 
 so it force-overrides `initialRoute` to `'transcode_hls'`.
 
-**Consequence: turning the gate on today silently downgrades every web
-direct-play to a full transcode**, because `/decision` auto-selects a PGS track
-for every client (`http/stream.rs:2205`, via `deliverable_as_default` at
-`crates/plurx-core/src/tracks.rs:235`) including the one that cannot draw it.
+**Consequence, before #447: turning the gate on downgraded a web direct-play
+to a full transcode** — or, on an HDR title, put a degraded notice in front of
+a viewer who had chosen no subtitle at all.
 
-That is the work. It is a code-provable regression, not ceremony.
+The trigger is not narrow. With the gate on, `deliverable_as_default`
+(`crates/plurx-core/src/tracks.rs:235`) admits **every** PGS track, forced or
+not, and it does so on a branch that short-circuits before the HDR term — so
+the HDR guard does not protect the *selection*, only the burn that follows.
+`forced_or_default` then picks any eligible track the container itself flags
+as default, with no step that would prefer a text track sitting beside it. **A
+Blu-ray remux with a `default`-flagged English PGS track is the common case in
+a library like this one** — including the 79.5 GB remux that started this
+incident.
 
-### 5.4 Proposed shape
+The repo already knew: `select_tracks_with`'s own doc comment
+(`plurx-core/src/tracks.rs`) says a remux like that *"had the PGS stamped as
+the default; on an HDR base delivery that track can only be shown by an SDR
+burn the HDR guard then refuses, so the viewer got the refusal notice on the
+web client and silence on the native ones — for a choice nobody made."*
+
+The server stamped that pick onto the wire `default` flag (`stream.rs`, the
+`s.default` loop after `sub_tracks`). The web applies the server's default
+400 ms after open (`decode-tiers.js`, *"Server-chosen default subtitle"*),
+`subNeedsBurn` is true for any bitmap track (`menus.js` — `s.text===false`),
+and `setSub` (`audio-sync.js`) turns that into a burn, or into the `keep_hdr`
+notice. `docs/PLAYBACK.md` documents the path as settled fact under
+`server.track-selection`.
+
+> **This paragraph was wrong twice, in opposite directions, and the second time
+> was mine.** The first revision called it a code-provable regression, which
+> was right. A later revision — mine, after the first adversarial review —
+> declared it false on the grounds that *"the web never reads the server's
+> policy pick"*, citing `web/detail/preplay-selection.js:135`. That citation is
+> about a different mechanism: the echo of an **explicit viewer pick**, which
+> the web is right to ignore. It says nothing about the `default` flag, which
+> the web does apply. The over-generalisation is corrected here and in #447's
+> own body.
+
+The web's local `initialRoute` override does **not** save it: that branch is
+reached only when `preBurn` is non-null, which happens only for an explicit
+viewer pick (`web/detail/preplay-selection.js`, `prePlayApplication`). Nothing
+stood between the auto-pick and the burn.
+
+Underneath the bytes there is a defect about honesty, and it is the one #447
+fixes: the server issued a plan the caller cannot execute and then described
+the delivery in terms untrue for that caller. **#447 closed both.** The overlay
+term is now narrowed per caller, so a client with no renderer **that sends a
+capabilities document** is not offered the PGS default at all, and there is no
+longer a regression waiting behind the gate. (The qualifier is load-bearing and
+§5.5 says why.) The rest of §5.4 is what that took.
+
+### 5.4 Shape — B1 built, B2 deliberately not, B5 partial (#447)
+
+#447 (`883cf4d42`) settled three of the five, and not the way this section
+proposed:
+
+| | proposed | shipped |
+|---|---|---|
+| **B1** capability negotiation | a boolean the server ANDs in | built, as a **list** of protocol names, with two limits the review added |
+| **B2** thread the switch into item detail | do it | **implemented, reviewed, reverted** — the proposal rested on a claim that is false for the web |
+| **B3** seek test on each native client | — | open |
+| **B4** overlay-failure guardrail | — | open |
+| **B5** correct the documentation | three docs | `PLAYBACK.md` done; the acceptance doc's retired env gate and the missing Android equivalent still open |
+
+Each proposal is kept verbatim below, with what actually landed beneath it.
 
 **B1 — client capability negotiation.** Add an overlay capability to the caps
 the client already sends, thread it into `decide`, and make
@@ -336,10 +413,62 @@ the client already sends, thread it into `decide`, and make
 (`clients/apple/Sources/AppModel.swift`,
 `clients/android/.../data/PlurxApi.kt`, `web/player/session.js`).
 
+> **Built**, as `DeviceCaps.subtitle_overlays: Vec<String>` — a list of
+> protocol names shaped like `transports`, so a later `pgs-v2` is a new entry
+> rather than a second flag and it lines up with `SubTrackDto.overlay`, which
+> already carries the string. Apple and Android claim `["pgs-v1"]`; the web
+> claims nothing and says why in a comment. `overlay_for_caller` in
+> `http/stream.rs` is the single place the switch and the claim meet.
+>
+> Two limits the review added, both deliberate. **No caps document at all is
+> not a refusal**: the legacy `GET /decision` query has no slot for a claim and
+> is a *mixed-fleet* path rather than an old-client one — both native clients
+> fall back to it on any 400/404/405 — so silence keeps the answer this server
+> gave before the claim existed, the switch alone. Reading it as "cannot" would
+> have sent a capable Apple TV off to re-encode a whole film. And **the
+> `overlay` field on the track keeps the server's own answer**, because it
+> describes what this process can deliver rather than what this caller can
+> paint, and it is the only surface that answers that question; what a client
+> must not be told is that the delivery needs no burn, and that is
+> `subtitle_requires_burn_in` and `subtitle_route`, both narrowed.
+>
+> `tests/validation/test_caps_wire_conformance.py` pins the field name across
+> all four ports. `DeviceCaps` has no `deny_unknown_fields` and every field is
+> `#[serde(default)]`, so a misspelled claim is not refused — it is silently
+> dropped and the server reads "not claimed".
+>
+> Note which way that fails, because an earlier wording had it backwards: a
+> dropped claim costs a **needless burn**, not an unplayable delivery. The
+> client is told the track needs burning in, the server burns it, the viewer
+> sees subtitles — and an HDR source has been re-encoded to SDR to draw
+> pictures the device could have drawn itself. The delivery is always playable;
+> it is just expensive and quietly worse. The unplayable case is the opposite
+> drop — losing the whole caps document, which takes the `None` branch and
+> reads as capable — and that is the branch the paragraph above is about.
+
 **B2 — `dto.rs:497` hardcodes overlay-off.** `FileDto::from_media_file` passes
 `false` because it "has no access to the setting", so pre-play and `/decision`
 disagree and Apple papers over it with hedged copy
 (`clients/apple/Sources/TrackFacts.swift:223`). Thread the setting in.
+
+> *(The quoted rationale no longer exists in the tree: #447 deleted the
+> "has no access to the setting" comment at `dto.rs:487`, and this document is
+> now the only place it survives.)*
+>
+> **Not built, on purpose — this proposal was wrong.** It was implemented in
+> `efadf3943`, reviewed, and reverted in `471754f7f`, both inside #447.
+> Threading the switch in rests on the claim that each client narrows it
+> locally, and that claim is false for the web *on the default*: nothing under
+> `web/detail/` narrows the **default** by a renderer, `track-facts.js` stamps
+> the chip "plays by default" straight from `selected_index`, and the one
+> renderer check there (`prePlayBurnNeeded`) is reached solely for an explicit
+> viewer pick. With the switch on, item detail would promise a browser a PGS track it
+> will never draw, on the exact chip where a viewer takes the server at its
+> word; old native builds would read it the same way. Now that the default is
+> per-client, an honest answer needs a capabilities document and this surface
+> has none. Too narrow for a capable client is a missing convenience;
+> confidently wrong is a lie. Apple's hedged copy stays until item detail
+> learns to ask.
 
 **B3 — a seek test on each native client.** Both have seek-reconciliation code
 (`AndroidPGSOverlay.kt:113` `reconcile`,
@@ -358,6 +487,10 @@ that enabling the gate "does not select an overlay automatically", which
 names the retired `PLURX_PGS_OVERLAY` env gate, and there is no Android
 equivalent.
 
+> **Built** for `PLAYBACK.md`, with the correction dated in the text so the
+> next reader can see the paragraph used to say the opposite. The acceptance
+> doc's retired env gate and the missing Android equivalent are still open.
+
 ### 5.5 The proof bar — deliberately not a matrix
 
 The plan's M4/M5 acceptance asks for an "executed compatibility matrix" and a
@@ -366,11 +499,32 @@ bitmap overlay can be wrong in exactly three ways a screen reveals: a cue lands
 at the wrong time, it lands in the wrong place, or decoding 4K-canvas bitmaps
 costs too much on the weakest device. So the bar proposed here is:
 
-> One real PGS title played on each of Android, Apple and web, with a mid-film
-> seek, confirming cues appear at the right time and position and that playback
-> does not degrade. Plus B3's automated seek test on both native clients.
+> **Two devices — one Android, one Apple — each playing one real PGS title,
+> one of them DV and one HDR10, with a seek in each direction.** Confirm cues
+> appear at the right time and in the right place, and that playback does not
+> degrade. Plus B3's automated seek test on both native clients.
 
-Fifteen minutes on hardware, not a program.
+Fifteen minutes on hardware, not a program. The review tightened this from
+"three surfaces" to two devices with a specified grade each, for a reason worth
+keeping: the web has no renderer, so playing a PGS title there proves only that
+the local override still works — and the HDR path is where an overlay can fail
+in a way a 4K SDR title will never show, so leaving the grade unspecified is
+how a check passes without testing anything.
+
+The gate stays off until this runs. `overlay_for_caller` removes the reason
+the switch was unsafe to flip — no client **that sends a capabilities
+document** is now offered a track it cannot draw, and none is told a delivery
+needs no burn when for it one does. That qualifier is load-bearing: a caller
+arriving with no document at all is deliberately read as capable, so a
+renderer-less client on the legacy `GET /decision` path would still be told the
+delivery needs no burn. In practice that set is empty — the web never falls
+back (`askDecision` skips the fallback whenever `progressive_hevc_sample_entries`
+is present, and `decode-tiers.js` always sends it) and the only clients that do
+fall back are the two that claim the protocol — but "empty in practice" is not
+"impossible", and it is the seam to watch if a fourth client ever appears.
+
+None of that makes the renderers proven on real hardware, and only one of those
+two things is a code question.
 
 ### 5.6 The stated reason the gate is off
 
@@ -414,10 +568,11 @@ artifact, produced in the background, with `vod_index_pending` as the
 retryable refusal while it is not ready. A subtitle-sidecar job keyed on
 `(file_id, track_index, source identity)` belongs in it.
 
-**Worth checking before designing:** whether the fragment-index pass already
-reads the whole file. If it does, extracting the subtitle tracks during that
-same read makes this close to free rather than a second full pass. I have not
-verified this and it materially changes the design.
+**Checked, and it does.** The fragment-index pass is already one sequential
+demux of the whole container, confirmed in review. So extracting every PGS
+track during that same read costs close to nothing rather than a second full
+pass, and Fix C should attach to that job rather than be a new one. This was
+§9's second question; it is answered.
 
 ### 6.3 The eviction problem
 
@@ -476,13 +631,12 @@ Both bit this work already:
 
 Ranked by how much the answer changes the work.
 
-1. **§5.4 B1 — is capability negotiation the right shape?** The alternative is
-   to build a web renderer so every client can draw the overlay and no
-   negotiation is needed. That is more work but removes a permanent
-   three-way-skew surface. Which is correct?
-2. **§6.2 — does the fragment-index pass already read the whole file?** If yes,
-   Fix C should attach to it rather than be a new job, and the cost argument
-   changes completely.
+1. ~~**§5.4 B1 — is capability negotiation the right shape?**~~ **Answered:
+   yes, and it shipped in #447** — as a list of protocol names rather than a
+   boolean. A web renderer remains the alternative that would remove the skew
+   surface entirely, and remains more work; nothing in #447 forecloses it.
+2. ~~**§6.2 — does the fragment-index pass already read the whole file?**~~
+   **Answered: yes.** Fix C attaches to that job. See §6.2.
 3. **§6.4 — which tracks get built ahead of play?** Eager for all is ten full
    reads on a 10-track disc; lazy-then-queued means the first selection is
    still slow.
@@ -509,7 +663,7 @@ Ranked by how much the answer changes the work.
 | `START_DEADLINE = 50 s` | `crates/plurxd/src/media_sessions.rs:54` |
 | `EXTRACTION_TIMEOUT = 600 s` | `crates/plurxd/src/subtitles.rs:35` |
 | unbounded join (pre-fix) | `crates/plurxd/src/subtitles.rs` `join_flight` |
-| burn extraction command | `crates/plurxd/src/subtitles.rs:1014` `ensure_burn_file` |
+| burn extraction command | `crates/plurxd/src/subtitles.rs` `ensure_burn_file` |
 | placement-deadline arm | `crates/plurxd/src/http/hls.rs`, `exceeded the placement deadline` |
 | overlay demux command | `crates/plurxd/src/pgs_overlay.rs:515` |
 | overlay async contract | `crates/plurxd/src/pgs_overlay.rs` `PrepareState` |
@@ -518,9 +672,16 @@ Ranked by how much the answer changes the work.
 | gate setting key | `crates/plurx-core/src/store/mod.rs:1794` |
 | Developer surface | `crates/plurxd/src/http/developer.rs:601` |
 | auto-select predicate | `crates/plurx-core/src/tracks.rs:235` |
-| auto-select call site | `crates/plurxd/src/http/stream.rs:2205` |
-| pre-play hardcoded off | `crates/plurxd/src/http/dto.rs:497` |
-| web force-override | `crates/plurxd/src/web/player/decode-tiers.js:955` |
+| auto-select call site | `crates/plurxd/src/http/stream.rs:2230` |
+| per-caller overlay term | `crates/plurxd/src/http/stream.rs` `overlay_for_caller` |
+| the claim on the wire | `crates/plurx-core/src/playback/caps.rs` `subtitle_overlays` |
+| pre-play hardcoded off | `crates/plurxd/src/http/dto.rs:506` |
+| web applies the server default | `web/player/decode-tiers.js` "Server-chosen default subtitle" |
+| web force-override (explicit pick only) | `web/player/decode-tiers.js`, the `preBurn` branch |
+| bitmap needs a burn | `web/player/menus.js` `subNeedsBurn` |
+| the burn decision | `web/player/audio-sync.js` `setSub` |
+| web ignores the pre-play echo | `web/detail/preplay-selection.js` `prePlayApplication` |
+| which track the policy picks | `crates/plurx-core/src/tracks.rs` `forced_or_default` |
 | retry ladder (web) | `crates/plurxd/src/web/playback-policy.js:871` |
 | retry ladder (Apple) | `clients/apple/Sources/PlayerController.swift:1550` |
 | `playbackId` per open | `clients/android/.../player/PlaybackIntent.kt:16` |

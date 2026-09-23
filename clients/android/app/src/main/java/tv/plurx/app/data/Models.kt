@@ -424,7 +424,7 @@ data class SubTrack(
         get() = native ?: (text && codec.lowercase().trim() !in STYLED_SUBTITLE_CODECS)
 
     val isPgsOverlay: Boolean
-        get() = overlay == "pgs-v1"
+        get() = overlay == tv.plurx.app.player.PGS_OVERLAY_PROTOCOL
 
     private companion object {
         val STYLED_SUBTITLE_CODECS = setOf("ass", "ssa")

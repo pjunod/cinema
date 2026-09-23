@@ -2248,7 +2248,9 @@ version = "0.3.0"
 dependencies = [
  "argon2",
  "async-trait",
+ "bincode",
  "chacha20poly1305",
+ "chrono",
  "dolby_vision",
  "flate2",
  "futures-util",

@@ -332,6 +332,11 @@ function capsDocument(c, limits){
     audio:String(c.acodec||"").split(",").filter(Boolean),
     containers:String(c.container||"").split(",").filter(Boolean),
     transports:["progressive","hls"],
+    // No `subtitle_overlays`. This player has no PGS renderer, and absent is
+    // never a claim — so the server offers it no PGS default, advertises no
+    // `overlay` protocol, and tells it the truth when a viewer picks a bitmap
+    // track: that delivery needs a burn-in. Add the key here the day a
+    // renderer lands, not before.
     progressive_hevc_sample_entries:Array.isArray(c.progressiveHevcSampleEntries)
       ?c.progressiveHevcSampleEntries.slice(0,4):[],
     // Only when this browser has one; absent is not a claim.

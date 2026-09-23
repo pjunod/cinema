@@ -124,6 +124,9 @@ internal enum class PGSOverlayStatus(val label: String?) {
 
 internal enum class PGSOverlayManifestDisposition { Ready, Preparing, Terminal }
 
+/** The overlay protocol this client implements, named once. */
+const val PGS_OVERLAY_PROTOCOL = "pgs-v1"
+
 internal object PGSOverlayPolicy {
     const val maximumCanvasWidth = 4_096
     const val maximumCanvasHeight = 2_160

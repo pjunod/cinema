@@ -2,11 +2,16 @@ use crate::client::stream::{ClientBackupPayload, ClientStreamReq};
 use crate::network::api::ApiStreamResponsePayload;
 use crate::store::state_machine::sqlite::state_machine::QueryWrite;
 use crate::{Client, Error, Response};
-use chrono::{NaiveDateTime, Utc};
+#[cfg(feature = "s3")]
+use chrono::NaiveDateTime;
+use chrono::Utc;
 use tokio::fs;
 use tokio::sync::oneshot;
-use tracing::{debug, error, warn};
+use tracing::debug;
+#[cfg(feature = "s3")]
+use tracing::{error, warn};
 
+#[cfg(feature = "s3")]
 use cryptr::stream::writer::channel_writer::ChannelReceiver;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -91,6 +96,7 @@ impl Client {
         }
     }
 
+    #[cfg(feature = "s3")]
     pub fn backup_s3_stream(&self, object: String) -> Result<ChannelReceiver, Error> {
         if let Some(state) = self.inner.state.clone() {
             if let Some(s3) = state.s3_config.clone() {
@@ -148,6 +154,7 @@ impl Client {
     }
 
     /// List all existing S3 backups.
+    #[cfg(feature = "s3")]
     pub async fn backup_list_s3(&self) -> Result<Vec<BackupListing>, Error> {
         if let Some(state) = self.inner.state.clone() {
             let mut res = Vec::with_capacity(16);

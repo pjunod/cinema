@@ -408,6 +408,7 @@ fn http_route_group(path: &str) -> usize {
         // Cluster administration and authenticated internal transport.
         "/api/v1/cluster/nodes"
         | "/api/v1/cluster/status"
+        | "/api/v1/cluster/backups"
         | "/api/v1/cluster/ingress"
         | "/api/v1/cluster/media"
         | "/api/v1/cluster/media/offers"
@@ -736,6 +737,7 @@ pub fn router(state: AppState) -> Router {
             post(cluster::enter_maintenance).delete(cluster::exit_maintenance),
         )
         .route("/cluster/election", post(cluster::force_election))
+        .route("/cluster/backups", post(crate::backup::create))
         .route("/cluster/leave", post(cluster::leave))
         .route(
             "/cluster/protocol/learner/activate",
@@ -5296,6 +5298,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn portable_backup_settings_save_without_readiness_gate() {
+        use plurx_core::store::keys;
+
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "backup_destination": "/mnt/nas/plurx-backups",
+                    "backup_schedule_utc": "03:17",
+                    "backup_keep": 9
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["backup_destination"], "/mnt/nas/plurx-backups");
+        assert_eq!(body["backup_schedule_utc"], "03:17");
+        assert_eq!(body["backup_keep"], 9);
+        assert_eq!(
+            state
+                .store
+                .get_setting(keys::BACKUP_DESTINATION)
+                .await
+                .expect("read saved backup destination")
+                .as_deref(),
+            Some("/mnt/nas/plurx-backups")
+        );
+
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "backup_destination": "relative/path" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn developer_playback_switches_persist_and_apply_their_documented_defaults() {
         use plurx_core::store::keys;
 
@@ -6635,6 +6682,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "cluster_backup",
                 "windows_server",
                 // D-01 adds the Android TV display-mode card. Its one row is
                 // advisory and reports `unobservable` on a node with no

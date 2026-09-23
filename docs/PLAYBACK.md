@@ -587,9 +587,44 @@ The server side of `pgs-v1` is implemented behind Settings → Developer →
 off by default while physical-device HDR/Dolby Vision acceptance remains
 incomplete. Apple and Android have automated application renderers, but that
 does not make the server capability production-ready. When off,
-`/decision` omits `overlay` and the
-overlay routes return 404. Enabling the gate changes subtitle delivery only;
-it does not select an overlay automatically and does not alter video bytes.
+`/decision` omits `overlay` and the overlay routes return 404.
+
+Enabling the gate changes subtitle delivery only and never alters video bytes.
+It **does** let `/decision` select a non-forced PGS track as the default — but
+only for a client that claimed it can draw one, **or** for one that sent no
+capabilities document at all. Those are two different absences and the server
+reads them as opposites; the distinction is the contract:
+
+- **The field is absent or empty in a document the client sent.** That is a
+  client saying what it can do and not naming this. It is offered no PGS
+  default *on account of the overlay*, and it is told that selecting a PGS
+  track requires a burn-in — which for that client is true. (A **forced** PGS
+  track on a base delivery that is already SDR remains eligible as a default
+  for every client, gate or no gate. That rule predates the overlay and is
+  unchanged by it: a forced track carries dialogue the picture depends on, and
+  on an SDR base the burn costs no grade.)
+- **No capabilities document at all**, i.e. the legacy `GET /decision` query,
+  which has no slot for the claim. That is silence, not a refusal, and it is a
+  *mixed-fleet* path rather than an old-client one: both native clients fall
+  back to it on any 400/404/405. It gets the answer this server gave before the
+  claim existed — the gate alone. A renderer-less client that reached that path
+  would therefore be offered the overlay; in the fleet today none can, since
+  the web never falls back and the two clients that do both claim the protocol.
+
+A client advertises the claim as `subtitle_overlays: ["pgs-v1"]`.
+
+`overlay` on the track itself is **not narrowed by the caller's claim**, in
+either of those two cases — it is still governed by the gate, which is why it
+is absent entirely while the gate is off. It answers what this process can
+deliver — "could this track be served as `pgs-v1` here" — and it is the only
+surface that answers it, so an operator checking the Developer switch and a
+client on an older build both have somewhere to look. What a client acts on is
+the default, `subtitle_requires_burn_in` and `subtitle_route`, and all three
+are narrowed by the claim.
+
+(The first of those paragraphs said the opposite until 2026-09-22: it claimed
+the gate "does not select an overlay automatically", which `stream.rs` has
+contradicted since the selection landed.)
 
 The manifest route is:
 
