@@ -198,6 +198,38 @@ const RETIRED_TTL: Duration = TERMINAL_TOMBSTONE_TTL;
 const STRAY_EVICTION_IDLE: Duration = Duration::from_secs(15);
 const SCRATCH_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
+/// How often this node refreshes its one validated observation of the
+/// replicated Live TV settings. Every live session validates against that
+/// observation on its own one-second fence tick instead of doing the
+/// consistent read itself, so the read rate is per node rather than per
+/// session.
+const FENCE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The age at which an observation stops being *fresh*: one observation
+/// interval plus one `STORE_TIMEOUT` (3 s, `store::hiqlite`), which is the
+/// longest a single successful consistent read may take. An observation older
+/// than this means a read failed or was retried, not merely that the tick has
+/// not come round yet.
+const FENCE_OBSERVATION_FRESH_MAX_AGE: Duration =
+    Duration::from_secs(FENCE_OBSERVATION_INTERVAL.as_secs() + 3);
+
+/// How long sessions may continue on the last validated observation while the
+/// consistent read keeps failing.
+///
+/// Longer than one authority-read retry budget — two `STORE_TIMEOUT` attempts
+/// 100 ms apart, or a 5 s quorum-recovery budget, so ~6.1 s at worst — so a
+/// leader failover does not end healthy streams. Shorter than any window in
+/// which a replacement owner could be admitted without this owner's own drain
+/// proof, because `admission_ready` needs that proof or an administrator's
+/// physical-stop attestation. And the serving fence ends the session
+/// independently on quorum loss, so this bound is never the only one.
+///
+/// Ten seconds is the repository owner's decision of 2026-09-23, recorded in
+/// the architecture review work board. It is a policy bound sized against the
+/// read's own budget, not against a measured fleet failover; that measurement
+/// is still outstanding.
+const FENCE_GRACE_MAX_AGE: Duration = Duration::from_secs(10);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LiveTvConfig {
     pub(crate) enabled: bool,
@@ -1672,6 +1704,14 @@ pub(crate) struct LiveTvMetrics {
     /// Fixed-cardinality DVR sink failure reasons. A per-sink writer records
     /// exactly once when its attempt ends; recording ids never become labels.
     dvr_sink_failures: [AtomicU64; 3],
+    /// Every consistent read of the replicated settings this subsystem makes,
+    /// by outcome. One per second on a running node: the observer loop's. A
+    /// start and a first publication each add one of their own, and nothing
+    /// else reads settings on the Live TV path.
+    settings_reads: [AtomicU64; 2],
+    /// Session fence ticks by the state of the observation they validated
+    /// against: fresh, in grace, expired. Indexed by `FenceFreshness`.
+    fence_observations: [AtomicU64; 3],
 }
 
 #[derive(Default)]
@@ -1700,6 +1740,38 @@ impl LiveTvMetrics {
 
     fn observe_stray_eviction(&self) {
         self.stray_evictions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn observe_settings_read(&self, ok: bool) {
+        self.settings_reads[usize::from(!ok)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The series an operator watches after this ships. `expired` must stay at
+    /// zero outside a real settings-store outage; a `grace` that is never zero
+    /// says the consistent read is failing often enough to matter even though
+    /// nothing has stopped yet.
+    fn fence_observations_prometheus(&self) -> String {
+        format!(
+            "# HELP plurx_live_tv_fence_observations_total Live TV session fence ticks by the state of the settings observation they validated against.\n\
+             # TYPE plurx_live_tv_fence_observations_total counter\n\
+             plurx_live_tv_fence_observations_total{{state=\"fresh\"}} {}\n\
+             plurx_live_tv_fence_observations_total{{state=\"grace\"}} {}\n\
+             plurx_live_tv_fence_observations_total{{state=\"expired\"}} {}\n",
+            self.fence_observations[0].load(Ordering::Acquire),
+            self.fence_observations[1].load(Ordering::Acquire),
+            self.fence_observations[2].load(Ordering::Acquire),
+        )
+    }
+
+    fn settings_reads_prometheus(&self) -> String {
+        format!(
+            "# HELP plurx_live_tv_settings_reads_total Consistent reads of the replicated Live TV settings, by outcome.\n\
+             # TYPE plurx_live_tv_settings_reads_total counter\n\
+             plurx_live_tv_settings_reads_total{{outcome=\"ok\"}} {}\n\
+             plurx_live_tv_settings_reads_total{{outcome=\"failed\"}} {}\n",
+            self.settings_reads[0].load(Ordering::Acquire),
+            self.settings_reads[1].load(Ordering::Acquire),
+        )
     }
 
     fn observe_dvr_sink_failure(&self, reason: &'static str) {
@@ -2735,6 +2807,98 @@ struct CachedSourceFormat {
     format: LiveTvSourceFormat,
 }
 
+/// One node's latest validated reading of the replicated Live TV settings.
+///
+/// The sessions used to take this reading each, four times a second between
+/// them per session; they now share this one. What is shared is the *reading*,
+/// not the decision: every session still runs `validate_start_config` against
+/// it on every fence tick, so owner, generation, enabled and drain admission
+/// are checked exactly as often as before.
+struct FenceObservation {
+    config: LiveTvConfig,
+    /// When the consistent read that produced this completed.
+    observed_at: tokio::time::Instant,
+}
+
+/// How a session's fence tick found the observation it validated against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FenceFreshness {
+    /// Read within one interval plus one store timeout.
+    Fresh,
+    /// Older than that but inside `FENCE_GRACE_MAX_AGE`: the read is failing
+    /// and the session is running on the last thing this node proved.
+    Grace,
+    /// Past the grace bound, or never read at all. The session ends.
+    Expired,
+}
+
+struct FenceObserver {
+    latest: tokio::sync::watch::Sender<Option<Arc<FenceObservation>>>,
+    /// Fence ticks counted by state, so an operator can see what sessions
+    /// actually validated against rather than only how many reads succeeded.
+    metrics: Arc<LiveTvMetrics>,
+}
+
+impl FenceObserver {
+    fn new(metrics: Arc<LiveTvMetrics>) -> Self {
+        Self {
+            latest: tokio::sync::watch::Sender::new(None),
+            metrics,
+        }
+    }
+
+    /// Publish a completed consistent read. Callers pass the config they just
+    /// read; this records when they read it.
+    fn publish(&self, config: LiveTvConfig) {
+        self.latest.send_replace(Some(Arc::new(FenceObservation {
+            config,
+            observed_at: tokio::time::Instant::now(),
+        })));
+    }
+
+    fn observed(&self) -> Option<Arc<FenceObservation>> {
+        self.latest.borrow().clone()
+    }
+
+    fn count(&self, state: FenceFreshness) {
+        let index = match state {
+            FenceFreshness::Fresh => 0,
+            FenceFreshness::Grace => 1,
+            FenceFreshness::Expired => 2,
+        };
+        self.metrics.fence_observations[index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The observation a session may validate against, or the reason it may
+    /// not. Counts what it found either way.
+    fn validated(&self) -> Result<Arc<FenceObservation>, LiveTvError> {
+        let Some(observation) = self.observed() else {
+            self.count(FenceFreshness::Expired);
+            return Err(LiveTvError::OwnerUnavailable(
+                "the replicated settings have not been read on this node; live TV stopped so a \
+                 disabled or moved tuner cannot keep streaming"
+                    .to_owned(),
+            ));
+        };
+        let age = tokio::time::Instant::now().saturating_duration_since(observation.observed_at);
+        if age <= FENCE_OBSERVATION_FRESH_MAX_AGE {
+            self.count(FenceFreshness::Fresh);
+            Ok(observation)
+        } else if age <= FENCE_GRACE_MAX_AGE {
+            self.count(FenceFreshness::Grace);
+            Ok(observation)
+        } else {
+            self.count(FenceFreshness::Expired);
+            Err(LiveTvError::OwnerUnavailable(format!(
+                "the replicated settings could not be read for {}s; live TV stopped so a \
+                 disabled or moved tuner cannot keep streaming",
+                age.as_secs()
+            )))
+        }
+    }
+
+}
+
 pub(crate) struct LiveTvManager {
     store: Arc<dyn Store>,
     client: Result<reqwest::Client, String>,
@@ -2766,6 +2930,9 @@ pub(crate) struct LiveTvManager {
     dvr_storage_free_bytes: AtomicU64,
     scratch_claims: StdMutex<HashSet<PathBuf>>,
     scratch_sweep_gate: tokio::sync::Mutex<()>,
+    /// The one settings observation every live session on this node validates
+    /// against, refreshed by `settings_observer_loop`.
+    fence: FenceObserver,
     metrics: Arc<LiveTvMetrics>,
 }
 
@@ -2806,6 +2973,7 @@ impl LiveTvManager {
             dvr_storage_free_bytes: AtomicU64::new(u64::MAX),
             scratch_claims: StdMutex::new(HashSet::new()),
             scratch_sweep_gate: tokio::sync::Mutex::new(()),
+            fence: FenceObserver::new(Arc::clone(&metrics)),
             metrics,
         });
         manager.adopt_persisted_guide();
@@ -2845,12 +3013,38 @@ impl LiveTvManager {
     }
 
     pub(crate) async fn config(&self) -> Result<LiveTvConfig, LiveTvError> {
-        let snapshot = self.store.settings_snapshot().await.map_err(|error| {
+        let read = self.store.settings_snapshot().await;
+        self.metrics.observe_settings_read(read.is_ok());
+        let snapshot = read.map_err(|error| {
             LiveTvError::DeviceUnavailable(format!("reading live-TV settings: {error}"))
         })?;
         let config = LiveTvConfig::from_snapshot(&snapshot, &self.node_id);
         self.observe_config(&config);
         Ok(config)
+    }
+
+    /// Take one consistent observation of the replicated settings and publish
+    /// it for every live session on this node.
+    ///
+    /// A failure keeps the previous observation: sessions run on it for
+    /// `FENCE_GRACE_MAX_AGE` and then end with a message naming the settings
+    /// store. Nothing here decides that — `FenceObserver::validated` does, on
+    /// the age of what this last managed to publish.
+    pub(crate) async fn observe_fence(&self) {
+        match self.config().await {
+            Ok(config) => self.fence.publish(config),
+            Err(error) => {
+                // Nothing is published: the previous observation stays, and
+                // sessions keep validating against it until its age passes
+                // `FENCE_GRACE_MAX_AGE`. It is that age, not a count of
+                // failures, that ends them — a read that fails once and
+                // succeeds on the next tick has cost nothing.
+                tracing::debug!(
+                    kind = %error.code(),
+                    "Live TV settings observation failed; sessions continue on the last one"
+                );
+            }
+        }
     }
 
     pub(crate) fn observe_config(&self, config: &LiveTvConfig) {
@@ -4066,15 +4260,25 @@ impl LiveTvManager {
         Arc::clone(&self.metrics)
     }
 
-    pub(crate) async fn metrics_loop(self: Arc<Self>, shutdown: CancellationToken) {
+    /// The one settings read this node makes for Live TV, once a second.
+    ///
+    /// It was already here, driving the `plurx_live_tv_enabled` and
+    /// `plurx_live_tv_device_ready` gauges and the guide-cache generation
+    /// observation. It now also publishes what it read as the session fence's
+    /// observation, which is why the sessions no longer read the store
+    /// themselves. It deliberately does *not* park when nothing is live: those
+    /// gauges go stale after three seconds without a read, so parking would
+    /// trade an operator's view of a node for a read that is already the
+    /// cheapest thing on this loop.
+    pub(crate) async fn settings_observer_loop(self: Arc<Self>, shutdown: CancellationToken) {
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => return,
-                _ = self.config() => {}
+                () = self.observe_fence() => {}
             }
             tokio::select! {
                 _ = shutdown.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                _ = tokio::time::sleep(FENCE_OBSERVATION_INTERVAL) => {}
             }
         }
     }
@@ -4885,6 +5089,8 @@ impl LiveTvMetrics {
         ) + &self.session_ends_prometheus()
             + &self.guide_prometheus()
             + &self.dvr_sink_failures_prometheus()
+            + &self.settings_reads_prometheus()
+            + &self.fence_observations_prometheus()
     }
 }
 
@@ -4892,6 +5098,7 @@ impl LiveTvManager {
     pub(crate) fn relay_counter(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.metrics.relay_bytes)
     }
+
 
     fn session(&self, capability: &str) -> Result<Arc<LiveTvSession>, LiveTvError> {
         let mut registry = self
@@ -5604,7 +5811,7 @@ async fn run_live_session_inner(
                 let owner = manager
                     .upgrade()
                     .ok_or_else(|| LiveTvError::StreamFailed("live-TV manager stopped".into()))?;
-                ensure_session_fence(&owner, session).await?;
+                ensure_session_fence_from_observation(&owner, session).await?;
             }
         }
     };
@@ -5684,6 +5891,15 @@ fn provisional_expired(state: &LiveTvSessionState, now: tokio::time::Instant) ->
             .is_some_and(|published_at| now.duration_since(published_at) >= PROVISIONAL_TIMEOUT)
 }
 
+/// The fence a session takes at start and again immediately before it
+/// publishes its first segment: the serving generation, then a **direct**
+/// consistent read.
+///
+/// These two fail closed on a read error, as they always have. A start has
+/// just read the settings for the public request anyway, and a
+/// stale-but-in-grace observation must never admit a first segment — after
+/// publication the client is watching and ending the session costs it the
+/// stream; before publication it costs nothing but a retry.
 async fn ensure_session_fence(
     manager: &LiveTvManager,
     session: &LiveTvSession,
@@ -5695,6 +5911,30 @@ async fn ensure_session_fence(
     }
     let config = manager.config().await?;
     validate_start_config(&config, &session.request, &manager.node_id)
+}
+
+/// The per-second fence every live session takes while it runs.
+///
+/// Identical to `ensure_session_fence` except for where the settings come
+/// from: the node's shared observation rather than a read of this session's
+/// own. The four `validate_start_config` checks are unchanged and run just as
+/// often, so a fresh observation that fails them ends the session with exactly
+/// the error it ended with before. What changes is the cost — one consistent
+/// read per node per second instead of one per session per second — and what
+/// happens when that read fails: `FENCE_GRACE_MAX_AGE` on the last validated
+/// observation, then an end that names the settings store rather than the
+/// tuner.
+async fn ensure_session_fence_from_observation(
+    manager: &LiveTvManager,
+    session: &LiveTvSession,
+) -> Result<(), LiveTvError> {
+    if !manager.serving.is_current(session.owner_serving_generation) {
+        return Err(LiveTvError::OwnerUnavailable(
+            crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
+        ));
+    }
+    let observation = manager.fence.validated()?;
+    validate_start_config(&observation.config, &session.request, &manager.node_id)
 }
 
 async fn open_tuner_stream(
@@ -8390,6 +8630,217 @@ mod tests {
             ])
             .await
             .expect("seed live-TV settings");
+    }
+
+    fn settings_reads(manager: &LiveTvManager) -> (u64, u64) {
+        (
+            manager.metrics.settings_reads[0].load(Ordering::Acquire),
+            manager.metrics.settings_reads[1].load(Ordering::Acquire),
+        )
+    }
+
+    fn fence_observations(manager: &LiveTvManager) -> (u64, u64, u64) {
+        (
+            manager.metrics.fence_observations[0].load(Ordering::Acquire),
+            manager.metrics.fence_observations[1].load(Ordering::Acquire),
+            manager.metrics.fence_observations[2].load(Ordering::Acquire),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_per_second_fence_costs_one_settings_read_per_node_not_one_per_session() {
+        // Two sessions each took the fence four times a second and each of
+        // those took a leader-consistent read of the replicated settings. The
+        // reading is now taken once per node per second and both sessions
+        // validate against it, so the read rate stops scaling with viewers.
+        let root = crate::test_tempdir().expect("scratch root");
+        let manager = test_manager(root.path());
+        seed_test_config(&manager).await;
+        let first = test_session(root.path().join("live-tv-a"), 1);
+        let second = test_session(root.path().join("live-tv-b"), 1);
+
+        manager.observe_fence().await;
+        let (ok_before, failed_before) = settings_reads(&manager);
+        assert_eq!((ok_before, failed_before), (1, 0));
+
+        tokio::time::pause();
+        for _ in 0..40 {
+            ensure_session_fence_from_observation(&manager, &first)
+                .await
+                .expect("the first session validates against the observation");
+            ensure_session_fence_from_observation(&manager, &second)
+                .await
+                .expect("and so does the second");
+        }
+        assert_eq!(
+            settings_reads(&manager),
+            (ok_before, failed_before),
+            "ten seconds of two sessions' fence ticks must read the store not once"
+        );
+        assert_eq!(fence_observations(&manager).0, 80);
+
+        // And the observer's own read is still one read, so the node's rate is
+        // the loop's rate rather than zero.
+        manager.observe_fence().await;
+        assert_eq!(settings_reads(&manager), (ok_before + 1, failed_before));
+    }
+
+    #[tokio::test]
+    async fn a_read_that_keeps_failing_is_graced_then_ends_the_session_naming_the_settings_store() {
+        // A leader failover costs ~6.1 s of failed consistent reads at worst.
+        // Ending healthy streams for that is what L2 is about; continuing
+        // indefinitely would let a tuner that has been disabled or moved on
+        // another node keep streaming. The grace is the bound between the two.
+        let root = crate::test_tempdir().expect("scratch root");
+        let manager = test_manager(root.path());
+        seed_test_config(&manager).await;
+        let session = test_session(root.path().join("live-tv-graced"), 1);
+        manager.observe_fence().await;
+
+        tokio::time::pause();
+        // Every tick from here on is a failed read: nothing new is published.
+        tokio::time::advance(Duration::from_secs(9)).await;
+        ensure_session_fence_from_observation(&manager, &session)
+            .await
+            .expect("nine seconds of failed reads must not end a healthy stream");
+        let (fresh, grace, expired) = fence_observations(&manager);
+        assert_eq!((fresh, grace, expired), (0, 1, 0));
+        assert!(
+            manager.fence.observed().is_some(),
+            "a failed read keeps the last observation rather than clearing it"
+        );
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let error = ensure_session_fence_from_observation(&manager, &session)
+            .await
+            .expect_err("past the grace bound the session ends");
+        assert_eq!(error.code(), "owner_unavailable");
+        let message = error.to_string();
+        assert!(
+            message.contains("replicated settings"),
+            "the sentence must name the settings store: {message}"
+        );
+        assert!(
+            !message.contains("HDHomeRun") && !message.contains("tuner owner"),
+            "and must not read as a tuner problem, which is what the old \
+             device_unavailable did: {message}"
+        );
+        assert_eq!(fence_observations(&manager), (0, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_session_with_no_observation_at_all_is_refused_rather_than_admitted() {
+        // "Unknown, continue" is the failure mode this whole fence exists to
+        // prevent. A node that has never managed a read has proved nothing.
+        let root = crate::test_tempdir().expect("scratch root");
+        let manager = test_manager(root.path());
+        seed_test_config(&manager).await;
+        let session = test_session(root.path().join("live-tv-unread"), 1);
+        let error = ensure_session_fence_from_observation(&manager, &session)
+            .await
+            .expect_err("no observation is not permission to keep streaming");
+        assert_eq!(error.code(), "owner_unavailable");
+        assert!(error.to_string().contains("replicated settings"));
+        assert_eq!(fence_observations(&manager), (0, 0, 1));
+    }
+
+    #[tokio::test]
+    async fn a_fresh_observation_that_fails_validation_ends_the_session_exactly_as_before() {
+        // The four `validate_start_config` checks are not weakened by moving
+        // where the config comes from: a change another node saved reaches
+        // every session through the next observation, with the same error
+        // codes the clients already branch on.
+        let root = crate::test_tempdir().expect("scratch root");
+        let manager = test_manager(root.path());
+        seed_test_config(&manager).await;
+        let session = test_session(root.path().join("live-tv-conflict"), 1);
+        manager.observe_fence().await;
+        ensure_session_fence_from_observation(&manager, &session)
+            .await
+            .expect("the seeded configuration admits this session");
+
+        manager
+            .store
+            .put_settings(&[(keys::LIVE_TV_CONFIG_GENERATION, "2")])
+            .await
+            .expect("another node saves a configuration change");
+        manager.observe_fence().await;
+        assert_eq!(
+            ensure_session_fence_from_observation(&manager, &session)
+                .await
+                .expect_err("a generation change ends the session")
+                .code(),
+            "settings_conflict"
+        );
+
+        manager
+            .store
+            .put_settings(&[
+                (keys::LIVE_TV_CONFIG_GENERATION, "1"),
+                (keys::LIVE_TV_ENABLED, "0"),
+            ])
+            .await
+            .expect("and a disable");
+        manager.observe_fence().await;
+        assert_eq!(
+            ensure_session_fence_from_observation(&manager, &session)
+                .await
+                .expect_err("a disable ends the session")
+                .code(),
+            "live_tv_disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_start_and_publication_fences_read_the_store_rather_than_the_observation() {
+        // A stale-but-in-grace observation must never admit a *first* segment:
+        // before publication the cost of failing closed is a retry, and after
+        // it is the stream the client is already watching. So those two fences
+        // keep their direct read, and only the per-second loop fence uses the
+        // shared observation.
+        let root = crate::test_tempdir().expect("scratch root");
+        let manager = test_manager(root.path());
+        seed_test_config(&manager).await;
+        let session = test_session(root.path().join("live-tv-publish"), 1);
+        manager.observe_fence().await;
+
+        tokio::time::pause();
+        tokio::time::advance(FENCE_GRACE_MAX_AGE + Duration::from_secs(1)).await;
+        assert!(
+            ensure_session_fence_from_observation(&manager, &session)
+                .await
+                .is_err(),
+            "the loop fence is past its grace bound"
+        );
+
+        let before = settings_reads(&manager);
+        ensure_session_fence(&manager, &session)
+            .await
+            .expect("the direct fence reads the store and finds it healthy");
+        assert_eq!(
+            settings_reads(&manager),
+            (before.0 + 1, before.1),
+            "the start and publication fences must spend a read of their own"
+        );
+    }
+
+    #[test]
+    fn the_fence_bounds_are_sized_against_the_reads_they_stand_for() {
+        // Fresh is one observation interval plus one `STORE_TIMEOUT`: the
+        // longest a single successful consistent read may take.
+        assert_eq!(
+            FENCE_OBSERVATION_FRESH_MAX_AGE,
+            FENCE_OBSERVATION_INTERVAL + Duration::from_secs(3)
+        );
+        // The grace must outlast one whole authority-read retry budget — two
+        // 3 s attempts 100 ms apart — or a leader failover ends healthy
+        // streams, which is the failure L2 names.
+        let authority_read_budget = Duration::from_secs(3) * 2 + Duration::from_millis(100);
+        assert!(FENCE_GRACE_MAX_AGE > authority_read_budget);
+        // And it must be a bound rather than an open end: a session may not
+        // outlive the last thing this node proved by more than this.
+        assert_eq!(FENCE_GRACE_MAX_AGE, Duration::from_secs(10));
+        assert!(FENCE_OBSERVATION_FRESH_MAX_AGE < FENCE_GRACE_MAX_AGE);
     }
 
     #[tokio::test]

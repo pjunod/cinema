@@ -2466,7 +2466,9 @@ fn spawn_background_loops(
     tokio::spawn(
         std::sync::Arc::clone(&state.live_tv).scratch_sweep_loop(background_shutdown.clone()),
     );
-    tokio::spawn(std::sync::Arc::clone(&state.live_tv).metrics_loop(background_shutdown.clone()));
+    tokio::spawn(
+        std::sync::Arc::clone(&state.live_tv).settings_observer_loop(background_shutdown.clone()),
+    );
     tokio::spawn(
         std::sync::Arc::clone(&state.live_tv)
             .guide_refresh_loop(state.serving.subscribe(), background_shutdown.clone()),
