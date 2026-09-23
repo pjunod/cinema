@@ -229,34 +229,89 @@ pub(crate) fn parse_manifest(bytes: &[u8]) -> Result<Manifest, MissReason> {
 /// The consumer half of the off switch: with `enabled` false both consumers
 /// ignore the store entirely, so a wrong artifact a bad producer published is
 /// out of service with one setting and no redeploy.
-#[derive(Clone, Debug)]
+///
+/// The switch is read **lazily**, by a lookup, and only once that lookup is
+/// actually going to consult the store. A warm overlay generation or a warm
+/// burn sidecar is served without the setting ever being read: the store has
+/// nothing to save on those paths, so they pay nothing for it.
+#[derive(Clone)]
 pub(crate) struct StoreAccess {
     root: PathBuf,
-    enabled: bool,
+    switch: Switch,
+}
+
+#[derive(Clone)]
+enum Switch {
+    #[cfg(test)]
+    Fixed(bool),
+    /// `subtitles.stored_sources`, read when a lookup first needs it.
+    Setting(std::sync::Arc<dyn plurx_core::store::Store>),
 }
 
 impl StoreAccess {
+    /// A switch already decided, for tests.
+    #[cfg(test)]
     pub(crate) fn new(root: PathBuf, enabled: bool) -> Self {
-        Self { root, enabled }
+        Self {
+            root,
+            switch: Switch::Fixed(enabled),
+        }
     }
 
     /// The store ignored, as when the switch is off.
     #[cfg(test)]
     pub(crate) fn off() -> Self {
-        Self {
-            root: PathBuf::new(),
-            enabled: false,
-        }
+        Self::new(PathBuf::new(), false)
     }
 
-    /// Read the switch and resolve the root for this node.
+    /// This node's store under `runtime_cache`, with the switch read from
+    /// `store` when a lookup first needs it.
     ///
     /// A store read that fails takes the store out of the answer rather than
     /// failing the caller: ignoring the store is exactly the behaviour that
     /// shipped before it, so the cost of an unreadable setting is one
     /// extraction the store might have saved.
-    pub(crate) async fn read(store: &dyn plurx_core::store::Store, runtime_cache: &Path) -> Self {
-        Self::new(store_root(runtime_cache), enabled(store).await)
+    pub(crate) fn from_setting(
+        store: std::sync::Arc<dyn plurx_core::store::Store>,
+        runtime_cache: &Path,
+    ) -> Self {
+        Self {
+            root: store_root(runtime_cache),
+            switch: Switch::Setting(store),
+        }
+    }
+
+    async fn is_enabled(&self) -> bool {
+        match &self.switch {
+            #[cfg(test)]
+            Switch::Fixed(enabled) => *enabled,
+            Switch::Setting(store) => enabled(store.as_ref()).await,
+        }
+    }
+}
+
+/// Where a consumer's live `fstat` comes from. Taken only after the switch,
+/// the MPEG-TS rule and the manifest have all said the store could answer, so
+/// a miss on any of those never touches the media mount.
+pub(crate) enum Live<'a> {
+    /// The descriptor a burn session holds open: `(dev, ino)` of that inode.
+    Handle(&'a std::fs::File),
+    /// The overlay's rule, taken the way its own `source_is_current` takes it.
+    Path(&'a Path),
+    /// A stamp taken already, for tests.
+    #[cfg(test)]
+    Stamp(SourceStamp),
+}
+
+impl Live<'_> {
+    async fn stamp(self) -> Option<SourceStamp> {
+        let metadata = match self {
+            Self::Handle(handle) => handle.metadata().ok()?,
+            Self::Path(path) => tokio::fs::metadata(path).await.ok()?,
+            #[cfg(test)]
+            Self::Stamp(stamp) => return Some(stamp),
+        };
+        Some(crate::fragment_index_cluster::source_stamp(&metadata))
     }
 }
 
@@ -306,10 +361,14 @@ pub(crate) enum MissReason {
     // another node. Reads zero until then.
     #[allow(dead_code)]
     HydratedOnly,
+    /// The overlay asked about a track the store holds as `empty`. The burn
+    /// path can answer "nothing to burn" from that; the overlay cannot, so it
+    /// demuxes the source as before and the lookup is a fall-through.
+    EmptyForOverlay,
 }
 
 impl MissReason {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Absent,
         Self::Stale,
         Self::Disabled,
@@ -317,6 +376,7 @@ impl MissReason {
         Self::HashMismatch,
         Self::NeverIndexed,
         Self::HydratedOnly,
+        Self::EmptyForOverlay,
     ];
 
     fn label(self) -> &'static str {
@@ -328,6 +388,7 @@ impl MissReason {
             Self::HashMismatch => "hash_mismatch",
             Self::NeverIndexed => "never_indexed",
             Self::HydratedOnly => "hydrated_only",
+            Self::EmptyForOverlay => "empty_track",
         }
     }
 
@@ -343,15 +404,19 @@ pub(crate) enum Fallback {
     DeriveFailed,
     /// The derived `.mks` would exceed the burn sidecar's bound.
     OverBound,
+    /// The derivation did not finish inside its own short budget — a stalled
+    /// read of the cache disk, say — and was killed.
+    TimedOut,
 }
 
 impl Fallback {
-    const ALL: [Self; 2] = [Self::DeriveFailed, Self::OverBound];
+    const ALL: [Self; 3] = [Self::DeriveFailed, Self::OverBound, Self::TimedOut];
 
     fn label(self) -> &'static str {
         match self {
             Self::DeriveFailed => "derive_failed",
             Self::OverBound => "over_bound",
+            Self::TimedOut => "timed_out",
         }
     }
 }
@@ -396,6 +461,12 @@ pub(crate) fn is_mpegts_container(file: &MediaFile) -> bool {
 
 /// Look one track up for a consumer.
 ///
+/// Cheapest question first, and the media mount last: the switch, the MPEG-TS
+/// rule, then the manifest on the cache disk, and only when all three say the
+/// store could answer, the live `fstat` of the source. An overlay lookup of an
+/// `empty` track is a fall-through ([`MissReason::EmptyForOverlay`]): the
+/// overlay has no "nothing to show" answer and demuxes the source.
+///
 /// A miss or an `empty` answer is counted here. A `kept` answer is counted
 /// when it is opened — [`open_verified`] or [`copy_verified`] — because that
 /// is when the store's bytes are actually relied on, and when a hash mismatch
@@ -405,9 +476,14 @@ pub(crate) async fn lookup(
     consumer: Consumer,
     file: &MediaFile,
     ordinal: i64,
-    live: &SourceStamp,
+    live: Live<'_>,
 ) -> Lookup {
-    let result = classify(access, consumer, file, ordinal, live).await;
+    let result = match classify(access, consumer, file, ordinal, live).await {
+        Lookup::Empty(_) if consumer == Consumer::Overlay => {
+            Lookup::Miss(MissReason::EmptyForOverlay)
+        }
+        other => other,
+    };
     match &result {
         Lookup::Kept(_) => {}
         Lookup::Empty(_) => record_empty(consumer),
@@ -421,9 +497,9 @@ async fn classify(
     consumer: Consumer,
     file: &MediaFile,
     ordinal: i64,
-    live: &SourceStamp,
+    live: Live<'_>,
 ) -> Lookup {
-    if !access.enabled {
+    if !access.is_enabled().await {
         return Lookup::Miss(MissReason::Disabled);
     }
     if consumer == Consumer::Burn && is_mpegts_container(file) {
@@ -446,7 +522,10 @@ async fn classify(
         Ok(manifest) => manifest,
         Err(reason) => return Lookup::Miss(reason),
     };
-    if !manifest.is_current(file.id, live, consumer) {
+    let Some(live) = live.stamp().await else {
+        return Lookup::Miss(MissReason::Stale);
+    };
+    if !manifest.is_current(file.id, &live, consumer) {
         return Lookup::Miss(MissReason::Stale);
     }
     let Some(track) = manifest.track(ordinal) else {
@@ -603,8 +682,8 @@ fn open_and_hash(path: &Path, expected: &str, copy_to: Option<&Path>) -> Opened 
 
 static LOOKUP_HITS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 static LOOKUP_EMPTY: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
-static LOOKUP_MISSES: [[AtomicU64; 7]; 2] = [const { [const { AtomicU64::new(0) }; 7] }; 2];
-static FALLBACKS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+static LOOKUP_MISSES: [[AtomicU64; 8]; 2] = [const { [const { AtomicU64::new(0) }; 8] }; 2];
+static FALLBACKS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
 fn record_hit(consumer: Consumer) {
     LOOKUP_HITS[consumer.index()].fetch_add(1, Ordering::Relaxed);
@@ -616,6 +695,14 @@ fn record_empty(consumer: Consumer) {
 
 fn record_miss(consumer: Consumer, reason: MissReason) {
     LOOKUP_MISSES[consumer.index()][reason.index()].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count a `kept` lookup whose bytes this caller did not open itself: it
+/// joined a flight another caller owns, or found the sidecar published by the
+/// time it enlisted. The store still answered for it — the owner reads the
+/// same current manifest — so it is a hit, not a lookup that went uncounted.
+pub(crate) fn record_kept_joined(consumer: Consumer) {
+    record_hit(consumer);
 }
 
 /// Count a burn derivation that fell back to reading the source.
@@ -934,6 +1021,14 @@ pub(crate) mod testing {
 
     use super::*;
 
+    /// Held by every test that asserts an exact change in the process-global
+    /// lookup counters, and by every test that moves the burn ones, so the
+    /// deltas one test reads are its own.
+    pub(crate) fn counter_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
     /// Store `bytes` as `ordinal`'s kept track and return its entry.
     pub(crate) fn kept(dir: &Path, ordinal: i64, bytes: &[u8]) -> TrackEntry {
         let sha256 = hex::encode(Sha256::digest(bytes));
@@ -1158,6 +1253,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_kept_track_is_a_hit_only_when_its_bytes_hash_to_the_manifest() {
+        let _counters = counter_lock().lock().await;
         let base = crate::test_tempdir().expect("store");
         let root = base.path().join(STORE_DIR);
         let source = base.path().join("source.mkv");
@@ -1170,7 +1266,9 @@ mod tests {
         write_manifest(&root, 7, live, vec![entry.clone()]);
 
         for consumer in Consumer::ALL {
-            let Lookup::Kept(kept_track) = lookup(&access, consumer, &file, 0, &live).await else {
+            let Lookup::Kept(kept_track) =
+                lookup(&access, consumer, &file, 0, Live::Stamp(live)).await
+            else {
                 panic!("a current kept track is found for {consumer:?}");
             };
             let before = hits_for_test(consumer);
@@ -1188,7 +1286,8 @@ mod tests {
         // Same name, different bytes: the manifest's sha256 is the authority.
         let path = dir.join(entry.file.as_deref().expect("name"));
         std::fs::write(&path, b"PGS bytez").expect("tamper");
-        let Lookup::Kept(kept_track) = lookup(&access, Consumer::Burn, &file, 0, &live).await
+        let Lookup::Kept(kept_track) =
+            lookup(&access, Consumer::Burn, &file, 0, Live::Stamp(live)).await
         else {
             panic!("the manifest still names it");
         };
@@ -1224,7 +1323,7 @@ mod tests {
         };
 
         assert_eq!(
-            miss(lookup(&on, Consumer::Overlay, &file, 0, &live).await),
+            miss(lookup(&on, Consumer::Overlay, &file, 0, Live::Stamp(live)).await),
             MissReason::Absent,
             "no directory"
         );
@@ -1241,21 +1340,46 @@ mod tests {
             ],
         );
         assert!(matches!(
-            lookup(&on, Consumer::Burn, &file, 1, &live).await,
+            lookup(&on, Consumer::Burn, &file, 1, Live::Stamp(live)).await,
             Lookup::Empty(_)
         ));
+        // The overlay cannot answer "nothing to show", so for it an empty
+        // track is a fall-through to the demux, counted as one.
+        let (empty_before, fall_before) = (
+            LOOKUP_EMPTY[Consumer::Overlay.index()].load(Ordering::Relaxed),
+            misses_for_test(Consumer::Overlay, MissReason::EmptyForOverlay),
+        );
         assert_eq!(
-            miss(lookup(&on, Consumer::Burn, &file, 2, &live).await),
+            miss(lookup(&on, Consumer::Overlay, &file, 1, Live::Stamp(live)).await),
+            MissReason::EmptyForOverlay
+        );
+        assert_eq!(
+            LOOKUP_EMPTY[Consumer::Overlay.index()].load(Ordering::Relaxed),
+            empty_before,
+            "never counted as an answered empty for the overlay"
+        );
+        assert!(misses_for_test(Consumer::Overlay, MissReason::EmptyForOverlay) > fall_before);
+        assert_eq!(
+            miss(lookup(&on, Consumer::Burn, &file, 2, Live::Stamp(live)).await),
             MissReason::Absent,
             "a malformed track left nothing to use"
         );
         assert_eq!(
-            miss(lookup(&on, Consumer::Burn, &file, 5, &live).await),
+            miss(lookup(&on, Consumer::Burn, &file, 5, Live::Stamp(live)).await),
             MissReason::Absent,
             "an ordinal the probe never saw"
         );
         assert_eq!(
-            miss(lookup(&StoreAccess::off(), Consumer::Overlay, &file, 0, &live).await),
+            miss(
+                lookup(
+                    &StoreAccess::off(),
+                    Consumer::Overlay,
+                    &file,
+                    0,
+                    Live::Stamp(live)
+                )
+                .await
+            ),
             MissReason::Disabled
         );
         assert_eq!(
@@ -1265,7 +1389,7 @@ mod tests {
                     Consumer::Burn,
                     &file,
                     0,
-                    &live
+                    Live::Stamp(live)
                 )
                 .await
             ),
@@ -1286,7 +1410,7 @@ mod tests {
         ] {
             for consumer in Consumer::ALL {
                 assert_eq!(
-                    miss(lookup(&on, consumer, &file, 0, &moved).await),
+                    miss(lookup(&on, consumer, &file, 0, Live::Stamp(moved)).await),
                     MissReason::Stale
                 );
             }
@@ -1298,11 +1422,11 @@ mod tests {
             let mut transport = file.clone();
             transport.container = container.map(str::to_owned);
             assert_eq!(
-                miss(lookup(&on, Consumer::Burn, &transport, 0, &live).await),
+                miss(lookup(&on, Consumer::Burn, &transport, 0, Live::Stamp(live)).await),
                 MissReason::Mpegts
             );
             assert!(matches!(
-                lookup(&on, Consumer::Overlay, &transport, 0, &live).await,
+                lookup(&on, Consumer::Overlay, &transport, 0, Live::Stamp(live)).await,
                 Lookup::Kept(_)
             ));
         }
@@ -1312,13 +1436,80 @@ mod tests {
         wrong.file = Some("../elsewhere.sup".into());
         write_manifest(&root, 9, live, vec![wrong]);
         assert_eq!(
-            miss(lookup(&on, Consumer::Overlay, &file, 0, &live).await),
+            miss(lookup(&on, Consumer::Overlay, &file, 0, Live::Stamp(live)).await),
             MissReason::Stale
         );
         std::fs::write(dir.join(MANIFEST_NAME), b"not json").expect("torn");
         assert_eq!(
-            miss(lookup(&on, Consumer::Overlay, &file, 0, &live).await),
+            miss(lookup(&on, Consumer::Overlay, &file, 0, Live::Stamp(live)).await),
             MissReason::Stale
+        );
+    }
+
+    /// Cheapest question first and the media mount last, and the switch read
+    /// when a lookup needs it rather than when the access was built.
+    #[tokio::test]
+    async fn the_switch_and_the_cache_disk_answer_before_the_media_mount() {
+        use plurx_core::store::Store;
+        let base = crate::test_tempdir().expect("store");
+        let runtime = base.path().join("runtime");
+        let root = store_root(&runtime);
+        // A source on a mount that is not there: stating it would fail.
+        let gone = base.path().join("unmounted").join("source.mkv");
+        let file = media_file(11, gone.clone(), 10, 20);
+        let miss = |lookup: Lookup| match lookup {
+            Lookup::Miss(reason) => reason,
+            other => panic!("expected a miss, got {other:?}"),
+        };
+        assert_eq!(
+            miss(
+                lookup(
+                    &StoreAccess::new(root.clone(), false),
+                    Consumer::Overlay,
+                    &file,
+                    0,
+                    Live::Path(&gone)
+                )
+                .await
+            ),
+            MissReason::Disabled,
+            "off never reaches the manifest or the source"
+        );
+        assert_eq!(
+            miss(
+                lookup(
+                    &StoreAccess::new(root.clone(), true),
+                    Consumer::Overlay,
+                    &file,
+                    0,
+                    Live::Path(&gone)
+                )
+                .await
+            ),
+            MissReason::Absent,
+            "no manifest is a miss on the cache disk; the source is never stated"
+        );
+
+        let store: std::sync::Arc<dyn Store> = std::sync::Arc::new(
+            plurx_core::store::SqliteStore::open_in_memory().expect("settings store"),
+        );
+        let access = StoreAccess::from_setting(std::sync::Arc::clone(&store), &runtime);
+        store
+            .put_setting(plurx_core::store::keys::SUBTITLE_STORED_SOURCES, "0")
+            .await
+            .expect("switch off");
+        assert_eq!(
+            miss(lookup(&access, Consumer::Burn, &file, 0, Live::Path(&gone)).await),
+            MissReason::Disabled,
+            "the switch is read when the lookup needs it"
+        );
+        store
+            .put_setting(plurx_core::store::keys::SUBTITLE_STORED_SOURCES, "1")
+            .await
+            .expect("switch on");
+        assert_eq!(
+            miss(lookup(&access, Consumer::Overlay, &file, 0, Live::Path(&gone)).await),
+            MissReason::Absent
         );
     }
 
@@ -1339,13 +1530,14 @@ mod tests {
                 "hash_mismatch",
                 "never_indexed",
                 "hydrated_only",
+                "empty_track",
             ] {
                 assert!(text.contains(&format!(
                     "plurx_subtitle_source_misses_total{{consumer=\"{consumer}\",reason=\"{reason}\"}}"
                 )));
             }
         }
-        for reason in ["derive_failed", "over_bound"] {
+        for reason in ["derive_failed", "over_bound", "timed_out"] {
             assert!(text.contains(&format!(
                 "plurx_subtitle_source_fallbacks_total{{reason=\"{reason}\"}}"
             )));

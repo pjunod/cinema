@@ -524,3 +524,104 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
         "and overlays it: {burned_args:?}"
     );
 }
+
+/// The burn sidecar is fetched only after the encoder and grade are chosen,
+/// because that choice can refuse the source outright. A refusal must be
+/// immediate and final — not a detached full-source extraction answered
+/// "pending" for as long as it takes, followed by the same refusal. Here the
+/// source is labelled Dolby Vision with no profile, which encoder selection
+/// refuses; the subtitle cache must still be untouched afterwards.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extraction() {
+    use plurx_core::store::SqliteStore;
+    let base = crate::test_tempdir().expect("manager fixture");
+    let video = plurx_core::testfixtures::source("h264");
+    let authored = base.path().join("authored.sup");
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/mkpgs");
+    let status = std::process::Command::new(script)
+        .args(["1920", "1080"])
+        .arg(&authored)
+        .output()
+        .expect("author the PGS track");
+    assert!(status.status.success());
+    let source = base.path().join("with-pgs.mkv");
+    let muxed = std::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+        .arg(&video)
+        .args(["-itsoffset", "1", "-i"])
+        .arg(&authored)
+        .args(["-map", "0", "-map", "1:s:0", "-c", "copy"])
+        .arg(&source)
+        .output()
+        .expect("mux the fixture");
+    assert!(
+        muxed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&muxed.stderr)
+    );
+    let probe = plurx_core::scan::probe::probe(&source)
+        .await
+        .expect("real source probe");
+    let metadata = std::fs::metadata(&source).expect("source metadata");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id =
+        seed_file_with_probe_at(&store, source.to_str().expect("path"), probe.clone()).await;
+    let seeded = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("seeded");
+    store
+        .upsert_file(
+            seeded.item_id,
+            source.to_str().expect("path"),
+            metadata.len() as i64,
+            crate::fragment_index_cluster::source_stamp(&metadata).mtime,
+            &probe,
+        )
+        .await
+        .expect("attested source metadata");
+    let mut file = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("attested");
+    // What encoder selection refuses: Dolby Vision whose profile is unknown.
+    file.hdr = Some("dolby_vision".into());
+    file.hdr_format = None;
+    file.dolby_vision = Default::default();
+    let manager = TranscodeManager::new(
+        store,
+        base.path().join("manager"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let req = SessionRequest {
+        request_id: Some("refused-before-burn".into()),
+        previous_session_id: None,
+        reopen_reason: None,
+        presentation: Presentation::Vod,
+        automatic: false,
+        start_seconds: 0.0,
+        kind: SessionKind::Transcode { height: 240 },
+        subtitle_burn: Some(0),
+        ..reopen_request(file_id, "refused-before-burn", "unused", "unused")
+    };
+    let refusal = match manager.prepare_vod_encoding(&req, &file).await {
+        Err(refusal) => refusal,
+        Ok(_) => panic!("encoder selection refuses an unknown Dolby Vision profile"),
+    };
+    assert!(refusal.contains("Dolby Vision"), "{refusal}");
+    // Had the fetch run first, the fixture's tiny track would have been
+    // extracted and published inside the call, before the refusal returned.
+    let cache = manager.subtitle_cache_dir();
+    let touched = std::fs::read_dir(cache)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(
+        touched, 0,
+        "a refused start must not have started a burn extraction in {}",
+        cache.display()
+    );
+}

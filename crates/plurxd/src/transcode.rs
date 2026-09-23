@@ -19314,10 +19314,17 @@ impl TranscodeManager {
                 "the source probe has no usable video cadence; rescan the file",
             )
         })?;
-        // Resolved before the encoder and grade are chosen, because a stored
-        // track that is `empty` means there is nothing to burn: the session is
-        // then exactly one without a burn — its encoder, its grade and its
-        // filter graph — rather than one that tone-maps to overlay nothing.
+        let (encoder, grade) = self
+            .encoder_and_grade_for(file, req.hdr10, target_height, subtitle_burn.is_some())
+            .await?;
+        // After the encoder and grade, deliberately. `encoder_and_grade_for`
+        // can refuse this source outright (an unknown Dolby Vision profile, an
+        // unproven Profile 5 renderer), and a refusal must not first start a
+        // detached full-source extraction and answer "pending" while it runs.
+        // A `Nothing` answer only has to reach the options: the grade chosen
+        // with the burn flag set is the one a burn-free session gets for every
+        // request the HTTP layer admits, because it already refuses a burn
+        // whose burn-free grade would be HDR10.
         let (subtitle_burn, burn_file) = match subtitle_burn {
             Some(burn) => {
                 // The only caller that passes the short budget. A start has 50 s
@@ -19326,11 +19333,11 @@ impl TranscodeManager {
                 // that leaves the viewer better off — including on the speculative
                 // prepared-successor path, which would otherwise hold a preparation
                 // slot for the length of a full-film demux.
-                let stored = crate::subtitle_source::StoreAccess::read(
-                    self.store.as_ref(),
+                // Read lazily: a warm sidecar never reads the setting.
+                let stored = crate::subtitle_source::StoreAccess::from_setting(
+                    Arc::clone(&self.store),
                     &self.runtime_cache,
-                )
-                .await;
+                );
                 match crate::subtitles::ensure_burn_source(
                     &self.subtitle_cache,
                     file,
@@ -19354,9 +19361,6 @@ impl TranscodeManager {
             }
             None => (None, None),
         };
-        let (encoder, grade) = self
-            .encoder_and_grade_for(file, req.hdr10, target_height, subtitle_burn.is_some())
-            .await?;
         let software_threads = Workload::of(file, target_height)
             .software_threads()
             .min(self.software_budget().await)

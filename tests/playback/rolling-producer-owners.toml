@@ -2560,7 +2560,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `subtitle_source::tests::over_the_cap_the_least_recently_accessed_directory_
 # goes_first`, spacing three `.access` writes so their mtimes order. It owns no
 # producer, no process and no timer beyond the test's own await.
-expected_occurrences = 869
+# 869 -> 870 with the #456 review: one production `tokio::time::timeout` in
+# `subtitles::derive_burn_from_store`, the derivation's own 30 s bound. It
+# runs inside the burn flight's owned task and under that flight's
+# `EXTRACTION_TIMEOUT`; expiry drops the derivation future, whose
+# `BoundedDiagnosticChild` kills and reaps the ffmpeg child, and the same task
+# goes on to the source extraction. It owns no new producer and elects no
+# recovery; it exists so a hung derivation cannot run the flight's timeout out
+# and have that memoised.
+expected_occurrences = 870
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2722,7 +2730,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # `-start_at_zero` variant (5); in `pgs_overlay::stored_source_tests` the
 # author, the mux and the ride-along (3); in `vodencode_manager_tests.rs` the
 # author and the mux (2).
-expected_occurrences = 146
+# 146 -> 149 with the #456 review, all test-only fixture renderers run to
+# completion before their test proceeds: the no-subtitle source mux in
+# `a_double_failure_remembers_the_source_error_and_runs_neither_again`, and the
+# `mkpgs` author and the mux in
+# `a_source_encoder_selection_refuses_is_refused_before_any_burn_extraction`.
+expected_occurrences = 149
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2989,7 +3002,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `pgs_overlay::stored_source_tests`, and two in `vodencode_manager_tests.rs`.
 # Every one is waited to completion before its test continues; none owns a
 # producer.
-expected_occurrences = 347
+# 347 -> 349 with the #456 review: the two test-only `.output()` launches of
+# the fixture renderers in
+# `a_source_encoder_selection_refuses_is_refused_before_any_burn_extraction`,
+# each waited to completion. (The double-failure test's mux goes through the
+# existing `run` helper, already counted.)
+expected_occurrences = 349
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

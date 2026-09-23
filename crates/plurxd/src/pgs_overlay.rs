@@ -589,12 +589,18 @@ async fn stored_track_into_stage(
     index: i64,
     sup: &Path,
 ) -> bool {
-    use crate::subtitle_source::{copy_verified, lookup, Consumer, Lookup};
-    let live = match tokio::fs::metadata(&file.path).await {
-        Ok(metadata) => crate::fragment_index_cluster::source_stamp(&metadata),
-        Err(_) => return false,
-    };
-    match lookup(stored, Consumer::Overlay, file, index, &live).await {
+    use crate::subtitle_source::{copy_verified, lookup, Consumer, Live, Lookup};
+    // The switch and the manifest are asked before the media mount is
+    // stated; the lookup takes the live `fstat` last.
+    match lookup(
+        stored,
+        Consumer::Overlay,
+        file,
+        index,
+        Live::Path(&file.path),
+    )
+    .await
+    {
         Lookup::Kept(kept) => copy_verified(&kept, sup).await,
         Lookup::Empty(_) | Lookup::Miss(_) => false,
     }

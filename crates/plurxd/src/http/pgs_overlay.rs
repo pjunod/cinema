@@ -89,7 +89,7 @@ pub async fn manifest(
         &state.subs_dir,
         &file,
         index,
-        state.subtitle_source_access().await,
+        state.subtitle_source_access(),
     )
     .await
     .map_err(map_overlay_error)?
@@ -210,14 +210,9 @@ async fn reprepare(
     generation_dir: &Path,
 ) -> Result<(), ApiError> {
     pgs_overlay::invalidate_generation(generation_dir).await;
-    pgs_overlay::prepare(
-        &state.subs_dir,
-        file,
-        index,
-        state.subtitle_source_access().await,
-    )
-    .await
-    .map_err(map_overlay_error)?;
+    pgs_overlay::prepare(&state.subs_dir, file, index, state.subtitle_source_access())
+        .await
+        .map_err(map_overlay_error)?;
     Ok(())
 }
 

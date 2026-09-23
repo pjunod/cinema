@@ -1085,60 +1085,136 @@ pub(crate) async fn ensure_burn_source(
     join_budget: Duration,
     stored: &crate::subtitle_source::StoreAccess,
 ) -> Result<BurnSource, String> {
+    ensure_burn_source_with(
+        dir,
+        file,
+        index,
+        expected_object_version,
+        stored,
+        ExtractionLimits {
+            max_sidecar_bytes: MAX_BURN_BYTES,
+            join_budget,
+            ..Default::default()
+        },
+        Derivation::default(),
+    )
+    .await
+}
+
+/// How long a derivation from a stored `.sup` may run before it is killed
+/// and the source is read instead.
+///
+/// Its own bound, far inside the flight's [`EXTRACTION_TIMEOUT`], because the
+/// flight's is the one that reaches the negative memo: a derivation that hung
+/// on a stalled cache disk and ran the flight out would be remembered as the
+/// track's failure for [`NEGATIVE_TTL`], refusing the very source extraction
+/// that was its fallback. A healthy derivation takes 0.04 s for an 18 KB
+/// track and 0.25 s for a 10 MB one (design §6.2 fact 11), so thirty seconds
+/// cuts off nothing honest.
+const DERIVATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The derivation's bound, and a test's way to make it hang.
+#[derive(Clone, Copy)]
+struct Derivation {
+    timeout: Duration,
+    /// Test-only: park forever in place of ffmpeg, so the bound is what ends it.
+    #[cfg(test)]
+    hang: bool,
+}
+
+impl Default for Derivation {
+    fn default() -> Self {
+        Self {
+            timeout: DERIVATION_TIMEOUT,
+            #[cfg(test)]
+            hang: false,
+        }
+    }
+}
+
+async fn ensure_burn_source_with(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    expected_object_version: Option<&str>,
+    stored: &crate::subtitle_source::StoreAccess,
+    limits: ExtractionLimits,
+    derivation: Derivation,
+) -> Result<BurnSource, String> {
     use sha2::{Digest, Sha256};
     let source = Arc::new(
         crate::fragment_index_cluster::open_source_fence(file, expected_object_version).await?,
     );
     let version = hex::encode(Sha256::digest(source.object_version().as_bytes()));
     let cached = dir.join(format!("f{}-s{index}-{version}-burn-v2.mks", file.id));
-    let limits = ExtractionLimits {
-        max_sidecar_bytes: MAX_BURN_BYTES,
-        join_budget,
-        ..Default::default()
-    };
-    // The store is asked only when there is a read it could save. A sidecar
-    // already published for this exact object is served as it always was.
-    let stored_track = if valid_sidecar(&cached, limits.max_sidecar_bytes).await {
-        None
+    // A sidecar already published for this exact object is served before any
+    // store work at all — no setting read, no manifest, no `fstat` — and
+    // without entering the flight machinery, whose first step is this same
+    // check. The store has nothing to save here.
+    let path = if valid_sidecar(&cached, limits.max_sidecar_bytes).await {
+        cached
     } else {
-        match stored_burn_track(stored, file, index, &source).await {
+        let stored_track = match stored_burn_track(stored, file, index, &source).await {
             StoredBurn::Nothing => return Ok(BurnSource::Nothing),
             StoredBurn::Kept(kept) => Some(kept),
             StoredBurn::Extract => None,
-        }
-    };
-    let extractor_source = Arc::clone(&source);
-    let path = ensure_vtt_at(
-        cached,
-        dir,
-        file,
-        index,
-        limits,
-        move |tmp, file, index| async move {
-            let source = extractor_source;
-            // The fallback lives inside this one flight, and a failed
-            // derivation never reaches the negative memo: only this closure's
-            // final answer is remembered, and a memo written for the
-            // derivation would refuse the source extraction below for its
-            // whole TTL.
-            if let Some(kept) = stored_track {
-                if derive_burn_from_store(&tmp, &kept, MAX_BURN_BYTES).await {
-                    #[cfg(test)]
-                    note_burn_route(file.id, "store");
-                    if !source.unchanged() {
-                        return Err("source changed during burn-track derivation".into());
+        };
+        // Whether this call's own extractor ran. A `kept` lookup whose caller
+        // joined someone else's flight — or found the sidecar published by
+        // the time it enlisted — never opens the stored bytes, and is counted
+        // here instead so that no lookup goes uncounted.
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let kept_lookup = stored_track.is_some();
+        let extractor_ran = Arc::clone(&ran);
+        let extractor_source = Arc::clone(&source);
+        let answer = ensure_vtt_at(
+            cached,
+            dir,
+            file,
+            index,
+            limits,
+            move |tmp, file, index| async move {
+                extractor_ran.store(true, std::sync::atomic::Ordering::Release);
+                let source = extractor_source;
+                // The fallback lives inside this one flight, and a failed
+                // derivation never reaches the negative memo: only this
+                // closure's final answer is remembered, and a memo written for
+                // the derivation would refuse the source extraction below for
+                // its whole TTL. That is also why the derivation has a bound of
+                // its own, far inside the flight's.
+                if let Some(kept) = stored_track {
+                    // Boxed: both routes carry a 64 KiB copy buffer in their
+                    // state, and unboxed they are laid out, and in debug builds
+                    // moved, side by side on the polling thread's stack.
+                    if Box::pin(derive_burn_from_store(
+                        &tmp,
+                        &kept,
+                        MAX_BURN_BYTES,
+                        derivation,
+                    ))
+                    .await
+                    {
+                        #[cfg(test)]
+                        note_burn_route(file.id, "store");
+                        if !source.unchanged() {
+                            return Err("source changed during burn-track derivation".into());
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
                 }
-            }
-            #[cfg(test)]
-            note_burn_route(file.id, "source");
-            #[cfg(not(test))]
-            let _ = &file;
-            extract_burn_from_source(&tmp, &source, index).await
-        },
-    )
-    .await?;
+                #[cfg(test)]
+                note_burn_route(file.id, "source");
+                #[cfg(not(test))]
+                let _ = &file;
+                extract_burn_from_source(&tmp, &source, index).await
+            },
+        )
+        .await;
+        if kept_lookup && !ran.load(std::sync::atomic::Ordering::Acquire) {
+            crate::subtitle_source::record_kept_joined(crate::subtitle_source::Consumer::Burn);
+        }
+        answer?
+    };
     if !source.unchanged() {
         return Err("source changed before burn sidecar attachment".into());
     }
@@ -1170,15 +1246,19 @@ async fn stored_burn_track(
     index: i64,
     source: &crate::fragment_index_cluster::SourceFence,
 ) -> StoredBurn {
-    use crate::subtitle_source::{lookup, Consumer, Lookup};
+    use crate::subtitle_source::{lookup, Consumer, Live, Lookup};
     // Validity at use is a live `fstat` of the file this session holds open,
     // not of its path, so a replacement at the name cannot vouch for this
-    // inode.
-    let live = match source.handle.metadata() {
-        Ok(metadata) => crate::fragment_index_cluster::source_stamp(&metadata),
-        Err(_) => return StoredBurn::Extract,
-    };
-    match lookup(stored, Consumer::Burn, file, index, &live).await {
+    // inode. The lookup takes it last, after the switch and the manifest.
+    match lookup(
+        stored,
+        Consumer::Burn,
+        file,
+        index,
+        Live::Handle(&source.handle),
+    )
+    .await
+    {
         Lookup::Kept(kept) => StoredBurn::Kept(kept),
         Lookup::Empty(dir) => {
             crate::subtitle_source::record_access(&dir).await;
@@ -1205,28 +1285,51 @@ async fn stored_burn_track(
 ///
 /// The stored file is read through the descriptor that was hashed, so the
 /// bytes derived are the bytes verified whatever happens to its name. The
-/// output is bounded physically, as the source extraction's is.
+/// output is bounded physically, as the source extraction's is, and the run
+/// is bounded in time by [`DERIVATION_TIMEOUT`]; expiry drops the child, which
+/// kills it.
 async fn derive_burn_from_store(
     tmp: &Path,
     kept: &crate::subtitle_source::KeptTrack,
     max_bytes: u64,
+    derivation: Derivation,
 ) -> bool {
     use crate::subtitle_source::{record_fallback, Fallback};
     let Some(sup) = crate::subtitle_source::open_verified(kept).await else {
         return false;
     };
-    let why = match run_burn_derivation(tmp, &sup, max_bytes).await {
-        Ok(()) => return true,
-        Err(why) => why,
+    let run = Box::pin(run_burn_derivation(tmp, &sup, max_bytes));
+    #[cfg(test)]
+    let run = async {
+        if derivation.hang {
+            std::future::pending::<()>().await;
+        }
+        run.await
     };
-    let over_bound = tokio::fs::metadata(tmp)
-        .await
-        .is_ok_and(|metadata| metadata.len() >= max_bytes);
-    record_fallback(if over_bound {
-        Fallback::OverBound
-    } else {
-        Fallback::DeriveFailed
-    });
+    let (why, reason) = match tokio::time::timeout(derivation.timeout, run).await {
+        Ok(Ok(())) => return true,
+        Ok(Err(why)) => {
+            let over_bound = tokio::fs::metadata(tmp)
+                .await
+                .is_ok_and(|metadata| metadata.len() >= max_bytes);
+            (
+                why,
+                if over_bound {
+                    Fallback::OverBound
+                } else {
+                    Fallback::DeriveFailed
+                },
+            )
+        }
+        Err(_) => (
+            format!(
+                "burn-track derivation did not finish in {}s",
+                derivation.timeout.as_secs_f64()
+            ),
+            Fallback::TimedOut,
+        ),
+    };
+    record_fallback(reason);
     tracing::warn!(
         stored = %kept.path().display(),
         why,
@@ -3483,6 +3586,7 @@ mod stored_source_tests {
     #[tokio::test]
     async fn a_derived_burn_sidecar_keeps_the_source_extraction_cue_times() {
         crate::transcode::require_ffmpeg();
+        let _counters = crate::subtitle_source::testing::counter_lock().lock().await;
         for (file_id, start) in [(91_001, "0"), (91_002, "7.5")] {
             let base = crate::test_tempdir().expect("fixture");
             let source = source_with_first_cue_at_sixty(base.path(), start);
@@ -3580,6 +3684,7 @@ mod stored_source_tests {
     #[tokio::test]
     async fn an_empty_stored_track_burns_nothing_without_reading_the_source() {
         crate::transcode::require_ffmpeg();
+        let _counters = crate::subtitle_source::testing::counter_lock().lock().await;
         let base = crate::test_tempdir().expect("fixture");
         let source = source_with_first_cue_at_sixty(base.path(), "0");
         let file_id = 91_003;
@@ -3626,6 +3731,7 @@ mod stored_source_tests {
     #[tokio::test]
     async fn off_and_mpegts_never_use_the_store() {
         crate::transcode::require_ffmpeg();
+        let _counters = crate::subtitle_source::testing::counter_lock().lock().await;
         let base = crate::test_tempdir().expect("fixture");
         let source = source_with_first_cue_at_sixty(base.path(), "0");
         let root = base.path().join("runtime").join(store::STORE_DIR);
@@ -3708,6 +3814,7 @@ mod stored_source_tests {
     #[tokio::test]
     async fn a_failed_derivation_reads_the_source_in_the_same_flight_and_leaves_no_memo() {
         crate::transcode::require_ffmpeg();
+        let _counters = crate::subtitle_source::testing::counter_lock().lock().await;
         let base = crate::test_tempdir().expect("fixture");
         let source = source_with_first_cue_at_sixty(base.path(), "0");
         let file_id = 91_006;
@@ -3753,11 +3860,12 @@ mod stored_source_tests {
             hex::encode(Sha256::digest(fence.object_version().as_bytes()))
         };
         let cached = cache.join(format!("f{file_id}-s0-{version}-burn-v2.mks"));
+        // The route assertion above is what catches a failed derivation
+        // being made terminal; a memo check here could not fail, because the
+        // successful source extraction clears the memo before it returns.
+        // `a_double_failure_remembers_the_source_error_and_runs_neither_again`
+        // is where the memo's contents are pinned.
         assert!(cached.exists(), "the source extraction was published");
-        assert!(
-            remembered_failure(&cached).await.is_none(),
-            "the derivation's failure left no negative memo"
-        );
         let mut entries = std::fs::read_dir(&cache).expect("cache");
         assert!(
             !entries.any(|entry| entry
@@ -3766,6 +3874,228 @@ mod stored_source_tests {
                 .to_string_lossy()
                 .starts_with(".tmp-")),
             "and no temp file"
+        );
+    }
+
+    /// The published burn sidecar's path for `file`, as the flight keys it.
+    async fn cached_burn(cache: &Path, file: &MediaFile) -> PathBuf {
+        use sha2::{Digest, Sha256};
+        let fence = crate::fragment_index_cluster::open_source_fence(file, None)
+            .await
+            .expect("fence");
+        cache.join(format!(
+            "f{}-s0-{}-burn-v2.mks",
+            file.id,
+            hex::encode(Sha256::digest(fence.object_version().as_bytes()))
+        ))
+    }
+
+    /// A derivation that never returns is killed at its own bound and the
+    /// source answers in the same call. Without that bound it would run the
+    /// flight's timeout out — shrunk to five seconds here — and *that*
+    /// timeout is memoised, refusing the track for the memo's whole TTL: the
+    /// one route by which a derivation failure could reach the memo.
+    #[tokio::test]
+    async fn a_hung_derivation_is_bounded_and_falls_back_to_the_source() {
+        crate::transcode::require_ffmpeg();
+        let _counters = crate::subtitle_source::testing::counter_lock().lock().await;
+        let base = crate::test_tempdir().expect("fixture");
+        let source = source_with_first_cue_at_sixty(base.path(), "0");
+        let file_id = 91_007;
+        let file = file_at(file_id, source.clone());
+        let root = base.path().join("runtime").join(store::STORE_DIR);
+        let dir = store::file_dir(&root, file_id);
+        let ride = ride_along_sup(base.path(), &source);
+        write_manifest(
+            &root,
+            file_id,
+            stamp_of(&source),
+            vec![kept(&dir, 0, &ride)],
+        );
+        let cache = base.path().join("subs");
+        let before = store::fallbacks_for_test(store::Fallback::TimedOut);
+
+        let answer = Box::pin(ensure_burn_source_with(
+            &cache,
+            &file,
+            0,
+            None,
+            &on(&root),
+            ExtractionLimits {
+                max_sidecar_bytes: MAX_BURN_BYTES,
+                join_budget: SIDECAR_JOIN_UNBOUNDED,
+                timeout: Duration::from_secs(5),
+                ..Default::default()
+            },
+            Derivation {
+                timeout: Duration::from_millis(200),
+                hang: true,
+            },
+        ))
+        .await
+        .expect("the source answers once the derivation is cut off");
+        assert!(matches!(answer, BurnSource::File(_)));
+        assert_eq!(
+            burn_routes_for_test(file_id),
+            vec!["source"],
+            "the hung derivation gave way to the source in the same flight"
+        );
+        assert!(store::fallbacks_for_test(store::Fallback::TimedOut) > before);
+        let cached = cached_burn(&cache, &file).await;
+        assert!(cached.exists(), "the source extraction was published");
+    }
+
+    /// A derivation that fails and a source extraction that then fails too:
+    /// the memo holds the *source's* error — the flight's final answer — and
+    /// the next call is refused from it without running either.
+    #[tokio::test]
+    async fn a_double_failure_remembers_the_source_error_and_runs_neither_again() {
+        crate::transcode::require_ffmpeg();
+        let _counters = crate::subtitle_source::testing::counter_lock().lock().await;
+        let base = crate::test_tempdir().expect("fixture");
+        // A source with no subtitle stream at all, so `-map 0:s:0` fails.
+        let source = base.path().join("no-subtitles.mkv");
+        run(
+            std::process::Command::new(ffmpeg_bin())
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=320x180:r=1:d=5",
+                    "-c:v",
+                    "mpeg4",
+                ])
+                .arg(&source),
+            "mux a source without subtitles",
+        );
+        let file_id = 91_008;
+        let file = file_at(file_id, source.clone());
+        let root = base.path().join("runtime").join(store::STORE_DIR);
+        let dir = store::file_dir(&root, file_id);
+        write_manifest(
+            &root,
+            file_id,
+            stamp_of(&source),
+            vec![kept(&dir, 0, b"these bytes are not a PGS stream")],
+        );
+        let cache = base.path().join("subs");
+        let limits = ExtractionLimits {
+            max_sidecar_bytes: MAX_BURN_BYTES,
+            join_budget: SIDECAR_JOIN_UNBOUNDED,
+            negative_ttl: Duration::from_secs(60),
+            ..Default::default()
+        };
+        let derivations_before = store::fallbacks_for_test(store::Fallback::DeriveFailed);
+
+        let why = match Box::pin(ensure_burn_source_with(
+            &cache,
+            &file,
+            0,
+            None,
+            &on(&root),
+            limits,
+            Derivation::default(),
+        ))
+        .await
+        {
+            Err(why) => why,
+            Ok(_) => panic!("neither route can produce a sidecar"),
+        };
+        assert!(
+            why.starts_with("burn-track extraction failed"),
+            "the caller sees the source's error, not the derivation's: {why}"
+        );
+        assert_eq!(burn_routes_for_test(file_id), vec!["source"]);
+        let derivations = store::fallbacks_for_test(store::Fallback::DeriveFailed);
+        assert_eq!(derivations, derivations_before + 1, "one derivation ran");
+        let cached = cached_burn(&cache, &file).await;
+        let remembered = remembered_failure(&cached).await.expect("a memo");
+        assert!(
+            remembered.starts_with("burn-track extraction failed"),
+            "the memo is the source's error: {remembered}"
+        );
+
+        let again = Box::pin(ensure_burn_source_with(
+            &cache,
+            &file,
+            0,
+            None,
+            &on(&root),
+            limits,
+            Derivation::default(),
+        ))
+        .await;
+        assert!(matches!(again, Err(ref why) if why == &remembered));
+        assert_eq!(
+            burn_routes_for_test(file_id),
+            vec!["source"],
+            "the memo refused the call before either route ran"
+        );
+        assert_eq!(
+            store::fallbacks_for_test(store::Fallback::DeriveFailed),
+            derivations,
+            "and no second derivation"
+        );
+        forget_failure(&cached).await;
+    }
+
+    /// A `kept` lookup is counted once per call even when the caller joins a
+    /// flight someone else owns and never opens the stored bytes itself.
+    #[tokio::test]
+    async fn a_kept_lookup_that_joins_another_flight_is_still_counted() {
+        crate::transcode::require_ffmpeg();
+        let _counters = crate::subtitle_source::testing::counter_lock().lock().await;
+        let base = crate::test_tempdir().expect("fixture");
+        let source = source_with_first_cue_at_sixty(base.path(), "0");
+        let file_id = 91_009;
+        let file = file_at(file_id, source.clone());
+        let root = base.path().join("runtime").join(store::STORE_DIR);
+        let dir = store::file_dir(&root, file_id);
+        let ride = ride_along_sup(base.path(), &source);
+        write_manifest(
+            &root,
+            file_id,
+            stamp_of(&source),
+            vec![kept(&dir, 0, &ride)],
+        );
+        let cache = base.path().join("subs");
+        let access = on(&root);
+        let before = store::hits_for_test(store::Consumer::Burn);
+
+        let (first, second) = tokio::join!(
+            Box::pin(ensure_burn_source(
+                &cache,
+                &file,
+                0,
+                None,
+                SIDECAR_JOIN_UNBOUNDED,
+                &access
+            )),
+            Box::pin(ensure_burn_source(
+                &cache,
+                &file,
+                0,
+                None,
+                SIDECAR_JOIN_UNBOUNDED,
+                &access
+            )),
+        );
+        assert!(matches!(first, Ok(BurnSource::File(_))));
+        assert!(matches!(second, Ok(BurnSource::File(_))));
+        assert_eq!(
+            burn_routes_for_test(file_id),
+            vec!["store"],
+            "one derivation served both callers"
+        );
+        assert_eq!(
+            store::hits_for_test(store::Consumer::Burn),
+            before + 2,
+            "both lookups counted, the joiner's included"
         );
     }
 }
