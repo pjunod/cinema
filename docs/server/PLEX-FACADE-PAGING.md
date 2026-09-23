@@ -646,6 +646,132 @@ On `media1`, on the build carrying M5, with nothing else playing:
 
 ---
 
+## 8. M0 — the census, run 2026-09-23, and what it decided
+
+**Verdict: do not build M1–M3.** Not "the census said no" — the census cannot
+be completed on the instrumentation this repository has today, and every datum
+that does exist points at no Plex-family client. What this session built is the
+one instrument that makes the question answerable, and nothing else.
+
+### 8.1 Why §6.3's prompt cannot be run as written
+
+§6.3 step 1 says to read the access log. **There is no access log.** That is
+C-08's finding (`docs/server/OBSERVABILITY-BASELINE.md` §2.1: the one
+`TraceLayer` has a `make_span_with` and nothing else, so the span's default
+`on_response` logs at DEBUG and the default filter is `info`), and it was
+confirmed on a real node: `docker logs plurxd` on nuc4 returns 243,801 lines
+for the 14 h since that process started and **not one** is a request line.
+
+Nor can a metric answer it. `http_route_group` folds
+`/library/sections/{id}/all`, `/library` and `/library/sections` into
+`route_group="library"` beside the native `/api/v1/libraries*` routes, and
+`/library/parts/{file_id}/{mtime}/{name}` into `route_group="playback"` beside
+the native media routes. There is no series anywhere that separates a façade
+request from a native one.
+
+And the façade writes no playback telemetry at all: `plex::part` resolves the
+file and calls `stream::serve_file_range` directly, with no session and no
+`playback_events` row. **A Kodi or PlexKodiConnect box could have streamed
+every night for a month and left no trace in any surface this repository
+exposes.** That is the finding, and it is why §6.3 step 3 — "curl /metrics |
+grep plurx_plex_" — is the step that actually settles this, and why it says
+the family exists only once the census counter is deployed. The plan's M0 was
+circular: it gated M1 on a measurement only M1 could produce.
+
+### 8.2 What the available evidence does say
+
+All of it from nuc4 (192.168.4.8), a voter running the owner's real library,
+read-only, 2026-09-23. It is the only fleet node this session was authorised to
+read, and that bound is part of the result.
+
+| Source | Value |
+|---|---|
+| `plurx_http_route_seconds_count`, all six roles, for `auth`, `home`, `library`, `item`, `search`, `playback` and `other` | **0**, every cell, over the 14 h 07 m since the process started at 2026-09-22T20:22:15Z. Only `settings` (7,670) and `cluster` (66,551) moved. |
+| `plurx_ttff_ms_count{method}` | **0** for `direct_play`, `remux`, `transcode` and `unknown`. |
+| `playback_events` in the node-local sidecar, 2026-08-25T01:48Z → 2026-09-23T11:12Z (29 days), 41,048 rows | Every row that carries a client class names a first-party plurx client: `Chrome` 196 (last 2026-09-04), `Android Media3` 62 (last 2026-09-11), `Apple AVPlayer` 38 (last 2026-09-14), `Safari` 4 (last 2026-09-02). 40,748 rows carry no class. **No Plex-family client appears at all.** |
+| `X-Plex-Container` anywhere in the tree | Absent outside the review documents — the plan's own correction 2, re-verified. |
+| `fn files_for_items` anywhere in the tree | Absent — the plan's correction 1, re-verified. |
+| Façade routes registered in `router()` | 14, exactly as §3.4 says. |
+
+Two honest limits on that table, both load-bearing:
+
+- The 29-day playback census is **silent about the façade**, for the reason in
+  §8.1. It is strong evidence about which clients play through the native API
+  and no evidence at all about which clients browse or stream through
+  `/library/`.
+- nuc4 served no user traffic whatsoever in the 14 h window, and its most
+  recent playback event is 2026-09-14. Its zeros are the zeros of an idle
+  node, not of a fleet. Another node may be the ingress.
+
+### 8.3 The recommendation
+
+**Do not build M1 (the golden corpus), M2 (batched metadata) or M3 (container
+paging) now.** C4's own priority note says the work "only matters if Kodi/PKC
+is in use", nothing in this repository can currently show that it is, and the
+repository's own client story has moved since REQ-PLEX-1 was written:
+`docs/CLIENTS.md` §3 describes Kodi-family clients as what covers living rooms
+"in the meantime", and `clients/android` and `clients/apple` now exist and ship
+to physical devices. Building a paging layer, a batched store helper on both
+backends and a nine-case golden corpus for a façade with no demonstrated
+caller is the speculative work §5.0 exists to prevent.
+
+The N+1 in `section_all` is real and the plan's description of it is accurate.
+It is not urgent, and this document remains the ready plan for the day the
+counter says it is.
+
+### 8.4 What was built instead, and its boundary
+
+One measure-only instrument, `plurx_plex_requests_total{handler,outcome}`:
+fourteen bounded handler labels by four bounded outcomes, 56 fixed series, no
+ids, no titles, no tokens. A layer over the façade sub-router only, so no
+native request can reach it, plus one recording call inside `root_dispatch`'s
+Plex branch because `/` serves both the web app and the capabilities container
+from one handler and counting it by path would count every page load as Plex
+traffic. **No handler was changed and no response byte moved.**
+
+Two deliberate departures from §3.4:
+
+1. **A fourth outcome, `unauthorized`, beside `ok`, `not_found` and `error`.**
+   Every façade route but `/` and `/identity` requires a plurx token presented
+   as `X-Plex-Token`, so a Kodi or PlexKodiConnect box that is configured but
+   not yet paired produces 401s and nothing else. For a census "somebody tried"
+   is the single most interesting thing that can happen, and folding it into
+   `error` would hide it.
+2. **`plurx_plex_container_items` was not built.** It answers "do clients page,
+   and how big a page do they ask for", which is a question about clients that
+   exist. It costs nothing to add on the day one does.
+
+### 8.5 How to close this row
+
+Deploy this branch, leave it for a week on the node clients actually connect
+to, then:
+
+```text
+curl -s http://<host>:32400/metrics | grep plurx_plex_requests_total | grep -v ' 0$'
+```
+
+- Nothing but zeros → the façade has no caller. Close C-07 as `abandoned: no
+  façade traffic`, keep this plan, and revisit if that ever changes.
+- `outcome="unauthorized"` moving → somebody is trying and cannot get in. That
+  is a pairing problem, not a paging one, and it is the more urgent finding.
+- `handler="section_all"` or `handler="children"` moving with `outcome="ok"` →
+  a client is browsing. Re-open C-07 at M1 and build the plan as written; the
+  §6.3 step 4 Kodi refresh timing is then both possible and required, because
+  it is the before-measurement M2 may not claim without.
+
+### 8.6 The C9 appendix (M5, M6) was not opened
+
+M5 is measure-only and independent of this census, so it was available. It was
+not taken because its measurement, §6.4, requires four concurrent real
+playbacks on the ingress node for ten minutes with seeks, a release and a fresh
+activation — an operation this session could not stage and could not ask for
+cheaply. Landing M5's three metric families without that protocol produces
+instrumentation nobody is scheduled to read, and §3.5's own framing is that the
+measurement, not the metric, is the deliverable. The appendix is unclaimed and
+unblocked.
+
+---
+
 ## Execution log
 
 Executing sessions append one row per milestone PR (see the
@@ -656,4 +782,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 — the census | [PR #462](http://192.168.4.7:3000/noirr/plurx/pulls/462) | Run against nuc4, read-only. **Could not be completed as §6.3 specifies**: there is no access log, no metric separates the façade from the native API, and `plex::part` writes no playback telemetry, so façade traffic is invisible by construction. Every datum that does exist — 29 days of node-local playback events naming only Chrome, Safari, Android Media3 and Apple AVPlayer, and 14 h of zero in every user-facing route group — points at no Plex-family client. Numbers and limits in §8.2. Verdict: **do not build M1–M3**. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 — the census instrument | [PR #462](http://192.168.4.7:3000/noirr/plurx/pulls/462) | `plurx_plex_requests_total{handler,outcome}` from §3.4, plus a fourth outcome `unauthorized` (§8.4). Measure-only: one layer over the façade sub-router, one call in `root_dispatch`'s Plex branch, no handler touched. Five tests, one of which reads the façade's route registrations out of `router()`'s own source so a new façade route without a label fails the build. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1, M2, M3 | — | **Deliberately not built.** §8.3. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5, M6 (C9 appendix) | — | **Not opened.** Unclaimed and unblocked; reason in §8.6. |
+| | | | | | `needs:` one week of `plurx_plex_requests_total` on the ingress node, then §8.5. |

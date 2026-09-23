@@ -2956,7 +2956,21 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # pattern, but the callee is `std::thread::Scope::spawn` with a closure that
 # only pushes onto a bounded in-process queue. No child process is created and
 # nothing survives the scope.
-expected_occurrences = 343
+# 343 -> 350 with C-07's M0 census: seven `.status(` occurrences across six
+# lines, every one of them `axum::response::Response::status()` on an
+# in-process response, and **not one of them launches a child**. This
+# sentinel's pattern counts `.spawn(`, `.output(` and `.status(` together and
+# `Response::status()` is the third spelling; no `Command` is constructed
+# anywhere on this branch and `process-command-construction` is unchanged.
+# Two are production, and both are the census itself: `plex_facade_census`
+# reads the status of the response the façade already produced to pick the
+# outcome cell, and `root_dispatch` does the same on its Plex branch. Neither
+# can change the response; they are reads of HTTP metadata after the fact.
+# The other five are assertions in the census tests -- a 401 on a tokenless
+# façade route, a 200 on `/identity`, a browser root, and the two arms of the
+# Plex root's accepted answers. All in-process; they create no task, timer,
+# process or rolling-producer owner.
+expected_occurrences = 350
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
