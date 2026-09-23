@@ -546,7 +546,7 @@ is worth weighing:
 
 ---
 
-## 6. Fix C — build the artifact on the analysis queue (proposed)
+## 6. Fix C — ride the extraction on the index pass (proposed)
 
 ### 6.1 The finding that motivates it
 
@@ -555,42 +555,161 @@ producing two formats**:
 
 | Artifact | Producer | Path |
 |---|---|---|
-| `f<id>-s<n>-<sha>-burn-v2.mks` | `subtitles::ensure_burn_file` | `/srv/plurx/cache/subs/` |
-| `track.sup` | `pgs_overlay::prepare` | `<subs_dir>/pgs/<generation>/` |
+| `f<id>-s<n>-<sha>-burn-v2.mks` | `subtitles::ensure_burn_file` | `<cache>/subs/` |
+| `track.sup` → PNG generation | `pgs_overlay::prepare` | `<cache>/subs/pgs/<generation>/` |
 
-Same source, same packets, 79.5 GB each, different container. If the queue
-builds the `.sup` once, the burn path can derive from it and the second read
-disappears.
+Same source, same packets, 79.5 GB each, different container. And a third read
+already happens for reasons of its own: the **fragment-index** job demuxes the
+whole file to build the segment plan.
 
-### 6.2 Proposed shape
+That third read is the opportunity. It is one `ffmpeg` child, started at byte
+zero, with no `-ss`, writing fragmented MP4 to `pipe:1` — `fragindex.rs`'s own
+module doc says *"one ffmpeg child, one pass over the file, and no side
+effects."* The subtitle packets stream past its demuxer already. They are
+discarded, explicitly, by `-an -sn`.
 
-The machinery exists and the precedent is exact: the analysis queue /
-fragment-index job is the same animal — an expensive per-file full-pass
-artifact, produced in the background, with `vod_index_pending` as the
-retryable refusal while it is not ready. A subtitle-sidecar job keyed on
-`(file_id, track_index, source identity)` belongs in it.
+So Fix C is not a new job. It is two more outputs on a pass that is already
+paid for.
 
-**Checked, and it does.** The fragment-index pass is already one sequential
-demux of the whole container, confirmed in review. So extracting every PGS
-track during that same read costs close to nothing rather than a second full
-pass, and Fix C should attach to that job rather than be a new one. This was
-§9's second question; it is answered.
+### 6.2 What the map of the code changed
 
-### 6.3 The eviction problem
+The shape above survived contact. Five things around it did not, and three are
+ways a naive implementation does real damage.
 
-The overlay cache is an LRU: `MAX_CACHE_BYTES = 2 GB`,
-`MAX_CACHE_TRACKS = 128`, `MAX_TRACK_BYTES = 256 MB`, with `prune()` on every
-exit path (`pgs_overlay.rs:32`). A queue-built artifact dropped into that cache
-will be evicted and rebuilt at the worst possible moment. A pre-built artifact
-needs a durable home, or the queue needs to be the cache's floor rather than
-one of its writers.
+**1. The argv is hashed into the cluster cache key.**
+`fragment_index_cluster::pipeline_digest_for_transform` hashes
+`copy_index_pipe_args` itself, and `cluster_fragment_index_key` folds that
+digest into every fragment-index `cache_key`. **Adding subtitle maps inside
+`copy_index_pipe_args*` changes the digest for every file, orphans every
+published `.idx` blob on the fleet, and re-indexes the library.** The
+ride-along arguments must be appended downstream of the hash, in
+`fragindex::index_pass`, and a test must pin that the digest is unchanged. That
+test is the one that fails on the obvious implementation.
 
-### 6.4 Scope question
+**2. A subtitle output that fails would fail the whole index.**
+`fragindex::build_with_args` treats any non-zero exit as
+`IndexFailureCode::IndexProcessFailed`, and the cluster worker turns that into
+a typed, retry-charged failure that can end as a permanent `refused` badge. One
+track `ffmpeg` will not copy would therefore destroy a perfectly good index.
+This is the finding that decides the design; §6.3 is the answer to it.
 
-Building every PGS track of every file eagerly is a lot of I/O for tracks
-nobody selects. A 10-track disc is ten 79.5 GB reads. Candidate policies:
-default/forced tracks only · on first selection, then queued · on scan for
-titles whose delivery plan would need it. §9 asks.
+**3. There are up to three index passes per file**, not one — `video_identities`
+returns DV-stripped, DV-preserved and DV-converting, and each is its own queued
+job. Subtitles are identical across all three, so a ride-along that attaches to
+every identity does the work three times, and the artifact key must not contain
+the identity.
+
+**4. A node often settles an index job without running ffmpeg at all.** Before
+building, the worker checks whether a peer has already published this exact
+`cache_key` and hydrates the blob instead. A ride-along therefore cannot
+guarantee the subtitle artifact exists wherever the index does. §6.5.
+
+**5. The `.sup` is not an artifact today.** `pgs_overlay` deletes `track.sup`
+the moment it has compiled the PNG generation; only the generation survives, in
+an LRU cache. So this introduces a *new durable artifact* rather than relocating
+an existing one — which is a bigger claim than §6.3 of the first draft made,
+and needs a durable home rather than a cache.
+
+### 6.3 Shape
+
+**Two extra outputs per PGS track, on the existing child**, appended in
+`fragindex::index_pass` — never in `copy_index_pipe_args*`:
+
+```
+-map 0:s:N -c:s copy -f sup       <stage>/track-N.sup
+-map 0:s:N -map 0:t? -c copy -f matroska  <stage>/track-N.mks
+```
+
+Both are stream copies of packets the demuxer has already produced. The `.sup`
+feeds the overlay; the `.mks` is byte-identical in purpose to what
+`ensure_burn_file` builds today, which means **the ride-along warms the start
+path, not only the overlay.** That matters: the overlay's extraction is already
+asynchronous and blocks nothing, while the burn sidecar is the artifact a
+session start waits for. Producing only the `.sup` would leave the incident's
+actual failure mode untouched.
+
+**The failure-classification change is the load-bearing part.** The index must
+keep its verdict when a subtitle output fails, and it can, because the index
+already has an independent completeness oracle: `probe_completion_expectation`
+tells `build_with_args` what a complete index looks like before the pass
+starts. So:
+
+> A non-zero exit whose index rows still satisfy the probe's expectation is
+> **`IndexBuiltSubtitlesFailed`**: the index publishes exactly as it does
+> today, the staged subtitle artifacts are discarded, and a counter records it.
+> A non-zero exit whose rows do *not* satisfy the expectation stays
+> `IndexProcessFailed`, unchanged.
+
+Without that, Fix C trades a slow start for a library of permanently refused
+indexes, which is a worse bug than the one it fixes.
+
+**One identity, not three.** The ride-along attaches to the first identity in
+`video_identities` order and the other two skip it, deterministically, so the
+choice is the same on every node.
+
+**A durable home, not the LRU.** Mirror the fragment index's own blob store:
+
+| | fragment index | subtitle source |
+|---|---|---|
+| path | `<cache>/runtime/fragment-index-v2/<xx>/<key>.idx` | `<cache>/runtime/subtitle-source-v1/<xx>/<key>.sup` |
+| reclaimed by | `sweep_local_orphans`, against the catalogue | the same sweep, same rule |
+| bound | none — it is not a cache | none |
+
+`<cache>/subs` is pruned by `subtitles::prune` and `<cache>/subs/pgs` by
+`pgs_overlay::prune`, both LRU, and `cachekeep` does not sweep either. A
+pre-built artifact dropped in there is evicted at the worst possible moment,
+which is the whole objection §6.3 of the first draft raised. The answer is not
+to make the cache smarter; it is to put the artifact where the index already
+puts its own.
+
+**Key:** `(file_id, track_index, source_size, source_mtime, source_sha256)` —
+the cluster index key minus `pipeline_sha256`, because subtitles do not depend
+on the video transform. The `.mks` keeps its existing node-local
+`object_version` name, which is strictly stronger (dev/ino/ctime) and is
+computed on the node that builds it.
+
+**Every on-demand producer is unchanged** except for one lookup: check the
+durable artifact first, fall through to today's extraction when it is absent.
+`ensure_burn_file` keeps its 5 s join budget and its pending refusal;
+`pgs_overlay::prepare` keeps its 202-then-poll contract. The ride-along is an
+optimisation and never a correctness requirement — which is what makes §6.5
+tolerable.
+
+### 6.4 Which tracks, and what it costs
+
+**All PGS tracks on the file.** The scope question the first draft asked —
+default/forced only, or on first selection, or on scan — was a question about
+*ten separate 79.5 GB reads*. On one pass it dissolves: ten `-c:s copy` outputs
+add demux-side work to packets already being parsed, which is low single-digit
+percent, not ten times.
+
+Disk is bounded and small. The `-fs` cap is 256 MiB per track in the existing
+extractor, so a pathological ten-track film is 2.5 GiB worst case; a real PGS
+track is single-digit megabytes, and the one measured on file 5208 was 18,866
+bytes. **PNG compilation stays lazy and LRU** — that is the expensive form, it
+is what the 2 GiB overlay budget is for, and pre-compiling ten generations per
+film would evict other films' work to store pictures nobody asked for.
+
+The `-fs` cap is itself a hazard-2 case: hitting it is not reliably exit-0. It
+is why the classification change comes first.
+
+### 6.5 What this deliberately does not solve
+
+**Coverage is best-effort.** A node that settles an index job by hydrating a
+peer's blob never runs the pass, so it never gets the subtitle artifacts. Two
+answers exist: ship them over the same peer transport as the `.idx`, or accept
+that the artifact is a cache whose absence costs exactly what today costs.
+**v1 accepts it**, because every producer still works unchanged when the
+artifact is missing, and because the peer transport is a larger change than the
+rest of Fix C put together. If the fleet's hydration rate turns out to make
+coverage useless in practice, the transport is the follow-up — and the counter
+in §6.3 is what would show it.
+
+**Backfill.** Nothing re-indexes a library to collect subtitles. Files indexed
+before this lands have no artifact and produce one only if something re-indexes
+them for its own reasons. A deliberate backfill is a separate decision with a
+real I/O cost, and it should be made against a measured hit rate rather than in
+advance.
 
 ---
 
