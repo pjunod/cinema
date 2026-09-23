@@ -1504,6 +1504,15 @@ pub(crate) fn persistable_credential(value: &SealedSecret) -> Result<String, Sto
 /// Well-known settings keys. Keys are dotted, lowercase, and owned by the
 /// module that writes them.
 pub mod keys {
+    /// Existing absolute directory for portable cluster backup artefacts.
+    /// Empty or absent means the schedule performs no work.
+    pub const BACKUP_DESTINATION: &str = "backup.destination";
+    /// One daily UTC wall-clock minute in `HH:MM` form.
+    pub const BACKUP_SCHEDULE_UTC: &str = "backup.schedule_utc";
+    /// Number of complete artefact directories retained at the destination.
+    pub const BACKUP_KEEP: &str = "backup.keep";
+    /// Lineage marker written only by offline restore.
+    pub const CLUSTER_RESTORE_GENERATION: &str = "cluster.restore_generation";
     /// Runtime Library-channel playback switch. The feature is always compiled;
     /// absence is off so an upgrade never starts scheduled playback implicitly.
     pub const LIBRARY_CHANNELS_ENABLED: &str = "library_channels.enabled";

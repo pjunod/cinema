@@ -47,7 +47,6 @@ __profiling = ["dep:console-subscriber"]
 auto-heal = ["hiqlite-wal/auto-heal"]
 backup = [
     "dep:cron",
-    "s3",
     "sqlite",
 ]
 cache = ["openraft/loosen-follower-log-revert"]
@@ -94,7 +93,7 @@ listen_notify_local = [
     "cache",
 ]
 macros = ["dep:hiqlite-derive"]
-s3 = ["backup"]
+s3 = ["backup", "cryptr/s3"]
 server = [
     "dep:clap",
     "dep:home",
@@ -189,7 +188,7 @@ version = "0.8.4"
 
 [dependencies.cryptr]
 version = "0.10"
-features = ["s3"]
+default-features = false
 
 [dependencies.ctrlc]
 version = "3.4.4"

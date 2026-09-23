@@ -1,0 +1,69 @@
+version = 1
+
+[[coverage]]
+commits = ["213b3aea"]
+points = [
+  "cluster.auth",
+  "persistence.upgrades",
+  "validation.framework",
+]
+checks = ["rust-gate", "rust-gate-ci", "hiqlite-vendor-clippy", "catalog-contract"]
+reason = """
+Corrective: `1cdb1abe` dropped `backup -> s3 -> cryptr/s3` from the vendored \
+fork, and with it the rustls crypto provider the workspace had been getting by \
+feature unification rather than by asking. `vendor/hiqlite` declares `reqwest` \
+with `rustls-no-provider`, so `ClientBuilder::build` reads \
+`rustls::crypto::CryptoProvider::get_default()` and panics outright when \
+nothing installed one — for every client it builds, not only the ones that go \
+on to speak TLS, because the TLS config is assembled during `build`. This \
+commit installs `ring` once per process in \
+`vendor/hiqlite/src/http_client.rs::ensure_rustls_crypto_provider` and routes \
+every client construction in the fork through it.
+
+`crates/plurx-core/tests/hiqlite_tls_provider.rs` is what pins it. \
+`hiqlite_client_construction_installs_the_ring_crypto_provider` builds a real \
+`HiqliteClient::remote` — the same constructor \
+`cluster::migration::status` uses for a remote maintenance client — and then \
+asserts that `CryptoProvider::get_default()` is populated and that its cipher \
+suites are `rustls::crypto::ring::default_provider()`'s. Removing the \
+`ensure_rustls_crypto_provider()` call from `build_http_client` fails it at \
+`reqwest-0.13.4/src/async_impl/client.rs:2484` with "No rustls crypto provider \
+is configured", verified by reverting exactly that line and re-running \
+(`0 passed; 1 failed`). The `ring` assertion is a second, independent failure \
+mode: declaring `reqwest`'s `rustls` feature instead would also stop the panic \
+but would silently move the process onto `aws-lc-rs`, add a fourth deliberate \
+edge to it, and close off option A of \
+`docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md` §3.6, whose acceptance \
+is `cargo tree -i aws-lc-sys` empty. That test fails on that change too.
+
+The test owns its own test binary deliberately, and the file says so. The \
+provider is process-global and idempotent, so a test sharing a binary with \
+anything that calls `install_default_crypto_provider` — which \
+`cluster::migration` does in ten places — would pass whether or not the fork \
+installs anything. That is precisely how this defect hid: `plurxd`'s `main` \
+reaches `install_default_crypto_provider`, so `-p plurxd --bin plurxd` stayed \
+green while `cargo test --workspace` did not. Alone in its binary the test \
+starts from the state a fresh process is in, and its first assertion fails \
+loudly if that ever stops being true.
+
+`rust-gate` (`make rust-check`) and `rust-gate-ci` (`make ci-rust-gate`) both \
+run `cargo test --workspace --locked --exclude plurx-cluster-check`, which is \
+the lane that caught the defect and the lane that executes the new test: \
+plurxd depends on `plurx-core` with `hiqlite-store`, so feature unification \
+compiles the `#![cfg(feature = "hiqlite-store")]` test target, and the gate log \
+shows `Running tests/hiqlite_tls_provider.rs ... 1 passed`. The pre-existing \
+`cluster::migration::status::tests::remote_client_cannot_construct_local_raft_observers` \
+is the second witness in the same lane: it went 44/1 failed to 45/0 passed. \
+`hiqlite-vendor-clippy` covers the fork edit itself, which also adds the \
+provider call ahead of the three `reqwest::Client` constructions in the fork's \
+own `#[cfg(test)]` modules, so the vendor lanes `operations-check` runs against \
+`vendor/hiqlite/Cargo.toml` keep building clients that work. \
+`catalog-contract` holds the one-line `validation/points.toml` change that \
+attributes the new test file to `cluster.auth`.
+
+No dependency moved: `Cargo.lock` and `THIRD-PARTY-NOTICES.md` are untouched, \
+and `cargo tree -e features -i aws-lc-rs` reports the same three parents of \
+`rustls feature "aws-lc-rs"` before and after — `axum-server`'s `tls-rustls`, \
+`rustls`'s `prefer-post-quantum` and `tokio-rustls`'s default — with no \
+`reqwest feature "__rustls-aws-lc-rs"` among them.
+"""

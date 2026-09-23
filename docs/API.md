@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 216
+One binary serves everything on one port (`:32400` by default). plurx has 217
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -2430,6 +2430,7 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 | GET | `/api/v1/cluster/nodes` | admin | Live roster, capacity, protocol range, per-node readiness |
 | GET | `/api/v1/cluster/status` | admin (cache-only ok) | The aggregate: roster + own snapshot + cached peer observations |
 | GET | `/api/v1/cluster/support-bundle` | admin (cache-only ok) | ZIP: the aggregate, a redacted log tail, a README, a manifest |
+| POST | `/api/v1/cluster/backups` | admin | Builds one portable, checksummed backup from this voter's published snapshot; skips with `status: skipped` when another voter holds the lease |
 | POST/DELETE | `/api/v1/cluster/nodes/{node_id}/restart-preparation` | admin | Fences and unfences new mutable media work on **this** process |
 | POST | `/api/v1/cluster/nodes/{node_id}/promote` | admin | Promotes a ready learner to voter |
 | POST/DELETE | `/api/v1/cluster/nodes/{node_id}/maintenance` | admin | Enters and clears the durable maintenance fence on **this** process |

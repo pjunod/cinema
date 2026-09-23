@@ -481,6 +481,9 @@ mod transport_route_tests {
             axum::serve(listener, app).await.expect("serve route test");
         });
         let url = format!("http://{address}/cluster/transport/sqlite");
+        // `reqwest` here is `rustls-no-provider`; name the provider before
+        // building a client. See `http_client::ensure_rustls_crypto_provider`.
+        crate::http_client::ensure_rustls_crypto_provider();
         let client = reqwest::Client::new();
 
         assert_eq!(
