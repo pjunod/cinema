@@ -1565,20 +1565,19 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--branch badges", coverage)
         self.assertIn('--message "${msg}%"', coverage)
 
-        # Branch-relative badge paths render through the viewer's authenticated
-        # Forgejo or GitHub session. From main, `../badges/coverage.svg` moves
-        # from the main branch segment to the sibling badges branch segment.
+        # Manual and release-tag badge publishers do not run on each merge.
+        # The README must direct readers to the active PR gate instead of
+        # showing old badge snapshots as current main-branch results.
         readme = read("README.md")
+        self.assertIn("[Main promotion gate](docs/DEVELOPMENT_PIPELINE.md)", readme)
+        self.assertIn("[validation](docs/VALIDATION.md)", readme)
         for badge in (
             "../badges-ci/ci.svg",
             "../badges-lint/lint.svg",
             "../badges/coverage.svg",
         ):
-            self.assertIn(badge, readme)
-        self.assertEqual(
-            sum(line.startswith("[![") for line in readme.splitlines()),
-            3,
-        )
+            self.assertNotIn(badge, readme)
+        self.assertNotIn("[![", readme)
         self.assertNotIn("docs/img/badges/", readme)
         self.assertNotRegex(
             readme,
