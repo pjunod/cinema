@@ -1520,7 +1520,7 @@ polling:
 
 | Code | Status | Retry-After | Means |
 |---|---|---|---|
-| `pgs_overlay_prepare_failed` | 500 | — | The preparation ran and failed: demux, I/O, a timeout, a source without a duration. Terminal; stop polling |
+| `pgs_overlay_prepare_failed` | 500 | — | The preparation ran and failed: demux, I/O, a timeout, a source without a duration, or the cache could not be created or synced. Terminal; stop polling. Every failed preparation carries this code; a codeless 500 is a store or serving error around it |
 | `pgs_overlay_prepare_failed` | 422 | — | The PGS stream is malformed or exceeds a safety limit. Terminal. The body keeps the older `error` and `detail` fields beside `code` and `message` |
 | `pgs_overlay_capacity` | 503 | 5 | Both preparation slots are busy. The one overlay refusal worth waiting out |
 

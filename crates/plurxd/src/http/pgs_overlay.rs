@@ -260,7 +260,17 @@ fn map_overlay_error(error: OverlayError) -> ApiError {
             message: "PGS overlay preparation capacity is full".into(),
             retry_after_seconds: CAPACITY_RETRY_AFTER_SECS,
         },
-        OverlayError::Internal(why) => ApiError::Internal(why),
+        // Remembered like any other failed preparation (the cache could not be
+        // created or synced), so it is terminal in the same words. The detail
+        // is logged, never returned.
+        OverlayError::Internal(why) => {
+            tracing::error!(error = %why, "PGS overlay preparation failed internally");
+            ApiError::typed(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                PREPARE_FAILED,
+                "PGS overlay preparation failed",
+            )
+        }
     }
 }
 
@@ -274,6 +284,7 @@ mod tests {
             OverlayError::Unavailable("PGS demux exited with status 1".into()),
             OverlayError::Unavailable("PGS overlay preparation timed out after 600.000s".into()),
             OverlayError::Unavailable("media duration is required for a PGS manifest".into()),
+            OverlayError::Internal("creating PGS staging directory: permission denied".into()),
         ] {
             match map_overlay_error(failure) {
                 ApiError::Typed { status, code, .. } => {
