@@ -33,7 +33,6 @@
             block_budget_secs: None,
             transport: None,
         };
-
         // The idempotency identity is `intent_fingerprint`, so that is what
         // these guards have to name. Asserting against anything else lets a
         // field silently leave the real key while the test stays green.

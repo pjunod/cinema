@@ -1461,6 +1461,40 @@
     }
 
     #[test]
+    /// Both 503s a viewer hit on 2026-09-21 were codeless, so every client
+    /// correctly refused to retry them and showed a terminal overlay for a
+    /// title that was merely still loading. Neither is a failure; both are
+    /// "ask again", which is what `startup_timeout` means to the ladder all
+    /// three clients already run. This pins the sidecar half; the placement
+    /// deadline's arm is inside the start handler and is covered by the
+    /// integration path rather than here.
+    fn a_pending_sidecar_is_a_named_not_yet_answer() {
+        let pending = format!(
+            "{}the source is still being read for this track",
+            crate::subtitles::SIDECAR_PENDING_PREFIX
+        );
+        match session_start_error(5208, pending) {
+            ApiError::TypedRetry {
+                status,
+                code,
+                retry_after_seconds,
+                ..
+            } => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(code, "startup_timeout");
+                assert_eq!(retry_after_seconds, SIDECAR_PENDING_RETRY_AFTER_SECS);
+            }
+            _ => panic!("a pending sidecar must be a named not-yet answer"),
+        }
+        // An extraction that genuinely failed is NOT a not-yet: it is about
+        // this track, the negative memo already remembers it, and retrying it
+        // three times would just replay the same failure at the viewer.
+        assert!(!crate::subtitles::is_sidecar_pending_error(
+            "text subtitle extraction failed; suppressing retries for now"
+        ));
+    }
+
+    #[test]
     fn bounded_admission_failure_is_a_retryable_503() {
         let capacity =
             "transcode capacity is temporarily unavailable: background encoding did not yield";

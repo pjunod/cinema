@@ -522,6 +522,157 @@
     }
 
     #[tokio::test]
+    async fn http_wait_ledger_counts_parked_requests_until_their_guard_drops() {
+        let dir = crate::test_tempdir().expect("tempdir");
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        assert_eq!(session.http_waits.snapshot(), HttpWaitSnapshot::default());
+        let first = HttpWaitGuard::enter(&session, Some(7));
+        std::thread::sleep(Duration::from_millis(5));
+        let second = HttpWaitGuard::enter(&session, Some(9));
+        let parked = session.http_waits.snapshot();
+        assert_eq!(parked.count, 2);
+        assert_eq!(
+            parked.oldest_segment,
+            Some(7),
+            "the oldest wait names its segment"
+        );
+        assert!(parked.oldest_ms.is_some_and(|ms| ms >= 5), "{parked:?}");
+        drop(first);
+        let after = session.http_waits.snapshot();
+        assert_eq!((after.count, after.oldest_segment), (1, Some(9)));
+        drop(second);
+        assert_eq!(session.http_waits.snapshot(), HttpWaitSnapshot::default());
+    }
+
+    /// The status reading is only honest if a request that is really waiting
+    /// shows up in it, and one the client abandons mid-wait leaves it again.
+    #[tokio::test]
+    async fn a_parked_segment_request_is_counted_until_the_client_drops_it() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("tempdir");
+        let manager_dir = crate::test_tempdir().expect("manager tempdir");
+        seeded_session_dir(dir.path(), 1, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            manager_dir.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.sessions
+            .lock()
+            .await
+            .insert("parked-wait".into(), Arc::clone(&session));
+
+        let request = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move {
+                mgr.segment_for_publication_before(
+                    "parked-wait",
+                    "seg00009.ts",
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .await
+                .map(|_| ())
+            }
+        });
+        let give_up = Instant::now() + Duration::from_secs(5);
+        while session.http_waits.snapshot().count == 0 {
+            assert!(
+                Instant::now() < give_up,
+                "a request for an unpublished segment never registered as a wait"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let parked = session.http_waits.snapshot();
+        assert_eq!(parked.count, 1);
+        assert_eq!(parked.oldest_segment, Some(9));
+        // And the status clients poll carries it, rather than the zero it
+        // used to report whatever was happening.
+        let status = session_info(
+            "parked-wait",
+            &session,
+            AheadLimits {
+                max_secs: 0,
+                max_bytes: 0,
+                global_max_bytes: 0,
+            },
+            0,
+            0,
+        )
+        .await;
+        assert_eq!(status.http_wait_count, 1);
+        assert_eq!(status.http_wait_segment, Some(9));
+        assert!(status.http_wait_oldest_ms.is_some());
+
+        request.abort();
+        let _ = request.await;
+        assert_eq!(
+            session.http_waits.snapshot(),
+            HttpWaitSnapshot::default(),
+            "a request the client dropped mid-wait must not stay counted"
+        );
+    }
+
+    /// A cached session skips the publication check and waits only at the
+    /// loop's final sleep, for a file that is not on disk. That wait counts
+    /// too.
+    #[tokio::test]
+    async fn a_parked_request_on_a_cached_session_is_counted() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("tempdir");
+        let manager_dir = crate::test_tempdir().expect("manager tempdir");
+        seeded_session_dir(dir.path(), 1, 2.0).await;
+        let mut session = test_session(dir.path().to_path_buf());
+        session.cached = true;
+        let session = Arc::new(session);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            manager_dir.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.sessions
+            .lock()
+            .await
+            .insert("parked-cached".into(), Arc::clone(&session));
+
+        let request = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move {
+                mgr.segment_for_publication_before(
+                    "parked-cached",
+                    "seg00009.ts",
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .await
+                .map(|_| ())
+            }
+        });
+        let give_up = Instant::now() + Duration::from_secs(5);
+        while session.http_waits.snapshot().count == 0 {
+            assert!(
+                !request.is_finished(),
+                "the cached lookup returned instead of waiting: {:?}",
+                request.await.map(|result| result.is_ok())
+            );
+            assert!(
+                Instant::now() < give_up,
+                "a cached request for a missing segment never registered as a wait"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(session.http_waits.snapshot().oldest_segment, Some(9));
+        request.abort();
+        let _ = request.await;
+        assert_eq!(session.http_waits.snapshot(), HttpWaitSnapshot::default());
+    }
+
+    #[tokio::test]
     async fn refresh_owner_sampling_cannot_cross_a_complete_replacement_aba() {
         let dir = crate::test_tempdir().expect("tempdir");
         seeded_session_dir(dir.path(), 2, 2.0).await;
@@ -1531,6 +1682,10 @@
             EncoderCaps::default(),
             Pipeline::Cpu,
         );
+        assert_eq!(
+            mgr.codec_qualification_encoder_count(Encoder::Software, OutputGrade::Sdr),
+            0
+        );
 
         let error = match mgr
             .start(file_id, 720, 0.0, None, None, "paul", "pb-failed-start")
@@ -1543,6 +1698,12 @@
         assert_eq!(mgr.active_sessions().await, 0);
         assert!(!mgr.admissions.live_is_waiting());
         assert_eq!(mgr.admissions.in_use(), 0);
+        assert_eq!(
+            mgr.codec_qualification_encoder_count(Encoder::Software, OutputGrade::Sdr),
+            0,
+            "a start that failed before manager registration was counted"
+        );
+        assert_eq!(mgr.codec_qualification_pipeline_count(Pipeline::Cpu), 0);
         assert_eq!(
             mgr.admissions.software_in_use(),
             0,
@@ -1651,11 +1812,21 @@
             .put_setting(keys::MAX_HW_SESSIONS, "1")
             .await
             .expect("cap");
+        assert_eq!(
+            mgr.codec_qualification_encoder_count(Encoder::Nvenc, OutputGrade::Sdr),
+            0
+        );
 
         let info = mgr
             .start(file_id, 1080, 0.0, None, None, "paul", "pb-mixed")
             .await
             .expect("hardware start");
+        assert_eq!(
+            mgr.codec_qualification_encoder_count(Encoder::Nvenc, OutputGrade::Sdr),
+            1,
+            "one manager-registered rolling start must count once"
+        );
+        assert_eq!(mgr.codec_qualification_pipeline_count(Pipeline::Cpu), 1);
         assert_eq!(mgr.admissions.in_use(), 1, "the start holds the only slot");
         let session = mgr
             .sessions

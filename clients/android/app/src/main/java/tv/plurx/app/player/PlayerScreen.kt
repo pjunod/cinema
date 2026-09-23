@@ -1234,9 +1234,16 @@ private fun PlayerContent(
         }
     }
 
+    // The wait's runway, sampled on the same half-second as the position. The
+    // player's buffered position is not Compose state, so reading it inside
+    // the wait block below only ever showed whatever it was when something
+    // else happened to recompose — in practice the 0.0 s of the wait's start.
+    var waitRunwayMs by remember(controller) { mutableLongStateOf(0L) }
     LaunchedEffect(controller) {
         while (true) {
             if (pendingMs == null) positionMs = controller.realPosition()
+            waitRunwayMs = (controller.player.bufferedPosition - controller.player.currentPosition)
+                .coerceAtLeast(0)
             delay(500)
         }
     }
@@ -1367,9 +1374,9 @@ private fun PlayerContent(
         // presenter raised, debounced by its class and retired by the picture.
         if (!isInPip && (findingNext || progressFault != null)) {
             val waiting = playbackWaitPresentation(
-                runwaySeconds = (controller.player.bufferedPosition - controller.player.currentPosition)
-                    .coerceAtLeast(0) / 1_000.0,
+                runwaySeconds = waitRunwayMs / 1_000.0,
                 httpWaitCount = controller.sessionStatus?.http_wait_count,
+                buffering = progressFault?.cls == SurfaceClass.Buffering,
             )
             // A typed fault says what the player is working on ("Reconnecting
             // on another server address."); `playbackWaitPresentation` only
@@ -1378,8 +1385,8 @@ private fun PlayerContent(
                 findingNext -> "Up next…"
                 progressFault?.detail != null -> progressFault.detail
                 // A `client_preparing` or a `media_waiting` carries no sentence
-                // of its own: the wait copy IS what this window said before the
-                // presenter owned it, and moving text is not this change's job.
+                // of its own: "Loading…" before the picture has started,
+                // "Buffering…" once a started stream has run dry.
                 else -> waiting.title
             }
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -2182,10 +2189,15 @@ internal data class PlaybackWaitPresentation(
     val detail: String,
 )
 
-/** Visible waiting copy that keeps client runway distinct from server response waits. */
+/**
+ * Visible waiting copy that keeps client runway distinct from server response
+ * waits. `buffering` is a `buffering`-class fault — a started stream that ran
+ * dry; anything else on this screen is the open, and says "Loading…".
+ */
 internal fun playbackWaitPresentation(
     runwaySeconds: Double,
     httpWaitCount: Long?,
+    buffering: Boolean,
 ): PlaybackWaitPresentation {
     val waits = httpWaitCount?.coerceAtLeast(0)
     val waitText = when (waits) {
@@ -2195,7 +2207,7 @@ internal fun playbackWaitPresentation(
         else -> "$waits server HTTP waits"
     }
     return PlaybackWaitPresentation(
-        title = "Presentation waiting",
+        title = if (buffering) "Buffering…" else "Loading…",
         detail = String.format(Locale.US, "%.1f s client loaded · %s", runwaySeconds, waitText),
     )
 }
