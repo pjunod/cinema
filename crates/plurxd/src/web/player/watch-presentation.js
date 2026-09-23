@@ -53,13 +53,19 @@ function watchAccept(ticket,owner){
 }
 function watchMount(page){
   const main=document.getElementById("main");
-  main.innerHTML=`<section id="watch-browser" class="watch-browser" aria-label="Watch and browse"><div class="watch-heading"><h1>${esc(page.meta.show||page.item.title)}</h1><button class="ghost" onclick="closePlayer()">Close player</button></div><div class="watch-stage"><div id="watch-slot" class="watch-slot" aria-label="Player space"></div><aside id="watch-title" class="watch-title" aria-label="Now playing"></aside></div><div id="watch-caption" class="watch-caption"></div><section id="watch-lower" class="watch-lower" aria-label="Browse"></section><dialog id="watch-details" class="watch-details"></dialog></section>`;
+  // The player's own ✕ in its bar is the one Close. The heading is the same
+  // breadcrumb the item page shows, so the page still says where it is.
+  const trail=[{href:"#/",label:"Home"}]
+    .concat(typeof NAV_ORIGIN!=="undefined"&&NAV_ORIGIN?[{href:NAV_ORIGIN.href,label:NAV_ORIGIN.label}]:[])
+    .concat((page.ancestors||[]).map(a=>({href:`#/item/${exactWireId(a)}`,label:a.title})))
+    .concat([{label:page.item.title}]);
+  main.innerHTML=`<section id="watch-browser" class="watch-browser" aria-label="Watch and browse">${pageHead(trail)}<div class="watch-stage"><div class="watch-picture"><div id="watch-slot" class="watch-slot" aria-label="Player space"></div><section id="watch-rail" class="watch-rail" aria-label="Chapters" hidden></section></div><aside id="watch-title-panel" class="watch-title" aria-label="Now playing"><div id="watch-title"></div><div id="watch-ledger" class="watch-ledger-host"></div></aside></div><div id="watch-band" class="watch-band"><div id="watch-band-title" class="watch-band-title"></div><div id="watch-band-ledger" class="watch-ledger-host"></div></div><section id="watch-lower" class="watch-lower" aria-label="Browse" hidden></section><dialog id="watch-details" class="watch-details"></dialog></section>`;
   WATCH.slot=document.getElementById("watch-slot");
   WATCH.observer=new ResizeObserver(watchScheduleLayout);
   WATCH.observer.observe(document.getElementById("watch-slot"));
   watchRenderTitle();
+  watchRenderChapters();
   if(page.item.kind==="episode") watchLoadSeasons(page);
-  else watchRenderChapters();
 }
 function watchScheduleLayout(){
   if(!WATCH||WATCH.frame!=null)return;
