@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["7b4885be"]
+reason = "Documentation only: this commit publishes the operator procedure for the portable cluster backup in docs/OPERATIONS.md — replacing the paragraph that said no quorum-aware backup or restore existed, adding the backup/verify/restore command walkthrough, the isolated-first validation step, the retire-the-old-hiqlite-directories fence, and the disaster-recovery boundary that forbids merging a surviving minority — and records the M2 through M5 evidence rows in docs/cluster/CLUSTER-BACKUP-AND-RESTORE.md plus the K-01 workboard status. It states plainly which milestones have only source-level evidence. The audit reads it as corrective because the subject and body name recovery and restore. It changes no runtime code, no client, and no validation behavior."
+ignore = true

@@ -187,6 +187,10 @@ pub(crate) async fn readiness(
 
     Ok(Json(DeveloperReadiness {
         items: vec![
+            cluster_backup(
+                &state,
+                settings.get(plurx_core::store::keys::BACKUP_DESTINATION),
+            ),
             windows_server(&state, convert_on),
             android_display_mode_match(display_mode_match_on, &display_mode_events),
             library_channels(&state, library_channels_on).await,
@@ -218,6 +222,63 @@ pub(crate) async fn readiness(
             source_probe_comparison().await,
         ],
     }))
+}
+
+fn cluster_backup(state: &AppState, destination: Option<&String>) -> DeveloperEnableItem {
+    let destination = destination.map(String::as_str).unwrap_or("").trim();
+    let configured = !destination.is_empty();
+    let path = std::path::Path::new(destination);
+    let exists = configured && path.is_absolute() && path.is_dir();
+    let last = state.backup.metrics().last_success_seconds();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let recent = last > 0 && now.saturating_sub(last) < 26 * 60 * 60;
+    DeveloperEnableItem {
+        id: "cluster_backup",
+        title: "Portable cluster backup",
+        enabled: Some(configured),
+        setting: None,
+        requirements: vec![
+            DeveloperRequirement {
+                id: "destination",
+                title: "Existing absolute destination",
+                status: if exists {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: if configured {
+                    format!("Configured destination: {destination}. This node observes it as {}.", if exists { "an existing directory" } else { "missing, relative, or not a directory" })
+                } else {
+                    "No destination is configured, so the scheduled job does not run.".to_owned()
+                },
+            },
+            DeveloperRequirement {
+                id: "off_node_and_space",
+                title: "Off-node storage and two-image free space",
+                status: RequirementStatus::Unobservable,
+                evidence: "The settings page cannot prove the destination's failure domain or future free space. Put it on a separately protected mount and keep at least twice the current state-machine image size free.".to_owned(),
+            },
+            DeveloperRequirement {
+                id: "recent_success",
+                title: "Successful artefact in the last 26 hours",
+                status: if recent {
+                    RequirementStatus::Met
+                } else if last > 0 {
+                    RequirementStatus::Unmet
+                } else {
+                    RequirementStatus::Unobservable
+                },
+                evidence: if last > 0 {
+                    format!("This process last completed a portable backup {} seconds ago.", now.saturating_sub(last))
+                } else {
+                    "This process has not completed a portable backup since it started; durable fleet history must be checked at the destination.".to_owned()
+                },
+            },
+        ],
+    }
 }
 
 fn android_display_mode_match(enabled: bool, events: &[PlaybackEvent]) -> DeveloperEnableItem {

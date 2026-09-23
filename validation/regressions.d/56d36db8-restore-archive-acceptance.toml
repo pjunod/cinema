@@ -1,0 +1,81 @@
+version = 1
+
+[[coverage]]
+commits = ["56d36db8"]
+points = ["persistence.upgrades", "identity.access"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+This correction turned the restore archive's stated acceptance into executable \
+assertions and fixed the three places where the code did not meet it. All of \
+its evidence is in `crates/plurx-core/src/cluster/migration.rs`, with one \
+supporting entry point in `crates/plurx-core/src/secrets.rs`.
+
+The builder used to select the credential key with \
+`credential_key_source.filter(|path| path.exists())` and then write the \
+caller's `credential_key_id` into the manifest regardless, so a declared key \
+that was absent produced a published archive whose manifest named a key it did \
+not contain. It now loads the key first and derives the manifest id from the \
+bytes it copied. `cluster_backup_refuses_a_declared_missing_key_without_publishing` \
+builds with a missing key path and a declared id, asserts the error text \
+contains `credential key file` (the `SecretError::KeyFile` wording from \
+`CredentialKey::load`), and asserts the destination directory still holds zero \
+entries, so neither staging nor an archive is published. \
+`cluster_backup_integrity_failure_cleans_staging_and_publishes_nothing` \
+poisons an index root page through `PRAGMA writable_schema`, asserts the build \
+fails, and asserts the same zero-entry destination — a failed integrity check \
+must leave nothing an operator could mistake for a backup.
+
+Verification used to call `secrets::open_credential_key`, whose explicit job \
+includes minting a key when none exists, so verifying an archive could write \
+a fresh `credentials.key` into the archive it was only supposed to read. The \
+commit adds `secrets::load_existing_credential_key`, which refuses a missing \
+path instead of creating one, and uses it here. \
+`restore_verify_missing_key_is_read_only_and_wrong_key_is_refused` builds a \
+keyed artefact, verifies it with a different key file and asserts the refusal \
+mentions `manifest names credential key`; then it deletes the archived \
+`credentials.key`, snapshots every archive member's bytes, asserts \
+verification fails with `credentials.key is missing`, asserts the archive is \
+byte-for-byte identical afterwards, and asserts the key file was not \
+recreated. Restoring `open_credential_key` there fails the last two \
+assertions.
+
+`restore_archive_newer_schema_refuses_before_creating_the_target` rewrites the \
+manifest's `replicated_schema_version` to `AUTH_SCHEMA_VERSION + 1`, repairs \
+`SHA256SUMS` so the refusal cannot come from a checksum, and asserts both that \
+the restore fails with a message containing `only knows` and that the target \
+directory was never created — a schema refusal must not leave a half-built \
+data directory behind.
+
+`restore_archive_from_real_snapshot_starts_as_the_only_voter` is the \
+end-to-end proof the plan's acceptance asked for at source level: it boots a \
+real replicated voter, triggers a real database snapshot and waits for it to \
+publish, builds the artefact from the published generation with the source's \
+real credential key, shuts the source down, restores into a new data \
+directory, starts a daemon store there, and asserts the membership projection \
+holds exactly one node, that it is the node id the restore report minted, and \
+that it is both voter and leader. Anything that broke the minted identity or \
+the single-voter membership rewrite would fail here rather than in a fixture.
+
+The commit also strengthens the existing \
+`restore_archive_remaps_paths_resets_fingerprint_and_mints_fence`. Its \
+snapshot fixture now opens a real `SqliteStore` first so the image carries the \
+production schema; the hand-written table subset it used before omitted \
+exactly the durable coordination tables the restore contract promises to \
+clear, so the old test passed while the restore cleared nothing. With the real \
+schema the test asserts `remapped_dvr_recordings == 1`, that \
+`dvr_recordings.path` became `/mnt/nas/media/dvr/news.ts`, and that \
+`media_session_requests`, `media_session_preparations`, \
+`media_session_terminal_acks`, `media_session_producer_recovery`, \
+`media_playback_pointers` and `media_sessions` are all empty in the restored \
+image. Reverting the DVR remap leaves recordings pointing at the old host's \
+paths; reverting the added coordination tables leaves a restored cluster \
+carrying another lineage's session ownership rows.
+
+These are `plurx-core` unit tests under `#[cfg(feature = "hiqlite-store")]`, \
+so `make rust-check` (`rust-gate`) and `make ci-rust-gate` (`rust-gate-ci`) \
+execute them through the workspace feature unification `plurxd` supplies. \
+`identity.access` is claimed for `secrets.rs`; note that its \
+`credential-encryption` check runs `cargo test -p plurx-core secrets::` \
+without `hiqlite-store`, and this commit added no test under `secrets::`, so \
+it is deliberately not claimed as evidence.
+"""

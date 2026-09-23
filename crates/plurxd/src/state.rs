@@ -686,6 +686,7 @@ pub struct AppState {
     /// fingerprint — see `http::stream::subtitles_vtt`.
     pub subs_dir: PathBuf,
     pub jobs: Arc<JobManager>,
+    pub(crate) backup: Arc<crate::backup::BackupManager>,
     pub transcode: Arc<TranscodeManager>,
     pub offline: Arc<OfflineManager>,
     /// Short-lived, revision-bound EPUB resource capabilities. Publication
@@ -830,6 +831,9 @@ impl AppState {
                 shared_cache_id: String::new(),
                 catalogue,
                 snapshot_recovery_budgets: SnapshotRecoveryBudgets::default(),
+                data_dir: PathBuf::new(),
+                credential_key_path: PathBuf::new(),
+                backup_client: None,
             },
             store,
             dirs,
@@ -863,6 +867,9 @@ impl AppState {
             shared_cache_id,
             catalogue,
             snapshot_recovery_budgets,
+            data_dir,
+            credential_key_path,
+            backup_client,
         } = config;
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
@@ -887,6 +894,17 @@ impl AppState {
             )
             .with_dv_disk_capabilities(system.dv_disk.clone())
             .with_membership(membership.clone()),
+        );
+        let backup = crate::backup::BackupManager::new(
+            Arc::clone(&store),
+            Arc::clone(&jobs),
+            backup_client,
+            data_dir,
+            credential_key_path,
+            node_id.clone(),
+            credential_key.id().to_owned(),
+            Duration::from_secs(snapshot_recovery_budgets.transfer_secs)
+                .saturating_add(Duration::from_secs(45)),
         );
         let coming_soon = crate::http::ComingSoonCache::new();
         let watched = crate::watched::WatchedNotifier::new(Arc::clone(&store));
@@ -993,6 +1011,7 @@ impl AppState {
             shared_cache,
             subs_dir,
             jobs,
+            backup,
             transcode,
             offline,
             publications: crate::http::publication::PublicationSessions::new(),
@@ -1145,6 +1164,9 @@ pub struct AppConfig {
     pub shared_cache_id: String,
     pub catalogue: CatalogueReader,
     pub snapshot_recovery_budgets: SnapshotRecoveryBudgets,
+    pub data_dir: PathBuf,
+    pub credential_key_path: PathBuf,
+    pub backup_client: Option<hiqlite::Client>,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.
@@ -2902,7 +2924,10 @@ impl JobManager {
         self
     }
 
-    async fn acquire_job(&self, resource: String) -> Result<Option<ActiveJobLease>, StoreError> {
+    pub(crate) async fn acquire_job(
+        &self,
+        resource: String,
+    ) -> Result<Option<ActiveJobLease>, StoreError> {
         acquire_cluster_job(&self.coordinator, self.job_authority.as_ref(), resource).await
     }
 
@@ -10715,6 +10740,7 @@ mod tests {
     /// Spelled out rather than derived, so adding a sixth job without deciding
     /// whether a node with no vote may run it fails here.
     const CLUSTER_SINGLETON_RESOURCES: &[&str] = &[
+        "backup:cluster",
         "provider:artwork",
         "provider:genres",
         "scan:library:1",

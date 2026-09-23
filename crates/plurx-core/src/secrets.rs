@@ -605,6 +605,26 @@ pub fn open_credential_key(
     Ok(key)
 }
 
+/// Load and validate an existing credential key without ever creating one.
+///
+/// Archive verification is read-only by contract. It must use this entry
+/// point rather than [`open_credential_key`], whose explicit job includes
+/// minting a key for a new database with no sealed rows.
+pub fn load_existing_credential_key(
+    path: &Path,
+    census: &SealedRowCensus,
+) -> Result<CredentialKey, SecretError> {
+    if !path.exists() {
+        return Err(SecretError::KeyMissingForWrappedRows {
+            path: path.to_owned(),
+            rows: census.sealed_rows(),
+        });
+    }
+    let key = CredentialKey::load(path)?;
+    census.verify(path, &key)?;
+    Ok(key)
+}
+
 /// Write fresh key material to `path` with owner-only permissions, fsynced, and
 /// never clobbering a key another process won the race to create.
 fn create_key_file(path: &Path) -> Result<(), SecretError> {

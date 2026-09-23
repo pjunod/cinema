@@ -1,0 +1,48 @@
+version = 1
+
+[[coverage]]
+commits = ["9bfd8e4e"]
+points = ["cluster.operations"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+`crates/plurxd/src/backup.rs` used to spend the UTC day before it had anything \
+to show for it. `schedule_loop` called \
+`self.last_schedule_day.swap(day, Ordering::AcqRel)` and continued on a match, \
+so the first tick of the scheduled minute claimed the day whatever happened \
+next: a transient failure, or a tick that lost the `backup:cluster` lease to \
+another voter, left that day permanently marked as done on this node. The \
+commit splits the fence into `schedule_day_is_pending` (an `Acquire` load) and \
+`record_schedule_success` (a `Release` store) and records the day only on \
+`Ok(Some(_))`, the publication arm. A lease-skipped tick (`Ok(None)`) breaks \
+without recording, because the voter that won the lease owns the outcome and \
+retrying behind it would publish a duplicate artefact; an error retries \
+against the same lease while the scheduled minute is still open, with a \
+five-second pause whose `tokio::select!` sibling is `shutdown.cancelled()`.
+
+`failed_schedule_attempt_keeps_the_day_retriable_until_success` pins that \
+split directly: it asserts the day is still pending across an outcome that \
+does not record, that it stops being pending after `record_schedule_success`, \
+and that the following day is pending again. Restoring the `swap` makes the \
+second `assert!(schedule_day_is_pending(...))` fail, because the read itself \
+would have written the fence.
+
+`backup_ticks_are_one_voter_only_and_a_learner_never_claims` pins the \
+invariant the retry loop depends on. Two `StoreCoordinator`s over one \
+`SqliteStore` call `acquire_cluster_job(..., "backup:cluster")` concurrently \
+under `UnclusteredJobAuthority`, and the test asserts that exactly one of the \
+two claims is `Some`; it then asserts that a coordinator using \
+`AdmittedRoleJobAuthority::new(ClusterRole::Learner)` gets `None`. Retrying \
+inside the minute is only safe because that lease keeps serializing every \
+voter and keeps learners out; if the lease stopped being exclusive, two voters \
+could publish the same day's archive into the same destination.
+
+The same commit also moves retention out of publication: the `backup.keep` \
+read and `prune_artifacts` now warn and continue instead of `?`-propagating, \
+so a retention error can no longer turn an already-published, already-counted \
+artefact into a reported failure the scheduler would then retry. That boundary \
+has no test of its own — it is held by the two comments at the call sites and \
+by the fact that the metrics and the day fence are both updated before \
+retention runs. Both tests above are `plurxd` unit tests, run by \
+`make rust-check` under `rust-gate` and by `make ci-rust-gate` under \
+`rust-gate-ci`.
+"""
