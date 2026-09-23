@@ -425,11 +425,38 @@ struct PlurxAPI {
         guard let http = response as? HTTPURLResponse else {
             throw APIError.transport("The PGS overlay response was not HTTP.")
         }
+        return try Self.pgsOverlayManifestFetch(http, data: data)
+    }
+
+    /// One manifest answer, read. Held to `tests/playback/pgs-overlay-cases.json`
+    /// `manifest_responses`, the rows Android reads too.
+    ///
+    /// A refusal goes through `check(_:data:)`, so a typed body becomes
+    /// `.refused` with its code instead of a bare `.http(status)`: that code is
+    /// what tells a failed preparation (stop, and say so) from full capacity
+    /// (wait on the server's cadence).
+    static func pgsOverlayManifestFetch(
+        _ http: HTTPURLResponse,
+        data: Data
+    ) throws -> PGSOverlayManifestFetch {
+        if !(200..<300).contains(http.statusCode) {
+            do {
+                try check(http, data: data)
+            } catch let error as APIError {
+                guard PGSOverlayPolicy.manifestDisposition(
+                    http.statusCode,
+                    code: error.refusalCode
+                ) == .preparing else { throw error }
+                return .preparing(retryAfterMs: PGSOverlayPolicy.retryAfterMs(
+                    http.value(forHTTPHeaderField: "Retry-After")
+                ))
+            }
+        }
         switch PGSOverlayPolicy.manifestDisposition(http.statusCode) {
         case .ready:
-            return .ready(try Self.decoder.decode(PGSOverlayManifest.self, from: data))
+            return .ready(try decoder.decode(PGSOverlayManifest.self, from: data))
         case .preparing where http.statusCode == 202:
-            let state = try Self.decoder.decode(PGSOverlayPreparing.self, from: data)
+            let state = try decoder.decode(PGSOverlayPreparing.self, from: data)
             guard state.state == "preparing" else { throw PGSOverlayError.invalidManifest }
             return .preparing(retryAfterMs: min(max(250, state.retryAfterMs), 5_000))
         case .preparing:
@@ -456,7 +483,7 @@ struct PlurxAPI {
         let response: URLResponse
         do { (data, response) = try await session.data(for: request) }
         catch { throw Self.transportError(from: error) }
-        try Self.check(response)
+        try Self.check(response, data: data)
         guard let http = response as? HTTPURLResponse,
               http.value(forHTTPHeaderField: "Content-Type")?
                 .lowercased().hasPrefix("image/png") == true

@@ -178,7 +178,10 @@ class EvidenceWorkflowCase(unittest.TestCase):
         apple = self.read("clients/apple/Sources/PlayerController.swift")
         server = self.read("crates/plurxd/src/pgs_overlay.rs")
         self.assertIn("PGSOverlayPolicy.periodicRefreshPosition", apple)
-        self.assertIn("self.refreshPGSOverlayWindow(at: overlayPosition)", apple)
+        # The observer hands its position to the overlay step XCTest drives,
+        # and that step asks for a tick refresh, never a forced one.
+        self.assertIn("self.pgsOverlayPeriodicTick(currentMs: self.currentMs)", apple)
+        self.assertIn("refreshPGSOverlayWindow(at: overlayPosition, reason: .tick)", apple)
         self.assertEqual(server.count("prune(&root).await;"), 1)
 
     def test_media_origin_and_contract_routing_remain_wired(self) -> None:
