@@ -48,7 +48,8 @@ const NEGATIVE_TTL: Duration = Duration::from_secs(120);
 /// bytes: a library full of broken tracks must not turn the memo into a leak.
 const MAX_NEGATIVE_ENTRIES: usize = 128;
 
-/// How long a caller will wait for a sidecar another task is producing.
+/// How long a caller **that has a deadline of its own** waits for a sidecar
+/// another task is producing.
 ///
 /// Deliberately far below any start budget, because the two outcomes are far
 /// apart and there is nothing in between: a published sidecar resolves on the
@@ -57,9 +58,21 @@ const MAX_NEGATIVE_ENTRIES: usize = 128;
 /// interleaved across 116 minutes — read the entire file to produce 18,866
 /// bytes, measured at 402 s on m6, which is just the disk's read speed. No
 /// start budget can contain that, so a start must not spend its budget
-/// discovering it: it refuses in seconds with an answer a client can act on,
-/// the extraction continues in its own task, and the retry joins it warm.
-const SIDECAR_JOIN_BUDGET: Duration = Duration::from_secs(5);
+/// discovering it.
+///
+/// **Only the session start uses this.** The other callers of this module —
+/// offline restore, offline package production, and the subtitle VTT endpoint
+/// — have no deadline to protect and map any error to something terminal
+/// (410 Gone, a failed download, 500). For them a slow success must stay a
+/// success, so they keep [`SIDECAR_JOIN_UNBOUNDED`].
+pub(crate) const SIDECAR_JOIN_BUDGET: Duration = Duration::from_secs(5);
+
+/// The budget of a caller with nothing to protect: long enough that it can
+/// only be reached after the extraction's own [`EXTRACTION_TIMEOUT`] has
+/// already published an answer, so these callers wait exactly as long as they
+/// did before the budget existed.
+pub(crate) const SIDECAR_JOIN_UNBOUNDED: Duration =
+    Duration::from_secs(EXTRACTION_TIMEOUT.as_secs() + 60);
 
 /// Marks a refusal that means "this artifact is being built; ask again".
 ///
@@ -96,8 +109,8 @@ struct ExtractionLimits {
     negative_ttl: Duration,
     max_sidecar_bytes: u64,
     /// How long a caller waits for a flight before taking its budget back.
-    /// In here with the others so a suite can shrink it; see
-    /// [`SIDECAR_JOIN_BUDGET`] for why production's value is small.
+    /// In here with the others so a suite can shrink it. Defaults to
+    /// [`SIDECAR_JOIN_UNBOUNDED`]; only the session start narrows it.
     join_budget: Duration,
 }
 
@@ -107,7 +120,7 @@ impl Default for ExtractionLimits {
             timeout: EXTRACTION_TIMEOUT,
             negative_ttl: NEGATIVE_TTL,
             max_sidecar_bytes: MAX_SIDECAR_BYTES,
-            join_budget: SIDECAR_JOIN_BUDGET,
+            join_budget: SIDECAR_JOIN_UNBOUNDED,
         }
     }
 }
@@ -1011,11 +1024,15 @@ pub async fn ensure_vtt_file(
 /// Matroska. Restarting video must not discard a cue that began before its
 /// seek landing. The existing cache owns one bounded extraction per identity,
 /// including cancellation, negative memo, atomic publication, and pruning.
+/// `join_budget` is the caller's, not this module's: a session start passes
+/// [`SIDECAR_JOIN_BUDGET`] because it has 50 s to spend on everything, and a
+/// caller with no deadline passes [`SIDECAR_JOIN_UNBOUNDED`].
 pub(crate) async fn ensure_burn_file(
     dir: &Path,
     file: &MediaFile,
     index: i64,
     expected_object_version: Option<&str>,
+    join_budget: Duration,
 ) -> Result<std::fs::File, String> {
     const MAX_BURN_BYTES: u64 = 64 * 1024 * 1024;
     use sha2::{Digest, Sha256};
@@ -1026,6 +1043,7 @@ pub(crate) async fn ensure_burn_file(
     let cached = dir.join(format!("f{}-s{index}-{version}-burn-v2.mks", file.id));
     let limits = ExtractionLimits {
         max_sidecar_bytes: MAX_BURN_BYTES,
+        join_budget,
         ..Default::default()
     };
     let extractor_source = Arc::clone(&source);
@@ -2730,10 +2748,18 @@ mod tests {
         );
 
         // And the next caller finds it warm, which is the whole point of
-        // letting the detached extraction run on.
-        let warm = ensure_vtt_bounded(dir.path(), &file, 0, limits(), move |_, _, _| async move {
-            Err("a published sidecar must not be re-extracted".into())
-        })
+        // letting the detached extraction run on. This one waits on the
+        // unbounded budget on purpose: it is asserting that the work was not
+        // abandoned, not racing the publish that proves it.
+        let warm = ensure_vtt_bounded(
+            dir.path(),
+            &file,
+            0,
+            ExtractionLimits::default(),
+            move |_, _, _| async move {
+                Err("a published sidecar must not be re-extracted".into())
+            },
+        )
         .await
         .expect("the published sidecar is served to the next caller");
         assert_eq!(

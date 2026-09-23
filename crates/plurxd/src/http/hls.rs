@@ -2464,21 +2464,21 @@ async fn create_with_purpose(
                         // Dropping a successful output drops its armed guard.
                         let _ = start_task.await;
                     });
-                    // Codeless until 2026-09-22, and this is the 503 a viewer
-                    // actually hit: both 50-second failures on m6 came through
-                    // here, not through `session_start_error`, which is why the
-                    // log carried no "session create failed" line for them. A
-                    // start that ran out of budget is the plainest "not ready
-                    // yet" there is, and the ladder's own absolute deadline
-                    // keeps a start this expensive from being re-posted more
-                    // than once.
-                    Err(ApiError::TypedRetry {
-                        status: StatusCode::SERVICE_UNAVAILABLE,
-                        code: "startup_timeout",
-                        message: "the media worker did not finish inside its start budget"
-                            .to_owned(),
-                        retry_after_seconds: SIDECAR_PENDING_RETRY_AFTER_SECS,
-                    })
+                    // Deliberately still codeless, i.e. still not retried.
+                    //
+                    // Both 50-second failures on m6 came through here rather
+                    // than through `session_start_error`, so naming it was
+                    // tempting. But with the burn sidecar bounded above, a cold
+                    // sidecar no longer reaches this arm at all — what does is
+                    // a start that spent 50 s queuing for an encoder slot, and
+                    // there the codeless 503 is correct back-pressure. Making
+                    // it retryable would add three more create posts per viewer
+                    // at exactly the moment the node is saturated, and the
+                    // abandoned start is detached rather than aborted, so the
+                    // node still pays for every one of them.
+                    Err(ApiError::ServiceUnavailable(
+                        "local media worker exceeded the placement deadline".to_owned(),
+                    ))
                 }
             }
         } else {
