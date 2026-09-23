@@ -1,0 +1,71 @@
+version = 1
+
+[[coverage]]
+commits = ["688d4626"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+The correction and its evidence landed together in `crates/plurxd`. The \
+preceding M1 commit made `RateControlSnapshot.requested_mode` an \
+`Option<RateMode>` so a family's code default could be distinguished from an \
+operator who chose `bitrate` on purpose, and in doing so moved the string \
+`pretranscode_policy_generation_for` (`crates/plurxd/src/transcode.rs`) hashes \
+for an unset pair from `requested:bitrate` to `requested:family_default`. That \
+string is not a diagnostic: the SHA-256 it feeds is stored per speculative \
+queue row as `policy_generation` (`crates/plurx-core/src/domain.rs`), compared \
+before production in `produce_pretranscode` -- which returns \
+`PretranscodeProduceOutcome::PolicyChanged` on a mismatch -- and turned into a \
+hard `fence.cancel_job(.., "policy_changed", ..)` in \
+`crates/plurxd/src/state.rs`, not a yield. The function's own doc comment \
+states the rule this broke: "Normalize language aliases so a spelling-only \
+settings edit does not create useless replacement work." \
+The cost was twice over, and §7.1's own fleet census records the pair unset on \
+all four daemons. At deploy, every queued speculative row on every node \
+carries a generation derived from `requested:bitrate` and the new binary \
+computes a different one, so each is cancelled and must be rediscovered and \
+re-queued. And at every boot, repeatedly: the manager's first live snapshot is \
+`RateControlSnapshot::bitrate(caps.quality_rc)`, i.e. `Some(Bitrate)`, while \
+`initialize_rate_control` then reads the absent pair through \
+`requested_rate_control` -> `normalize_rate_control_request(None, None)` -> \
+`(None, None, false)` and publishes `requested_mode: None`. Before the \
+refactor both spellings were `bitrate` and the generation was constant across \
+boot; after it the generation flipped mid-boot on every restart, cancelling \
+whatever had been claimed in that window. This commit restores the spelling \
+with `map_or_else(|| RateMode::Bitrate.as_str(), RateMode::as_str)`. Unset and \
+explicit `bitrate` are indistinguishable in this key precisely because they \
+resolve to the same effective policy: `effective_for` resolves `None` through \
+`Encoder::default_rate_mode()`, and that returns `Bitrate` for all five \
+families. \
+`an_unset_rate_control_pair_keeps_the_explicit_bitrate_policy_generation` \
+(`crates/plurxd/src/transcode.rs`) is the test, and it asserts three things. \
+That an unset pair and `Some(RateMode::Bitrate)` produce the same generation, \
+which is the invariant that keeps a deploy and a boot from cancelling rows. \
+That `Some(RateMode::Quality)` produces a different one, so the key still \
+moves when the policy really does. And the absolute value itself, \
+`speculative-auto-v2:08494ca183d08fdddf67791b5c47a324dbf4dd32544694dc2fd12589a6c67723`, \
+so a later family-default flip has to move this durable key deliberately, with \
+the artefact the plan's §3.4 requires, rather than by accident. That literal \
+was verified against the pre-refactor code, not merely recorded from the fixed \
+code: the same assertion compiled against `origin/main` at `056312c4`, where \
+`requested_mode` is a bare `RateMode` and the format argument is \
+`snapshot.requested_mode.as_str()`, passes unchanged. Reverting this commit's \
+one expression to `map_or("family_default", RateMode::as_str)` makes the test \
+read \
+`speculative-auto-v2:82d8b686f93d5d80c76381d63c4ab06c437a512cd5962a7778449845e82a884f` \
+and the first assertion fails with "an unset pair and an explicit bitrate \
+request are the same policy and must not enqueue replacement work against each \
+other". The pre-existing \
+`speculative_policy_generation_tracks_replicated_track_preferences` (same \
+file) passes identically under that revert -- it compares successive \
+generations to each other and asserts language aliases agree, and contains no \
+absolute value -- which is why the branch's own suite did not catch the move; \
+both tests were run under the revert to confirm exactly that. Neither test \
+needs ffmpeg: the new one calls the associated function directly with a \
+constructed `RateControlSnapshot` and `LangPrefs::default()`, and the older \
+one drives an in-memory `SqliteStore`. Both are `crates/plurxd` unit tests run \
+by `make rust-check` under `rust-gate` and by `make ci-rust-gate` under \
+`rust-gate-ci`. Nothing else in the tri-state change moved: `effective_for`, \
+`settings_dto`'s compatibility `bitrate` for an absent pair, the corrupt-state \
+fail-closed to `Some(Bitrate)`, and the golden recipe hash are all untouched \
+by this commit.
+"""
