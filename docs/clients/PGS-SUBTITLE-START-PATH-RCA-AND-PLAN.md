@@ -546,7 +546,18 @@ is worth weighing:
 
 ---
 
-## 6. Fix C — ride the extraction on the index pass (proposed)
+## 6. Fix C — ride the extraction on the index pass (proposed, v2)
+
+> **v2, after adversarial review.** v1 of this section proposed adding plain
+> file outputs to the index ffmpeg and rescuing the index from a subtitle
+> failure by reclassifying the exit code. **Experiments on ffmpeg 8.0.1 — the
+> major version production ships — showed that cannot work:** one failed output
+> terminates the whole process, the index pipe still receives a well-formed
+> trailer, and the row check cannot tell a complete index from one cut short in
+> its last two seconds. v1 would have turned files whose index builds today into
+> retry-charged failures, and published some truncated indexes as good. The
+> shape below isolates the subtitle outputs inside ffmpeg instead, and leaves
+> the index's own success rules exactly as they are.
 
 ### 6.1 The finding that motivates it
 
@@ -558,158 +569,162 @@ producing two formats**:
 | `f<id>-s<n>-<sha>-burn-v2.mks` | `subtitles::ensure_burn_file` | `<cache>/subs/` |
 | `track.sup` → PNG generation | `pgs_overlay::prepare` | `<cache>/subs/pgs/<generation>/` |
 
-Same source, same packets, 79.5 GB each, different container. And a third read
-already happens for reasons of its own: the **fragment-index** job demuxes the
-whole file to build the segment plan.
+Same source, same packets, 79.5 GB each. And a third read already happens for
+reasons of its own: the **fragment-index** job demuxes the whole file to build
+the segment plan. It is one `ffmpeg` child, started at byte zero, no `-ss`,
+writing fragmented MP4 to `pipe:1`; the subtitle packets stream past its
+demuxer and are discarded by `-sn`.
 
-That third read is the opportunity. It is one `ffmpeg` child, started at byte
-zero, with no `-ss`, writing fragmented MP4 to `pipe:1` — `fragindex.rs`'s own
-module doc says *"one ffmpeg child, one pass over the file, and no side
-effects."* The subtitle packets stream past its demuxer already. They are
-discarded, explicitly, by `-an -sn`.
+So Fix C is not a new job. It is extra outputs on a pass that is already paid
+for — measured to cost next to nothing in CPU or memory, with no back-pressure
+between outputs, because separate outputs have separate muxers.
 
-So Fix C is not a new job. It is two more outputs on a pass that is already
-paid for.
+### 6.2 What the code and the experiments established
 
-### 6.2 What the map of the code changed
-
-The shape above survived contact. Five things around it did not, and three are
-ways a naive implementation does real damage.
-
-**1. The argv is hashed into the cluster cache key.**
-`fragment_index_cluster::pipeline_digest_for_transform` hashes
-`copy_index_pipe_args` itself, and `cluster_fragment_index_key` folds that
-digest into every fragment-index `cache_key`. **Adding subtitle maps inside
-`copy_index_pipe_args*` changes the digest for every file, orphans every
-published `.idx` blob on the fleet, and re-indexes the library.** The
-ride-along arguments must be appended downstream of the hash, in
-`fragindex::index_pass`, and a test must pin that the digest is unchanged. That
-test is the one that fails on the obvious implementation.
-
-**2. A subtitle output that fails would fail the whole index.**
-`fragindex::build_with_args` treats any non-zero exit as
-`IndexFailureCode::IndexProcessFailed`, and the cluster worker turns that into
-a typed, retry-charged failure that can end as a permanent `refused` badge. One
-track `ffmpeg` will not copy would therefore destroy a perfectly good index.
-This is the finding that decides the design; §6.3 is the answer to it.
-
-**3. There are up to three index passes per file**, not one — `video_identities`
-returns DV-stripped, DV-preserved and DV-converting, and each is its own queued
-job. Subtitles are identical across all three, so a ride-along that attaches to
-every identity does the work three times, and the artifact key must not contain
-the identity.
-
-**4. A node often settles an index job without running ffmpeg at all.** Before
-building, the worker checks whether a peer has already published this exact
-`cache_key` and hydrates the blob instead. A ride-along therefore cannot
-guarantee the subtitle artifact exists wherever the index does. §6.5.
-
-**5. The `.sup` is not an artifact today.** `pgs_overlay` deletes `track.sup`
-the moment it has compiled the PNG generation; only the generation survives, in
-an LRU cache. So this introduces a *new durable artifact* rather than relocating
-an existing one — which is a bigger claim than §6.3 of the first draft made,
-and needs a durable home rather than a cache.
+| # | fact | consequence |
+|---|---|---|
+| 1 | `pipeline_digest_for_transform` hashes `copy_index_pipe_args` itself, and that digest is in every cluster fragment-index `cache_key` | extra outputs go **downstream** of the hashed function, and a test pins the digest unchanged |
+| 2 | one failing output terminates the whole ffmpeg process (`exit=183`, pipe cut at 300.7 of 600 s); `-xerror` changes nothing; an unopenable output kills it with zero bytes | subtitle outputs must be isolated **inside ffmpeg** — §6.3 |
+| 3 | on abort, ffmpeg still writes the index's `mfro` trailer, and `VideoCompletionExpectation::covers` accepts anything within 2 s of the expected duration | **no exit-code reclassification of any kind** — a non-zero exit stays `IndexProcessFailed` |
+| 4 | the index argv has no `-y` and stdin is null; a leftover stage file makes ffmpeg answer "Not overwriting — exiting", **exit 0, zero bytes**, which the worker records as a final `Unsupported` | a fresh private stage per attempt, `-nostdin -y`, and a drop guard |
+| 5 | reaching `-fs` exits **0** and leaves a truncated artifact that looks valid; on a `tee` output `-fs` is ignored entirely | bounds are enforced **after** the pass by size, not by `-fs` |
+| 6 | up to three index passes per file (one per DV identity); a node often settles a job by hydrating a peer's blob and never runs ffmpeg | ride on the first pass *this node actually runs*, not on a fixed identity |
+| 7 | `source_sha256` exists only in the cluster worker's attestation; the non-cluster path and both on-demand consumers never have it | the key is node-local and uses what every caller has |
+| 8 | `<cache>/subs` is LRU-pruned at 256 entries; `sweep_local_orphans` only considers `*.idx`/`*.tmp` and would either ignore or delete every subtitle artifact | the artifact gets its own home and its own sweep rule |
+| 9 | the burn `.mks` built from a ride-along `.sup` with `ensure_burn_file`'s own argv has **identical cue timestamps** to one built from the source, on mkv with a 7.5 s offset and on continuous m2ts | store only the `.sup`; derive the `.mks` on demand, cheaply |
 
 ### 6.3 Shape
 
-**Two extra outputs per PGS track, on the existing child**, appended in
-`fragindex::index_pass` — never in `copy_index_pipe_args*`:
+**One extra output, a `tee`, carrying one slave per PGS track plus a sentinel**,
+appended after `pipe:1` in `fragindex::index_pass` — never in
+`copy_index_pipe_args*`:
 
 ```
--map 0:s:N -c:s copy -f sup       <stage>/track-N.sup
--map 0:s:N -map 0:t? -c copy -f matroska  <stage>/track-N.mks
+-map 0:s:N0 -map 0:s:N1 … -c:s copy -f tee
+  "[select=0:f=sup:onfail=ignore]<stage>/s<N0>.sup|
+   [select=1:f=sup:onfail=ignore]<stage>/s<N1>.sup|
+   [f=null]-"
 ```
 
-Both are stream copies of packets the demuxer has already produced. The `.sup`
-feeds the overlay; the `.mks` is byte-identical in purpose to what
-`ensure_burn_file` builds today, which means **the ride-along warms the start
-path, not only the overlay.** That matters: the overlay's extraction is already
-asynchronous and blocks nothing, while the burn sidecar is the artifact a
-session start waits for. Producing only the `.sup` would leave the incident's
-actual failure mode untouched.
+`onfail=ignore` is per slave, so a track ffmpeg cannot copy — or a stage file
+it cannot open — drops that slave and nothing else. The `null` sentinel is
+**mandatory**: a `tee` whose every slave fails reports "All tee outputs
+failed" and takes the process down with it (tested). With it, the worst case of
+the ride-along is "no subtitle artifacts", never "no index":
 
-**The failure-classification change is the load-bearing part.** The index must
-keep its verdict when a subtitle output fails, and it can, because the index
-already has an independent completeness oracle: `probe_completion_expectation`
-tells `build_with_args` what a complete index looks like before the pass
-starts. So:
+```
+bad.mkv, index + tee(one failing slave + sentinel)   exit=0  pipe_bytes=47100588  (= baseline)
+unopenable slave + good slave + sentinel              exit=0  pipe_bytes=47100588, good .sup complete
+tee with only the failing slave, no sentinel          exit=183 pipe cut at 300.7 s
+```
 
-> A non-zero exit whose index rows still satisfy the probe's expectation is
-> **`IndexBuiltSubtitlesFailed`**: the index publishes exactly as it does
-> today, the staged subtitle artifacts are discarded, and a counter records it.
-> A non-zero exit whose rows do *not* satisfy the expectation stays
-> `IndexProcessFailed`, unchanged.
+**The index's rules do not change.** Exit code, row check, retry charging,
+`Unsupported` — all exactly as today. That is the property v1 lacked.
 
-Without that, Fix C trades a slow start for a library of permanently refused
-indexes, which is a worse bug than the one it fixes.
+**Per-track verdict.** A slave that fails leaves a truncated file behind, which
+would parse cleanly and silently lose every cue after the cut. So a track is
+kept only if **all** of:
 
-**One identity, not three.** The ride-along attaches to the first identity in
-`video_identities` order and the other two skip it, deterministically, so the
-choice is the same on every node.
+- ffmpeg's stderr did not report that slave failing (`Slave muxer #k failed`,
+  or an open error naming its path) — scanned from the whole stream into a
+  per-slave failure set, not from the index's bounded stderr tail, at a log
+  level that emits it;
+- the file is non-empty and within `pgs_overlay::MAX_TRACK_BYTES` (256 MiB);
+- it parses end to end with the same `plurx_pgs` normaliser the overlay uses;
+- the index itself was `Built`. Anything else discards every stage file.
 
-**A durable home, not the LRU.** Mirror the fragment index's own blob store:
+The build's first test is the one that fails if the stderr detection is wrong:
+a fixture with a PGS segment corrupted mid-track must produce the index and
+**no** artifact for that track, and an intact second track.
 
-| | fragment index | subtitle source |
-|---|---|---|
-| path | `<cache>/runtime/fragment-index-v2/<xx>/<key>.idx` | `<cache>/runtime/subtitle-source-v1/<xx>/<key>.sup` |
-| reclaimed by | `sweep_local_orphans`, against the catalogue | the same sweep, same rule |
-| bound | none — it is not a cache | none |
+**Stage and publish.** A fresh private stage directory per attempt, on the same
+filesystem as the store so publishing is an atomic rename, removed by a drop
+guard on every exit route including `foreground_preempted` and lease loss.
+`-nostdin -y` on the process. The stage stays on local disk: a blocked file
+output stalls the shared demuxer, so a slow stage would stall the index with
+it.
 
-`<cache>/subs` is pruned by `subtitles::prune` and `<cache>/subs/pgs` by
-`pgs_overlay::prune`, both LRU, and `cachekeep` does not sweep either. A
-pre-built artifact dropped in there is evicted at the worst possible moment,
-which is the whole objection §6.3 of the first draft raised. The answer is not
-to make the cache smarter; it is to put the artifact where the index already
-puts its own.
+**Only the `.sup` is stored.** `subtitles::ensure_burn_file` derives its `.mks`
+from the stored `.sup` with its existing argv — a remux of kilobytes to a few
+megabytes — and keeps its existing `MAX_BURN_BYTES` bound, name, and LRU home;
+the derived `.mks` is disposable because it is cheap. `-map 0:t?` is not carried:
+fonts mean nothing to a bitmap track. This removes v1's contradiction about
+where the `.mks` lives, and the risk of a library pass flooding a 256-entry LRU.
 
-**Key:** `(file_id, track_index, source_size, source_mtime, source_sha256)` —
-the cluster index key minus `pipeline_sha256`, because subtitles do not depend
-on the video transform. The `.mks` keeps its existing node-local
-`object_version` name, which is strictly stronger (dev/ino/ctime) and is
-computed on the node that builds it.
+**Timestamps.** The `.sup` is produced without `-copyts`, exactly as
+`pgs_overlay::prepare_stage` produces its own, so it can stand in for the
+overlay's extraction unchanged. The burn path's own extraction does use
+`-copyts -start_at_zero`, which cannot be added to the index process. They
+agree on continuous timelines (tested) and can diverge on timestamp
+discontinuities, so **`ensure_burn_file` uses the stored `.sup` only when the
+source container is not MPEG-TS**, until a discontinuous-m2ts fixture proves
+otherwise. The overlay can use it for every container.
 
-**Every on-demand producer is unchanged** except for one lookup: check the
-durable artifact first, fall through to today's extraction when it is absent.
-`ensure_burn_file` keeps its 5 s join budget and its pending refusal;
-`pgs_overlay::prepare` keeps its 202-then-poll contract. The ride-along is an
-optimisation and never a correctness requirement — which is what makes §6.5
-tolerable.
+**Home and key.**
 
-### 6.4 Which tracks, and what it costs
+| | |
+|---|---|
+| path | `<cache>/runtime/subtitle-source-v1/f<file_id>/s<track>-<size>-<mtime>.sup` |
+| key | `(file_id, track, size, mtime)` — node-local, what every caller has |
+| validity | re-checked against a **live** `fstat` of the source at use, as `pgs_overlay::source_is_current` already does, so a replaced file is never served its predecessor's cues |
+| sweep | its own rule and cursor, on both the cluster and non-cluster paths: delete when the file row is gone or its size/mtime no longer match the name |
+| bound | a total-size cap, oldest-access first — a safety rail, set well above any real library's PGS footprint, not an LRU the lookup path fights |
 
-**All PGS tracks on the file.** The scope question the first draft asked —
-default/forced only, or on first selection, or on scan — was a question about
-*ten separate 79.5 GB reads*. On one pass it dissolves: ten `-c:s copy` outputs
-add demux-side work to packets already being parsed, which is low single-digit
-percent, not ten times.
+**When it rides.** On the first index pass this node actually *runs* for a file
+that has no valid local artifact, on whichever identity that is — a per-file
+latch, not a fixed identity. Enumerate PGS tracks from the stored
+`subtitle_streams`, mapped to the same `0:s:N` ordinals `ensure_burn_file` and
+`pgs_overlay` already use.
 
-Disk is bounded and small. The `-fs` cap is 256 MiB per track in the existing
-extractor, so a pathological ten-track film is 2.5 GiB worst case; a real PGS
-track is single-digit megabytes, and the one measured on file 5208 was 18,866
-bytes. **PNG compilation stays lazy and LRU** — that is the expensive form, it
-is what the 2 GiB overlay budget is for, and pre-compiling ten generations per
-film would evict other films' work to store pictures nobody asked for.
+**Capability gate.** Only when the running ffmpeg lists both the `tee` and
+`sup` muxers, checked once at start the way the Dockerfile checks `dovi_rpu`,
+because `PLURX_FFMPEG` can point at a different build.
 
-The `-fs` cap is itself a hazard-2 case: hitting it is not reliably exit-0. It
-is why the classification change comes first.
+**Every on-demand producer is otherwise unchanged.** `ensure_burn_file` keeps
+its 5 s join budget and its pending refusal; `pgs_overlay::prepare` keeps its
+202-then-poll contract. Each looks for a valid stored `.sup` first and falls
+through to today's extraction when there is none. The ride-along is an
+optimisation, never a correctness requirement.
 
-### 6.5 What this deliberately does not solve
+### 6.4 Attribution, and a way to stop it
 
-**Coverage is best-effort.** A node that settles an index job by hydrating a
-peer's blob never runs the pass, so it never gets the subtitle artifacts. Two
-answers exist: ship them over the same peer transport as the `.idx`, or accept
-that the artifact is a cache whose absence costs exactly what today costs.
-**v1 accepts it**, because every producer still works unchanged when the
-artifact is missing, and because the peer transport is a larger change than the
-rest of Fix C put together. If the fleet's hydration rate turns out to make
-coverage useless in practice, the transport is the follow-up — and the counter
-in §6.3 is what would show it.
+This is background work on real disks, so it has to be visible from inside the
+product:
 
-**Backfill.** Nothing re-indexes a library to collect subtitles. Files indexed
-before this lands have no artifact and produce one only if something re-indexes
-them for its own reasons. A deliberate backfill is a separate decision with a
-real I/O cost, and it should be made against a measured hit rate rather than in
-advance.
+- the analysis progress row says the pass is **also extracting N PGS tracks**,
+  and the bytes written;
+- the cache diagnostics show the subtitle store's size and file count;
+- counters for **lookups by outcome** — `hit`, and misses by reason (`absent`,
+  `stale`, `never_indexed`, `hydrated_only`) — plus ride-along tracks
+  attempted, kept, and dropped by reason;
+- a Developer setting that turns the ride-along off, with an enable section
+  that states what it needs (the two muxers) and whether each is met.
+
+### 6.5 Which tracks, and what it costs
+
+**All PGS tracks on the file.** v1's scope question — default/forced only, or
+on first selection — was a question about ten separate 79.5 GB reads; on one
+pass it dissolves. Disk is small: a real PGS track is single-digit megabytes,
+and the one measured on file 5208 was 18,866 bytes. **PNG compilation stays
+lazy and LRU** — that is the expensive form, and pre-compiling ten generations
+per film would evict other films' work to store pictures nobody asked for.
+
+### 6.6 What this deliberately does not solve
+
+**Coverage is per node, and best-effort.** A node that hydrates its index from
+a peer does not run the pass, so it has no artifact until it runs one for
+another reason, and the on-demand path serves it exactly as today. The
+lookup counters in §6.4 are what would show whether that is good enough in
+practice; shipping the artifact over the peer transport is the follow-up if it
+is not.
+
+**Backfill.** Nothing re-indexes a library to collect subtitles. A deliberate
+backfill is a separate decision with a real I/O cost, to be made against the
+measured miss rate.
+
+**The first start of a never-indexed file.** If a title is played before its
+index has run, the start path is exactly what #445 made it: a pending answer in
+seconds and the extraction continuing behind it.
 
 ---
 
