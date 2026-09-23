@@ -2196,7 +2196,23 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +3 for #444: the two ledger tests' 10 ms polls and one `std::thread::sleep`
 # that ages the first ledger entry. All test-only; production waits are
 # unchanged (the guard is taken inside the existing publication loop).
-expected_occurrences = 846
+# +2 for #445, both in `crates/plurxd/src/subtitles.rs`, and both belated —
+# that PR moved the source without moving this number, so `main` has been
+# failing this gate since 5c605768. One is shipped: the
+# `tokio::time::timeout(budget, join_flight_unbounded(flight))` in
+# `join_flight`, which bounds *the caller's wait* and nothing else. It is the
+# opposite of a detached producer: the extraction it stops waiting for is
+# already owned by its own single-flight task, keeps running, publishes, and
+# serves the next caller warm — the whole point of the change was that a
+# session start must not inherit a 400-second full-source demux. The budget is
+# the caller's, passed in, so a caller with no deadline (offline restore, the
+# VTT endpoint, package production) passes one it cannot reach. The other is
+# test-only: a 10 ms poll in
+# `a_cold_sidecar_gives_the_caller_its_budget_back_and_keeps_extracting`,
+# waiting for that detached extraction to publish, which is exactly what the
+# test exists to prove. Neither starts a process, selects a recipe, or owns a
+# producer.
+expected_occurrences = 848
 
 [[module_structures]]
 id = "bare-time-constructor"
