@@ -258,11 +258,31 @@ function playbackWaitCopy(runwaySeconds,httpWaitCount){
 // cold open "server wait state unavailable" too — so the sampling tick hands
 // the render a fresh one twice a second. Null when this player does not own
 // the attached element: a predecessor's runway is not this wait's runway.
-function playbackWaitLiveDetail(v,p){
+//
+// The server count is only a reading while it is fresh: health is polled every
+// two seconds while the Playback info panel is open or a media wait is live,
+// and a sample older than PLAYBACK_WAIT_HEALTH_MAX_AGE_MS says "unavailable"
+// rather than repeating a count from before the wait began.
+const PLAYBACK_WAIT_HEALTH_MAX_AGE_MS=5000;
+function playbackWaitLiveDetail(v,p,now){
   if(!v||!p||PLAYER!==p||!playbackOwnsAttachedMedia(p)) return null;
   let runway=0;
   try{ runway=bufferRunway(v); }catch(e){}
-  return playbackWaitCopy(runway,p.health&&p.health.http_wait_count).detail;
+  const at=now==null?performance.now():now;
+  const fresh=p.health&&p.healthObservedAt!=null&&at-p.healthObservedAt<=PLAYBACK_WAIT_HEALTH_MAX_AGE_MS;
+  return playbackWaitCopy(runway,fresh?p.health.http_wait_count:null).detail;
+}
+// Is a media wait on screen? The health poll runs for it as well as for the
+// panel, so the wait's server count is a current one.
+function playbackWaitSurfaceLive(){
+  const surface=PLAYBACK_SURFACE.surface;
+  return !!(surface&&surface.source==="media_waiting");
+}
+// The half-second sampling tick: resample the wait sentence, then run the
+// presenter step that paints it.
+function playbackSamplingTick(v,p){
+  renderPlaybackSurface.waitDetail=playbackWaitLiveDetail(v,p);
+  playbackProgressTick(v,p);
 }
 function playbackStatsTelemetry(){
   const p=PLAYER||{},v=playbackOwnsAttachedMedia(PLAYER)?document.getElementById("video"):null,s=p.source||{},h=p.health||null;
@@ -436,7 +456,7 @@ async function pollSessionHealth(force){
   const current=()=>playbackOwnsAttachedMedia(p)&&p.sessionId===session&&p.streamId===stream
     &&p.mediaAttachment===attachment;
   const ov=document.getElementById("statsov");
-  if(!force&&(!ov||!ov.classList.contains("on"))) return;
+  if(!force&&(!ov||!ov.classList.contains("on"))&&!playbackWaitSurfaceLive()) return;
   // Two shapes of stream, one question. An HLS session answers from the
   // transcode manager; a progressive remux answers from its own registry (see
   // progressive.rs) — that path is Chrome's whole remux experience, and until

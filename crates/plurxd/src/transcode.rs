@@ -318,8 +318,10 @@ const SEGMENT_WAIT: Duration = Duration::from_secs(20);
 /// starvation instead of being inferred from a later timeout.
 const SEGMENT_WAIT_EVENT_MIN: Duration = Duration::from_millis(250);
 
-/// Segment requests parked in [`TranscodeManager::segment_for_publication_before`]
-/// waiting for the producer to publish what they asked for.
+/// Media requests parked in [`TranscodeManager::segment_for_publication_before`]
+/// waiting for the producer to publish what they asked for — segments, and
+/// the init object a playlist request resolves through the same loop (those
+/// carry no segment index).
 ///
 /// The rolling twin of the VOD wait pool's reading. The rolling status used to
 /// report a constant zero here, on the claim that rolling delivery never parks
@@ -6881,7 +6883,7 @@ struct Session {
     /// exists only when hls.js is the one fetching. The server serves every
     /// segment on every path, so it is the one place the answer always exists.
     delivery: Meter,
-    /// Segment requests currently parked waiting for publication; see
+    /// Media requests currently parked waiting for publication; see
     /// [`HttpWaitLedger`].
     http_waits: HttpWaitLedger,
     /// Effective input pace for this session; 0 means unpaced.
@@ -10912,7 +10914,7 @@ pub struct SessionInfo {
     /// its last real value and this says how old it is, so a reader can tell a
     /// measurement from a memory.
     pub delivered_idle_ms: i64,
-    /// Segment requests parked waiting for publication right now: rolling
+    /// Media requests parked waiting for publication right now: rolling
     /// sessions measure it in their [`HttpWaitLedger`], VOD from its bounded
     /// wait pool. The diagnostics-only VOD delivery listing does not carry the
     /// pool and reports zero.
@@ -26928,10 +26930,17 @@ impl TranscodeManager {
         };
 
         let started_waiting = Instant::now();
-        // Taken at the first sleep, not here: a segment that is already
-        // published is served without ever counting as a wait.
+        // Taken on the second pass, not here: a segment that is already
+        // published is served on the first pass without ever counting as a
+        // wait. Every later pass follows a sleep or a replacement retry, so
+        // one site covers every way this loop can wait — including the
+        // final sleep, the only one a cached session reaches.
         let mut parked: Option<HttpWaitGuard> = None;
+        let mut first_pass = true;
         loop {
+            if !std::mem::take(&mut first_pass) {
+                parked.get_or_insert_with(|| HttpWaitGuard::enter(&session, idx));
+            }
             let producer_attempt = if retired_owner {
                 Some(resolved_attempt)
             } else {
@@ -26949,7 +26958,6 @@ impl TranscodeManager {
                     }
                     return Ok(SegmentPublication::Pending(current_owner()));
                 }
-                parked.get_or_insert_with(|| HttpWaitGuard::enter(&session, idx));
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             };
@@ -27011,7 +27019,6 @@ impl TranscodeManager {
                     if Instant::now() >= deadline {
                         return Ok(SegmentPublication::Pending(current_owner()));
                     }
-                    parked.get_or_insert_with(|| HttpWaitGuard::enter(&session, idx));
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
@@ -27241,7 +27248,6 @@ impl TranscodeManager {
                 .await;
                 return Ok(SegmentPublication::Pending(current_owner()));
             }
-            parked.get_or_insert_with(|| HttpWaitGuard::enter(&session, idx));
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -40136,6 +40142,62 @@ pub(crate) mod tests {
             HttpWaitSnapshot::default(),
             "a request the client dropped mid-wait must not stay counted"
         );
+    }
+
+    /// A cached session skips the publication check and waits only at the
+    /// loop's final sleep, for a file that is not on disk. That wait counts
+    /// too.
+    #[tokio::test]
+    async fn a_parked_request_on_a_cached_session_is_counted() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("tempdir");
+        let manager_dir = crate::test_tempdir().expect("manager tempdir");
+        seeded_session_dir(dir.path(), 1, 2.0).await;
+        let mut session = test_session(dir.path().to_path_buf());
+        session.cached = true;
+        let session = Arc::new(session);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            manager_dir.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.sessions
+            .lock()
+            .await
+            .insert("parked-cached".into(), Arc::clone(&session));
+
+        let request = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move {
+                mgr.segment_for_publication_before(
+                    "parked-cached",
+                    "seg00009.ts",
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .await
+                .map(|_| ())
+            }
+        });
+        let give_up = Instant::now() + Duration::from_secs(5);
+        while session.http_waits.snapshot().count == 0 {
+            assert!(
+                !request.is_finished(),
+                "the cached lookup returned instead of waiting: {:?}",
+                request.await.map(|result| result.is_ok())
+            );
+            assert!(
+                Instant::now() < give_up,
+                "a cached request for a missing segment never registered as a wait"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(session.http_waits.snapshot().oldest_segment, Some(9));
+        request.abort();
+        let _ = request.await;
+        assert_eq!(session.http_waits.snapshot(), HttpWaitSnapshot::default());
     }
 
     #[tokio::test]

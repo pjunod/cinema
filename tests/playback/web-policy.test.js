@@ -292,23 +292,80 @@ test("playback info keeps readiness unknown distinct from measured zero", () => 
 // recomputes it, and only for the player that owns the attached element.
 test("the wait detail is sampled live and only for the owning player", () => {
   const live = new Function(
-    "bufferRunway", "playbackOwnsAttachedMedia",
-    `let PLAYER=null;\n${shippedSource("playbackWaitCopy")}\n${shippedSource("playbackWaitLiveDetail")}\n` +
+    "bufferRunway", "playbackOwnsAttachedMedia", "performance",
+    `let PLAYER=null;\n${shippedSource("playbackWaitCopy")}\n` +
+      `${shippedBinding("const", "PLAYBACK_WAIT_HEALTH_MAX_AGE_MS")}\n${shippedSource("playbackWaitLiveDetail")}\n` +
       "return {own(p){PLAYER=p;}, playbackWaitLiveDetail};",
-  )(() => 4.26, () => true);
-  const player = { health: { http_wait_count: 2 } };
+  )(() => 4.26, () => true, { now: () => 10_000 });
+  const player = { health: { http_wait_count: 2 }, healthObservedAt: 9_000 };
   live.own(player);
   assert.equal(live.playbackWaitLiveDetail({}, player), "4.3 s client loaded · 2 server HTTP waits");
+  player.healthObservedAt = 1_000;
+  assert.equal(live.playbackWaitLiveDetail({}, player), "4.3 s client loaded · server wait state unavailable",
+    "a count from before the wait began is not a reading");
   assert.equal(live.playbackWaitLiveDetail({}, { health: null }), null,
     "a player that is not PLAYER has no runway to report");
   assert.equal(live.playbackWaitLiveDetail(null, player), null);
-  // Both places that arm the sampling tick (a cold attach and a prepared
-  // handoff's adoption) refresh the reading before the presenter step paints.
-  for (const name of ["armPlaybackSampling", "adoptPlaybackMediaElement"]) {
-    assert.match(shippedSource(name),
-      /renderPlaybackSurface\.waitDetail=playbackWaitLiveDetail\(v,p\);\s*playbackProgressTick\(v,p\);/,
-      `${name} must refresh the wait detail before the presenter step renders it`);
-  }
+});
+
+test("the sampling tick resamples the wait sentence before the presenter paints", () => {
+  const order = [];
+  const render = function renderPlaybackSurface() {};
+  const tick = new Function(
+    "renderPlaybackSurface", "playbackWaitLiveDetail", "playbackProgressTick",
+    `${shippedSource("playbackSamplingTick")}\nreturn playbackSamplingTick;`,
+  )(
+    render,
+    () => { order.push("sample"); return "1.5 s client loaded · 1 server HTTP wait"; },
+    () => { order.push(`paint:${render.waitDetail}`); },
+  );
+  tick({}, {});
+  assert.deepEqual(order, ["sample", "paint:1.5 s client loaded · 1 server HTTP wait"]);
+  // Both places that arm the half-second tick use it: a cold attach and a
+  // prepared handoff's adoption of the successor element.
+  const intervals = [];
+  const arm = new Function(
+    "setInterval", "clearInterval", "playbackSamplingTick", "PlaybackPolicy",
+    `${shippedSource("armPlaybackSampling")}\nreturn armPlaybackSampling;`,
+  )(
+    (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
+    () => {},
+    (v, p) => order.push(["sampled", v, p]),
+    { AUTO_DEFAULTS: { sampleMs: 1000 } },
+  );
+  const v = { id: "v" }, p = { id: "p" };
+  arm(v, p);
+  const half = intervals.find((entry) => entry.ms === 500);
+  assert.ok(half, "armPlaybackSampling no longer arms a 500 ms tick");
+  half.fn();
+  assert.deepEqual(order.at(-1), ["sampled", v, p]);
+  assert.match(shippedSource("adoptPlaybackMediaElement"), /setInterval\(\(\)=>playbackSamplingTick\(v,p\),500\)/);
+});
+
+test("the health poll runs for a live media wait as well as for the panel", async () => {
+  const build = (waitLive) => {
+    const calls = [];
+    const poll = new Function(
+      "PLAYER", "playbackOwnsAttachedMedia", "document", "playbackWaitSurfaceLive", "api",
+      "updateStats", "performance",
+      `${shippedSource("pollSessionHealth")}\nreturn pollSessionHealth;`,
+    )(
+      { sessionId: "s1", streamId: null, mediaAttachment: 1 },
+      () => true,
+      { getElementById: () => ({ classList: { contains: () => false } }) },
+      () => waitLive,
+      async (url) => { calls.push(url); return { http_wait_count: 1 }; },
+      () => {},
+      { now: () => 0 },
+    );
+    return { poll, calls };
+  };
+  const waiting = build(true);
+  await waiting.poll();
+  assert.deepEqual(waiting.calls, ["/hls/s1/status"]);
+  const idle = build(false);
+  await idle.poll();
+  assert.deepEqual(idle.calls, [], "with the panel closed and no wait, nothing polls");
 });
 
 test("a media wait renders the live detail; every other fault renders its own", () => {

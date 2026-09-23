@@ -146,11 +146,11 @@ class PlaybackInfoContractTest {
                 title = "Buffering…",
                 detail = "3.3 s client loaded · 2 server HTTP waits",
             ),
-            playbackWaitPresentation(3.25, 2),
+            playbackWaitPresentation(3.25, 2, buffering = true),
         )
         assertEquals(
             "0.0 s client loaded · server wait state unavailable",
-            playbackWaitPresentation(0.0, null).detail,
+            playbackWaitPresentation(0.0, null, buffering = true).detail,
         )
         assertEquals(
             "Loading…",

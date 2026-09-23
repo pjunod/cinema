@@ -2197,7 +2197,7 @@ internal data class PlaybackWaitPresentation(
 internal fun playbackWaitPresentation(
     runwaySeconds: Double,
     httpWaitCount: Long?,
-    buffering: Boolean = true,
+    buffering: Boolean,
 ): PlaybackWaitPresentation {
     val waits = httpWaitCount?.coerceAtLeast(0)
     val waitText = when (waits) {

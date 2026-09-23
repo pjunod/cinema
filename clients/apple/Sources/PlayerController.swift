@@ -6089,6 +6089,8 @@ final class PlayerController: ObservableObject {
         surfaceHasPresented = false
         streamChangePreparingIntent = nil
         surfaceLogOnlyReasons.removeAll()
+        // The last playback's wait reading is not this one's.
+        waitDetail = nil
     }
 
     /// The ledger ring and the four client-log events of the contract's §3.6.
