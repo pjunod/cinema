@@ -1521,7 +1521,12 @@ impl LiveTvPeers {
                 auth_mode,
             )
             .await;
-        self.note_owner_exchange(outcome.as_ref().map(|response| response.status).map_err(|error| *error));
+        self.note_owner_exchange(
+            outcome
+                .as_ref()
+                .map(|response| response.status)
+                .map_err(|error| *error),
+        );
         outcome
     }
 
@@ -1556,7 +1561,6 @@ impl LiveTvPeers {
         );
         outcome
     }
-
 }
 
 /// Every failure here happens *before* a request leaves this node, so none of
@@ -2121,7 +2125,10 @@ mod tests {
             let answer = resolved(&peers, "owner-a", "http://owner-a:8080", &calls)
                 .await
                 .expect("resolution");
-            assert_eq!(answer, ("owner-a".to_owned(), "http://owner-a:8080".to_owned()));
+            assert_eq!(
+                answer,
+                ("owner-a".to_owned(), "http://owner-a:8080".to_owned())
+            );
             tokio::time::advance(Duration::from_millis(50)).await;
         }
         assert_eq!(
@@ -2172,7 +2179,8 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_owner_that_does_not_serve_an_internal_path_is_re_resolved_and_any_other_status_is_not() {
+    async fn an_owner_that_does_not_serve_an_internal_path_is_re_resolved_and_any_other_status_is_not(
+    ) {
         // A 404 on an internal path is an older build answering, so the next
         // request looks for the owner again rather than spending the TTL on a
         // peer that cannot serve the route. Every other status — including the

@@ -2896,7 +2896,6 @@ impl FenceObserver {
             )))
         }
     }
-
 }
 
 pub(crate) struct LiveTvManager {
@@ -5098,7 +5097,6 @@ impl LiveTvManager {
     pub(crate) fn relay_counter(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.metrics.relay_bytes)
     }
-
 
     fn session(&self, capability: &str) -> Result<Arc<LiveTvSession>, LiveTvError> {
         let mut registry = self
