@@ -372,6 +372,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
       shippedSource("subtitleStoredSourcesCard"),
+      shippedSource("chapterThumbnailsCard"),
       shippedSource("seekScratchReservationsCard"),
       shippedSource("liveTvGuideCard"), shippedSource("liveTvDeinterlaceCard"),
       // `clusterBackupCard`'s extracted source runs to the next function and
@@ -445,8 +446,15 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503", "subsrc"])
+  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503", "subsrc", "chthumb"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
+  // Absent from the settings document is on: chapter thumbnails default on.
+  assert.match(html, /TOG:chthumb\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(html, /FOOT:saveChapterThumbnails/);
+  assert.match(
+    panels.developerPanel({ ...settings, chapter_thumbnails: false }, readiness),
+    /TOG:chthumb\|[^|]*\|[^|]*\|checked=false/,
+  );
   // Absent from the settings document is on: the store's switch defaults on.
   assert.match(html, /TOG:subsrc\|[^|]*\|[^|]*\|checked=true/);
   assert.match(html, /FOOT:saveSubtitleStoredSources/);
