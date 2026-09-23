@@ -74,7 +74,7 @@ the array at 198 MB/s.
     Per-track verdicts from byte arithmetic, a persistent latch, a behavioural
     startup self-test, a local-disk and free-space gate, and one Developer
     switch (`subtitles.stored_sources`) that turns off producer and readers.
-  - **#463** (open) — attribution: the analysis row says the pass is also
+  - **#463** (`9236de83a`, merged) — attribution: the analysis row says the pass is also
     keeping N PGS tracks, by title, with bytes and a link to the switch, on both
     indexers; a Maintenance card shows the store, what is running and why.
 
