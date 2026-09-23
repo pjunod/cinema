@@ -2594,7 +2594,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `fragindex::ride_along_tests::dropping_the_build_future_mid_pass_removes_the_
 # stage`, polling the paced pass until its slaves exist so the test can drop
 # the future mid-pass. None owns a producer.
-expected_occurrences = 873
+# 873 -> 874 with Fix C PR 3: one test-only 50 ms `tokio::time::timeout` in
+# `fragindex::ride_along_tests::a_riding_pass_reports_its_tracks_and_bytes_
+# with_its_progress`, polling the paced riding pass until a progress report
+# carries ride-along bytes. It bounds a poll of the build future the test
+# owns; expiry leaves that future to the next poll, and the test drops it at
+# the end. No producer, no timer outside the test.
+# 874 -> 875 with #463's review: one test-only 25 ms `tokio::time::sleep` in
+# `state::tests::the_queue_worker_row_carries_its_ride_along`, between the
+# test's own calls to `work_cluster_fragment_index_queue` while the queued
+# request resolves, is claimed and builds (at most 40 rounds). It owns no
+# producer and outlives nothing: the test awaits each round.
+expected_occurrences = 875
 
 [[module_structures]]
 id = "bare-time-constructor"

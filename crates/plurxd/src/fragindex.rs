@@ -58,7 +58,23 @@ const PACKET_PROBE_AGGREGATE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const PACKET_PROBE_TAIL_OFFSETS_SECS: [i64; 3] = [128, 512, 2_048];
 
 type IndexProgress = dyn Fn(u64, i64, usize) + Send + Sync;
-type SharedIndexProgress = Arc<IndexProgress>;
+pub(crate) type SharedIndexProgress = Arc<dyn Fn(&PassProgress) + Send + Sync>;
+
+/// One progress report from a running index pass, as its caller sees it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PassProgress {
+    pub(crate) bytes_read: u64,
+    pub(crate) media_ms: i64,
+    pub(crate) fragments: usize,
+    /// PGS tracks this pass is also keeping — zero when it does not ride.
+    pub(crate) pgs_tracks: usize,
+    /// Bytes the ride-along has written into its stage so far, measured at
+    /// most once a second.
+    pub(crate) pgs_bytes_written: u64,
+}
+
+/// How often a running pass re-measures its ride-along stage for progress.
+const RIDE_ALONG_MEASURE_EVERY: Duration = Duration::from_secs(1);
 
 /// How an index build ended.
 #[derive(Debug, Clone, PartialEq)]
@@ -1547,7 +1563,7 @@ pub async fn build(
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
-    build_riding(file, video, runtime_cache, budget, None)
+    build_riding(file, video, runtime_cache, budget, None, None)
         .await
         .outcome
 }
@@ -1564,6 +1580,7 @@ pub(crate) async fn build_riding(
     runtime_cache: &Path,
     budget: Duration,
     ride_along: Option<&RideAlongGate>,
+    progress: Option<SharedIndexProgress>,
 ) -> IndexBuild {
     let source = match crate::fragment_index_cluster::open_source_fence(file, None).await {
         Ok(source) => source,
@@ -1580,7 +1597,7 @@ pub(crate) async fn build_riding(
         video,
         runtime_cache,
         budget,
-        None,
+        progress,
         ride_along,
     )
     .await;
@@ -1628,7 +1645,7 @@ pub(crate) async fn build_from_attested_file_with_progress<F>(
     ride_along: Option<&RideAlongGate>,
 ) -> IndexBuild
 where
-    F: Fn(u64, i64, usize) + Send + Sync + 'static,
+    F: Fn(&PassProgress) + Send + Sync + 'static,
 {
     build_attested(
         file,
@@ -1813,12 +1830,43 @@ async fn build_with_args(
     let observed = Arc::new(std::sync::Mutex::new((0_u64, 0_i64, 0_usize)));
     let observed_for_progress = Arc::clone(&observed);
     let caller_progress = progress.clone();
+    // What the ride-along adds to each report: its track count, and the
+    // bytes in its stage, re-measured at most once a second — a stage is a
+    // handful of files, and reports arrive per fragment.
+    let ride_meter = ride_along
+        .as_ref()
+        .map(|plan| (plan.tracks().len(), plan.stage().to_owned()));
+    let measured = std::sync::Mutex::new((None::<Instant>, 0_u64));
     let record_progress = move |bytes: u64, media_ms: i64, rows: usize| {
         if let Ok(mut current) = observed_for_progress.lock() {
             *current = (bytes, media_ms, rows);
         }
         if let Some(progress) = caller_progress.as_deref() {
-            progress(bytes, media_ms, rows);
+            let (pgs_tracks, pgs_bytes_written) = match &ride_meter {
+                Some((tracks, stage)) => {
+                    let mut measured = measured
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if measured
+                        .0
+                        .is_none_or(|at| at.elapsed() >= RIDE_ALONG_MEASURE_EVERY)
+                    {
+                        *measured = (
+                            Some(Instant::now()),
+                            crate::subtitle_ride_along::stage_bytes(stage),
+                        );
+                    }
+                    (*tracks, measured.1)
+                }
+                None => (0, 0),
+            };
+            progress(&PassProgress {
+                bytes_read: bytes,
+                media_ms,
+                fragments: rows,
+                pgs_tracks,
+                pgs_bytes_written,
+            });
         }
     };
     let (mut outcome, deadline_fired) = match tokio::time::timeout(
@@ -3463,7 +3511,7 @@ mod ride_along_tests {
             VIDEO,
             cache.path(),
             Duration::from_secs(60),
-            |_, _, _| {},
+            |_: &crate::fragindex::PassProgress| {},
             Some(&gate),
         )
         .await;
@@ -3473,6 +3521,84 @@ mod ride_along_tests {
             retry.outcome
         );
         assert!(retry.ride_along.is_none(), "and did not ride");
+    }
+
+    /// PR 3: a riding pass reports, with its progress, how many PGS tracks
+    /// it keeps and what its stage holds — re-measured at most once a second —
+    /// so the analysis row can say so while the pass runs.
+    ///
+    /// The fixture's track is a few kilobytes, which the `sup` slave holds in
+    /// its I/O buffer until the trailer; a film's track is megabytes and
+    /// reaches the disk as it goes. So the test puts known bytes into the
+    /// stage mid-pass and requires a later report to count them: the meter
+    /// re-measures the stage during the pass rather than once at its start.
+    #[tokio::test]
+    async fn a_riding_pass_reports_its_tracks_and_bytes_with_its_progress() {
+        const MARKER: usize = 1234;
+        let fixture = fixture(72_004, &[Sub::Pgs]);
+        let cache = crate::test_tempdir().expect("cache");
+        let plan = RideAlongPlan::standalone(
+            cache.path(),
+            fixture.file.id,
+            stamp_of(&fixture.source),
+            vec![0],
+        )
+        .expect("plan");
+        let stage = plan.stage().to_owned();
+        let mut pass = pass_over(&fixture.source, &fixture.file, Some(plan));
+        // Read at the media's own pace, so the pass is still running while
+        // the test watches its reports.
+        let input = pass
+            .args
+            .iter()
+            .position(|arg| arg == "-i")
+            .expect("an input");
+        pass.args.insert(input, "-re".to_owned());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<PassProgress>::new()));
+        let recorder = Arc::clone(&seen);
+        let progress: SharedIndexProgress = Arc::new(move |report: &PassProgress| {
+            recorder.lock().expect("seen").push(*report);
+        });
+        let mut build = Box::pin(build_with_args(
+            &fixture.file,
+            pass,
+            None,
+            None,
+            cache.path(),
+            Duration::from_secs(60),
+            Instant::now(),
+            Some(progress),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut marked = false;
+        loop {
+            let reports = seen.lock().expect("seen").clone();
+            if let Some(first) = reports.first() {
+                assert_eq!(first.pgs_tracks, 1, "every report names the track");
+                assert!(reports.iter().all(|report| report.pgs_tracks == 1));
+                if !marked {
+                    std::fs::write(stage.join("meter-marker"), [0_u8; MARKER])
+                        .expect("a marker in the stage");
+                    marked = true;
+                } else if reports
+                    .iter()
+                    .any(|report| report.pgs_bytes_written >= MARKER as u64)
+                {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no report counted the stage's bytes: {reports:?}"
+            );
+            if tokio::time::timeout(Duration::from_millis(50), &mut build)
+                .await
+                .is_ok()
+            {
+                panic!("the paced pass finished before a report counted the stage: {reports:?}");
+            }
+        }
+        drop(build);
     }
 
     /// (g) The cluster worker `select!`s the build against lease loss and

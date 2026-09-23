@@ -1395,6 +1395,10 @@ pub struct JobManager {
     analysis_progress: std::sync::Mutex<HashMap<(String, String), AnalysisProgress>>,
     analysis_progress_epoch: AtomicU64,
     analysis_metrics: Arc<AnalysisRuntimeMetrics>,
+    /// Every progress row as it stood when its pass ended, so a test can see
+    /// what a real pass wrote onto the row it no longer has.
+    #[cfg(test)]
+    finished_analysis_rows: std::sync::Mutex<Vec<AnalysisProgress>>,
     /// Which title the pass is on, for the activity feed.
     ///
     /// The flag above answers "may another pass start"; this answers "what is
@@ -1470,6 +1474,14 @@ pub struct AnalysisProgress {
     pub media_ms_examined: i64,
     pub total_media_ms: i64,
     pub fragments_indexed: usize,
+    /// PGS tracks the pass is also keeping for the subtitle-source store;
+    /// zero when it is not riding along. Defaulted for a peer that predates
+    /// the field.
+    #[serde(default)]
+    pub pgs_tracks: usize,
+    /// Bytes the ride-along has written so far.
+    #[serde(default)]
+    pub pgs_bytes_written: u64,
     pub started_at_ms: i64,
     pub updated_at_ms: i64,
     pub elapsed_ms: i64,
@@ -1495,6 +1507,8 @@ impl AnalysisProgress {
             media_ms_examined: 1,
             total_media_ms: 2,
             fragments_indexed: 1,
+            pgs_tracks: 0,
+            pgs_bytes_written: 0,
             started_at_ms: 1,
             updated_at_ms: 1,
             elapsed_ms: 1,
@@ -1841,6 +1855,17 @@ const INDEX_FILE_BUDGET_FLOOR_SECS: u64 = 90;
 const INDEX_FILE_BUDGET_CEILING_SECS: u64 = 30 * 60;
 const INDEX_EXPECTED_MIN_SPEED: u64 = 8;
 const INDEX_FILE_HEADROOM_SECS: u64 = 30;
+
+/// The progress-row key of a local (non-queue) index pass: the file and the
+/// pipeline's argv fingerprint, so a file's identities get a row each, and a
+/// prefix no queue cache key (a hex digest) can take.
+fn local_index_job_id(file_id: i64, identity: &plurx_core::segplan::SourceIdentity) -> String {
+    let fingerprint = identity
+        .argv_fingerprint
+        .get(..12)
+        .unwrap_or(&identity.argv_fingerprint);
+    format!("local-index:{file_id}:{fingerprint}")
+}
 
 fn index_file_budget(duration_ms: Option<i64>) -> Duration {
     let film_secs = duration_ms
@@ -2921,6 +2946,8 @@ impl JobManager {
             analysis_progress: std::sync::Mutex::new(HashMap::new()),
             analysis_progress_epoch: AtomicU64::new(0),
             analysis_metrics: Arc::new(AnalysisRuntimeMetrics::default()),
+            #[cfg(test)]
+            finished_analysis_rows: std::sync::Mutex::new(Vec::new()),
             now_producing: Mutex::new(None),
             stop_producing: std::sync::atomic::AtomicBool::new(false),
             pretranscode_refusals: Mutex::new(HashMap::new()),
@@ -4197,6 +4224,8 @@ impl JobManager {
                 media_ms_examined: 0,
                 total_media_ms: total_media_ms.max(0),
                 fragments_indexed: 0,
+                pgs_tracks: 0,
+                pgs_bytes_written: 0,
                 started_at_ms: now,
                 updated_at_ms: now,
                 elapsed_ms: 0,
@@ -4250,6 +4279,55 @@ impl JobManager {
         value.updated_at_ms = now;
     }
 
+    /// The progress callback both index paths hand a pass — the queue worker
+    /// and the local background loop — so their rows read the same: bytes,
+    /// media time and fragments, and for a pass that is also keeping PGS
+    /// tracks, how many and what it has written, so that work is attributable
+    /// from inside the product while it runs.
+    fn index_pass_reporter(
+        self: &Arc<Self>,
+        job_id: &str,
+        target_node_id: &str,
+    ) -> crate::fragindex::SharedIndexProgress {
+        let jobs = Arc::clone(self);
+        let (job_id, target_node_id) = (job_id.to_owned(), target_node_id.to_owned());
+        Arc::new(move |progress: &crate::fragindex::PassProgress| {
+            jobs.update_analysis_progress(
+                &job_id,
+                &target_node_id,
+                "fragment_index",
+                progress.bytes_read,
+                progress.media_ms,
+                progress.fragments,
+            );
+            jobs.update_analysis_ride_along(
+                &job_id,
+                &target_node_id,
+                progress.pgs_tracks,
+                progress.pgs_bytes_written,
+            );
+        })
+    }
+
+    /// Record what a running index pass's PGS ride-along is doing on its
+    /// progress row: how many tracks it keeps and the bytes written so far.
+    fn update_analysis_ride_along(
+        &self,
+        job_id: &str,
+        target_node_id: &str,
+        pgs_tracks: usize,
+        pgs_bytes_written: u64,
+    ) {
+        let mut progress = self
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(value) = progress.get_mut(&(job_id.to_owned(), target_node_id.to_owned())) {
+            value.pgs_tracks = pgs_tracks;
+            value.pgs_bytes_written = pgs_bytes_written;
+        }
+    }
+
     fn set_analysis_progress_totals(
         &self,
         job_id: &str,
@@ -4280,6 +4358,11 @@ impl JobManager {
         {
             if let Some(value) = progress.remove(&(job_id.to_owned(), target_node_id.to_owned())) {
                 self.analysis_metrics.finish(&value);
+                #[cfg(test)]
+                self.finished_analysis_rows
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(value);
             }
         }
     }
@@ -6792,6 +6875,9 @@ impl JobManager {
                         "reconciled stored subtitle sources"
                     );
                 }
+                if let Some(footprint) = outcome.footprint {
+                    crate::subtitle_source::record_footprint(footprint);
+                }
                 *self.subtitle_source_sweep_cursor.lock().await = Some(outcome.next);
             }
             Err(error) => {
@@ -6826,12 +6912,15 @@ impl JobManager {
         pending: crate::subtitle_ride_along::PendingRideAlong,
         source_still_matches: bool,
     ) -> Option<crate::subtitle_source::Manifest> {
+        use crate::subtitle_ride_along::{record_discard, Discard};
+
         let file_id = pending.file_id();
         if !source_still_matches {
             tracing::info!(
                 file_id,
                 "the source moved during the pass; its PGS ride-along is discarded"
             );
+            record_discard(Discard::SourceMoved);
             return None;
         }
         let still_current = self
@@ -6846,6 +6935,19 @@ impl JobManager {
                 file_id,
                 "the catalog moved during the pass; its PGS ride-along is discarded"
             );
+            record_discard(Discard::CatalogMoved);
+            return None;
+        }
+        // The gate read the switch when the pass began. Turned off since, the
+        // consumers already ignore the store; publishing now would add tracks
+        // under a switch that says off, so the switch stops the pass it was
+        // turned off during, not only the next one.
+        if !crate::subtitle_source::enabled(self.store.as_ref()).await {
+            tracing::info!(
+                file_id,
+                "stored subtitle tracks were turned off during the pass; its PGS ride-along is discarded"
+            );
+            record_discard(Discard::SwitchOff);
             return None;
         }
         let harvest = pending.judge().await;
@@ -6909,6 +7011,7 @@ impl JobManager {
         let convert = transcode.dv_convert_enabled().await;
         let runtime_cache = transcode.runtime_cache_dir().to_path_buf();
         let max_index_attempts = self.analysis_retry_policy().await.max_attempts;
+        let node_id = self.coordinator.node_id().to_owned();
         let libraries = match self.store.list_libraries().await {
             Ok(libraries) => libraries,
             Err(error) => {
@@ -7029,6 +7132,19 @@ impl JobManager {
                     &runtime_cache,
                 )
                 .await;
+                // A progress row like the queue worker's, so Content analysis
+                // shows this pass — and what it keeps — on an install that
+                // never turns the queue on. Keyed by file and pipeline, on
+                // this node; dropped when the pass ends.
+                let progress_job = local_index_job_id(file_id, &identity);
+                let _progress = self.start_analysis_progress(
+                    (&progress_job, &node_id),
+                    file_id,
+                    "fragment_index",
+                    "fragment_index",
+                    file.size.max(0) as u64,
+                    file.duration_ms.unwrap_or(0),
+                );
                 let crate::fragindex::IndexBuild {
                     outcome,
                     ride_along: harvest,
@@ -7039,6 +7155,7 @@ impl JobManager {
                     &runtime_cache,
                     index_file_budget(file.duration_ms),
                     ride_along.as_ref(),
+                    Some(self.index_pass_reporter(&progress_job, &node_id)),
                 )
                 .await;
                 let refusal = match outcome {
@@ -8733,9 +8850,7 @@ impl JobManager {
             }
         }
 
-        let progress_jobs = Arc::clone(&self);
-        let progress_key = job.cache_key.clone();
-        let progress_target = job.target_node_id.clone();
+        let report_progress = self.index_pass_reporter(&job.cache_key, &job.target_node_id);
         // Asked per job: the switch, the self-test and the filesystem, now.
         let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
             self.store.as_ref(),
@@ -8753,16 +8868,7 @@ impl JobManager {
                 video,
                 transcode.runtime_cache_dir(),
                 index_file_budget(file.duration_ms),
-                move |bytes_read, media_ms, fragments| {
-                    progress_jobs.update_analysis_progress(
-                        &progress_key,
-                        &progress_target,
-                        "fragment_index",
-                        bytes_read,
-                        media_ms,
-                        fragments,
-                    );
-                },
+                move |progress: &crate::fragindex::PassProgress| report_progress(progress),
                 ride_along.as_ref(),
             ) => (Some(built), false),
             () = lost.cancelled() => (None, false),
@@ -11676,7 +11782,7 @@ mod tests {
                 video,
                 cache.path(),
                 std::time::Duration::from_secs(60),
-                |_, _, _| {},
+                |_: &crate::fragindex::PassProgress| {},
                 Some(&gate),
             )
             .await
@@ -11781,6 +11887,172 @@ mod tests {
             manifest.track(0).map(|track| track.verdict),
             Some(crate::subtitle_source::Verdict::Kept)
         );
+        // #463 review findings 1 and 6: the local pass — the default one —
+        // has a progress row like the queue's, and the real pass wrote its
+        // ride-along onto it.
+        let row = finished_row_of(&jobs, file.id);
+        assert!(
+            row.job_id.starts_with(&format!("local-index:{}:", file.id)),
+            "{row:?}"
+        );
+        assert_eq!(row.component, "fragment_index");
+        assert!(row.fragments_indexed > 0, "{row:?}");
+        assert_eq!(
+            row.pgs_tracks, 1,
+            "the row names the track it kept: {row:?}"
+        );
+    }
+
+    /// The row a finished pass over `file_id` left behind, as it stood when
+    /// the pass ended.
+    fn finished_row_of(jobs: &JobManager, file_id: i64) -> AnalysisProgress {
+        jobs.finished_analysis_rows
+            .lock()
+            .expect("rows")
+            .iter()
+            .rev()
+            .find(|row| row.file_id == file_id && row.component == "fragment_index")
+            .cloned()
+            .unwrap_or_else(|| panic!("no progress row for file {file_id}"))
+    }
+
+    /// #463 review finding 6: the queue worker's pass writes its ride-along
+    /// onto its progress row through the real wiring — request, resolve,
+    /// claim, build — not only through the row's own update call.
+    #[tokio::test]
+    async fn the_queue_worker_row_carries_its_ride_along() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(0, &[Sub::Pgs]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("the queue on");
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let transcode_dir = crate::test_tempdir().expect("transcode");
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            transcode_dir.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let _open = crate::subtitle_ride_along::force_gate_open_on_this_thread();
+        jobs.request_file_analysis(file.id, false, "fragment_index", "admin")
+            .await
+            .expect("requested");
+        for _ in 0..40 {
+            Arc::clone(&jobs)
+                .work_cluster_fragment_index_queue(Arc::clone(&transcode))
+                .await;
+            let done = jobs
+                .finished_analysis_rows
+                .lock()
+                .expect("rows")
+                .iter()
+                .any(|row| row.file_id == file.id && row.pgs_tracks > 0);
+            if done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let row = finished_row_of(&jobs, file.id);
+        assert!(!row.job_id.starts_with("local-index:"), "{row:?}");
+        assert_eq!(
+            row.pgs_tracks, 1,
+            "the queue's row names the track: {row:?}"
+        );
+        assert!(row.fragments_indexed > 0, "{row:?}");
+    }
+
+    /// #463 review finding 3: the switch turned off while a riding pass runs
+    /// stops that pass's tracks reaching the store, and is counted.
+    #[tokio::test]
+    async fn a_riding_pass_finished_after_the_switch_went_off_publishes_nothing() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+        use crate::subtitle_ride_along::{discarded, Discard};
+
+        let fixture = fixture(0, &[Sub::Pgs]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let jobs = manager(store.clone(), artwork.path());
+        let cache = crate::test_tempdir().expect("cache");
+        let root = crate::subtitle_source::store_root(cache.path());
+        let gate = crate::subtitle_ride_along::RideAlongGate::for_test(root.clone());
+        let source = std::fs::File::open(&fixture.source).expect("held source");
+        let pending = crate::fragindex::build_from_attested_file_with_progress(
+            &file,
+            &source,
+            "fixture-object-v1",
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
+            cache.path(),
+            std::time::Duration::from_secs(60),
+            |_: &crate::fragindex::PassProgress| {},
+            Some(&gate),
+        )
+        .await
+        .ride_along
+        .expect("the pass rode along");
+        // Turned off after the gate let the pass ride.
+        store
+            .put_setting(keys::SUBTITLE_STORED_SOURCES, "0")
+            .await
+            .expect("switch off");
+        let before = discarded(Discard::SwitchOff);
+        assert!(jobs.settle_ride_along(&file, pending, true).await.is_none());
+        assert!(discarded(Discard::SwitchOff) > before, "counted");
+        assert!(
+            crate::subtitle_source::read_manifest(&crate::subtitle_source::file_dir(
+                &root, file.id
+            ))
+            .await
+            .is_none(),
+            "nothing was published"
+        );
+    }
+
+    /// PR 3: the analysis row of a pass that rides along says how many PGS
+    /// tracks it keeps and what it has written.
+    #[tokio::test]
+    async fn an_analysis_row_carries_its_ride_along() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let jobs = manager(store.clone(), artwork.path());
+        let _guard = jobs.start_analysis_progress(
+            ("job-ride", "node-a"),
+            7,
+            "fragment_index",
+            "fragment_index",
+            1_000,
+            60_000,
+        );
+        let row = |jobs: &JobManager| {
+            jobs.analysis_progress_snapshot()
+                .into_iter()
+                .find(|row| row.job_id == "job-ride")
+                .expect("row")
+        };
+        assert_eq!(
+            (row(&jobs).pgs_tracks, row(&jobs).pgs_bytes_written),
+            (0, 0)
+        );
+        jobs.update_analysis_ride_along("job-ride", "node-a", 2, 18_866);
+        assert_eq!(
+            (row(&jobs).pgs_tracks, row(&jobs).pgs_bytes_written),
+            (2, 18_866)
+        );
+        // A peer that predates the fields still parses, as not riding.
+        let mut value = serde_json::to_value(row(&jobs)).expect("json");
+        value.as_object_mut().expect("object").remove("pgs_tracks");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("pgs_bytes_written");
+        let parsed: AnalysisProgress = serde_json::from_value(value).expect("old row");
+        assert_eq!((parsed.pgs_tracks, parsed.pgs_bytes_written), (0, 0));
     }
 
     /// A file the indexer cannot index is asked once, not once per pass.
