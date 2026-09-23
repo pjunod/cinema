@@ -14996,11 +14996,22 @@ impl TranscodeManager {
             format!("recipe:{CACHE_RECIPE_VERSION}"),
             "contract:hls-mpegts-v1".to_owned(),
             format!("requested-encoder:{requested_encoder}"),
+            // Unset spells exactly what explicit `bitrate` spells. This is a
+            // durable dedupe key: it is stored on every speculative queue row
+            // and a mismatch is a hard `cancel_job(.., "policy_changed")`, not
+            // a yield. Every `Encoder::default_rate_mode()` is Bitrate, so the
+            // two requests resolve to the same effective policy and the key
+            // must not move because the internal type gained a third state —
+            // it would re-queue every speculative row at deploy and flip again
+            // mid-boot on every restart, when the manager's initial
+            // `RateControlSnapshot::bitrate` is replaced by the absent pair.
+            // A PR that flips a family default moves this spelling
+            // deliberately, with the artefact §3.4 requires.
             format!(
                 "requested:{}",
                 snapshot
                     .requested_mode
-                    .map_or("family_default", RateMode::as_str)
+                    .map_or_else(|| RateMode::Bitrate.as_str(), RateMode::as_str)
             ),
             format!("quality:{:?}", snapshot.requested_quality),
             format!("audio-lang:{audio_lang}"),
@@ -46377,6 +46388,58 @@ pub(crate) mod tests {
             )
             .await
             .is_none());
+    }
+
+    /// The speculative dedupe key is durable: it is stored on every queue
+    /// row (`domain.rs` `policy_generation`), compared before production,
+    /// and a mismatch is turned into a hard `cancel_job(.., "policy_changed")`
+    /// rather than a yield. An unset pair and an explicit `bitrate` resolve
+    /// to the same effective policy on every family, so they must hash to the
+    /// same generation. If the tri-state spelled "unset" differently, every
+    /// queued speculative row would be cancelled and rediscovered at deploy,
+    /// and the generation would flip again mid-boot on every restart — the
+    /// manager's first snapshot is `RateControlSnapshot::bitrate`, and
+    /// `initialize_rate_control` then republishes the absent pair as `None`.
+    #[test]
+    fn an_unset_rate_control_pair_keeps_the_explicit_bitrate_policy_generation() {
+        let prefs = plurx_core::tracks::LangPrefs::default();
+        let unset = RateControlSnapshot {
+            requested_mode: None,
+            requested_quality: None,
+            quality_rc: QualityRc::default(),
+        };
+        let explicit = RateControlSnapshot {
+            requested_mode: Some(RateMode::Bitrate),
+            ..unset
+        };
+        let quality = RateControlSnapshot {
+            requested_mode: Some(RateMode::Quality),
+            ..unset
+        };
+
+        let generation =
+            TranscodeManager::pretranscode_policy_generation_for(unset, "auto", &prefs);
+        assert_eq!(
+            generation,
+            TranscodeManager::pretranscode_policy_generation_for(explicit, "auto", &prefs),
+            "an unset pair and an explicit bitrate request are the same policy and must \
+             not enqueue replacement work against each other"
+        );
+        assert_ne!(
+            generation,
+            TranscodeManager::pretranscode_policy_generation_for(quality, "auto", &prefs),
+            "an explicit quality request is a different policy"
+        );
+
+        // The durable value itself, unchanged since before `requested_mode`
+        // became an `Option`. A PR that flips a family default moves this
+        // deliberately, with its artefact; nothing else may move it.
+        assert_eq!(
+            generation,
+            "speculative-auto-v2:\
+             08494ca183d08fdddf67791b5c47a324dbf4dd32544694dc2fd12589a6c67723",
+            "the speculative dedupe key for an unset pair is durable state"
+        );
     }
 
     #[tokio::test]
