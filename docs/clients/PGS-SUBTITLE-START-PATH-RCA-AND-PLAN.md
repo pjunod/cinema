@@ -1,6 +1,6 @@
 # PGS subtitles on the start path — why a 79.5 GB read blocks playback, and the three fixes
 
-**Status:** §4 merged-pending, §5 and §6 proposed and unbuilt ·
+**Status:** §4 merged (PR #445, `5c605768`), not deployed · §5 and §6 proposed and unbuilt · reviewed — see [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
 **Reviewer:** Fable, adversarial · **Written:** 2026-09-22 ·
 **Reported by:** Paul, 2026-09-21 ~18:50 ET, Android on the TCL tablet
 
@@ -200,7 +200,7 @@ Full write-up:
 
 ## 4. Fix A — stop spending the start budget to learn nothing
 
-**Status: PR #445, open, fast lane in progress. Not deployed.**
+**Status: PR #445, merged as `5c605768` (2026-09-23 00:48 UTC). Not deployed.**
 
 ### 4.1 What it does
 
@@ -243,8 +243,8 @@ Three findings, all taken. They matter to §5 and §6 too:
 
 The create-retry ladder is **rung-bounded, not deadline-bounded**:
 `backoff_ms = [1000, 2000, 4000]`, three rungs, then `exhausted("ladder_spent")`.
-`crates/plurxd/src/web/playback-policy.js:868`,
-`clients/apple/Sources/PlayerController.swift:1546`,
+`crates/plurxd/src/web/playback-policy.js:871`,
+`clients/apple/Sources/PlayerController.swift:1550`,
 `clients/android/.../player/PlaybackPolicy.kt` all agree.
 `retry_after_seconds` is **not consulted** by `createRetryStep` at all.
 
@@ -343,7 +343,7 @@ disagree and Apple papers over it with hedged copy
 
 **B3 — a seek test on each native client.** Both have seek-reconciliation code
 (`AndroidPGSOverlay.kt:113` `reconcile`,
-`PlayerController.swift:3440` `refreshPGSOverlayWindow`) and **no test drives a
+`PlayerController.swift:4881` `refreshPGSOverlayWindow`) and **no test drives a
 seek on either.** Cue timing and render position are well covered; seek is a
 genuine hole in M2/M3 acceptance, not only M4.
 
@@ -521,6 +521,6 @@ Ranked by how much the answer changes the work.
 | auto-select call site | `crates/plurxd/src/http/stream.rs:2205` |
 | pre-play hardcoded off | `crates/plurxd/src/http/dto.rs:497` |
 | web force-override | `crates/plurxd/src/web/player/decode-tiers.js:955` |
-| retry ladder (web) | `crates/plurxd/src/web/playback-policy.js:868` |
-| retry ladder (Apple) | `clients/apple/Sources/PlayerController.swift:1546` |
+| retry ladder (web) | `crates/plurxd/src/web/playback-policy.js:871` |
+| retry ladder (Apple) | `clients/apple/Sources/PlayerController.swift:1550` |
 | `playbackId` per open | `clients/android/.../player/PlaybackIntent.kt:16` |
