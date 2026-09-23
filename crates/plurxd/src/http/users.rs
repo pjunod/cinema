@@ -7,13 +7,129 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
+use plurx_core::auth;
+use plurx_core::store::{DeleteTokenByPrefixOutcome, TokenSummary};
 use serde::Deserialize;
 
 use super::dto::UserDto;
 use super::error::ApiError;
-use super::extract::{AdminUser, AuthUser};
+use super::extract::{AdminUser, AuthUser, RawToken};
 use super::internal_auth_revocation::ClusterCacheRevocation;
 use crate::state::AppState;
+
+/// GET /api/v1/me/devices
+pub async fn list_my_devices(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<TokenSummary>>, ApiError> {
+    list_devices_for_user(&state, user.id).await
+}
+
+/// DELETE /api/v1/me/devices/{prefix}
+pub async fn revoke_my_device(
+    AuthUser(user): AuthUser,
+    RawToken(token): RawToken,
+    State(state): State<AppState>,
+    Path(prefix): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    revoke_device_for_user(&state, user.id, &token, &prefix).await
+}
+
+/// GET /api/v1/users/{id}/devices (admin)
+pub async fn list_user_devices(
+    AdminUser(_admin): AdminUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<TokenSummary>>, ApiError> {
+    state
+        .store
+        .get_user(id)
+        .await?
+        .ok_or(ApiError::NotFound("user"))?;
+    list_devices_for_user(&state, id).await
+}
+
+/// DELETE /api/v1/users/{id}/devices/{prefix} (admin)
+pub async fn revoke_user_device(
+    AdminUser(_admin): AdminUser,
+    RawToken(token): RawToken,
+    State(state): State<AppState>,
+    Path((id, prefix)): Path<(i64, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .store
+        .get_user(id)
+        .await?
+        .ok_or(ApiError::NotFound("user"))?;
+    revoke_device_for_user(&state, id, &token, &prefix).await
+}
+
+async fn list_devices_for_user(
+    state: &AppState,
+    user_id: i64,
+) -> Result<Json<Vec<TokenSummary>>, ApiError> {
+    Ok(Json(state.store.list_tokens_for_user(user_id).await?))
+}
+
+async fn revoke_device_for_user(
+    state: &AppState,
+    user_id: i64,
+    current_token: &str,
+    prefix: &str,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let prefix = normalize_token_prefix(prefix)?;
+    let matches = state
+        .store
+        .list_tokens_for_user(user_id)
+        .await?
+        .into_iter()
+        .filter(|token| token.token_hash_prefix == prefix)
+        .count();
+    match matches {
+        0 => return Err(ApiError::NotFound("device token")),
+        1 if prefix == token_prefix(current_token) => {
+            return Err(ApiError::BadRequest(
+                "the current device must sign out through /api/v1/auth/logout".into(),
+            ));
+        }
+        1 => {}
+        _ => {
+            return Err(ApiError::Conflict(
+                "device token prefix is ambiguous; refresh the device list".into(),
+            ));
+        }
+    }
+
+    let proof_revocation = ClusterCacheRevocation::begin_user(state, user_id).await?;
+    let outcome = state
+        .store
+        .delete_token_by_prefix_for_user(user_id, &prefix, proof_revocation.mutation_claim())
+        .await?;
+    proof_revocation.finish(state).await?;
+    match outcome {
+        DeleteTokenByPrefixOutcome::Deleted => Ok(Json(serde_json::json!({ "ok": true }))),
+        DeleteTokenByPrefixOutcome::NotFound => Err(ApiError::NotFound("device token")),
+        DeleteTokenByPrefixOutcome::Ambiguous => Err(ApiError::Conflict(
+            "device token prefix is ambiguous; refresh the device list".into(),
+        )),
+        DeleteTokenByPrefixOutcome::ClaimLost => Err(ApiError::ServiceUnavailable(
+            "device revocation lost its cache-revocation exclusion; retry the request".into(),
+        )),
+    }
+}
+
+fn token_prefix(token: &str) -> String {
+    auth::hash_token(token).chars().take(8).collect()
+}
+
+fn normalize_token_prefix(prefix: &str) -> Result<String, ApiError> {
+    if prefix.len() != 8 || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::BadRequest(
+            "device token prefix must be exactly 8 hexadecimal characters".into(),
+        ));
+    }
+    Ok(prefix.to_ascii_lowercase())
+}
 
 /// GET /api/v1/users (admin)
 pub async fn list(

@@ -1696,6 +1696,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
+# 547 -> 549 with C-04: both are joined test fixtures for the cluster
+# revocation queue, and neither owns a producer, a process or a clock.
+# `http/extract.rs` spawns the queued waiters that prove the admission
+# semaphore admits eight callers behind one active operation and refuses the
+# ninth; every handle is awaited in the same test before it returns.
+# `http/mod.rs` spawns the two concurrent sign-out requests of
+# `two_concurrent_logouts_queue_behind_one_operation_and_both_succeed`, which
+# have to be in flight at the same time for the contention to exist at all;
+# both handles are awaited and asserted on before the test ends. No shipped
+# task was added: the revocation coordinator still runs on the caller's own
+# request future, which is what keeps its RAII guard tied to that request.
 # +5 for C-06's telemetry queue review: `crates/plurxd/src/telemetry.rs` now
 # spawns the supervised bounded writer from three places instead of one --
 # `ensure_sink` (production), the test-only `install_test_sink`, and four
@@ -1760,7 +1771,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # base that branch was written on. This row's value is the whole integration
 # tree re-measured after every plan in this wave was merged together, so it is
 # the sum of all of them and will not equal any single branch's arithmetic.
-expected_occurrences = 564
+expected_occurrences = 566
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2258,6 +2269,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
+# 841 -> 843 with C-04. One is production and one is a fixture.
+# `http/extract.rs` wraps the revocation operation mutex in a
+# `tokio::time::timeout` of `REVOCATION_ADMISSION_WAIT` (2.5 s): that is the
+# admission wait itself, the bound that lets a second sign-out queue instead
+# of taking a 503, sized under the web client's 5 s logout abort. It is a
+# waiting caller's own deadline, not a producer's clock, a lease or a fence
+# timing — every constant of the Begin/Store/End fence is unchanged.
+# `http/mod.rs` sleeps 50 ms in
+# `two_concurrent_logouts_queue_behind_one_operation_and_both_succeed` to let
+# the two spawned sign-outs reach the held gate before asserting that neither
+# has completed. It is a settle in a test, well inside the 2.5 s window it is
+# asserting against, and it owns nothing.
 # +7 for C-06's telemetry queue review. Two are shipped and both are bounds
 # this plan exists to state: `tokio::time::timeout(BATCH_WINDOW, ..)` is the
 # writer's batch window, and `tokio::time::timeout(DRAIN, ..)` is the whole of
@@ -2340,10 +2363,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # base that branch was written on. This row's value is the whole integration
 # tree re-measured after every plan in this wave was merged together, so it is
 # the sum of all of them and will not equal any single branch's arithmetic.
-# This row's value is the whole integration tree re-measured after every plan
-# in this wave was merged together, so it is the sum of all of their deltas and
-# will not equal any single branch's arithmetic.
-expected_occurrences = 864
+expected_occurrences = 866
 
 [[module_structures]]
 id = "bare-time-constructor"

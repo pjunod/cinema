@@ -2301,6 +2301,7 @@ fn build_state(
             server_name: config.server.name.clone(),
             node_id,
             cluster_advertisement: !config.cluster.advertise_host.trim().is_empty(),
+            trusted_proxies: config.server.trusted_proxies.clone(),
             scan_prune_percent: config.storage.scan_prune_percent,
             credential_key,
             replication,

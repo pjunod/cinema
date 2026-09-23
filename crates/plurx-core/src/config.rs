@@ -54,6 +54,9 @@ pub struct ServerConfig {
     pub name: String,
     /// Address the HTTP API binds to.
     pub bind: SocketAddr,
+    /// Reverse-proxy networks whose appended forwarding hops may be trusted
+    /// for security-sensitive client-address decisions.
+    pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
 impl Default for ServerConfig {
@@ -61,6 +64,7 @@ impl Default for ServerConfig {
         ServerConfig {
             name: "plurx".to_owned(),
             bind: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -315,6 +319,19 @@ impl Config {
                 message: format!("`{bind}` is not a socket address (e.g. 0.0.0.0:{DEFAULT_PORT})"),
             })?;
         }
+        if let Some(value) = env_var("PLURX_TRUSTED_PROXIES") {
+            self.server.trusted_proxies = value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| {
+                    entry.parse().map_err(|_| ConfigError::Env {
+                        var: "PLURX_TRUSTED_PROXIES".to_owned(),
+                        message: format!("`{entry}` is not an IP network (for example 10.0.0.0/8)"),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        }
         if let Some(dir) = env_var("PLURX_DATA_DIR") {
             self.storage.data_dir = PathBuf::from(dir);
         }
@@ -435,6 +452,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.server.bind.port(), DEFAULT_PORT);
         assert_eq!(config.server.name, "plurx");
+        assert!(config.server.trusted_proxies.is_empty());
         assert_eq!(config.storage.data_dir, PathBuf::from("./data"));
         assert!(config.storage.cache_dir.as_os_str().is_empty());
         assert!(config.storage.transcode_dir.as_os_str().is_empty());
@@ -473,12 +491,13 @@ mod tests {
 
         std::fs::write(
             &path,
-            "[server]\nname = \"den\"\nbind = \"127.0.0.1:9999\"\n",
+            "[server]\nname = \"den\"\nbind = \"127.0.0.1:9999\"\ntrusted_proxies = [\"10.0.0.0/8\"]\n",
         )
         .expect("write config");
         let config = Config::load(Some(&path)).expect("load");
         assert_eq!(config.server.name, "den");
         assert_eq!(config.server.bind.port(), 9999);
+        assert_eq!(config.server.trusted_proxies[0].to_string(), "10.0.0.0/8");
         // Unspecified sections keep defaults.
         assert_eq!(config.storage.data_dir, PathBuf::from("./data"));
 

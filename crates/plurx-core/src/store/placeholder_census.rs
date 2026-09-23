@@ -835,7 +835,15 @@ fn is_sqlite_candidate(text: &str) -> bool {
 /// `?1`/`?2` are bound by the `query_map` on the next statement. The census
 /// was re-measured against the merged tree and that one literal is the whole
 /// difference; the luminance `UPDATE` beside it binds locally and is checked.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 92;
+///
+/// 92 -> 93 on this branch for one more site of that same shape:
+/// `list_tokens_for_user` in `sqlite/users.rs` prepares the device-inventory
+/// `SELECT` once and binds `?1`/`?2` in the `query_map` on the next statement,
+/// so its arity cannot be paired syntactically even though the numbered
+/// placeholders themselves are still covered by this census. The two entries
+/// main contributed (field order, luminance) and this one are the whole
+/// difference between the pre-merge sets; no other literal changed shape.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 93;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

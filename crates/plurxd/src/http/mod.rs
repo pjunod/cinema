@@ -7,6 +7,7 @@
 
 mod analysis;
 mod auth;
+pub(crate) use auth::LoginThrottle;
 mod browse;
 mod cluster;
 pub(crate) mod cluster_operations;
@@ -234,6 +235,13 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/auth/logout"
         | "/api/v1/users"
         | "/api/v1/users/{id}"
+        // The device inventory and per-device revocation are account
+        // administration on the same rows as login and logout, so they are
+        // attributed here rather than opening a group of their own.
+        | "/api/v1/me/devices"
+        | "/api/v1/me/devices/{prefix}"
+        | "/api/v1/users/{id}/devices"
+        | "/api/v1/users/{id}/devices/{prefix}"
         | "/api/v1/keys"
         | "/api/v1/keys/{id}" => 0,
 
@@ -703,8 +711,18 @@ pub fn router(state: AppState) -> Router {
         // hashing, scans, or child work. Five minutes stays above their own
         // fences while still making a wedged request finite.
         .route("/setup", post(system::setup))
-        .route("/auth/login", post(auth::login))
+        .route(
+            "/auth/login",
+            post(auth::login).layer(DefaultBodyLimit::max(auth::MAX_LOGIN_BODY_BYTES)),
+        )
         .route("/auth/logout", post(auth::logout))
+        .route("/me/devices", get(users::list_my_devices))
+        .route("/me/devices/{prefix}", delete(users::revoke_my_device))
+        .route("/users/{id}/devices", get(users::list_user_devices))
+        .route(
+            "/users/{id}/devices/{prefix}",
+            delete(users::revoke_user_device),
+        )
         .route("/settings", put(system::update_settings))
         .route(
             "/live-tv/readiness/refresh",
@@ -6394,6 +6412,315 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The device label is the only caller-chosen, caller-repeatable field in
+    /// `tokens`, and `TOKEN_SUMMARY_MAX` bounds inventory rows but not bytes.
+    /// Bound it where it is created, and refuse the oversized body before the
+    /// handler ever parses it.
+    #[tokio::test]
+    async fn login_bounds_the_device_label_and_caps_its_request_body() {
+        use plurx_core::store::MAX_DEVICE_LABEL_BYTES;
+
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+
+        let at_bound = "d".repeat(MAX_DEVICE_LABEL_BYTES);
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": at_bound }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a label at the bound must log in: {body}"
+        );
+
+        let over_bound = "d".repeat(MAX_DEVICE_LABEL_BYTES + 1);
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": over_bound }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "one byte over the bound must be refused, not stored: {body}"
+        );
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("device label"));
+
+        // A megabyte body is refused by the route's own limit, before the
+        // JSON is parsed, before any password work, and before the Store.
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({
+                    "username": "paul",
+                    "password": "supersecret",
+                    "device": "d".repeat(1024 * 1024)
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+        // Exactly two sessions exist: setup's, and the one at the bound. The
+        // refused attempts minted nothing.
+        let (status, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{devices}");
+        let devices = devices.as_array().expect("device array");
+        assert_eq!(devices.len(), 2);
+        // The label at the bound is stored whole, not silently shortened.
+        assert!(devices
+            .iter()
+            .any(|row| row["device"].as_str() == Some(at_bound.as_str())));
+    }
+
+    /// M1's contract is that a second sign-out queues behind the first rather
+    /// than receiving a 503 while the server still honours its bearer. Hold
+    /// the single active slot the way a live fence does, so the contention is
+    /// a fact of the test rather than a race it hopes to win.
+    #[tokio::test]
+    async fn two_concurrent_logouts_queue_behind_one_operation_and_both_succeed() {
+        let (app, state) = test_app_with_state();
+        let first = setup_admin(&app).await;
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": "Kitchen" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let second = body["token"].as_str().expect("second token").to_owned();
+
+        let held = state
+            .cache_only_admin_proofs
+            .acquire_revocation_operation()
+            .await
+            .expect("the test owns the active revocation slot");
+
+        let mut signouts = Vec::new();
+        for token in [first.clone(), second.clone()] {
+            let app = app.clone();
+            signouts.push(tokio::spawn(async move {
+                call(&app, post("/api/v1/auth/logout", Some(&token), json!({}))).await
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for signout in &signouts {
+            assert!(
+                !signout.is_finished(),
+                "a sign-out behind a running fence must queue, not be refused"
+            );
+        }
+
+        drop(held);
+        for signout in signouts {
+            let (status, body) = signout.await.expect("sign-out task");
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["ok"], true);
+        }
+
+        // Two bearers cleared, two rows gone.
+        for token in [&first, &second] {
+            assert_eq!(
+                call(&app, get("/api/v1/me", Some(token))).await.0,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert!(state
+            .store
+            .list_tokens_for_user(1)
+            .await
+            .expect("inventory")
+            .is_empty());
+    }
+
+    /// The other side of the bound: past the admission wait the caller is
+    /// still refused, and a refused caller leaves nothing behind — no claim,
+    /// no armed fence, no deleted row.
+    #[tokio::test]
+    async fn a_logout_that_waits_out_the_admission_window_is_refused_and_changes_nothing() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": "Kitchen" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let second = body["token"].as_str().expect("second token").to_owned();
+
+        let held = state
+            .cache_only_admin_proofs
+            .acquire_revocation_operation()
+            .await
+            .expect("the test owns the active revocation slot");
+
+        let started = Instant::now();
+        let (status, body) =
+            call(&app, post("/api/v1/auth/logout", Some(&second), json!({}))).await;
+        let waited = started.elapsed();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            waited >= extract::REVOCATION_ADMISSION_WAIT,
+            "the caller must actually wait its admission window, not fail fast: {waited:?}"
+        );
+        drop(held);
+
+        // Nothing was revoked and no fence was armed: both sessions still
+        // authenticate and both rows are still listed.
+        for token in [&admin, &second] {
+            assert_eq!(
+                call(&app, get("/api/v1/me", Some(token))).await.0,
+                StatusCode::OK
+            );
+        }
+        let (_, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert_eq!(devices.as_array().expect("device array").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn device_inventory_and_fenced_revocation_cover_self_and_admin_routes() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let (status, second_login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": "Living room" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{second_login}");
+        let second = second_login["token"].as_str().expect("second token");
+
+        let (status, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{devices}");
+        let devices = devices.as_array().expect("device array");
+        assert_eq!(devices.len(), 2);
+        assert!(devices.iter().all(|row| {
+            row["token_hash_prefix"]
+                .as_str()
+                .is_some_and(|prefix| prefix.len() == 8)
+        }));
+        assert!(!format!("{devices:?}").contains(second));
+        let current_prefix = plurx_core::auth::hash_token(&admin)
+            .chars()
+            .take(8)
+            .collect::<String>();
+        let current = devices
+            .iter()
+            .find(|row| row["token_hash_prefix"] == current_prefix)
+            .expect("current device");
+        let (status, body) = call(
+            &app,
+            delete(
+                &format!(
+                    "/api/v1/me/devices/{}",
+                    current["token_hash_prefix"].as_str().expect("prefix")
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("logout"));
+
+        let other = devices
+            .iter()
+            .find(|row| row["token_hash_prefix"] != current_prefix)
+            .expect("other device");
+        let (status, body) = call(
+            &app,
+            delete(
+                &format!(
+                    "/api/v1/me/devices/{}",
+                    other["token_hash_prefix"].as_str().expect("prefix")
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(second))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&admin))).await.0,
+            StatusCode::OK
+        );
+
+        let (status, user) = call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "kid", "password": "longenough" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{user}");
+        let user_id = user["id"].as_i64().expect("user id");
+        let (status, kid_login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "kid", "password": "longenough", "device": "Tablet" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kid_login}");
+        let kid = kid_login["token"].as_str().expect("kid token");
+        let (status, kid_devices) = call(
+            &app,
+            get(&format!("/api/v1/users/{user_id}/devices"), Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kid_devices}");
+        let prefix = kid_devices[0]["token_hash_prefix"]
+            .as_str()
+            .expect("kid prefix");
+        let (status, body) = call(
+            &app,
+            delete(
+                &format!("/api/v1/users/{user_id}/devices/{prefix}"),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(kid))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     /// The Settings→login-page bounce, as a request pair.
