@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries sixteen compatibility patches for clustered
+Apache-2.0. Plurx carries seventeen compatibility patches for clustered
 deployments:
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
@@ -138,8 +138,23 @@ deployments:
   support unconditionally; `backup` and `backup,s3` remain independently
   compilable, and a build without backup returns an explicit feature error if
   it receives the reserved replicated variant.
+- `http_client::ensure_rustls_crypto_provider` installs the `ring` rustls
+  provider once per process, and every `reqwest::Client` this crate builds goes
+  through it. `reqwest` is declared with `rustls-no-provider`, so
+  `ClientBuilder::build` reads the process-wide default and panics when there is
+  none — for any client, TLS or not. Before the patch above dropped
+  `backup -> s3 -> cryptr/s3`, that edge pulled a second `reqwest` whose
+  provider feature Cargo unified onto this one, so the provider was present by
+  accident and no build asked for it. `ring` is what this crate's `rustls`
+  dependency and `axum-server`'s `tls-rustls-no-provider` already select and
+  what `plurx-core`'s `install_default_crypto_provider` installs, so one
+  provider stays in the process. Naming it at client construction rather than in
+  a `main` is deliberate: a test binary or a library consumer runs no `main` of
+  ours, which is how the accidental inheritance went unnoticed.
+  `crates/plurx-core/tests/hiqlite_tls_provider.rs` builds a real client in a
+  binary of its own and fails if the install goes away.
 
-Remove this vendor when an upstream Hiqlite release contains all sixteen patches
+Remove this vendor when an upstream Hiqlite release contains all seventeen patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
 and the snapshot RPC error-boundary plus queue-saturated reset tests above keep

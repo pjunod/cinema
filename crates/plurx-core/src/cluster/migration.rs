@@ -7675,6 +7675,15 @@ pub mod status {
         Client, DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot, LocalDbSnapshotMetrics,
         LocalSnapshotTransportStatus,
     };
+
+    /// The Hiqlite client type, re-exported for `tests/hiqlite_tls_provider.rs`.
+    ///
+    /// That test has to build a real client in a test binary of its own, with no
+    /// rustls crypto provider installed first — the state a fresh daemon process
+    /// is in. An integration test cannot see `plurx-core`'s own dependencies, so
+    /// the type has to reach it through here. Not part of the supported surface.
+    #[doc(hidden)]
+    pub use hiqlite::Client as HiqliteClient;
     use std::sync::{Arc, Mutex};
 
     const PASSIVE_METRICS_REFRESH: Duration = Duration::from_secs(5);
