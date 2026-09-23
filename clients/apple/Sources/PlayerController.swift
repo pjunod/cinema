@@ -2345,6 +2345,14 @@ final class PlayerController: ObservableObject {
     private var pgsOverlayManifest: PGSOverlayManifest?
     private var pgsOverlayPrepareTask: Task<Void, Never>?
     private var pgsOverlayWindowTask: Task<Void, Never>?
+    /// The source range the in-flight window load covers, so a periodic tick
+    /// cannot cancel the very load that will cover its position.
+    private var pgsOverlayLoadingRange: Range<Int>?
+    /// Which window load is current; an older load's outcome is not news.
+    private var pgsOverlayLoadGeneration = 0
+    /// The last window load failed. Unforced refreshes stop until a seek, an
+    /// item change or a reselection forces one, so a failure is said once.
+    private var pgsOverlayWindowFailed = false
     private var pgsOverlaySelectionGeneration = 0
     private var pgsOverlayItemGeneration = 0
     private var pgsOverlayRevision = 0
@@ -4621,6 +4629,8 @@ final class PlayerController: ObservableObject {
         observeStatus(of: item)
         pgsOverlayItemGeneration &+= 1
         pgsOverlayWindowTask?.cancel()
+        pgsOverlayLoadingRange = nil
+        pgsOverlayWindowFailed = false
         pgsOverlayWindow = nil
         stallObservation.reset()
         player.replaceCurrentItem(with: item)
@@ -4858,11 +4868,9 @@ final class PlayerController: ObservableObject {
                 return
             } catch {
                 guard self.pgsOverlaySelectionGeneration == selectionGeneration else { return }
-                self.pgsOverlayStatus = .failed(error.localizedDescription)
+                self.pgsOverlayStatus = .failed(PGSOverlayPolicy.failureDescription(error))
                 self.pgsOverlayWindow = nil
-                self.showPlaybackNotice(
-                    "\(error.localizedDescription) Video playback was kept unchanged."
-                )
+                self.showPlaybackNotice(PGSOverlayPolicy.failureNotice(error))
             }
         }
     }
@@ -4873,6 +4881,8 @@ final class PlayerController: ObservableObject {
         pgsOverlayPrepareTask = nil
         pgsOverlayWindowTask?.cancel()
         pgsOverlayWindowTask = nil
+        pgsOverlayLoadingRange = nil
+        pgsOverlayWindowFailed = false
         pgsOverlayTrackIndex = nil
         pgsOverlayManifest = nil
         pgsOverlayWindow = nil
@@ -4889,7 +4899,9 @@ final class PlayerController: ObservableObject {
               selectedSubtitle == trackIndex,
               force || PGSOverlayPolicy.shouldRefresh(
                 sourceTimeMs: sourceTimeMs,
-                loadedRange: pgsOverlayWindow?.sourceRange
+                loadedRange: pgsOverlayWindow?.sourceRange,
+                loadingRange: pgsOverlayLoadingRange,
+                windowFailed: pgsOverlayWindowFailed
               )
         else { return }
 
@@ -4905,6 +4917,10 @@ final class PlayerController: ObservableObject {
         let itemBaseMs = baseMs
         let generation = manifest.generation
         pgsOverlayWindowTask?.cancel()
+        pgsOverlayLoadGeneration &+= 1
+        let loadGeneration = pgsOverlayLoadGeneration
+        pgsOverlayLoadingRange = sourceRange
+        pgsOverlayWindowFailed = false
 
         pgsOverlayWindowTask = Task { [weak self] in
             guard let self, let model = self.model else { return }
@@ -4957,7 +4973,10 @@ final class PlayerController: ObservableObject {
                 guard self.pgsOverlaySelectionGeneration == selectionGeneration,
                       self.pgsOverlayItemGeneration == itemGeneration,
                       self.pgsOverlayTrackIndex == trackIndex,
-                      self.selectedSubtitle == trackIndex
+                      self.selectedSubtitle == trackIndex,
+                      // A superseded load that finished before it saw its
+                      // cancellation must not publish over its successor.
+                      self.pgsOverlayLoadGeneration == loadGeneration
                 else { return }
                 self.pgsOverlayRevision &+= 1
                 self.pgsOverlayWindow = PGSOverlayWindow(
@@ -4967,16 +4986,19 @@ final class PlayerController: ObservableObject {
                     sourceRange: sourceRange,
                     cues: rendered
                 )
+                self.pgsOverlayLoadingRange = nil
                 self.pgsOverlayStatus = .ready
             } catch is CancellationError {
                 return
             } catch {
-                guard self.pgsOverlaySelectionGeneration == selectionGeneration else { return }
-                self.pgsOverlayStatus = .failed(error.localizedDescription)
+                guard self.pgsOverlaySelectionGeneration == selectionGeneration,
+                      self.pgsOverlayLoadGeneration == loadGeneration
+                else { return }
+                self.pgsOverlayLoadingRange = nil
+                self.pgsOverlayWindowFailed = true
+                self.pgsOverlayStatus = .failed(PGSOverlayPolicy.failureDescription(error))
                 self.pgsOverlayWindow = nil
-                self.showPlaybackNotice(
-                    "\(error.localizedDescription) Video playback was kept unchanged."
-                )
+                self.showPlaybackNotice(PGSOverlayPolicy.failureNotice(error))
             }
         }
     }
@@ -7195,6 +7217,8 @@ final class PlayerController: ObservableObject {
         observeStatus(of: item)
         pgsOverlayItemGeneration &+= 1
         pgsOverlayWindowTask?.cancel()
+        pgsOverlayLoadingRange = nil
+        pgsOverlayWindowFailed = false
         pgsOverlayWindow = nil
         player.replaceCurrentItem(with: item)
         if resumeAttempt?.repairAdmitted == true {
@@ -9388,6 +9412,8 @@ extension PlayerController: PreparedSuccessorHost {
         observeStatus(of: item)
         pgsOverlayItemGeneration &+= 1
         pgsOverlayWindowTask?.cancel()
+        pgsOverlayLoadingRange = nil
+        pgsOverlayWindowFailed = false
         pgsOverlayWindow = nil
         stallObservation.reset()
         // M3. The predecessor's final reading, and then the instant the item

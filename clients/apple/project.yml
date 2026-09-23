@@ -126,6 +126,8 @@ targets:
         buildPhase: resources
       - path: ../../tests/playback/live-tv-start-cases.json
         buildPhase: resources
+      - path: ../../tests/playback/pgs-overlay-cases.json
+        buildPhase: resources
       - path: ../../tests/playback/dvr-visibility-cases.json
         buildPhase: resources
     dependencies:
@@ -155,6 +157,8 @@ targets:
       - path: ../../tests/playback/live-tv-guide-cases.json
         buildPhase: resources
       - path: ../../tests/playback/live-tv-start-cases.json
+        buildPhase: resources
+      - path: ../../tests/playback/pgs-overlay-cases.json
         buildPhase: resources
       - path: ../../tests/playback/dvr-visibility-cases.json
         buildPhase: resources

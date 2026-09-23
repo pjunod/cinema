@@ -10678,6 +10678,170 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
+    // MARK: - PGS overlay: the shared seek, tick and manifest-response fixture
+    //
+    // tests/playback/pgs-overlay-cases.json is the same file the Android JVM
+    // suite reads (PGSOverlayTest), so the two clients cannot drift apart on
+    // when a seek refreshes, which cue is due, or which answers stop a poll.
+
+    private func pgsOverlayCasesData() throws -> Data {
+        let fixtureURL = try XCTUnwrap(
+            Bundle(for: AppleClientTests.self).url(
+                forResource: "pgs-overlay-cases",
+                withExtension: "json"
+            )
+        )
+        return try Data(contentsOf: fixtureURL)
+    }
+
+    private func pgsOverlayCasesFixture() throws -> PGSOverlayCasesFixture {
+        let data = try pgsOverlayCasesData()
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(PGSOverlayCasesFixture.self, from: data)
+    }
+
+    private func pgsOverlayRange(_ bounds: [Int]?) -> Range<Int>? {
+        guard let bounds else { return nil }
+        return bounds[0]..<bounds[1]
+    }
+
+    /// Apple has no stale-frame problem on a seek (its cues are timed layers on
+    /// an `AVSynchronizedLayer`), so `clear_now` is Android's; the refresh
+    /// decision, the window and the cue due are shared. The cue due is read
+    /// through `itemInterval`, the interval the renderer schedules, at a zero
+    /// and a non-zero item base.
+    func testPGSOverlaySeekCasesFromSharedFixture() throws {
+        let fixture = try pgsOverlayCasesFixture()
+        let cues = fixture.manifest.cues.map {
+            pgsOverlayCue(id: $0.id, startMs: $0.startMs, endMs: $0.endMs)
+        }
+        XCTAssertGreaterThanOrEqual(fixture.seekCases.count, 6)
+        for seek in fixture.seekCases {
+            let loaded = pgsOverlayRange(seek.loadedWindow)
+            let refresh = PGSOverlayPolicy.shouldRefresh(
+                sourceTimeMs: seek.toMs,
+                loadedRange: loaded,
+                loadingRange: nil
+            )
+            XCTAssertEqual(refresh, seek.expect.refresh, seek.name)
+            let window = refresh
+                ? PGSOverlayPolicy.windowRange(
+                    at: seek.toMs,
+                    durationMs: fixture.manifest.durationMs
+                )
+                : loaded
+            XCTAssertEqual(window, pgsOverlayRange(seek.expect.window), seek.name)
+            for baseMs in [0, 5_000] {
+                let due = cues.first {
+                    PGSOverlayPolicy.itemInterval(cue: $0, baseMs: baseMs)?
+                        .contains(seek.toMs - baseMs) == true
+                }
+                XCTAssertEqual(due?.id, seek.expect.activeCue, "\(seek.name) at base \(baseMs)")
+            }
+        }
+    }
+
+    /// The 1 s periodic observer used to cancel and restart a window load for
+    /// as long as the position was outside the *published* window, which after
+    /// an out-of-window seek is the whole load. Any PNG slower than about a
+    /// second meant the window never arrived.
+    func testPGSOverlayTickDoesNotCancelCoveringLoad() throws {
+        let fixture = try pgsOverlayCasesFixture()
+        XCTAssertGreaterThanOrEqual(fixture.tickCases.count, 5)
+        for tick in fixture.tickCases {
+            XCTAssertEqual(
+                PGSOverlayPolicy.shouldRefresh(
+                    sourceTimeMs: tick.positionMs,
+                    loadedRange: pgsOverlayRange(tick.loadedWindow),
+                    loadingRange: pgsOverlayRange(tick.loadingWindow),
+                    windowFailed: tick.windowFailed
+                ),
+                tick.expect.refresh,
+                tick.name
+            )
+        }
+        let covering = try XCTUnwrap(fixture.tickCases.first {
+            $0.loadingWindow != nil && !$0.windowFailed && !$0.expect.refresh
+        })
+        XCTAssertTrue(
+            PGSOverlayPolicy.shouldRefresh(
+                sourceTimeMs: covering.positionMs,
+                loadedRange: pgsOverlayRange(covering.loadedWindow)
+            ),
+            "the covering-load row must be one the published window alone would refresh"
+        )
+    }
+
+    /// After a window failed, the window is nil and the manifest is kept, so
+    /// the published-window rule alone refreshes on every tick: a refetch and
+    /// another `degraded_notice` every second. Unforced refreshes now stop at
+    /// a failure; a seek or a reselection still forces one.
+    func testPGSOverlayFailedWindowIsNotRetriedOrRenoticedByTheTick() {
+        var notices = 0
+        var failed = false
+        for second in 0..<30 {
+            let position = 120_000 + second * 1_000
+            if PGSOverlayPolicy.shouldRefresh(
+                sourceTimeMs: position,
+                loadedRange: nil,
+                loadingRange: nil,
+                windowFailed: failed
+            ) {
+                // Every refresh of this window fails and raises one notice,
+                // exactly as `refreshPGSOverlayWindow`'s catch does.
+                notices += 1
+                failed = true
+            }
+        }
+        XCTAssertEqual(notices, 1)
+        XCTAssertTrue(PGSOverlayPolicy.shouldRefresh(
+            sourceTimeMs: 120_000,
+            loadedRange: nil
+        ), "the published-window rule alone would have retried every tick")
+    }
+
+    func testPGSOverlayManifestResponsesFromSharedFixture() throws {
+        let fixture = try pgsOverlayCasesFixture()
+        // The bodies go to the reader byte for byte as the server would send
+        // them, so they are taken from the raw file, not from a decoded copy.
+        let raw = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: pgsOverlayCasesData()) as? [String: Any]
+        )
+        let bodies = try XCTUnwrap(raw["manifest_responses"] as? [[String: Any]])
+            .map { $0["body"] as Any }
+        XCTAssertEqual(bodies.count, fixture.manifestResponses.count)
+        XCTAssertGreaterThanOrEqual(fixture.manifestResponses.count, 6)
+        for (answer, rawBody) in zip(fixture.manifestResponses, bodies) {
+            var headers = ["Content-Type": "application/json"]
+            if let retryAfter = answer.retryAfter { headers["Retry-After"] = retryAfter }
+            let http = try XCTUnwrap(HTTPURLResponse(
+                url: try XCTUnwrap(URL(string: "http://plurx.test/api/v1/files/42/subs/3/overlay.json")),
+                statusCode: answer.status,
+                httpVersion: "HTTP/1.1",
+                headerFields: headers
+            ))
+            let body = try JSONSerialization.data(withJSONObject: rawBody)
+            do {
+                switch try PlurxAPI.pgsOverlayManifestFetch(http, data: body) {
+                case .ready(let manifest):
+                    XCTAssertEqual(answer.expect.disposition, "ready", answer.name)
+                    XCTAssertNoThrow(try manifest.validated(fileId: 42, trackIndex: 3), answer.name)
+                case .preparing(let retryAfterMs):
+                    XCTAssertEqual(answer.expect.disposition, "preparing", answer.name)
+                    XCTAssertEqual(retryAfterMs, answer.expect.retryAfterMs, answer.name)
+                }
+            } catch {
+                XCTAssertEqual(answer.expect.disposition, "terminal", answer.name)
+                let notice = PGSOverlayPolicy.failureNotice(error)
+                if let expected = answer.expect.notice {
+                    XCTAssertEqual(notice, expected, answer.name)
+                }
+                XCTAssertTrue(notice.hasSuffix("Video playback was kept unchanged."), answer.name)
+            }
+        }
+    }
+
     private func pgsOverlayManifest(cues: [PGSOverlayCue]) -> PGSOverlayManifest {
         PGSOverlayManifest(
             schema: 1,
@@ -10849,7 +11013,7 @@ final class AppleClientTests: XCTestCase {
 
     func testPGSOverlayUsesSourceTimeWithANonZeroItemBase() {
         XCTAssertEqual(
-            [503, 202, 200].map(PGSOverlayPolicy.manifestDisposition),
+            [503, 202, 200].map { PGSOverlayPolicy.manifestDisposition($0) },
             [.preparing, .preparing, .ready]
         )
         XCTAssertEqual(PGSOverlayPolicy.retryAfterMs("2"), 2_000)
@@ -11585,4 +11749,61 @@ private extension PreferredLanguageStatus {
     /// state to be added without anyone deciding how it should read.
     static let allFive: [PreferredLanguageStatus] =
         [.selected, .available, .missing, .unknown, .noTracks]
+}
+
+// MARK: - tests/playback/pgs-overlay-cases.json
+
+private struct PGSOverlayCasesFixture: Decodable {
+    struct Manifest: Decodable {
+        struct Cue: Decodable {
+            let id: String
+            let startMs: Int
+            let endMs: Int
+        }
+        let durationMs: Int
+        let cues: [Cue]
+    }
+
+    struct SeekCase: Decodable {
+        struct Expect: Decodable {
+            let refresh: Bool
+            let clearNow: Bool
+            let activeCue: String?
+            let window: [Int]?
+        }
+        let name: String
+        let loadedWindow: [Int]?
+        let shownCue: String?
+        let toMs: Int
+        let expect: Expect
+    }
+
+    struct TickCase: Decodable {
+        struct Expect: Decodable {
+            let refresh: Bool
+        }
+        let name: String
+        let positionMs: Int
+        let loadedWindow: [Int]?
+        let loadingWindow: [Int]?
+        let windowFailed: Bool
+        let expect: Expect
+    }
+
+    struct ManifestResponse: Decodable {
+        struct Expect: Decodable {
+            let disposition: String
+            let retryAfterMs: Int?
+            let notice: String?
+        }
+        let name: String
+        let status: Int
+        let retryAfter: String?
+        let expect: Expect
+    }
+
+    let manifest: Manifest
+    let seekCases: [SeekCase]
+    let tickCases: [TickCase]
+    let manifestResponses: [ManifestResponse]
 }

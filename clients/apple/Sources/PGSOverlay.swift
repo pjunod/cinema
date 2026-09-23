@@ -159,12 +159,39 @@ enum PGSOverlayPolicy {
     static let refreshMarginMs = 20_000
     static let maximumPrepareSeconds = 600
 
-    static func manifestDisposition(_ statusCode: Int) -> PGSOverlayManifestDisposition {
+    /// The server remembered a failed preparation; asking again only replays it.
+    static let prepareFailedCode = "pgs_overlay_prepare_failed"
+    /// Both preparation slots are busy: the one refusal worth waiting out.
+    static let capacityCode = "pgs_overlay_capacity"
+    /// docs/clients/PGS_OVERLAY_PLAN.md §15.2, the same sentence Android shows.
+    static let prepareFailedMessage = "That subtitle could not be prepared."
+
+    /// A typed code outranks the status. A codeless 503 stays a wait so an
+    /// older server that still answers a failure that way keeps its behaviour.
+    static func manifestDisposition(
+        _ statusCode: Int,
+        code: String? = nil
+    ) -> PGSOverlayManifestDisposition {
+        if code == prepareFailedCode { return .terminal }
+        if code == capacityCode { return .preparing }
         switch statusCode {
-        case 200: .ready
-        case 202, 503: .preparing
-        default: .terminal
+        case 200: return .ready
+        case 202, 503: return .preparing
+        default: return .terminal
         }
+    }
+
+    /// The sentence a failed overlay shows, before the playback clause.
+    static func failureDescription(_ error: Error) -> String {
+        if (error as? APIError)?.refusalCode == prepareFailedCode {
+            return prepareFailedMessage
+        }
+        return error.localizedDescription
+    }
+
+    /// Every overlay failure keeps the video exactly as it was (plan §16).
+    static func failureNotice(_ error: Error) -> String {
+        "\(failureDescription(error)) Video playback was kept unchanged."
     }
 
     static func retryAfterMs(_ header: String?) -> Int {
@@ -177,6 +204,15 @@ enum PGSOverlayPolicy {
 
     static func itemTimeMs(sourceTimeMs: Int, baseMs: Int) -> Int {
         sourceTimeMs - baseMs
+    }
+
+    /// When a cue is on screen, in item time. The renderer schedules exactly
+    /// this interval, so the fixture's `active_cue` and what AVFoundation shows
+    /// cannot disagree. `nil` for a cue that ended before the item began.
+    static func itemInterval(cue: PGSOverlayCue, baseMs: Int) -> Range<Int>? {
+        let start = max(0, itemTimeMs(sourceTimeMs: cue.startMs, baseMs: baseMs))
+        let end = itemTimeMs(sourceTimeMs: cue.endMs, baseMs: baseMs)
+        return end > start ? start..<end : nil
     }
 
     static func windowRange(at sourceTimeMs: Int, durationMs: Int) -> Range<Int> {
@@ -192,6 +228,29 @@ enum PGSOverlayPolicy {
         guard let loadedRange else { return true }
         return sourceTimeMs < loadedRange.lowerBound
             || sourceTimeMs >= loadedRange.upperBound - refreshMarginMs
+    }
+
+    /// The unforced refresh the 1 s periodic observer asks for.
+    ///
+    /// Two things it used to get wrong. While the position was outside the
+    /// *published* window, which is the whole load after any out-of-window
+    /// seek, every tick cancelled and restarted the in-flight load, so a window
+    /// whose PNGs took over a second never arrived and nothing was shown. And
+    /// after a window failed, the next tick fetched it again and raised
+    /// another notice, every second, for as long as playback ran. A seek, an
+    /// item change or a reselection still forces a refresh.
+    static func shouldRefresh(
+        sourceTimeMs: Int,
+        loadedRange: Range<Int>?,
+        loadingRange: Range<Int>?,
+        windowFailed: Bool = false
+    ) -> Bool {
+        if windowFailed { return false }
+        if let loadingRange,
+           !shouldRefresh(sourceTimeMs: sourceTimeMs, loadedRange: loadingRange) {
+            return false
+        }
+        return shouldRefresh(sourceTimeMs: sourceTimeMs, loadedRange: loadedRange)
     }
 
     static func windowFitsDecodedBudget(_ cues: [PGSOverlayCue]) -> Bool {
