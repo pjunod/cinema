@@ -594,6 +594,25 @@ decoration — watch state, resolution, `media` facts, child counts, and the
 `{leaves, watched}` rollup on shows, seasons and folders — is a page-wide
 batched query, never an N+1.
 
+**Ordering is total: every sort ends in `id`** — `id DESC` for `added`, which
+already had it, and `id ASC` for the other four. The visible key is not
+unique: three items can all reduce to the sort title `harbor lights`, two can
+share a year, and a whole library can share "no capture date". Without a
+unique final key SQLite may return tied rows in a different order for each
+request, and a client paging by `offset` then reads two adjacent pages of two
+different orderings — showing one item twice and never showing its neighbour.
+
+Each row carries `sort_title`, the server's own key: the title lowercased with
+a leading `the `, `a ` or `an ` removed when something remains (folders keep
+their raw name, because a directory called "The Lake House 2021" is a place,
+not a work). It is there so a native client merging several libraries into one
+grid can merge on the key the server sorted by instead of re-deriving it in
+its own language. **Compare it as UTF-8 bytes** — that is SQLite's BINARY
+collation — and not with a locale-aware or case-insensitive compare, which
+disagrees with the server on accented and non-Latin titles.
+`tests/contracts/library-sort-cases.json` pins this order for the server and
+for every client that merges.
+
 `GET /api/v1/search` takes `q` and the same `limit` clamp, and returns
 `{results}` alone — no `total`, no paging. The query is split on every
 non-alphanumeric character, lowercased, quoted per token, and the **last**

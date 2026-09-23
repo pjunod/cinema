@@ -16376,7 +16376,19 @@ mod tests {
     /// the absence of `media` — is pre-S1's.
     const PRE_S1_LIST_BODY: &str = concat!(
         r#"{"items":[{"id":1,"library_id":1,"kind":"movie","parent_id":null,"#,
-        r#""title":"Neon District 2049","year":2017,"overview":null,"#,
+        r#""title":"Neon District 2049","#,
+        // A-03 landed `sort_title` on ItemDto after this golden was captured,
+        // for the same reason S3's `genres` did: it is additive on its own
+        // terms. It is always present, it is the stored key the library
+        // `ORDER BY` already sorted on rather than anything newly computed,
+        // and the native clients merge library cursors on it. The decoders on
+        // both sides of the fleet skip keys they do not know — Swift's
+        // `JSONDecoder` by default, `Net.kt`'s `Json { ignoreUnknownKeys =
+        // true }` on Android — so an older client reads this body unchanged.
+        // The baseline this test defends therefore moved by exactly one more
+        // field. Anything else appearing here is what it is still watching for.
+        r#""sort_title":"neon district 2049","#,
+        r#""year":2017,"overview":null,"#,
         r#""season_number":null,"episode_number":null,"air_date":null,"#,
         r#""runtime_ms":null,"added_at":{added},"updated_at":{updated},"#,
         // S3 landed `genres` on ItemDto after this golden was captured. It is

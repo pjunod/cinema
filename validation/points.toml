@@ -631,6 +631,10 @@ title = "Shared native API wire contract"
 contract = "The server, Apple clients, and Android clients decode the same representative JSON without field-name or type drift."
 paths = [
   "tests/contracts/native-api.json",
+  # The library grid's ORDER BY, pinned from outside the server. The Rust
+  # store replays it; the Apple and Android merges must reproduce it from
+  # per-library cursors, so a change here is a change to all three at once.
+  "tests/contracts/library-sort-cases.json",
   "crates/plurxd/src/http/{dto,mod}.rs",
   "clients/apple/Sources/{PlurxAPI,Models}.swift",
   "clients/android/app/src/main/java/tv/plurx/app/data/**",

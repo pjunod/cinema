@@ -109,6 +109,18 @@ pub struct ItemDto {
     pub kind: ItemKind,
     pub parent_id: Option<i64>,
     pub title: String,
+    /// The server's own sort key: `domain::sort_title_for` applied at write
+    /// time and stored beside the title, which is what every library
+    /// `ORDER BY` sorts on.
+    ///
+    /// It is exposed because the native clients merge several library cursors
+    /// into one grid, and a merge is only the server's order if it uses the
+    /// server's key. Re-deriving it on each client means three lowercasing
+    /// rules in three languages having to agree forever, on accented and
+    /// non-Latin titles included; shipping the key costs a short string per
+    /// row and removes the question. Compare it as UTF-8 bytes — SQLite's
+    /// BINARY collation — not with a locale-aware compare.
+    pub sort_title: String,
     pub year: Option<i32>,
     pub overview: Option<String>,
     pub season_number: Option<i32>,
@@ -245,6 +257,7 @@ impl From<Item> for ItemDto {
             kind: item.kind,
             parent_id: item.parent_id,
             title: item.title,
+            sort_title: item.sort_title,
             year: item.year,
             overview: item.overview,
             season_number: item.season_number,

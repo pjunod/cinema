@@ -3078,6 +3078,42 @@ pub(crate) const TOP_LEVEL_ITEM_PREDICATE: &str =
     "(kind IN ('movie','show','book','audiobook') OR \
      (kind IN ('folder','video','photo') AND parent_id IS NULL))";
 
+/// The `ORDER BY` for a library grid page, for every backend and every sort.
+///
+/// **Every clause ends in `id`, and that is the point.** `sort_title` is not
+/// unique — "Harbor Lights" the 1947 film and "Harbor Lights" the 1971 film
+/// reduce to the same key — and neither are `year`, a resolution or a capture
+/// date. Without a unique final key SQLite is free to return equal rows in
+/// any order it likes, and it does not have to pick the same one twice. A
+/// client paging by `offset` then asks for rows 0..199 and rows 200..399 of
+/// two different orderings, so an item on the seam is shown twice and its
+/// neighbour is never shown at all. That is invisible on a small library and
+/// certain on a large one, and it is why a client cannot be asked to merge
+/// several of these pages into one grid until the order is total.
+///
+/// `Added` already ended in `id DESC` and keeps it: giving it `id ASC` for
+/// symmetry would reorder equal-`added_at` rows that viewers see today, for
+/// nothing. The four that gain `id ASC` had no tie-break at all.
+///
+/// One function rather than one per backend because the SQLite and Hiqlite
+/// media stores each spelled this out, three copies in total, and a merge
+/// order that differs between backends is a bug no single-backend test can
+/// see. Native clients merge library cursors against this exact order, so it
+/// is also pinned from the outside by `tests/contracts/library-sort-cases.json`.
+pub(crate) fn item_sort_order_by(sort: ItemSort) -> &'static str {
+    match sort {
+        ItemSort::Title => "sort_title ASC, id ASC",
+        ItemSort::Added => "added_at DESC, id DESC",
+        ItemSort::Year => "year IS NULL, year DESC, sort_title ASC, id ASC",
+        // Best (max) file height per item, highest first; no-height items last.
+        ItemSort::Resolution => {
+            "COALESCE((SELECT MAX(f.height) FROM files f WHERE f.item_id = items.id), -1) DESC, \
+             sort_title ASC, id ASC"
+        }
+        ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC, id ASC",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootFingerprintStatus {
     Established,
@@ -5595,5 +5631,81 @@ mod producer_recovery_schema_tests {
                 .contains(&format!("<= {MAX_DECODE_RESTRICTION_BYTES}")),
             "the ledger's CHECK must name MAX_DECODE_RESTRICTION_BYTES exactly"
         );
+    }
+}
+
+#[cfg(test)]
+mod item_sort_order_tests {
+    use super::item_sort_order_by;
+    use crate::domain::ItemSort;
+
+    /// Every library sort ends in a unique key.
+    ///
+    /// This is a text assertion on the clause, and it is deliberately not the
+    /// fixture replay in `tests/store_contract.rs`, because **that replay does
+    /// not detect the tie-break's removal.** Run it against
+    /// `sort_title ASC` with no `id` and it still passes: SQLite happens to
+    /// return the tied rows of this table in rowid order, which is the order
+    /// the fixture expects. That it *happens* to is the entire problem — it is
+    /// not promised by anything, it can change with the query plan, the
+    /// schema, an added index or the backend, and when it changes the symptom
+    /// is a client paging by `offset` that reads two adjacent pages of two
+    /// different orderings: an item on the seam shown twice and its neighbour
+    /// never shown at all. A property nothing guarantees cannot be pinned by
+    /// observing that it currently holds; it has to be pinned by requiring the
+    /// clause that makes it true.
+    ///
+    /// `Added` ends in `id DESC` and the other four in `id ASC`. `Added` is
+    /// not made symmetric on purpose: it already had a tie-break, and flipping
+    /// it would reorder equal-`added_at` rows that viewers see today for
+    /// nothing.
+    #[test]
+    fn every_sort_ends_in_a_unique_key() {
+        for sort in [
+            ItemSort::Title,
+            ItemSort::Added,
+            ItemSort::Year,
+            ItemSort::Resolution,
+            ItemSort::Recorded,
+        ] {
+            let clause = item_sort_order_by(sort);
+            let last = clause
+                .rsplit(',')
+                .next()
+                .expect("a non-empty ORDER BY")
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                last.first().copied(),
+                Some("id"),
+                "{sort:?} ends in {clause:?}, which has no unique final key"
+            );
+            assert!(
+                matches!(last.get(1).copied(), Some("ASC") | Some("DESC")),
+                "{sort:?} ends in {clause:?}, whose final key has no explicit direction"
+            );
+        }
+        assert!(item_sort_order_by(ItemSort::Added).ends_with("id DESC"));
+    }
+
+    /// The clause is one function, and every backend's page and count use it.
+    ///
+    /// Three copies of this `match` is how the SQLite and Hiqlite stores would
+    /// drift apart, and a merge order that differs between backends is a
+    /// defect no single-backend test can see — `for_each_backend` runs the
+    /// Hiqlite voters only under `hiqlite-contract-tests`, so on an ordinary
+    /// run the fixture replay never compares them at all.
+    #[test]
+    fn the_stores_do_not_carry_their_own_copies_of_the_order() {
+        for source in [
+            include_str!("sqlite/media.rs"),
+            include_str!("hiqlite_media.rs"),
+        ] {
+            assert!(
+                !source.contains("ItemSort::Title =>"),
+                "a media store spells the library ORDER BY itself again"
+            );
+            assert!(source.contains("item_sort_order_by(sort)"));
+        }
     }
 }
