@@ -161,7 +161,14 @@ console.log(JSON.stringify({
         observed = json.loads(result.stdout)
         self.assertEqual(46, observed["rowCount"])
         self.assertEqual([10], observed["cellCounts"])
-        self.assertIn("ldd | grep fontconfig", observed["s04Notes"])
+        # A distinctive phrase from the S-04 row's live Notes cell: this
+        # pins that the parser reads a real row's last column, and it moves
+        # when that row does. Escaped-pipe parsing has its own coverage in
+        # `test_overlay_javascript_contract_executes`.
+        self.assertIn(
+            "folds the encoder executable into the attestation batch",
+            observed["s04Notes"],
+        )
         self.assertTrue(observed["schemaMismatchFailedClosed"])
 
     def test_overlay_javascript_contract_executes(self) -> None:

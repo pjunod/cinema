@@ -637,6 +637,12 @@ pub struct AppState {
     /// Ordinary authentication populates it; cache-only routes never reach
     /// Store on a miss.
     pub(crate) cache_only_admin_proofs: crate::http::CacheOnlyAdminProofCache,
+    /// Process-local, bounded failed-login history. It never enters the Store,
+    /// so a hostile request cannot turn authentication pressure into Raft
+    /// writes or a replicated account lockout.
+    pub(crate) login_throttle: crate::http::LoginThrottle,
+    /// Node-local network boundary for security-sensitive forwarding headers.
+    pub(crate) trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
     pub catalogue: CatalogueReader,
     /// Read-only projection of the selected backend's watch-state convergence.
@@ -818,6 +824,7 @@ impl AppState {
                 server_name,
                 node_id,
                 cluster_advertisement: false,
+                trusted_proxies: Vec::new(),
                 scan_prune_percent: plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
                 // Process-lifetime key. Production resolves one from disk in
                 // `open_store`; this constructor is for callers that have no
@@ -858,6 +865,7 @@ impl AppState {
             server_name,
             node_id,
             cluster_advertisement,
+            trusted_proxies,
             scan_prune_percent,
             credential_key,
             replication,
@@ -988,6 +996,8 @@ impl AppState {
         AppState {
             store,
             cache_only_admin_proofs,
+            login_throttle: Default::default(),
+            trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
             replication,
             peer_activity: crate::http::internal_activity::PeerActivityClient::new(
@@ -1151,6 +1161,7 @@ pub struct AppConfig {
     pub server_name: String,
     pub node_id: String,
     pub cluster_advertisement: bool,
+    pub trusted_proxies: Vec<ipnet::IpNet>,
     pub scan_prune_percent: u8,
     /// Node-local key for durable credentials plurx replays rather than
     /// verifies. Resolved by `open_store` so a boot that cannot open the

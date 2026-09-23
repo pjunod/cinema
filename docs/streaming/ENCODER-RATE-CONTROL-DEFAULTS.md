@@ -1,8 +1,9 @@
 # Encoder rate-control defaults — flip a family to quality mode only on evidence
 
-**Status:** ready for review · **Executes:** Q1 / F-stream-1 from
+**Status:** implementation in progress — M1, M2 and M5 complete; M3/M4 need
+fleet acceptance captures · **Executes:** Q1 / F-stream-1 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-· **Written:** 2026-09-20 against `main` @ `88a3957a`
+· **Written:** 2026-09-20 · **Implementation base:** `main` @ `21eab120`
 
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
 
@@ -10,8 +11,9 @@ Read the review's §3.1 row Q1 and the assessment's Q1 / F-stream-1 rows
 ([ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md))
 first, then §4 of
 [PERF2-PLAN.md](../performance/PERF2-PLAN.md) (N1), which built the machinery
-this plan reuses. Work the milestones in order; each is one draft PR into
-`main` under the fast lane. Every `file:line` below was read at `88a3957a`
+this plan reuses. The whole plan is one draft PR into `main`; milestones are
+logical commits and Execution-log rows under the current workboard protocol.
+Every `file:line` below was first read at `88a3957a`
 and is marked **re-verify at build time**. If a step seems to require
 changing `EffectiveRateControl::recipe_value()`'s VBR spelling, the HDR10
 grade's forced VBR, or the `-maxrate 1.5× / -bufsize 2×` bounds, stop and
@@ -180,10 +182,44 @@ schema the harness already validates) with balanced `easy`/`hard` halves:
 
 All SDR, because the harness requires it and because the HDR10 grade is out
 of scope (its rate control is a separate qualified policy). A tone-mapped SDR
-*output* of an HDR source is admissible once the harness lets a fixture
-declare `dynamic_range: hdr10` with `output_grade: sdr`; that is a harness
-change with its own PR (§5.2) and is required before the "every HDR tone-map
-session goes through this" claim in the appendix can be measured.
+*output* of an HDR source is admissible once the **scorer** can handle it, not
+merely once the manifest can spell it. `score_vmaf` builds its graph with no
+tone-map on either leg — `format=yuv420p` converts depth and chroma, not
+transfer or primaries — so an admitted `dynamic_range: hdr10` fixture would
+have a PQ reference compared against BT.709 SDR output. Both modes would then
+score the same meaningless number: `vmaf_regression` and `quality_benefit_path`
+would compare noise while the byte gates kept working, which is a gate passing
+for the wrong reason rather than one failing loudly. `load_rate_control_corpus`
+therefore refuses `hdr10` and names the missing tone-map. Adding the tone-map
+is the harness change with its own PR, and it is required before the "every HDR
+tone-map session goes through this" claim in the appendix can be measured.
+
+**Fixture reproducibility is a property of the recipe, not of the manifest.**
+`scripts/bench fixtures` skips a file that already exists, so a pinned
+`reference_sha256` is only reachable on a host that does not already hold the
+bytes when the recipe produces the same bytes every time. Three things are
+needed and the corpus originally had only the first two, and only on four of
+its six fixtures:
+
+1. **Bit-exact muxing.** Without `-map_metadata -1 -fflags +bitexact
+   -flags:v +bitexact -flags:a +bitexact`, Matroska writes a random SegmentUID
+   and Lavf tags, so two runs of the same recipe differ.
+2. **A seed on anything random.** The `grainy` fixture's grain comes from
+   `noise=alls=40:allf=t+u` with no `all_seed`, which changes the *pixels* as
+   well as the container.
+3. **A fixed thread count.** libx264 partitions frame threads by the host's
+   core count, so the same bit-exact recipe produces different bytes on a
+   16-core and a 2-core machine. This is why even the four bit-exact fixtures'
+   pinned hashes could not be reproduced on another host. `-threads 1` closes
+   it, measured: the same recipe under `taskset -c 0,1` and with all 16 cores
+   available produces one hash.
+
+All six fixtures the pinned manifests reference now carry all three, and both
+`scripts/perf2-rate-control-n1-corpus.json` and the n2 manifest are re-pinned
+together from that recipe. The pins remain tied to the encoder build — they
+were regenerated on ffmpeg 8.0.1-3ubuntu2 (the controller's accepted build) —
+and nothing in the harness can make a hash portable across x264 versions; what
+is now portable is everything the controller actually varies.
 
 ### 3.3 The benefit gate
 
@@ -258,9 +294,9 @@ after deploy.
 ### 5.2 Corpus and harness extension
 
 New fixtures in `scripts/bench fixtures`; n2 corpus manifest with pinned
-SHA-256s; harness accepts `output_grade` on a fixture and refuses an HDR
-source whose output grade is not `sdr` (so an HDR10-rung capture can never
-be scored against an SDR reference by accident). Python gate:
+SHA-256s; harness validates `output_grade` on a fixture and refuses an HDR
+source outright while `score_vmaf` has no tone-map (so an HDR10-rung capture
+can never be scored against an SDR reference by accident). Python gate:
 `make operations-check` (`Makefile:130-131`, which runs
 [`tests/operations/test_bench_rate_control.py`](../../tests/operations/test_bench_rate_control.py))
 plus a `scripts/bench rate-control --modes vbr --corpus
@@ -307,7 +343,7 @@ though x264 CRF-with-VBV is the best-understood mode of the five.
 
 Acceptance: as 5.3, for `Encoder::Software`.
 
-### 5.5 Close the un-runnable families
+### 5.5 Close the families without acceptance evidence
 
 Record in this document's §7 and in OPERATIONS.md that NVENC, VA-API and
 VideoToolbox defaults remain Bitrate with the observation that would unpark
@@ -325,11 +361,12 @@ actually serve sessions; the doc row matches.
   focused commands are `cargo test -p plurxd rate_control`, `cargo test -p
   plurx-core recipe`, `cargo test -p plurx-core encoder`.
 - `make operations-check` covers the `scripts/bench` contract tests.
-- Each flip PR body carries: artefact path and SHA-256, corpus manifest
+- The one plan PR carries each flip's artefact path and SHA-256, corpus manifest
   SHA-256, deployed build string, the per-fixture table, and the sentence
   "every SDR transcode recipe on <family> changes key; caches refill by
   mismatch".
-- Rollout order: 5.1 → 5.2 → 5.3 → 5.4; 5.5 is documentation. One PR each.
+- Rollout order inside the one plan PR: 5.1 → 5.2 → 5.3 → 5.4; 5.5 is
+  documentation.
 - Production counter (review §5.3 rule): after a flip, watch
   `plurx_cache_serves_total` (existing) for the expected miss wave and
   `plurx_sessions_total{encoder}` for the family; alert owner: Paul; window:
@@ -337,25 +374,87 @@ actually serve sessions; the doc row matches.
 - Rollback: revert the one-line default; new sessions return to the old
   recipe key, whose entries may still be cached.
 
-## 7. Open questions
+## 7. Evidence and decisions
 
-1. Whether the n2 corpus should include a burned-subtitle fixture: a burn
-   changes the encoder's input, not its rate control, so it is excluded
-   here; say so if the reviewer disagrees.
-2. The tone-mapped-SDR-output-of-HDR fixture needs the harness change in
-   §5.2; whether to gate the QSV flip on it, or accept SDR-source evidence
-   for SDR output, is Paul's call. This plan gates on SDR sources only and
-   records the HDR-source run as follow-up evidence.
-3. Whether a flipped family should also raise `bitrate_for_height` ceilings
-   (they become caps, not targets): no — unchanged caps keep
-   `Rung.peak_kbps` and every advertised BANDWIDTH honest (see
-   [HONEST-MASTER-PLAYLIST.md](HONEST-MASTER-PLAYLIST.md)).
+### 7.1 Read-only fleet census — 2026-09-21 06:54 UTC
+
+All four Linux daemons ran OCI revision
+`882862e887fa26a064be0de30bf9797698af8e84`. The evidence was read-only:
+`/api/v1/server`, the boot capability line in `docker logs plurxd`, and
+`/metrics`; no setting, container, library or media file changed.
+
+| Deployment host | Selected family / boot capability | Process-lifetime encoded-session counters | Decision |
+|---|---|---|---|
+| `nynuc` (media1) | QSV selected; QSV, VA-API and software quality probes passed | QSV 0, VA-API 0, software 0, NVENC 0, VideoToolbox 0 | QSV stays Bitrate: capability is not the n2 comparison. |
+| `nuc4` (lab4) | QSV selected; QSV, VA-API and software quality probes passed | all five encoded families 0 | QSV and software stay Bitrate pending their separate captures. |
+| `nuc3` (lab3 learner) | QSV selected; QSV, VA-API and software quality probes passed | all five encoded families 0 | QSV stays Bitrate. `/api/v1/server` returned 503 on the learner; the OCI revision label, boot log and metrics remained readable. |
+| `m6` (lab6) | VA-API selected; VA-API and software quality probes passed; QSV and NVENC validation failed | VA-API 0, software 0, NVENC 0, VideoToolbox 0; copy 3 and VOD 1 | The old plan statement that no VA-API node existed is superseded. VA-API still stays Bitrate because the new process has no encoded session evidence, much less a week or an n2 comparison. |
+
+The counters had restarted with the 2026-09-21 deployment, about 2.5 hours
+before this read. They are a current-process observation, not a seven-day
+history. NVENC is unusable on these Linux nodes, VideoToolbox is absent, and
+the Apple build host runs no daemon. The observation that unparks either
+family remains a deployed node with a non-zero family counter for a week;
+VA-API additionally needs its own n2 comparison now that a selectable node
+exists.
+
+### 7.2 Safe implementation boundary
+
+- M1 is behavior-neutral: an absent setting is now distinct from explicit
+  `bitrate`, every `Encoder::default_rate_mode()` remains Bitrate, and
+  `/system` reports all five defaults beside the quality capability verdicts.
+  It is behavior-neutral including in the *speculative pretranscode dedupe
+  key*, which the first implementation moved. `pretranscode_policy_generation_for`
+  hashed `requested:family_default` for an unset pair where it had hashed
+  `requested:bitrate`; that string is durable per-queue-row state and a
+  mismatch is a hard `cancel_job(.., "policy_changed")`, not a yield, so every
+  queued speculative row on every node would have been cancelled and
+  rediscovered at deploy — and again mid-boot on every restart, because the
+  manager's first snapshot is `RateControlSnapshot::bitrate` and
+  `initialize_rate_control` then republishes the absent pair as `None`. Unset
+  and explicit `bitrate` resolve to the same effective policy on every family,
+  so they spell the same thing. A PR that flips a family default moves this
+  spelling deliberately, with the artefact §3.4 requires, and
+  `an_unset_rate_control_pair_keeps_the_explicit_bitrate_policy_generation`
+  pins the durable value so it cannot move by accident.
+- M2 adds the balanced six-fixture n2 manifest, reproducible generation for
+  **all six** fixtures it references, source/output-grade validation, and the
+  exact §3.3 benefit gate. The first implementation gave the four new fixtures
+  bit-exact muxing and left the two inherited ones, `1080p-h264` and `grainy`,
+  without it — and `grainy`'s noise without a seed — so neither could be
+  regenerated to the hash the manifest pinned; and no fixture pinned its thread
+  count, so even the bit-exact four were reproducible only on a host with the
+  generating machine's core count. Both are fixed and both manifests are
+  re-pinned from the corrected recipe. Measured on nuc3 (ffmpeg
+  8.0.1-3ubuntu2): before the fix, two runs of `1080p-h264` gave
+  `b9906d6b…`/`9f4bc7a7…` and two runs of `grainy` gave `a2ceeec5…`/`f772af54…`,
+  while the bit-exact `1080p-animation` gave `53a6da75…` twice but
+  `f8181814…` under `taskset -c 0,1`. After the fix, three generations of every
+  fixture — two at 16 cores and one at 2 — were byte-identical, and those are
+  the hashes now pinned. The temporary generated media was removed.
+- The media1 smoke and the M3/M4 comparisons were not run. `/srv/bench-media`
+  is absent on media1, and the authorized census was read-only; copying media,
+  rescanning a production library, changing the replicated rate-control pair,
+  or forcing a daemon to software would be a fleet mutation. The PR therefore
+  contains no QSV or software default flip.
+
+### 7.3 Recorded decisions
+
+1. Burned subtitles remain outside n2 because a burn changes the encoder's
+   input rather than isolating rate control.
+2. SDR-source evidence gates only SDR-source defaults. The harness refuses an
+   HDR source entirely, naming the missing tone-map, because admitting one
+   would score SDR output against a PQ reference — the same wrong number the
+   removed guard prevented. `output_grade` is still validated so the manifest
+   can record the intent, and admitting `hdr10` is the tone-map PR's to do.
+3. `bitrate_for_height`, `-maxrate 1.5×`, and `-bufsize 2×` remain unchanged.
+   No source-average bitrate cap is introduced.
 
 ---
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per logical milestone commit (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
@@ -363,4 +462,10 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | Draft plan PR claimed from `main` `21eab120`; board link commit `cab6e764`. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | `46fac273`: tri-state request and per-family defaults; all defaults remain Bitrate. Pinned compile, encoder (34 + 1 integration), recipe (12 + 1 integration), and filtered plurxd rate-control (3) checks passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | `2917a84c`: deterministic six-fixture n2 corpus, output-grade contract and benefit gate; 55 focused Python tests passed. Media1 smoke needs the read-write fleet step in §5.2. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3 | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | needs: reserved media1 n2 `vbr,qvbr` capture under the §5.3 prompt. QSV remains Bitrate. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M4 | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | needs: representative lab4 n2 capture with hardware selection disabled under the §5.4 contract. Software remains Bitrate. |
+| 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1/M2 review fixes | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | All three adversarial-review findings fixed. M1's dedupe key spells an unset pair `requested:bitrate` again; the two inherited fixtures gained bit-exact, seeded generation and every pinned fixture gained `-threads 1`, with both manifests re-pinned from three byte-identical generations across two core counts; and `load_rate_control_corpus` refuses `dynamic_range: hdr10` while `score_vmaf` has no tone-map. Each fix has a test that fails on revert. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M5 | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | Read-only four-node census in §7.1. NVENC and VideoToolbox remain unrunnable; VA-API is selectable on m6 but has zero encoded sessions since restart. All three defaults remain Bitrate. |

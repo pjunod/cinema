@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "purpose": "n1_acceptance",
+  "fixtures": [
+    {
+      "identity": "easy-1080p-h264",
+      "class": "easy",
+      "dynamic_range": "sdr",
+      "output_grade": "sdr",
+      "filename": "1080p-h264.mkv",
+      "reference": "../bench-media/1080p-h264.mkv",
+      "reference_sha256": "8e4f356daf8a64c989c0ca6d01ba3accf81edfbc23bb257ab1b1f8382f5f9513",
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 30
+      },
+      "rung": 1080
+    },
+    {
+      "identity": "easy-1080p-animation",
+      "class": "easy",
+      "dynamic_range": "sdr",
+      "output_grade": "sdr",
+      "filename": "1080p-animation.mkv",
+      "reference": "../bench-media/1080p-animation.mkv",
+      "reference_sha256": "3cc8f1460a285e5e329bb22955e37fa27e0bb292b276fbcedc9649a6276ab785",
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 30
+      },
+      "rung": 1080
+    },
+    {
+      "identity": "easy-720p-web",
+      "class": "easy",
+      "dynamic_range": "sdr",
+      "output_grade": "sdr",
+      "filename": "720p-web.mkv",
+      "reference": "../bench-media/720p-web.mkv",
+      "reference_sha256": "546de636bafc7d4552f439db9d8816aa8f2358759f160bdcf6be06e6d35f5ab2",
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 30
+      },
+      "rung": 720
+    },
+    {
+      "identity": "hard-1080p-grain",
+      "class": "hard",
+      "dynamic_range": "sdr",
+      "output_grade": "sdr",
+      "filename": "grainy.mkv",
+      "reference": "../bench-media/grainy.mkv",
+      "reference_sha256": "d0b373626dad2cd41566da858ff713f0f90a540096491e68310765bc508c308d",
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 30
+      },
+      "rung": 1080
+    },
+    {
+      "identity": "hard-1080p-dark-gradient",
+      "class": "hard",
+      "dynamic_range": "sdr",
+      "output_grade": "sdr",
+      "filename": "dark-gradient.mkv",
+      "reference": "../bench-media/dark-gradient.mkv",
+      "reference_sha256": "1092fc1e267b45938502f7fc5d1da23f955538a026a4bc2ee1d6e46e68d8fbe3",
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 30
+      },
+      "rung": 1080
+    },
+    {
+      "identity": "hard-1080p-sport",
+      "class": "hard",
+      "dynamic_range": "sdr",
+      "output_grade": "sdr",
+      "filename": "sport.mkv",
+      "reference": "../bench-media/sport.mkv",
+      "reference_sha256": "430cd8394d4c2dbf477424f93d4967466646d86a614037335ed4e239bc7fd372",
+      "trim": {
+        "start_seconds": 0,
+        "duration_seconds": 30
+      },
+      "rung": 1080
+    }
+  ]
+}

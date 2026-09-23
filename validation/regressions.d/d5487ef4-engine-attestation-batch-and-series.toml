@@ -1,0 +1,81 @@
+version = 1
+
+[[coverage]]
+commits = ["d5487ef4"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+Both corrections and their evidence landed together in `crates/plurxd`. \
+The preceding M1 commit moved the captured-object stats onto the blocking \
+pool but left the recipe's encoder executable in front of them: \
+`recipe_engine_is_current` (`crates/plurxd/src/vodserve.rs`) read \
+`encoding.executable.is_current() || encoding.engine.is_current().await`, \
+`EncodedExecutable::is_current` was a synchronous `engine_path_version` -- \
+one `std::fs::metadata`, and on Windows an `open_read_nofollow_blocking` -- \
+and `||` short-circuits left to right, so that stat ran inline on a tokio \
+runtime worker before either `spawn_blocking` batch at all five call sites: \
+every producer launch and every `materialize`, for non-burn renditions as \
+well as burn ones. This commit removes `EncodedExecutable::is_current`, adds \
+`attestation_object()` returning the `(path, version)` pair, and routes the \
+site through `EncodedEngine::is_current_with_executable`, which passes that \
+pair as the `extra` argument of `engine_objects_are_current_batch` so it is \
+compared first inside the same blocking task as the dependency closure. The \
+answer is unchanged because the batch compares with `all`, which \
+short-circuits on the executable exactly as the caller's `||` did. \
+`a_stale_executable_is_detected_on_the_blocking_pool` \
+(`crates/plurxd/src/ffmpeg.rs`) is the test: on a `new_current_thread` \
+runtime with `max_blocking_threads(1)`, it captures an executable, replaces \
+the file, occupies the one blocking thread, spawns the check, sleeps 25 ms and \
+asserts the check has *not* finished, then releases the blocker and asserts \
+the check answers `false` within a second. Restoring the inline stat makes \
+the check answer `false` from the runtime thread without ever touching the \
+pool, and `assert!(!check.is_finished(), ...)` fails with "the executable \
+must be attested on the blocking pool, not inline on a runtime worker" -- \
+verified by reverting exactly that composition in a scratch checkout. \
+The same commit corrects the four \
+`plurx_engine_attestation_seconds{kind,phase}` series, which the plan's \
+§5.1/§5.2 before/after acceptance reads as per-check cost. Two defects: \
+`EncodedEngine.objects` was the union of the ffmpeg dependency closure and \
+the Fontconfig closure while `is_current` chose the label from \
+`font_digest.is_some()`, so on a text-burn rendition the dependency-closure \
+stats were charged to `kind="font"` and `kind="media",phase="stat"` recorded \
+nothing at all for that rendition; and one `is_current()` on a burn recipe \
+runs three separate font stat batches -- the captured font objects, \
+`font_render_engine_inner`'s own stat loop, and the enumerated closure -- \
+each of which observed, so `_count` read three times the number of checks \
+and `_sum / _count` was not the mean cost of a check. `EncodedEngine` now \
+carries `objects` and `font_objects` as separate `Arc<[(PathBuf, String)]>` \
+lists so each batch is charged to the series naming what it statted, and \
+`EngineAttestationCharges` folds every batch of a check into one entry per \
+`(kind, phase)` before flushing one histogram observation each. \
+`one_attestation_charges_each_series_once_by_what_it_stats` \
+(`crates/plurxd/src/ffmpeg.rs`) is the test: it asserts a non-burn check \
+charges exactly `[("media", "stat", 1)]`, and that a burn-shaped engine \
+charges exactly `[("font", "spawn", 1), ("font", "stat", 3), ("media", \
+"stat", 1)]` -- the third element being the number of internal batches folded \
+into that one observation, so the assertion pins both the label chosen for \
+each batch and the fact that three font stat batches produce one observation. \
+Restoring the union label makes the same check charge `[("font", "spawn", \
+1), ("font", "stat", 4)]` with no `media` series at all, which is the exact \
+failure observed on revert. Reading the charges from the returned ledger \
+rather than from `engine_attestation_prometheus()` is deliberate: the \
+histogram is a process-wide static that every other attestation test in the \
+binary also increments, so a counter-delta assertion would race. \
+Two existing tests were adjusted rather than relaxed: \
+`encoded_executable_refuses_same_size_mtime_replacement` now makes its \
+same-size, preserved-mtime replacement assertion through \
+`is_current_with_executable`, which is the composition production uses, and \
+`a_changed_fontconfig_closure_invalidates_the_retained_recipe` reads `.0` \
+of `font_closure_is_current`, which now reports its batch's elapsed time \
+alongside the answer so the caller can charge it once. Both still assert the \
+same refusals. The fail-closed choices are unchanged: \
+`spawn_blocking(...).await.unwrap_or(false)` in \
+`engine_objects_are_current_batch` and the `JoinError` arm in \
+`font_object_versions_observed` that returns an error list, so a panicked or \
+cancelled batch withdraws the recipe. Both tests are `crates/plurxd` unit \
+tests run by `make rust-check` under `rust-gate` and by `make \
+ci-rust-gate` under `rust-gate-ci`; neither needs ffmpeg or fontconfig -- \
+the burn-shaped engine is constructed directly with a `font_digest` that \
+cannot match, so the enumeration's own usability is irrelevant to what it \
+asserts.
+"""

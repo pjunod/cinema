@@ -1,6 +1,6 @@
 # The hiqlite fork and what it drags in — decide the ownership, then cut the graph
 
-**Status:** ready for review · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
+**Status:** implementation in progress; lab/provider/upstream evidence pending · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
 F-build-ops-codehealth-5, -6, -7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -173,9 +173,8 @@ tasks, retained reset notification, and more. Its exit condition:
 — 3 restart-recovery patches: `last_purged_log_id` reconstruction, atomic
 `meta.hql` replacement, WAL incarnation guard. Same exit condition shape.
 
-[vendor/s3-simple/PLURX-PATCH.md](../../vendor/s3-simple/PLURX-PATCH.md) —
-one dependency-only patch, and it states this plan's premise in its own
-words:
+Before M1, `vendor/s3-simple/PLURX-PATCH.md` carried one dependency-only
+patch and stated this plan's premise in its own words:
 
 > Hiqlite 0.14 enables cryptr's S3 feature even when plurx builds hiqlite
 > with only `macros` and `sqlite`. That makes this otherwise unused package
@@ -411,19 +410,60 @@ patch 16, kind `generic bug`, with an upstream issue: the unconditional
 edge is an upstream defect and every downstream user of hiqlite without
 `backup` pays it.
 
-### 3.4 Delete `vendor/s3-simple`
+### 3.4 Take `s3-simple` out of the workspace graph, and scope its override to the fork
+
+**Corrected 2026-09-22 after the sole adversarial review of
+[#432](http://192.168.4.7:3000/noirr/plurx/pulls/432).** This section
+originally said "delete `vendor/s3-simple`". Deleting the directory outright
+was wrong, and the reason is the clause the section itself calls
+load-bearing.
 
 Once §3.3 lands, `cargo tree -i s3-simple` is empty for every feature
-combination plurx builds. Delete the directory, its `[patch.crates-io]` row
-([Cargo.toml:151](../../Cargo.toml)), its `VENDORED` entry in
-[scripts/vendor-audit-lock:12-17](../../scripts/vendor-audit-lock), and its
-path glob in [points.toml](../../validation/points.toml).
+combination *plurx builds* — but not for every feature combination the fork
+*advertises*. `backup` and `s3` still reach `cryptr/s3`, and with the root
+override deleted they resolve **registry** `s3-simple` 0.8.0, whose manifest
+requires `quick-xml ^0.39`. That resolves `quick-xml` 0.39.4, the exact
+release RUSTSEC-2026-0194 and RUSTSEC-2026-0195 name, plus `aws-lc-sys`
+0.39.1, the version §3.5 bans. cryptr 0.10.0 requires `s3-simple ^0.8.0`, so
+the fixed upstream — s3-simple 0.9.0, which moved to `quick-xml ^0.42` and
+dropped its unreferenced `aws-lc-rs`, `aws-lc-sys`, `quinn` and `quinn-proto`
+edges — cannot be selected in its place. A configuration the fork ships and
+nothing in this repository compiles is precisely the one whose graph nobody
+looks at.
+
+What lands instead:
+
+- **Out of the workspace.** The root `[patch.crates-io]` row
+  ([Cargo.toml](../../Cargo.toml)) and the `VENDORED` entry in
+  [scripts/vendor-audit-lock](../../scripts/vendor-audit-lock) go, because
+  the workspace graph genuinely no longer contains `s3-simple` and a patch
+  for a package the graph does not contain is an unused patch — a cargo
+  warning on every invocation and evidence of nothing. `vendor/s3-simple/**`
+  stays in [points.toml](../../validation/points.toml) and the directory
+  stays in the workspace `exclude` list.
+- **Into the fork.** [vendor/hiqlite/Cargo.toml](../../vendor/hiqlite/Cargo.toml)
+  gains its own `[patch.crates-io]` row pointing `s3-simple` at
+  `../s3-simple` — patch 17 in its ledger. That is the manifest cargo honours
+  when `backup`/`s3` is enabled, so the advertised configuration resolves the
+  vendored copy.
+- **The vendored copy carries two dependency-only patches**, both mirroring
+  what upstream s3-simple 0.9.0 did to its own manifest: `quick-xml` raised to
+  0.41, and the four non-optional `aws-lc-rs`/`aws-lc-sys`/`quinn`/
+  `quinn-proto` edges that `src/` never references removed. `aws-lc-rs` still
+  reaches the graph through `reqwest`'s rustls feature, at the single version
+  the rest of the graph already uses.
+- **If plurx ever enables `hiqlite/backup` from the workspace**, the fork's
+  `[patch]` is ignored (cargo honours only the workspace root's) and registry
+  0.8.0 returns. §3.5's ban on `aws-lc-sys =0.39.1` is the tripwire, and the
+  root row has to come back with it. The comment above the root
+  `[patch.crates-io]` says so at the site.
 
 The condition on "every feature combination plurx builds" is load-bearing
 and is the assessment's F-build-ops-codehealth-6 disposition ("Verify the
 whole resolved graph and optional backup/S3 combinations after changing
 defaults"). The acceptance check in §5.2 enumerates them rather than
-asserting one.
+asserting one — and, after this correction, asserts what each enabled
+combination *resolves*, not merely that it still has a backend.
 
 ### 3.5 Ban the duplicate versions, not the crate
 
@@ -637,7 +677,7 @@ and (2) with `CARGO_BUILD_JOBS=1` so I can see how much of the cold time is
 the C builds (aws-lc-sys, onig_sys) rather than parallel Rust codegen.
 ```
 
-### 5.2 M1 — the cryptr edge and the deleted vendor
+### 5.2 M1 — the cryptr edge and the scoped vendor override
 
 §3.3 and §3.4 in one PR, because the second is only safe after the first.
 
@@ -663,7 +703,31 @@ done
 
 `absent` for the empty and `cache`/`dashboard` rows; `present` for every row
 containing `backup` or `s3`, which proves the feature still works for a
-downstream user. `make unit`, `make hiqlite-vendor-clippy` and
+downstream user.
+
+Presence is not the whole acceptance, and treating it as such is the defect
+the sole adversarial review found. Each `present` row must also resolve the
+vendored override rather than registry 0.8.0:
+
+```bash
+for f in "backup" "s3" "backup,s3" "full"; do
+  cargo tree --locked --manifest-path vendor/hiqlite/Cargo.toml \
+    --no-default-features --features "auto-heal,macros,sqlite,$f" -i quick-xml
+done                                   # quick-xml v0.41.0 <- s3-simple (path)
+cargo tree --locked --manifest-path vendor/hiqlite/Cargo.toml \
+  --no-default-features --features auto-heal,macros,sqlite,backup \
+  -i aws-lc-sys@0.39.1                 # error: did not match any packages
+```
+
+and `python3 -m unittest tests.operations.test_hiqlite_patch_ledger` must be
+green, because `ForkBackupGraphPolicyCase` is what holds that resolution
+after the PR closes: it reads `vendor/hiqlite/Cargo.lock` — which pins every
+optional dependency of every feature, selected or not — and judges it against
+`deny.toml`'s own ban list and the `quick-xml` advisory floor. `cargo deny`
+cannot do that job: it only ever sees the workspace graph, and the workspace
+does not enable `backup`.
+
+`make unit`, `make hiqlite-vendor-clippy` and
 `make cluster-wal-check` green; `cargo deny check licenses` green (the
 license set shrinks, and the allow-list must shrink with it — §2.5's own
 rule that "an allow-list that permits more than the build actually uses
@@ -735,6 +799,53 @@ of the above.
 Acceptance: every `generic bug` row in the three ledgers has a URL, and this
 document's Execution log records which were accepted, rejected or ignored.
 
+### 5.8 2026-09-21 implementation boundary
+
+The safe source-only boundary is M1 plus the locally provable portion of M2.
+Paul Junod is the named fork owner. The crate remains named `hiqlite`, every
+retained patch has a ledger row and drop condition, and the dependency policy
+rejects the retired `aws-lc-sys = 0.39.1` plus accidental OpenSSL/native-TLS
+stacks. Generic rows say `pending M6` until a real public link exists; a label
+is not substituted for external coordination.
+
+The default workspace graph moved from 47 to 43 duplicate-version rows at
+base `9deb58a2` versus `5c87d1895`. `s3-simple`, `quinn`, and
+`aws-lc-sys = 0.39.1` have no root reverse dependency. The fork's optional
+feature matrix reports S3 absent for the empty, `cache`, and `dashboard`
+configurations, and present for `backup`, `s3`, `backup,s3`, and `full`.
+This removes only the cryptr edge. The `axum-server/tls-rustls` and
+`rustls/prefer-post-quantum` routes to the surviving aws-lc version remain
+unchanged pending M3's provider proof.
+
+**2026-09-22 correction (sole adversarial review of #432).** The boundary
+above was stated for the *workspace* graph and was true of it, but the review
+was right that it did not hold for the configuration the fork still
+advertises. Every `present` row in that matrix resolved registry `s3-simple`
+0.8.0, and with it `quick-xml` 0.39.4 (RUSTSEC-2026-0194, RUSTSEC-2026-0195)
+and the `aws-lc-sys` 0.39.1 this branch's own `deny.toml` forbids. §3.4 now
+records what replaced the outright deletion: `vendor/s3-simple` is retained
+with two dependency-only patches that mirror upstream s3-simple 0.9.0, and
+`vendor/hiqlite/Cargo.toml` carries its own `[patch.crates-io]` row so those
+patches apply wherever `backup`/`s3` is enabled. Every `present` row now
+resolves `quick-xml` 0.41.0 through the path copy,
+`cargo tree -i aws-lc-sys@0.39.1` matches no package in that graph, and
+`quinn` is gone from it as well. `tests/operations/test_hiqlite_patch_ledger.py`
+holds the result against `deny.toml` and the advisory floor.
+
+The remaining milestones are evidence-bound rather than safe assumptions:
+
+- **M0 needs:** cold/warm timings and target size from the named lab runner;
+  the source-only compiler VM is not that runner.
+- **M2/M6 need:** public upstream issues or pull requests for the nine generic
+  ledger rows. No upstream credential or issue authority was available in
+  this session.
+- **M3 needs:** the installed-provider test and three-voter transport evidence
+  before either surviving aws-lc edge can move.
+- **M4 needs:** the lab library corpus and both tokenizer backends for exact id
+  equivalence.
+- **M5 needs:** M0's cost result and M4's equivalence result; no build feature,
+  runtime gate, or Developer setting was added speculatively.
+
 ## 6. Verification and rollout
 
 Fast lane per PR. M1 and M3 additionally need `make cluster-check`, because
@@ -787,4 +898,12 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | claim | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | Claimed K-08 from `9deb58a2`; opened the whole-plan draft before implementation. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M0 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: cold/warm workspace and lean-lane timings plus target size on the normal lab runner; not replaced with source-only VM measurements. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 · `a94c71a9e` | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | Root graph no longer contains `s3-simple`, `quinn`, or `aws-lc-sys = 0.39.1`; duplicate rows 47 → 43. All seven optional-feature combinations preserve S3 exactly when `backup`/`s3` requires it. Rust 1.97.1 checks cover the shipped core and optional backup fork configurations. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 · `5c87d1895` | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | Named Paul Junod as owner; recorded 16 + 3 patch kinds/drop conditions; added drift contracts and dependency bans. `cargo-deny` 0.20.2 reports bans/licenses green and rejects the base graph's banned 0.39.1 version. Generic upstream URLs remain pending M6. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: ring-provider assertion plus three-voter transport evidence. Both surviving aws-lc routes are mapped and deliberately unchanged. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: lab library snapshot and exact onig/fancy-regex token-id comparison. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: M0 cost and M4 equivalence results. No speculative build/runtime gate was added. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M6 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: public upstream issue/PR coordination for nine generic bugs; the ledgers expose `pending M6` until real URLs exist. |
+| 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 review fix | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | Sole-review P1: the advertised `backup`/`s3` graph still resolved registry `s3-simple` 0.8.0, `quick-xml` 0.39.4 and `aws-lc-sys` 0.39.1. Retained `vendor/s3-simple` with the quick-xml 0.41 bump plus removal of its four unreferenced aws-lc/quinn edges, and moved the override into `vendor/hiqlite/Cargo.toml`'s own `[patch.crates-io]`. Fork lock now resolves `quick-xml` 0.41.0 through the path copy, one `aws-lc-sys` (0.42.0), no `quinn`. `ForkBackupGraphPolicyCase` pins it and fails on the pre-fix tree. |

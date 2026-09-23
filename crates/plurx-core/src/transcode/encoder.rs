@@ -186,6 +186,21 @@ impl Encoder {
         }
     }
 
+    /// The policy used when the replicated operator setting is absent.
+    ///
+    /// This is deliberately per family: calibration evidence may qualify one
+    /// encoder without saying anything about another. Every family remains on
+    /// the byte-for-byte legacy path until its own acceptance artefact passes.
+    pub fn default_rate_mode(self) -> RateMode {
+        match self {
+            Encoder::Software
+            | Encoder::Nvenc
+            | Encoder::Qsv
+            | Encoder::Vaapi
+            | Encoder::VideoToolbox => RateMode::Bitrate,
+        }
+    }
+
     /// Family defaults. QSV 22 is the highest passing value from the
     /// 2026-08-14 media1 D5 sweep; the other families remain candidates until
     /// the same corpus runs on hardware that can select them. Explicit
@@ -602,6 +617,36 @@ pub struct QualityRc {
     pub qsv: bool,
     pub vaapi: bool,
     pub videotoolbox: bool,
+    /// Family policy when no operator override is stored. Kept beside the
+    /// behavioral capability verdicts so `/system` exposes both facts without
+    /// making an unproved default look like a driver capability.
+    pub default_rate_mode: DefaultRateModes,
+}
+
+/// The unset-request policy for every encoder family.
+///
+/// The values are strings in diagnostics because this is an API report, not a
+/// second policy store. [`Encoder::default_rate_mode`] remains the sole source
+/// of the decision.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct DefaultRateModes {
+    pub software: &'static str,
+    pub nvenc: &'static str,
+    pub qsv: &'static str,
+    pub vaapi: &'static str,
+    pub videotoolbox: &'static str,
+}
+
+impl Default for DefaultRateModes {
+    fn default() -> Self {
+        Self {
+            software: Encoder::Software.default_rate_mode().as_str(),
+            nvenc: Encoder::Nvenc.default_rate_mode().as_str(),
+            qsv: Encoder::Qsv.default_rate_mode().as_str(),
+            vaapi: Encoder::Vaapi.default_rate_mode().as_str(),
+            videotoolbox: Encoder::VideoToolbox.default_rate_mode().as_str(),
+        }
+    }
 }
 
 impl QualityRc {
@@ -1663,6 +1708,30 @@ mod tests {
         assert_eq!(Encoder::Nvenc.default_quality(), 23);
         assert_eq!(Encoder::Vaapi.default_quality(), 23);
         assert_eq!(Encoder::VideoToolbox.default_quality(), 65);
+    }
+
+    #[test]
+    fn every_family_default_remains_bitrate_until_its_own_evidence_passes() {
+        for encoder in [
+            Encoder::Software,
+            Encoder::Nvenc,
+            Encoder::Qsv,
+            Encoder::Vaapi,
+            Encoder::VideoToolbox,
+        ] {
+            assert_eq!(encoder.default_rate_mode(), RateMode::Bitrate);
+        }
+        let reported = serde_json::to_value(QualityRc::default()).expect("serialize capability");
+        assert_eq!(
+            reported["default_rate_mode"],
+            serde_json::json!({
+                "software": "bitrate",
+                "nvenc": "bitrate",
+                "qsv": "bitrate",
+                "vaapi": "bitrate",
+                "videotoolbox": "bitrate",
+            })
+        );
     }
 
     /// The admission pool's thread budget reaches x264 as an explicit

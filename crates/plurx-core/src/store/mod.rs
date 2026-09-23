@@ -104,6 +104,78 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheAdminMutationClaim(String);
 
+pub const TOKEN_SUMMARY_MAX: usize = 256;
+
+/// Largest device label, in bytes, that a login may persist.
+///
+/// The label is the one field in `tokens` a caller both chooses and can
+/// repeat: every successful login appends a row carrying whatever string the
+/// client sent. `TOKEN_SUMMARY_MAX` bounds the device inventory to 256 rows
+/// but says nothing about bytes, so without a byte bound one account can mint
+/// hundreds of sessions whose labels are each as large as the login body
+/// limit allows and turn a single `GET /api/v1/me/devices` into hundreds of
+/// MiB of allocation and response — and, on a cluster, replicate each of
+/// those labels to every member.
+///
+/// 256 bytes is the number because a device label is a short human display
+/// string: "Paul's iPhone", "Chrome on Windows", "Apple TV (Living Room)", or
+/// at the long end a model name derived from a user agent, which runs to
+/// roughly 150 bytes. 256 leaves room above every real client while making
+/// the worst case arithmetic rather than a hope: 256 rows x 256 bytes is a
+/// 64 KiB ceiling on the labels in one inventory response, the same order as
+/// the rest of that JSON body. A smaller bound would clip legitimate names in
+/// non-Latin scripts, where one character costs three bytes; a larger one buys
+/// nothing a client needs and multiplies by 256.
+///
+/// A label over the bound is **rejected at the write**, not dropped at the
+/// read: `POST /api/v1/auth/login` answers `400` and mints no token, so the
+/// caller learns immediately rather than discovering later that a device it
+/// believes is named is anonymous. Rows an older build already stored are
+/// capped by [`bounded_device_label`] where the inventory is projected, so a
+/// database that predates this bound still serves a bounded response and
+/// still shows every device the user can revoke.
+pub const MAX_DEVICE_LABEL_BYTES: usize = 256;
+
+/// Cap a stored label for projection at [`MAX_DEVICE_LABEL_BYTES`].
+///
+/// Truncation stops at the nearest character boundary at or below the bound,
+/// so the result is always valid UTF-8 and never longer than the bound. This
+/// runs on read for legacy rows only — new writes are refused above the bound
+/// — and it truncates rather than omitting the row, because a device the user
+/// cannot see is a device the user cannot revoke.
+pub fn bounded_device_label(label: Option<String>) -> Option<String> {
+    label.map(|mut label| {
+        if label.len() <= MAX_DEVICE_LABEL_BYTES {
+            return label;
+        }
+        let mut end = MAX_DEVICE_LABEL_BYTES;
+        while end > 0 && !label.is_char_boundary(end) {
+            end -= 1;
+        }
+        label.truncate(end);
+        label
+    })
+}
+
+/// Privacy-safe login-token metadata for account device management. The full
+/// digest remains inside the Store; eight hex characters identify one row
+/// only after the Store has proved the prefix is unique for that user.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TokenSummary {
+    pub token_hash_prefix: String,
+    pub device: Option<String>,
+    pub created_at: i64,
+    pub last_seen_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteTokenByPrefixOutcome {
+    Deleted,
+    NotFound,
+    Ambiguous,
+    ClaimLost,
+}
+
 #[cfg(feature = "hiqlite-store")]
 impl CacheAdminMutationClaim {
     pub(crate) fn new(claim_id: String) -> Self {
@@ -2100,6 +2172,18 @@ pub trait UserStore: Send + Sync + 'static {
         token_hash: &str,
         claim: Option<&CacheAdminMutationClaim>,
     ) -> Result<bool, StoreError>;
+    /// List a bounded, oldest-first inventory without exposing full token
+    /// digests to the HTTP layer.
+    async fn list_tokens_for_user(&self, user_id: i64) -> Result<Vec<TokenSummary>, StoreError>;
+    /// Delete exactly one token selected by an eight-hex prefix. Ambiguous
+    /// prefixes are never accepted, and clustered writes retain the exact
+    /// cache-admin mutation claim.
+    async fn delete_token_by_prefix_for_user(
+        &self,
+        user_id: i64,
+        prefix: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<DeleteTokenByPrefixOutcome, StoreError>;
 }
 
 #[async_trait]
@@ -3999,6 +4083,23 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
 #[async_trait]
 pub trait PlaybackTelemetryStore: Send + Sync + 'static {
     async fn record_playback_event(&self, event: &PlaybackEvent) -> Result<i64, StoreError>;
+    /// Persist retained events AND fold network-prior observations using one
+    /// node-local connection lease and transaction.
+    ///
+    /// Both subjects live in the same node-local sidecar behind the same
+    /// `Mutex<Connection>`, so a writer that batched its events and then
+    /// called [`NetworkPriorStore::observe_network_prior`] once per event
+    /// would take one lease for the batch and another for every event in it.
+    /// The two opt-ins stay independent: retention off is an empty `events`,
+    /// the prior opt-in off is an empty `observations`, and either alone
+    /// still costs one lease. Returns the number of retained rows written,
+    /// which is `events.len()` — folded observations update at most one prior
+    /// row each and are not rows this count describes.
+    async fn record_playback_batch(
+        &self,
+        events: &[PlaybackEvent],
+        observations: &[NetworkPriorObservation],
+    ) -> Result<u64, StoreError>;
     async fn prune_playback_events(&self, before_ms: i64, limit: i64) -> Result<u64, StoreError>;
     async fn playback_events(
         &self,
