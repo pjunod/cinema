@@ -88,8 +88,12 @@ rail; the choice is stored per browser in `plurx_watch_folds` (`rail`,
 default open).
 
 **Where the pictures come from:** `GET /api/v1/files/{id}/chapters/{n}/thumb`
-(next section). A thumbnail that cannot be had — the switch is off, the file
-has gone, ffmpeg failed — leaves the tile as the numbered tile it was
+(next section). The page loads them two at a time, in order, and only once
+playback has been accepted, so eight image requests never take the browser's
+connections to the origin while the stream is starting; a failed load is
+retried once after four seconds (a 503 means both of the node's extraction
+slots were busy). A thumbnail that cannot be had — the switch is off, the
+file has gone, ffmpeg failed — leaves the tile as the numbered tile it was
 before, so the rail degrades to what it used to be rather than to a broken
 image.
 
@@ -99,7 +103,9 @@ image.
 watch page asks for it and kept under the runtime cache at
 `<runtime cache>/chapter-thumbs/<file id>-<size>-<mtime>/<n>.jpg`. The
 second request for the same chapter is a file read. The cache key names the
-file's identity, so a replaced file gets fresh thumbnails; the URL the page
+file's identity, so a replaced file gets fresh thumbnails and the old ones
+become an orphan directory (there is no cap and no sweep; removing
+`chapter-thumbs` under the runtime cache reclaims everything). The URL the page
 uses carries `?v=<mtime>` for the same reason on the browser side, and the
 response carries an `ETag` and `private, max-age=604800`.
 
@@ -109,8 +115,11 @@ quality 4, on the input side of the seek so the demuxer jumps to the nearest
 keyframe rather than decoding from the start. CPU only; no GPU is touched. At
 most two extractions run on a node at a time; the others wait up to 20 s for
 a slot and are told 503 after that; each extraction is bounded to 15 s and
-2 MiB. Two requests for the same chapter never spawn two extractions: the
-second finds the file when it gets its slot.
+2 MiB. A request that queued behind the one that made a thumbnail finds it
+on disk when it gets its slot; two requests that hold both slots for the same
+chapter both extract, and the atomic rename makes the second a no-op. A
+failed extraction leaves a `<n>.fail` marker beside the thumbnails and the
+route answers 404 from it for an hour without running ffmpeg again.
 
 **Why on request and not in the analysis queue:** the analysis queue is the
 replicated, leased, target-node machinery behind the fragment index, and a
@@ -199,9 +208,12 @@ Each is easy to reverse; they are recorded so they can be looked over.
 4. **Folded subtitle summary shows up to three names, then `+N`.** Names
    tell you whether opening the row is worth it; past three they truncate.
 5. **The ⓘ Playback info button in the player bar still opens the title
-   dialog in compact and wide** (it now carries the ledger too). With the
-   facts on the page it is redundant there, but it is the transport's button
-   and the Playback Surface Contract fixture pins the transport row.
+   dialog in compact and wide** (it now carries the ledger too, with working
+   chips). With the facts on the page it is redundant there, but it is the
+   transport's button and the Playback Surface Contract fixture pins the
+   transport row.
+7. **Episodes keep a "Play next" button** in the title block, where the old
+   caption had it; the episode grid below is the other way to the next one.
 6. **Native clients are untouched.** Their watch layouts are gated on
    separately reviewed owner designs (WATCH-AND-BROWSE-IMPLEMENTATION §2).
 
