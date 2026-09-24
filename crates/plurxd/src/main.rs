@@ -2761,7 +2761,32 @@ impl HttpAcceptor for tokio::net::TcpListener {
     type Stream = tokio::net::TcpStream;
 
     async fn accept(&self) -> std::io::Result<(Self::Stream, SocketAddr)> {
-        tokio::net::TcpListener::accept(self).await
+        let (stream, remote) = tokio::net::TcpListener::accept(self).await?;
+        disable_nagle(&stream, remote);
+        Ok((stream, remote))
+    }
+}
+
+/// Send every write as soon as it is made: set `TCP_NODELAY` on an accepted
+/// HTTP connection.
+///
+/// With Nagle's algorithm on, the kernel holds back a write smaller than one
+/// segment while earlier data on the connection is still unacknowledged. A
+/// media body is a run of large writes that usually ends in a short one, and
+/// the peer acknowledges lazily (delayed ACK, 40 ms minimum on Linux), so that
+/// last short write can wait one delayed-ACK interval before it leaves. How
+/// often a body ends that way depends on write timing, which the media read
+/// size changes: measured on loopback, the 128 KiB and 256 KiB reads put most
+/// HLS segment fetches into a ~50 ms mode that the 4 KiB read only reached in
+/// its tail (docs/streaming/MEDIA-BODY-BUFFERS.md §5.1.1, Decision 6). hyper
+/// already coalesces a response's head and body writes itself, so disabling
+/// Nagle does not turn one response into many small packets.
+///
+/// Failing to set the option is not a reason to refuse the connection; it is
+/// only slower.
+fn disable_nagle(stream: &tokio::net::TcpStream, remote: SocketAddr) {
+    if let Err(error) = stream.set_nodelay(true) {
+        tracing::debug!(%error, %remote, "could not set TCP_NODELAY on an accepted connection");
     }
 }
 
@@ -3720,6 +3745,33 @@ mod startup_tests {
             }
             self.listener.accept().await
         }
+    }
+
+    /// The production acceptor hands `serve_http` sockets with Nagle's
+    /// algorithm off. Revert `disable_nagle` in the `TcpListener` acceptor and
+    /// the accepted stream reports `nodelay() == false`, which is the default
+    /// the kernel gives every accepted socket.
+    #[tokio::test]
+    async fn accepted_http_connections_have_nagle_disabled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let client = tokio::spawn(async move {
+            tokio::net::TcpStream::connect(address)
+                .await
+                .expect("connect")
+        });
+
+        let (accepted, _remote) = HttpAcceptor::accept(&listener)
+            .await
+            .expect("accept through the production acceptor");
+        let _client = client.await.expect("client task");
+
+        assert!(
+            accepted.nodelay().expect("read TCP_NODELAY"),
+            "every accepted HTTP connection must have TCP_NODELAY set"
+        );
     }
 
     #[tokio::test]
