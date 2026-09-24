@@ -1,6 +1,7 @@
 # Web VOD seek repair — implementation status
 
-**Updated:** 2026-09-23 · **Branch:** `codex/web-vod-seek-deadline` ·
+**Status:** open — current-head fast lane and merge pending ·
+**Updated:** 2026-09-24 · **Branch:** `codex/web-vod-seek-deadline` ·
 **Base:** `main` at `99d4abf8c` · **PR:** [#478](http://192.168.4.7:3000/noirr/plurx/pulls/478) ·
 **State:** adversarial review addressed; final validation pending in a
 separate clone.
@@ -40,6 +41,11 @@ commits `ba6e39ca0` and `528316c24`. The
 [`regressions.d` entry](../../validation/regressions.d/ba6e39ca-web-vod-seek-deadline.toml)
 maps both to the focused web check. See PR #478 for the final-head gate
 outcome; earlier runs cannot qualify a newer commit.
+
+The next preflight passed history coverage and failed the doc status audit:
+this newly indexed page lacked a `**Status:**` header. That header is now
+present and `python3 -m unittest discover -s tests/operations -p
+test_doc_status_audit.py` passes 3/3.
 
 **Forgejo draft limitation:** The API accepted PR creation but reported
 `draft: false` despite the requested draft flag. The conversion endpoint
