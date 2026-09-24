@@ -29888,6 +29888,231 @@ async fn classification_search_fences_and_corrections() {
     .await;
 }
 
+/// One item of `tests/contracts/library-sort-cases.json`.
+#[derive(serde::Deserialize)]
+struct LibrarySortItem {
+    index: i64,
+    title: String,
+    sort_title: String,
+    year: Option<i32>,
+    recorded_at: Option<String>,
+    resolution: Option<i64>,
+    /// Absent means `movie`. Every item is inserted at the library root.
+    #[serde(default)]
+    kind: Option<String>,
+    /// The probed height of the item's file when it is not also the merge
+    /// key — a root photo has one and carries no `resolution`.
+    #[serde(default)]
+    file_height: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+struct LibrarySortFixture {
+    page_size: i64,
+    items: Vec<LibrarySortItem>,
+    expected_order: std::collections::BTreeMap<String, Vec<i64>>,
+}
+
+/// The library grid's five sort keys, replayed on every backend, whole and
+/// across a page boundary.
+///
+/// What it pins: which columns each sort orders by and in which direction,
+/// that NULL years and NULL capture dates go last, that an item with no file
+/// reads as -1 and sorts after every probed one, that `sort_title` is the
+/// stored `sort_title_for` output rather than anything the DTO recomputes, and
+/// that the `resolution` a row carries is the key the SQL ranked it by. That
+/// last one is why the fixture has root photos: a photo is probed and has a
+/// real file height, but no photo carries a `resolution`, so the SQL must rank
+/// it at -1 too — rank it by height and a client merging on the key it was
+/// given sees a cursor that is not sorted under its own comparator.
+///
+/// The paged walk checks the client's walk, not the order: advancing `offset`
+/// by the rows returned and stopping on a short or empty page yields the same
+/// sequence as one request. With one `ORDER BY` for both, paged and whole can
+/// only disagree through ties, and the guard against ties is not this test —
+/// it is `store::item_sort_order_tests::every_sort_ends_in_a_unique_key`,
+/// which requires every clause to end in `id` rather than observing what
+/// SQLite happens to do with tied rows today.
+///
+/// Items 32 (a photo) and 33 (a movie) tie on every visible key of four of
+/// the sorts, and the photo was inserted first. Today the grid query reads
+/// through `idx_items_library_kind`, which yields the movie first, so dropping
+/// the `id` tie-break does fail this replay — but that is a fact about
+/// today's query plan, not a promise, which is why the unit test above stays
+/// the guard.
+///
+/// The same fixture is what the Apple and Android `LibraryMerge` must
+/// reproduce from k per-library cursors, so an `ORDER BY` edit that this test
+/// still accepts is one the clients will be checked against too.
+#[tokio::test]
+async fn library_sort_fixture_matches_order() {
+    let fixture: LibrarySortFixture = serde_json::from_str(include_str!(
+        "../../../tests/contracts/library-sort-cases.json"
+    ))
+    .expect("library sort fixture parses");
+    let fixture = Arc::new(fixture);
+
+    for_each_backend(move |store, backend| {
+        let fixture = Arc::clone(&fixture);
+        async move {
+            let library = store
+                .create_library(&NewLibrary {
+                    name: format!("Library sort {backend}"),
+                    kind: LibraryKind::Movies,
+                    paths: Vec::new(),
+                    anime: false,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: create sort library: {error}"));
+
+            // index -> the id the store actually assigned. The fixture's
+            // `index` is insertion order and nothing more; assuming it is also
+            // the row id would make this test pass or fail on an unrelated
+            // sequence rather than on the ordering it is about.
+            let mut ids: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
+            for item in &fixture.items {
+                let kind = item
+                    .kind
+                    .as_deref()
+                    .map(|kind| {
+                        ItemKind::parse(kind)
+                            .unwrap_or_else(|| panic!("fixture kind {kind:?} is not an item kind"))
+                    })
+                    .unwrap_or(ItemKind::Movie);
+                let id = store
+                    .insert_item(&NewItem {
+                        library_id: library.id,
+                        kind,
+                        parent_id: None,
+                        title: item.title.clone(),
+                        year: item.year,
+                        season_number: None,
+                        episode_number: None,
+                    })
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: insert {:?}: {error}", item.title));
+                ids.insert(item.index, id);
+
+                // The key the clients will merge on has to be the key the SQL
+                // sorts on. This is the one place both are visible at once.
+                let stored = store
+                    .get_item(id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: get {id}: {error}"))
+                    .unwrap_or_else(|| panic!("{backend}: item {id} vanished"));
+                assert_eq!(
+                    stored.sort_title, item.sort_title,
+                    "{backend}: sort_title for {:?}",
+                    item.title
+                );
+
+                if let Some(height) = item.file_height.or(item.resolution) {
+                    let extension = if kind == ItemKind::Photo {
+                        "jpg"
+                    } else {
+                        "mkv"
+                    };
+                    store
+                        .upsert_file(
+                            id,
+                            &format!("/contract/sort/{}.{extension}", item.index),
+                            1_000 + item.index,
+                            item.index,
+                            &ProbeResult {
+                                height: Some(height),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap_or_else(|error| panic!("{backend}: file for {id}: {error}"));
+                }
+                // The fixture's `resolution` is the key a client merges on, so
+                // it has to be what the DTO carries: the best file height for
+                // a kind that carries one, and nothing for any other kind.
+                let heights = store
+                    .item_max_heights(&[id])
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: heights for {id}: {error}"));
+                let carried = kind
+                    .carries_resolution()
+                    .then(|| heights.get(&id).copied())
+                    .flatten();
+                assert_eq!(
+                    carried, item.resolution,
+                    "{backend}: the resolution {:?} carries",
+                    item.title
+                );
+                if let Some(recorded_at) = item.recorded_at.clone() {
+                    store
+                        .apply_metadata(
+                            id,
+                            &MetadataPatch {
+                                recorded_at: Some(recorded_at),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap_or_else(|error| panic!("{backend}: recorded for {id}: {error}"));
+                }
+            }
+
+            for (name, sort) in [
+                ("title", ItemSort::Title),
+                ("added", ItemSort::Added),
+                ("year", ItemSort::Year),
+                ("resolution", ItemSort::Resolution),
+                ("recorded", ItemSort::Recorded),
+            ] {
+                let expected: Vec<i64> = fixture
+                    .expected_order
+                    .get(name)
+                    .unwrap_or_else(|| panic!("fixture has no expected order for {name}"))
+                    .iter()
+                    .map(|index| ids[index])
+                    .collect();
+
+                let whole = store
+                    .list_top_items_in_genre(library.id, sort, 0, fixture.items.len() as i64, None)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: {name} page: {error}"));
+                assert_eq!(
+                    whole.total,
+                    fixture.items.len() as i64,
+                    "{backend}: {name} total"
+                );
+                assert_eq!(
+                    whole.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+                    expected,
+                    "{backend}: {name} in one request"
+                );
+
+                // The same order, walked the way a client walks it: advance by
+                // the rows returned, stop on a short or empty page.
+                let mut paged: Vec<i64> = Vec::new();
+                let mut offset = 0_i64;
+                loop {
+                    let page = store
+                        .list_top_items_in_genre(library.id, sort, offset, fixture.page_size, None)
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{backend}: {name} page at {offset}: {error}")
+                        });
+                    if page.items.is_empty() {
+                        break;
+                    }
+                    offset += page.items.len() as i64;
+                    paged.extend(page.items.iter().map(|item| item.id));
+                    if page.items.len() < fixture.page_size as usize || offset >= page.total {
+                        break;
+                    }
+                }
+                assert_eq!(paged, expected, "{backend}: {name} across page boundaries");
+            }
+        }
+    })
+    .await;
+}
+
 /// `fragment_index_builders_held_by` answers the same on every backend: the
 /// node that built an index names itself, a node that only holds a location
 /// for it names the builder, and another node or another source holds none.
