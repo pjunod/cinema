@@ -285,6 +285,8 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-seek-scratch"><h2>Seek scratch accounting</h2><p>Recently shipped accounting and retention changes with unverified native-device behavior.</p></div>${seekScratchReservationsCard()}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}
+      <div class="setsection" id="enable-subtitle-sources"><h2>Stored subtitle tracks</h2><p>Keep each PGS track while the file is indexed, and read it instead of the whole source.</p></div>${subtitleStoredSourcesCard(settings,readiness)}
+      <div class="setsection" id="enable-chapter-thumbnails"><h2>Chapter thumbnails</h2><p>A frame per chapter for the watch view's chapter rail, made the first time a page asks for it.</p></div>${chapterThumbnailsCard(settings,readiness)}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}`;
 }
 // Automatic decode recovery.
@@ -320,6 +322,58 @@ function subtitleNotReadyCard(s,readiness){
       </div></details>
       <div class="err" id="sub503err" role="alert"></div>
       ${setCardFoot("saveSubtitleNotReady")}`,{id:"sub503card"});
+}
+// Stored PGS tracks.
+//
+// Both halves of the subtitle-source store, behind one switch: the
+// fragment-index pass keeps every PGS track it reads, and the overlay and the
+// burn path read a kept track instead of demuxing the whole source again. On
+// by default. Off stops the pass keeping tracks and makes both paths ignore
+// what is stored, which is how a wrong stored artifact is taken out of service
+// without a redeploy. The pass keeps nothing until the startup self-test has
+// passed and the cache is on a local filesystem.
+function subtitleStoredSourcesCard(s,readiness){
+  const enabled=s.subtitle_stored_sources!==false;
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Keep and read stored PGS tracks","Keep each PGS track while a file is indexed, and serve the PGS overlay and burned PGS subtitles from it instead of reading the whole source again.",state)}
+      ${togRow("subsrc",`Use stored PGS tracks <span class="pill">preview</span>`,`Applies immediately to the next index pass, new overlay preparations and burned sessions. This checkbox is authoritative: nothing below turns it on or off.`,enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> Off stops the index pass keeping tracks and makes both consumers ignore the store and read the source as they always have.</div>
+      <details class="setdetails" open><summary>What it needs</summary><div class="setdetails-body">
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_producer","Something fills the store","The fragment-index pass keeps each PGS track as it reads the file, with the tracks attempted and their verdicts since this process started.")}
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_self_test","The startup self-test passed","At startup the configured ffmpeg runs the index argv with the tee over a tiny synthetic file with one corrupted track, and ffprobe must be the same build as ffmpeg. Until it passes, the index pass keeps nothing.")}
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_local_cache","The cache is on a local filesystem","A stage on NFS, SMB or FUSE could stall the demuxer the index shares, so on those the index pass keeps nothing.")}
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_free_space","The cache has room for the stage","The pass keeps nothing while the cache has less free than 1 GiB or 2% of its filesystem, whichever is larger: stage writes share the disk with the index it is about to publish.")}
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_lookups","Lookups answered from the store","How many overlay and burn lookups this process served from a stored track, answered as having no cues, or passed through to extraction.")}
+      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice.</p>
+      </div></details>
+      <div class="err" id="subsrcerr" role="alert"></div>
+      ${setCardFoot("saveSubtitleStoredSources")}`,{id:"subsrccard"});
+}
+// Chapter thumbnails.
+//
+// One ffmpeg seek per chapter, on request, kept under the runtime cache.
+// There is no background producer: nothing runs unless a watch page asks
+// for that chapter, and the rows below say how much has run. The switch is
+// the enable path; off answers the route 404 and the rail shows numbered
+// tiles instead of pictures.
+function chapterThumbnailsCard(s,readiness){
+  const enabled=s.chapter_thumbnails!==false;
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Make chapter thumbnails","Extract one small frame per chapter the first time the watch view asks for it, and keep it on this node.",state)}
+      ${togRow("chthumb",`Make chapter thumbnails on request`,`Applies to the next thumbnail a watch page asks for. This checkbox is authoritative: nothing below turns it on or off.`,enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> Off runs no ffmpeg for thumbnails and the chapter rail shows numbered tiles; what is already cached stays on disk and is served again when the switch comes back.</div>
+      <details class="setdetails" open><summary>What it needs</summary><div class="setdetails-body">
+      ${devReq(readiness,"chapter_thumbnails","chapter_thumbs_ffmpeg","ffmpeg can decode a frame","The configured ffmpeg answered -version at startup. Every thumbnail is one seek into the source and one decoded frame scaled to 320 px, CPU only.")}
+      ${devReq(readiness,"chapter_thumbnails","chapter_thumbs_cache_space","The runtime cache has room","Thumbnails are tens of kilobytes each and live under the runtime cache beside the other node-local stores; a full cache fails every write.")}
+      ${devReq(readiness,"chapter_thumbnails","chapter_thumbs_work","What this process has extracted","Made, served from cache, failed and running now since this process started, and what the cache holds on disk. At most two extractions run at once, each bounded to 15 seconds.")}
+      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice.</p>
+      </div></details>
+      <div class="err" id="chthumberr" role="alert"></div>
+      ${setCardFoot("saveChapterThumbnails")}`,{id:"chthumbcard"});
 }
 function decodeRecoveryCard(s){
   const q=s.decoder_health_qualification||{};

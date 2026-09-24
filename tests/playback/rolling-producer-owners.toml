@@ -1928,7 +1928,37 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # base that branch was written on. This row's value is the whole integration
 # tree re-measured after every plan in this wave was merged together, so it is
 # the sum of all of them and will not equal any single branch's arithmetic.
-expected_occurrences = 567
+# 567 -> 569 with Fix C PR 1 (the subtitle-source store's readers): two
+# `tokio::task::spawn_blocking` calls in `subtitle_source.rs`, `open_verified`
+# and `copy_verified`. Each opens one stored `.sup`, hashes it (and for the
+# overlay copies it into the stage it already owns), and returns; the caller
+# awaits the handle before going on. Bounded by the store's 256 MiB track cap,
+# no timer, no process, no producer. The two `spawn_blocking` calls in
+# `pgs_overlay::prepare_stage` moved with the function's split into
+# `prepare_stage_with` and `demux_track`; they are the same two calls.
+# 569 -> 572 with Fix C PR 2 (the PGS ride-along producer). One `tokio::spawn`
+# in `main.rs::spawn_background_loops`: `subtitle_ride_along::startup_self_test`,
+# once per process, bounded by its own 60 s `SELF_TEST_BUDGET` and by the
+# background shutdown token, whose every `ffmpeg` child is `kill_on_drop` and
+# awaited through `.output()` before the task records its result and returns.
+# Two `tokio::task::spawn_blocking` calls in `subtitle_ride_along.rs`: the
+# per-track verdict after a reaped index pass (`RideAlongHarvest::take`) and
+# the same verdict inside the self-test. Each reads the stage's few files,
+# walks and parses a `.sup` bounded by the 256 MiB track cap, and returns; the
+# caller awaits the handle. No timer, no process, no producer.
+# 572 -> 573 with #460's review: one `tokio::spawn` in
+# `subtitle_source::classify_no_directory_later`. A stored-subtitle lookup that
+# finds no directory is answered at once, and why (`never_indexed`,
+# `hydrated_only`, `absent`) is counted by this detached task: two keyed store
+# reads, one counter increment, then it returns. At most eight run at once (an
+# atomic in-flight count); past that the miss is counted `absent` inline. No
+# timer, no process, no producer, and no request waits on it.
+# +1 for `http/developer.rs`'s chapter-thumbnail readiness card: one
+# `tokio::task::spawn_blocking` that walks the small thumbnail cache and
+# takes a statvfs, awaited to completion inside the request. It owns no
+# producer, no process and no timer; it exists so two synchronous filesystem
+# reads do not run on the async runtime.
+expected_occurrences = 574
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2548,7 +2578,44 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # base that branch was written on. This row's value is the whole integration
 # tree re-measured after every plan in this wave was merged together, so it is
 # the sum of all of them and will not equal any single branch's arithmetic.
-expected_occurrences = 868
+# 868 -> 869 with Fix C PR 1: one test-only `tokio::time::sleep` (20 ms) in
+# `subtitle_source::tests::over_the_cap_the_least_recently_accessed_directory_
+# goes_first`, spacing three `.access` writes so their mtimes order. It owns no
+# producer, no process and no timer beyond the test's own await.
+# 869 -> 870 with the #456 review: one production `tokio::time::timeout` in
+# `subtitles::derive_burn_from_store`, the derivation's own 30 s bound. It
+# runs inside the burn flight's owned task and under that flight's
+# `EXTRACTION_TIMEOUT`; expiry drops the derivation future, whose
+# `BoundedDiagnosticChild` kills and reaps the ffmpeg child, and the same task
+# goes on to the source extraction. It owns no new producer and elects no
+# recovery; it exists so a hung derivation cannot run the flight's timeout out
+# and have that memoised.
+# 870 -> 873 with Fix C PR 2, merged over the #456 review's 869 -> 870. Two
+# production `tokio::time::timeout`s in
+# `subtitle_ride_along.rs`: the self-test's whole 60 s budget around
+# `run_self_test`, and the 20 s bound on each of its three `ffmpeg` runs
+# (`run_ffmpeg`), whose child is `kill_on_drop`, so a run that times out is
+# killed as its future is dropped. One test-only 20 ms `timeout` in
+# `fragindex::ride_along_tests::dropping_the_build_future_mid_pass_removes_the_
+# stage`, polling the paced pass until its slaves exist so the test can drop
+# the future mid-pass. None owns a producer.
+# 873 -> 874 with Fix C PR 3: one test-only 50 ms `tokio::time::timeout` in
+# `fragindex::ride_along_tests::a_riding_pass_reports_its_tracks_and_bytes_
+# with_its_progress`, polling the paced riding pass until a progress report
+# carries ride-along bytes. It bounds a poll of the build future the test
+# owns; expiry leaves that future to the next poll, and the test drops it at
+# the end. No producer, no timer outside the test.
+# 874 -> 875 with #463's review: one test-only 25 ms `tokio::time::sleep` in
+# `state::tests::the_queue_worker_row_carries_its_ride_along`, between the
+# test's own calls to `work_cluster_fragment_index_queue` while the queued
+# request resolves, is claimed and builds (at most 40 rounds). It owns no
+# producer and outlives nothing: the test awaits each round.
+# +2 for `http/chapter_thumbs.rs`: `tokio::time::timeout` bounding the wait
+# for one of the two extraction permits (10 s), and `tokio::time::timeout`
+# bounding the one-frame ffmpeg child (15 s). Both are request-scoped waits
+# that end with the request; neither selects a recipe, publishes anything
+# or starts a rolling producer.
+expected_occurrences = 877
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2695,7 +2762,42 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 135
+# 135 -> 146 with Fix C PR 1. One production construction: the burn path's
+# `ffmpeg` derivation from a stored `.sup` (`subtitles::run_burn_derivation`),
+# spawned through `BoundedDiagnosticChild::spawn_piped_output` with
+# `kill_on_drop`, fed the verified descriptor as fd 3 and written through
+# `output_to_bounded_file` under the burn sidecar's 64 MiB bound. It runs only
+# inside the existing single flight's owned task, under that flight's
+# `EXTRACTION_TIMEOUT`, and exits before the flight answers — the same owner as
+# the source extraction it stands in for, which moved unchanged into
+# `extract_burn_from_source` (a move, not a new site). Ten test-only fixture
+# renderers, each `std::process::Command` run to completion with `.output()`
+# before its test proceeds: in `subtitles::stored_source_tests` the `mkpgs`
+# author, the fixture mux, the ride-along extraction, `ffprobe`, and the
+# `-start_at_zero` variant (5); in `pgs_overlay::stored_source_tests` the
+# author, the mux and the ride-along (3); in `vodencode_manager_tests.rs` the
+# author and the mux (2).
+# 146 -> 149 with the #456 review, all test-only fixture renderers run to
+# completion before their test proceeds: the no-subtitle source mux in
+# `a_double_failure_remembers_the_source_error_and_runs_neither_again`, and the
+# `mkpgs` author and the mux in
+# `a_source_encoder_selection_refuses_is_refused_before_any_burn_extraction`.
+# 149 -> 151 with Fix C PR 2, merged over the #456 review's 146 -> 149. One
+# production construction:
+# `subtitle_ride_along::run_ffmpeg`, the self-test's bounded `ffmpeg` runner
+# (the synthetic-source mux, the baseline index run and the run with the tee),
+# `kill_on_drop`, stdin null, awaited with `.output()` under a 20 s timeout
+# inside the self-test task that owns it. One test-only fixture renderer,
+# `subtitle_ride_along::testing::run_ffmpeg_to_completion`, a
+# `std::process::Command` run to completion through `testfixtures::run`
+# before its test proceeds.
+# +1 for `http/chapter_thumbs.rs`: the one-frame chapter thumbnail child,
+# built by `extract_command` and spawned through
+# `BoundedDiagnosticChild::spawn_piped_output`, so it inherits
+# `kill_on_drop`, an output cap (2 MiB) and a 15 s timeout. It runs only for
+# the chapter a watch page asked for, two at a time behind a semaphore, and
+# nothing owns it beyond the request's await.
+expected_occurrences = 152
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2956,8 +3058,25 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # pattern, but the callee is `std::thread::Scope::spawn` with a closure that
 # only pushes onto a bounded in-process queue. No child process is created and
 # nothing survives the scope.
-# 343 -> 350 with C-07's M0 census: seven `.status(` occurrences across six
-# lines, every one of them `axum::response::Response::status()` on an
+# 343 -> 347 with Fix C PR 1: four test-only `.output()` launches, the ones
+# that run the fixture renderers counted in the command-construction row above
+# — one shared `run` helper each in `subtitles::stored_source_tests` and
+# `pgs_overlay::stored_source_tests`, and two in `vodencode_manager_tests.rs`.
+# Every one is waited to completion before its test continues; none owns a
+# producer.
+# 347 -> 349 with the #456 review: the two test-only `.output()` launches of
+# the fixture renderers in
+# `a_source_encoder_selection_refuses_is_refused_before_any_burn_extraction`,
+# each waited to completion. (The double-failure test's mux goes through the
+# existing `run` helper, already counted.)
+# 349 -> 350 with Fix C PR 2, merged over the #456 review's 347 -> 349: the
+# `.output()` in
+# `subtitle_ride_along::run_ffmpeg`, which spawns, drains and reaps the
+# self-test's child in one await under the 20 s timeout; `kill_on_drop` covers
+# the timeout.
+# +7 with C-07's M0 census (branch base 343 -> 350, merged over main's
+# Fix C / #456 count of 350 and re-measured on the merged tree): seven
+# `.status(` occurrences across six lines, every one of them `axum::response::Response::status()` on an
 # in-process response, and **not one of them launches a child**. This
 # sentinel's pattern counts `.spawn(`, `.output(` and `.status(` together and
 # `Response::status()` is the third spelling; no `Command` is constructed
@@ -2970,7 +3089,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # façade route, a 200 on `/identity`, a browser root, and the two arms of the
 # Plex root's accepted answers. All in-process; they create no task, timer,
 # process or rolling-producer owner.
-expected_occurrences = 350
+expected_occurrences = 357
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3194,7 +3313,12 @@ pattern = "kill_on_drop\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 81
+# 81 -> 82 with Fix C PR 2: the self-test's `ffmpeg` runner
+# (`subtitle_ride_along::run_ffmpeg`), so a run its 20 s timeout or the
+# self-test's shutdown drops is killed with it. The index pass's own child,
+# which now also carries the ride-along's tee, was already `kill_on_drop` and
+# is unchanged.
+expected_occurrences = 82
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
