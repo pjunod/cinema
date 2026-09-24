@@ -838,7 +838,10 @@ mod tests {
         pool.satisfy("abcd1234", 1);
         assert_eq!(ready.wait(secs(1)).await, WaitOutcome::Ready);
         let mut late = pool.register(key(2), "other").expect("admitted");
-        assert_eq!(late.wait(Duration::from_millis(5)).await, WaitOutcome::Deadline);
+        assert_eq!(
+            late.wait(Duration::from_millis(5)).await,
+            WaitOutcome::Deadline
+        );
         let after = admission_waits_for_test(AdmissionPool::VodBlockedGet);
         assert!(after - before >= 2, "{before} -> {after}");
     }

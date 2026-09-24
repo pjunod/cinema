@@ -3342,7 +3342,10 @@ mod tests {
         use crate::telemetry::{admission_waits_for_test, AdmissionPool};
         let coordinator = ArtworkCoordinator::new();
         let before = admission_waits_for_test(AdmissionPool::ImageMaterialize);
-        let _permit = coordinator.derive_permit().await.expect("an idle pool admits");
+        let _permit = coordinator
+            .derive_permit()
+            .await
+            .expect("an idle pool admits");
         let after = admission_waits_for_test(AdmissionPool::ImageMaterialize);
         assert!(after > before, "{before} -> {after}");
     }

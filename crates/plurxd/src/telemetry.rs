@@ -300,9 +300,8 @@ impl PlaybackMetrics {
             stalled_ms: [const { AtomicU64::new(0) }; STALL_KINDS.len()],
             watched_ms: [const { AtomicU64::new(0) }; METHODS.len()],
             delivered_bytes: [const { AtomicU64::new(0) }; METHODS.len()],
-            admission_wait: [const {
-                [const { AtomicU64::new(0) }; ADMISSION_WAIT_BUCKETS_US.len()]
-            }; ADMISSION_POOLS.len()],
+            admission_wait: [const { [const { AtomicU64::new(0) }; ADMISSION_WAIT_BUCKETS_US.len()] };
+                ADMISSION_POOLS.len()],
             admission_wait_sum_us: [const { AtomicU64::new(0) }; ADMISSION_POOLS.len()],
             stall_recoveries: [const { AtomicU64::new(0) }; STALL_RECOVERY_OUTCOMES.len()],
             suspends: [const { AtomicU64::new(0) }; HOLD_REASONS.len()],
@@ -660,8 +659,7 @@ impl PlaybackMetrics {
             out.push_str(&format!(
                 "plurx_admission_wait_seconds_sum{{pool=\"{pool}\"}} {:.6}\n\
                  plurx_admission_wait_seconds_count{{pool=\"{pool}\"}} {cumulative}\n",
-                self.admission_wait_sum_us[pool_index].load(Ordering::Relaxed) as f64
-                    / 1_000_000.0,
+                self.admission_wait_sum_us[pool_index].load(Ordering::Relaxed) as f64 / 1_000_000.0,
             ));
         }
     }
@@ -777,7 +775,12 @@ impl WatchLedger {
     }
 }
 
-fn watched_credit_ms(previous_ms: i64, previous_at: Instant, position_ms: i64, now: Instant) -> u64 {
+fn watched_credit_ms(
+    previous_ms: i64,
+    previous_at: Instant,
+    position_ms: i64,
+    now: Instant,
+) -> u64 {
     let elapsed = now.saturating_duration_since(previous_at);
     if elapsed > WATCH_BEAT_MAX_GAP {
         return 0;
@@ -790,12 +793,15 @@ fn watched_credit_ms(previous_ms: i64, previous_at: Instant, position_ms: i64, n
     else {
         return 0;
     };
-    if advance > elapsed_ms.saturating_mul(2).saturating_add(WATCH_BEAT_SLACK_MS) {
+    if advance
+        > elapsed_ms
+            .saturating_mul(2)
+            .saturating_add(WATCH_BEAT_SLACK_MS)
+    {
         return 0;
     }
     advance.min(elapsed_ms)
 }
-
 
 /// Read one node-wide release-evidence cell. Tests elsewhere in the crate use
 /// these to prove their call site feeds the family, without parsing text.
@@ -1984,9 +1990,9 @@ mod tests {
         });
         let text = metrics.render();
         assert!(text.contains("plurx_ttff_ms_count{method=\"remux\",client=\"other\"} 1"));
-        assert!(text.contains(
-            "plurx_ttff_ms_bucket{method=\"remux\",client=\"other\",le=\"1000\"} 1"
-        ));
+        assert!(
+            text.contains("plurx_ttff_ms_bucket{method=\"remux\",client=\"other\",le=\"1000\"} 1")
+        );
         assert!(text.contains("plurx_stalls_total{kind=\"supply\"} 1"));
         assert!(text.contains("plurx_stall_recoveries_total{outcome=\"attempt\"} 1"));
         assert!(text.contains("plurx_stall_recoveries_total{outcome=\"recovered\"} 1"));
@@ -2029,9 +2035,18 @@ mod tests {
                 .expect("value")
                 .to_owned()
         };
-        assert_eq!(line(r#"method="transcode",client="safari",le="30000""#), "0");
-        assert_eq!(line(r#"method="transcode",client="safari",le="60000""#), "1");
-        assert_eq!(line(r#"method="transcode",client="safari",le="120000""#), "2");
+        assert_eq!(
+            line(r#"method="transcode",client="safari",le="30000""#),
+            "0"
+        );
+        assert_eq!(
+            line(r#"method="transcode",client="safari",le="60000""#),
+            "1"
+        );
+        assert_eq!(
+            line(r#"method="transcode",client="safari",le="120000""#),
+            "2"
+        );
         assert_eq!(line(r#"method="transcode",client="safari",le="+Inf""#), "2");
         assert!(text.contains(r#"plurx_ttff_ms_count{method="transcode",client="other"} 1"#));
         assert!(!text.contains("script"));
@@ -2042,9 +2057,12 @@ mod tests {
         text.lines()
             .filter(|line| !line.starts_with('#'))
             .filter(|line| {
-                line.split(['{', ' '])
-                    .next()
-                    .is_some_and(|name| name == family || name.strip_prefix(family).is_some_and(|rest| ["_bucket", "_sum", "_count"].contains(&rest)))
+                line.split(['{', ' ']).next().is_some_and(|name| {
+                    name == family
+                        || name
+                            .strip_prefix(family)
+                            .is_some_and(|rest| ["_bucket", "_sum", "_count"].contains(&rest))
+                })
             })
             .map(|line| {
                 let labels = line
@@ -2108,7 +2126,11 @@ mod tests {
             "plurx_watched_seconds_total",
             "plurx_delivered_bytes_total",
         ] {
-            assert_eq!(label_values(&text, family, "method"), set(&METHODS), "{family}");
+            assert_eq!(
+                label_values(&text, family, "method"),
+                set(&METHODS),
+                "{family}"
+            );
         }
         assert_eq!(
             label_values(&text, "plurx_stalled_seconds_total", "kind"),
@@ -2122,8 +2144,18 @@ mod tests {
             label_values(&text, "plurx_ttff_ms", "client"),
             set(&CLIENT_CLASSES)
         );
-        for forbidden in ["/mnt", "session=", "file_id", "token", "user-agent", "abc123"] {
-            assert!(!text.contains(forbidden), "{forbidden} leaked into the exposition");
+        for forbidden in [
+            "/mnt",
+            "session=",
+            "file_id",
+            "token",
+            "user-agent",
+            "abc123",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{forbidden} leaked into the exposition"
+            );
         }
         // The hostile values folded into the fixed fallbacks.
         assert!(text.contains(r#"plurx_seeks_total{method="unknown"} 2"#));
@@ -2132,7 +2164,8 @@ mod tests {
         assert!(text.contains(r#"plurx_stalled_seconds_total{kind="other"} 0.900"#));
         assert!(text.contains(r#"plurx_watched_seconds_total{method="unknown"} 5.000"#));
         assert!(text.contains(r#"plurx_delivered_bytes_total{method="unknown"} 1"#));
-        assert!(text.contains(r#"plurx_admission_wait_seconds_bucket{pool="encode_permit",le="0.05"} 1"#));
+        assert!(text
+            .contains(r#"plurx_admission_wait_seconds_bucket{pool="encode_permit",le="0.05"} 1"#));
         assert!(text.contains(r#"plurx_admission_wait_seconds_count{pool="encode_permit"} 1"#));
     }
 
@@ -2155,7 +2188,11 @@ mod tests {
                 start + Duration::from_secs(beat * 5),
             );
         }
-        for (detail, ms) in [("supply", 1_200), ("decode", 800), ("state=recovered", 3_000)] {
+        for (detail, ms) in [
+            ("supply", 1_200),
+            ("decode", 800),
+            ("state=recovered", 3_000),
+        ] {
             metrics.record_from(
                 &PlaybackEvent {
                     event: "stall".into(),
@@ -2189,23 +2226,51 @@ mod tests {
         let base = Instant::now();
         let t = |seconds: u64| base + Duration::from_secs(seconds);
         let ledger = WatchLedger::default();
-        assert_eq!(ledger.beat(1, 1, 10_000, t(0)), 0, "a first beat has no baseline");
+        assert_eq!(
+            ledger.beat(1, 1, 10_000, t(0)),
+            0,
+            "a first beat has no baseline"
+        );
         assert_eq!(ledger.beat(1, 1, 15_000, t(5)), 5_000, "ordinary play");
         assert_eq!(ledger.beat(1, 1, 15_000, t(10)), 0, "paused");
         assert_eq!(ledger.beat(1, 1, 615_000, t(15)), 0, "a ten-minute seek");
         assert_eq!(ledger.beat(1, 1, 600_000, t(20)), 0, "a rewind");
-        assert_eq!(ledger.beat(1, 1, 610_000, t(25)), 5_000, "2x speed earns wall time");
-        assert_eq!(ledger.beat(1, 1, 612_000, t(30)), 2_000, "part stalled earns the advance");
-        assert_eq!(ledger.beat(1, 1, 750_000, t(160)), 0, "after a silence longer than the gap");
-        assert_eq!(ledger.beat(1, 1, 755_000, t(165)), 5_000, "and the baseline restarts");
-        assert_eq!(ledger.beat(2, 1, 0, t(165)), 0, "another viewer is another key");
+        assert_eq!(
+            ledger.beat(1, 1, 610_000, t(25)),
+            5_000,
+            "2x speed earns wall time"
+        );
+        assert_eq!(
+            ledger.beat(1, 1, 612_000, t(30)),
+            2_000,
+            "part stalled earns the advance"
+        );
+        assert_eq!(
+            ledger.beat(1, 1, 750_000, t(160)),
+            0,
+            "after a silence longer than the gap"
+        );
+        assert_eq!(
+            ledger.beat(1, 1, 755_000, t(165)),
+            5_000,
+            "and the baseline restarts"
+        );
+        assert_eq!(
+            ledger.beat(2, 1, 0, t(165)),
+            0,
+            "another viewer is another key"
+        );
 
         let full = WatchLedger::default();
         for key in 0..WATCH_LEDGER_CAP {
             full.beat(i64::try_from(key).expect("key"), 1, 0, t(0));
         }
         assert_eq!(full.beat(-1, 1, 0, t(1)), 0);
-        assert_eq!(full.beat(-1, 1, 5_000, t(6)), 0, "a viewer past the cap is not tracked");
+        assert_eq!(
+            full.beat(-1, 1, 5_000, t(6)),
+            0,
+            "a viewer past the cap is not tracked"
+        );
         assert_eq!(full.beats.lock().expect("ledger").len(), WATCH_LEDGER_CAP);
         // Once the tracked viewers go quiet past the gap, room is made.
         assert_eq!(full.beat(-1, 1, 0, t(200)), 0);
