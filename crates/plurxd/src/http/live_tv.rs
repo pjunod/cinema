@@ -1358,10 +1358,17 @@ pub(crate) async fn drain_owner(
     Ok(())
 }
 
-/// Same order as `PEER_STATUS_CACHE_TTL` in `cluster_operations`. One sixth of
-/// the roster's own 30 s `NODE_REACHABLE_WINDOW_MS`, so a peer that stops
-/// heartbeating leaves this memory well before the roster itself stops calling
-/// it reachable.
+/// Same order as `PEER_STATUS_CACHE_TTL` in `cluster_operations`, and one sixth
+/// of the roster's own 30 s `NODE_REACHABLE_WINDOW_MS`.
+///
+/// What this bounds is the staleness this memory *adds* to the roster's, not
+/// how soon a dead peer is noticed. The memory refills from `activity_peers`,
+/// which keeps reporting a silent peer `reachable` for the whole 30 s window,
+/// so a peer that stops heartbeating stays here for as long as the roster calls
+/// it reachable plus at most this TTL. The TTL cannot make the memory notice a
+/// dead peer before the roster does. What stops an ingress relaying at a dead
+/// owner is the other rule: every `PeerTransportError` from an exchange drops
+/// the entry, so the first failed request re-resolves.
 pub(crate) const OWNER_PEER_TTL: Duration = Duration::from_secs(5);
 
 /// Where the owner was last resolved to be. Only an address: which node owns a
@@ -2255,8 +2262,12 @@ mod tests {
     #[test]
     fn the_owner_peer_ttl_stays_inside_the_window_the_roster_derives_reachability_from() {
         // `reachable` is `now - last_seen_at <= 30 s`, refreshed by 10 s
-        // heartbeats. This memory must expire well inside that, or an ingress
-        // could keep relaying at a peer the roster itself has given up on.
+        // heartbeats. The memory refills from that roster, so it can never
+        // notice a silent peer sooner than the roster does; the TTL only bounds
+        // how much staleness it adds on top (here at most 5 s over the 30 s
+        // window). A dead owner is dropped from the memory by the first failed
+        // exchange, which `a_failed_owner_exchange_invalidates_the_cached_peer`
+        // pins. This guard keeps the added staleness small against the window.
         assert!(OWNER_PEER_TTL <= Duration::from_secs(30) / 6);
     }
 
