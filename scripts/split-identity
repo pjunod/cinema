@@ -180,9 +180,71 @@ MOVES: list[tuple[str, str, str, int]] = [
     ("crates/plurxd/src/transcode.rs", "retirement", "transcode/rolling/retirement.rs", 37),
     ("crates/plurxd/src/transcode.rs", "prepublication-executor", "transcode/producer/prepublication_executor.rs", 7),
     ("crates/plurxd/src/transcode.rs", "attempt-child", "transcode/producer/attempt_child.rs", 38),
+    ("crates/plurxd/src/transcode.rs", "publication", "transcode/rolling/publication.rs", 58),
+    ("crates/plurxd/src/transcode.rs", "session", "transcode/rolling/session.rs", 156),
+    ("crates/plurxd/src/transcode.rs", "response", "transcode/response.rs", 31),
+    ("crates/plurxd/src/transcode.rs", "hls-codecs", "transcode/hls_codecs.rs", 2),
+    ("crates/plurxd/src/transcode.rs", "cluster-adoption", "transcode/cluster_adoption.rs", 43),
+    ("crates/plurxd/src/transcode.rs", "session-request", "transcode/session_request.rs", 22),
+    ("crates/plurxd/src/transcode.rs", "requests", "transcode/requests.rs", 12),
+    ("crates/plurxd/src/transcode.rs", "pretranscode-source", "transcode/pretranscode/source.rs", 44),
+    ("crates/plurxd/src/transcode.rs", "pretranscode-parts", "transcode/pretranscode/parts.rs", 46),
+    ("crates/plurxd/src/transcode.rs", "rate-control", "transcode/rate_control.rs", 9),
+    ("crates/plurxd/src/transcode.rs", "retention", "transcode/rolling/retention.rs", 6),
+    ("crates/plurxd/src/transcode.rs", "ladder", "transcode/ladder.rs", 7),
+    ("crates/plurxd/src/transcode.rs", "test-support", "transcode/test_support.rs", 3),
 ]
 
 CHILD_HEADER = "use super::*;\n\n"
+
+# (parent, marker, impl header line, [chunk children], pub(super) additions):
+# one `impl` block cut into contiguous chunks. Each chunk child is the
+# structural header, the same impl header line, its methods, and a closing
+# `}`; the single blank line that separated two methods at each cut is
+# structural too, so the reconstruction joins chunks with one blank line.
+IMPL_SPLITS: list[tuple[str, str, str, list[str], int]] = [
+    (
+        "crates/plurxd/src/transcode.rs",
+        "manager",
+        'impl TranscodeManager {\n',
+        [
+            "transcode/manager/construct.rs",
+            "transcode/manager/plan.rs",
+            "transcode/manager/cache.rs",
+            "transcode/manager/produce.rs",
+            "transcode/manager/create.rs",
+            "transcode/manager/describe.rs",
+            "transcode/manager/start.rs",
+            "transcode/manager/control.rs",
+            "transcode/manager/publication.rs",
+            "transcode/manager/maintenance.rs",
+        ],
+        76,
+    ),
+]
+
+
+def impl_split_reconstruction(
+    parent_text: str, parent: str, marker: str, header: str, chunks: list[str], expected: int
+) -> tuple[str, str]:
+    bodies: list[str] = []
+    added = 0
+    for chunk_rel in chunks:
+        chunk_path = str(pathlib.Path(parent).parent / chunk_rel)
+        text = read(chunk_path)
+        prefix = CHILD_HEADER + header
+        if not text.startswith(prefix) or not text.endswith("\n}\n"):
+            raise SystemExit(f"{chunk_path}: lost its exact impl-chunk wrapper")
+        body = text[len(prefix) : -len("}\n")]
+        added += body.count("pub(super) ")
+        bodies.append(body.replace("pub(super) ", ""))
+    if added != expected:
+        raise SystemExit(f"{marker}: pub(super) additions expected {expected}, got {added}")
+    rebuilt = header + "\n".join(bodies) + "}\n"
+    return (
+        replace_marker(parent_text, marker, rebuilt),
+        f"{marker}: {len(chunks)} impl chunks, {added} pub(super) additions",
+    )
 
 
 def rustfmt(text: str) -> str:
@@ -214,6 +276,12 @@ def moves_reconstructions() -> tuple[dict[str, str], list[str]]:
         report.append(
             f"{child_path}: {child.count(chr(10))} lines, {added} pub(super) additions"
         )
+    for parent, marker, header, chunks, expected in IMPL_SPLITS:
+        text = parents.get(parent) or read(parent)
+        parents[parent], line = impl_split_reconstruction(
+            text, parent, marker, header, chunks, expected
+        )
+        report.append(line)
     return parents, report
 
 
