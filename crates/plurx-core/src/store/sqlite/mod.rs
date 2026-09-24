@@ -1308,6 +1308,10 @@ pub struct SqliteStore {
     /// where a second connection would be a different, empty database;
     /// their reads take the writer connection exactly as before.
     reads: Option<Arc<ReadPool>>,
+    /// Admits one `last_seen_at` refresh per token per activity window in
+    /// this process, so a burst of requests from one due session queues one
+    /// write on the writer instead of one each (K-05 section 3.2).
+    token_activity: Arc<users::TokenActivityGate>,
 }
 
 /// A few read-only connections picked round-robin. Opened READ_ONLY so a
@@ -1393,6 +1397,7 @@ impl SqliteStore {
         Ok(SqliteStore {
             conn: Arc::new(Mutex::new(conn)),
             reads: None,
+            token_activity: Arc::default(),
         })
     }
 

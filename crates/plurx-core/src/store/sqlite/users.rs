@@ -21,6 +21,82 @@ fn require_standalone_claim(claim: Option<&CacheAdminMutationClaim>) -> Result<(
     Ok(())
 }
 
+/// The standalone twin of the replicated store's activity gate: one
+/// `last_seen_at` refresh per token per `ACTIVITY_REFRESH_SECS` in this
+/// process. A reservation is kept only when its write committed; a failed
+/// write releases it so the next request retries.
+#[derive(Default)]
+pub(super) struct TokenActivityGate {
+    reservations: std::sync::Mutex<std::collections::HashMap<String, i64>>,
+}
+
+pub(super) struct TokenActivityReservation<'a> {
+    gate: &'a TokenActivityGate,
+    token_hash: String,
+    reserved_at: i64,
+    retained: bool,
+}
+
+impl TokenActivityGate {
+    fn try_reserve(&self, token_hash: &str, now: i64) -> Option<TokenActivityReservation<'_>> {
+        let mut reservations = self
+            .reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Expired reservations go on every admission, so the map holds at
+        // most the tokens refreshed within the last window.
+        reservations
+            .retain(|_, reserved_at| !crate::auth::activity_refresh_due(Some(*reserved_at), now));
+        if reservations.contains_key(token_hash) {
+            return None;
+        }
+        reservations.insert(token_hash.to_owned(), now);
+        Some(TokenActivityReservation {
+            gate: self,
+            token_hash: token_hash.to_owned(),
+            reserved_at: now,
+            retained: false,
+        })
+    }
+
+    fn forget(&self, token_hash: &str) {
+        self.reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(token_hash);
+    }
+
+    #[cfg(test)]
+    fn is_reserved(&self, token_hash: &str) -> bool {
+        self.reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(token_hash)
+    }
+}
+
+impl TokenActivityReservation<'_> {
+    fn retain(mut self) {
+        self.retained = true;
+    }
+}
+
+impl Drop for TokenActivityReservation<'_> {
+    fn drop(&mut self) {
+        if self.retained {
+            return;
+        }
+        let mut reservations = self
+            .gate
+            .reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if reservations.get(&self.token_hash) == Some(&self.reserved_at) {
+            reservations.remove(&self.token_hash);
+        }
+    }
+}
+
 #[async_trait]
 impl UserStore for SqliteStore {
     async fn count_users(&self) -> Result<i64, StoreError> {
@@ -283,10 +359,16 @@ impl UserStore for SqliteStore {
         token_hash: &str,
     ) -> Result<TokenAuthentication, StoreError> {
         let token_hash = token_hash.to_owned();
-        self.with_conn(move |conn| {
-            // The expiry policy is read in the same statement as the token, so
-            // a request is judged against one snapshot of both.
-            const SQL: &str = "SELECT u.id, u.username, u.password_hash, u.is_admin, u.created_at,
+        let read_hash = token_hash.clone();
+        // The read is on the read pool: an authenticated request no longer
+        // takes the writer mutex, and inside the activity window it takes
+        // nothing else either (K-05 section 3.2).
+        let found = self
+            .with_read(move |conn| {
+                // The expiry policy is read in the same statement as the
+                // token, so a request is judged against one snapshot of both.
+                const SQL: &str =
+                    "SELECT u.id, u.username, u.password_hash, u.is_admin, u.created_at,
                             t.last_seen_at,
                             (SELECT value FROM settings WHERE key = ?2),
                             (SELECT value FROM settings WHERE key = ?3),
@@ -295,48 +377,67 @@ impl UserStore for SqliteStore {
                      FROM users u
                      JOIN tokens t ON t.user_id = u.id
                      WHERE t.token_hash = ?1";
-            super::trace_statement("authenticate_token", SQL);
-            let found = conn
-                .query_row(
-                    SQL,
-                    params![
-                        token_hash,
-                        keys::AUTH_TOKEN_EXPIRY_ENABLED,
-                        keys::AUTH_TOKEN_IDLE_DAYS,
-                        keys::AUTH_TOKEN_EXPIRY_SINCE
-                    ],
-                    |row| {
-                        Ok((
-                            user_from_row(row)?,
-                            row.get::<_, i64>(5)?,
-                            TokenIdlePolicy::from_settings(
-                                row.get::<_, Option<String>>(6)?.as_deref(),
-                                row.get::<_, Option<String>>(7)?.as_deref(),
-                                row.get::<_, Option<String>>(8)?.as_deref(),
-                            ),
-                            row.get::<_, i64>(9)?,
-                        ))
-                    },
-                )
-                .optional()?;
-            let Some((user, last_seen_at, policy, now)) = found else {
-                return Ok(TokenAuthentication::Unknown);
-            };
-            if let Some(policy) = policy.filter(|policy| policy.is_expired(last_seen_at, now)) {
-                // No touch: refreshing an expired token would revive it.
-                return Ok(TokenAuthentication::Expired {
-                    idle_days: policy.idle_days,
-                });
+                super::trace_statement("authenticate_token", SQL);
+                Ok(conn
+                    .query_row(
+                        SQL,
+                        params![
+                            read_hash,
+                            keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                            keys::AUTH_TOKEN_IDLE_DAYS,
+                            keys::AUTH_TOKEN_EXPIRY_SINCE
+                        ],
+                        |row| {
+                            Ok((
+                                user_from_row(row)?,
+                                row.get::<_, i64>(5)?,
+                                TokenIdlePolicy::from_settings(
+                                    row.get::<_, Option<String>>(6)?.as_deref(),
+                                    row.get::<_, Option<String>>(7)?.as_deref(),
+                                    row.get::<_, Option<String>>(8)?.as_deref(),
+                                ),
+                                row.get::<_, i64>(9)?,
+                            ))
+                        },
+                    )
+                    .optional()?)
+            })
+            .await?;
+        let Some((user, last_seen_at, policy, now)) = found else {
+            return Ok(TokenAuthentication::Unknown);
+        };
+        if let Some(policy) = policy.filter(|policy| policy.is_expired(last_seen_at, now)) {
+            // No touch: refreshing an expired token would revive it.
+            return Ok(TokenAuthentication::Expired {
+                idle_days: policy.idle_days,
+            });
+        }
+        // Touch at most once a minute to keep write volume trivial, and at
+        // most once per process: the gate admits one refresh per token per
+        // window, and the predicate is the final guard across processes and
+        // against a delete that landed after the read. An UPDATE cannot
+        // resurrect a deleted row, so a token revoked between the read and
+        // this write stays revoked; this request, which read it live, is
+        // served, exactly as when the delete landed just after the read did.
+        if crate::auth::activity_refresh_due(Some(last_seen_at), now) {
+            if let Some(reservation) = self.token_activity.try_reserve(&token_hash, now) {
+                self.with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE tokens SET last_seen_at = ?2
+                         WHERE token_hash = ?1 AND last_seen_at < ?3",
+                        params![
+                            token_hash,
+                            now,
+                            now.saturating_sub(crate::auth::ACTIVITY_REFRESH_SECS)
+                        ],
+                    )?;
+                    Ok(())
+                })
+                .await?;
+                reservation.retain();
             }
-            // Touch at most once a minute to keep write volume trivial.
-            conn.execute(
-                "UPDATE tokens SET last_seen_at = unixepoch()
-                 WHERE token_hash = ?1 AND last_seen_at < unixepoch() - 60",
-                params![token_hash],
-            )?;
-            Ok(TokenAuthentication::Authenticated(user))
-        })
-        .await
+        }
+        Ok(TokenAuthentication::Authenticated(user))
     }
 
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError> {
@@ -436,6 +537,9 @@ impl SqliteStore {
         token_hash: &str,
         last_seen_at: i64,
     ) -> Result<bool, StoreError> {
+        // Moving the clock for a token also ends this process's memory of
+        // having refreshed it, as the passage of that much time would.
+        self.token_activity.forget(token_hash);
         let token_hash = token_hash.to_owned();
         self.with_conn(move |conn| {
             Ok(conn.execute(
@@ -449,7 +553,7 @@ impl SqliteStore {
 
 #[cfg(test)]
 mod tests {
-    use crate::store::{DeleteTokenByPrefixOutcome, SqliteStore, UserStore};
+    use crate::store::{DeleteTokenByPrefixOutcome, SqliteStore, TokenAuthentication, UserStore};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -699,6 +803,195 @@ mod tests {
             );
         }
         assert_eq!(changes().await.expect("changes") - before, 0);
+    }
+
+    /// Park the writer connection until told to release it, optionally
+    /// running one statement on it first (while the reads carry on).
+    struct HeldWriter {
+        run: std::sync::mpsc::Sender<Option<&'static str>>,
+        task: tokio::task::JoinHandle<Result<(), crate::error::StoreError>>,
+    }
+
+    async fn hold_writer(store: &Arc<SqliteStore>) -> HeldWriter {
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (run, commands) = std::sync::mpsc::channel::<Option<&'static str>>();
+        let task = {
+            let store = Arc::clone(store);
+            tokio::spawn(async move {
+                store
+                    .with_conn(move |conn| {
+                        held_tx.send(()).ok();
+                        while let Ok(Some(sql)) = commands.recv() {
+                            conn.execute_batch(sql)?;
+                        }
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        tokio::task::spawn_blocking(move || held_rx.recv())
+            .await
+            .expect("join")
+            .expect("the holder took the writer");
+        HeldWriter { run, task }
+    }
+
+    impl HeldWriter {
+        async fn release(self) {
+            self.run.send(None).expect("release");
+            self.task.await.expect("join").expect("holder");
+        }
+    }
+
+    async fn file_store_with_due_token(
+        token_hash: &str,
+    ) -> (tempfile::TempDir, Arc<SqliteStore>, i64) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SqliteStore::open(&dir.path().join("plurx.db")).expect("open"));
+        let user = store
+            .create_user("paul", "hash", false)
+            .await
+            .expect("user");
+        store
+            .create_token(token_hash, user.id, None)
+            .await
+            .expect("token");
+        store
+            .fixture_set_token_last_seen(token_hash, 0)
+            .await
+            .expect("age");
+        (dir, store, user.id)
+    }
+
+    /// K-05 M2: a hundred concurrent requests from one due token are served
+    /// while the writer is held, except the single one the gate admitted to
+    /// refresh `last_seen_at`, and that refresh lands once.
+    ///
+    /// Reading on the writer (the old path) serves none of them until the
+    /// release; reading on the pool without the gate queues all hundred
+    /// refreshes behind the writer. Either regression leaves the count at
+    /// zero while the writer is held.
+    #[tokio::test]
+    async fn token_refresh_is_single_flight_and_reads_skip_the_writer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (_dir, store, user_id) = file_store_with_due_token("th_burst").await;
+        let writer = hold_writer(&store).await;
+        let served = Arc::new(AtomicUsize::new(0));
+        let requests = (0..100)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let served = Arc::clone(&served);
+                tokio::spawn(async move {
+                    let verdict = store.authenticate_token("th_burst").await;
+                    served.fetch_add(1, Ordering::SeqCst);
+                    verdict
+                })
+            })
+            .collect::<Vec<_>>();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while served.load(Ordering::SeqCst) < 99 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "only {} of 100 authentications completed while the writer was held",
+                served.load(Ordering::SeqCst)
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            served.load(Ordering::SeqCst),
+            99,
+            "exactly one request, the admitted refresh, waits for the writer"
+        );
+        assert!(store.token_activity.is_reserved("th_burst"));
+        let unwritten: i64 = store
+            .with_read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT last_seen_at FROM tokens WHERE token_hash = 'th_burst'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .expect("last_seen_at");
+        assert_eq!(unwritten, 0, "nothing written while the writer is held");
+
+        writer.release().await;
+        for request in requests {
+            match request.await.expect("join").expect("authenticate") {
+                TokenAuthentication::Authenticated(user) => assert_eq!(user.id, user_id),
+                other => panic!("expected an authenticated user, got {other:?}"),
+            }
+        }
+        assert!(
+            last_seen(&store, "th_burst").await > 0,
+            "the refresh landed"
+        );
+    }
+
+    /// Revocation first, then a request: the read connection sees the
+    /// committed delete, so the token is unknown.
+    #[tokio::test]
+    async fn token_deleted_before_the_read_is_unknown() {
+        let (_dir, store, _) = file_store_with_due_token("th_gone").await;
+        assert!(store.delete_token("th_gone").await.expect("delete"));
+        assert!(matches!(
+            store.authenticate_token("th_gone").await.expect("auth"),
+            TokenAuthentication::Unknown
+        ));
+    }
+
+    /// A request that read the token, then a revocation, then that request's
+    /// refresh: the refresh is an UPDATE that matches nothing, so the token
+    /// stays deleted. The request itself is served, having read a live row.
+    #[tokio::test]
+    async fn token_read_then_deleted_then_touched_stays_deleted() {
+        let (_dir, store, user_id) = file_store_with_due_token("th_race").await;
+        let writer = hold_writer(&store).await;
+        let request = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move { store.authenticate_token("th_race").await })
+        };
+        // Reserved means the read returned and the refresh is waiting for
+        // the writer we hold.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !store.token_activity.is_reserved("th_race") {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the read never finished"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        writer
+            .run
+            .send(Some("DELETE FROM tokens WHERE token_hash = 'th_race'"))
+            .expect("delete");
+        writer.release().await;
+        match request.await.expect("join").expect("authenticate") {
+            TokenAuthentication::Authenticated(user) => assert_eq!(user.id, user_id),
+            other => {
+                panic!("expected the request that read a live token to be served, got {other:?}")
+            }
+        }
+        let remaining: i64 = store
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM tokens WHERE token_hash = 'th_race'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .expect("count");
+        assert_eq!(
+            remaining, 0,
+            "the refresh must not resurrect a revoked token"
+        );
+        assert!(matches!(
+            store.authenticate_token("th_race").await.expect("auth"),
+            TokenAuthentication::Unknown
+        ));
     }
 
     /// A device label is caller-chosen and caller-repeatable, so it is the one
