@@ -23,6 +23,7 @@ mod media_pool;
 mod media_sessions;
 mod meter;
 mod offline;
+mod online_subtitles;
 mod pgs_overlay;
 mod pipeprobe;
 mod playback_control;
@@ -2393,6 +2394,10 @@ fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
+    tokio::spawn(http::subtitle_downloads::automatic_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(state.clone().store_metrics_loop());
     tokio::spawn(Arc::clone(&state.backup).schedule_loop(background_shutdown.clone()));
     tokio::spawn(

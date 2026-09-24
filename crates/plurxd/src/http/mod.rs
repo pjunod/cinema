@@ -43,6 +43,7 @@ mod reading;
 mod scan;
 pub(crate) mod scan_identity;
 pub(crate) mod stream;
+pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
 mod trakt;
 
@@ -277,6 +278,8 @@ fn http_route_group(path: &str) -> usize {
 
         // Item metadata, artwork, reading, analysis and DVR catalogue rows.
         "/api/v1/items/{id}"
+        | "/api/v1/files/{id}/subtitles/search"
+        | "/api/v1/files/{id}/subtitles/download"
         | "/api/v1/items/{id}/classification"
         | "/api/v1/items/{id}/photo"
         | "/api/v1/items/{id}/reanalyze"
@@ -375,6 +378,7 @@ fn http_route_group(path: &str) -> usize {
         "/"
         | "/api/v1/server"
         | "/api/v1/settings"
+        | "/api/v1/subtitle-provider"
         | "/api/v1/developer/readiness"
         | "/api/v1/scan"
         | "/api/v1/scan/status"
@@ -586,6 +590,7 @@ pub fn router(state: AppState) -> Router {
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
         .route("/settings", get(system::get_settings))
+        .route("/subtitle-provider", get(subtitle_downloads::settings))
         // Advisory only. The Developer section lists what must be true
         // before each switch is safe; this is the other half — what this
         // process can currently observe. Nothing reads it to decide
@@ -707,6 +712,10 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(json_short_deadline));
 
     let json_long = Router::new()
+        .route(
+            "/files/{id}/subtitles/search",
+            get(subtitle_downloads::search),
+        )
         // These handlers legitimately coordinate cluster writes, password
         // hashing, scans, or child work. Five minutes stays above their own
         // fences while still making a wedged request finite.
@@ -724,6 +733,14 @@ pub fn router(state: AppState) -> Router {
             delete(users::revoke_user_device),
         )
         .route("/settings", put(system::update_settings))
+        .route(
+            "/subtitle-provider",
+            put(subtitle_downloads::update_settings),
+        )
+        .route(
+            "/files/{id}/subtitles/download",
+            post(subtitle_downloads::download),
+        )
         .route(
             "/live-tv/readiness/refresh",
             post(live_tv::refresh_readiness),
@@ -2790,6 +2807,75 @@ mod tests {
 
     fn test_app() -> Router {
         test_app_with_state().0
+    }
+
+    #[tokio::test]
+    async fn subtitle_provider_settings_are_admin_only_and_never_return_secrets() {
+        let app = test_app();
+        assert_eq!(
+            call(&app, get("/api/v1/subtitle-provider", None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let admin = setup_admin(&app).await;
+        let (status, initial) = call(&app, get("/api/v1/subtitle-provider", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(initial["configured"], false);
+        assert_eq!(initial["automatic"], false);
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    "/api/v1/subtitle-provider",
+                    Some(&admin),
+                    json!({"automatic":true})
+                )
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (status,saved)=call(&app,put("/api/v1/subtitle-provider",Some(&admin),json!({"api_key":"fixture-api-key","username":"fixture-user","password":"fixture-password","languages":["en","fr"],"automatic":false}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(saved["configured"], true);
+        assert_eq!(saved["password_configured"], true);
+        assert!(!saved.to_string().contains("fixture-api-key"));
+        assert!(!saved.to_string().contains("fixture-password"));
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    "/api/v1/subtitle-provider",
+                    Some(&admin),
+                    json!({"api_key":"","languages":["en&query=other"]})
+                )
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(&app, get("/api/v1/subtitle-provider", Some(&admin)))
+                .await
+                .1["configured"],
+            true,
+            "invalid updates are atomic"
+        );
+        call(
+            &app,
+            put(
+                "/api/v1/subtitle-provider",
+                Some(&admin),
+                json!({"api_key":"","password":"","automatic":false}),
+            ),
+        )
+        .await;
+        let (status, disabled) = call(
+            &app,
+            get("/api/v1/files/1/subtitles/search?language=en", Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(disabled["code"], "subtitle_provider_disabled");
     }
 
     /// The same app, plus the state behind it — for tests that have to put the

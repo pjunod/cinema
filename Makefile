@@ -1451,6 +1451,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/activity-node-names.test.js
 	@node tests/web/analysis-node-names.test.js
 	@node tests/web/settings-sections.test.js
+	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.
 	@node tests/web/cluster-recovery-session.test.js
 	# The validation runner already has this as `web-membership`, but this is

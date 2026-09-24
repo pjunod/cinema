@@ -549,6 +549,7 @@ mod tests {
         probed: bool,
     ) -> plurx_core::domain::MediaFile {
         plurx_core::domain::MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: std::path::PathBuf::from("/m/x.mkv"),

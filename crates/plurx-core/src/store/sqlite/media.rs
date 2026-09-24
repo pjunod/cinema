@@ -31,7 +31,7 @@ pub(super) fn identity_repair_snapshot(
     show_ids: &[i64],
 ) -> Result<IdentityRepairSnapshot, StoreError> {
     const REPAIR_ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, year, overview, tmdb_id, imdb_id, season_number, episode_number, air_date, runtime_ms, poster_path, backdrop_path, added_at, updated_at, recorded_at, tags, nfo_seeded_at, metadata_at, artwork_attempted_at, artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source";
-    const REPAIR_FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, mastering_max_luminance, luminance_source";
+    const REPAIR_FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles";
     if !(IDENTITY_REPAIR_SHOWS_MIN..=IDENTITY_REPAIR_SHOWS_MAX).contains(&show_ids.len())
         || show_ids.iter().any(|id| *id <= 0)
     {
@@ -1801,6 +1801,43 @@ impl MediaStore for SqliteStore {
                 over_segmented_floor,
                 max_bitrate,
             })
+        })
+        .await
+    }
+
+    async fn add_downloaded_subtitle(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+    ) -> Result<bool, StoreError> {
+        let raw = crate::store::downloaded_subtitles::encode(track)?;
+        let track = track.clone();
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                crate::store::downloaded_subtitles::ADD,
+                params![
+                    file_id,
+                    track.source_size,
+                    track.source_mtime,
+                    raw,
+                    track.provider_file_id
+                ],
+            )?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
+    async fn subtitle_candidate_file_ids(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<i64>, StoreError> {
+        self.with_read(move |conn| {
+            Ok(conn
+                .prepare(crate::store::downloaded_subtitles::CANDIDATES)?
+                .query_map(params![after_id, limit.clamp(1, 16)], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?)
         })
         .await
     }

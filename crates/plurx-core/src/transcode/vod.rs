@@ -312,6 +312,7 @@ mod tests {
     #[test]
     fn encoded_vod_recipe_explicitly_excludes_source_chapters() {
         let source = crate::domain::MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: "/media/chaptered.mkv".into(),

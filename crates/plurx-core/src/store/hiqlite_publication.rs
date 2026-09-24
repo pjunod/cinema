@@ -278,6 +278,38 @@ impl HiqliteAuthStore {
 
 #[async_trait]
 impl FencedPublicationStore for HiqliteAuthStore {
+    async fn add_downloaded_subtitle_fenced(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        let raw = super::downloaded_subtitles::encode(track)?;
+        let sql=format!("{} AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$6 AND owner_node_id=$7 AND fence=$8 AND revision=$9 AND expires_at_ms=$10)",super::downloaded_subtitles::ADD);
+        let counts = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![(
+                    sql,
+                    params!(
+                        file_id,
+                        track.source_size,
+                        track.source_mtime,
+                        raw,
+                        track.provider_file_id,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    ),
+                )],
+            )
+            .await?;
+        Ok(counts.first().copied() == Some(1))
+    }
     async fn apply_identity_repair_fenced(
         &self,
         snapshot: &IdentityRepairSnapshot,

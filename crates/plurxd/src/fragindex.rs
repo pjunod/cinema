@@ -2267,6 +2267,7 @@ mod tests {
         let size = i64::try_from(source.metadata().expect("fixture metadata").len())
             .expect("fixture size");
         let file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 42,
             item_id: 1,
             path: source_path,
@@ -2328,6 +2329,7 @@ mod tests {
 
     fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 77,
             item_id: 1,
             path: std::path::PathBuf::from("/library/film.mkv"),

@@ -1893,6 +1893,7 @@
 
     fn execution_file_for_retry() -> plurx_core::domain::MediaFile {
         plurx_core::domain::MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 91,
             item_id: 3,
             path: PathBuf::from("/media/retry.mkv"),

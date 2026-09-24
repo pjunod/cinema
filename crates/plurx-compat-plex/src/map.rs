@@ -229,6 +229,7 @@ mod tests {
 
     fn movie_file() -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 7,
             item_id: 42,
             path: "/media/The Matrix (1999).mkv".into(),

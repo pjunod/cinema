@@ -1501,8 +1501,21 @@ the client inferring it from `producer_state`.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/api/v1/files/{id}/subs/{subtitle}` | bearer | One subtitle stream as WebVTT, for a `<track>` element |
+| GET | `/api/v1/subtitle-provider` | admin bearer | Configured flags, account username, automatic mode and language codes; never the API key or password |
+| PUT | `/api/v1/subtitle-provider` | admin bearer | Update optional `api_key`, `username`, `password`, `automatic` and `languages`; omitted fields are retained, empty secrets clear them |
+| GET | `/api/v1/files/{id}/subtitles/search?language=en` | bearer | Movie/episode candidates with provider file ID, release, language, file match, translation and accessibility flags, plus downloaded IDs |
+| POST | `/api/v1/files/{id}/subtitles/download` | bearer | Accept `{language, provider_file_id}`, revalidate against search results, acquire and return `{subtitle_index, already_downloaded}` |
 | GET | `/api/v1/files/{id}/subs/{index}/overlay.json` | bearer | The `pgs-v1` overlay manifest |
 | GET | `/api/v1/files/{id}/subs/{index}/overlay/{generation}/objects/{object}` | bearer | One immutable overlay PNG, addressed by content hash |
+
+Provider routes use typed errors: `subtitle_provider_disabled`,
+`subtitle_provider_credentials`, `subtitle_provider_quota`,
+`subtitle_provider_unavailable` and `subtitle_invalid`. Quota responses use
+429 and carry `Retry-After`; other provider refusals use 503. A stale source,
+full track list or competing per-file download returns 409. Automatic mode
+defaults to false; `languages` accepts one to three language codes, default
+`["en"]`. A successful acquisition appends an ordinary `webvtt` subtitle
+ordinal. Caption bodies are not included in file metadata responses.
 
 `{subtitle}` accepts **both** spellings: the handler strips a trailing `.vtt`
 if present and parses the remainder as an integer, so `/subs/0` (legacy) and

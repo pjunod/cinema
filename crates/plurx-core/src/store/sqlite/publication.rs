@@ -19,6 +19,29 @@ use crate::store::{
 
 #[async_trait]
 impl FencedPublicationStore for SqliteStore {
+    async fn add_downloaded_subtitle_fenced(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        let raw = crate::store::downloaded_subtitles::encode(track)?;
+        let track = track.clone();
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            Ok(conn.execute(
+                crate::store::downloaded_subtitles::ADD,
+                params![
+                    file_id,
+                    track.source_size,
+                    track.source_mtime,
+                    raw,
+                    track.provider_file_id
+                ],
+            )? == 1)
+        })
+        .await
+    }
     async fn apply_identity_repair_fenced(
         &self,
         snapshot: &IdentityRepairSnapshot,

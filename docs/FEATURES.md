@@ -339,6 +339,17 @@ the physical Apple/Android device matrix remains a release acceptance step.
   the burn rather than replacing HDR with SDR. The choice belongs to that one
   playback: it does not write Settings → Playback defaults and does not follow
   you to the next item.
+- **Download missing subtitles.** Movie and episode detail pages offer
+  **Find subtitles**, including files with no embedded tracks. Search
+  OpenSubtitles by language, compare the release and file-match indicator,
+  then download and select a track for the next playback. Configure the
+  provider under **Settings → Integrations → OpenSubtitles**. Acquired
+  captions remain in the catalog across rescans and cache eviction and appear
+  in the existing web, Apple and Android subtitle lists. Optional automatic
+  acquisition is off initially; it accepts only complete, untranslated file
+  matches for missing configured languages. Each source revision can hold
+  eight downloaded tracks of at most 256 KiB each. Provider quotas still
+  apply. See [operation and setup](OPERATIONS.md#download-missing-subtitles).
 - **Track facts are ready before playback.** Every file in the native item-detail
   response carries its complete audio/subtitle lists plus `playback_defaults`:
   the exact audio and subtitle indices the shared server policy would select,

@@ -1871,6 +1871,7 @@
 
     fn profile5_file() -> plurx_core::domain::MediaFile {
         plurx_core::domain::MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 5,
             item_id: 1,
             path: PathBuf::from("/media/profile5.mkv"),

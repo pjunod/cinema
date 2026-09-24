@@ -1856,6 +1856,7 @@
 
     fn hls_file(subtitle_streams: Vec<SubtitleStream>) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 5615,
             item_id: 1,
             path: "/media/Scary Movie.mkv".into(),

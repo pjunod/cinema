@@ -1504,6 +1504,7 @@ mod tests {
 
     fn hevc_source(hdr: Option<&str>) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: "/library/film.mkv".into(),
@@ -2149,6 +2150,7 @@ mod tests {
 
         let src = plurx_core::testfixtures::source("clean-cra");
         let file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: src.clone(),

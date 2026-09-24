@@ -1105,6 +1105,7 @@ mod tests {
 
     fn file(path: PathBuf) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 7,
             item_id: 1,
             path,
@@ -1867,6 +1868,7 @@ mod stored_source_tests {
     fn media(id: i64, path: PathBuf) -> MediaFile {
         let metadata = std::fs::metadata(&path).expect("source metadata");
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id,
             item_id: 1,
             size: metadata.len() as i64,

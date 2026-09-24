@@ -86,8 +86,10 @@ function setPrePlay(fileId, kind, raw){
 }
 function prePlayPickers(f){
   const auds=f.audio_streams||[], subs=f.subtitle_streams||[];
+  const find=f.subtitle_search_enabled?`<button class="ghost sm" onclick="findSubtitles(${f.id})">Find subtitles</button><div id="subtitle-search-${f.id}"></div>`:"";
   // Nothing to choose between: one audio track and no subtitles at all.
-  if(!f.available || (auds.length<2 && !subs.length)) return "";
+  if(!f.available) return "";
+  if(auds.length<2 && !subs.length) return find;
   const pd=f.playback_defaults||{}, ad=pd.audio||{}, sd=pd.subtitle||{};
   const sel=prePlaySelection(f.id)||{audio:null,subtitle:null};
   const defAudio=auds.find(a=>a.index===ad.selected_index);
@@ -107,12 +109,55 @@ function prePlayPickers(f){
         ${subs.map(s=>opt(s.index,subFactLabel(s),sel.subtitle===s.index)).join("")}
       </select></div>`:"";
   return `<div class="preplay">
-    <div class="pprow">${audioField}${subField}</div>
+    <div class="pprow">${audioField}${subField}</div>${find}
     <div class="ppnote" id="pp-n-${f.id}" role="status">${esc(PREPLAY_SCOPE_NOTE)}</div></div>`;
 }
 // Criterion 7, said out loud rather than merely implemented: this is one
 // playback's choice, and Settings → Playback defaults is untouched by it.
 const PREPLAY_SCOPE_NOTE="Applies to this playback only — it doesn’t change your Playback defaults.";
+
+function findSubtitles(fileId){
+  const panel=document.getElementById(`subtitle-search-${fileId}`);
+  if(!panel)return;
+  panel.innerHTML=`<div class="card" style="padding:16px;margin-top:8px">
+    <label for="subtitle-language-${fileId}">Subtitle language</label>
+    <select id="subtitle-language-${fileId}">${[["en","English"],["fr","French"],["de","German"],["es","Spanish"],["it","Italian"],["pt","Portuguese"],["pt-BR","Portuguese (Brazil)"],["nl","Dutch"],["ja","Japanese"],["ko","Korean"],["zh-CN","Chinese (Simplified)"],["ar","Arabic"]].map(([code,name])=>`<option value="${code}">${name}</option>`).join("")}</select>
+    <button class="sm" onclick="searchSubtitles(${fileId})">Search OpenSubtitles</button>
+    <button class="ghost sm" onclick="this.closest('.card').remove()">Close</button>
+    <div id="subtitle-results-${fileId}" role="status" aria-live="polite">Choose a language, then search.</div></div>`;
+}
+
+async function searchSubtitles(fileId){
+  const results=document.getElementById(`subtitle-results-${fileId}`);
+  const language=document.getElementById(`subtitle-language-${fileId}`).value;
+  const request={};results._request=request;
+  results.textContent="Searching OpenSubtitles…";
+  try{
+    const data=await api(`/files/${fileId}/subtitles/search?language=${encodeURIComponent(language)}`);
+    if(!results.isConnected||results._request!==request)return;
+    results.innerHTML=(data.results||[]).map(c=>`<div style="margin-top:12px"><b>${esc(c.release)}</b>
+      <div class="muted">${esc(c.language)}${c.hash_match?" · File match":" · Check release for matching timing"}${c.hearing_impaired?" · SDH":""}${c.forced?" · Forced only":""}</div>
+      ${(data.downloaded||[]).includes(c.file_id)?"<span>Downloaded</span>":`<button class="sm" onclick="downloadSubtitle(${fileId},${Number(c.file_id)},'${esc(c.language)}',this)">Download</button>`}</div>`).join("")||"No matching subtitles found in this language.";
+  }catch(e){if(results.isConnected&&results._request===request)results.textContent=e.message||"Subtitle search failed.";}
+}
+
+async function downloadSubtitle(fileId,providerId,language,button){
+  const route=location.hash;
+  button.disabled=true;button.textContent="Downloading…";
+  try{
+    const data=await api(`/files/${fileId}/subtitles/download`,{method:"POST",body:{language,provider_file_id:providerId}});
+    if(location.hash!==route)return;
+    await viewItem(ITEM_FOR_FILE[fileId]);
+    if(location.hash!==route)return;
+    const select=document.getElementById(`pp-s-${fileId}`);
+    if(select&&Number.isInteger(data.subtitle_index)){
+      select.value=String(data.subtitle_index);setPrePlay(fileId,"subtitle",String(data.subtitle_index));
+    }
+    toast("Subtitle downloaded and selected for your next playback.");
+  }catch(e){
+    if(button.isConnected){button.disabled=false;button.textContent="Retry download";const note=document.createElement("div");note.className="err";note.textContent=e.message||"Subtitle download failed.";button.after(note);}
+  }
+}
 // Does THIS player have to burn the chosen subtitle into the picture?
 //
 // Two authorities that answer two different questions, and the player owes the
@@ -289,6 +334,7 @@ async function loadItem(id,isCurrent=()=>true){
     // conversion status endpoint publishes modes per library, so bind the
     // already-loaded item authority once instead of issuing per-file reads.
     f.library_id=it.library_id;
+    f.subtitle_search_enabled=it.kind==="movie"||it.kind==="episode";
   });
   const files=d.files, children=d.children||[], ancestors=d.ancestors||[];
   const best=files[0], multi=files.length>1;
