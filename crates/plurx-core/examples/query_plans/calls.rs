@@ -144,7 +144,9 @@ fn bind(backend: &str, label: &str, statement: &str) -> Vec<Value> {
             } else {
                 Value::Null
             };
-            vec![library, json!(RAIL)]
+            // The first pass of the widening window: eight rows a card, so
+            // the zero-based offset of the window's last row (K-05 M4).
+            vec![library, json!(RAIL * 8 - 1), json!(RAIL)]
         }
         "search_items" => vec![
             json!(plurx_core::metadata::classification::fts_query(SEARCH).expect("tokens")),
