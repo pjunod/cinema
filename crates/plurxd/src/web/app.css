@@ -3218,7 +3218,8 @@
 .watch-picture{min-width:0}
 .watch-slot{aspect-ratio:16/9;background:#050609;border-radius:12px;min-width:0}
 .watch-title{min-width:0;padding:0;display:flex;flex-direction:column;gap:12px}
-.watch-kicker{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.watch-np-kicker{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.watch-actions{display:flex;gap:8px;flex-wrap:wrap}
 .watch-title h2,.watch-band-title h2{font-size:26px;line-height:1.15;margin:0;overflow-wrap:anywhere}
 .watch-band-title h2{font-size:28px;line-height:1.1}
 .watch-meta{color:var(--muted);font-size:13px;margin:0}
@@ -3237,16 +3238,20 @@
 .watch-ledger .watch-fn{display:block;font-family:var(--font-mono);font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 .watch-ledger .watch-fmeta{display:block}
 .watch-ledger .mode-detail{display:inline;margin-left:8px}
+/* Chips, the "N more" pill and the fold chevrons are buttons, and the themed
+   `button:not(.ghost):not(.pbtn)` rules (0,3,1) would paint every one of
+   them accent. These selectors match that specificity and come later. */
 .watch-trks{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0}
-.watch-trks .trk{border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:13px;line-height:1.5;color:var(--prose);background:none;font:inherit;font-size:13px;cursor:default;max-width:100%;overflow-wrap:anywhere;text-align:left}
-.watch-trks button.trk{cursor:pointer}
-.watch-trks button.trk:hover{border-color:var(--muted)}
-.watch-trks .trk.on{border-color:var(--accent);color:var(--accent)}
+.watch-browser .watch-trks .trk,.watch-details .watch-trks .trk{border:1px solid var(--line);border-radius:999px;padding:3px 10px;font:inherit;font-size:13px;line-height:1.5;color:var(--prose);background:none;box-shadow:none;letter-spacing:0;min-height:0;cursor:default;max-width:100%;overflow-wrap:anywhere;text-align:left}
+.watch-browser .watch-trks button.trk,.watch-details .watch-trks button.trk{cursor:pointer}
+.watch-browser .watch-trks button.trk:hover,.watch-details .watch-trks button.trk:hover{border-color:var(--muted);background:none;color:var(--prose);box-shadow:none!important}
+.watch-browser .watch-trks .trk.on,.watch-details .watch-trks .trk.on,.watch-browser .watch-trks button.trk.on:hover,.watch-details .watch-trks button.trk.on:hover{border-color:var(--accent);color:var(--accent)}
 .watch-trks .trk.on::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);margin-right:6px;vertical-align:middle}
-.watch-trkmore{font:inherit;font-size:12px;color:var(--muted);border:1px dashed var(--line);border-radius:999px;padding:3px 10px;background:none;cursor:pointer;line-height:1.5}
+.watch-browser .watch-trks button.watch-trkmore,.watch-details .watch-trks button.watch-trkmore{font:inherit;font-size:12px;color:var(--muted);border:1px dashed var(--line);border-radius:999px;padding:3px 10px;background:none;box-shadow:none;letter-spacing:0;min-height:0;cursor:pointer;line-height:1.5}
+.watch-browser .watch-trks button.watch-trkmore:hover,.watch-details .watch-trks button.watch-trkmore:hover{color:var(--text);border-color:var(--muted);background:none;box-shadow:none!important}
 .watch-trkmore b{color:var(--text);font-weight:600}
-.watch-fold{font:inherit;font-size:11px;color:var(--muted);background:none;border:0;padding:2px 6px;cursor:pointer;line-height:1}
-.watch-fold:hover{color:var(--text)}
+.watch-browser .watch-trks button.watch-fold,.watch-details .watch-trks button.watch-fold,.watch-browser .watch-rail-head button.watch-fold{font:inherit;font-size:11px;color:var(--muted);background:none;border:0;box-shadow:none;letter-spacing:0;min-height:0;padding:2px 6px;cursor:pointer;line-height:1}
+.watch-browser .watch-trks button.watch-fold:hover,.watch-details .watch-trks button.watch-fold:hover,.watch-browser .watch-rail-head button.watch-fold:hover{color:var(--text);background:none;box-shadow:none!important}
 .watch-lower{margin-top:28px;min-width:0}
 .watch-season select{margin-left:8px;max-width:200px}
 .watch-episodes{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:18px}
@@ -3256,21 +3261,23 @@
 .watch-rail-head h2{font-size:15px;font-weight:600;margin:0}
 .watch-rail-now{font-size:13px;margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .watch-rail-now b{color:var(--accent);font-weight:600}
-.watch-rail-head .watch-fold{width:28px;height:28px;border-radius:50%;border:1px solid var(--line);background:var(--panel2);display:inline-flex;align-items:center;justify-content:center;font-size:12px;padding:0;flex:none}
+.watch-browser .watch-rail-head button.watch-fold{width:28px;height:28px;border-radius:50%;border:1px solid var(--line);background:var(--panel2);display:inline-flex;align-items:center;justify-content:center;font-size:12px;padding:0;flex:none}
+.watch-browser .watch-rail-head button.watch-fold:hover{background:var(--panel2);border-color:var(--muted)}
 .watch-ruler{position:relative;height:6px;margin:10px 0 8px;background:var(--line);border-radius:3px;overflow:hidden}
 .watch-ruler i{position:absolute;left:0;top:0;bottom:0;background:var(--accent);transition:width .25s linear}
 .watch-ruler em{position:absolute;top:0;bottom:0;width:2px;background:var(--bg)}
 .watch-ruler-mini{flex:1 1 120px;margin:0;height:8px;min-width:60px}
-.watch-rail-now+.watch-ruler-mini{margin-left:0}
-.watch-rail-open .watch-rail-now{margin-left:auto}
 .watch-rail:not(.watch-rail-open) .watch-rail-now{margin-left:0}
 .watch-chapters{display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x proximity;padding:2px 2px 6px;scrollbar-width:thin}
-.watch-chapter{flex:0 0 132px;scroll-snap-align:start;display:flex;flex-direction:column;gap:6px;text-align:left;min-width:0;background:none;border:0;padding:0;color:inherit;cursor:pointer;font:inherit}
+.watch-browser .watch-chapters button.watch-chapter{flex:0 0 132px;scroll-snap-align:start;display:flex;flex-direction:column;gap:6px;text-align:left;min-width:0;background:none;border:0;box-shadow:none;letter-spacing:0;min-height:0;border-radius:0;padding:0;color:inherit;cursor:pointer;font:inherit}
+.watch-browser .watch-chapters button.watch-chapter:hover{background:none;color:inherit;box-shadow:none!important}
+.watch-chapter:hover .watch-chapter-art{border-color:var(--muted)}
 .watch-chapter-art{position:relative;display:block;aspect-ratio:16/9;border-radius:8px;overflow:hidden;background:#0d0e12;border:2px solid transparent}
 .watch-chapter-art img{width:100%;height:100%;object-fit:cover;display:block}
-.watch-chapter-art .watch-art-fallback{display:none;position:absolute;inset:0;border-radius:0;font-size:20px}
-.watch-chapter-art.watch-art-missing .watch-art-fallback{display:flex}
-.watch-chapter-art.watch-art-missing .watch-chapter-n{display:none}
+/* The number shows until a picture has arrived, and stays if none does. */
+.watch-chapter-art .watch-art-fallback{display:flex;position:absolute;inset:0;border-radius:0;font-size:20px}
+.watch-chapter-art:has(img) .watch-art-fallback{display:none}
+.watch-chapter-art:not(:has(img)) .watch-chapter-n{display:none}
 .watch-chapter-n{position:absolute;left:4px;top:4px;font:600 10px var(--font-mono);background:rgba(0,0,0,.6);color:#fff;padding:1px 4px;border-radius:4px;letter-spacing:.04em}
 .watch-chapter-tc{position:absolute;right:4px;bottom:4px;font:10px var(--font-mono);background:rgba(0,0,0,.72);color:#fff;padding:1px 4px;border-radius:4px}
 .watch-chapter-prog{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,.25);display:none}
@@ -3304,7 +3311,7 @@
   .watch-slot{aspect-ratio:auto;height:calc((100vw - 40px)*9/16 + 132px)}
   .watch-lower{margin-top:18px}
   .watch-episodes{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-  .watch-chapter{flex-basis:112px}
+  .watch-browser .watch-chapters button.watch-chapter{flex-basis:112px}
   .watch-rail-now{display:none}
   .watch-season{align-items:center;gap:8px}
   .watch-season select{max-width:145px}
@@ -3324,7 +3331,8 @@
   .watch-host .picon,.watch-host .pbar button{min-width:44px;min-height:44px}
   .watch-host .ptimeline{min-height:44px}
   .watch-browser button{min-height:44px}
-  .watch-browser .watch-trks button,.watch-browser .watch-fold{min-height:36px}
+  .watch-browser .watch-trks button.trk,.watch-browser .watch-trks button.watch-trkmore,.watch-browser .watch-trks button.watch-fold{min-height:36px}
+  .watch-browser .watch-rail-head button.watch-fold{width:36px;height:36px}
 }
 
 @media(pointer:coarse){.watch-host .ptimeline{bottom:64px}.watch-host .watch-inline .ptimeline{bottom:88px}}

@@ -31,18 +31,31 @@ function watchMetaLine(page){
   const m=page.meta;
   const facts=[m.show,m.season!=null?`S${String(m.season).padStart(2,"0")}E${String(m.episode).padStart(2,"0")}`:null,m.year,m.runtime_ms?fmtDur(m.runtime_ms):null].filter(Boolean).map(esc);
   const left=Math.max(0,(page.runtime||0)-(WATCH?.accepted?pbPosSec()*1000:0));
-  if(page.runtime)facts.push(`<b id="watch-remaining">${esc(fmtDur(left))} left</b>`);
+  if(page.runtime)facts.push(`<b class="watch-remaining">${esc(fmtDur(left))} left</b>`);
   return facts.join(" · ");
 }
 // The same block feeds the compact side panel and the wide band under the
 // rail; CSS shows whichever the state calls for.
 function watchTitleHtml(){
   const page=WATCH.page;
-  return `<span class="watch-kicker">${WATCH.accepted?"Now playing":"Starting"}</span><h2>${esc(page.item.title)}</h2><p class="watch-meta">${watchMetaLine(page)}</p><div class="vbadges">${WATCH.accepted?playerFactBadges():""}</div><p class="watch-synopsis">${esc(page.meta.overview||"")}</p>`;
+  const next=page.item.kind==="episode"?`<div class="watch-actions"><button type="button" class="ghost watch-play-next" onclick="playNextEpisode()">Play next</button></div>`:"";
+  return `<span class="watch-np-kicker">${WATCH.accepted?"Now playing":"Starting"}</span><h2>${esc(page.item.title)}</h2><p class="watch-meta">${watchMetaLine(page)}</p><div class="vbadges">${WATCH.accepted?playerFactBadges():""}</div><p class="watch-synopsis">${esc(page.meta.overview||"")}</p>${next}`;
+}
+// The heading is the item page's breadcrumb. It is re-rendered with the
+// title, because playing another episode from the grid changes the last
+// crumb and the season above it.
+function watchHeadHtml(){
+  const page=WATCH.page;
+  const trail=[{href:"#/",label:"Home"}]
+    .concat(NAV_ORIGIN?[{href:NAV_ORIGIN.href,label:NAV_ORIGIN.label}]:[])
+    .concat((page.ancestors||[]).map(a=>({href:`#/item/${exactWireId(a)}`,label:a.title})))
+    .concat([{label:page.item.title}]);
+  return pageHead(trail);
 }
 function watchRenderTitle(){
   if(!WATCH?.page)return;
   const html=watchTitleHtml();
+  const head=document.getElementById("watch-head");if(head)head.innerHTML=watchHeadHtml();
   const title=document.getElementById("watch-title");if(title)title.innerHTML=html;
   const band=document.getElementById("watch-band-title");if(band)band.innerHTML=html;
   watchRenderLedger();
@@ -60,7 +73,7 @@ function watchSelectedSub(file){
 function watchTrackChip(label,on,action,title){
   const cls=`trk${on?" on":""}`;
   if(!action)return `<span class="${cls}" ${title?`title="${esc(title)}"`:""}>${esc(label)}</span>`;
-  return `<button type="button" class="${cls}" ${action} ${on?'aria-current="true"':""}>${esc(label)}</button>`;
+  return `<button type="button" class="${cls}" ${action} aria-pressed="${on?"true":"false"}">${esc(label)}</button>`;
 }
 function watchFoldButton(which,open){
   return `<button type="button" class="watch-fold" data-watch-fold="${which}" aria-expanded="${open?"true":"false"}" aria-label="${open?"Show only the selected track":"Show every track"}">${open?"▴":"▾"}</button>`;
@@ -71,8 +84,9 @@ function watchTrackRow(which,tracks,selected,label,offChip){
   if(offChip)chips.push(offChip(selected<0));
   tracks.forEach(t=>chips.push(label(t,t.index===selected)));
   if(open||chips.length<=1)return `<div class="watch-trks">${chips.join("")}${chips.length>1?watchFoldButton(which,true):""}</div>`;
-  const current=selected<0&&offChip?offChip(true):(tracks.find(t=>t.index===selected)?label(tracks.find(t=>t.index===selected),true):(offChip?offChip(true):label(tracks[0],false)));
-  const rest=tracks.filter(t=>t.index!==selected);
+  const chosen=tracks.find(t=>t.index===selected);
+  const current=chosen?label(chosen,true):offChip?offChip(true):label(tracks[0],false);
+  const rest=tracks.filter(t=>t!==(chosen||(offChip?null:tracks[0])));
   const names=rest.slice(0,3).map(t=>langName(t.language)||"Untagged");
   const summary=which==="audio"
     ?`<b>${rest.length}</b> more`
@@ -108,30 +122,44 @@ function watchLedgerHtml(){
     ${delivery?`<dt>Delivery</dt><dd>${delivery}</dd>`:""}
     <dt>File</dt><dd><span class="watch-fn">${esc(f.filename||"")}</span>${file?`<span class="watch-fmeta">${esc(file)}</span>`:""}</dd></dl>`;
 }
+// One binder for every place the ledger renders — the side panel, the wide
+// band and the ⓘ dialog — so a chip is a control wherever it appears.
+function watchBindLedger(node){
+  node.querySelectorAll("[data-watch-audio]").forEach(b=>b.addEventListener("click",()=>{
+    const want=Number(b.dataset.watchAudio);const i=(PLAYER?.audio||[]).findIndex(t=>t.index===want);
+    if(i>=0&&i!==PLAYER.curAudio)switchAudio(i);
+  }));
+  node.querySelectorAll("[data-watch-sub]").forEach(b=>b.addEventListener("click",()=>{
+    const want=Number(b.dataset.watchSub),f=watchCurrentFile();
+    // Re-applying the selected subtitle is not a no-op in the player: a
+    // burned track would start a fresh transcode. Refuse it here.
+    if(PLAYER&&f&&want!==watchSelectedSub(f))setSub(want);
+  }));
+  node.querySelectorAll("[data-watch-fold]").forEach(b=>b.addEventListener("click",()=>watchToggleFold(b.dataset.watchFold)));
+}
 function watchRenderLedger(){
   if(!WATCH?.page)return;
   const html=watchLedgerHtml();
+  // A re-render replaces the control that had focus; put focus back on the
+  // same control so a keyboard fold or switch does not drop to <body>.
+  const active=document.activeElement,keep=active&&active.closest&&active.closest(".watch-ledger-host")?["watchAudio","watchSub","watchFold"].map(k=>active.dataset[k]!=null?`[data-${k.replace(/[A-Z]/g,m=>"-"+m.toLowerCase())}="${active.dataset[k]}"]`:null).find(Boolean):null;
   for(const id of ["watch-ledger","watch-band-ledger"]){
     const node=document.getElementById(id);if(!node)continue;
     node.innerHTML=html;
-    node.querySelectorAll("[data-watch-audio]").forEach(b=>b.addEventListener("click",()=>{
-      const want=Number(b.dataset.watchAudio);const i=(PLAYER?.audio||[]).findIndex(t=>t.index===want);
-      if(i>=0)switchAudio(i);
-    }));
-    node.querySelectorAll("[data-watch-sub]").forEach(b=>b.addEventListener("click",()=>{if(PLAYER)setSub(Number(b.dataset.watchSub));}));
-    node.querySelectorAll("[data-watch-fold]").forEach(b=>b.addEventListener("click",()=>watchToggleFold(b.dataset.watchFold)));
+    watchBindLedger(node);
+    if(keep&&active.closest(`#${id}`)){const again=node.querySelector(keep);if(again)again.focus({preventScroll:true});}
   }
   const f=watchCurrentFile();
   WATCH.ledgerSig=f?`${watchSelectedAudio(f)}|${watchSelectedSub(f)}|${WATCH.accepted}`:"";
 }
-function watchShowFacts(){
-  const d=document.getElementById("watch-details");if(!d||!WATCH?.page)return;
-  d.innerHTML=`<button class="ghost" onclick="this.closest('dialog').close()">Close</button><h2>${esc(WATCH.page.item.title)}</h2><div class="vbadges">${playerFactBadges()}</div>${watchLedgerHtml()}`;d.showModal();
-}
+// The player bar's ⓘ in the compact and wide states. The facts are on the
+// page, but the transport row is pinned by the surface contract, so the
+// button stays and shows the same panel as a dialog.
 function watchShowTitleInfo(){
   const d=document.getElementById("watch-details");
   if(!d||!WATCH?.page)return;
-  d.innerHTML=`<button class="ghost" onclick="this.closest('dialog').close()">Close title info</button>${watchTitleHtml()}${watchLedgerHtml()}`;d.showModal();
+  d.innerHTML=`<button class="ghost" onclick="this.closest('dialog').close()">Close title info</button><div class="watch-title">${watchTitleHtml()}</div><div class="watch-ledger-host">${watchLedgerHtml()}</div>`;
+  watchBindLedger(d);d.showModal();
 }
 function watchToggleEpisodeRows(){
   if(!WATCH)return;
@@ -160,12 +188,12 @@ async function watchLoadSeasons(page){
   const w=WATCH;
   const show=page.ancestors.find(a=>a.kind==="show"),season=page.ancestors.find(a=>a.kind==="season");
   if(!season)return;
+  const lowerHost=document.getElementById("watch-lower");if(lowerHost)lowerHost.hidden=false;
   try{
     const showData=show?await api(`/items/${exactWireId(show)}`):null;
     if(WATCH!==w)return;
     const seasons=(showData?.children||[season]).filter(s=>s.kind==="season");
     const lower=document.getElementById("watch-lower");
-    lower.hidden=false;
     lower.innerHTML=`<div class="watch-season"><h2>Episodes</h2><button id="watch-row-toggle" class="ghost" onclick="watchToggleEpisodeRows()" aria-pressed="false">Rows</button><label>Season <select id="watch-season">${seasons.map(s=>`<option value="${esc(exactWireId(s))}" ${exactWireId(s)===exactWireId(season)?"selected":""}>${esc(s.title)}</option>`).join("")}</select></label></div><div id="watch-episodes" class="watch-episodes"></div>`;
     document.getElementById("watch-season").addEventListener("change",e=>watchSelectSeason(e.target.value));
     await watchSelectSeason(exactWireId(season));
@@ -226,20 +254,56 @@ function watchRenderChapters(){
   const open=!!watchFolds().rail;
   const totalMs=(file&&file.duration_ms)||w.page.runtime||0;
   rail.classList.toggle("watch-rail-open",open);
-  rail.innerHTML=`<div class="watch-rail-head"><h2>Chapters</h2><span class="watch-rail-now muted"><b id="watch-chapter-now"></b> · ${chapters.length} chapters · <span id="watch-chapter-pos"></span></span>${open?"":watchRulerHtml(chapters,totalMs,"watch-ruler-mini")}<button type="button" class="watch-fold" data-watch-fold="rail" aria-expanded="${open?"true":"false"}" aria-label="${open?"Hide chapter thumbnails":"Show chapter thumbnails"}">${open?"▴":"▾"}</button></div>${open?watchRulerHtml(chapters,totalMs,"")+`<div class="watch-chapters" role="list">${chapters.map((c,i)=>{
+  rail.innerHTML=`<div class="watch-rail-head"><h2>Chapters</h2><span class="watch-rail-now muted"><b id="watch-chapter-now"></b> · ${chapters.length} chapters · <span id="watch-chapter-pos"></span></span>${open?"":watchRulerHtml(chapters,totalMs,"watch-ruler-mini")}<button type="button" class="watch-fold" data-watch-fold="rail" aria-expanded="${open?"true":"false"}" aria-label="${open?"Hide chapter thumbnails":"Show chapter thumbnails"}">${open?"▴":"▾"}</button></div>${open?watchRulerHtml(chapters,totalMs,"")+`<div class="watch-chapters">${chapters.map((c,i)=>{
     const len=(chapters[i+1]?chapters[i+1].start_ms:totalMs)-c.start_ms;
-    return `<button type="button" class="watch-chapter" role="listitem" data-watch-chapter="${i}" data-start-ms="${c.start_ms}" title="${esc(c.title||`Chapter ${i+1}`)} · ${esc(clockFromSec(c.start_ms/1000))}${len>0?" · "+esc(fmtDur(len))+" long":""}"><span class="watch-chapter-art"><img src="${esc(watchChapterThumbUrl(file,i))}" alt="" loading="lazy" decoding="async" onerror="this.parentNode.classList.add('watch-art-missing');this.remove()"><span class="watch-art-fallback">${String(i+1).padStart(2,"0")}</span><span class="watch-chapter-n">${String(i+1).padStart(2,"0")}</span><span class="watch-chapter-tc">${esc(clockFromSec(c.start_ms/1000))}</span><span class="watch-chapter-prog"><i></i></span></span><strong>${esc(c.title||`Chapter ${i+1}`)}</strong></button>`;
+    return `<button type="button" class="watch-chapter" data-watch-chapter="${i}" data-start-ms="${c.start_ms}" title="${esc(c.title||`Chapter ${i+1}`)} · ${esc(clockFromSec(c.start_ms/1000))}${len>0?" · "+esc(fmtDur(len))+" long":""}"><span class="watch-chapter-art" data-thumb="${esc(watchChapterThumbUrl(file,i))}"><span class="watch-art-fallback">${String(i+1).padStart(2,"0")}</span><span class="watch-chapter-n">${String(i+1).padStart(2,"0")}</span><span class="watch-chapter-tc">${esc(clockFromSec(c.start_ms/1000))}</span><span class="watch-chapter-prog"><i></i></span></span><strong>${esc(c.title||`Chapter ${i+1}`)}</strong></button>`;
   }).join("")}</div>`:""}`;
   rail.querySelectorAll('[data-watch-chapter]').forEach(b=>b.addEventListener('click',()=>{if(WATCH===w&&w.accepted)seekTo(Number(b.dataset.startMs)/1000);}));
   rail.querySelectorAll('[data-watch-fold]').forEach(b=>b.addEventListener('click',()=>watchToggleFold(b.dataset.watchFold)));
   w.chapterMarked=-1;
   watchMarkChapter();
+  watchLoadThumbs();
+}
+// Thumbnails load two at a time, in order, and only once playback has been
+// accepted. Eight <img> tags firing together would take most of the
+// browser's connections to a plain-HTTP origin while the stream is starting,
+// and each first-time request holds its connection for an ffmpeg seek. A
+// failed load gets one retry after a pause (a 503 means the node's two
+// extraction slots were busy); after that the tile keeps its number.
+const WATCH_THUMB_LANES=2;
+function watchLoadThumbs(){
+  const w=WATCH;if(!w?.accepted)return;
+  const rail=document.getElementById("watch-rail");if(!rail||rail.hidden)return;
+  const pending=Array.from(rail.querySelectorAll(".watch-chapter-art[data-thumb]"));
+  if(!pending.length||w.thumbLoading)return;
+  w.thumbLoading=true;
+  let active=0;
+  const next=()=>{
+    while(active<WATCH_THUMB_LANES&&pending.length){
+      const art=pending.shift();
+      if(WATCH!==w||!art.isConnected)continue;
+      const url=art.dataset.thumb;delete art.dataset.thumb;
+      active++;
+      const attempt=(retry)=>{
+        const img=new Image();img.decoding="async";
+        img.onload=()=>{if(art.isConnected){img.alt="";art.prepend(img);}active--;next();};
+        img.onerror=()=>{
+          if(retry&&WATCH===w){setTimeout(()=>{if(WATCH===w&&art.isConnected)attempt(false);else{active--;next();}},4000);return;}
+          art.classList.add("watch-art-missing");active--;next();
+        };
+        img.src=url;
+      };
+      attempt(true);
+    }
+    if(!pending.length&&active===0)w.thumbLoading=false;
+  };
+  next();
 }
 function watchMarkChapter(){
   if(!WATCH?.page)return;
   const position=WATCH.accepted?pbPosSec()*1000:0;
   const total=WATCH.accepted?pbTotalSec()*1000:0;
-  const remaining=document.getElementById("watch-remaining");if(remaining&&total)remaining.textContent=fmtDur(Math.max(0,total-position))+" left";
+  if(total)document.querySelectorAll(".watch-remaining").forEach(r=>{r.textContent=fmtDur(Math.max(0,total-position))+" left";});
   const f=watchCurrentFile();
   if(f){const sig=`${watchSelectedAudio(f)}|${watchSelectedSub(f)}|${WATCH.accepted}`;if(sig!==WATCH.ledgerSig)watchRenderLedger();}
   const rail=document.getElementById("watch-rail");if(!rail||rail.hidden)return;
@@ -258,7 +322,12 @@ function watchMarkChapter(){
   });
   if(current!==WATCH.chapterMarked){
     WATCH.chapterMarked=current;
-    const b=buttons[current];
-    if(b&&WATCH.accepted)b.scrollIntoView({block:"nearest",inline:"nearest",behavior:"smooth"});
+    // Keep the current chapter in view along the strip only — never scroll the
+    // page, which is what scrollIntoView would do while somebody is watching.
+    const b=buttons[current],strip=b&&b.parentElement;
+    if(b&&strip&&WATCH.accepted){
+      const left=b.offsetLeft-strip.offsetLeft,right=left+b.offsetWidth;
+      if(left<strip.scrollLeft||right>strip.scrollLeft+strip.clientWidth)strip.scrollTo({left:Math.max(0,left-10),behavior:"smooth"});
+    }
   }
 }
