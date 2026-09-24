@@ -1,0 +1,56 @@
+version = 1
+
+[[coverage]]
+commits = ["b3c0b14b"]
+points = ["live-tv.integration", "live.dvr"]
+checks = ["rust-gate", "rust-gate-ci", "live-tv-two-node"]
+reason = """
+The review of PR #482 found that one probe taken when a shared tuner \
+transport opened decided every later viewer of that channel, that a joiner's \
+plan was never checked against its own input, that retirement could race an \
+attach, that D2 was untested on the real start path, and that an evicted \
+viewer's session outlived its eviction; building the eviction test found that \
+the held opening prefix evicted the opener of every full-rate channel. Each \
+retained test below was run with its production hunk reverted and failed \
+(exit 101), then passed with it restored. \
+a_failed_or_stale_probe_is_reprobed_for_the_next_viewer_of_a_recording \
+(live_tv::dvr::tests) is the reviewer's reproduction: a recording transport \
+whose opening probe failed, a scripted FFprobe and a running fan-out. It \
+requires the failed channel to be left out of watchable_channels, the first \
+joiner to get its own re-probe's error rather than the stored timeout, the \
+next joiner to get fresh facts from a re-probe of the live edge, fresh facts \
+to be shared without probing, a stale mark to leave joins open and be \
+re-probed into the new format, and the recording never to be cut. Reverting \
+source_for_viewer's re-probe returns the stored timeout; reverting the \
+watchable filter offers the failed channel. \
+a_failed_probe_ends_a_viewers_only_transport_and_the_next_start_probes_again \
+(live_tv::tests) drives two concurrent start_local calls through a loopback \
+HDHomeRun whose FFprobe fails slowly: both must answer with the probe's error \
+well inside the start deadline, the transport must close, and the next start \
+must open a second GET and plan. Keeping a viewers-only transport up after a \
+failed probe leaves both starts waiting for a re-probe that never comes. \
+a_viewer_whose_input_contradicts_its_plan_ends_and_marks_the_facts_stale \
+requires a start planned from 480-line facts whose FFmpeg reports a \
+1080-line input to end with source_format_changed and leave the transport's \
+facts stale; without the check the session runs on the wrong plan. \
+only_a_stated_difference_in_size_or_channels_contradicts_a_plan pins the \
+comparison itself. retirement_is_atomic_against_a_consumer_attaching races an \
+attach-and-release against try_retire 20000 times and requires no \
+retirement with a viewer attached; reading the lists and swapping \
+separately retired one in 4 of 20000 rounds. \
+two_concurrent_starts_on_one_channel_open_one_transport_with_one_get holds \
+both lineup answers so two starts reach admission together and requires one \
+shared transport, one registry slot and one tuner GET; the reviewer's \
+mutation (insert in a second lock hold behind a yield) gives two transports. \
+an_evicted_viewer_ends_on_the_next_tick_with_the_eviction_reason uses an \
+FFmpeg that never reads stdin and requires the start to answer with \
+"stopped consuming" well before TUNER_READ_TIMEOUT; without the observe \
+loop's eviction check it does not answer in time. \
+the_opener_of_a_full_rate_channel_takes_its_whole_prefix feeds a 7 MiB \
+prefix to a reading opener and a stalled sibling and requires the opener to \
+receive every byte and the sibling still to be evicted; without the \
+prefix allowance the opener is evicted on its first chunk. All of these run \
+in the local and hosted Rust gates. The live-tv-two-node harness, re-run \
+against this commit, still requires two viewers on one channel to open one \
+device GET.
+"""
