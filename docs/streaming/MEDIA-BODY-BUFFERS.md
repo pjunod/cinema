@@ -1,8 +1,9 @@
 # Media body buffers — size the read, then, separately, the acknowledgement
 
-**Status:** M1 merged. §5.1 before/after measured 2026-09-24 (§5.1.1):
-throughput and p99 met, both peak-RSS figures grew, Decision 1 is waiting on
-Paul. M2 pending ·
+**Status:** M1 merged. §5.1 before/after measured 2026-09-24 (§5.1.1).
+Decision 1 taken on Paul's behalf and his to overturn: the shared read is
+128 KiB, and `TCP_NODELAY` is set on accepted connections, which removed the
+HLS p50 regression (§5.1.2, Decision 6). M2 pending ·
 **Executes:** §2.4, C1, F-core-1, F-stream-8, §5.1 item 3 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @
@@ -29,10 +30,11 @@ pieces, so the read size can move without the proof moving with it.
 
 ## 1. Objective
 
-1. Media bodies read storage in 256 KiB units instead of 4 KiB, at the four
-   sites the review names, so an 80 Mb/s direct play costs ~40 blocking-pool
+1. Media bodies read storage in 128 KiB units instead of 4 KiB, at the four
+   sites the review names, so an 80 Mb/s direct play costs ~80 blocking-pool
    hops per second per viewer instead of ~2,500, and a 4 MB segment crosses
-   the pump ~16 times instead of ~1,000.
+   the pump ~32 times instead of ~1,000. (M1 shipped 256 KiB, half those
+   counts; Decision 1 moved it to 128 KiB on the §5.1.1 measurement.)
 2. The change is measured — throughput, resident memory under concurrent
    viewers, and tail latency of segment responses — before it is credited,
    with the protocol written down so the number is reproducible.
@@ -162,10 +164,13 @@ direct-play path agree:
 ```rust
 // media_sessions.rs, beside MAX_ADMITTED_MEDIA_BODY_LIFETIME
 /// Bytes requested from storage per read while streaming a media body.
-/// One blocking-pool hop per read; tokio::fs caps a read at 2 MiB. Matches
-/// the fragment-index and offline transfer paths (256 KiB).
-pub(crate) const MEDIA_BODY_READ_BUFFER: usize = 256 * 1024;
+/// One blocking-pool hop per read; tokio::fs caps a read at 2 MiB.
+pub(crate) const MEDIA_BODY_READ_BUFFER: usize = 128 * 1024;
 ```
+
+M1 shipped this at 256 KiB, matching the fragment-index and offline transfer
+paths. Decision 1 (§7) lowered it to 128 KiB after §5.1.1 measured the two
+sizes equal on throughput and latency and 128 KiB cheaper in memory.
 
 The four constructors become `ReaderStream::with_capacity(reader,
 MEDIA_BODY_READ_BUFFER)`. M1 also adopts the constant in `offline.rs` and
@@ -189,7 +194,8 @@ piece exactly as before. `Bytes::split_to` is a refcount bump on the buffer
 the read already filled, so this costs no copy and no extra allocation, and
 it does not touch the blocking-pool hop count — the thing §1 exists to
 reduce. The acknowledgement rate is unchanged from before M1 (at 80 Mb/s,
-~2,560/s either way); only the storage read count falls, by 64×.
+~2,560/s either way); only the storage read count falls, by 32× at
+128 KiB (64× at the 256 KiB M1 first shipped).
 `driven_local_body`, the channel capacity, both deadlines, the terminal and
 the ownership set are untouched.
 
@@ -428,10 +434,74 @@ Against the acceptance above:
   evidence and not a §5.1 acceptance figure.
 
 128 KiB matches 256 KiB on throughput and latency within run-to-run spread,
-at about two thirds of the group A growth. **Decision 1 (§7) is Paul's to
-make on these numbers.** The choices are to keep 256 KiB and restate the
-memory acceptance as a budget rather than "not worse", or to drop to
-128 KiB. This record does neither.
+at about two thirds of the group A growth. This record left Decision 1 (§7)
+to Paul. It was then taken on his behalf, as 128 KiB, and §5.1.2 records the
+follow-up measurement.
+
+#### 5.1.2 Decision 1 follow-up, measured 2026-09-24
+
+Two more runs on nuc3 with the same harness and conditions as §5.1.1: fresh
+process per group, `VmHWM` after `clear_refs`, page-cache warm, loopback,
+three trials in rotated order, a shared build host (load average 1 to 10).
+The harness now also records peak established connections in group B, and
+how many of the 200 timed HLS GETs took 40 ms or more. The raw record is in
+the same [evidence file](../evidence/media-body-buffers-m1-measurement-2026-09-24.md).
+
+**The Nagle test.** The HLS p50 hypothesis in §5.1.1 was tested, not
+assumed. Three release builds of `7eea547fe` were compared: 4 KiB, 128 KiB,
+and 128 KiB plus `TCP_NODELAY` on every accepted connection. The last is the
+`dbcb1168f` change, applied as a patch. Ranges are over the three trials:
+
+| Figure | 4 KiB | 128 KiB, Nagle on | 128 KiB, `TCP_NODELAY` |
+|---|---|---|---|
+| Single-viewer direct play, MB/s (9 runs, median) | 361 | 2665 | 2886 |
+| Group A: RSS growth, MiB | 1.0–1.2 | 10.2–10.9 | 9.2–10.5 |
+| Group B: RSS growth, MiB (median) / peak connections | 34.0–38.4 (37.9) / 78–101 | 37.9–48.5 (48.3) / 74–104 | 36.7–44.8 (44.6) / 68–97 |
+| HLS p50 / p95 / p99, ms | 26–27 / 60–66 / 67–71 | 49–51 / 52–58 / 52–58 | **15–16 / 18 / 19–20** |
+| HLS GETs of 200 at ≥ 40 ms | 17, 34, 17 | 124, 118, 111 | **0, 0, 0** |
+| Peak threads, group A / group B | 45–47 / 57–66 | 32–39 / 39–46 | 31–36 / 40–44 |
+
+The hypothesis holds on loopback. With Nagle on, 128 KiB puts 56 to 62 % of
+segment fetches in the ~50 ms delayed-ACK mode. With `TCP_NODELAY` none are
+there, and every percentile is below the 4 KiB build's p50. Throughput,
+memory and thread counts did not move beyond run-to-run spread. So
+`TCP_NODELAY` is in this PR (Decision 6).
+
+**The final state against the before side.** One release build of
+`dbcb1168f`, the final code (128 KiB with `TCP_NODELAY`), was compared with
+the 4 KiB build above in a separate run of the full protocol:
+
+| Figure (§5.1) | 4 KiB (before) | Final: 128 KiB + `TCP_NODELAY` |
+|---|---|---|
+| Single-viewer direct play, MB/s (9 runs, median) | 373 | 2747 |
+| Group A, 8 large viewers: wall s | 0.67–0.70 | 0.10 |
+| Group A: RSS growth, MiB | 0.9–1.2 | 9.0–11.5 |
+| Group B, 128 small requests per round: wall s | 3.08–3.22 | 2.08–2.69 |
+| Group B: RSS growth, MiB (median) / peak connections | 32.3–38.9 (33.2) / 68–89 | 38.5–47.0 (38.7) / 93–102 |
+| Group B: failed requests | 0 | 0 |
+| HLS 200 GETs p50 / p95 / p99, ms | 25–26 / 61–64 / 66–76 | **15 / 18 / 19–20** |
+| HLS GETs of 200 at ≥ 40 ms | 28, 21, 15 | 0, 0, 0 |
+| Peak threads, group A / group B | 44–47 / 58–60 | 30–35 / 38–45 |
+
+Against the §5.1 acceptance:
+
+- All five figures are reported.
+- **HLS p99 improved**, from 66–76 ms to 19–20 ms. p50 and p95 improved
+  too. The p50 regression §5.1.1 recorded is gone.
+- **Group A peak RSS is still worse than 4 KiB**, by 9.0 to 11.5 MiB for 8
+  bodies. That is 1.0 to 1.3 MiB per concurrent large body, at the ≈1 MiB
+  budget in §2.1. The 256 KiB build was about 1.8 MiB per body. Any read
+  above 4 KiB reserves more per open body, so no size that delivers §1 can
+  meet "not worse" literally. Decision 1 accepts this cost at 128 KiB.
+- **Group B is worse in the median**, 33.2 → 38.7 MiB. The final build also
+  ran at higher peak concurrency here (93–102 connections against 68–89), and
+  group B memory follows concurrency (§5.1.1). The veto (about half a
+  megabyte per concurrent small request) is not reached: even crediting all
+  5.5 MiB to the read size, it is well under 0.1 MiB per request.
+
+So on these numbers M1 plus Decision 1 meets the acceptance except the
+literal "not worse" for peak RSS. That remainder is the cost Decision 1
+accepts, and Paul can overturn it.
 
 ### 5.2 M2 — acknowledgement batching
 
@@ -460,8 +530,10 @@ lab4 with HLS p99 not worse than M1's.
   `a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units`,
   `a_large_read_at_the_event_boundary_emits_no_storage_stall_warning`,
   `segment_storage_stall_signal_is_normalized_by_read_size`,
-  `segment_delivery_counts_reads_and_names_incomplete_storage`, and the three
-  proof-granularity tests tabled in §5.1. Run the six M2 tests by name when
+  `segment_delivery_counts_reads_and_names_incomplete_storage`, the three
+  proof-granularity tests tabled in §5.1, and, since Decision 1,
+  `the_shared_media_read_is_128_kib_and_the_delivery_proof_stays_4_kib` and
+  `accepted_http_connections_have_nagle_disabled`. Run the six M2 tests by name when
   that milestone becomes eligible.
 - Lane: `make unit` before promoting the one plan PR. The implementation
   session did not run it while P-01 was repairing that lane; this is pending
@@ -483,13 +555,23 @@ lab4 with HLS p99 not worse than M1's.
 
 ## 7. Decisions and pending evidence
 
-1. **Use 256 KiB provisionally.** It matches the two pre-existing file-backed
-   paths and reduces the default read count by 64×. The concurrent-memory
-   measurement still decides whether this PR keeps 256 KiB or reduces it to
-   128 KiB before M1 is accepted. *Measured 2026-09-24 (§5.1.1): both
-   sizes give the same throughput and latency. 256 KiB costs about 1.8 MiB
-   per concurrent large body against about 1.1 MiB at 128 KiB. Group B's
-   veto was not reached. Undecided: waiting on Paul.*
+1. **Use 128 KiB.** *Decided 2026-09-24 on Paul's behalf, and his to
+   overturn.* M1 shipped 256 KiB provisionally, to match the two
+   pre-existing file-backed paths, and left the size to the concurrent-memory
+   measurement. §5.1.1 measured both sizes. They are indistinguishable on
+   direct-play throughput (3341 against 3172 MB/s median) and HLS latency.
+   128 KiB costs about two thirds of 256 KiB's per-stream memory in group A
+   (9.3–10.9 against 14.3–16.1 MiB for 8 bodies) and less in group B
+   (median 41.9 against 53.1 MiB). The reservation is eager, so every open
+   body pays it whatever it carries. Taking the smaller size costs nothing
+   measurable and saves memory on every body. The constant is shared, so
+   the offline transfer and internal fragment-index paths also move from
+   256 to 128 KiB. Neither was in the measured harness, and both still read
+   32× fewer times than a 4 KiB default. `MEDIA_BODY_ACK_GRANULARITY` stays
+   4 KiB and stays a separate constant (Decision 5). A test pins the read
+   size and the acknowledgement unit separately, so a change to either is a
+   deliberate edit. §5.1.2 has the final-state measurement. To overturn:
+   restore `256 * 1024` and that test's expected value. Nothing persists.
 2. **Use 1 MiB/s for the slow-read rate.** At that rate a roughly 20 MiB 4K
    segment already takes 20 seconds to read, close to the 30-second no-progress
    budget. The boundary test makes the intended classification explicit;
@@ -516,6 +598,24 @@ lab4 with HLS p99 not worse than M1's.
    three fixtures past 256 KiB so the assertions go green was never an
    option: it would have deleted the only coverage naming the behaviour
    while leaving the behaviour changed.
+6. **Set `TCP_NODELAY` on every accepted HTTP connection.** *Decided
+   2026-09-24 on measurement; outside the letter of M1, and recorded here
+   because M1's measurement found it.* `plurxd` had never disabled Nagle's
+   algorithm. The HLS p50 doubled with the larger read while p99 improved,
+   and §5.1.1 recorded a hypothesis: Nagle holding a body's trailing short
+   write until the peer's delayed ACK, 40 ms minimum on Linux. §5.1.2 tested
+   it with two 128 KiB builds that differed only in the socket option. With
+   `TCP_NODELAY`, p50/p95/p99 fell from 49–51 / 52–58 / 52–58 ms to
+   15–16 / 18 / 19–20 ms, and fetches at 40 ms or more fell from 353 of 600
+   to none. Throughput, memory and thread counts were unchanged within
+   spread. hyper already coalesces a response's head and body writes, so
+   the option does not fragment responses. It is set in the `TcpListener`
+   acceptor that feeds `serve_http`, the only production HTTP listener. A
+   failure to set it is logged at debug, and the connection is still
+   served. `accepted_http_connections_have_nagle_disabled` pins it.
+   Loopback is not a client network. Whether the same p50 shift existed on
+   real client links, and how much this changes there, is not measured. The
+   post-deploy telemetry check in §6 is the place it would show.
 
 ---
 
@@ -533,3 +633,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | pending in [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Needs: M1 candidate deployed on media1 for one week with no `segment_delivery` regression, then the §5.1 lab4 protocol re-run. No acknowledgement-batching code has been written. |
 | 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 review disposition | [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Addressed the sole adversarial review. The 256 KiB read had carried the pump's delivery-proof granularity up with it; `MEDIA_BODY_ACK_GRANULARITY = 4 KiB` now pins the proof where it was (§2.2 item 1, §3.1, Decision 5) and the three delivery-accounting tests that failed at the merged head pass again for that reason. Added `a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units` and `a_large_read_at_the_event_boundary_emits_no_storage_stall_warning`; §5.1 now measures small-object concurrency (group B) as well as large. Still needs: the lab4 groups A and B before/after, and `make unit`. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 §5.1 measurement | evidence PR (this row's commit) | Before/after measured on nuc3 with three release builds of `886fc8bd4`, identical except `MEDIA_BODY_READ_BUFFER` at 4/128/256 KiB, and three rotated trials. nuc4 was only inspected: it already runs M1 (`99d4abf8c`), so it has no before side, and it carries production load. Results (§5.1.1, raw record in `docs/evidence/media-body-buffers-m1-measurement-2026-09-24.md`): single-viewer direct play 373 → 3172 MB/s median; HLS p99 65–72 → 51–58 ms (met) and p50 24–25 → 48–50 ms; group A RSS growth 1.0–1.3 → 14.3–16.1 MiB; group B median 44.8 → 53.1 MiB, with the veto not reached. Acceptance **not met as written**: both peak-RSS figures grew. Decision 1 (256 or 128 KiB) is waiting on Paul. The §5.1 photo URL is now the real route, `/api/v1/items/{id}/photo`. `make unit`: #454's integration record ran its `cargo test --workspace --exclude plurx-cluster-check` half on the integrated tree (4051 passed, 0 failed). Its `vodencode-restart-check` half is not recorded there. Still owed: Paul's Decision 1, a lab4 re-run only if the quiet-host condition is wanted, and M2's media1 week. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Decision 1 + HLS p50 | `7eea547fe`, `dbcb1168f` / [#487](http://192.168.4.7:3000/noirr/plurx/pulls/487) | **Decision 1 taken on Paul's behalf; he can overturn it:** the shared read is now 128 KiB (`7eea547fe`). `MEDIA_BODY_ACK_GRANULARITY` is unchanged at 4 KiB. The new `the_shared_media_read_is_128_kib_and_the_delivery_proof_stays_4_kib` pins both values. The pin fails with the read reverted to 256 KiB (`left: 262144, right: 131072`). Defining the acknowledgement unit from the read stops the test binary compiling. Re-coupling the pump split still fails `a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units` (`left: 65536, right: 4096`). The HLS p50 Nagle hypothesis was tested on nuc3 (§5.1.2): 128 KiB with and without `TCP_NODELAY`, three rotated trials. p50 went from 49–51 to 15–16 ms, with nothing else moving, so `dbcb1168f` sets it on accepted connections. `accepted_http_connections_have_nagle_disabled` pins it and fails with the call removed. Final state against 4 KiB, full §5.1 re-run: direct play 373 → 2747 MB/s median; HLS p50/p95/p99 25–26 / 61–64 / 66–76 → 15 / 18 / 19–20 ms; group A growth 0.9–1.2 → 9.0–11.5 MiB, which is 1.0–1.3 MiB per body, at the §2.1 budget; group B median 33.2 → 38.7 MiB, at higher concurrency, far from the veto. Gates: fmt, clippy `-D warnings`, `cargo test -p plurxd` (2717 passed, 0 failed, 11 ignored), history-check, validation-lint, validation unittests, operations-check, spike-lock-check, all exit 0 (PR body). Still owed: Paul's confirmation or reversal of Decision 1, M2's media1 week, and the §6 post-deploy telemetry for both changes. |
