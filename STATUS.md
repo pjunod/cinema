@@ -319,36 +319,6 @@ progressive. The seek-scratch reservation finding (C16) is a tracking item
 for the existing repair. §9 records what was run and what was not. No code
 changed.
 
-## Architecture review, revision 2 — after the adversarial assessment
-
-**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-revised in place; the assessment that drove it is
-[ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md)
-(210 dispositions, every appendix finding covered).** The assessment's verdict
-on the first draft — a useful defect inventory, unsafe as a direct
-implementation handoff — was right: several remedies removed the condition
-that made the existing code safe. Revision 2 withdraws or rewrites them, each
-re-checked in the tree: B-frames via `negative_cts_offsets` (refused by
-`vodgen.rs:399`'s landing check — a timeline design item now); copying the
-cache-only admin proof onto ordinary auth and replacing the two-phase logout
-with a best-effort delete (both weaken acknowledged revocation); the encoded-VOD
-SIGSTOP without a stopped→release transition on `Admissions::live_is_waiting`
-(a stopped producer yields `Step::Nothing`, so a later viewer would wait
-forever); a 60 s TTL on font attestation (re-enumeration exists to catch font
-additions under an immutable recipe); heartbeat-derived clock skew (10 s
-heartbeats cannot see a 2 s offset) and any clock evaluated inside replicated
-SQL; the `NOT EXISTS` search predicate (reproduced to hide renamed titles); a
-nonexistent `-hls_start_time_offset`; a self-contradicting release profile;
-and Media3's nonexistent `STRATEGY_ALWAYS`. Claims narrowed: the compile-only
-fast lane is Paul's 09-10 ruling, not drift — the finding is that the batch
-process it assumes has no input; "every audio transcode" → every full video
-transcode; rollback artefacts exist as `sha-` image tags, semantic tags do
-not; the CI selector run for real gives 3/16 hiqlite and 7/24 SQLite modules
-out of scope, not 7/20; the 51 "unindexed" docs are exempted by policy. The
-ten do-first items all survive on their code facts; §5 now splits the ones
-that were two changes and defers the ones that became design questions.
-§0 of the review lists every disposition. No code changed.
-
 ## Older efforts — where each one now lives
 
 Sections older than those above moved verbatim on 2026-09-24 into the
@@ -356,6 +326,7 @@ status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-20 | Architecture review, revision 2 — after the adversarial assessment | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-20 | End-to-end architecture review — ten verified do-first items, ranked | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-19 | The web app is a tree, and the bytes are the same ones | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |
 | 2026-09-17 | The twenty red tests, and the three live defects three of them were reporting | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
