@@ -1,6 +1,6 @@
 # Subtitle cluster extraction — implementation status
 
-**Status:** claimed · **Updated:** 2026-09-24 · **Board:** K-09 · **Branch:** `plan/K-09` · **Base:** `f600d2823`
+**Status:** claimed · **Updated:** 2026-09-24 · **Board:** K-09 · **Branch:** `plan/K-09` · **PR:** [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) · **Base:** `f600d2823`
 
 The [v2 plan](SUBTITLE-CLUSTER-EXTRACTION-PLAN.md) is the contract. Its
 Execution log holds the evidence for each milestone. This page is the short
