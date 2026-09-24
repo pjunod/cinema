@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["ecec9944"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The plurxd regression streamed_cue_metadata_is_bounded_even_when_pngs_are_reused proves that many timed cues cannot grow retained snapshot metadata past its cap while reusing one small PNG, and that same-timestamp replacement releases the old metadata charge. The pinned Rust gate runs that focused test."
