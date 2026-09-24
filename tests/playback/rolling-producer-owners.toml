@@ -1958,7 +1958,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # takes a statvfs, awaited to completion inside the request. It owns no
 # producer, no process and no timer; it exists so two synchronous filesystem
 # reads do not run on the async runtime.
-expected_occurrences = 574
+# 574 -> 575 (measured) with the #461 review's P1 fix: one test-only
+# `tokio::spawn` in
+# `http::tests::a_fully_delivered_body_counts_complete_over_a_real_connection_whatever_its_framing`,
+# running `axum::serve` on a 127.0.0.1:0 listener so the regression test goes
+# through a real hyper connection, which is the only place the defect exists
+# (`oneshot` always polls a body to its end). The task owns the listener and
+# nothing else; it ends with the test's runtime. No timer, no process, no
+# producer.
+expected_occurrences = 575
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the

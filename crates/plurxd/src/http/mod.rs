@@ -782,21 +782,63 @@ static ACCESS_LINES: LazyLock<AccessLineThrottle> = LazyLock::new(AccessLineThro
 /// the size hint when the handler has not set the header itself, so a wrapper
 /// that reported an unknown length would silently move range responses onto
 /// chunked framing.
+///
+/// A body is `complete` when it handed the connection everything it promised,
+/// and there are two ways to know that because hyper ends bodies two ways:
+///
+/// - a body polled to its end (`Poll::Ready(None)`). A chunked body always
+///   ends like this: hyper has to see the end to write the terminating chunk.
+/// - a body whose response head declared a length and which has yielded that
+///   many data bytes. hyper **does not poll such a body to its end.** Once its
+///   length encoder has written the declared bytes the dispatcher drops the
+///   body unpolled (hyper 1.x `proto/h1/dispatch.rs`, the `!can_write_body()`
+///   branch), and a stream-backed body — every direct play range and every HLS
+///   segment plurx serves — reports `is_end_stream() == false` until it has
+///   been polled to `None`. Without the byte count every fully delivered media
+///   body would be counted as abandoned.
+///
+/// "Handed the connection" is not "acknowledged by the client": a connection
+/// that dies after the last bytes were yielded but before they reached the
+/// socket still counts `complete`. That is the same line the chunked case
+/// draws, and the last point at which a body can observe its own delivery.
 struct MeasuredBody {
     inner: axum::body::Body,
+    metrics: &'static HttpRequestMetrics,
     group: usize,
     started_at: Instant,
+    /// The number of body bytes the response head promised, when it promised
+    /// a number (see `declared_body_length`).
+    declared: Option<u64>,
+    /// Data bytes this body has yielded to the connection so far.
+    delivered: u64,
     recorded: bool,
 }
 
 impl MeasuredBody {
-    fn new(group: usize, inner: axum::body::Body) -> Self {
+    fn new(
+        metrics: &'static HttpRequestMetrics,
+        group: usize,
+        inner: axum::body::Body,
+        declared: Option<u64>,
+    ) -> Self {
         Self {
             inner,
+            metrics,
             group,
             started_at: Instant::now(),
+            declared,
+            delivered: 0,
             recorded: false,
         }
+    }
+
+    /// Whether everything this body promised has been handed over: it is at
+    /// its end, or it has yielded the length its response head declared.
+    fn delivered_everything(&self) -> bool {
+        http_body::Body::is_end_stream(&self.inner)
+            || self
+                .declared
+                .is_some_and(|declared| self.delivered >= declared)
     }
 
     fn finish(&mut self, complete: bool) {
@@ -804,7 +846,8 @@ impl MeasuredBody {
             return;
         }
         self.recorded = true;
-        HTTP_REQUEST_METRICS.record_body(self.group, self.started_at.elapsed(), complete);
+        self.metrics
+            .record_body(self.group, self.started_at.elapsed(), complete);
     }
 }
 
@@ -821,12 +864,17 @@ impl http_body::Body for MeasuredBody {
         let this = self.get_mut();
         let polled = std::pin::Pin::new(&mut this.inner).poll_frame(cx);
         match &polled {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    this.delivered = this.delivered.saturating_add(data.len() as u64);
+                }
+            }
             Poll::Ready(None) => this.finish(true),
             // A body that ended in an error did not deliver what it promised,
             // so it is counted beside the abandoned ones rather than as a
             // completed delivery.
             Poll::Ready(Some(Err(_))) => this.finish(false),
-            Poll::Ready(Some(Ok(_))) | Poll::Pending => {}
+            Poll::Pending => {}
         }
         polled
     }
@@ -842,12 +890,41 @@ impl http_body::Body for MeasuredBody {
 
 impl Drop for MeasuredBody {
     fn drop(&mut self) {
-        // A body dropped with frames still to come is a consumer that went
-        // away. One dropped at its end — a 204, a HEAD response, or a body the
-        // server never needed to poll — delivered everything it had.
-        let ended = http_body::Body::is_end_stream(&self.inner);
-        self.finish(ended);
+        // A body dropped short of what it promised is a consumer that went
+        // away. One dropped after handing over everything — at its end, or
+        // with its declared length yielded, which is how hyper lets go of
+        // every fixed-length body — was delivered.
+        let complete = self.delivered_everything();
+        self.finish(complete);
     }
+}
+
+/// The number of body bytes a response's head promised, if it promised one.
+///
+/// A response to HEAD, and a 1xx, 204 or 304, promises none whatever its
+/// `Content-Length` says: there the header describes the representation, and
+/// hyper writes no body at all. Otherwise the header wins when present,
+/// because it is what hyper frames the response by; when the handler set none,
+/// hyper derives it from the body's exact size hint, so that is the fallback.
+/// Neither means a chunked body, which is `complete` only at its end.
+fn declared_body_length(
+    head_request: bool,
+    status: StatusCode,
+    response: &Response,
+) -> Option<u64> {
+    if head_request
+        || status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED
+    {
+        return Some(0);
+    }
+    response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .or_else(|| http_body::Body::size_hint(response.body()).exact())
 }
 
 /// Counts every request's outcome and times its body.
@@ -858,6 +935,17 @@ impl Drop for MeasuredBody {
 /// and a node refusing everything with an uncounted 503 is exactly the failure
 /// this family exists to show.
 async fn http_request_metrics(request: Request<axum::body::Body>, next: Next) -> Response {
+    measure_http_request(&HTTP_REQUEST_METRICS, request, next).await
+}
+
+/// `http_request_metrics` over a metrics table the caller names, so a test can
+/// own one and read exact counts without racing every other router test in
+/// the binary for the process-wide cells.
+async fn measure_http_request(
+    metrics: &'static HttpRequestMetrics,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
     // `other` is the last group, and is what both ways of having no template —
     // the web fallback and a genuinely unmatched path — resolve to.
     let group = request
@@ -867,6 +955,7 @@ async fn http_request_metrics(request: Request<axum::body::Body>, next: Next) ->
             http_route_group(path.as_str())
         });
     let method = http_method_index(request.method());
+    let head_request = request.method() == Method::HEAD;
     let target = safe_trace_target(request.uri());
     let request_id = request
         .headers()
@@ -877,7 +966,7 @@ async fn http_request_metrics(request: Request<axum::body::Body>, next: Next) ->
     let started_at = Instant::now();
     let response = next.run(request).await;
     let status = response.status();
-    HTTP_REQUEST_METRICS.record_request(group, method, http_status_class_index(status));
+    metrics.record_request(group, method, http_status_class_index(status));
     if status.is_server_error() {
         // Only 5xx, and at most one line per route group per second.
         // `logbuf::LogBuffer` is a bounded ring and it is the only log the
@@ -899,7 +988,8 @@ async fn http_request_metrics(request: Request<axum::body::Body>, next: Next) ->
             );
         }
     }
-    response.map(|body| axum::body::Body::new(MeasuredBody::new(group, body)))
+    let declared = declared_body_length(head_request, status, &response);
+    response.map(|body| axum::body::Body::new(MeasuredBody::new(metrics, group, body, declared)))
 }
 
 pub(crate) fn prometheus_http_request_metrics() -> String {
@@ -2174,8 +2264,14 @@ mod tests {
 
     /// The two observability layers over three routes with known shapes, in the
     /// same order `router()` adds them.
-    fn observability_probe_router() -> Router {
-        Router::new()
+    ///
+    /// The metrics layer records into a table this test owns rather than the
+    /// process-wide one, so its counts are exact: every other router test in
+    /// this binary increments the process-wide cells in parallel, and two of
+    /// these tests share the `search` group.
+    fn observability_probe_router() -> (Router, &'static HttpRequestMetrics) {
+        let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let router = Router::new()
             .route("/api/v1/items/{id}", axum::routing::get(|| async { "ok" }))
             .route(
                 "/api/v1/settings",
@@ -2186,8 +2282,13 @@ mod tests {
                 axum::routing::get(|| async { (StatusCode::SERVICE_UNAVAILABLE, "refused") }),
             )
             .route("/api/v1/search", axum::routing::get(streaming_test_handler))
-            .layer(axum::middleware::from_fn(http_request_metrics))
-            .layer(axum::middleware::from_fn(http_request_id))
+            .layer(axum::middleware::from_fn(
+                move |request: Request<axum::body::Body>, next: Next| {
+                    measure_http_request(metrics, request, next)
+                },
+            ))
+            .layer(axum::middleware::from_fn(http_request_id));
+        (router, metrics)
     }
 
     fn request_cell(exposition: &str, group: &str, method: &str, status: &str) -> u64 {
@@ -2225,14 +2326,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_request_is_labelled_by_its_route_group_and_never_by_its_uri() {
-        let app = observability_probe_router();
-        let before = prometheus_http_request_metrics();
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
         let response = app
             .oneshot(get("/api/v1/items/424242", None))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
-        let after = prometheus_http_request_metrics();
+        let after = metrics.render();
         assert_eq!(
             request_cell(&after, "item", "get", "2xx"),
             request_cell(&before, "item", "get", "2xx") + 1
@@ -2248,8 +2349,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_unmatched_path_uses_one_shared_label_and_mints_no_series() {
-        let app = observability_probe_router();
-        let before = prometheus_http_request_metrics();
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
         let before_lines = before
             .lines()
             .filter(|line| line.starts_with("plurx_http_requests_total{"))
@@ -2262,7 +2363,7 @@ mod tests {
                 .expect("response");
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
-        let after = prometheus_http_request_metrics();
+        let after = metrics.render();
         assert!(
             request_cell(&after, "other", "get", "4xx")
                 >= request_cell(&before, "other", "get", "4xx") + 100
@@ -2321,8 +2422,8 @@ mod tests {
 
     #[tokio::test]
     async fn header_latency_and_body_delivery_are_separate_measurements() {
-        let app = observability_probe_router();
-        let before = prometheus_http_request_metrics();
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
         let started_at = Instant::now();
         let response = app
             .oneshot(get("/api/v1/search", None))
@@ -2343,7 +2444,7 @@ mod tests {
             to_last_frame >= Duration::from_millis(250),
             "the body took {to_last_frame:?}"
         );
-        let after = prometheus_http_request_metrics();
+        let after = metrics.render();
         assert_eq!(
             body_cell(&after, "search", "complete"),
             body_cell(&before, "search", "complete") + 1
@@ -2357,8 +2458,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_abandoned_body_counts_aborted_and_not_as_an_error() {
-        let app = observability_probe_router();
-        let before = prometheus_http_request_metrics();
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
         let response = app
             .oneshot(get("/api/v1/search", None))
             .await
@@ -2367,7 +2468,7 @@ mod tests {
         // The consumer goes away without reading a frame, exactly as a client
         // that seeks away from a segment does.
         drop(response);
-        let after = prometheus_http_request_metrics();
+        let after = metrics.render();
         assert_eq!(
             body_cell(&after, "search", "aborted"),
             body_cell(&before, "search", "aborted") + 1
@@ -2384,13 +2485,170 @@ mod tests {
         );
     }
 
+    /// Four 5-byte frames from a stream, so the body cannot know it has ended
+    /// until it is polled past its last frame — the shape of every direct play
+    /// range and HLS segment plurx serves.
+    fn four_frame_stream_body() -> axum::body::Body {
+        axum::body::Body::from_stream(futures_util::stream::iter(
+            (0..4).map(|_| Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"frame"))),
+        ))
+    }
+
+    /// `/api/v1/items/length` declares `Content-Length: 20` for the stream the
+    /// way `stream.rs` and `hls.rs` do; any other id leaves hyper to frame it
+    /// chunked.
+    async fn framed_stream_handler(
+        axum::extract::Path(framing): axum::extract::Path<String>,
+    ) -> Response {
+        let mut response = four_frame_stream_body().into_response();
+        if framing == "length" {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, HeaderValue::from_static("20"));
+        }
+        response
+    }
+
+    /// One request on a fresh HTTP/1.1 connection, read until the server
+    /// closes it. `connection: close` makes that close the end of the
+    /// exchange, and hyper closes only after its dispatcher has let go of the
+    /// body, so the body's outcome is recorded by the time this returns.
+    async fn raw_http1_exchange(address: std::net::SocketAddr, method: &str, path: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        stream
+            .write_all(
+                format!(
+                    "{method} {path} HTTP/1.1\r\nhost: plurx.test\r\nconnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("request");
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.expect("response");
+        String::from_utf8(raw).expect("a UTF-8 response")
+    }
+
+    /// The #461 review's reproduction, kept as the regression test: through a
+    /// real hyper connection rather than `oneshot` + `collect()`, which always
+    /// polls a body to its end and so can never see how hyper lets go of a
+    /// fixed-length one.
+    #[tokio::test]
+    async fn a_fully_delivered_body_counts_complete_over_a_real_connection_whatever_its_framing() {
+        let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let app = Router::new()
+            .route(
+                "/api/v1/items/{id}",
+                axum::routing::get(framed_stream_handler),
+            )
+            .layer(axum::middleware::from_fn(
+                move |request: Request<axum::body::Body>, next: Next| {
+                    measure_http_request(metrics, request, next)
+                },
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let chunked = raw_http1_exchange(address, "GET", "/api/v1/items/chunked").await;
+        let length = raw_http1_exchange(address, "GET", "/api/v1/items/length").await;
+        assert!(
+            chunked
+                .to_ascii_lowercase()
+                .contains("transfer-encoding: chunked"),
+            "{chunked}"
+        );
+        assert!(
+            length.to_ascii_lowercase().contains("content-length: 20"),
+            "{length}"
+        );
+        for response in [&chunked, &length] {
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            assert_eq!(response.matches("frame").count(), 4, "{response}");
+        }
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (2, 0),
+            "both bodies reached the client whole, so neither was abandoned"
+        );
+
+        // HEAD: axum answers it from the GET route with the GET's headers, and
+        // hyper writes no body. Nothing was promised, so nothing was abandoned.
+        let head = raw_http1_exchange(address, "HEAD", "/api/v1/items/length").await;
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(!head.contains("frame"), "{head}");
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (3, 0),
+            "a HEAD response has no body to abandon"
+        );
+    }
+
+    /// The other half of the byte count: a fixed-length body let go of before
+    /// it yielded its declared length is still a consumer that went away, and
+    /// one that yielded all of it is complete without ever being polled to
+    /// `None` — which is exactly what hyper does with it.
+    #[tokio::test]
+    async fn a_fixed_length_body_is_complete_at_its_declared_length_and_aborted_short_of_it() {
+        let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let group = http_route_group("/api/v1/items/{id}");
+
+        let mut short = MeasuredBody::new(metrics, group, four_frame_stream_body(), Some(20));
+        short.frame().await.expect("a frame").expect("data");
+        drop(short);
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (0, 1),
+            "5 of 20 declared bytes is an abandoned body"
+        );
+
+        let mut whole = MeasuredBody::new(metrics, group, four_frame_stream_body(), Some(20));
+        for _ in 0..4 {
+            whole.frame().await.expect("a frame").expect("data");
+        }
+        assert!(
+            !http_body::Body::is_end_stream(&whole),
+            "the stream does not know it has ended, which is the whole problem"
+        );
+        drop(whole);
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (1, 1),
+            "20 of 20 declared bytes is a delivered body"
+        );
+    }
+
     #[tokio::test]
     async fn wrapping_a_body_preserves_its_exact_length() {
         // hyper derives Content-Length from the body's size hint when the
         // handler has not set the header, so a wrapper that reported an unknown
         // length would silently move fixed-length responses onto chunked
         // framing.
-        let app = observability_probe_router();
+        let (app, _) = observability_probe_router();
         let response = app
             .oneshot(get("/api/v1/items/1", None))
             .await
@@ -2404,8 +2662,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_server_error_is_counted_as_five_hundred_and_logged_once_at_warn() {
-        let app = observability_probe_router();
-        let before = prometheus_http_request_metrics();
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
         let captured = CapturedWriter::new();
         let guard = tracing::subscriber::set_default(
             tracing_subscriber::fmt()
@@ -2426,7 +2684,7 @@ mod tests {
         assert_eq!(ok.status(), StatusCode::OK);
         drop(guard);
 
-        let after = prometheus_http_request_metrics();
+        let after = metrics.render();
         assert_eq!(
             request_cell(&after, "settings", "get", "5xx"),
             request_cell(&before, "settings", "get", "5xx") + 1
@@ -2460,8 +2718,8 @@ mod tests {
     async fn a_refusal_storm_is_counted_exactly_and_logged_at_most_once_a_second() {
         // A fenced node refuses every request with 503. The counter must see
         // all of them and the bounded ring must not.
-        let app = observability_probe_router();
-        let before = prometheus_http_request_metrics();
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
         let captured = CapturedWriter::new();
         let guard = tracing::subscriber::set_default(
             tracing_subscriber::fmt()
@@ -2479,7 +2737,7 @@ mod tests {
         }
         drop(guard);
 
-        let after = prometheus_http_request_metrics();
+        let after = metrics.render();
         assert_eq!(
             request_cell(&after, "cluster", "get", "5xx"),
             request_cell(&before, "cluster", "get", "5xx") + 25,
