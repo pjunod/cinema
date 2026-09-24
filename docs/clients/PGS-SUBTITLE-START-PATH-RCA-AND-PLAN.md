@@ -552,9 +552,14 @@ client's 250 ms first-frame window. Android versionCode 124 waits for later
 rendered video to cross that target before settling a progressive-remux seek.
 The versionCode 124 package passed both PGS seek directions before the
 subsequent foreground guard review fix. The final package with that guard was
-installed on six physical Android devices, each reporting versionCode 124;
-its Pixel replay is pending device unlock.
-six reachable physical Apple devices reported build 182. These installations
+installed on six physical Android devices, each reporting versionCode 124.
+On the unlocked Pixel 11 Pro XL, the final package played *Casino* with English
+SDH PGS overlay through a backward seek from about 1:06 to about 10 minutes
+and a forward seek to 58:16. Each destination showed continuous video and a
+new timed PGS cue. Its playback panel reported 3840×2160, HDR10 rendering,
+remux, Playing, and zero buffering interruptions after both seeks. No seek
+timeout appeared in the observed run. Six reachable physical Apple devices
+reported build 182. These installations
 used local development builds; they are not evidence of store-signed release
 packages.
 
