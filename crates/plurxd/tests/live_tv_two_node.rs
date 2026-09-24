@@ -1133,3 +1133,67 @@ async fn moving_the_owner_hands_the_tuner_to_the_new_node_exactly_once() {
         device.opens.load(Ordering::Acquire)
     );
 }
+
+/// Plan L-03 M1: two viewers on one channel cost one tuner GET. One starts
+/// through the owner and one through the ingress, so two capabilities, two
+/// activations and two FFmpeg graphs exist; the fixture device's open counter
+/// is the oracle for the one GET they share.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_viewers_on_one_channel_open_one_tuner_get() {
+    let (device, _serial) = exclusive_device().await;
+    let mut cluster = Cluster::start().await;
+    cluster
+        .configure(&device.address, &cluster.node_a_id.clone())
+        .await;
+    cluster.enable().await;
+    let channel = cluster.channel_id(&cluster.a_base.clone()).await;
+
+    let mut capabilities = Vec::new();
+    for base in [cluster.a_base.clone(), cluster.b_base.clone()] {
+        let started = cluster.start_session(&base, &channel).await;
+        assert_eq!(
+            started.status(),
+            StatusCode::OK,
+            "a viewer could not start; node A: {}",
+            cluster.node_a.diagnostics()
+        );
+        capabilities.push(
+            started.json::<Value>().await.expect("start JSON")["session_id"]
+                .as_str()
+                .expect("capability")
+                .to_owned(),
+        );
+    }
+    assert_ne!(
+        capabilities[0], capabilities[1],
+        "two viewers are two capabilities; the transport authorises nothing"
+    );
+    let a_base = cluster.a_base.clone();
+    let b_base = cluster.b_base.clone();
+    let owner_read = cluster.read_until_rolled(&a_base, &capabilities[0]).await;
+    let ingress_read = cluster.read_until_rolled(&b_base, &capabilities[1]).await;
+    assert!(owner_read >= 3 && ingress_read >= 3);
+    assert_eq!(
+        device.opens.load(Ordering::Acquire),
+        1,
+        "two viewers on one channel must share one tuner GET"
+    );
+    let metrics = cluster
+        .client
+        .get(format!("{a_base}/metrics"))
+        .bearer_auth(&cluster.token)
+        .send()
+        .await
+        .expect("metrics request")
+        .text()
+        .await
+        .expect("metrics body");
+    assert!(
+        metrics.contains("plurx_live_tv_transports 1\n"),
+        "one transport on the owner: {metrics}"
+    );
+    assert!(
+        metrics.contains("plurx_live_tv_transport_consumers{kind=\"viewer\"} 2\n"),
+        "two viewers on it: {metrics}"
+    );
+}
