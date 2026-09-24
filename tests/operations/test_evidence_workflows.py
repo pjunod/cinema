@@ -19,6 +19,13 @@ class EvidenceWorkflowCase(unittest.TestCase):
             self.assertIn("workflow_dispatch:", triggers)
             self.assertNotIn("  pull_request:", triggers)
             self.assertNotIn("branches: [main]", triggers)
+            if name == "release-readiness":
+                # The one scheduled runtime sweep, and only once a week: Paul
+                # chose weekly release tags cut from a green scheduled run on
+                # 2026-09-23 (docs/RELEASING.md "The weekly release tag").
+                self.assertEqual(triggers.count("- cron:"), 1)
+                self.assertIn('  schedule:\n    - cron: "0 6 * * 1"\n', triggers)
+                continue
             self.assertNotIn("  schedule:", triggers)
         fast = self.read(".github/workflows/main-fast-lane.yml")
         self.assertIn(

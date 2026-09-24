@@ -641,6 +641,10 @@ pub struct AppState {
     /// so a hostile request cannot turn authentication pressure into Raft
     /// writes or a replicated account lockout.
     pub(crate) login_throttle: crate::http::LoginThrottle,
+    /// Argon2 admission (workers and queue). Per state, like the throttle:
+    /// one per process in production, one per router in tests (see
+    /// `http::PasswordCapacity`).
+    pub(crate) password_capacity: crate::http::PasswordCapacity,
     /// C-07's façade census. Per state rather than process-global so each
     /// router counts only its own requests (see `http::PlexCensus`).
     pub(crate) plex_census: Arc<crate::http::PlexCensus>,
@@ -1018,6 +1022,7 @@ impl AppState {
             store,
             cache_only_admin_proofs,
             login_throttle: Default::default(),
+            password_capacity: Default::default(),
             plex_census: Default::default(),
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,

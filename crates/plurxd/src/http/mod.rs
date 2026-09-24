@@ -7,7 +7,7 @@
 
 mod analysis;
 mod auth;
-pub(crate) use auth::LoginThrottle;
+pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
 mod chapter_thumbs;
 mod cluster;
@@ -65,7 +65,7 @@ pub(crate) mod test_agents {
     pub(crate) const ANDROID_NATIVE_UA: &str = "okhttp/5.1.0";
 }
 
-mod users;
+pub(crate) mod users;
 mod watch;
 pub(crate) mod web;
 
@@ -8204,6 +8204,255 @@ mod tests {
         }
         let (_, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
         assert_eq!(devices.as_array().expect("device array").len(), 2);
+    }
+
+    /// A file-backed app plus a second handle on the same database, for the
+    /// one thing a request cannot do: make a token look 91 days idle.
+    fn test_app_with_fixture_store() -> (Router, AppState, SqliteStore) {
+        let base = crate::test_temp_path(format!("plurx-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).expect("test directory");
+        let db = base.join("plurx.db");
+        let store = SqliteStore::open(&db).expect("store");
+        let fixture = SqliteStore::open(&db).expect("fixture handle");
+        let state = AppState::new(
+            "test".into(),
+            Arc::new(store),
+            test_dirs(&base),
+            "test-node".into(),
+            Default::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        (router(state.clone()), state, fixture)
+    }
+
+    async fn login_device(app: &Router, device: &str) -> String {
+        let (status, body) = call(
+            app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": device }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body["token"].as_str().expect("token").to_owned()
+    }
+
+    const EXPIRY_DAY: i64 = 86_400;
+
+    /// The distinct refusal clients land on their sign-in screen with, the
+    /// devices list that says when each device goes, and the revocation that
+    /// still works beside it.
+    #[tokio::test]
+    async fn an_idle_sign_in_is_refused_as_session_expired_and_the_devices_list_says_when() {
+        let (app, state, fixture) = test_app_with_fixture_store();
+        let admin = setup_admin(&app).await;
+        let tv = login_device(&app, "Living room").await;
+        let now = users::unix_now();
+        // The upgrade took effect 200 days ago; the default is on, 90 days.
+        users::start_token_expiry_clock(state.store.as_ref(), now - 200 * EXPIRY_DAY)
+            .await
+            .expect("start the clock");
+        let tv_digest = plurx_core::auth::hash_token(&tv);
+        assert!(fixture
+            .fixture_set_token_last_seen(&tv_digest, now - 91 * EXPIRY_DAY)
+            .await
+            .expect("age the living-room box"));
+
+        let (status, body) = call(&app, get("/api/v1/me", Some(&tv))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["code"], "session_expired");
+        assert_eq!(body["idle_days"], 90);
+        assert!(body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("90 days of inactivity"));
+        // Every authenticated route refuses it the same way, including the
+        // query-credential form media URLs use.
+        let (status, body) = call(&app, get(&format!("/api/v1/libraries?token={tv}"), None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "session_expired");
+        // The device in use is untouched.
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&admin))).await.0,
+            StatusCode::OK
+        );
+
+        let (status, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{devices}");
+        let devices = devices.as_array().expect("device array");
+        let tv_row = devices
+            .iter()
+            .find(|row| row["device"] == "Living room")
+            .expect("tv row");
+        assert_eq!(tv_row["expired"], true);
+        assert_eq!(
+            tv_row["expires_at"].as_i64(),
+            Some(now - 91 * EXPIRY_DAY + 90 * EXPIRY_DAY)
+        );
+        let admin_row = devices
+            .iter()
+            .find(|row| row["device"] != "Living room")
+            .expect("admin row");
+        assert_eq!(admin_row["expired"], false);
+        assert!(admin_row["expires_at"].as_i64().expect("expiry") >= now + 89 * EXPIRY_DAY);
+
+        // Revoking the expired device still goes through the fence.
+        let (status, body) = call(
+            &app,
+            delete(
+                &format!(
+                    "/api/v1/me/devices/{}",
+                    tv_row["token_hash_prefix"].as_str().expect("prefix")
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = call(&app, get("/api/v1/me", Some(&tv))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body["code"],
+            Value::Null,
+            "a revoked token is not an expired one"
+        );
+    }
+
+    /// Settings → Users owns the option: off never expires, switching it back
+    /// on restarts every device's clock instead of signing anyone out, and the
+    /// window is bounded.
+    #[tokio::test]
+    async fn sign_in_expiry_settings_round_trip_and_enabling_signs_nobody_out() {
+        let (app, state, fixture) = test_app_with_fixture_store();
+        let admin = setup_admin(&app).await;
+        let tv = login_device(&app, "Living room").await;
+        let tv_digest = plurx_core::auth::hash_token(&tv);
+        let now = users::unix_now();
+        users::start_token_expiry_clock(state.store.as_ref(), now - 400 * EXPIRY_DAY)
+            .await
+            .expect("start the clock");
+
+        let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["auth_token_expiry"], true, "on by default");
+        assert_eq!(settings["auth_token_idle_days"], 90);
+        assert_eq!(
+            settings["auth_token_expiry_since"].as_i64(),
+            Some(now - 400 * EXPIRY_DAY)
+        );
+
+        fixture
+            .fixture_set_token_last_seen(&tv_digest, now - 150 * EXPIRY_DAY)
+            .await
+            .expect("age");
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&tv))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Off: today's non-expiring behaviour.
+        let (status, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "auth_token_expiry": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["auth_token_expiry"], false);
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&tv))).await.0,
+            StatusCode::OK
+        );
+        let (_, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert!(devices
+            .as_array()
+            .expect("device array")
+            .iter()
+            .all(|row| row["expires_at"].is_null() && row["expired"] == false));
+
+        // Back on: the clock restarts now, so a device idle for 150 days is
+        // not signed out by the switch itself.
+        fixture
+            .fixture_set_token_last_seen(&tv_digest, now - 150 * EXPIRY_DAY)
+            .await
+            .expect("age");
+        let (status, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "auth_token_expiry": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert!(settings["auth_token_expiry_since"].as_i64().expect("since") >= now);
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&tv))).await.0,
+            StatusCode::OK
+        );
+        // On -> on does not keep pushing the clock back.
+        let since = settings["auth_token_expiry_since"].clone();
+        let (_, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "auth_token_expiry": true }),
+            ),
+        )
+        .await;
+        assert_eq!(settings["auth_token_expiry_since"], since);
+
+        for days in [0, -1, 3_651] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({ "auth_token_idle_days": days }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{days}: {body}");
+        }
+        let (status, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "auth_token_idle_days": 30 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["auth_token_idle_days"], 30);
+    }
+
+    /// The first start of a build with the option records when expiry took
+    /// effect; every later start, on any node, keeps that first value.
+    #[tokio::test]
+    async fn the_sign_in_expiry_clock_is_started_once() {
+        let (_, state) = test_app_with_state();
+        assert_eq!(
+            users::start_token_expiry_clock(state.store.as_ref(), 1_000)
+                .await
+                .expect("first start"),
+            1_000
+        );
+        assert_eq!(
+            users::start_token_expiry_clock(state.store.as_ref(), 9_000)
+                .await
+                .expect("restart"),
+            1_000,
+            "a restart must not push every device's clock forward again"
+        );
     }
 
     #[tokio::test]
