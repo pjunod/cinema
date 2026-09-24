@@ -2814,7 +2814,16 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # `kill_on_drop`, an output cap (2 MiB) and a 15 s timeout. It runs only for
 # the chapter a watch page asked for, two at a time behind a semaphore, and
 # nothing owns it beyond the request's await.
-expected_occurrences = 152
+# 152 -> 153 (measured) with the #461 review's P2 fix: one test-only
+# `std::process::Command::new(std::env::current_exe())` in
+# `panics::tests::run_in_a_child`, re-running a single named test of this
+# same test binary (`--exact`, one thread) in a child process. Two tests use
+# it because the property they pin is what a panic does to the *process* —
+# one expects the child to abort, which cannot be observed from inside the
+# process that aborts. The child is this binary, runs one test and exits; it
+# is waited to completion by `.output()` before the test continues. No
+# producer, no `ffmpeg`, nothing outlives the test.
+expected_occurrences = 153
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3109,7 +3118,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # asserts the wire answer the middleware saw, which is the only way to pin the
 # status classification the counter depends on. All in-process; they create no
 # task, timer, process or rolling-producer owner.
-expected_occurrences = 357
+# 357 -> 358 (measured) with the #461 review's P2 fix: the `.output()` in
+# `panics::tests::run_in_a_child`, the same test-only launch described in
+# `process-command-construction` above — this test binary re-run on one named
+# test, waited to completion before its test continues.
+expected_occurrences = 358
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

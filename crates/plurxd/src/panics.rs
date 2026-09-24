@@ -9,8 +9,18 @@
 //! **This is a report, not a repair.** A task that panics mid-publication
 //! still leaves whatever it left; making that visible is this module's whole
 //! job, and repairing it belongs to the efforts that own those lifecycles.
+//!
+//! **A panic inside this hook aborts the process, and nothing here can stop
+//! that.** std never re-enters a panic hook: a second panic raised while one is
+//! running is `MustAbort::PanicInHook`, which prints "panicked while processing
+//! panic" and aborts before anything unwinds, so no guard and no
+//! `catch_unwind` — here or in the task that panicked — gets a say. A panic
+//! tokio would have contained to one task would take the daemon down instead.
+//! The only protection is that the reporting path cannot panic, and
+//! `report_panic` is written to be panic-free by construction; its comment
+//! lists why each step cannot. `a_panic_inside_the_reporting_path_aborts_the_process`
+//! pins the abort, so nobody reintroduces a guard that claims otherwise.
 
-use std::cell::Cell;
 use std::panic::PanicHookInfo;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
@@ -50,31 +60,12 @@ const OTHER_SUBSYSTEM: usize = PANIC_SUBSYSTEMS.len() - 1;
 static PANICS: LazyLock<[AtomicU64; PANIC_SUBSYSTEMS.len()]> =
     LazyLock::new(|| std::array::from_fn(|_| AtomicU64::new(0)));
 
-thread_local! {
-    static IN_HOOK: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Runs `body` unless this thread is already inside the hook.
-///
-/// A panic raised *inside* the reporting path — a poisoned mutex in the log
-/// ring, a subscriber layer that panics on third-party payload text — would
-/// otherwise re-enter the hook and recurse until the stack is gone. The guard
-/// is checked first and released before the default hook runs, so a later,
-/// unrelated panic on the same thread still reports.
-fn with_hook_guard<T>(body: impl FnOnce() -> T) -> Option<T> {
-    if IN_HOOK.with(|flag| flag.replace(true)) {
-        return None;
-    }
-    let outcome = body();
-    IN_HOOK.with(|flag| flag.set(false));
-    Some(outcome)
-}
-
 /// Installs the reporting hook in front of whatever hook is already set.
 ///
-/// The previous hook is **chained, not replaced**: it always runs, at the end,
-/// outside the recursion guard. The process's stderr output and its
-/// abort-versus-unwind behaviour are unchanged by this module.
+/// The previous hook is **chained, not replaced**: it always runs, after the
+/// report. The process's stderr output and its abort-versus-unwind behaviour
+/// are unchanged by this module — provided the report itself does not panic,
+/// which is why `report_panic` is built so that it cannot.
 pub(crate) fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -83,24 +74,45 @@ pub(crate) fn install_panic_hook() {
     }));
 }
 
-/// The reporting half of the hook, separated so it can be exercised without
-/// the test having to own the process-wide hook.
+/// The reporting half of the hook.
+///
+/// **Panic-free by construction**, because a panic here aborts the process
+/// (see the module comment). Each step is one that cannot panic on any input:
+///
+/// - the payload is only ever downcast to `&str` or `String`; anything else
+///   becomes a fixed string, so no third-party `Debug` or `Display` impl runs
+///   here;
+/// - the location is formatted from a `&str` and a `u32`;
+/// - `subsystem_of` and `redact_bounded` do only whole-string and `char`-wise
+///   work — no byte-index slicing that could land inside a multi-byte
+///   character;
+/// - the counter and the label are reached with `get`, not by indexing;
+/// - the backtrace is std's own `Display` into a `String`, behind a fixed
+///   environment variable name;
+/// - every field handed to `tracing` is a string. A panic raised *inside* a
+///   subscriber callback reaches this hook while that dispatcher is in use,
+///   and tracing-core sends the re-entrant event to `Dispatch::none` rather
+///   than back into the layer that panicked; the log ring's mutex is
+///   poison-tolerant (`logbuf.rs`).
+///
+/// Allocation failure is not on the list because it aborts whatever this
+/// function does.
 fn report_panic(info: &PanicHookInfo<'_>) {
-    with_hook_guard(|| {
-        let location = info
-            .location()
-            .map(|location| format!("{}:{}", location.file(), location.line()));
-        let subsystem = subsystem_of(info.location().map(|location| location.file()));
-        let message = redact_bounded(&panic_message(info), MAX_PANIC_MESSAGE);
-        PANICS[subsystem].fetch_add(1, Ordering::Relaxed);
-        tracing::error!(
-            target: "plurxd::panic",
-            subsystem = PANIC_SUBSYSTEMS[subsystem],
-            location = location.as_deref().unwrap_or("unknown"),
-            backtrace = %bounded_backtrace(),
-            "panic: {message}"
-        );
-    });
+    let location = info
+        .location()
+        .map(|location| format!("{}:{}", location.file(), location.line()));
+    let subsystem = subsystem_of(info.location().map(|location| location.file()));
+    let message = redact_bounded(&panic_message(info), MAX_PANIC_MESSAGE);
+    if let Some(counter) = PANICS.get(subsystem) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+    tracing::error!(
+        target: "plurxd::panic",
+        subsystem = PANIC_SUBSYSTEMS.get(subsystem).copied().unwrap_or("other"),
+        location = location.as_deref().unwrap_or("unknown"),
+        backtrace = %bounded_backtrace(),
+        "panic: {message}"
+    );
 }
 
 /// A panic payload is third-party text: `panic!("{}", response_body)` puts
@@ -258,13 +270,136 @@ mod tests {
         assert_eq!(PANIC_SUBSYSTEMS[subsystem_of(None)], "other");
     }
 
+    /// Which half of a re-executed test this process is: unset in the test
+    /// run itself, set to the child's role in the copy it starts.
+    const CHILD_ROLE: &str = "PLURX_PANICS_TEST_CHILD";
+
+    /// Runs one test of this binary again in a child process, with
+    /// `CHILD_ROLE` set to `role`. The two properties below are about what a
+    /// panic does to the *process*, and the only way to watch a process abort
+    /// without taking the test harness with it is from outside.
+    fn run_in_a_child(test: &str, role: &str) -> std::process::Output {
+        std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env(CHILD_ROLE, role)
+            .output()
+            .expect("run the child test process")
+    }
+
+    fn child_role() -> Option<String> {
+        std::env::var(CHILD_ROLE).ok()
+    }
+
+    /// What the #461 review established and the earlier "recursion guard"
+    /// claimed the opposite of: a panic raised inside the reporting path is
+    /// not re-entered, suppressed or caught. std aborts the process. The
+    /// child installs the real hook behind a log writer that panics — the
+    /// "formatter that panics" the plan named — and panics once, inside
+    /// `catch_unwind`, exactly as a task tokio would have contained.
     #[test]
-    fn a_nested_report_is_suppressed_by_the_guard() {
-        let outcome = with_hook_guard(|| with_hook_guard(|| "inner ran"));
-        assert_eq!(outcome, Some(None));
-        // The guard is released once the outer body returns, so a later,
-        // unrelated panic on this thread still reports.
-        assert_eq!(with_hook_guard(|| "later"), Some("later"));
+    fn a_panic_inside_the_reporting_path_aborts_the_process() {
+        if child_role().as_deref() == Some("abort") {
+            struct PanickingWriter;
+            impl std::io::Write for PanickingWriter {
+                fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                    panic!("a log writer that panics");
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            install_panic_hook();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(|| PanickingWriter)
+                .with_ansi(false)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                let _ = std::panic::catch_unwind(|| panic!("the panic being reported"));
+            });
+            println!("CHILD SURVIVED a panic inside its panic hook");
+            return;
+        }
+        let output = run_in_a_child(
+            "panics::tests::a_panic_inside_the_reporting_path_aborts_the_process",
+            "abort",
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stdout.contains("CHILD SURVIVED"),
+            "the process outlived a panic in its hook: {stdout}{stderr}"
+        );
+        assert!(
+            stderr.contains("while processing panic"),
+            "std's nested-panic abort message is missing: {stderr}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            // SIGABRT, not a test failure's ordinary non-zero exit.
+            assert_eq!(output.status.signal(), Some(6), "{stderr}");
+        }
+    }
+
+    /// The property that keeps the abort above from happening: payloads a
+    /// careless reporter would trip on go through the real hook and come out
+    /// as log lines. A payload whose `Debug` and `Display` both panic, a
+    /// non-string payload, an empty one, and one whose 512-character cut
+    /// falls on an odd byte offset inside a multi-byte character. Run in a
+    /// child because a regression here aborts the process, and an abort in
+    /// this binary would take every other test's result with it.
+    #[test]
+    fn hostile_payloads_are_reported_without_a_second_panic() {
+        if child_role().as_deref() == Some("hostile") {
+            struct Hostile;
+            impl std::fmt::Debug for Hostile {
+                fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    panic!("the reporter ran a payload's Debug");
+                }
+            }
+            impl std::fmt::Display for Hostile {
+                fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    panic!("the reporter ran a payload's Display");
+                }
+            }
+            install_panic_hook();
+            let captured = CapturedWriter::new();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(captured.clone())
+                .with_ansi(false)
+                .finish();
+            let before = panic_count("other");
+            let long = format!("a{}", "é".repeat(2_000));
+            tracing::subscriber::with_default(subscriber, || {
+                let _ = std::panic::catch_unwind(|| std::panic::panic_any(Hostile));
+                let _ = std::panic::catch_unwind(|| std::panic::panic_any(7_u32));
+                let _ = std::panic::catch_unwind(|| std::panic::panic_any(String::new()));
+                let _ = std::panic::catch_unwind(|| std::panic::panic_any(long.clone()));
+            });
+            let logged = captured.text();
+            assert_eq!(
+                logged.matches("panic: non-string panic payload").count(),
+                2,
+                "{logged}"
+            );
+            let kept = format!("a{}", "é".repeat(511));
+            assert!(logged.contains(&kept), "{logged}");
+            assert!(!logged.contains(&format!("{kept}é")), "{logged}");
+            assert_eq!(panic_count("other"), before + 4);
+            println!("CHILD REPORTED every hostile payload");
+            return;
+        }
+        let output = run_in_a_child(
+            "panics::tests::hostile_payloads_are_reported_without_a_second_panic",
+            "hostile",
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("CHILD REPORTED"),
+            "{:?}\n{stdout}\n{stderr}",
+            output.status
+        );
     }
 
     #[test]
@@ -295,10 +430,17 @@ mod tests {
     #[test]
     fn the_installed_hook_reports_redacts_counts_and_chains() {
         static PREVIOUS_RAN: AtomicU64 = AtomicU64::new(0);
+        static THIS_TEST: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
 
+        // The hook is process-wide for as long as this test holds it, so a
+        // test panicking on another thread meanwhile goes through it too. The
+        // stand-in previous hook counts only this thread's panics.
+        let _ = THIS_TEST.set(std::thread::current().id());
         let original = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {
-            PREVIOUS_RAN.fetch_add(1, Ordering::Relaxed);
+            if THIS_TEST.get() == Some(&std::thread::current().id()) {
+                PREVIOUS_RAN.fetch_add(1, Ordering::Relaxed);
+            }
         }));
         install_panic_hook();
 
@@ -330,8 +472,11 @@ mod tests {
             "the location is missing: {logged}"
         );
         // This file's first module component is `panics`, which is not on the
-        // allowlist, so the panic must land in `other`.
-        assert_eq!(panic_count("other"), before_panics + 1);
+        // allowlist, so the panic must land in `other`. At least one: another
+        // test's panic in an unlisted module can land there meanwhile. The
+        // exact count is pinned in a process of its own by
+        // `hostile_payloads_are_reported_without_a_second_panic`.
+        assert!(panic_count("other") > before_panics);
         assert_eq!(
             PREVIOUS_RAN.load(Ordering::Relaxed),
             before_previous + 1,
