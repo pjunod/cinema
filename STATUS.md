@@ -1,6 +1,6 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-22 · Kept current by the working agent in the same
+**Updated:** 2026-09-23 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
@@ -46,13 +46,55 @@ the array at 198 MB/s.
   `deny_unknown_fields`, so a misspelled claim is silently dropped rather than
   refused — costing a needless burn and, on an HDR source, the grade with it.
 
-**Not deployed, and nothing has run on hardware.** Still open: the overlay's
-enablement check (two devices — one Android, one Apple — one playing a DV
-title and one an HDR10 title, a seek each way), the seek tests on both native
-clients, the overlay-failure guardrail, and building the `.sup` as a ride-along
-on the fragment-index pass — confirmed in review to be already one sequential
-demux of the whole file, so every PGS track can come out of it at zero added
-I/O.
+- **#453** (`1d21b184e`, merged) — overlay seeks and failures, on both native
+  clients against one shared fixture (`tests/playback/pgs-overlay-cases.json`).
+  Four bugs fixed: Apple's 1 s tick cancelled its own in-flight load, so any PNG
+  slower than a second never arrived; Apple re-raised a notice every second
+  after one failed window; Android left a finished cue on screen after a seek
+  into the refresh margin; Android read every refused manifest as "empty". The
+  server now answers a failed preparation with a typed
+  `pgs_overlay_prepare_failed` instead of a 503 both clients kept polling for
+  ten minutes; only capacity is a 503. Apple build 179, Android 119.
+- **Fix C — every PGS track rides the fragment-index pass**, which already reads
+  the whole file. Designed in #451 (§6 of the RCA, three adversarial rounds with
+  ffmpeg experiments, each overturning something load-bearing), built as three
+  PRs:
+  - **#456** (`8962c0c66`, merged) — the store at
+    `<cache>/runtime/subtitle-source-v1/` and its two readers. The overlay uses
+    a stored `.sup` instead of demuxing; the burn path derives its `.mks` from
+    it in a fraction of a second (with `-copyts` and **no** `-start_at_zero`,
+    which would have moved every cue early) and answers "nothing to burn"
+    without reading 79.5 GB for a track with no cues. MPEG-TS sources keep
+    today's extraction.
+  - **#466** (`cf5666876`, merged; first merged as #460, see below) — the
+    producer: one `tee` output after the index's `pipe:1` with a `sup` slave
+    and a `framecrc` companion per track, `onfail=ignore`, and a mandatory
+    `null` sentinel, so the worst case is no subtitles and never no index; the
+    index's argv, bytes, cache key and retry rules are unchanged, measured.
+    Per-track verdicts from byte arithmetic, a persistent latch, a behavioural
+    startup self-test, a local-disk and free-space gate, and one Developer
+    switch (`subtitles.stored_sources`) that turns off producer and readers.
+  - **#463** (`9236de83a`, merged) — attribution: the analysis row says the pass is also
+    keeping N PGS tracks, by title, with bytes and a link to the switch, on both
+    indexers; a Maintenance card shows the store, what is running and why.
+
+**Forge anomaly, 2026-09-23 13:48 UTC.** Forgejo reported #460 merged as
+`6a9a6a5a2`, but the server-side reflog shows `refs/heads/main` moved to it and
+was set back to `8962c0c66` one second later by an internal "update by push".
+Main never kept the merge. The same head was re-landed as #466. #460 had been
+retargeted from its stacked base to `main` just before merging, which is the one
+thing it did differently from every merge that stuck — worth avoiding
+(merge stacks bottom-up and open the upper PR against `main` fresh) until the
+cause is known.
+
+**Deployed to all four nodes 2026-09-23 19:28 UTC** (`v0.3.0-3626-gfad591a46`, each node's own build report; the ride-along self-test passed on ffmpeg 8.1.2-Jellyfin). The first `deploy.yml` run called nuc4 and m6 "already at" that build while their containers were a day old, because their checkouts had moved without a rebuild; `-e force=true` rebuilt them, and `pjunod/ansible#4` now rebuilds whenever the running image's revision label differs from the checkout. **The mobile apps and the overlay switch are not done**: devices need Apple 179 / Android 119, then
+the overlay's
+enablement check — two devices, one Android and one Apple, one playing a DV
+title and one an HDR10 title, a seek each way — before the gate
+(`subtitles.pgs_overlay`) is turned on, and the Developer and Maintenance page
+layout goldens, which need `scripts/ui-baseline --self-host --update` on a
+machine with Playwright (the golden is also stale on `main` for unrelated
+routes).
 
 ## The full Rust suite and the release build are clean again
 

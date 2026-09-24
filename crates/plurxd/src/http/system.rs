@@ -1733,6 +1733,20 @@ pub struct SettingsDto {
     /// `503` + `Retry-After` rather than an empty track. Off by default; the
     /// Developer tab's readiness rows are advisory and never override it.
     pub subtitle_not_ready_503: bool,
+    /// Let the PGS overlay and burn paths read a track the subtitle-source
+    /// store kept instead of the whole source. On by default; off makes both
+    /// ignore the store entirely.
+    pub subtitle_stored_sources: bool,
+    /// Make a chapter thumbnail the first time a watch page asks for one.
+    /// On by default; off answers the thumbnail route 404 and runs no
+    /// ffmpeg. The Developer tab's readiness rows are advisory.
+    pub chapter_thumbnails: bool,
+    /// What the subtitle-source store occupies on this node and what its
+    /// producer is doing: the footprint its last sweep measured, its cap, the
+    /// ride-alongs running now and the verdicts since this process started.
+    /// Node-local, like `cache_used_bytes`. Read-only here; the switch above
+    /// turns the whole thing off.
+    pub subtitle_store: crate::subtitle_source::StoreDiagnostics,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
     /// readiness bit is true only while the replicated flag is enabled and
     /// every committed voter publishes the current media protocol.
@@ -1815,6 +1829,25 @@ pub struct SettingsDto {
     /// it worked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub genre_backfill_last: Option<GenreBackfillReport>,
+}
+
+/// The subtitle-source store's diagnostics for the Maintenance card, with each
+/// running ride-along named by its title: the producer knows only file ids.
+/// A handful of keyed reads — one ride per running index pass.
+async fn subtitle_store_diagnostics(
+    state: &AppState,
+    switch_on: bool,
+) -> crate::subtitle_source::StoreDiagnostics {
+    let mut diagnostics = crate::subtitle_source::diagnostics(switch_on, &state.runtime_cache_dir);
+    let mut titles = HashMap::new();
+    for ride in &mut diagnostics.riding {
+        let Ok(Some(file)) = state.store.get_file(ride.file_id).await else {
+            continue;
+        };
+        ride.item_id = file.item_id;
+        ride.title = title_of(state, file.item_id, &mut titles).await;
+    }
+    diagnostics
 }
 
 async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
@@ -2100,6 +2133,22 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::SUBTITLE_NOT_READY_503).as_deref(),
             false,
         ),
+        subtitle_stored_sources: plurx_core::store::stored_switch(
+            setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
+            true,
+        ),
+        chapter_thumbnails: plurx_core::store::stored_switch(
+            setting(keys::CHAPTER_THUMBNAILS).as_deref(),
+            true,
+        ),
+        subtitle_store: subtitle_store_diagnostics(
+            state,
+            plurx_core::store::stored_switch(
+                setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
+                true,
+            ),
+        )
+        .await,
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
@@ -2330,6 +2379,8 @@ pub struct UpdateSettings {
     pub analysis_backoff_max_secs: Option<i64>,
     pub subtitle_window_secs: Option<i64>,
     pub subtitle_not_ready_503: Option<bool>,
+    pub subtitle_stored_sources: Option<bool>,
+    pub chapter_thumbnails: Option<bool>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -2484,6 +2535,8 @@ impl UpdateSettings {
             || self.analysis_backoff_max_secs.is_some()
             || self.subtitle_window_secs.is_some()
             || self.subtitle_not_ready_503.is_some()
+            || self.subtitle_stored_sources.is_some()
+            || self.chapter_thumbnails.is_some()
             || self.live_tv_deinterlace_output.is_some()
             || self.default_audio_lang.is_some()
             || self.default_sub_lang.is_some()
@@ -3257,6 +3310,18 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::SUBTITLE_NOT_READY_503, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.subtitle_stored_sources {
+        state
+            .store
+            .put_setting(keys::SUBTITLE_STORED_SOURCES, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.chapter_thumbnails {
+        state
+            .store
+            .put_setting(keys::CHAPTER_THUMBNAILS, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(name) = server_name {
@@ -5160,7 +5225,7 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
         plurx_core::store::prometheus_store_operations(),
         crate::store_result::prometheus(),
@@ -5177,6 +5242,7 @@ pub(crate) async fn metrics(
         crate::ffmpeg::engine_attestation_prometheus(),
         super::prometheus_http_store_attribution(),
         crate::state::fragment_index_validation_prometheus(),
+        crate::subtitle_source::prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus();

@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 221
+One binary serves everything on one port (`:32400` by default). plurx has 222
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -574,6 +574,7 @@ away.
 | GET, PUT | `/api/v1/search/settings` | bearer for GET; admin for PUT | GET returns `semantic_enabled`, classification progress and semantic status. PUT accepts `{ "semantic_enabled": true }`; readiness remains advisory |
 | GET, PUT | `/api/v1/items/{id}/classification` | bearer for GET; admin for PUT | GET returns the classification record and `pending`. PUT accepts `expected_revision`, `include` and `exclude` label arrays; returns the new revision or 409 on concurrent metadata/correction changes |
 | GET | `/api/v1/images/{filename}` | bearer | Cached artwork, materialized from a peer on miss |
+| GET | `/api/v1/files/{id}/chapters/{index}/thumb` | bearer | One 320 px JPEG for the chapter at `index` (zero-based, the item detail's `chapters` order), made by one bounded ffmpeg seek on first request and kept under the runtime cache; `ETag` + `If-None-Match`; 404 when the `chapter_thumbnails` setting is off or the frame could not be made, 503 + `Retry-After` when both extraction slots are busy |
 
 ### 6.1 Listing a library
 
@@ -813,6 +814,21 @@ no rotation or resize step: browsers honour EXIF orientation on `<img>`
 natively.
 
 ---
+
+**Chapter thumbnails.** `GET /api/v1/files/{id}/chapters/{index}/thumb` is the
+watch view's chapter rail. `index` is the zero-based position in the item
+detail's `chapters` array for that file. The first request for a chapter
+runs one ffmpeg — an input-side seek to the chapter start plus two seconds
+(never past the chapter midpoint), one decoded frame, scaled to 320 px wide,
+JPEG — and keeps the result under the node's runtime cache at
+`chapter-thumbs/<file id>-<size>-<mtime>/<index>.jpg`; later requests are a
+file read. Two extractions run at once per node, each bounded to 15 s and
+2 MiB; a request that cannot get a slot within 10 s is answered 503 with
+`Retry-After`. A failed extraction leaves a marker and the route answers 404
+for that chapter for an hour without running ffmpeg again. The response
+carries `ETag` (file id, size, mtime, index) and `private, max-age=604800`.
+When Settings → Developer → Chapter thumbnails is off the route answers 404
+and runs nothing. See [clients/WATCH-VIEW-LAYOUT.md](clients/WATCH-VIEW-LAYOUT.md).
 
 ## 7. Playback — the decision
 
@@ -1528,6 +1544,25 @@ The overlay routes serve PGS subtitles as an application-drawn overlay rather
 than a burn: `overlay.json` answers `202 {"state":"preparing"}` while the
 build runs, and objects are immutable and addressed by content hash, so they
 cache indefinitely.
+
+A preparation that fails is remembered for 120 s, and asking inside that
+window replays the failure rather than starting another. The answers a client
+must tell apart are typed, so the status alone never decides whether to keep
+polling:
+
+| Code | Status | Retry-After | Means |
+|---|---|---|---|
+| `pgs_overlay_prepare_failed` | 500 | — | The preparation ran and failed: demux, I/O, a timeout, a source without a duration, or the cache could not be created or synced. Terminal; stop polling. Every failed preparation carries this code; a codeless 500 is a store or serving error around it |
+| `pgs_overlay_prepare_failed` | 422 | — | The PGS stream is malformed or exceeds a safety limit. Terminal. The body keeps the older `error` and `detail` fields beside `code` and `message` |
+| `pgs_overlay_capacity` | 503 | 5 | Both preparation slots are busy. The one overlay refusal worth waiting out |
+
+A 409 means the source changed while it was being prepared, a 404 that the
+overlay is switched off or the file, track or generation does not exist, and a
+415 that the track is not PGS. A codeless 503 on the object route means the
+generation vanished and is being rebuilt. Before these codes, a remembered
+failure was a plain 503, which both native clients read as "still preparing"
+and polled for ten minutes while showing nothing. Clients keep treating a
+codeless 503 on `overlay.json` as a wait, for older servers.
 
 ---
 

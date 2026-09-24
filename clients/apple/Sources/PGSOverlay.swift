@@ -159,12 +159,39 @@ enum PGSOverlayPolicy {
     static let refreshMarginMs = 20_000
     static let maximumPrepareSeconds = 600
 
-    static func manifestDisposition(_ statusCode: Int) -> PGSOverlayManifestDisposition {
+    /// The server remembered a failed preparation; asking again only replays it.
+    static let prepareFailedCode = "pgs_overlay_prepare_failed"
+    /// Both preparation slots are busy: the one refusal worth waiting out.
+    static let capacityCode = "pgs_overlay_capacity"
+    /// docs/clients/PGS_OVERLAY_PLAN.md §15.2, the same sentence Android shows.
+    static let prepareFailedMessage = "That subtitle could not be prepared."
+
+    /// A typed code outranks the status. A codeless 503 stays a wait so an
+    /// older server that still answers a failure that way keeps its behaviour.
+    static func manifestDisposition(
+        _ statusCode: Int,
+        code: String? = nil
+    ) -> PGSOverlayManifestDisposition {
+        if code == prepareFailedCode { return .terminal }
+        if code == capacityCode { return .preparing }
         switch statusCode {
-        case 200: .ready
-        case 202, 503: .preparing
-        default: .terminal
+        case 200: return .ready
+        case 202, 503: return .preparing
+        default: return .terminal
         }
+    }
+
+    /// The sentence a failed overlay shows, before the playback clause.
+    static func failureDescription(_ error: Error) -> String {
+        if (error as? APIError)?.refusalCode == prepareFailedCode {
+            return prepareFailedMessage
+        }
+        return error.localizedDescription
+    }
+
+    /// Every overlay failure keeps the video exactly as it was (plan §16).
+    static func failureNotice(_ error: Error) -> String {
+        "\(failureDescription(error)) Video playback was kept unchanged."
     }
 
     static func retryAfterMs(_ header: String?) -> Int {
@@ -177,6 +204,15 @@ enum PGSOverlayPolicy {
 
     static func itemTimeMs(sourceTimeMs: Int, baseMs: Int) -> Int {
         sourceTimeMs - baseMs
+    }
+
+    /// When a cue is on screen, in item time. The renderer schedules exactly
+    /// this interval, so the fixture's `active_cue` and what AVFoundation shows
+    /// cannot disagree. `nil` for a cue that ended before the item began.
+    static func itemInterval(cue: PGSOverlayCue, baseMs: Int) -> Range<Int>? {
+        let start = max(0, itemTimeMs(sourceTimeMs: cue.startMs, baseMs: baseMs))
+        let end = itemTimeMs(sourceTimeMs: cue.endMs, baseMs: baseMs)
+        return end > start ? start..<end : nil
     }
 
     static func windowRange(at sourceTimeMs: Int, durationMs: Int) -> Range<Int> {
@@ -192,6 +228,49 @@ enum PGSOverlayPolicy {
         guard let loadedRange else { return true }
         return sourceTimeMs < loadedRange.lowerBound
             || sourceTimeMs >= loadedRange.upperBound - refreshMarginMs
+    }
+
+    /// After a failed window: retry once after 5 s, once more after 30 s,
+    /// then wait for a seek or a reselection.
+    static let windowRetryDelaysMs = [5_000, 30_000]
+
+    /// The wait before the next retry after `failures` consecutive failed
+    /// window loads, or nil once the retries are spent.
+    static func windowRetryDelayMs(afterFailures failures: Int) -> Int? {
+        guard failures >= 1, failures <= windowRetryDelaysMs.count else { return nil }
+        return windowRetryDelaysMs[failures - 1]
+    }
+
+    /// Whether a tick or a seek starts a window load. Held to
+    /// `tests/playback/pgs-overlay-cases.json` (`seek_cases`, `tick_cases`),
+    /// the rows Android's `PGSOverlayPolicy.refreshDecision` reads too.
+    ///
+    /// Two things the periodic tick used to get wrong. While the position was
+    /// outside the *published* window, which is the whole load after any
+    /// out-of-window seek, every tick cancelled and restarted the in-flight
+    /// load, so a window whose PNGs took over a second never arrived. And
+    /// after a window failed, every tick fetched it again and raised another
+    /// notice. A load that covers the position is now left alone, and a
+    /// failure is retried on a bounded backoff. A seek passes zero failures:
+    /// the viewer's move ends the backoff.
+    static func shouldRefresh(
+        sourceTimeMs: Int,
+        loadedRange: Range<Int>?,
+        loadingRange: Range<Int>?,
+        windowFailures: Int = 0,
+        msSinceFailure: Int = 0
+    ) -> Bool {
+        if let loadedRange,
+           !shouldRefresh(sourceTimeMs: sourceTimeMs, loadedRange: loadedRange) {
+            return false
+        }
+        if let loadingRange,
+           !shouldRefresh(sourceTimeMs: sourceTimeMs, loadedRange: loadingRange) {
+            return false
+        }
+        guard windowFailures > 0 else { return true }
+        guard let delay = windowRetryDelayMs(afterFailures: windowFailures) else { return false }
+        return msSinceFailure >= delay
     }
 
     static func windowFitsDecodedBudget(_ cues: [PGSOverlayCue]) -> Bool {
@@ -231,6 +310,36 @@ enum PGSOverlayPolicy {
             y: originY + CGFloat(object.y) * scale,
             width: CGFloat(object.width) * scale,
             height: CGFloat(object.height) * scale
+        )
+    }
+}
+
+/// Where the overlay's bytes come from. Production reads through the model;
+/// XCTest supplies its own to drive the controller's load, tick, seek and
+/// failure paths without a server.
+struct PGSOverlayFetcher {
+    var manifest: @MainActor (_ fileId: Int, _ trackIndex: Int) async throws -> PGSOverlayManifestFetch
+    var object: @MainActor (
+        _ fileId: Int,
+        _ trackIndex: Int,
+        _ generation: String,
+        _ path: String
+    ) async throws -> Data
+}
+
+extension PGSOverlayFetcher {
+    @MainActor
+    init(model: AppModel) {
+        self.init(
+            manifest: { try await model.pgsOverlayManifest(fileId: $0, trackIndex: $1) },
+            object: {
+                try await model.pgsOverlayObject(
+                    fileId: $0,
+                    trackIndex: $1,
+                    generation: $2,
+                    path: $3
+                )
+            }
         )
     }
 }

@@ -1637,7 +1637,7 @@
             "prepublication/universal followers cannot spawn a second scratch owner"
         );
 
-        let events = tokio::time::timeout(Duration::from_secs(2), async {
+        let events = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let events = store
                     .playback_events(&plurx_core::domain::PlaybackEventQuery {

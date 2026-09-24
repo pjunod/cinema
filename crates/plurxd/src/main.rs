@@ -44,6 +44,8 @@ mod shared_cache;
 mod state;
 mod store_result;
 mod storeprobe;
+mod subtitle_ride_along;
+mod subtitle_source;
 mod subtitles;
 mod telemetry;
 mod titlestore;
@@ -2465,6 +2467,14 @@ fn spawn_background_loops(
         std::sync::Arc::clone(&state.jobs)
             .fragment_index_validation_loop(background_shutdown.clone()),
     );
+    // Once per process, off the startup path: the fragment-index pass keeps
+    // PGS tracks only after this proves the configured ffmpeg behaves as the
+    // design measured. Bounded by its own budget and by shutdown; every child
+    // it runs is killed on drop and reaped before it returns.
+    tokio::spawn(crate::subtitle_ride_along::startup_self_test(
+        state.runtime_cache_dir.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(crate::media_sessions::lease_loop(state.clone()));
     tokio::spawn(crate::media_sessions::takeover_loop(state.clone()));
     tokio::spawn(crate::media_sessions::maintenance_loop(state.clone()));

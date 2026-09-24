@@ -1619,13 +1619,12 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--branch badges", coverage)
         self.assertIn('--message "${msg}%"', coverage)
 
-        # Branch-relative badge paths render through the viewer's authenticated
-        # Forgejo or GitHub session. From main, `../badges/coverage.svg` moves
-        # from the main branch segment to the sibling badges branch segment.
+        # The README shows badges from the ready-PR gate and the last manual
+        # coverage measurement, rather than the retired full-CI snapshots.
         readme = read("README.md")
         for badge in (
-            "../badges-ci/ci.svg",
-            "../badges-lint/lint.svg",
+            "../badges-pr-ci/ci.svg",
+            "../badges-pr-lint/lint.svg",
             "../badges/coverage.svg",
         ):
             self.assertIn(badge, readme)
@@ -1633,6 +1632,9 @@ assert.equal(context.ACT_TIMER, null);
             sum(line.startswith("[![") for line in readme.splitlines()),
             3,
         )
+        self.assertNotIn("../badges-ci/ci.svg", readme)
+        self.assertNotIn("../badges-lint/lint.svg", readme)
+        self.assertIn("last manual full-CI measurement", readme)
         self.assertNotIn("docs/img/badges/", readme)
         self.assertNotRegex(
             readme,
@@ -1652,6 +1654,18 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--branch badges-ci", badge)
         self.assertIn("--message \"$message\"", badge)
         self.assertIn("success|skipped", badge)
+
+        fast_gate = workflow_job_blocks(".github/workflows/main-fast-lane.yml")[
+            "promotion_gate"
+        ]
+        self.assertIn("Require the reviewed head and base to remain current", fast_gate)
+        self.assertIn("--branch badges-pr-ci", fast_gate)
+        self.assertIn("--branch badges-pr-lint", fast_gate)
+        self.assertIn("if: needs.rust_compile.result == 'success'", fast_gate)
+        self.assertLess(
+            fast_gate.index("Require the reviewed head and base to remain current"),
+            fast_gate.index("Publish the qualified PR gate badge"),
+        )
 
         package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
         self.assertNotIn("needs: check", package)
