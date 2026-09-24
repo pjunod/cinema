@@ -775,7 +775,7 @@ test("the rejection report carries the join, whatever the path built it", () => 
     SHIPPED_UI.indexOf('v.addEventListener("error"'),
   ).slice(0, 4000);
   for (const [name, source] of [
-    ["hls.js", shippedSource("attachHls")],
+    ["hls.js", shippedSource("onHlsError")],
     ["<video>", wire],
   ]) {
     assert.ok(
@@ -904,12 +904,12 @@ test("the VOD fetch contract stays below hls.js and beyond the producer watchdog
     "503 backoff must outlive the 30-second producer watchdog with margin",
   );
   assert.match(
-    shippedSource("attachHls"),
+    shippedSource("constructHls"),
     /fragLoadPolicy:vodClientContract\(\)\.fragLoadPolicy/,
     "every HLS response uses the VOD materialization policy",
   );
   assert.doesNotMatch(
-    shippedSource("attachHls"),
+    shippedSource("wireHlsObservers"),
     /LEVEL_LOADING[\s\S]*_keeperFires/,
     "the removed live-playlist keeper must not survive the VOD-only cutover",
   );
@@ -4196,7 +4196,7 @@ test("a successful playlist retry immediately clears its 503 explanation", () =>
     "the encoder exited before it produced video",
   );
   assert.match(
-    shippedSource("attachHls"),
+    shippedSource("wireHlsObservers"),
     /Hls\.Events\.LEVEL_LOADED[\s\S]*?clearStreamFailureFor\(hls\)/,
     "the shipped successful-level event must invalidate its own refusal",
   );
@@ -6202,13 +6202,13 @@ test("hls.js media recovery is fenced by the shared attach and item budgets", ()
   assert.equal(decide({ itemRecoveries: 2 }), "fallback");
   assert.equal(decide({ type: "networkError" }), "none");
 
-  const attach = shippedSource("attachHls");
-  const recovery = attach.indexOf("PlaybackPolicy.hlsMediaFatalAction");
-  const terminal = attach.indexOf('notifyPlaybackControl("failed"', recovery);
+  const handler = shippedSource("onHlsError");
+  const recovery = handler.indexOf("PlaybackPolicy.hlsMediaFatalAction");
+  const terminal = handler.indexOf('notifyPlaybackControl("failed"', recovery);
   assert.ok(recovery >= 0, "the shipped fatal handler must ask the recovery policy");
   assert.ok(terminal > recovery,
     "decoder rescue must run before the attempt is reported terminal");
-  assert.match(attach, /sourceBufferName:d\.sourceBufferName\|\|null/,
+  assert.match(handler, /sourceBufferName:d\.sourceBufferName\|\|null/,
     "the vendored hls.js 1.6.16 payload names its SourceBuffer explicitly");
 });
 

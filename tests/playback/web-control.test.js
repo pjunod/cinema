@@ -152,7 +152,10 @@ function fullOpenHarness() {
     shippedSource("streamFailureResponseBodyNow"),shippedSource("streamFailureResponseBody"),
     shippedSource("observeStreamFailureResponse"),
     shippedSource("createHlsStartupLoader"),shippedSource("scheduleHlsNetworkRetry"),
-    shippedSource("attachHls"),
+    shippedSource("attachHls"),shippedSource("beginHlsAttachment"),
+    shippedSource("hlsStartupEpisode"),shippedSource("constructHls"),
+    shippedSource("wireHlsObservers"),shippedSource("onHlsError"),
+    shippedSource("attachNativeHls"),
     // The directed-change owner, shipped. Neither of these harnesses has a
     // control reporter, so `awaitPreparedOffer` answers "timed_out" at once
     // and the owner takes its one reopen -- which is what every menu case
@@ -1272,7 +1275,10 @@ async function main() {
       shippedSource("teardownHls"),
       shippedSource("beginPlaybackMediaAttachment"),shippedSource("applyPlaybackAttachmentPosition"),
       shippedSource("playbackAttemptTerminallyStopped"),
-      shippedSource("attachHls"),
+      shippedSource("attachHls"),shippedSource("beginHlsAttachment"),
+      shippedSource("hlsStartupEpisode"),shippedSource("constructHls"),
+      shippedSource("wireHlsObservers"),shippedSource("onHlsError"),
+      shippedSource("attachNativeHls"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {p:PLAYER,video,instances,metadata,attach:()=>attachHls(video,'/session/index.m3u8',30),teardownHls};",
     ].join("\n"))(native);
@@ -2046,7 +2052,7 @@ async function main() {
   assert.doesNotMatch(shippedSource("persistentWait"),/persistent_decode_stall/,
     "elapsed time must never be serialized as a decoder failure");
   assert.match(shippedSource("persistentWait"),/askPlaybackControl\("stalled",controlObservation,began\+CONTROL_STALL_DEFER_DEADLINE_MS\)/);
-  assert.match(shippedSource("attachHls"),/notifyPlaybackControl\("failed",hlsFailure\.observation\)/);
+  assert.match(shippedSource("onHlsError"),/notifyPlaybackControl\("failed",hlsFailure\.observation\)/);
   assert.match(shippedSource("stallDiagnose"),/notifyPlaybackControl\("stalled"\)/);
   assert.match(shippedSource("handleEnded"),/control_trigger:controlTrigger/);
   assert.match(shippedSource("startPlaybackControl"),/p\.controlReporter!==reporter/);
