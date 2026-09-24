@@ -123,6 +123,11 @@ longer hold a conservative producer charge past the fence.
 them, and a measurement taken afterwards can only discover an overrun. The
 candidates were weighed and none passed:
 
+> **Superseded 2026-09-24.** `-method PUT` gives the muxer an owned output
+> boundary without changing the muxer, so the first candidate below did not
+> need the pipeline change it was rejected for. See the
+> [FFmpeg HLS write boundary receipt](ffmpeg-hls-write-boundary-receipt-2026-09-24.md).
+
 | Candidate | Why it was not selected |
 |---|---|
 | Owned output boundary | Would mean routing transcoded output through the fragmented-pipe + `copyseg` path the copy sessions use. That is a substantial media-pipeline change — playlist tags, discontinuities, subtitle and audio-only handling, DV — and it cannot be qualified without the physical runs this session cannot perform. Surfaced here rather than disguised as a local refactor. |
