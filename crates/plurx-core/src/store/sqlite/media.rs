@@ -1015,8 +1015,15 @@ impl MediaStore for SqliteStore {
             return Ok(Vec::new());
         };
         self.with_read(move |conn| {
+            // An `items_fts` hit is dropped only while the item has a *current*
+            // classification index entry: membership of `classification_fts`,
+            // looked up per hit by rowid (K-05 section 3.6). A rename deletes
+            // that row (`classification_source_changed`) and keeps the
+            // `media_classifications` row for regeneration, so the renamed
+            // title is found through `items_fts`; testing the classification
+            // table instead would hide it from both branches.
             let sql = format!(
-                "WITH hits AS MATERIALIZED (SELECT rowid,rank AS score FROM items_fts WHERE items_fts MATCH ?1 AND rowid NOT IN (SELECT rowid FROM classification_fts) UNION ALL SELECT rowid,rank AS score FROM classification_fts WHERE classification_fts MATCH ?1) SELECT {i}, show.title, season.poster_path
+                "WITH hits AS MATERIALIZED (SELECT rowid,rank AS score FROM items_fts WHERE items_fts MATCH ?1 AND NOT EXISTS (SELECT 1 FROM classification_fts c WHERE c.rowid = items_fts.rowid) UNION ALL SELECT rowid,rank AS score FROM classification_fts WHERE classification_fts MATCH ?1) SELECT {i}, show.title, season.poster_path
                  FROM (SELECT rowid,min(score) AS score FROM hits GROUP BY rowid) f
                  JOIN items i ON i.id = f.rowid
                  LEFT JOIN items season

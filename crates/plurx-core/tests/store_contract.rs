@@ -30698,3 +30698,116 @@ async fn k05_capture_hiqlite_statements() {
     )
     .expect("write capture");
 }
+
+/// K-05 M3 (plan section 3.6): search hides an item's `items_fts` hit only
+/// while it has a *current* classification index entry, which is membership
+/// of `classification_fts`, never existence of a `media_classifications`
+/// row. A rename deletes the item's `classification_fts` row through
+/// `classification_source_changed` and keeps the classification for the
+/// classifier to regenerate, so the renamed title must be found by its new
+/// title (through `items_fts`), not by its old one, while the classification
+/// row survives. The withdrawn `NOT EXISTS (… media_classifications …)`
+/// predicate would hide the renamed title from both branches.
+#[tokio::test]
+async fn search_renamed_title_is_found_by_its_new_title_only() {
+    use plurx_core::metadata::classification::classify;
+    use plurx_core::store::classification::{ClassificationStore, Record};
+
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let movie = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Harbor Lights".into(),
+                year: Some(1999),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("movie");
+        let entry = store
+            .classification_page(0, 10)
+            .await
+            .expect("classification inventory")
+            .into_iter()
+            .find(|entry| entry.input().expect("input").id == movie)
+            .expect("the movie is in the classification inventory");
+        let record = Record {
+            classification: classify(
+                &entry.input().expect("input").metadata(),
+                vec!["lighthouse keeper".into()],
+            ),
+            source_json: entry.source_json,
+            overrides: Default::default(),
+            revision: 0,
+        };
+        assert!(store
+            .write_classification(movie, &record)
+            .await
+            .expect("classify"));
+        let found = |query: &'static str| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .search_items(query, 10)
+                    .await
+                    .expect("search")
+                    .into_iter()
+                    .map(|hit| hit.item.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(
+            found("harbor lights").await,
+            [movie],
+            "{backend}: classified title"
+        );
+        assert_eq!(
+            found("lighthouse").await,
+            [movie],
+            "{backend}: classification terms"
+        );
+
+        store
+            .apply_metadata(
+                movie,
+                &MetadataPatch {
+                    title: Some("Night Tide".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("rename");
+        assert_eq!(found("night tide").await, [movie], "{backend}: new title");
+        assert!(
+            found("harbor lights").await.is_empty(),
+            "{backend}: the old title must not find the renamed item"
+        );
+        assert!(
+            found("lighthouse").await.is_empty(),
+            "{backend}: stale classification terms are not searchable"
+        );
+        let entry = store
+            .classification_page(0, 10)
+            .await
+            .expect("classification inventory")
+            .into_iter()
+            .find(|entry| entry.input().expect("input").id == movie)
+            .expect("renamed movie still inventoried");
+        assert!(
+            entry.record.is_some(),
+            "{backend}: the classification row survives the rename for regeneration"
+        );
+    })
+    .await;
+}
