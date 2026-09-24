@@ -287,6 +287,24 @@ contradicts a guardrail in §4, so M1 cannot be built until it is decided.**
   today — and whether a VideoToolbox session then shows an empty one — is a
   device fact, and it is the baseline M4 changes; the §6.3 caption prompt
   records it before M4 is built.
+- **C6 — a caption proof belongs to an FFmpeg build, not to an encoder
+  family.** Measured by the M3 audit (the per-graph table in
+  [HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md)): on the
+  default engine (jellyfin-ffmpeg 8.1.2) every audited graph preserves CC1
+  and service 1, and `h264_vaapi` already includes `a53_cc` in its default
+  `-sei`, so §3.7's "add `-sei +a53_cc` on VAAPI" is not needed there. On the
+  distro fallback engine in the same image (FFmpeg 5.1.9, `/usr/bin`) the
+  default `send_field` deinterlace (`LiveDeinterlaceOutput::Field`,
+  `live_tv_delivery.rs:291-294`) copies each frame's `cc_data` onto both
+  fields, so CC1 text doubles and every 708 packet repeats; and `h264_vaapi`
+  there has no `a53_cc` flag at all, so the review's flag would be a hard
+  error, not a fix. A static "proven encoders" set in M4 would therefore
+  advertise a garbled track on any node running the fallback. M4 instead
+  needs a boot-time caption probe per validated encoder and deinterlace mode
+  — a short slice of the M3 fixture through the live filter and encoder,
+  decoded with the M3 decoder, recorded with the encoder caps the way
+  `forced_idr` is — and advertises only for a session whose admitted
+  (encoder, deinterlace) pair preserved both on this node's own FFmpeg.
 
 ## 3. Change
 
@@ -608,6 +626,10 @@ the fixture green; a device pass per the GPT prompt in §6.3.
 
 Files: `tests/fixtures/live-tv/captioned-608-708.ts` + generator script;
 `live_tv.rs` (`-sei +a53_cc` for VAAPI if the audit says so);
+**as built:** `live_tv/caption_audit_tests.rs` (generator, decoder, tests,
+audit) and `scripts/live-tv-caption-audit` (the plan's
+`scripts/live_tv_caption_audit.sh`, named like the other `scripts/live-tv-*`
+tools); no `live_tv.rs` flag change — see §2.4 C6;
 [HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md) row 184 updated
 with the per-graph table.
 
@@ -749,4 +771,89 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Design re-verification (§2.4) | [PR #482](http://192.168.4.7:3000/noirr/plurx/pulls/482) | Done, commit `3cb3951a8`. Every §2/§3 premise re-read at `886fc8bd` with `file:line`; eight M1 design corrections (D1–D8) and six caption findings (C1–C6). The false premises that would have broken M1: the DVR transport has never probed its prefix, so `DvrTransport.source` is always `None` (D1); DVR capacity and insertion are two lock holds, which with viewers lets a second start on one channel overwrite a live transport in the map (D2); both transport closers key on sinks and would close viewer-only transports (D3). **D7 is flagged, not decided:** the plan's own "a join never crosses a generation" guardrail, combined with DVR transports that outlive a settings save, would refuse every viewer on a recorded channel for the rest of the recording after any Live TV settings save. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 captions fixture and per-graph audit | [PR #482](http://192.168.4.7:3000/noirr/plurx/pulls/482) | Landed on the branch, commit `ee4a1752c`. Generated fixture (1080i MPEG-2, B-frames, CC1 pop-on + 708 service 1, ground truth in code), an independent `cc_data` decoder, and the production planner + live argv run end to end. In `make unit`: `the_caption_fixture_carries_608_and_708`, `the_caption_decoder_tells_dropped_and_partial_from_preserved`, `the_software_live_graph_carries_608_and_708_through_both_deinterlace_modes`, `a_copied_h264_route_carries_608_and_708`, `caption_args_per_encoder_match_the_audit_table`. Per-node audit on `nuc3` with `plurx/plurxd:latest`: jellyfin-ffmpeg 8.1.2 preserves CC1 and service 1 for software, QSV, VA-API (12 runs) and copy (2 runs), exit 0; the distro FFmpeg 5.1.9 fallback in the same image garbles CC1 under `send_field`, drops everything on VA-API, and could not start QSV, exit 101 — recorded in the status table and as §2.4 C6. No production code changed: `live_caption_args` is untouched because no audited default-engine graph needed a flag. Mutation check: giving `Encoder::Software` `-a53cc 0` in `live_caption_args` fails `caption_args_per_encoder_match_the_audit_table` and `the_software_live_graph_carries_608_and_708_through_both_deinterlace_modes` (and the existing `live_caption_forwarding_is_disabled_only_for_videotoolbox_encoding`), exit 101; restored before commit. **Not audited here:** NVENC (no node has it) and VideoToolbox's `-a53cc 1` re-proof (needs a Mac) — `needs:` below. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 | — | **Not started — blocked on Paul's decision on §2.4 D7.** D1–D6 and D8 are the corrected design M1 is to be built against; the dependency on the DVR plan's owned writers is met on `main`. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 | — | Not started: depends on M1. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 | — | Not started, deliberately: advertising needs the broadcast service ids (open question 5: "the capture gates the advertising") and today's client baseline (§2.4 C5), both device/tuner facts; and §2.4 C6 changes M4's design from a static proven-encoder set to a per-node, per-build caption probe. |
+| 2026-09-24 | — | — | needs: broadcast capture | — | `needs:` real-tuner capture of three captioned channels, analysed with `scripts/live-tv-caption-audit analyze` — GPT prompt A below. |
+| 2026-09-24 | — | — | needs: Mac and NVENC audit | — | `needs:` VideoToolbox audit and `-a53cc 1` re-proof on a Mac node's own FFmpeg; NVENC on any node that has it — GPT prompt B below. |
+| 2026-09-24 | — | — | needs: client baseline | — | `needs:` what each client shows for in-band captions today with no master playlist — GPT prompt C below. |
+
+#### GPT prompts for the L-03 M3 evidence
+
+Prompt A — broadcast caption services (gates M4's service ids):
+
+```
+Live TV caption services from a real broadcast (plurx plan L-03 M3).
+Use a checkout of the plurx repo at branch plan/L-03 (or main once PR #482 has
+merged) on the node that owns Live TV (Settings -> Live TV names the owner
+node and the HDHomeRun IPv4; call them OWNER and DEVICE). Cargo must work
+there; on a Docker node add `--image plurx/plurxd:latest` to every
+scripts/live-tv-caption-audit command.
+1. Pick three captioned ATSC 1.0 channels from the lineup: a network
+   affiliate's main MPEG-2 channel, an MPEG-2 subchannel, and an H.264
+   subchannel if the lineup has one. Make sure at least one tuner is free
+   (Activity page) and nothing is recording on the channel you capture.
+2. For each CHANNEL (guide number, e.g. 2.1):
+     curl -s --max-time 40 "http://DEVICE:5004/auto/vCHANNEL?duration=30" -o /tmp/cap-CHANNEL.ts
+     ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,field_order,r_frame_rate -of csv=p=0 /tmp/cap-CHANNEL.ts
+     scripts/live-tv-caption-audit analyze /tmp/cap-CHANNEL.ts
+3. Report per channel, verbatim: the ffprobe line and every
+   `caption-capture:` line (they carry the 608 channels CC1-CC4 and the 708
+   SERVICE numbers present, with short samples). Then delete the captures.
+Do not change any setting.
+```
+
+Prompt B — VideoToolbox re-proof and NVENC:
+
+```
+Live TV caption audit on a Mac and on NVIDIA (plurx plan L-03 M3).
+Mac: on a Mac in the plurx fleet that runs plurxd natively with
+VideoToolbox (the plan calls them maca/macb; use whichever exists), in a
+checkout of plurx at branch plan/L-03 with cargo:
+1. Find the ffmpeg and ffprobe that node's plurxd runs (its launchd plist or
+   environment: PLURX_FFMPEG / PLURX_FFPROBE; else `which ffmpeg ffprobe`
+   for the account plurxd runs as). Report `"$PLURX_FFMPEG" -version | head -1`.
+2. export PLURX_FFMPEG=<that ffmpeg> PLURX_FFPROBE=<that ffprobe>
+   scripts/live-tv-caption-audit videotoolbox software copy
+   Expected: exit 0, every videotoolbox line cc1=dropped service1=dropped
+   (the -a53cc 0 workaround), software and copy lines preserved.
+3. scripts/live-tv-caption-audit --a53cc 1 videotoolbox
+   This run never fails; report every `caption-audit:` and
+   `caption-audit-failure:` line verbatim. A line with a non-zero exit and
+   diagnostic "VideoToolbox failed while inserting A/53 captions into H.264
+   SEI data" reproduces the failure (the workaround stays). Four lines with
+   exit status 0 and cc1=preserved service1=preserved mean it does not
+   reproduce on this FFmpeg.
+NVENC: on every node, `docker logs plurxd 2>&1 | grep "usable hardware encoders" | tail -1`.
+On any node showing nvenc=true, in a checkout of plan/L-03 with cargo:
+   scripts/live-tv-caption-audit --image plurx/plurxd:latest nvenc
+and report the lines. If no node has nvenc=true, say so.
+```
+
+Prompt C — what clients show today (the baseline M4 changes):
+
+```
+Live TV captions on clients today, before any caption advertising
+(plurx plan L-03 §2.4 C5). Deploy nothing. Use a channel prompt A showed
+carries CC1 text. Note the encoder label the Activity page shows for each
+session (e.g. "software (x264)", "Intel QuickSync", "VA-API",
+"Apple VideoToolbox").
+1. Web, Chrome: play the channel 30 s, then in DevTools run
+   [...document.querySelector("video").textTracks].map(t=>[t.kind,t.label,t.mode,t.cues&&t.cues.length])
+   Report the output and whether captions are drawn.
+2. Web, Safari on a Mac: same command; also open the player's subtitle menu
+   and report what it lists.
+3. Apple TV and iPhone: with Settings -> Accessibility -> Subtitles &
+   Captioning -> Closed Captions + SDH on, play 60 s: are captions drawn?
+   What does the player's subtitle/caption menu list? Repeat with it off.
+4. Android TV (Shield) and an Android phone: with system captions on
+   (Settings -> Accessibility -> Caption preferences), play 60 s: are
+   captions drawn? What does Playback info say for Subtitles? Repeat off.
+5. If any Live TV owner in the fleet encodes with Apple VideoToolbox, repeat
+   1-4 on one session there and report any caption option that is listed
+   but never shows text within 60 s (a phantom track).
+Report one line per client: encoder label, track listed (yes/no + label),
+text drawn (yes/no), system caption setting.
+```
