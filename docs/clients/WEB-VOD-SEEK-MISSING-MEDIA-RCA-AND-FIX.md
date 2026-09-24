@@ -157,10 +157,10 @@ claim that the 20 s deadline alone observes the 30 s server verdict.
 | Case | Required result | Evidence |
 |---|---|---|
 | Uncovered VOD target | `seekRoute({vod:true})` remains local; a 20 s fallback is armed without a session create. | Extend `tests/playback/seek-control.test.js`. |
-| Target arrives | Target buffer coverage or target presentation retires the fallback; `seeked` alone does not. | Timer and event harness. |
+| Target arrives | Target buffer coverage or proven target presentation retires the fallback; `seeked` alone does not. Presentation still counts when control settlement lacks a frame sequence. | Timer and progress-watch harness. |
 | Target stays missing | Exactly one forced reopen at the same target on expiry; no `stallRecoveries` increment or competing `owner_exhausted`. | Full-open harness, including the 20 s boundary. |
 | Seek superseded | Previous intent's timer cannot reopen; only the winning target remains attached. | Generation and attachment fence test. |
-| Unlanded VOD seek versus later stall | No `supply-persistent` before the 20 s seek deadline, even if `seeked` has fired and `beginWait()` runs; after presentation, a true starvation stall still fires at 8 s. | Progress-watch and wait-event harness. |
+| Unlanded VOD seek versus later stall | No `supply-persistent` before the 20 s seek deadline, even if `seeked` has fired and `beginWait()` runs. Losing target coverage cancels any earlier wait timer; after presentation, a true starvation stall still fires at 8 s. | Progress-watch, wait-event, and persistent-wait harness. |
 | Incident replay | Safari on `media1`, reference film U/file `6341`, `4:57 → 0:32` resumes or performs its one bounded fallback without the early exhausted prompt. | Physical browser log and playback panel. |
 | Common materialized seek | A 60 s forward seek on an already-materialized rendition stays local, presents in under one second, and creates zero sessions. | Physical Safari timing plus session-create count. |
 

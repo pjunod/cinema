@@ -77,29 +77,37 @@ test("rolling and progressive seeks stay local only inside advertised coverage",
 
 function localSeekHarness({buffered, published, vod=false}) {
   const listeners=new Map(), timers=new Map(), changes=[], logs=[], stalls=[];
-  const video={currentTime:10,buffered,
+  const video={currentTime:10,buffered,seeking:false,paused:false,ended:false,
     addEventListener(name,fn){listeners.set(name,fn);},
     removeEventListener(name,fn){if(listeners.get(name)===fn)listeners.delete(name);}};
   const player={method:"transcode",copyHls:false,vod,offset:0,durMs:600_000,
+    started:true,wantsPlayback:true,source:{video_codec:"h264"},controlHasFrameCallbacks:false,
     mediaAttachment:{id:1},pendingMediaChange:null,stallRecoveries:1,
     hls:{currentLevel:0,levels:[{details:published}]}};
   const api=new Function("policy","video","player","timers","changes","logs","stalls",[
-    "let PLAYER=player;",
-    "const document={getElementById:()=>video};",
-    "const PlaybackPolicy=policy;",
+    "let PLAYER=player,now=0;const performance={now:()=>now};",
+    "const document={getElementById:()=>video,hidden:false};",
+    "const PlaybackPolicy=policy,PERSISTENT_STALL_MS=8000;",
     "let nextTimerId=0;function setTimeout(fn,ms){if(ms===100){fn();return -1;}const id=++nextTimerId;timers.set(id,{fn,ms});return id;}",
     "function clearTimeout(id){timers.delete(id);} function markerNowMs(){return 0;} function pbTotalSec(){return 600;}",
     "function playbackChangeAlreadyInFlight(){return false;} function endWait(){}",
     "function restartPendingPlaybackOpen(){return false;} function hasPendingPlaybackOpen(){return false;}",
     "function beginPlaybackControlSeek(p,target){const value={targetMs:target*1000,executed:false};p.controlSeek=value;return value;}",
-    "function markPlaybackControlSeekExecuted(p){p.controlSeek.executed=true;}",
+    "function markPlaybackControlSeekExecuted(p){p.controlSeek.executed=true;p.controlSeek.executedAt=now;p.controlSeek.frameFloor=0;}",
     "function playerActivity(){} function armStall(target,deadline){stalls.push({target,deadline});}",
     "function clientLog(value){logs.push(value);}",
     "function requestPlaybackMediaChange(p,change){changes.push({target:p.controlSeek.targetMs,change});}",
     "function play(){throw new Error('multipart route not expected');}",
+    "function playbackSurfaceStep(){}function playbackSurfaceGeneration(){return 1;}",
+    "function playbackOwnsAttachedMedia(){return true;}function samplePlaybackPresentationClock(){return 0;}",
+    "function samplePreparedSwitchFrames(){}function streamHasVideo(){return true;}",
+    "function completeHlsStartup(){}function clearStall(){}function finishStallRecovery(){}",
+    "function bufferRunway(){return 0;}function persistentWait(){throw Error('unexpected persistent wait');}",
+    "function notifyPlaybackControl(){}",
     source("playbackSeekBufferedRangesMs"),source("playbackSeekPublishedRangeMs"),
-    source("playbackSeekBufferCovers"),source("seekTo"),
-    "return {seekTo,logs,changes,stalls,timerDelays(){return [...timers.values()].map(t=>t.ms);},async expire(ms=Infinity){for(const [id,timer] of [...timers])if(timer.ms<=ms){timers.delete(id);timer.fn();}for(let i=0;i<5;i+=1)await Promise.resolve();}};",
+    source("playbackSeekBufferCovers"),source("settlePlaybackControlSeek"),
+    source("playbackProgressTick"),source("seekTo"),
+    "return {seekTo,logs,changes,stalls,tick(at){now=at;playbackProgressTick(video,player);},timerDelays(){return [...timers.values()].map(t=>t.ms);},async expire(ms=Infinity){for(const [id,timer] of [...timers])if(timer.ms<=ms){timers.delete(id);timer.fn();}for(let i=0;i<5;i+=1)await Promise.resolve();}};",
   ].join("\n"))(policy,video,player,timers,changes,logs,stalls);
   return {api,video,player,listeners};
 }
@@ -180,9 +188,15 @@ test("target coverage or presentation retires the VOD fallback", async () => {
     published:{fragments:[{start:0}],edge:120,targetduration:10},
   });
   await presented.api.seekTo(50);
-  presented.player.controlSeek=null;
+  presented.api.tick(0);
+  presented.video.currentTime=50.1;
+  presented.api.tick(100);
+  assert.ok(presented.player.controlSeek,
+    "control settlement can remain pending without a usable frame sequence");
+  assert.equal(presented.player.controlSeek.localVodPresented,true);
+  assert.deepEqual(presented.api.timerDelays(),[],"actual target progress clears the fallback");
   await presented.api.expire(20_000);
-  assert.equal(presented.api.changes.length,0,"the presentation owner settled the intent");
+  assert.equal(presented.api.changes.length,0,"actual presentation cannot reopen a playing stream");
 });
 
 test("a newer VOD seek fences the prior seek's fallback", async () => {
@@ -199,9 +213,9 @@ test("a newer VOD seek fences the prior seek's fallback", async () => {
 
 function vodWaitHarness() {
   return new Function("policy",[
-    "let now=0,attempts=0;const performance={now:()=>now},document={hidden:false};",
-    "const PlaybackPolicy=policy,PERSISTENT_STALL_MS=8000;const timers=[];",
-    "function setTimeout(fn,ms){timers.push({fn,ms});return timers.length;}function clearTimeout(){}",
+    "let now=0,attempts=0;const performance={now:()=>now},document={hidden:false,getElementById:()=>v};",
+    "const PlaybackPolicy=policy,PERSISTENT_STALL_MS=8000,STALL_MIN_MS=350;const timers=[];",
+    "function setTimeout(fn,ms){timers.push({fn,ms,active:true});return timers.length;}function clearTimeout(id){if(timers[id-1])timers[id-1].active=false;}",
     "const v={currentTime:50,seeking:false,paused:false,ended:false,buffered:{length:0,start:()=>0,end:()=>0}};",
     "const p={vod:true,started:true,wantsPlayback:true,offset:0,waitAt:null,source:{video_codec:'h264'},controlHasFrameCallbacks:true,controlPresentedFrames:1,stallRecoveries:1,",
     "  controlSeek:{targetMs:50000,executed:true,executedAt:0,localVodSeek:true,localVodSeekFallbackPending:true,sequence:1}};let PLAYER=p;",
@@ -210,9 +224,10 @@ function vodWaitHarness() {
     "function samplePreparedSwitchFrames(){}function streamHasVideo(){return true;}",
     "function settlePlaybackControlSeek(){}function completeHlsStartup(){}",
     "function bufferRunway(){return 0;}function persistentWait(){attempts++;return Promise.resolve();}",
-    "function endWait(){}function clearStall(){}function finishStallRecovery(){}",
+    "function recordWaitStall(){}function persistentWaitEvidence(){return {kind:'supply'};}",
+    "function clearStall(){}function finishStallRecovery(){}",
     source("playbackSeekBufferedRangesMs"),source("playbackSeekBufferCovers"),
-    source("playbackProgressTick"),source("beginWait"),
+    source("endWait"),source("playbackProgressTick"),source("beginWait"),
     "return {p,v,timers,attempts:()=>attempts,tick(at){now=at;playbackProgressTick(v,p);},wait(at){now=at;beginWait(v);}};",
   ].join("\n"))(policy);
 }
@@ -247,6 +262,35 @@ test("late target coverage starts a fresh 8-second presentation clock", () => {
   h.p.controlSeek.localVodSeekFallbackPending=false;
   h.tick(23_001);
   assert.equal(h.attempts(),1,"presentation still has the ordinary 8 s bound");
+});
+
+test("loss of target coverage cancels an earlier waiting timer", () => {
+  const h=vodWaitHarness();
+  h.tick(0);
+  h.v.buffered={length:1,start:()=>40,end:()=>60};
+  h.tick(1_000);
+  h.wait(1_000);
+  assert.equal(h.p.waitAt,1_000);
+  assert.equal(h.timers[0].active,true);
+  h.v.buffered={length:0,start:()=>0,end:()=>0};
+  h.tick(1_500);
+  assert.equal(h.p.waitAt,null);
+  assert.equal(h.timers[0].active,false);
+  assert.equal(h.attempts(),0);
+});
+
+test("an already due waiting timer rechecks missing VOD media before recovery", async () => {
+  const h=new Function([
+    "let ended=0;const p={started:true,waitAt:1000,wantsPlayback:true,",
+    "controlSeek:{targetMs:50000,executed:true,localVodSeekFallbackPending:true}};let PLAYER=p;",
+    "const v={seeking:false,paused:false};function playbackOwnsAttachedMedia(){return true;}",
+    "function playbackSeekBufferCovers(){return false;}function endWait(){ended++;p.waitAt=null;}",
+    source("persistentWait"),
+    "return {run:()=>persistentWait(v,p,1000,0,0),ended:()=>ended,p};",
+  ].join("\n"))();
+  await h.run();
+  assert.equal(h.ended(),1);
+  assert.equal(h.p.waitAt,null);
 });
 
 test("the startup watchdog yields the shared 20-second boundary to the VOD fallback", async () => {

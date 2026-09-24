@@ -1,8 +1,9 @@
 # Web VOD seek repair — implementation status
 
 **Updated:** 2026-09-23 · **Branch:** `codex/web-vod-seek-deadline` ·
-**Base:** `main` at `99d4abf8c` · **State:** implementation written; review and
-validation pending in a separate clone.
+**Base:** `main` at `99d4abf8c` · **PR:** [#478](http://192.168.4.7:3000/noirr/plurx/pulls/478) ·
+**State:** adversarial review addressed; final validation pending in a
+separate clone.
 
 Companion to [the RCA and fix proposal](WEB-VOD-SEEK-MISSING-MEDIA-RCA-AND-FIX.md).
 This page records which parts of the client repair have been built and which
@@ -12,9 +13,9 @@ review response, and fast lane result together.
 | Step | State | Evidence or next action |
 |---|---|---|
 | RCA and Fable design review | Done | Keep VOD local; use the existing 20 s seek deadline and one fenced reopen. |
-| Client implementation | Written, not yet reviewed | Local VOD intents have one 20 s fallback; progress watch, `waiting`, and startup watchdog yield while target media is missing. |
-| Focused regression cases | Written, not yet run | Cover target coverage, `seeked` alone, superseded intents, the 20 s boundary, late target coverage, and a later true 8 s stall. |
-| Adversarial implementation review | Pending | Run once when the PR is ready to merge; address findings before fast lane. |
+| Client implementation | Review fixes written | Local VOD intents have one 20 s fallback; progress watch, `waiting`, and startup watchdog yield while target media is missing. |
+| Focused regression cases | Passed locally | `node --test tests/playback/seek-control.test.js` passed 19/19 after correcting the harness frame floor. `web-control.test.js` passed in the combined run; the docs index passed 4/4. |
+| Adversarial implementation review | Done | One static review found a stale `waiting` timer after coverage loss and a needless reopen after proven presentation; both are addressed in source and regression cases. |
 | Fast lane | Pending | Run after review fixes, then record exact commands and results here and in the PR. |
 | Merge | Pending | Merge only after the reviewed candidate passes the requested fast lane. |
 
@@ -22,3 +23,19 @@ review response, and fast lane result together.
 It does not add a feature flag or a new enable switch. Existing Developer
 settings use advisory readiness for optional capabilities; no optional
 capability is introduced by this change.
+
+**Focused validation, 2026-09-23:** The first combined Node run found a
+fixture error in the new presentation case: its stubbed executed seek had no
+`frameFloor`, so the real settlement function accepted a null frame sequence.
+The harness now initializes that floor as production does. The rerun of
+`node --test tests/playback/seek-control.test.js` passed all 19 tests;
+`tests/playback/web-control.test.js` passed in the combined run. The four
+`tests/operations/test_docs_index.py` contracts passed, and
+`git diff --check` was clean. No physical Safari run or server deploy is
+claimed.
+
+**Forgejo draft limitation:** The API accepted PR creation but reported
+`draft: false` despite the requested draft flag. The conversion endpoint
+returned HTTP 405, and a patch also left `draft: false`. Any fast-lane run
+on the initial commit is superseded by the corrected head; only the final
+head's result can qualify this PR.
