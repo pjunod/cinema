@@ -7,7 +7,7 @@
 
 mod analysis;
 mod auth;
-pub(crate) use auth::LoginThrottle;
+pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
 mod chapter_thumbs;
 mod cluster;

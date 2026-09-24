@@ -52,10 +52,31 @@ static LOGIN_BAD_CREDENTIALS: AtomicU64 = AtomicU64::new(0);
 static LOGIN_BACKOFF: AtomicU64 = AtomicU64::new(0);
 static LOGIN_CAPACITY: AtomicU64 = AtomicU64::new(0);
 
-static PASSWORD_ACTIVE: LazyLock<Arc<tokio::sync::Semaphore>> =
-    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(PASSWORD_HASH_WORKERS)));
-static PASSWORD_WAITERS: LazyLock<Arc<tokio::sync::Semaphore>> =
-    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(PASSWORD_HASH_WAITERS)));
+/// Admission for Argon2 work: at most [`PASSWORD_HASH_WORKERS`] hashes run and
+/// at most [`PASSWORD_HASH_WAITERS`] requests queue for one.
+///
+/// Held on [`AppState`] rather than in a process-wide static. Production builds
+/// one state per process, so the bound is unchanged there; but every test
+/// router used to share one pair of semaphores with every other test on
+/// libtest's threads, and a test whose own setup hashed a password queued
+/// behind strangers' hashes. Under a paused tokio clock that queue was fatal
+/// rather than slow: the idle runtime auto-advanced straight through
+/// [`PASSWORD_HASH_ADMISSION_WAIT`] and the setup answered 503 "password
+/// verification capacity is busy".
+#[derive(Clone)]
+pub(crate) struct PasswordCapacity {
+    active: Arc<tokio::sync::Semaphore>,
+    waiters: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for PasswordCapacity {
+    fn default() -> Self {
+        Self {
+            active: Arc::new(tokio::sync::Semaphore::new(PASSWORD_HASH_WORKERS)),
+            waiters: Arc::new(tokio::sync::Semaphore::new(PASSWORD_HASH_WAITERS)),
+        }
+    }
+}
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
@@ -313,7 +334,7 @@ pub async fn login(
     let user = state.store.get_user_by_username(&req.username).await?;
     // Verify even on unknown user to keep timing uniform.
     let password = req.password;
-    let (ok, user) = run_password_work(move || match user {
+    let (ok, user) = run_password_work(&state.password_capacity, move || match user {
         Some(u) => {
             let ok = auth::verify_password(&password, &u.password_hash);
             (ok, Some(u))
@@ -472,8 +493,11 @@ pub(crate) fn validate_new_password(password: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-pub(crate) async fn hash_password_bounded(password: String) -> Result<String, ApiError> {
-    run_password_work(move || auth::hash_password(&password))
+pub(crate) async fn hash_password_bounded(
+    capacity: &PasswordCapacity,
+    password: String,
+) -> Result<String, ApiError> {
+    run_password_work(capacity, move || auth::hash_password(&password))
         .await?
         .map_err(|error| ApiError::Internal(error.to_string()))
 }
@@ -481,17 +505,17 @@ pub(crate) async fn hash_password_bounded(password: String) -> Result<String, Ap
 /// Admit both queued and active Argon2 work before leaving the async executor.
 /// The active permit moves into the blocking closure, so cancellation of the
 /// HTTP request cannot advertise capacity while its abandoned hash still runs.
-async fn run_password_work<T, Work>(work: Work) -> Result<T, ApiError>
+async fn run_password_work<T, Work>(capacity: &PasswordCapacity, work: Work) -> Result<T, ApiError>
 where
     T: Send + 'static,
     Work: FnOnce() -> T + Send + 'static,
 {
-    let _waiting = Arc::clone(&PASSWORD_WAITERS)
+    let _waiting = Arc::clone(&capacity.waiters)
         .try_acquire_owned()
         .map_err(|_| password_capacity_error())?;
     let active = tokio::time::timeout(
         PASSWORD_HASH_ADMISSION_WAIT,
-        Arc::clone(&PASSWORD_ACTIVE).acquire_owned(),
+        Arc::clone(&capacity.active).acquire_owned(),
     )
     .await
     .map_err(|_| password_capacity_error())?
@@ -529,6 +553,34 @@ mod tests {
         assert!(validate_password_size(&"x".repeat(MAX_PASSWORD_BYTES + 1)).is_err());
         assert!(validate_new_password(&"x".repeat(MAX_PASSWORD_BYTES + 1)).is_err());
         assert!(validate_password_size(&"é".repeat(MAX_PASSWORD_BYTES / 2 + 1)).is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn password_capacity_belongs_to_its_state_not_the_process() {
+        // Every worker of one state is busy: that state's next hash waits out
+        // the admission bound and is refused, and it is refused by THIS
+        // capacity — nothing else in the process is holding a permit.
+        let busy = PasswordCapacity::default();
+        let mut held = Vec::new();
+        for _ in 0..PASSWORD_HASH_WORKERS {
+            held.push(
+                Arc::clone(&busy.active)
+                    .acquire_owned()
+                    .await
+                    .expect("worker permit"),
+            );
+        }
+        assert!(matches!(
+            run_password_work(&busy, || ()).await,
+            Err(ApiError::ServiceUnavailable(_))
+        ));
+        // Another state's work is admitted at once. Under the process-wide
+        // semaphores it queued behind the first state's hashes and, on this
+        // paused clock, was refused without waiting a real instant.
+        let other = PasswordCapacity::default();
+        assert_eq!(run_password_work(&other, || 7).await.ok(), Some(7));
+        drop(held);
+        assert_eq!(run_password_work(&busy, || 8).await.ok(), Some(8));
     }
 
     #[tokio::test(start_paused = true)]

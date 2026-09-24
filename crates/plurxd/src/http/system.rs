@@ -114,7 +114,7 @@ pub async fn setup(
         return Err(ApiError::BadRequest("username required".into()));
     }
     super::auth::validate_new_password(&req.password)?;
-    let hash = super::auth::hash_password_bounded(req.password).await?;
+    let hash = super::auth::hash_password_bounded(&state.password_capacity, req.password).await?;
     let user = state
         .store
         .create_user(req.username.trim(), &hash, true)
