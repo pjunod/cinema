@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -12,6 +13,7 @@ from validation.history import (
     ISSUE_RE,
     HistoryError,
     _audit_tips,
+    _write_report,
     audit_history,
     landing_commit_title,
     load_coverage,
@@ -786,6 +788,11 @@ class CorrectiveBoundaryCase(RepositoryFixture):
             any(after[:8] in error for error in frozen.errors),
             f"the post-boundary commit was judged by the legacy rule: {frozen.errors}",
         )
+        judged = {issue.sha for issue in frozen.issues}
+        self.assertIn(before, judged)
+        self.assertNotIn(
+            after, judged, "the post-boundary commit was judged by the legacy rule"
+        )
 
         # Control: with no boundary the repository is in phase A and both
         # commits are judged by the legacy rule, exactly as before this change.
@@ -1038,6 +1045,44 @@ class CorrectiveBoundaryCase(RepositoryFixture):
         frozen = [error for error in report.errors if "frozen boundary" in error]
         self.assertEqual(len(frozen), 1, report.errors)
         self.assertIn(late[:8], frozen[0])
+
+    def test_the_report_carries_the_landing_commits_it_audited(self):
+        """M3's acceptance: `jq '.merges | length'` counts the landing commits.
+
+        Generated into target/, never tracked: landing a pull request adds no
+        file to the repository.
+        """
+
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
+        boundary = self.commit(root, "docs: draw the boundary")
+        base = self.branch(root)
+        subprocess.run(["git", "checkout", "-q", "-b", "topic"], cwd=root, check=True)
+        (root / "tests/app_test.rs").write_text(
+            "#[test]\nfn it_holds() { assert!(true); }\n", encoding="utf-8"
+        )
+        fix = self.commit(root, "fix(app): hold")
+        subprocess.run(["git", "checkout", "-q", base], cwd=root, check=True)
+        landing = self.merge(
+            root, "topic",
+            "Merge pull request 'fix(app): hold' (#6) from topic into main\n\n"
+            "Regression-Test: tests/app_test.rs::it_holds\n",
+        )
+        report = audit_history(
+            root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
+        )
+        out = root / "target" / "history.json"
+        _write_report(out, report)
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(len(payload["merges"]), 1)
+        self.assertEqual(payload["merges"][0]["landing"], landing)
+        self.assertEqual(payload["merges"][0]["tests"], ["tests/app_test.rs::it_holds"])
+        self.assertTrue(payload["merges"][0]["resolved"])
+        self.assertEqual(payload["summary"]["landing_trailer"], 1)
+        coverage_of = {row["commit"]: row["coverage"] for row in payload["commits"]}
+        self.assertEqual(coverage_of[fix], "landing-trailer")
 
     def test_an_erratum_that_names_no_commit_past_the_boundary_is_an_error(self):
         root, catalog, coverage = self.repository()
