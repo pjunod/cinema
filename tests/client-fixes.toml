@@ -2461,3 +2461,29 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = ".onChange(of: live.busy) { _, _ in closeSurfaceIfSessionFinished() }"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "a failed tune ends on the busy edge"
+
+[[fixes]]
+# e2b31cdb: every Live TV envelope sent interlaced: false and never named
+# mpeg2video, so all 59 ATSC 1.0 channels were encoded on television SoCs that
+# decode and deinterlace MPEG-2 in hardware; the AAC claim was a fixed stereo.
+# The source anchor is the television-mode interlaced claim a revert deletes;
+# the test pins it together with the sink channel claim and both HEVC
+# containers.
+id = "android.live-tv-envelope-claims-the-sink"
+commits = ["e2b31cdb"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvApi.kt"
+source_anchor = "LiveTvRational(60, 1), sink.deinterlaces)"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
+test_anchor = "liveEnvelopeCarriesTheSinkFactsAndBothHevcContainers"
+
+[[fixes]]
+# 323edd83: the Apple Live TV envelope claimed aac: max_channels 2, which
+# folded every converted 5.1 broadcast to stereo before it reached the
+# receiver. The source anchor is the route-derived claim; the test pins the
+# ceiling and the envelope reading it.
+id = "apple.live-tv-envelope-claims-the-route-channels"
+commits = ["323edd83"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "maxChannels: $0 == \"aac\" ? aacChannels : 8"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLiveEnvelopeClaimsTheRouteChannelsForAac"
