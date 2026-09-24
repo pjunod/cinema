@@ -1,0 +1,64 @@
+version = 1
+
+[[coverage]]
+commits = ["025f5c73"]
+points = ["live-tv.integration", "live.dvr", "cluster.media-observation"]
+checks = ["rust-gate", "rust-gate-ci", "live-tv-two-node"]
+reason = """
+Plan L-02 M3 (L6) and M4 (L9). M4 corrects three defects: a session whose \
+cleanup failed was never retired, so it stayed in the registry counted against \
+MAX_TERMINAL_TOMBSTONES and 256 of them refused every start for good; a hung \
+scratch scan, awaited inline by the session tick, stopped the tick and with it \
+the producer-progress timer that is the only thing that ends a published \
+session whose producer stopped; and nothing pruned expired tombstones on a \
+quiet owner, so a burst of ends refused starts until some later lookup pruned \
+them. Each retained test below was run with its production hunk reverted and \
+failed (exit 101), then passed with it restored. \
+a_failed_cleanup_retires_the_session_and_keeps_the_child_until_reaped \
+(live_tv::tests) runs a real session worker whose FFmpeg exit is withheld: the \
+session must leave the registry and Activity, the child (a real process), its \
+encoder admission and its directory must stay owned by the orphan record, the \
+hourly sweep must not remove the directory, a drain must still refuse, and the \
+orphan retry must then kill and reap the child, release the admission, remove \
+the directory and let the drain acknowledge. Reverting run_live_session to \
+return before retiring keeps the session registered; removing the scratch \
+claim lets the sweep delete the live child's directory. \
+a_failed_scratch_cleanup_retires_the_session_and_a_drain_waits_for_the_directory \
+is the same handoff for an undeletable directory. \
+two_hundred_failed_cleanups_do_not_refuse_starts runs 300 failing cleanups and \
+requires none left registered, the orphan list bounded at ORPHAN_MAX, and the \
+recovery history admitting once the minute has passed. \
+a_full_recovery_history_admits_again_once_its_minute_is_up fills the history \
+with 256 tombstones and requires admission after the minute with nothing else \
+pruning; without the prune in recovery_history_admits it stays refused. \
+a_hung_inventory_does_not_stack_and_the_progress_timer_still_ends_the_session \
+publishes a start through the loopback HDHomeRun, then hangs every scan: the \
+session must end on the producer-progress timer with exactly one scan started \
+after the hang; awaiting the scan inline, as before, the session never ends. \
+inspect_scratch_keeps_every_check_in_one_blocking_scan breaks each of seven \
+inventory rules in turn, including a 200 MiB growing temporary segment under \
+an unchanged playlist. \
+an_unknown_capability_is_unavailable_unless_a_recent_incarnation_proves_a_restart \
+requires the capability_expired code throughout and the "restarted" sentence \
+only for a previous incarnation seen 20 s ago, not 10 minutes ago or never; \
+reverting the lookup text returns "live-TV capability expired". M3's warm start \
+is new behaviour and is pinned the same way: \
+a_warm_start_spawns_before_the_prefix_ceiling_and_publishes_only_after_agreement \
+requires the warm FFmpeg to be spawned within SOURCE_PREFIX_TIME and fed while \
+its verification probe runs, and nothing published while the inventory is \
+already publishable; without the publication gate it publishes before the \
+probe, and with a transport that holds the prefix the FFmpeg is not fed. \
+a_warm_start_that_disagrees_restarts_cold_and_never_publishes_the_wrong_plan \
+changes the probed format under a cached one and requires the first FFmpeg \
+killed and reaped, three spawns, the probed plan published, one tuner GET kept \
+and warm_disagreed counted; an agreement check that always agrees fails it. \
+a_cold_start_probes_before_it_spawns_and_caches_the_facts requires the facts \
+cached after a cold start; without recording them no start is ever warm. \
+every_tuner_byte_reaches_ffmpeg_exactly_once_on_a_warm_start, \
+an_expired_or_foreign_generation_entry_is_cold and \
+warm_agreement_is_an_identical_delivery_and_command pin the feed, the cache key \
+and expiry, and the agreement rule. All run in the local and hosted Rust \
+gates. The live-tv-two-node harness adds \
+a_second_watch_starts_warm_and_the_real_probe_agrees, where the real FFprobe \
+of the second tune must re-prove the plan built for the real FFmpeg.
+"""
