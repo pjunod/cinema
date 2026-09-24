@@ -629,8 +629,8 @@ def resolve_regression_test(value: str, read: TreeReader, where: str) -> str | N
         return (
             f"{REGRESSION_TRAILER} names {name}, which {path} does not define "
             f"as a test in {where} (searched {path} for a Node title, a "
-            f"declaration under #[test]/#[tokio::test]/@Test, or a name "
-            f"beginning `test`)"
+            f"declaration carrying or under #[test]/#[tokio::test]/@Test, or "
+            f"a Swift `func test…()` or Python `def test…`)"
         )
     return None
 
