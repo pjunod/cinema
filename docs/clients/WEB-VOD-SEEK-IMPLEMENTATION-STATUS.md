@@ -16,8 +16,8 @@ review response, and fast lane result together.
 | Client implementation | Review fixes written | Local VOD intents have one 20 s fallback; progress watch, `waiting`, and startup watchdog yield while target media is missing. |
 | Focused regression cases | Passed locally | `node --test tests/playback/seek-control.test.js` passed 19/19 after correcting the harness frame floor. `web-control.test.js` passed in the combined run; the docs index passed 4/4. |
 | Adversarial implementation review | Done | One static review found a stale `waiting` timer after coverage loss and a needless reopen after proven presentation; both are addressed in source and regression cases. |
-| Fast lane | Pending | Run after review fixes, then record exact commands and results here and in the PR. |
-| Merge | Pending | Merge only after the reviewed candidate passes the requested fast lane. |
+| Fast lane | See PR checks | The corrected head's first preflight rejected missing historical regression mappings. Both corrective commits now have one `regressions.d` entry; the PR's current-head checks are authoritative. |
+| Merge | See PR #478 | Merge only after the reviewed candidate passes the requested fast lane. |
 
 **Scope decision:** This is a direct repair to existing VOD playback behavior.
 It does not add a feature flag or a new enable switch. Existing Developer
@@ -33,6 +33,13 @@ The harness now initializes that floor as production does. The rerun of
 `tests/operations/test_docs_index.py` contracts passed, and
 `git diff --check` was clean. No physical Safari run or server deploy is
 claimed.
+
+**Fast-lane preflight, 2026-09-24:** The first corrected-head run stopped at
+`make history-check`, which required explicit retained-check mappings for
+commits `ba6e39ca0` and `528316c24`. The
+[`regressions.d` entry](../../validation/regressions.d/ba6e39ca-web-vod-seek-deadline.toml)
+maps both to the focused web check. See PR #478 for the final-head gate
+outcome; earlier runs cannot qualify a newer commit.
 
 **Forgejo draft limitation:** The API accepted PR creation but reported
 `draft: false` despite the requested draft flag. The conversion endpoint
