@@ -3757,16 +3757,13 @@ mod startup_tests {
             .await
             .expect("bind");
         let address = listener.local_addr().expect("address");
-        let client = tokio::spawn(async move {
-            tokio::net::TcpStream::connect(address)
-                .await
-                .expect("connect")
-        });
 
-        let (accepted, _remote) = HttpAcceptor::accept(&listener)
-            .await
-            .expect("accept through the production acceptor");
-        let _client = client.await.expect("client task");
+        let (client, accepted) = tokio::join!(
+            tokio::net::TcpStream::connect(address),
+            HttpAcceptor::accept(&listener),
+        );
+        let _client = client.expect("connect");
+        let (accepted, _remote) = accepted.expect("accept through the production acceptor");
 
         assert!(
             accepted.nodelay().expect("read TCP_NODELAY"),
