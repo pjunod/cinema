@@ -730,7 +730,7 @@ impl MediaStore for SqliteStore {
     }
 
     async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError> {
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             // Shows order by season/episode; home folders want subfolders
             // first, then their media chronologically. The extra keys are
             // inert for movie/show libraries (recorded_at is NULL there).
@@ -850,7 +850,7 @@ impl MediaStore for SqliteStore {
         genre: Option<&str>,
     ) -> Result<ItemPage, StoreError> {
         let genre = genre.map(str::to_owned);
-        self.with_conn(move |conn| {
+        self.with_read_txn(move |conn| {
             let order = item_sort_order_by(sort);
             // Genres are a JSON array (migration v13), so membership is a
             // `json_each` scan rather than an index probe. Written as
@@ -954,7 +954,7 @@ impl MediaStore for SqliteStore {
         library_id: Option<i64>,
         limit: i64,
     ) -> Result<Vec<RecentItem>, StoreError> {
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             // One card per movie, per show (latest episode represents the
             // show), and — in home libraries — per video or folder. A scan can
             // insert several seasons inside the same second, so added_at alone
@@ -1014,7 +1014,7 @@ impl MediaStore for SqliteStore {
         let Some(match_expr) = fts_query(query) else {
             return Ok(Vec::new());
         };
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             let sql = format!(
                 "WITH hits AS MATERIALIZED (SELECT rowid,rank AS score FROM items_fts WHERE items_fts MATCH ?1 AND rowid NOT IN (SELECT rowid FROM classification_fts) UNION ALL SELECT rowid,rank AS score FROM classification_fts WHERE classification_fts MATCH ?1) SELECT {i}, show.title, season.poster_path
                  FROM (SELECT rowid,min(score) AS score FROM hits GROUP BY rowid) f
@@ -1612,7 +1612,7 @@ impl MediaStore for SqliteStore {
     }
 
     async fn episodes_for_show(&self, show_id: i64) -> Result<Vec<Item>, StoreError> {
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {e} FROM items e
                  JOIN items season ON e.parent_id = season.id
@@ -2143,7 +2143,7 @@ impl MediaStore for SqliteStore {
     }
 
     async fn files_for_item(&self, item_id: i64) -> Result<Vec<MediaFile>, StoreError> {
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             // Best version first: an item can have several source files (a 4K
             // and a 1080p rip of the same movie). Order by resolution, then
             // bitrate, so clients default to the highest quality; SQLite
@@ -2192,7 +2192,7 @@ impl MediaStore for SqliteStore {
         }
         // ids are our own row ids (trusted i64s), so an inline IN-list is safe.
         let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             let mut stmt = conn.prepare(&format!(
                 "SELECT parent_id, COUNT(*) FROM items
                  WHERE parent_id IN ({list}) GROUP BY parent_id"
@@ -2212,7 +2212,7 @@ impl MediaStore for SqliteStore {
         // ids come from our own item rows (trusted i64s), so an inline IN-list
         // is safe and avoids a variadic-params dance.
         let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             let mut stmt = conn.prepare(&format!(
                 "SELECT item_id, MAX(height) FROM files
                  WHERE height IS NOT NULL AND item_id IN ({list})
@@ -2233,7 +2233,7 @@ impl MediaStore for SqliteStore {
         // Same inline IN-list as `item_max_heights`, for the same reason: our
         // own row ids, and a bound list needs a statement per arity.
         let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             // ONE statement for the whole page. The window functions do both
             // halves of the aggregation rule documented on `MediaFacts`:
             // COUNT/SUM describe every file of the item, ROW_NUMBER picks the

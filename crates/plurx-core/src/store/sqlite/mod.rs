@@ -1694,6 +1694,32 @@ impl SqliteStore {
         .await
     }
 
+    /// [`with_read`](Self::with_read) inside one read transaction, for a
+    /// closure whose statements must agree with each other.
+    ///
+    /// A read connection in WAL mode gives each statement its own snapshot
+    /// (every implicit transaction starts at the current end mark), so a
+    /// count and a page read by two statements can straddle a commit: the
+    /// grid says 50 items and shows 51. `BEGIN DEFERRED` takes the snapshot at
+    /// the first read and holds it until `COMMIT`, which is what the writer
+    /// mutex used to give these closures by excluding every other writer.
+    /// The guard rolls back on drop, so an error or a panic inside `f` never
+    /// leaves the connection mid-transaction. On an in-memory store this runs
+    /// on the writer connection, where the mutex still provides the same.
+    pub(crate) async fn with_read_txn<T, F>(&self, f: F) -> Result<T, StoreError>
+    where
+        F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.with_read(move |conn| {
+            let snapshot = conn.unchecked_transaction()?;
+            let value = f(&snapshot)?;
+            snapshot.commit()?;
+            Ok(value)
+        })
+        .await
+    }
+
     /// Like [`with_conn`](Self::with_conn), on a read connection when the
     /// store has them. Only for closures that read: the pool's connections
     /// are opened READ_ONLY, so a write through here fails loudly rather
@@ -2214,6 +2240,198 @@ mod tests {
 
         release_tx.send(()).expect("release");
         holder.await.expect("join").expect("holder");
+    }
+
+    /// K-05 M1: every Home and library-page read migrated to the read pool
+    /// completes while the writer holds an open write transaction, and none
+    /// of them sees that transaction's uncommitted row.
+    ///
+    /// The writer here is not just holding the mutex but has taken the WAL
+    /// write lock with `BEGIN IMMEDIATE` and inserted a library, which is what
+    /// a scan batch does. Each read gets two seconds; a method routed back
+    /// through `with_conn` waits for the release that only comes after all of
+    /// them returned, so it times out instead of passing slowly.
+    #[tokio::test]
+    async fn home_and_library_page_reads_do_not_queue_behind_a_held_writer_transaction() {
+        use crate::domain::{ItemKind, ItemSort, LibraryKind, NewItem, NewLibrary};
+        use crate::store::{LibraryStore, UserStore};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SqliteStore::open(&dir.path().join("plurx.db")).expect("open"));
+        let user = store
+            .create_user("reader", "hash", true)
+            .await
+            .expect("user");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = |kind, parent_id, title: &str, season, episode| NewItem {
+            library_id: library.id,
+            kind,
+            parent_id,
+            title: title.to_owned(),
+            year: None,
+            season_number: season,
+            episode_number: episode,
+        };
+        let show = store
+            .insert_item(&item(ItemKind::Show, None, "Harbor Lights", None, None))
+            .await
+            .expect("show");
+        let season = store
+            .insert_item(&item(
+                ItemKind::Season,
+                Some(show),
+                "Season 1",
+                Some(1),
+                None,
+            ))
+            .await
+            .expect("season");
+        let episode = store
+            .insert_item(&item(
+                ItemKind::Episode,
+                Some(season),
+                "Pilot",
+                Some(1),
+                Some(1),
+            ))
+            .await
+            .expect("episode");
+        store
+            .put_progress(user.id, episode, 1_000, Some(10_000))
+            .await
+            .expect("progress");
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .with_conn(move |conn| {
+                        conn.execute_batch(
+                            "BEGIN IMMEDIATE;
+                             INSERT INTO libraries(name, kind, paths)
+                             VALUES('uncommitted', 'movies', '[]');",
+                        )?;
+                        held_tx.send(()).ok();
+                        release_rx.recv().ok();
+                        conn.execute_batch("ROLLBACK")?;
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        tokio::task::spawn_blocking(move || held_rx.recv())
+            .await
+            .expect("join")
+            .expect("the holder took the write lock");
+
+        let bound = std::time::Duration::from_secs(2);
+        macro_rules! off_the_writer {
+            ($name:literal, $call:expr) => {
+                tokio::time::timeout(bound, $call)
+                    .await
+                    .unwrap_or_else(|_| panic!("{} queued behind the writer", $name))
+                    .unwrap_or_else(|error| panic!("{}: {error}", $name))
+            };
+        }
+        let libraries = off_the_writer!("list_libraries", store.list_libraries());
+        assert_eq!(
+            libraries.len(),
+            1,
+            "a read connection must not see the writer's uncommitted row"
+        );
+        off_the_writer!("get_library", store.get_library(library.id));
+        let page = off_the_writer!(
+            "list_top_items_in_genre",
+            store.list_top_items_in_genre(library.id, ItemSort::Title, 0, 50, None)
+        );
+        assert_eq!((page.total, page.items.len()), (1, 1));
+        off_the_writer!("home_preview_pages", store.home_preview_pages(24));
+        off_the_writer!("recently_added", store.recently_added(None, 24));
+        off_the_writer!("search_items", store.search_items("harbor", 24));
+        off_the_writer!("get_item_children", store.get_item_children(show));
+        off_the_writer!("episodes_for_show", store.episodes_for_show(show));
+        off_the_writer!("files_for_item", store.files_for_item(episode));
+        off_the_writer!("child_counts", store.child_counts(&[show, season]));
+        off_the_writer!("item_max_heights", store.item_max_heights(&[episode]));
+        off_the_writer!("item_media_facts", store.item_media_facts(&[episode]));
+        off_the_writer!("watch_map", store.watch_map(user.id, &[episode]));
+        off_the_writer!("watch_rollup", store.watch_rollup(user.id, show));
+        off_the_writer!("watch_rollups", store.watch_rollups(user.id, &[show]));
+        let in_progress =
+            off_the_writer!("continue_watching", store.continue_watching(user.id, 24));
+        assert_eq!(in_progress.len(), 1);
+        off_the_writer!("next_up", store.next_up(user.id, 24));
+
+        release_tx.send(()).expect("release");
+        holder.await.expect("join").expect("holder");
+    }
+
+    /// `with_read_txn` gives a multi-statement closure one WAL snapshot: a
+    /// commit that lands between its two statements is invisible to the
+    /// second, where plain `with_read` shows it. That second half is the
+    /// control: it proves the interleaving really happened, so the first half
+    /// cannot pass merely because the insert was late.
+    #[tokio::test]
+    async fn read_transactions_see_one_snapshot_across_statements() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SqliteStore::open(&dir.path().join("plurx.db")).expect("open"));
+        store.put_setting("seed", "0").await.expect("seed");
+
+        async fn two_counts(
+            store: &Arc<SqliteStore>,
+            snapshot: bool,
+            key: &'static str,
+        ) -> (i64, i64) {
+            let (between_tx, between_rx) = std::sync::mpsc::channel::<()>();
+            let (inserted_tx, inserted_rx) = std::sync::mpsc::channel::<()>();
+            let writer = {
+                let store = Arc::clone(store);
+                tokio::spawn(async move {
+                    tokio::task::spawn_blocking(move || between_rx.recv())
+                        .await
+                        .expect("join")
+                        .expect("reader reached the gap");
+                    store.put_setting(key, "1").await.expect("insert");
+                    inserted_tx.send(()).expect("signal");
+                })
+            };
+            let read = move |conn: &Connection| -> Result<(i64, i64), StoreError> {
+                let count = |conn: &Connection| -> Result<i64, StoreError> {
+                    Ok(conn.query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))?)
+                };
+                let first = count(conn)?;
+                between_tx.send(()).ok();
+                inserted_rx.recv().ok();
+                Ok((first, count(conn)?))
+            };
+            let counts = if snapshot {
+                store.with_read_txn(read).await
+            } else {
+                store.with_read(read).await
+            }
+            .expect("read");
+            writer.await.expect("writer");
+            counts
+        }
+
+        let (first, second) = two_counts(&store, true, "during-snapshot").await;
+        assert_eq!(first, second, "one read transaction, one snapshot");
+        let (first, second) = two_counts(&store, false, "during-plain-read").await;
+        assert_eq!(
+            second,
+            first + 1,
+            "control: without the transaction the second statement sees the commit"
+        );
     }
 
     /// The revision advances on a change of ask and on nothing else.

@@ -129,7 +129,7 @@ impl LibraryStore for SqliteStore {
     }
 
     async fn get_library(&self, id: i64) -> Result<Option<Library>, StoreError> {
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             Ok(conn
                 .query_row(
                     &format!("SELECT {LIB_COLS} FROM libraries WHERE id = ?1"),
@@ -142,7 +142,7 @@ impl LibraryStore for SqliteStore {
     }
 
     async fn list_libraries(&self) -> Result<Vec<Library>, StoreError> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt =
                 conn.prepare(&format!("SELECT {LIB_COLS} FROM libraries ORDER BY name"))?;
             let libraries = stmt

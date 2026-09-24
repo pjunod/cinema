@@ -77,7 +77,7 @@ impl WatchStore for SqliteStore {
             return Ok(Vec::new());
         }
         let item_ids = item_ids.to_vec();
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             // rarray would need a feature; a temp-free IN via json_each keeps
             // the query parameter-count bounded regardless of list length.
             let ids_json = serde_json::to_string(&item_ids)
@@ -363,7 +363,7 @@ impl WatchStore for SqliteStore {
     }
 
     async fn watch_rollup(&self, user_id: i64, item_id: i64) -> Result<WatchRollup, StoreError> {
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             let (leaves, watched) = conn.query_row(
                 &format!(
                     "WITH RECURSIVE tree(id) AS (
@@ -398,7 +398,7 @@ impl WatchStore for SqliteStore {
         // safe — same reasoning `child_counts` runs on.
         let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
         let ids = ids.to_vec();
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             // One walk for the whole page: the recursion carries the root it
             // started from alongside each descendant, so a single pass can
             // group the leaf counts back onto the containers that asked.
@@ -450,7 +450,7 @@ impl WatchStore for SqliteStore {
         user_id: i64,
         limit: i64,
     ) -> Result<Vec<InProgressItem>, StoreError> {
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             // In-progress = has a position, not finished. Episodes carry their
             // show's title so a card can read "Severance · S1E3".
             let sql = format!(
@@ -485,7 +485,7 @@ impl WatchStore for SqliteStore {
     }
 
     async fn next_up(&self, user_id: i64, limit: i64) -> Result<Vec<RecentItem>, StoreError> {
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             // Episode ordering key = season*100000 + episode. Next-up per show
             // is the smallest-ordering episode that is unwatched and not in
             // progress, strictly after the last watched episode of that show.
