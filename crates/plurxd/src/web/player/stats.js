@@ -571,7 +571,9 @@ async function reportProgress(fileId, ended, attachedOwner){
   // suppress the next one, or a close that follows a failed beat would take the
   // resume point down with it.
   p.lastBeatMs=posMs; p.lastBeatAt=beatAt; p.lastBeatAttachment=attachment;
-  try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs}}); }
+  // `method` labels the server's watched-seconds denominator (C-08 M5); the
+  // server takes only the playback vocabulary and stores none of it.
+  try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs,method:p.method}}); }
   catch(e){ p.lastBeatMs=null; p.lastBeatAt=null; }
 }
 function closePlayer(options={}){

@@ -156,7 +156,8 @@ impl Streams {
             item_id,
             readrate,
             progress: Arc::new(Progress::new()),
-            delivery: Meter::new(),
+            // A progressive stream copies the video; it is the remux path.
+            delivery: Meter::for_method("remux"),
             started_unix: now_unix(),
             seq: self.seq.fetch_add(1, Relaxed),
         });

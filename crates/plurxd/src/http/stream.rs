@@ -2581,7 +2581,30 @@ pub async fn direct(
         // wrong — the unmounted-share case, arriving as it actually arrives.
         Err(_) => state.availability.forget(id),
     }
-    served
+    if method == Method::GET {
+        served.map(count_direct_play_bytes)
+    } else {
+        served
+    }
+}
+
+/// Credit a direct play's body to `plurx_delivered_bytes_total
+/// {method="direct_play"}` as each chunk is handed to the connection.
+///
+/// A direct play has no session and no meter, so this is its only count. The
+/// body was already a stream with its length in `Content-Length`, so wrapping
+/// it loses no size hint the connection was using. A body that is not a
+/// success (a 416, say) carries no media and is left alone.
+fn count_direct_play_bytes(response: Response) -> Response {
+    use futures_util::TryStreamExt;
+    if !response.status().is_success() {
+        return response;
+    }
+    response.map(|body| {
+        Body::from_stream(body.into_data_stream().inspect_ok(|chunk| {
+            crate::telemetry::record_delivered_bytes("direct_play", chunk.len() as u64);
+        }))
+    })
 }
 
 /// GET /api/v1/files/:id/content — original bytes for a text book.

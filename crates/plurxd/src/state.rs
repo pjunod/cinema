@@ -744,6 +744,10 @@ pub struct AppState {
     /// lifetimes, so this holds only what would otherwise be invisible; see
     /// [`crate::delivery`].
     pub direct_plays: Arc<crate::delivery::DirectPlays>,
+    /// Last progress beat per viewer and item, for
+    /// `plurx_watched_seconds_total` (C-08 M5). One per process, like the
+    /// direct-play registry beside it.
+    pub watch_ledger: Arc<crate::telemetry::WatchLedger>,
     /// Store-backed gauges sampled away from the Prometheus request path.
     pub store_metrics: StoreMetricsCache,
     /// Application-initiated graceful drain. Signals still use the process
@@ -1065,6 +1069,7 @@ impl AppState {
             starts: Arc::new(crate::playstart::StartNotifier::new()),
             streams: crate::progressive::Streams::new(),
             direct_plays: crate::delivery::DirectPlays::new(),
+            watch_ledger: Arc::new(crate::telemetry::WatchLedger::default()),
             store_metrics: StoreMetricsCache::default(),
             shutdown: tokio_util::sync::CancellationToken::new(),
             #[cfg(test)]

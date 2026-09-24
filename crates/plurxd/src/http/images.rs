@@ -186,13 +186,18 @@ impl ArtworkCoordinator {
     }
 
     async fn derive_permit(&self) -> Option<OwnedSemaphorePermit> {
-        tokio::time::timeout(
+        let started = Instant::now();
+        let permit = tokio::time::timeout(
             DERIVATIVE_ADMISSION_WAIT,
             Arc::clone(&self.derive_permits).acquire_owned(),
         )
-        .await
-        .ok()?
-        .ok()
+        .await;
+        // Granted or timed out, the wait happened.
+        crate::telemetry::record_admission_wait(
+            crate::telemetry::AdmissionPool::ImageMaterialize,
+            started.elapsed(),
+        );
+        permit.ok()?.ok()
     }
 
     async fn verified_snapshot(&self) -> BTreeMap<String, [u8; 32]> {
@@ -3330,6 +3335,16 @@ mod tests {
         assert_eq!(maximum.load(Ordering::SeqCst), PEER_FETCH_CONCURRENCY);
         assert_eq!(admitted, PEER_FETCH_CONCURRENCY);
         assert_eq!(rejected, 24 - PEER_FETCH_CONCURRENCY);
+    }
+
+    #[tokio::test]
+    async fn a_derive_permit_wait_is_timed_into_the_image_materialize_pool() {
+        use crate::telemetry::{admission_waits_for_test, AdmissionPool};
+        let coordinator = ArtworkCoordinator::new();
+        let before = admission_waits_for_test(AdmissionPool::ImageMaterialize);
+        let _permit = coordinator.derive_permit().await.expect("an idle pool admits");
+        let after = admission_waits_for_test(AdmissionPool::ImageMaterialize);
+        assert!(after > before, "{before} -> {after}");
     }
 
     #[tokio::test]

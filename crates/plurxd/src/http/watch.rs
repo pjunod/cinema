@@ -20,6 +20,11 @@ pub struct ProgressRequest {
     /// states are ignored by the store instead of rewinding newer playback.
     #[serde(default)]
     pub recorded_at: Option<i64>,
+    /// The delivery method the player is on (`direct_play` · `remux` ·
+    /// `transcode`), used only to label `plurx_watched_seconds_total`. Any
+    /// other value, or none, is `unknown`; it is never stored.
+    #[serde(default)]
+    pub method: Option<String>,
 }
 
 /// POST /api/v1/items/:id/progress — report playback position. Crossing 95%
@@ -75,6 +80,16 @@ pub async fn progress(
     // player in the house arrives here every few seconds.
     if req.recorded_at.is_none() {
         state.direct_plays.touch_item(user.id, id);
+        // The denominator for stalled seconds and bytes per watched minute
+        // (C-08 M5). Live beats only: an offline replay's position did not
+        // advance in front of this node.
+        crate::telemetry::record_progress_beat(
+            &state.watch_ledger,
+            user.id,
+            id,
+            position,
+            req.method.as_deref(),
+        );
     }
     // Feed the Trakt scrobbler (fire-and-forget; a beat every ~5s while the
     // player is open, and the watched flip triggers the scrobble stop).

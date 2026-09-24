@@ -10233,6 +10233,86 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
+    /// C-08 M5 row 1 end to end: a `ttff` beacon is counted under the class
+    /// of the requester's own `User-Agent` header — not the client's `ua`
+    /// field, which is free text — and over IPv6 or no peer at all, where the
+    /// network identity is `None`.
+    #[tokio::test]
+    async fn a_ttff_beacon_is_labelled_by_the_requesters_client_class() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let bucket = r#"plurx_ttff_ms_bucket{method="remux",client="firefox",le="120000"} "#;
+        let read = || {
+            crate::telemetry::prometheus()
+                .lines()
+                .find_map(|line| line.strip_prefix(bucket).map(str::to_owned))
+                .and_then(|value| value.parse::<u64>().ok())
+                .expect("the firefox bucket renders")
+        };
+        let before = read();
+        let mut request = post(
+            "/api/v1/client-log",
+            Some(&admin),
+            json!({ "event": "ttff", "method": "remux", "ms": 97_000, "ua": "Safari" }),
+        );
+        request.headers_mut().insert(
+            axum::http::header::USER_AGENT,
+            axum::http::HeaderValue::from_static(super::test_agents::FIREFOX_WINDOWS_UA),
+        );
+        let (status, _) = call(&app, request).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // Recorded on the handler's spawned task.
+        for _ in 0..200 {
+            if read() > before {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(read() > before, "the ttff never reached client=\"firefox\"");
+    }
+
+    /// C-08 M5 row 3's denominator end to end: two live progress beats a
+    /// second apart credit the advance to the method the player names; an
+    /// offline replay (`recorded_at`) credits nothing.
+    #[tokio::test]
+    async fn live_progress_beats_credit_watched_seconds_to_the_named_method() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let uri = format!("/api/v1/items/{}/progress", seeded.movie);
+        let before = crate::telemetry::watched_ms_for_test("transcode");
+        for position in [60_000, 61_000] {
+            let (status, body) = call(
+                &app,
+                post(
+                    &uri,
+                    Some(&admin),
+                    json!({ "position_ms": position, "duration_ms": 600_000, "method": "transcode" }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        }
+        let credited = crate::telemetry::watched_ms_for_test("transcode") - before;
+        assert!(
+            (1_000..=1_100).contains(&credited),
+            "two beats one second apart credited {credited} ms"
+        );
+        let replayed = crate::telemetry::watched_ms_for_test("transcode");
+        let (status, _) = call(
+            &app,
+            post(
+                &uri,
+                Some(&admin),
+                json!({ "position_ms": 62_000, "method": "transcode", "recorded_at": 1 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(crate::telemetry::watched_ms_for_test("transcode"), replayed);
+    }
+
     #[tokio::test]
     async fn client_telemetry_updates_the_matching_network_prior() {
         let (app, state) = test_state();
