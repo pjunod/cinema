@@ -4803,6 +4803,7 @@ pub(crate) struct MetricsState {
     blocked_gets: Arc<crate::waitpool::BlockedGetMetrics>,
     live_tv: Arc<crate::live_tv::LiveTvMetrics>,
     backup: Arc<crate::backup::BackupMetrics>,
+    plex_census: Arc<super::PlexCensus>,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -4822,6 +4823,7 @@ impl FromRef<AppState> for MetricsState {
             blocked_gets: state.transcode.blocked_get_metrics_handle(),
             live_tv: state.live_tv.metrics_handle(),
             backup: state.backup.metrics(),
+            plex_census: Arc::clone(&state.plex_census),
         }
     }
 }
@@ -5241,7 +5243,7 @@ pub(crate) async fn metrics(
         super::prometheus_handler_deadlines(),
         crate::ffmpeg::engine_attestation_prometheus(),
         super::prometheus_http_store_attribution(),
-        super::prometheus_plex_requests(),
+        state.plex_census.prometheus(),
         crate::state::fragment_index_validation_prometheus(),
         crate::subtitle_source::prometheus(),
     );

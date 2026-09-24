@@ -641,6 +641,9 @@ pub struct AppState {
     /// so a hostile request cannot turn authentication pressure into Raft
     /// writes or a replicated account lockout.
     pub(crate) login_throttle: crate::http::LoginThrottle,
+    /// C-07's façade census. Per state rather than process-global so each
+    /// router counts only its own requests (see `http::PlexCensus`).
+    pub(crate) plex_census: Arc<crate::http::PlexCensus>,
     /// Node-local network boundary for security-sensitive forwarding headers.
     pub(crate) trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
@@ -1009,6 +1012,7 @@ impl AppState {
             store,
             cache_only_admin_proofs,
             login_throttle: Default::default(),
+            plex_census: Default::default(),
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
             replication,

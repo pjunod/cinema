@@ -555,8 +555,26 @@ const PLEX_HANDLERS: [&str; 14] = [
 /// interesting thing that can happen.
 const PLEX_OUTCOMES: [&str; 4] = ["ok", "not_found", "unauthorized", "error"];
 
-static PLEX_REQUESTS: LazyLock<[AtomicU64; PLEX_HANDLERS.len() * PLEX_OUTCOMES.len()]> =
-    LazyLock::new(|| std::array::from_fn(|_| AtomicU64::new(0)));
+/// The census cells, one per `(handler, outcome)`.
+///
+/// Held on `AppState` behind an `Arc`, not in a process-wide `static`, so a
+/// router counts only the requests that router served. In production that is
+/// the same thing — one state per process — but it is what lets a test assert
+/// an exact delta: a process-global counter is also moved by every other test
+/// in the binary that sends façade traffic, on libtest's parallel threads, and
+/// the adversarial review of PR #462 measured that race failing 34 runs in
+/// 400.
+pub(crate) struct PlexCensus {
+    cells: [AtomicU64; PLEX_HANDLERS.len() * PLEX_OUTCOMES.len()],
+}
+
+impl Default for PlexCensus {
+    fn default() -> Self {
+        Self {
+            cells: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
 
 /// The façade's registered templates, and nothing else.
 ///
@@ -594,42 +612,48 @@ fn plex_outcome_index(status: StatusCode) -> usize {
     }
 }
 
-pub(crate) fn record_plex_request(handler: usize, status: StatusCode) {
-    PLEX_REQUESTS[handler * PLEX_OUTCOMES.len() + plex_outcome_index(status)]
-        .fetch_add(1, Ordering::Relaxed);
+impl PlexCensus {
+    pub(crate) fn record(&self, handler: usize, status: StatusCode) {
+        self.cells[handler * PLEX_OUTCOMES.len() + plex_outcome_index(status)]
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn prometheus(&self) -> String {
+        let mut out = String::from(
+            "# HELP plurx_plex_requests_total Plex-compat façade requests by handler and outcome, since this process started. The census that decides whether the façade gets further work.\n\
+             # TYPE plurx_plex_requests_total counter\n",
+        );
+        for (handler_index, handler) in PLEX_HANDLERS.iter().enumerate() {
+            for (outcome_index, outcome) in PLEX_OUTCOMES.iter().enumerate() {
+                let count = self.cells[handler_index * PLEX_OUTCOMES.len() + outcome_index]
+                    .load(Ordering::Relaxed);
+                out.push_str(&format!(
+                    "plurx_plex_requests_total{{handler=\"{handler}\",outcome=\"{outcome}\"}} {count}\n"
+                ));
+            }
+        }
+        out
+    }
 }
 
 /// Counts one façade request. Attached to the façade sub-router only, so a
 /// native `/api/v1/...` request never reaches it and cannot be mistaken for
 /// Plex traffic — which is the whole reason this is a separate layer rather
 /// than another label on `http_route_group`.
-async fn plex_facade_census(request: Request<axum::body::Body>, next: Next) -> Response {
+async fn plex_facade_census(
+    State(census): State<std::sync::Arc<PlexCensus>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
     let handler = request
         .extensions()
         .get::<MatchedPath>()
         .and_then(|path| plex_handler_index(path.as_str()));
     let response = next.run(request).await;
     if let Some(handler) = handler {
-        record_plex_request(handler, response.status());
+        census.record(handler, response.status());
     }
     response
-}
-
-pub(crate) fn prometheus_plex_requests() -> String {
-    let mut out = String::from(
-        "# HELP plurx_plex_requests_total Plex-compat façade requests by handler and outcome. The census that decides whether the façade gets further work.\n\
-         # TYPE plurx_plex_requests_total counter\n",
-    );
-    for (handler_index, handler) in PLEX_HANDLERS.iter().enumerate() {
-        for (outcome_index, outcome) in PLEX_OUTCOMES.iter().enumerate() {
-            let count = PLEX_REQUESTS[handler_index * PLEX_OUTCOMES.len() + outcome_index]
-                .load(Ordering::Relaxed);
-            out.push_str(&format!(
-                "plurx_plex_requests_total{{handler=\"{handler}\",outcome=\"{outcome}\"}} {count}\n"
-            ));
-        }
-    }
-    out
 }
 
 /// `root` is not a façade route: `/` serves the web app to a browser and the
@@ -1109,10 +1133,16 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             mutable_media_serving_gate,
         ))
-        // Outside the serving gate, so a request this node refuses is still
-        // counted: a census that cannot see refusals would report an idle
-        // façade on a node that is turning clients away.
-        .layer(axum::middleware::from_fn(plex_facade_census));
+        // Outside the serving gate, so a request `mutable_media_serving_gate`
+        // refuses is still counted. That is the only refusal it sees.
+        // `cluster_capacity_gate` is layered outside the whole router (below)
+        // and answers 503 before routing — maintenance, a fenced node, a
+        // learner-ineligible route — so those refusals never reach this layer
+        // and are not counted. The plan's §8.5 closing rule accounts for that.
+        .layer(axum::middleware::from_fn_with_state(
+            std::sync::Arc::clone(&state.plex_census),
+            plex_facade_census,
+        ));
 
     let public_short = Router::new()
         .without_v07_checks()
@@ -1651,13 +1681,14 @@ async fn root_dispatch(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     if plex::looks_like_plex(&headers) {
+        let census = std::sync::Arc::clone(&state.plex_census);
         let response = match plex::root(state).await {
             Ok(resp) => resp,
             Err(e) => e.into_response(),
         };
         // Only this branch. A browser loading the web app from the same path
         // is not façade traffic and must not be counted as any.
-        record_plex_request(PLEX_ROOT_HANDLER, response.status());
+        census.record(PLEX_ROOT_HANDLER, response.status());
         response
     } else {
         web::index().await.into_response()
@@ -1885,7 +1916,7 @@ mod tests {
 
     #[test]
     fn the_census_label_space_is_closed() {
-        let exposition = prometheus_plex_requests();
+        let exposition = PlexCensus::default().prometheus();
         assert_eq!(
             exposition
                 .lines()
@@ -1906,8 +1937,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_unauthenticated_facade_request_is_counted_as_a_client_that_tried() {
-        let app = test_app();
-        let before = prometheus_plex_requests();
+        let (app, state) = test_app_with_state();
+        let before = state.plex_census.prometheus();
         let response = app
             .oneshot(get("/library/sections", None))
             .await
@@ -1915,7 +1946,7 @@ mod tests {
         // No `X-Plex-Token`: the façade refuses, and that refusal is the signal
         // a census exists to see.
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let after = prometheus_plex_requests();
+        let after = state.plex_census.prometheus();
         assert_eq!(
             plex_cell(&after, "sections", "unauthorized"),
             plex_cell(&before, "sections", "unauthorized") + 1
@@ -1928,14 +1959,14 @@ mod tests {
 
     #[tokio::test]
     async fn the_public_facade_routes_are_counted_and_the_web_app_is_not() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
         let root_total = |text: &str| {
             PLEX_OUTCOMES
                 .iter()
                 .map(|outcome| plex_cell(text, "root", outcome))
                 .sum::<u64>()
         };
-        let before = prometheus_plex_requests();
+        let before = state.plex_census.prometheus();
 
         // `/identity` takes no token and is how a Plex client finds a server.
         let identity = app
@@ -1944,7 +1975,7 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(identity.status(), StatusCode::OK);
-        let after_identity = prometheus_plex_requests();
+        let after_identity = state.plex_census.prometheus();
         assert_eq!(
             plex_cell(&after_identity, "identity", "ok"),
             plex_cell(&before, "identity", "ok") + 1
@@ -1956,7 +1987,7 @@ mod tests {
         // counted instead".
         let web_root = app.clone().oneshot(get("/", None)).await.expect("response");
         assert!(web_root.status().is_success());
-        let after_web = prometheus_plex_requests();
+        let after_web = state.plex_census.prometheus();
         assert_eq!(
             root_total(&after_web),
             root_total(&after_identity),
@@ -1976,7 +2007,7 @@ mod tests {
             .expect("response");
         assert!(plex_root.status().is_success() || plex_root.status().is_client_error());
         assert_eq!(
-            root_total(&prometheus_plex_requests()),
+            root_total(&state.plex_census.prometheus()),
             root_total(&after_web) + 1,
             "the Plex branch of root_dispatch is the one that counts"
         );
@@ -1984,8 +2015,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_native_request_never_reaches_the_census() {
-        let app = test_app();
-        let before = prometheus_plex_requests();
+        let (app, state) = test_app_with_state();
+        let before = state.plex_census.prometheus();
         for path in ["/api/v1/libraries", "/api/v1/search", "/healthz"] {
             let _ = app
                 .clone()
@@ -1994,9 +2025,52 @@ mod tests {
                 .expect("response");
         }
         assert_eq!(
-            prometheus_plex_requests(),
+            state.plex_census.prometheus(),
             before,
             "a native request moved a façade counter"
+        );
+    }
+
+    /// The census tests above assert exact deltas, which is only sound if the
+    /// counter they read is moved by nothing but their own requests. With a
+    /// process-global counter every other test in this binary that sends
+    /// façade traffic (`plex_facade_requires_a_valid_token`,
+    /// `plex_facade_serves_seeded_content`, ...) moves it too, on libtest's
+    /// parallel threads. This pins the property deterministically instead of
+    /// by racing: a second router's façade traffic must not reach this one's
+    /// census, and `/metrics` must render this router's census, not another.
+    #[tokio::test]
+    async fn each_router_counts_only_its_own_facade_requests() {
+        let (app, state) = test_app_with_state();
+        let (other_app, _other_state) = test_app_with_state();
+        let before = state.plex_census.prometheus();
+        for _ in 0..3 {
+            let _ = other_app
+                .clone()
+                .oneshot(get("/library/sections", None))
+                .await
+                .expect("response");
+        }
+        assert_eq!(
+            state.plex_census.prometheus(),
+            before,
+            "another router's façade request moved this router's census"
+        );
+
+        let _ = app
+            .clone()
+            .oneshot(get("/library/sections", None))
+            .await
+            .expect("response");
+        let metrics = app.oneshot(get("/metrics", None)).await.expect("response");
+        let body = axum::body::to_bytes(metrics.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let exposition = String::from_utf8(body.to_vec()).expect("utf-8");
+        assert_eq!(
+            plex_cell(&exposition, "sections", "unauthorized"),
+            plex_cell(&before, "sections", "unauthorized") + 1,
+            "/metrics renders the census of the router that served it"
         );
     }
 
