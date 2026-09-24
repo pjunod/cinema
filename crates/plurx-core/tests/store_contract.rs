@@ -264,6 +264,7 @@ const USER_METHODS: &[&str] = &[
     "delete_tokens_for_user",
     "create_token",
     "create_token_if_password_matches",
+    "authenticate_token",
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
@@ -10161,6 +10162,191 @@ async fn token_activity_refresh_burst_is_bounded_by_independent_store_count() {
     );
 }
 
+/// A fixed-clock store whose client prefers voter `ordinal`: one serving
+/// process on one node at one moment.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn contract_store_on_voter_at(
+    cluster: &ContractCluster,
+    ordinal: usize,
+    now: i64,
+    name: &str,
+) -> HiqliteAuthStore {
+    let mut addresses = cluster.addresses.clone();
+    let voters = addresses.len();
+    addresses.rotate_left(ordinal % voters);
+    let client = Client::remote(
+        addresses,
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect voter-preferring contract client");
+    let telemetry = cluster._root.path().join(format!("{name}-telemetry.db"));
+    bootstrap_contract_hiqlite_store_at(client, &telemetry, now).await
+}
+
+/// Sign-in expiry on the replicated backend: the policy one process commits
+/// is the policy every other voter judges by, the clock never starts before
+/// expiry took effect, use inside the window slides it with one coalesced
+/// Raft entry, an expired token appends nothing and is not revived, off never
+/// expires, and the ordinary revocation still removes the row.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sign_in_expiry_is_judged_on_every_voter_against_the_replicated_policy() {
+    use plurx_core::store::{keys, TokenAuthentication};
+    const DAY: i64 = 86_400;
+    const T0: i64 = 1_000 * DAY;
+    const TOKEN: &str = "sign-in-expiry-token";
+    fn verdict(outcome: TokenAuthentication) -> Result<i64, Option<i64>> {
+        match outcome {
+            TokenAuthentication::Authenticated(user) => Ok(user.id),
+            TokenAuthentication::Expired { idle_days } => Err(Some(idle_days)),
+            TokenAuthentication::Unknown => Err(None),
+        }
+    }
+    async fn last_seen(client: &Client) -> i64 {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT last_seen_at AS value FROM tokens WHERE token_hash = $1",
+                hiqlite::params!(TOKEN),
+            )
+            .await
+            .expect("read token activity");
+        assert_eq!(rows.len(), 1);
+        rows[0].value
+    }
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect measurement client");
+    let writer = contract_store_on_voter_at(&cluster, 0, T0, "expiry-writer").await;
+    writer
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated expiry state");
+    let user = writer
+        .create_user("sign-in-expiry", "hash", false)
+        .await
+        .expect("create expiry user");
+    writer
+        .create_token(TOKEN, user.id, Some("Living room"))
+        .await
+        .expect("create expiry token");
+    // Last used long before expiry existed, as an upgraded household's
+    // living-room box would be.
+    client
+        .execute(
+            "UPDATE tokens SET last_seen_at = $1 WHERE token_hash = $2",
+            hiqlite::params!(T0 - 500 * DAY, TOKEN),
+        )
+        .await
+        .expect("age the token");
+    writer
+        .put_settings(&[
+            (keys::AUTH_TOKEN_EXPIRY_ENABLED, "1"),
+            (keys::AUTH_TOKEN_IDLE_DAYS, "90"),
+            (keys::AUTH_TOKEN_EXPIRY_SINCE, &T0.to_string()),
+        ])
+        .await
+        .expect("commit the expiry policy");
+
+    // Another voter, 89 days after expiry took effect: the clock started at
+    // T0, not at the ancient last use, so the device is still signed in. Its
+    // thirty requests append exactly one coalesced activity entry.
+    let day_89 = contract_store_on_voter_at(&cluster, 1, T0 + 89 * DAY, "expiry-day-89").await;
+    let before = contract_leader_point(&client).await;
+    for _ in 0..30 {
+        assert_eq!(
+            verdict(day_89.authenticate_token(TOKEN).await.expect("auth")),
+            Ok(user.id)
+        );
+    }
+    assert_eq!(
+        contract_stable_leader_delta(before, contract_leader_point(&client).await),
+        1,
+        "thirty authentications inside the window must append one activity entry"
+    );
+    assert_eq!(last_seen(&client).await, T0 + 89 * DAY);
+
+    // The third voter, 89 days later still: the use on day 89 slid the
+    // window, so this is inside it too.
+    let day_178 = contract_store_on_voter_at(&cluster, 2, T0 + 178 * DAY, "expiry-day-178").await;
+    assert_eq!(
+        verdict(day_178.authenticate_token(TOKEN).await.expect("auth")),
+        Ok(user.id)
+    );
+    assert_eq!(last_seen(&client).await, T0 + 178 * DAY);
+
+    // Ninety idle days after that last use: expired on every voter, with the
+    // window it was judged by, and no request appends anything or moves the
+    // timestamp that would revive it.
+    let mut expired_stores = Vec::new();
+    for ordinal in 0..3 {
+        expired_stores.push(
+            contract_store_on_voter_at(
+                &cluster,
+                ordinal,
+                T0 + 268 * DAY,
+                &format!("expiry-day-268-{ordinal}"),
+            )
+            .await,
+        );
+    }
+    let before = contract_leader_point(&client).await;
+    for expired in &expired_stores {
+        for _ in 0..10 {
+            assert_eq!(
+                verdict(expired.authenticate_token(TOKEN).await.expect("auth")),
+                Err(Some(90))
+            );
+        }
+        assert!(expired
+            .user_for_token(TOKEN)
+            .await
+            .expect("resolve")
+            .is_none());
+    }
+    assert_eq!(
+        contract_stable_leader_delta(before, contract_leader_point(&client).await),
+        0,
+        "an expired token must append no activity entry"
+    );
+    assert_eq!(last_seen(&client).await, T0 + 178 * DAY);
+
+    // Off is today's behaviour: nothing expires.
+    writer
+        .put_setting(keys::AUTH_TOKEN_EXPIRY_ENABLED, "0")
+        .await
+        .expect("switch expiry off");
+    let off = contract_store_on_voter_at(&cluster, 1, T0 + 5_000 * DAY, "expiry-off").await;
+    assert_eq!(
+        verdict(off.authenticate_token(TOKEN).await.expect("auth")),
+        Ok(user.id)
+    );
+
+    // Revocation is unchanged.
+    assert!(writer
+        .delete_token_with_cache_admin_claim(TOKEN, None)
+        .await
+        .expect("revoke"));
+    assert_eq!(
+        verdict(off.authenticate_token(TOKEN).await.expect("auth")),
+        Err(None)
+    );
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_key_activity_refresh_burst_is_bounded_by_independent_store_count() {
@@ -16530,7 +16716,13 @@ fn contract_inventory_matches_every_store_method() {
     // in `FRAGMENT_INDEX_METHODS` above; no new trait and no new supertrait of
     // `Store`. Its sibling `fragment_index_builders_held_by` is on the cluster
     // trait, which this inventory does not walk.
-    assert_eq!(declared.len(), 384, "review the Store method count");
+    //
+    // 384 -> 385 for the one `UserStore` method the sign-in expiry option
+    // adds, `authenticate_token`, which judges a token under the replicated
+    // expiry policy read in the same snapshot as its row. `user_for_token`
+    // stays, now a provided method over it so every older caller honours
+    // expiry. Named in `USER_METHODS` above; no new trait or supertrait.
+    assert_eq!(declared.len(), 385, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

@@ -1592,6 +1592,13 @@ async fn boot(
         .get_or_init_setting(keys::SERVER_NAME, &config.server.name)
         .await
         .context("initializing replicated server name")?;
+    // "Sign-ins expire" defaults to on; this is the moment it takes effect on
+    // an upgraded server, and no device's idle window starts before it.
+    let expiry_since =
+        http::users::start_token_expiry_clock(store.as_ref(), http::users::unix_now())
+            .await
+            .context("starting the sign-in expiry clock")?;
+    tracing::debug!(expiry_since, "sign-in expiry clock");
     log_startup(&config, &identity);
 
     let instance_id = identity.cluster_id;

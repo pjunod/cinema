@@ -1822,6 +1822,14 @@ pub struct SettingsDto {
     /// (see migration v13), and an upgrade that started that on its own is
     /// the failure v9 documents.
     pub genre_backfill: bool,
+    /// "Sign-ins expire" (Settings → Users). On by default: a device that
+    /// goes unused for `auth_token_idle_days` is signed out; one in regular
+    /// use never is. Off keeps login tokens valid until revoked.
+    pub auth_token_expiry: bool,
+    pub auth_token_idle_days: i64,
+    /// When expiry last took effect (Unix seconds). No device's idle window
+    /// starts earlier. `None` until the server has started the clock.
+    pub auth_token_expiry_since: Option<i64>,
     /// What the last backfill pass did, or `None` if none has run since boot.
     /// Reported here rather than in the per-library scan status because the
     /// backfill walks item ids, not libraries — and because this page is
@@ -2179,6 +2187,15 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .unwrap_or(14)
             .clamp(1, 365),
         genre_backfill,
+        auth_token_expiry: plurx_core::store::stored_switch(
+            setting(keys::AUTH_TOKEN_EXPIRY_ENABLED).as_deref(),
+            true,
+        ),
+        auth_token_idle_days: plurx_core::auth::token_idle_days(
+            setting(keys::AUTH_TOKEN_IDLE_DAYS).as_deref(),
+        ),
+        auth_token_expiry_since: setting(keys::AUTH_TOKEN_EXPIRY_SINCE)
+            .and_then(|value| value.trim().parse().ok()),
         genre_backfill_last: state.jobs.last_genre_backfill().await,
     })
 }
@@ -2443,6 +2460,11 @@ pub struct UpdateSettings {
     pub dv_disk_convert_parallel: Option<i64>,
     /// Arm or disarm the one-off genre backfill.
     pub genre_backfill: Option<bool>,
+    /// "Sign-ins expire". Switching it on (from off) restarts the idle clock
+    /// at that moment, so enabling it never signs a device out on the spot.
+    pub auth_token_expiry: Option<bool>,
+    /// The idle window in whole days, 1..=3650.
+    pub auth_token_idle_days: Option<i64>,
 }
 
 struct PreparedLiveTvUpdate {
@@ -2571,6 +2593,8 @@ impl UpdateSettings {
             || self.dv_disk_keep_original.is_some()
             || self.dv_disk_convert_parallel.is_some()
             || self.genre_backfill.is_some()
+            || self.auth_token_expiry.is_some()
+            || self.auth_token_idle_days.is_some()
             // The DVR settings are their own transaction boundary for the same
             // reason the Live TV tuple is: mixing them would let one commit
             // while the other's CAS reports 409.
@@ -2607,6 +2631,17 @@ pub async fn update_settings(
     // write, so a later bad field cannot leave an earlier policy change in
     // force despite returning 400/409. This matters especially for destructive
     // policies such as `dv_disk_keep_original = false`.
+    if let Some(days) = req.auth_token_idle_days {
+        if !(plurx_core::auth::TOKEN_IDLE_DAYS_MIN..=plurx_core::auth::TOKEN_IDLE_DAYS_MAX)
+            .contains(&days)
+        {
+            return Err(ApiError::BadRequest(format!(
+                "sign-in expiry must be between {} and {} days",
+                plurx_core::auth::TOKEN_IDLE_DAYS_MIN,
+                plurx_core::auth::TOKEN_IDLE_DAYS_MAX
+            )));
+        }
+    }
     let live_tv_requested = req.live_tv_enabled.is_some()
         || req.live_tv_device_ipv4.is_some()
         || req.live_tv_owner_node_id.is_some()
@@ -3750,6 +3785,41 @@ pub async fn update_settings(
             .store
             .put_setting(keys::JOB_SCAN_ON_STARTUP, if on { "1" } else { "0" })
             .await?;
+    }
+    if req.auth_token_expiry.is_some() || req.auth_token_idle_days.is_some() {
+        let mut values: Vec<(&str, String)> = Vec::new();
+        if let Some(days) = req.auth_token_idle_days {
+            values.push((keys::AUTH_TOKEN_IDLE_DAYS, days.to_string()));
+        }
+        if let Some(on) = req.auth_token_expiry {
+            // Off -> on restarts the clock in the same write that flips the
+            // switch: every device's idle window then starts now, so turning
+            // expiry on signs nobody out on the spot. On -> on leaves it.
+            let settings = state.store.settings_snapshot().await?;
+            let was_on = plurx_core::store::stored_switch(
+                settings
+                    .get(keys::AUTH_TOKEN_EXPIRY_ENABLED)
+                    .map(String::as_str),
+                true,
+            );
+            let clock_started = settings.contains_key(keys::AUTH_TOKEN_EXPIRY_SINCE);
+            if on && (!was_on || !clock_started) {
+                values.push((
+                    keys::AUTH_TOKEN_EXPIRY_SINCE,
+                    super::users::unix_now().to_string(),
+                ));
+            }
+            values.push((
+                keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                if on { "1" } else { "0" }.to_owned(),
+            ));
+            tracing::info!(on, "sign-in expiry");
+        }
+        let borrowed = values
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        state.store.put_settings(&borrowed).await?;
     }
     if let Some(on) = req.genre_backfill {
         // Arming rewinds the cursor. A pass that finished left it at 0 and
