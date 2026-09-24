@@ -92,7 +92,7 @@ const SEATS_RETIRED: usize = 1 << (usize::BITS - 1);
 #[derive(Clone, Debug)]
 pub(crate) enum TransportProbe {
     Pending,
-    Ready(LiveSourceFacts),
+    Ready(Box<LiveSourceFacts>),
     Failed(LiveTvError),
 }
 
@@ -358,7 +358,8 @@ impl DvrTransport {
                     .source
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(facts.clone());
-                self.probe.send_replace(TransportProbe::Ready(facts));
+                self.probe
+                    .send_replace(TransportProbe::Ready(Box::new(facts)));
             }
             Err(error) => {
                 self.probe.send_replace(TransportProbe::Failed(error));
@@ -391,7 +392,7 @@ impl DvrTransport {
                 .map_err(|_| LiveTvError::StreamFailed("the tuner transport stopped".into()))?,
         };
         match observed {
-            TransportProbe::Ready(facts) => Ok(facts),
+            TransportProbe::Ready(facts) => Ok(*facts),
             TransportProbe::Failed(error) => Err(error),
             TransportProbe::Pending => Err(LiveTvError::StreamFailed(
                 "the tuner transport stopped before its source was observed".into(),
@@ -448,6 +449,7 @@ impl DvrTransport {
         self.closed.cancelled().await;
     }
 
+    #[cfg(test)]
     pub(crate) fn is_closed(&self) -> bool {
         self.closed.is_cancelled()
     }
