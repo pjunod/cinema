@@ -700,11 +700,12 @@ class Controller internal constructor(
             // still own success/failure; failover must not steal the request.
             if (stallGuard.defersPredecessorRecovery(recipeOwnership.needsMediaReplacement(currentRecipe()))) return
             val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
-            // Only a transport failure can be answered by another node. A
-            // terminal answer — an ended session's 404, a refused
-            // credential — is the same on every ingress, and walking the list
-            // for one costs a full player prepare per node before the viewer
-            // sees the error they were always going to see.
+            // Only a transport failure can be answered by another node, and
+            // for 2004 only some of them: `nodeFailoverEligible` reads the
+            // status the exception carries, so an ended session's 404 or a
+            // refused credential is terminal here instead of costing a full
+            // player prepare on every ingress before the viewer sees the error
+            // they were always going to see.
             reportControlEvidence(
                 ClientObservation(
                     decoderState = DecoderState.FAILED,
@@ -716,7 +717,9 @@ class Controller internal constructor(
             // The surface adapter runs AFTER the ladder, on its outcome:
             // `playbackErrorAction` is untouched (contract §3.5).
             val refusal = mediaRefusal(error)
-            if (isTransportPlaybackError(error.errorCode) && retryMediaOnNextNode(error)) {
+            if (nodeFailoverEligible(error.errorCode, httpResponseCode(error)) &&
+                retryMediaOnNextNode(error)
+            ) {
                 raiseRecoveryStep(refusal, "Reconnecting on another server address.")
                 return
             }
@@ -2340,7 +2343,8 @@ class Controller internal constructor(
             level = "warn",
             message = error.errorCodeName,
             code = error.errorCode,
-            detail = "delivery=$deliveryMode compatibility_ladder=false",
+            detail = "delivery=$deliveryMode compatibility_ladder=false " +
+                "http_status=${httpResponseCode(error) ?: "none"}",
         )
         // A failover is a new media generation. Any stall owner awaiting a
         // verdict for the failed item is stale, and the successor needs the
@@ -2892,22 +2896,46 @@ class Controller internal constructor(
     }
 
     /**
-     * A playlist or segment refusal Media3 wrapped, as a contract source id.
+     * The HTTP refusal Media3 wrapped inside this error, if there is one.
      *
-     * The plan names `error.cause`; Media3 wraps the loader exception a level
-     * or two deeper on some paths, so the chain is walked to a small bounded
-     * depth rather than only its first link. Classification is by status, as
-     * §3.5 gives it — the body only supplies the sentence and the position, and
-     * a body that is not a legible refusal supplies neither.
+     * One walk, two readers: `mediaRefusal` wants the body and the status to
+     * build a surface source id, `httpResponseCode` wants only the status to
+     * decide whether another node is worth trying. The depth bound is the
+     * original's and stays: Media3 wraps the loader exception a level or two
+     * deep, four links covers every shape seen, and an unbounded walk over a
+     * cyclic cause chain does not return.
      */
-    private fun mediaRefusal(error: PlaybackException): MediaRefusal? {
+    private fun invalidResponse(
+        error: PlaybackException,
+    ): HttpDataSource.InvalidResponseCodeException? {
         var cause: Throwable? = error.cause
         var depth = 0
         while (cause != null && cause !is HttpDataSource.InvalidResponseCodeException && depth < 4) {
             cause = cause.cause
             depth += 1
         }
-        val response = cause as? HttpDataSource.InvalidResponseCodeException ?: return null
+        return cause as? HttpDataSource.InvalidResponseCodeException
+    }
+
+    /**
+     * The HTTP status this error carries, or `null` when it never got a
+     * response. `nodeFailoverEligible` turns it into the failover decision.
+     */
+    private fun httpResponseCode(error: PlaybackException): Int? =
+        invalidResponse(error)?.responseCode
+
+    /**
+     * A playlist or segment refusal Media3 wrapped, as a contract source id.
+     *
+     * The plan names `error.cause`; Media3 wraps the loader exception a level
+     * or two deeper on some paths, so `invalidResponse` walks the chain to a
+     * small bounded depth rather than reading only its first link.
+     * Classification is by status, as
+     * §3.5 gives it — the body only supplies the sentence and the position, and
+     * a body that is not a legible refusal supplies neither.
+     */
+    private fun mediaRefusal(error: PlaybackException): MediaRefusal? {
+        val response = invalidResponse(error) ?: return null
         val body = try {
             String(response.responseBody, Charsets.UTF_8)
         } catch (_: Exception) {

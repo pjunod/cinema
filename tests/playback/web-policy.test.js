@@ -6241,6 +6241,102 @@ test("the final manifest-send gate rejects pause, stale ownership, deadline and 
   assert.equal(decide({ dispatches: 16 }), "exhaust");
 });
 
+// ---- D-02 M6: node failover is gated on the response code -------------------
+//
+// `nodeFailoverEligible` is Kotlin. `LadderVerdictTest` (PlaybackPolicyTest.kt)
+// executes the predicate under `make android-test`; this file runs where no
+// Android toolchain may exist, so these are source assertions: weaker than
+// running the predicate, but each is the line a refactor would quietly drop,
+// and the call-site cases are the only pin on the gate in `onPlayerError`,
+// which no JVM test reaches — delete the gate and they fail here.
+const ANDROID_CONTROLLER = fs.readFileSync(
+  path.join(__dirname, "../../clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
+  "utf8",
+);
+
+test("the Android failover predicate reads the status and defaults to refusing", () => {
+  const body = ANDROID_POLICY.match(
+    /internal fun nodeFailoverEligible\(\s*errorCode: Int,\s*responseCode: Int\?,?\s*\): Boolean = when \{([\s\S]*?)\n\}/,
+  );
+  assert.ok(body, "PlaybackPolicy.kt no longer declares nodeFailoverEligible");
+  const branches = body[1]
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("//"));
+
+  // Order is load-bearing: the allowlist decides first, so widening the status
+  // rules can never admit a code the 2xxx family excludes.
+  assert.equal(
+    branches[0],
+    "!isTransportPlaybackError(errorCode) -> false",
+    "the transport allowlist must remain the first question",
+  );
+  assert.equal(
+    branches[1],
+    "responseCode == null -> true",
+    "a failure that never got a response is the case failover exists for",
+  );
+  assert.equal(
+    branches[2],
+    "responseCode in 500..599 -> responseCode != 501 && responseCode != 505",
+    "only 5xx is worth a peer, and not the two that state what the build is",
+  );
+  // The dangerous mutation is `else -> true`: it restores exactly the old
+  // behaviour (every 2004 walks the ingress list) while looking gated.
+  assert.equal(
+    branches[3],
+    "else -> false",
+    "anything not named above must be terminal, not a failover",
+  );
+  assert.equal(branches.length, 4, "the policy is these four branches");
+});
+
+test("the Android failover call site actually consults the status", () => {
+  assert.match(
+    ANDROID_CONTROLLER,
+    /if \(nodeFailoverEligible\(error\.errorCode, httpResponseCode\(error\)\) &&\s*\n\s*retryMediaOnNextNode\(error\)/,
+    "onPlayerError must gate the failover on the predicate AND pass it the "
+      + "status; a call that passes null would silently restore the old behaviour",
+  );
+  assert.ok(
+    !/isTransportPlaybackError\(error\.errorCode\) && retryMediaOnNextNode/.test(
+      ANDROID_CONTROLLER,
+    ),
+    "no failover may go round the status gate",
+  );
+  // One walk of the cause chain, bounded, shared by the refusal adapter and
+  // the status accessor. An unbounded walk over a cyclic chain does not return.
+  assert.match(
+    ANDROID_CONTROLLER,
+    /private fun httpResponseCode\(error: PlaybackException\): Int\? =\s*\n\s*invalidResponse\(error\)\?\.responseCode/,
+    "the status must come from the shared bounded cause-chain walk",
+  );
+  assert.match(
+    ANDROID_CONTROLLER,
+    /depth < 4/,
+    "the cause-chain walk must stay bounded",
+  );
+  assert.match(
+    ANDROID_CONTROLLER,
+    /http_status=\$\{httpResponseCode\(error\) \?: "none"\}/,
+    "playback_transport_failover must carry the status that admitted it, so a "
+      + "failover storm can be attributed after the fact",
+  );
+});
+
+test("the Android policy module stays free of ExoPlayer and Android", () => {
+  // Why `httpResponseCode` lives in Controller.kt and not beside the predicate
+  // it feeds: PlaybackPolicy.kt's own header promises these are pure functions
+  // "free of ExoPlayer and Android", which is what keeps them testable on the
+  // JVM without a device. Pulling `HttpDataSource.InvalidResponseCodeException`
+  // in to shorten one call site would cost that.
+  assert.ok(
+    !/\bandroidx\./.test(ANDROID_POLICY),
+    "PlaybackPolicy.kt must not reference androidx; the Media3-typed half of "
+      + "M6 belongs at the call site",
+  );
+});
+
 // Drained last, in registration order, after every synchronous case has run.
 (async () => {
   for (const [name, run] of ASYNC_TESTS) {

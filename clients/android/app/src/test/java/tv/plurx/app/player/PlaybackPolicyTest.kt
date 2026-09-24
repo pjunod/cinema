@@ -457,4 +457,54 @@ class LadderVerdictTest {
             ),
         )
     }
+
+    // ---- node failover is gated on the status the failure carried -----------
+
+    @Test
+    fun aConnectionLevelTransportFailureTriesAnotherNode() {
+        // No response at all: refused, reset, timed out. Another ingress is
+        // exactly what this is for.
+        assertTrue(nodeFailoverEligible(2001, null))
+        assertTrue(nodeFailoverEligible(2002, null))
+        assertTrue(nodeFailoverEligible(2004, null))
+    }
+
+    @Test
+    fun aServerErrorTriesAnotherNodeExceptWhenEveryNodeWouldSayIt() {
+        assertTrue(nodeFailoverEligible(2004, 500))
+        assertTrue(nodeFailoverEligible(2004, 502))
+        assertTrue(nodeFailoverEligible(2004, 503))
+        // 501 and 505 are statements about the build and the protocol, and
+        // every node runs the same build.
+        assertFalse(nodeFailoverEligible(2004, 501))
+        assertFalse(nodeFailoverEligible(2004, 505))
+    }
+
+    @Test
+    fun aClientErrorIsTerminalAndNeverWalksTheIngressList() {
+        // The regression this closes: every one of these used to spend a full
+        // player prepare per node before the viewer saw the same error.
+        assertFalse(nodeFailoverEligible(2004, 401))
+        assertFalse(nodeFailoverEligible(2004, 403))
+        assertFalse(nodeFailoverEligible(2004, 404))
+        assertFalse(nodeFailoverEligible(2004, 409))
+        assertFalse(nodeFailoverEligible(2004, 410))
+        assertFalse(nodeFailoverEligible(2004, 416))
+    }
+
+    @Test
+    fun aNonTransportErrorIsNeverEligibleWhateverTheStatus() {
+        // The allowlist still decides first; the status only narrows it.
+        assertFalse(nodeFailoverEligible(3001, 500))
+        assertFalse(nodeFailoverEligible(4001, null))
+        assertFalse(nodeFailoverEligible(ERROR_CODE_BEHIND_LIVE_WINDOW, 503))
+    }
+
+    @Test
+    fun a2xxOr3xxStatusIsNotAFailoverEither() {
+        // Media3 raises 2004 for any non-2xx, but a status outside 5xx is the
+        // same answer everywhere, so the `else` branch owns it.
+        assertFalse(nodeFailoverEligible(2004, 304))
+        assertFalse(nodeFailoverEligible(2004, 302))
+    }
 }

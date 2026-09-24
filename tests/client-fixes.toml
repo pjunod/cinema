@@ -2355,3 +2355,27 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "/// Interruption state, deliberately NOT `@Published`."
 test = "tests/operations/test_playback_surface_fence.py"
 test_anchor = "def test_the_player_controllers_published_surface_inventory_is_pinned(self):"
+
+[[fixes]]
+# `onPlayerError` gated the node failover on the error CODE alone, and 2004 is
+# raised for any non-2xx, so a 404 on an ended session, a 401, a 409 and a 416
+# each cost a full player prepare on every ingress before the viewer saw the
+# same error. The comment on 2004 claimed a 4xx was "filtered at the call
+# site"; nothing filtered anything, which is the drift review row D3 named.
+#
+# The correction is a predicate that reads the status the exception carried,
+# with the transport allowlist still asked FIRST so the status rules can only
+# ever narrow the set, never widen it. The anchored source line is the
+# `else -> false` fall-through, because the mutation that matters is flipping
+# it to `true`: that restores the old walk-every-node behaviour while the
+# function still looks gated, and a reviewer skimming the diff would not catch
+# it. No Android toolchain runs in this repository's suites, so the anchored
+# test is the Node policy test that reads the Kotlin back and pins all four
+# branches AND their order; the Kotlin cases beside it in PlaybackPolicyTest.kt
+# have not been executed anywhere.
+id = "android.node-failover-is-gated-on-the-response-code"
+commits = ["da2409ba8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackPolicy.kt"
+source_anchor = "internal fun nodeFailoverEligible(errorCode: Int, responseCode: Int?): Boolean = when {"
+test = "tests/playback/web-policy.test.js"
+test_anchor = "the Android failover predicate reads the status and defaults to refusing"
