@@ -941,7 +941,18 @@ pattern = "ServingAuthority"
 # bytes. They project the always-ready authority every other fixture uses; the
 # one test that proves lost authority cancels the sinks builds a real
 # `ServingFence` instead. No production serving lease is added.
-expected_occurrences = 27
+# 27 -> 32 (measured) with L-03 M1: five test-only references in
+# `live_tv::dvr::tests` -- the shared-transport manager fixture's
+# always-ready authority and four fan-out cases that pass
+# `ServingAuthority::always_ready()` to `pump_tuner_fanout`. The shared
+# transport projects the same existing authority the DVR transport already
+# did (its per-chunk `is_current` check); no new authority is created.
+# 32 -> 34 (measured) with the L-03 review round: two test-only
+# `ServingAuthority::always_ready()` in `live_tv::dvr::tests`, for the
+# re-probe case and the full-rate prefix case, each passed to
+# `pump_tuner_fanout` exactly as the M1 fan-out cases do. No production
+# authority is added or projected differently.
+expected_occurrences = 34
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -1966,7 +1977,25 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # (`oneshot` always polls a body to its end). The task owns the listener and
 # nothing else; it ends with the test's runtime. No timer, no process, no
 # producer.
-expected_occurrences = 575
+# 575 -> 580 (measured) with L-03 M1: five test-only `tokio::spawn`s in
+# `live_tv::dvr::tests` -- a viewer-feed drain, three fan-out readers run
+# as a transport's worker would be, and one source waiter. Each is joined
+# or ends with its test. Production is unchanged in count: the transport
+# worker and its close hand-off moved from `attach_sink` into
+# `spawn_transport_worker`, which viewer starts now share.
+# 580 -> 587 (measured) with the L-03 review round, all test-only; production
+# is unchanged in count (the fan-out's re-probe is a future polled inside the
+# fan-out task, deliberately not a spawned task, so cancelling and joining the
+# worker still ends everything the transport owns). In `live_tv::tests`: the
+# start-path fixture tuner's accept loop and its per-connection handler (both
+# end when the test's runtime or the client does; the accept loop is aborted
+# on drop), the fixture's 1 Hz settings-observer loop standing in for the
+# node's (aborted on drop, and it ends when the manager is gone), and
+# `spawn_start` running `start_local` as an HTTP handler would (each joined).
+# In `live_tv::dvr::tests`: a fan-out worker and a viewer-feed reader (both
+# joined), and one `std::thread::spawn` racing an attach against retirement
+# (joined each round). No timer, no process, no producer.
+expected_occurrences = 587
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2051,7 +2080,13 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # test returns, and it owns no producer, process, child, timer or lease. The
 # sentinel still sees it, which is the point: the one thing this module may not
 # do is start a rolling owner nobody joins.
-expected_occurrences = 47
+# 47 -> 48 (measured) with L-03 M3: one test-only `command.spawn()` in
+# `live_tv::caption_audit_tests::run_live_graph`, which runs the production
+# live FFmpeg argv on a generated caption fixture. The child is
+# `kill_on_drop`, its stdin is written and closed in the same `join!` that
+# awaits `wait_with_output` under a 180 s timeout, so it cannot outlive the
+# test. No producer, no session, nothing registered.
+expected_occurrences = 48
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2632,7 +2667,32 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # wait is the assertion rather than a wait for somebody else's work. It sits
 # inside `mod tests`, it is bounded, and it owns no producer, no process, no
 # child and no recovery decision.
-expected_occurrences = 878
+# 878 -> 880 (measured) with L-03 M3: two test-only `tokio::time::timeout`
+# calls in `live_tv::caption_audit_tests` (`media_command` and
+# `run_live_graph`), each bounding one awaited FFmpeg/ffprobe child to
+# 180 s. Neither is a timer anything else observes.
+# 880 -> 889 (measured) with L-03 M1. Production +1: the viewer pump
+# (`pump_viewer_feed`) keeps one `TUNER_READ_TIMEOUT` stdin write in place
+# of `pump_tuner_stream`'s three (its tuner read moved to the shared
+# fan-out, which already had one), -2; the transport's wait for its first
+# consumer polls with a 250 ms `sleep`, +1; a viewer's wait for its
+# transport's probe is bounded by `sleep_until` its start deadline, +1; a
+# start that waits for a closing transport bounds it with `timeout_at`,
+# +1. Each bounds one owned wait; none creates a producer. Tests +8: the
+# endless-tuner fixture's pacing `sleep` and the shared-transport cases'
+# settling sleeps and join timeouts.
+# 889 -> 900 (measured) with the L-03 review round. Production net 0: the
+# viewer's start-deadline `sleep_until` moved with the wait into
+# `DvrTransport::source_for_viewer`, which now also waits for a re-probe
+# under the same bound; the fan-out's re-probe adds no timer (its sample is
+# bounded by `SOURCE_PREFIX_TIME` read off the chunks it already receives,
+# and the probe keeps `probe_live_source`'s own `SOURCE_PROBE_TIME`). Tests
+# +11: the fixture tuner's 1 ms pacing `sleep` and its one-second lineup-gate
+# `timeout`, the fixture's 1 Hz observer `sleep`, three 10 ms polling sleeps
+# and one 500 ms settling sleep in the start-path cases, three `timeout`s
+# bounding a start's answer, and the busy-tuner fixture's pacing `sleep` in
+# `live_tv::dvr::tests`. Each bounds one test wait.
+expected_occurrences = 900
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2839,7 +2899,14 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # in `plurx-core/src/process/rlimit.rs` and C-08's one in
 # `plurxd/src/panics.rs`, each reviewed above. Disjoint files; the merge
 # itself added no occurrence.
-expected_occurrences = 155
+# 155 -> 160 (measured) with L-03 M3: five test-only commands in
+# `live_tv::caption_audit_tests` -- the fixture's MPEG-2 generation and
+# mux, the ffprobe that exports `cc_data`, the H.264 copy-route source,
+# and the production live argv rebuilt in `run_live_graph` (same program,
+# arguments and cleared environment as `live_ffmpeg_command_for_input`).
+# Each is awaited to completion under a 180 s timeout with `kill_on_drop`;
+# none is a producer and none is in a shipped binary.
+expected_occurrences = 160
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3172,7 +3239,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # C-07 and C-08 reads are different call sites in `plurxd/src/http/mod.rs`
 # (the façade census against the request-metrics middleware and their own
 # tests); the merge itself added no occurrence.
-expected_occurrences = 367
+# 367 -> 369 (measured) with L-03 M3: the two launches of the commands
+# described under process-command-construction -- `media_command`'s
+# `.output()` and `run_live_graph`'s `.spawn()` -- both test-only and
+# awaited to completion.
+expected_occurrences = 369
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3284,7 +3355,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 379
+# 379 -> 381 (measured) with the L-03 review round: two test-only
+# `std::sync::Barrier::wait` calls in `live_tv::dvr::tests`
+# (`retirement_is_atomic_against_a_consumer_attaching` lines its two threads
+# up each round). The pattern matches the method name; neither is a process.
+expected_occurrences = 381
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -3401,7 +3476,11 @@ pattern = "kill_on_drop\\s*\\("
 # self-test's shutdown drops is killed with it. The index pass's own child,
 # which now also carries the ride-along's tee, was already `kill_on_drop` and
 # is unchanged.
-expected_occurrences = 82
+# 82 -> 84 (measured) with L-03 M3: `media_command` and `run_live_graph` in
+# `live_tv::caption_audit_tests`, so an FFmpeg child whose 180 s timeout
+# fires, or whose test panics, is killed rather than left holding a
+# hardware encoder the next audit run needs.
+expected_occurrences = 84
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
