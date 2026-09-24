@@ -2379,3 +2379,27 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackPolicy.k
 source_anchor = "internal fun nodeFailoverEligible(errorCode: Int, responseCode: Int?): Boolean = when {"
 test = "tests/playback/web-policy.test.js"
 test_anchor = "the Android failover predicate reads the status and defaults to refusing"
+
+[[fixes]]
+# A-04's D5, and the one row in this ledger whose subject is a deletion. The
+# repository owner decided on 2026-09-23 to revive the stall-reopen wire and
+# delete the Apple helper that minted onto it, so this commit removes both
+# `stallReopenIntent` overloads. Neither had a production call site, so there
+# is no behaviour to assert the absence of and no new test could be written:
+# the evidence is that the symbol is gone from `clients/apple/` entirely and
+# that the wire it minted onto is not.
+#
+# The source anchor is the corrected `PlayerOpenIntent` doc comment, which is
+# exactly what a revival would have to delete: it states that nothing in the
+# target constructs `.stallReopen` and says why the case, the ticket,
+# `applyOpenIntent`'s binding and `unboundStallRetry` were kept anyway. The
+# test anchor is the delivery-watchdog floor test the same commit corrected —
+# one of its assertions was the minter's fourth call site, and its name and
+# doc comment now state what it actually proves rather than a ladder step it
+# no longer asserts.
+id = "apple.stall-ticket-minter-deleted-wire-retained"
+commits = ["d49a079b8"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "`.stallReopen` is the bound half of the wire and **nothing in this target"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testTheDeliveryWatchdogIsBoundedByItsFloorAndStopsWithItsOwnMessage()"

@@ -6337,6 +6337,169 @@ test("the Android policy module stays free of ExoPlayer and Android", () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// The shared Auto-quality policy fixture (A-04 / D1).
+//
+// `tests/playback/auto-quality-policy.json` is one file, read by three runners:
+// this one today, and a Swift and a JVM runner the build plan adds. It exists
+// so "the same policy" is a checkable claim rather than three codebases that
+// happen to spell 1.8 the same way this week.
+//
+// The rule that makes it honest: a case may carry `web_current` beside
+// `expect` when the shipped browser and the design disagree. The runner then
+// asserts `web_current` — so the suite stays green and the disagreement stays
+// on the page — and requires a `finding` saying what disagrees and who settles
+// it. A green run of this file proves the browser still behaves as recorded.
+// It does not enable anything on any platform (design section 5.4).
+// ---------------------------------------------------------------------------
+const autoQuality = require("./auto-quality-policy.json");
+
+// Keys `decideRung` actually returns. An expectation naming anything else is
+// describing a policy output that does not exist yet, which is only allowed on
+// a case that has already declared itself a disagreement.
+const AUTO_DECISION_KEYS = new Set([
+  "height", "reason", "emergency", "action", "evidence", "mildSamples",
+  "upgradeSinceMs",
+]);
+
+// Design section 3.5's table, verbatim in its first column. Pinned here and
+// not read from the fixture, because a fixture that dropped a row would
+// otherwise silently stop covering it.
+const VIEWER_STATES_SECTION_3_5 = [
+  "Original", "Manual rung", "Paused", "Background / PiP", "HDR fidelity",
+  "A stall-scoped control verdict",
+];
+
+// Design section 8.1's tick guards, in the order `autoControllerTick` applies
+// them. Pinned here rather than read from the fixture for the same reason as
+// the table above: a fixture that dropped a row would otherwise silently stop
+// pinning the guard.
+const TICK_GUARDS_SECTION_8_1 = [
+  "playbackOwnsAttachedMedia(p)", "SERVER.playback_auto_abr",
+  "qualityForce()!=='auto'", "!p.started", "v.paused", "p.abr.switching",
+  "p.autoFallbackInFlight",
+  "PLAYER!==p||p.mediaAttachment!==attachment||p.sessionId!==session||p.streamId!==stream",
+];
+
+test("the Auto-quality fixture's defaults are the browser's own constants", () => {
+  assert.equal(autoQuality.schema, 1);
+  assert.deepEqual(
+    autoQuality.defaults,
+    {...policy.AUTO_DEFAULTS},
+    "the fixture ships AUTO_DEFAULTS; tuning one without the other would hand " +
+      "the native runners a number the browser does not use",
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(policy.AUTO_DEFAULTS, "switchBudgetPerHour"),
+    false,
+    "switchBudgetPerHour is a proposal (design 3.4, open question 7.3) and " +
+      "must stay in proposed_defaults until a shaped trace justifies it",
+  );
+  assert.equal(autoQuality.proposed_defaults.switchBudgetPerHour, 6);
+});
+
+test("every evidence class and every section 3.5 row has at least one fixture case", () => {
+  for (const cause of autoQuality.causes) {
+    assert.ok(
+      autoQuality.cases.some((item) => item.name.startsWith(`${cause}: `)),
+      `design section 3.2 row "${cause}" has no case`,
+    );
+  }
+  for (const state of VIEWER_STATES_SECTION_3_5) {
+    assert.ok(
+      autoQuality.controller_gates.some((row) => row.viewer_state === state),
+      `design section 3.5 row "${state}" has no controller gate`,
+    );
+  }
+});
+
+test("the Auto-quality fixture drives decideRung, and records every disagreement", () => {
+  const names = new Set();
+  for (const item of autoQuality.cases) {
+    assert.ok(!names.has(item.name), `duplicate case name: ${item.name}`);
+    names.add(item.name);
+    const decision = policy.decideRung({
+      ...autoQuality.sample_defaults,
+      ...item.sample,
+      ladder: autoQuality.ladder,
+    });
+    if (item.web_current) {
+      assert.notDeepEqual(
+        item.web_current,
+        item.expect,
+        `${item.name}: web_current identical to expect is not a disagreement`,
+      );
+      assert.ok(
+        typeof item.finding === "string" && item.finding.length >= 200,
+        `${item.name}: a recorded disagreement needs a finding that says what ` +
+          "disagrees and who settles it",
+      );
+    }
+    const wanted = item.web_current || item.expect;
+    for (const [key, value] of Object.entries(wanted)) {
+      if (!AUTO_DECISION_KEYS.has(key)) {
+        assert.ok(
+          item.web_current,
+          `${item.name}: "${key}" is not an AutoDecision field decideRung ` +
+            "returns, so this case must declare itself a disagreement",
+        );
+        continue;
+      }
+      if (key === "evidence") {
+        for (const [field, expected] of Object.entries(value)) {
+          assert.equal(
+            decision.evidence && decision.evidence[field], expected,
+            `${item.name}: evidence.${field}`,
+          );
+        }
+        continue;
+      }
+      assert.deepEqual(decision[key], value, `${item.name}: ${key}`);
+    }
+  }
+});
+
+test("every controller gate the fixture names is still in the shipped tick", () => {
+  const tick = shippedSource("autoControllerTick");
+  // Each gate is asserted on its own side of the awaited health poll. A whole-
+  // function substring match let `if(p.autoFallbackInFlight) return;` be
+  // deleted with the suite green, because the post-poll re-check still spells
+  // the same expression.
+  const poll = "await pollSessionHealth(";
+  const at = tick.indexOf(poll);
+  assert.ok(at > 0 && tick.indexOf(poll, at + 1) < 0,
+    "autoControllerTick must await exactly one health poll");
+  const sides = { before_poll: tick.slice(0, at), after_poll: tick.slice(at) };
+  const pinned = new Set();
+  for (const row of autoQuality.controller_gates) {
+    if (!row.viewer_state) continue;
+    if (row.web_gate == null) {
+      assert.ok(
+        typeof row.finding === "string" && row.finding.length >= 200,
+        `${row.viewer_state}: a gate the browser does not have needs a finding`,
+      );
+      continue;
+    }
+    const phases = row.web_phase === "both"
+      ? ["before_poll", "after_poll"]
+      : [row.web_phase];
+    for (const phase of phases) {
+      assert.ok(Object.prototype.hasOwnProperty.call(sides, phase),
+        `${row.viewer_state}: web_phase must be before_poll, after_poll or both`);
+      assert.ok(
+        sides[phase].includes(row.web_gate),
+        `${row.viewer_state}: autoControllerTick no longer contains ${row.web_gate} ${phase.replace("_", " ")}`,
+      );
+    }
+    pinned.add(row.web_gate);
+  }
+  for (const guard of TICK_GUARDS_SECTION_8_1) {
+    assert.ok(pinned.has(guard), `design section 8.1 guard ${guard} has no fixture row`);
+  }
+  assert.equal(pinned.size, TICK_GUARDS_SECTION_8_1.length,
+    "a fixture gate row names a guard design section 8.1 does not list");
+});
+
 // Drained last, in registration order, after every synchronous case has run.
 (async () => {
   for (const [name, run] of ASYNC_TESTS) {
