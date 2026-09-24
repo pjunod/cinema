@@ -14,6 +14,17 @@ markers in each current parent with the children named below, removes only
 the module plumbing represented by those markers, and compares the complete
 reconstructed parent byte-for-byte with BASE. The segment-index recipe also
 checks the exact count of parent-visibility additions before removing them.
+``--moves`` proves the S-14 continuation moves (M2/T3 onward) against the
+continuation's branch base. Each row of ``MOVES`` names a parent, a marker
+and the child that marker stands for: the child's exact ``use super::*;``
+header is dropped, every ``pub(super) `` it gained is removed (and counted
+against the row's declared number), the result replaces the marker block,
+and the reconstructed parent is passed through ``rustfmt`` on stdin (the
+added visibility pushes some signatures past the line limit, so rustfmt
+wrapped them; formatting the reconstruction unwraps exactly those) before a
+byte-for-byte comparison with the base parent. The base parent is itself
+checked to be a rustfmt fixed point so formatting cannot hide a difference.
+
 This one-shot helper is deleted before the plan PR is promoted.
 """
 
@@ -161,6 +172,51 @@ def plan_reconstructions() -> dict[str, str]:
     return {transcode_path: transcode, hls_path: hls, vod_path: vod}
 
 
+MOVES: list[tuple[str, str, str, int]] = [
+    # (parent, marker, child relative to the parent's directory, pub(super) additions)
+    ("crates/plurxd/src/transcode.rs", "flow", "transcode/rolling/flow.rs", 50),
+    ("crates/plurxd/src/transcode.rs", "spawn", "transcode/producer/spawn.rs", 20),
+    ("crates/plurxd/src/transcode.rs", "prepublication", "transcode/rolling/prepublication.rs", 44),
+    ("crates/plurxd/src/transcode.rs", "retirement", "transcode/rolling/retirement.rs", 37),
+    ("crates/plurxd/src/transcode.rs", "prepublication-executor", "transcode/producer/prepublication_executor.rs", 7),
+    ("crates/plurxd/src/transcode.rs", "attempt-child", "transcode/producer/attempt_child.rs", 38),
+]
+
+CHILD_HEADER = "use super::*;\n\n"
+
+
+def rustfmt(text: str) -> str:
+    return subprocess.run(
+        ["rustfmt", "--edition", "2021", "--emit", "stdout"],
+        check=True,
+        input=text.encode("utf-8"),
+        stdout=subprocess.PIPE,
+    ).stdout.decode("utf-8")
+
+
+def moves_reconstructions() -> tuple[dict[str, str], list[str]]:
+    parents: dict[str, str] = {}
+    report: list[str] = []
+    for parent, marker, child_rel, expected in MOVES:
+        text = parents.get(parent) or read(parent)
+        child_path = str(pathlib.Path(parent).parent / child_rel)
+        child = read(child_path)
+        if not child.startswith(CHILD_HEADER):
+            raise SystemExit(f"{child_path}: lost its exact structural header")
+        child = child[len(CHILD_HEADER) :]
+        added = child.count("pub(super) ")
+        if added != expected:
+            raise SystemExit(
+                f"{child_path}: pub(super) additions expected {expected}, got {added}"
+            )
+        child = child.replace("pub(super) ", "")
+        parents[parent] = replace_marker(text, marker, child)
+        report.append(
+            f"{child_path}: {child.count(chr(10))} lines, {added} pub(super) additions"
+        )
+    return parents, report
+
+
 def baseline(base: str, source: str) -> str:
     return subprocess.run(
         ["git", "show", f"{base}:{source}"],
@@ -199,6 +255,28 @@ def main() -> int:
             )
             else 1
         )
+
+    if len(sys.argv) == 3 and sys.argv[2] == "--moves":
+        base = sys.argv[1]
+        reconstructions, report = moves_reconstructions()
+        ok = True
+        for source, current in reconstructions.items():
+            original = baseline(base, source)
+            if rustfmt(original) != original:
+                print(f"{source}: base is not a rustfmt fixed point")
+                ok = False
+                continue
+            raw_same = current == original
+            ok &= compare(
+                base,
+                source,
+                rustfmt(current),
+                "marker-expanded continuation split tree"
+                + ("" if raw_same else " after rustfmt"),
+            )
+        for line in report:
+            print(line)
+        return 0 if ok else 1
 
     if len(sys.argv) < 4:
         print(
