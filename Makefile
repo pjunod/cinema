@@ -1796,10 +1796,35 @@ android-release: android-image ## Build the SIGNED Android release APK (needs PL
 	  $(ANDROID_IMAGE) ./gradlew --no-daemon :app:assembleRelease
 	@echo "→ clients/android/app/build/outputs/apk/release/app-release.apk"
 
+# Publishing keeps the R8 mapping of every build it serves (plan
+# ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD §3.5, F-android-12): the
+# release APK is obfuscated, so a device stack trace means nothing without the
+# `mapping.txt` of the exact build that produced it, and the next Gradle run
+# overwrites that file. It is kept beside the APK as
+# `plurx-android-<versionCode>.mapping.txt`, the versionCode read from the
+# build's own output-metadata.json rather than from build.gradle.kts. The
+# mapping is written before the APK is replaced, so a served APK always has
+# one; a republish of the same versionCode with a different mapping moves the
+# earlier one aside instead of overwriting it. Only
+# /download/plurx-android.apk is served, so the mappings stay private.
+ANDROID_OUTPUTS ?= clients/android/app/build/outputs
+
 .PHONY: android-publish
 android-publish: android-release ## Build the signed APK + serve it from the web UI (ANDROID_DATA_DIR=/path/to/data)
 	@test -n "$(ANDROID_DATA_DIR)" || { echo "set ANDROID_DATA_DIR to the server's data_dir, e.g. make android-publish ANDROID_DATA_DIR=~/.local/share/plurx"; exit 1; }
-	cp clients/android/app/build/outputs/apk/release/app-release.apk "$(ANDROID_DATA_DIR)/plurx-android.apk"
+	@metadata="$(ANDROID_OUTPUTS)/apk/release/output-metadata.json"; \
+	  mapping="$(ANDROID_OUTPUTS)/mapping/release/mapping.txt"; \
+	  code="$$(sed -n 's/.*"versionCode": *\([0-9][0-9]*\).*/\1/p' "$$metadata" | head -1)"; \
+	  test -n "$$code" || { echo "no versionCode in $$metadata; nothing published"; exit 1; }; \
+	  test -s "$$mapping" || { echo "no R8 mapping at $$mapping; nothing published (a release APK without its mapping cannot be de-obfuscated)"; exit 1; }; \
+	  kept="$(ANDROID_DATA_DIR)/plurx-android-$$code.mapping.txt"; \
+	  if [ -e "$$kept" ] && ! cmp -s "$$mapping" "$$kept"; then \
+	    aside="$$kept.$$(date +%Y%m%dT%H%M%S)"; \
+	    mv "$$kept" "$$aside" && echo "versionCode $$code was published before with a different build; its mapping is kept as $$aside"; \
+	  fi; \
+	  cp "$$mapping" "$$kept.tmp" && mv "$$kept.tmp" "$$kept" && \
+	  cp "$(ANDROID_OUTPUTS)/apk/release/app-release.apk" "$(ANDROID_DATA_DIR)/plurx-android.apk" && \
+	  echo "R8 mapping for versionCode $$code -> $$kept"
 	@echo "Published -> $(ANDROID_DATA_DIR)/plurx-android.apk (served at /download/plurx-android.apk, no restart needed)"
 	@echo "NOTE: the signing key changed with the debug->release switch; the first"
 	@echo "      install on each device needs an 'adb uninstall tv.plurx.app' first."

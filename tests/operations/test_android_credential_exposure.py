@@ -414,8 +414,9 @@ class AndroidReleaseMakeTargetCase(unittest.TestCase):
     """`make android-release` / `android-publish`, run against a `docker` stub.
 
     These run the real recipes. `docker` is replaced by a stub on `PATH` that
-    records its arguments, so what is asserted is what the recipe actually
-    hands Docker.
+    records its arguments, and `ANDROID_OUTPUTS` points `android-publish` at a
+    fabricated build tree, so what is asserted is what the recipe actually
+    hands Docker and actually leaves in the data directory.
     """
 
     def setUp(self) -> None:
@@ -453,6 +454,39 @@ class AndroidReleaseMakeTargetCase(unittest.TestCase):
             timeout=60,
         )
 
+    def _build(self, version_code: int, apk: bytes, mapping: bytes | None) -> None:
+        release = self.outputs / "apk/release"
+        release.mkdir(parents=True, exist_ok=True)
+        (release / "app-release.apk").write_bytes(apk)
+        (release / "output-metadata.json").write_text(
+            "{\n"
+            '  "version": 3,\n'
+            '  "variantName": "release",\n'
+            '  "elements": [\n'
+            "    {\n"
+            '      "type": "SINGLE",\n'
+            f'      "versionCode": {version_code},\n'
+            '      "versionName": "0.3.0",\n'
+            '      "outputFile": "app-release.apk"\n'
+            "    }\n"
+            "  ]\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        mapping_file = self.outputs / "mapping/release/mapping.txt"
+        mapping_file.parent.mkdir(parents=True, exist_ok=True)
+        if mapping is None:
+            mapping_file.unlink(missing_ok=True)
+        else:
+            mapping_file.write_bytes(mapping)
+
+    def _publish(self) -> subprocess.CompletedProcess[str]:
+        return self._make(
+            "android-publish",
+            f"ANDROID_OUTPUTS={self.outputs}",
+            f"ANDROID_DATA_DIR={self.data}",
+        )
+
     def test_a_relative_keystore_reaches_docker_as_an_absolute_bind_path(self) -> None:
         """Docker reads a non-absolute `-v` source as a named volume.
 
@@ -479,6 +513,52 @@ class AndroidReleaseMakeTargetCase(unittest.TestCase):
             os.path.realpath(source),
             os.path.realpath(self.tmp / "plurx-upload.jks"),
         )
+
+    def test_publish_keeps_each_builds_mapping_keyed_by_version_code(self) -> None:
+        """Plan §3.5 "Diagnostics retained" (F-android-12).
+
+        The next Gradle run overwrites `mapping/release/mapping.txt`, so the
+        mapping of a published build survives only if publishing keeps it.
+        """
+        self._build(120, b"apk-120", b"mapping-120")
+        first = self._publish()
+        self.assertEqual(first.returncode, 0, first.stdout)
+        self._build(121, b"apk-121", b"mapping-121")
+        second = self._publish()
+        self.assertEqual(second.returncode, 0, second.stdout)
+
+        self.assertEqual((self.data / "plurx-android.apk").read_bytes(), b"apk-121")
+        self.assertEqual(
+            (self.data / "plurx-android-120.mapping.txt").read_bytes(),
+            b"mapping-120",
+            "the earlier build's mapping must survive the next publish",
+        )
+        self.assertEqual(
+            (self.data / "plurx-android-121.mapping.txt").read_bytes(),
+            b"mapping-121",
+        )
+
+    def test_republishing_a_version_code_moves_the_earlier_mapping_aside(self) -> None:
+        """Devices may still run the first build of a reused versionCode."""
+        self._build(120, b"apk-a", b"mapping-a")
+        self.assertEqual(self._publish().returncode, 0)
+        self._build(120, b"apk-b", b"mapping-b")
+        result = self._publish()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(
+            (self.data / "plurx-android-120.mapping.txt").read_bytes(), b"mapping-b"
+        )
+        kept = sorted(self.data.glob("plurx-android-120.mapping.txt.*"))
+        self.assertEqual(len(kept), 1, sorted(p.name for p in self.data.iterdir()))
+        self.assertEqual(kept[0].read_bytes(), b"mapping-a")
+
+    def test_publish_refuses_a_build_without_its_mapping(self) -> None:
+        """A served APK always has its mapping: nothing is published without it."""
+        self._build(120, b"apk-120", None)
+        result = self._publish()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("no R8 mapping", result.stdout)
+        self.assertFalse((self.data / "plurx-android.apk").exists())
 
 
 class ShipPhysicalReleaseVariantCase(unittest.TestCase):
