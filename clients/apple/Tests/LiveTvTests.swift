@@ -1061,7 +1061,10 @@ final class LiveTvTests: XCTestCase {
         )
         XCTAssertNil(controller.surfaceMessage)
         await controller.watch(channel)
-        XCTAssertEqual(controller.message, "Playing live · no recording or rewind")
+        // 014c0ad55 (DVR visibility) dropped "· no recording or rewind":
+        // Live TV records now, so the old suffix was no longer true.
+        XCTAssertEqual(controller.message, "Playing live")
+        XCTAssertTrue(LiveTvView.isSteadyStateMessage(controller.message))
         XCTAssertNil(controller.surfaceMessage, "attach clears stale surface copy")
         controller.togglePause()
         XCTAssertEqual(
@@ -1786,9 +1789,10 @@ final class LiveTvTests: XCTestCase {
         let source = try String(
             contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
             encoding: .utf8)
-        // The mutually exclusive iOS inline, tvOS browse-picture, and
-        // fullscreen sites all hand the element to AVKit.
-        XCTAssertEqual(source.components(separatedBy: "allowsPictureInPicture: true").count - 1, 3,
+        // The mutually exclusive iOS inline, iPad tablet watch panel
+        // (298eced8e), tvOS browse-picture, and fullscreen sites all hand the
+        // element to AVKit.
+        XCTAssertEqual(source.components(separatedBy: "allowsPictureInPicture: true").count - 1, 4,
                        "every live picture surface must allow picture-in-picture")
         XCTAssertFalse(source.contains("allowsPictureInPicture: false"))
         // Entering PiP backgrounds the app. Stopping on that would kill the one
