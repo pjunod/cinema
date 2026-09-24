@@ -1,5 +1,8 @@
 package tv.plurx.app.player
 
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -39,5 +42,13 @@ class PlaybackTransportReserveTest {
         assertFalse(onScreen(isInPip = true))
         assertFalse(onScreen(faulted = true))
         assertTrue(onScreen())
+    }
+
+    @Test
+    fun aTransportThatIsNotOnScreenReservesNothingWhateverWasLastMeasured() {
+        val density = Density(2f)
+        assertEquals(0.dp, playbackTransportReserve(false, 640, density))
+        assertEquals(320.dp, playbackTransportReserve(true, 640, density))
+        assertEquals(PlaybackTransportReserveFallback, playbackTransportReserve(true, 0, density))
     }
 }

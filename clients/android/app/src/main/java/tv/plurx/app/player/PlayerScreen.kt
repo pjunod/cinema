@@ -89,6 +89,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
@@ -1569,6 +1570,7 @@ private fun PlayerContent(
                 transportReserve = playbackTransportReserve(
                     playbackTransportOnScreen(isInPip, controlsVisible, panel, statsMode, blockingFault != null),
                     transportHeightPx,
+                    LocalDensity.current,
                 ),
                 mode = statsMode,
                 onMode = {
@@ -2156,10 +2158,9 @@ internal fun playbackTransportOnScreen(
  * info mode but Mini hides it — the measured height once it has been laid out,
  * and only a floor in the window between the two.
  */
-@Composable
-private fun playbackTransportReserve(transportOnScreen: Boolean, measuredPx: Int): Dp = when {
+internal fun playbackTransportReserve(transportOnScreen: Boolean, measuredPx: Int, density: Density): Dp = when {
     !transportOnScreen -> 0.dp
-    measuredPx > 0 -> with(LocalDensity.current) { measuredPx.toDp() }
+    measuredPx > 0 -> with(density) { measuredPx.toDp() }
     else -> PlaybackTransportReserveFallback
 }
 
@@ -2276,7 +2277,7 @@ private val PlaybackOverlayInset = 12.dp
  * with chips, a context line and a three-line overview it is closer to 318.dp,
  * which is exactly why this is a fallback and not the reserve.
  */
-private val PlaybackTransportReserveFallback = 192.dp
+internal val PlaybackTransportReserveFallback = 192.dp
 private val PlaybackPanelMinHeight = 180.dp
 /**
  * A source value is a run of separator-joined facts, sometimes with a clause
