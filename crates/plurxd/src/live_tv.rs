@@ -1705,10 +1705,18 @@ pub(crate) struct LiveTvMetrics {
     /// exactly once when its attempt ends; recording ids never become labels.
     dvr_sink_failures: [AtomicU64; 3],
     /// Every consistent read of the replicated settings this subsystem makes,
-    /// by outcome. One per second on a running node: the observer loop's. A
-    /// start and a first publication each add one of their own, and nothing
-    /// else reads settings on the Live TV path.
-    settings_reads: [AtomicU64; 2],
+    /// by the site that took it and by outcome, indexed
+    /// `[SettingsReadSite][ok, failed]`. `observer` is the node's 1 Hz
+    /// settings loop: one read per second on every running node, and the only
+    /// read the per-second session fence depends on. `fence` is the direct
+    /// read the start fence and the pre-publication fence each take, so it
+    /// moves with starts rather than with running sessions. `request` is every
+    /// other caller of `LiveTvManager::config` — each public and internal
+    /// Live TV handler (guide, lineup, status, start, stop, ...) and the guide
+    /// refresh paths — so it scales with API traffic, not with viewers. The
+    /// read rate the session fence costs is `observer` + `fence`; the node's
+    /// whole Live TV settings read rate is the sum of all three.
+    settings_reads: [[AtomicU64; 2]; 3],
     /// Session fence ticks by the state of the observation they validated
     /// against: fresh, in grace, expired. Indexed by `FenceFreshness`.
     fence_observations: [AtomicU64; 3],
@@ -1742,8 +1750,8 @@ impl LiveTvMetrics {
         self.stray_evictions.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn observe_settings_read(&self, ok: bool) {
-        self.settings_reads[usize::from(!ok)].fetch_add(1, Ordering::Relaxed);
+    fn observe_settings_read(&self, site: SettingsReadSite, ok: bool) {
+        self.settings_reads[site as usize][usize::from(!ok)].fetch_add(1, Ordering::Relaxed);
     }
 
     /// The series an operator watches after this ships. `expired` must stay at
@@ -1763,15 +1771,24 @@ impl LiveTvMetrics {
         )
     }
 
+    /// `site="observer"` is the one the session fence runs on and should read
+    /// one per second per node; `site="fence"` moves with starts;
+    /// `site="request"` is API traffic and has no fixed rate.
     fn settings_reads_prometheus(&self) -> String {
-        format!(
-            "# HELP plurx_live_tv_settings_reads_total Consistent reads of the replicated Live TV settings, by outcome.\n\
-             # TYPE plurx_live_tv_settings_reads_total counter\n\
-             plurx_live_tv_settings_reads_total{{outcome=\"ok\"}} {}\n\
-             plurx_live_tv_settings_reads_total{{outcome=\"failed\"}} {}\n",
-            self.settings_reads[0].load(Ordering::Acquire),
-            self.settings_reads[1].load(Ordering::Acquire),
-        )
+        let mut out = String::from(
+            "# HELP plurx_live_tv_settings_reads_total Consistent reads of the replicated Live TV settings, by site (observer: the node's 1 Hz loop the session fence validates against; fence: the direct start and pre-publication fences; request: Live TV API handlers and guide refresh) and outcome.\n\
+             # TYPE plurx_live_tv_settings_reads_total counter\n",
+        );
+        for site in SettingsReadSite::ALL {
+            for (index, outcome) in ["ok", "failed"].into_iter().enumerate() {
+                out.push_str(&format!(
+                    "plurx_live_tv_settings_reads_total{{site=\"{}\",outcome=\"{outcome}\"}} {}\n",
+                    site.as_str(),
+                    self.settings_reads[site as usize][index].load(Ordering::Acquire),
+                ));
+            }
+        }
+        out
     }
 
     fn observe_dvr_sink_failure(&self, reason: &'static str) {
@@ -2820,6 +2837,31 @@ struct FenceObservation {
     observed_at: tokio::time::Instant,
 }
 
+/// Which Live TV path took a consistent settings read. Only the label of
+/// `plurx_live_tv_settings_reads_total`; every site takes the same read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsReadSite {
+    /// The node's 1 Hz `settings_observer_loop`, which feeds the session fence.
+    Observer = 0,
+    /// The direct start and pre-publication fences (`ensure_session_fence`).
+    Fence = 1,
+    /// Every other caller of `LiveTvManager::config`: API handlers and the
+    /// guide refresh paths.
+    Request = 2,
+}
+
+impl SettingsReadSite {
+    const ALL: [Self; 3] = [Self::Observer, Self::Fence, Self::Request];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Observer => "observer",
+            Self::Fence => "fence",
+            Self::Request => "request",
+        }
+    }
+}
+
 /// How a session's fence tick found the observation it validated against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FenceFreshness {
@@ -2932,6 +2974,8 @@ pub(crate) struct LiveTvManager {
     /// The one settings observation every live session on this node validates
     /// against, refreshed by `settings_observer_loop`.
     fence: FenceObserver,
+    #[cfg(test)]
+    fail_settings_reads: AtomicBool,
     metrics: Arc<LiveTvMetrics>,
 }
 
@@ -2973,6 +3017,8 @@ impl LiveTvManager {
             scratch_claims: StdMutex::new(HashSet::new()),
             scratch_sweep_gate: tokio::sync::Mutex::new(()),
             fence: FenceObserver::new(Arc::clone(&metrics)),
+            #[cfg(test)]
+            fail_settings_reads: AtomicBool::new(false),
             metrics,
         });
         manager.adopt_persisted_guide();
@@ -3012,14 +3058,39 @@ impl LiveTvManager {
     }
 
     pub(crate) async fn config(&self) -> Result<LiveTvConfig, LiveTvError> {
-        let read = self.store.settings_snapshot().await;
-        self.metrics.observe_settings_read(read.is_ok());
+        self.config_read_at(SettingsReadSite::Request).await
+    }
+
+    /// One consistent read of the replicated settings, counted under `site`.
+    async fn config_read_at(&self, site: SettingsReadSite) -> Result<LiveTvConfig, LiveTvError> {
+        let read = self.settings_snapshot().await;
+        self.metrics.observe_settings_read(site, read.is_ok());
         let snapshot = read.map_err(|error| {
             LiveTvError::DeviceUnavailable(format!("reading live-TV settings: {error}"))
         })?;
         let config = LiveTvConfig::from_snapshot(&snapshot, &self.node_id);
         self.observe_config(&config);
         Ok(config)
+    }
+
+    async fn settings_snapshot(
+        &self,
+    ) -> Result<BTreeMap<String, String>, plurx_core::error::StoreError> {
+        #[cfg(test)]
+        if self.fail_settings_reads.load(Ordering::SeqCst) {
+            return Err(plurx_core::error::StoreError::Database(
+                "injected replicated-settings read failure".to_owned(),
+            ));
+        }
+        self.store.settings_snapshot().await
+    }
+
+    /// Make every settings read on this manager fail until cleared, the way a
+    /// leader failover does, so the fence's failure arm is driven by a real
+    /// failed read rather than by the absence of one.
+    #[cfg(test)]
+    fn test_fail_settings_reads(&self, fail: bool) {
+        self.fail_settings_reads.store(fail, Ordering::SeqCst);
     }
 
     /// Take one consistent observation of the replicated settings and publish
@@ -3030,7 +3101,7 @@ impl LiveTvManager {
     /// store. Nothing here decides that — `FenceObserver::validated` does, on
     /// the age of what this last managed to publish.
     pub(crate) async fn observe_fence(&self) {
-        match self.config().await {
+        match self.config_read_at(SettingsReadSite::Observer).await {
             Ok(config) => self.fence.publish(config),
             Err(error) => {
                 // Nothing is published: the previous observation stays, and
@@ -5907,7 +5978,7 @@ async fn ensure_session_fence(
             crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
         ));
     }
-    let config = manager.config().await?;
+    let config = manager.config_read_at(SettingsReadSite::Fence).await?;
     validate_start_config(&config, &session.request, &manager.node_id)
 }
 
@@ -8630,11 +8701,18 @@ mod tests {
             .expect("seed live-TV settings");
     }
 
-    fn settings_reads(manager: &LiveTvManager) -> (u64, u64) {
+    fn settings_reads(manager: &LiveTvManager, site: SettingsReadSite) -> (u64, u64) {
         (
-            manager.metrics.settings_reads[0].load(Ordering::Acquire),
-            manager.metrics.settings_reads[1].load(Ordering::Acquire),
+            manager.metrics.settings_reads[site as usize][0].load(Ordering::Acquire),
+            manager.metrics.settings_reads[site as usize][1].load(Ordering::Acquire),
         )
+    }
+
+    fn all_settings_reads(manager: &LiveTvManager) -> (u64, u64) {
+        SettingsReadSite::ALL
+            .into_iter()
+            .map(|site| settings_reads(manager, site))
+            .fold((0, 0), |(ok, failed), (o, f)| (ok + o, failed + f))
     }
 
     fn fence_observations(manager: &LiveTvManager) -> (u64, u64, u64) {
@@ -8658,7 +8736,7 @@ mod tests {
         let second = test_session(root.path().join("live-tv-b"), 1);
 
         manager.observe_fence().await;
-        let (ok_before, failed_before) = settings_reads(&manager);
+        let (ok_before, failed_before) = all_settings_reads(&manager);
         assert_eq!((ok_before, failed_before), (1, 0));
 
         tokio::time::pause();
@@ -8671,7 +8749,7 @@ mod tests {
                 .expect("and so does the second");
         }
         assert_eq!(
-            settings_reads(&manager),
+            all_settings_reads(&manager),
             (ok_before, failed_before),
             "ten seconds of two sessions' fence ticks must read the store not once"
         );
@@ -8680,7 +8758,10 @@ mod tests {
         // And the observer's own read is still one read, so the node's rate is
         // the loop's rate rather than zero.
         manager.observe_fence().await;
-        assert_eq!(settings_reads(&manager), (ok_before + 1, failed_before));
+        assert_eq!(
+            settings_reads(&manager, SettingsReadSite::Observer),
+            (ok_before + 1, failed_before)
+        );
     }
 
     #[tokio::test]
@@ -8689,26 +8770,58 @@ mod tests {
         // Ending healthy streams for that is what L2 is about; continuing
         // indefinitely would let a tuner that has been disabled or moved on
         // another node keep streaming. The grace is the bound between the two.
+        //
+        // Every observer tick after t=0 really does take a read, and every one
+        // of those reads really fails: the failure arm of `observe_fence` is
+        // what is under test, not the absence of a read.
         let root = crate::test_tempdir().expect("scratch root");
         let manager = test_manager(root.path());
         seed_test_config(&manager).await;
         let session = test_session(root.path().join("live-tv-graced"), 1);
         manager.observe_fence().await;
+        let proved = manager
+            .fence
+            .observed()
+            .expect("the healthy read at t=0 is published");
+        assert_eq!(settings_reads(&manager, SettingsReadSite::Observer), (1, 0));
 
         tokio::time::pause();
-        // Every tick from here on is a failed read: nothing new is published.
-        tokio::time::advance(Duration::from_secs(9)).await;
+        manager.test_fail_settings_reads(true);
+        for second in 1..=9 {
+            tokio::time::advance(FENCE_OBSERVATION_INTERVAL).await;
+            manager.observe_fence().await;
+            let kept = manager
+                .fence
+                .observed()
+                .expect("a failed read keeps the last observation rather than clearing it");
+            assert!(
+                Arc::ptr_eq(&kept, &proved),
+                "a failed read at t={second}s must leave the t=0 observation in place, \
+                 neither clearing it nor re-publishing it as new"
+            );
+        }
+        assert_eq!(
+            settings_reads(&manager, SettingsReadSite::Observer),
+            (1, 9),
+            "every tick took a read and every one of them failed"
+        );
         ensure_session_fence_from_observation(&manager, &session)
             .await
             .expect("nine seconds of failed reads must not end a healthy stream");
-        let (fresh, grace, expired) = fence_observations(&manager);
-        assert_eq!((fresh, grace, expired), (0, 1, 0));
-        assert!(
-            manager.fence.observed().is_some(),
-            "a failed read keeps the last observation rather than clearing it"
-        );
+        assert_eq!(fence_observations(&manager), (0, 1, 0));
 
-        tokio::time::advance(Duration::from_secs(2)).await;
+        for _ in 0..2 {
+            tokio::time::advance(FENCE_OBSERVATION_INTERVAL).await;
+            manager.observe_fence().await;
+        }
+        assert!(Arc::ptr_eq(
+            &manager.fence.observed().expect("still the t=0 observation"),
+            &proved
+        ));
+        assert_eq!(
+            settings_reads(&manager, SettingsReadSite::Observer),
+            (1, 11)
+        );
         let error = ensure_session_fence_from_observation(&manager, &session)
             .await
             .expect_err("past the grace bound the session ends");
@@ -8724,6 +8837,57 @@ mod tests {
              device_unavailable did: {message}"
         );
         assert_eq!(fence_observations(&manager), (0, 1, 1));
+
+        // The first read that succeeds again replaces the observation; nothing
+        // about the outage is latched.
+        manager.test_fail_settings_reads(false);
+        manager.observe_fence().await;
+        assert!(!Arc::ptr_eq(
+            &manager.fence.observed().expect("a fresh observation"),
+            &proved
+        ));
+        ensure_session_fence_from_observation(&manager, &session)
+            .await
+            .expect("a recovered read is fresh again");
+        assert_eq!(fence_observations(&manager), (1, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn settings_reads_are_counted_by_the_site_that_took_them() {
+        // The session fence's cost is the observer's 1 Hz read plus the two
+        // direct fences per start. Every Live TV API handler also reads
+        // settings, so an unlabelled total says nothing about the fence.
+        let root = crate::test_tempdir().expect("scratch root");
+        let manager = test_manager(root.path());
+        seed_test_config(&manager).await;
+        let session = test_session(root.path().join("live-tv-sites"), 1);
+
+        manager.config().await.expect("a handler read");
+        manager.config().await.expect("another handler read");
+        manager.observe_fence().await;
+        ensure_session_fence(&manager, &session)
+            .await
+            .expect("a direct fence read");
+        manager.test_fail_settings_reads(true);
+        manager.observe_fence().await;
+
+        assert_eq!(settings_reads(&manager, SettingsReadSite::Request), (2, 0));
+        assert_eq!(settings_reads(&manager, SettingsReadSite::Observer), (1, 1));
+        assert_eq!(settings_reads(&manager, SettingsReadSite::Fence), (1, 0));
+        let prometheus = manager.metrics.settings_reads_prometheus();
+        for line in [
+            "plurx_live_tv_settings_reads_total{site=\"observer\",outcome=\"ok\"} 1\n",
+            "plurx_live_tv_settings_reads_total{site=\"observer\",outcome=\"failed\"} 1\n",
+            "plurx_live_tv_settings_reads_total{site=\"fence\",outcome=\"ok\"} 1\n",
+            "plurx_live_tv_settings_reads_total{site=\"fence\",outcome=\"failed\"} 0\n",
+            "plurx_live_tv_settings_reads_total{site=\"request\",outcome=\"ok\"} 2\n",
+            "plurx_live_tv_settings_reads_total{site=\"request\",outcome=\"failed\"} 0\n",
+        ] {
+            assert!(
+                prometheus.contains(line),
+                "missing {line:?} in {prometheus}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -8811,12 +8975,12 @@ mod tests {
             "the loop fence is past its grace bound"
         );
 
-        let before = settings_reads(&manager);
+        let before = settings_reads(&manager, SettingsReadSite::Fence);
         ensure_session_fence(&manager, &session)
             .await
             .expect("the direct fence reads the store and finds it healthy");
         assert_eq!(
-            settings_reads(&manager),
+            settings_reads(&manager, SettingsReadSite::Fence),
             (before.0 + 1, before.1),
             "the start and publication fences must spend a read of their own"
         );
