@@ -43,6 +43,16 @@ STATUS_PAGES = (
     "STATUS.md",
     "docs/STATUS.html",
     "docs/playback-control/PLAYBACK-CONTROL-STATUS.md",
+    # Where STATUS.md's older sections now live (LEDGER-TEXT-CONTRACTS-AND-
+    # RELEASE-TAGS.md M6). The prose moved; the guard moved with it.
+    # tests/operations/test_status_page_shape.py refuses an index row in
+    # STATUS.md that links to a document missing from this tuple.
+    "docs/ci/STATUS-HISTORY.md",
+    "docs/clients/STATUS-HISTORY.md",
+    "docs/cluster/STATUS-HISTORY.md",
+    "docs/features/STATUS-HISTORY.md",
+    "docs/playback-control/STATUS-HISTORY.md",
+    "docs/streaming/STATUS-HISTORY.md",
 )
 
 # Phrases that assert a pull request has not landed. Kept narrow on purpose,

@@ -251,6 +251,26 @@ validation fan-out, builds once on an X64 runner, verifies the immutable
 registry copy, and only then moves the fleet tag. It publishes
 `sha-<12hex>` for rollback and `main` for the newest qualified merge.
 Versioned releases own `latest`; fleet merges never overwrite that alias.
+**No run currently reaches that job:** `ci.yml` runs on `v*` tags and manual
+dispatch only, and the job's condition is a push to `main`, so no new
+`sha-` image has had an automatic producer since `3cd127e2` (2026-09-10)
+([LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
+correction 1, re-verified 2026-09-24; the fix belongs to
+[RUST-TEST-EXECUTION-POLICY.md](ci/RUST-TEST-EXECUTION-POLICY.md) §3.1(b)).
+
+**Two identities, two questions.** The `sha-<12hex>` image is the deploy and
+rollback identity: it is what `deploy/.env`'s `PLURX_IMAGE` names and what a
+voter runs. A `v` release tag ([RELEASING.md](RELEASING.md), cut weekly) is
+the communication identity: it names the `CHANGELOG.md` section. To go from a
+node to its changelog:
+
+```bash
+curl -fsS http://127.0.0.1:32400/api/v1/server | jq '{version, build}'
+# build "v0.3.1"             -> CHANGELOG.md "## [0.3.1]"
+# build "v0.3.1-12-gabc1234" -> "## [0.3.1]" plus `git log v0.3.1..abc1234`
+```
+
+`plurx_build_info{version,build}` is the same pair for every node at once.
 Every external workflow action is resolved to a reviewed 40-character commit,
 and checkout drops its injected repository credential immediately after the
 fetch. Version comments preserve the human update trail without restoring a

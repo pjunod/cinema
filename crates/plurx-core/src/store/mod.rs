@@ -168,6 +168,17 @@ pub struct TokenSummary {
     pub last_seen_at: i64,
 }
 
+/// What a login-token lookup found. `Expired` is distinct from `Unknown` so
+/// the HTTP layer can tell a client "you were signed out after N idle days"
+/// instead of a bare 401; an expired token's activity is never refreshed, so
+/// presenting it cannot slide it back to life.
+#[derive(Clone, Debug)]
+pub enum TokenAuthentication {
+    Authenticated(User),
+    Expired { idle_days: i64 },
+    Unknown,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeleteTokenByPrefixOutcome {
     Deleted,
@@ -1646,6 +1657,18 @@ pub mod keys {
     /// Human-visible name of the logical server. Configuration supplies only
     /// the first value; thereafter this replicated key is authoritative.
     pub const SERVER_NAME: &str = "server.name";
+    /// "Sign-ins expire": whether a login token that goes unused for
+    /// `AUTH_TOKEN_IDLE_DAYS` stops authenticating. Absent is ON — the
+    /// product default — and `0` restores non-expiring tokens.
+    pub const AUTH_TOKEN_EXPIRY_ENABLED: &str = "auth.token_expiry_enabled";
+    /// The sliding idle window in whole days (1..=3650). Absent is 90.
+    pub const AUTH_TOKEN_IDLE_DAYS: &str = "auth.token_idle_days";
+    /// Unix seconds at which expiry last took effect: seeded once at startup
+    /// and rewritten whenever an administrator switches expiry back on. No
+    /// token's idle clock starts before it, so turning expiry on — including
+    /// the default taking effect on upgrade — never signs anyone out at once.
+    /// Absent means the clock has not started and nothing can expire.
+    pub const AUTH_TOKEN_EXPIRY_SINCE: &str = "auth.token_expiry_since";
     /// TMDB API key (set by the admin; empty/absent disables the agent).
     pub const TMDB_API_KEY: &str = "tmdb.api_key";
     /// OMDb API key — powers review-site ratings (Rotten Tomatoes / Metacritic /
@@ -2169,8 +2192,21 @@ pub trait UserStore: Send + Sync + 'static {
         device: Option<&str>,
         expected_password_hash: &str,
     ) -> Result<bool, StoreError>;
-    /// Resolve a token hash to its user (touching `last_seen_at`).
-    async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError>;
+    /// Resolve a token hash under the server's sign-in expiry policy, read in
+    /// the same snapshot as the token row. A live token's coalesced
+    /// `last_seen_at` is refreshed exactly as before; an expired one is
+    /// reported and left untouched.
+    async fn authenticate_token(&self, token_hash: &str)
+        -> Result<TokenAuthentication, StoreError>;
+    /// Resolve a token hash to its user (touching `last_seen_at`). An expired
+    /// token resolves to nobody, so every caller that predates expiry — the
+    /// Plex facade, recovery reads — honours the policy without knowing it.
+    async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError> {
+        Ok(match self.authenticate_token(token_hash).await? {
+            TokenAuthentication::Authenticated(user) => Some(user),
+            TokenAuthentication::Expired { .. } | TokenAuthentication::Unknown => None,
+        })
+    }
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError>;
     /// Delete a login token only while the exact clustered cache-revocation
     /// exclusion claim is still live. Standalone SQLite passes no claim.

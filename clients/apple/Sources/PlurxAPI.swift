@@ -250,10 +250,24 @@ struct PlurxAPI {
     ///
     /// Everything else with a legible `{code, message}` body becomes
     /// `.refused`; anything bodiless or unparseable stays `.http(status)`.
+    /// The server's sentence when a 401 is an idle-expired sign-in
+    /// (`session_expired`: "Signed out after 90 days of inactivity."), nil
+    /// for every other answer.
+    static func sessionExpiryMessage(status: Int, data: Data?) -> String? {
+        guard status == 401, let data, data.count <= 16_384,
+              let detail = try? JSONDecoder().decode(Refusal.self, from: data),
+              detail.code == "session_expired", !detail.message.isEmpty
+        else { return nil }
+        return String(detail.message.prefix(512))
+    }
+
     static func check(_ resp: URLResponse, data: Data? = nil) throws {
         guard let http = resp as? HTTPURLResponse,
               !(200..<300).contains(http.statusCode) else { return }
         if http.statusCode == 401 || http.statusCode == 403 {
+            if let message = sessionExpiryMessage(status: http.statusCode, data: data) {
+                Session.shared.noteSessionExpiry(message)
+            }
             throw APIError.http(http.statusCode)
         }
         if let data, data.count <= 16_384,

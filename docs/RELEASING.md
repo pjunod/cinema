@@ -10,7 +10,7 @@ means. It lives in exactly one place:
 ```toml
 # Cargo.toml
 [workspace.package]
-version = "0.2.7"
+version = "0.3.0"
 ```
 
 Every crate inherits it with `version.workspace = true`. The native apps keep
@@ -68,12 +68,23 @@ CI passes the tag name automatically when it publishes an image.
 
 1. **Decide the number** using the table above.
 
-2. **Update `Cargo.toml`**, then `cargo build` so `Cargo.lock` picks up the new
-   version (it records workspace members).
+2. **Run `scripts/release-cut`** (`--part minor` for a minor bump, or
+   `--version X.Y.Z`). It refuses an empty `Unreleased` section, an existing
+   tag and an existing changelog section before it writes anything; then it
+   moves `CHANGELOG.md`'s `Unreleased` section under a dated
+   `## [X.Y.Z] — YYYY-MM-DD` heading, rewrites the two link definitions at the
+   bottom, sets the workspace version in `Cargo.toml`, sets both native apps'
+   marketing versions to it and advances both native build counters (the
+   mobile-version contract requires all of that of a version bump), rewrites
+   the status lines that quote the version or a build counter
+   (`clients/apple/README.md`, `clients/android/README.md`,
+   `docs/clients/APPLE-CLIENT-PARITY.md`, `docs/STATUS.html`, the Apple ones
+   through `validation/apple_build.py`'s generator) so the tree it leaves
+   passes `make operations-check`, and lets Cargo relock `Cargo.lock` and
+   `spikes/hiqlite-m0/Cargo.lock`. It never tags.
 
-3. **Move `CHANGELOG.md`'s `Unreleased` section into a dated release heading**
-   and add the two link definitions at the bottom. Write entries for people
-   running the server, not for people reading the diff.
+3. **Read the changelog it dated.** Entries are for people running the server,
+   not for people reading the diff; edit them in the release pull request.
 
 4. **Run the gates.** `scripts/validate run --profile ci --all --strict` is the
    exact all-points CI contract: catalog, fmt, clippy, tests, embedded
@@ -82,14 +93,20 @@ CI passes the tag name automatically when it publishes an image.
    machine; every unavailable check is recorded as a skip rather than disguised
    as a pass.
 
-5. **Merge the release commit, then tag that exact green commit.** Open a pull
-   request for the version and changelog changes, wait for its required checks,
-   merge it, update local `main`, and run `make release-check` once more before
-   creating the tag.
+5. **Merge the release pull request; the weekly run tags its landing commit.**
+   Open a pull request for the release commit (`release: vX.Y.Z`), wait for its
+   required checks, and merge it. The commit that lands it on `main` is the
+   **release commit**: the first commit on `main`'s first-parent line whose
+   `CHANGELOG.md` carries the dated `## [X.Y.Z]` heading. The next scheduled
+   release-readiness run (below) checks that commit out, runs
+   `make release-check` there, and pushes the annotated tag onto it only if it
+   is green, however many pull requests have merged on top of it since.
+   Tagging by hand remains possible and is the same act the workflow performs:
 
    ```sh
-   git tag -a v0.2.7 -m "v0.2.7"
-   git push origin v0.2.7
+   make release-check
+   git tag -a v0.3.1 -m "v0.3.1"
+   git push origin v0.3.1
    ```
 
    The tag is `v` + the version. CI refuses to publish a tag that disagrees
@@ -103,6 +120,49 @@ CI passes the tag name automatically when it publishes an image.
    tests each platform by digest before assigning the local Forgejo registry
    tags `{version}`, `{major}.{minor}`, and `latest`. Pushes to `main` build but
    do not publish, so releases are always deliberate.
+
+### The weekly release tag
+
+Releases are cut **weekly, from a green scheduled run** — the cadence Paul
+chose on 2026-09-23 ([LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
+§3.5 option (a)). `.github/workflows/release-readiness.yml` runs every Monday
+at 06:00 UTC and starts from `main`'s tip:
+
+- `scripts/release-cut --pending` asks whether a release is waiting: the
+  tip's workspace version is dated in `CHANGELOG.md` and `v<version>` is not
+  yet a tag. That is true exactly when a release pull request has merged since
+  the last tag. It then names the **release commit** (step 5), never the tip:
+  every commit merged after the release still carries the same version and
+  dated section, but none of them is the release. It refuses, and the run
+  fails, when that commit is not one the changelog describes: it does not
+  declare the version, it still has entries under `[Unreleased]`, or `main`
+  has since edited the release's section.
+- If a release is waiting, the run checks the release commit out and the gate
+  there is `make release-check`; if not, the gate on the tip is the same
+  `scripts/validate run --profile ci --all --strict` sweep, so every week
+  answers "is `main` releasable" whether or not anything is waiting.
+- Only when that gate is green, on a scheduled run, for a pending release,
+  does the `tag` job push the annotated tag, onto the release commit the gate
+  passed. The tag starts `ci.yml`'s full sweep and the image publication in
+  step 6.
+
+The push uses the `RELEASE_TAG_TOKEN` repository secret, scoped to that one
+step: a tag pushed with a run's own token starts no workflow, and this tag has
+to start one. Without the secret a pending release's run fails at that step
+and says so; nothing else changes. A manual dispatch runs the gate and never
+tags.
+
+A week with nothing to release is a green run and no tag. Preparing the week's
+release is landing one `scripts/release-cut` pull request before Monday.
+
+**Not yet in use.** The fleet's deploy identity is the `sha-<12hex>` image,
+and at the time of writing nothing produces one: `ci.yml` runs on `v*` tags
+and manual dispatch only, while its `publish_main` job requires a push to
+`main` ([LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
+correction 1; [RUST-TEST-EXECUTION-POLICY.md](ci/RUST-TEST-EXECUTION-POLICY.md)
+§3.1(b) owns the fix). The first release after `v0.3.0` waits for that, so
+no release pull request should merge before it; the schedule tags nothing
+until one does.
 
 ### The release pull request is the gate the cut depends on
 
@@ -146,9 +206,9 @@ run to finish green before checking the registry aliases:
 
 ```bash
 image=forge.lan:3000/noirr/plurxd
-version_digest=$(docker buildx imagetools inspect "$image:0.2.7" \
+version_digest=$(docker buildx imagetools inspect "$image:0.3.1" \
   | sed -n 's/^Digest:[[:space:]]*//p' | head -1)
-for alias in 0.2.7 0.2 latest; do
+for alias in 0.3.1 0.3 latest; do
   test "$(docker buildx imagetools inspect "$image:$alias" \
     | sed -n 's/^Digest:[[:space:]]*//p' | head -1)" = "$version_digest"
   test "$(docker buildx imagetools inspect --raw "$image:$alias" \
@@ -162,23 +222,23 @@ remote tag that moves after source resolution. It pushes architecture images
 without human-facing tags, smoke tests them, then creates the immutable version
 index and its moving aliases. If the version index already exists, both of its
 architecture bindings must pass the same source-label, version, and container
-smoke checks before the workflow reuses it. `0.2` and `latest` move only when
+smoke checks before the workflow reuses it. `0.3` and `latest` move only when
 the recovered version is not older than their verified current target, so a
 late recovery cannot roll clients backward.
 
 The successful workflow is the acceptance record: both platform jobs must
-report `plurxd 0.2.7 (v0.2.7)`, both image configs must name the tag's peeled
+report `plurxd 0.3.1 (v0.3.1)`, both image configs must name the tag's peeled
 source commit, and container smoke must pass on both. For a first publication,
-`0.2.7`, `0.2`, and `latest` must resolve to the same two-platform index. For a
-recovery after a newer release, the immutable `0.2.7` index must pass while the
+`0.3.1`, `0.3`, and `latest` must resolve to the same two-platform index. For a
+recovery after a newer release, the immutable `0.3.1` index must pass while the
 newer moving aliases remain unchanged. Never delete or move the release tag to
 make recovery pass; a mismatch is an incident to investigate, not an alias to
 overwrite.
 
-The weekly release-readiness workflow runs `make release-check`. A red run
-means the current workspace version is already tagged or has no dated
-changelog section; it is a visible prompt to prepare the next release, not a
-reason to move or overwrite an existing tag.
+The weekly release-readiness run is described above. A red run means the
+gate failed on `main`'s tip or, for a pending release, on the release commit
+(or that `--pending` refused the release commit, or that the tag push could
+not happen); it is never a reason to move or overwrite an existing tag.
 
 ## Checking what a build reports
 
@@ -187,3 +247,11 @@ make version          # what a build from this tree would stamp
 plurxd --version      # what an existing binary reports
 curl -s localhost:32400/api/v1/server | jq '{version, build}'
 ```
+
+From a node's `build` to the changelog entries it runs: a `build` of
+`v0.3.1` is exactly the `## [0.3.1]` section of `CHANGELOG.md`; a `build` of
+`v0.3.1-12-gabc1234` is that section **plus** whatever of `[Unreleased]` was
+merged by commit `abc1234` (`git log v0.3.1..abc1234`). Across the fleet the
+same pair is the `plurx_build_info{version,build}` metric, and
+[OPERATIONS.md](OPERATIONS.md) "The fleet registry" says which image a node
+runs.
