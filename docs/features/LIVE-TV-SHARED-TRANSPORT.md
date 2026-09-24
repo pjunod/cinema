@@ -48,7 +48,9 @@ it cannot raise the number of slots.
 4. Authorisation stays per viewer: capability, activation, request key,
    fence, idle and stray rules are unchanged; the transport authorises
    nothing and a join is refused unless `(generation, device_id,
-   channel_id)` match exactly.
+   channel_id)` match exactly. **Amended by the §2.4 D7 decision:** the
+   join key is `(channel_id, device_id, device address, serving generation)`;
+   the configuration generation is not part of it.
 5. `tuner_capacity` is refused only when a **new** transport is needed and
    no slot is free; `tuner_unavailable` is still the device's own 503 at
    open, seen by the consumer that opened.
@@ -226,7 +228,8 @@ contradicts a guardrail in §4, so M1 cannot be built until it is decided.**
   read; only the *write* timeout moves to the per-viewer pump (stdin) and the
   DVR writer (disk). §3.2's sentence is corrected accordingly.
 - **D7 — the generation join rule would lock viewers out of a recorded
-  channel after any settings save. Flagged; not decided here.** A recording
+  channel after any settings save. Decided: option (b), see the end of
+  this item.** A recording
   transport opened at generation 3 keeps running after an unrelated save
   (say, output height) bumps the generation to 4. Under §3.4 a viewer start
   at generation 4 for that channel is refused `settings_conflict`, and
@@ -243,7 +246,20 @@ contradicts a guardrail in §4, so M1 cannot be built until it is decided.**
   other generation-scoped setting (heights, deinterlace, guide) is applied by
   the joiner's own FFmpeg and plan. The recommendation is (b): a drain still
   closes old-generation transports, and a changed device address or owner
-  still refuses the join. Needs Paul's call before M1.
+  still refuses the join.
+
+  **Decision, 2026-09-24: option (b).** Taken by the coordinating session
+  on Paul's behalf so M1 could proceed, and recorded here as a decision
+  **Paul can overturn**; if he does, M1's join condition
+  (`LiveTvRegistry::viewer_admission`) and its test
+  `a_join_crosses_a_settings_generation_but_not_a_device_or_serving_change`
+  are the two places that change. As built: a viewer joins the channel's
+  transport when the device id and address it would itself open and the
+  owner's serving generation match the transport's, and the transport's
+  source facts are not stale (D5). The configuration generation is not
+  compared. A mismatched transport is never joined and never duplicated: a
+  start waits for it if nothing wants it, and is refused `tuner_capacity`
+  if something does.
 - **D8 — stray eviction must free a transport, and must be waited for.**
   With sharing, cancelling a stray that shares its transport frees nothing,
   so `stray_to_evict` gains a filter: only a stray that is its transport's
@@ -252,6 +268,45 @@ contradicts a guardrail in §4, so M1 cannot be built until it is decided.**
   `close_transport`'s removal rather than at cancel, "retry once" is a
   bounded wait: the start releases the lock, awaits that transport's close
   (≤ `SESSION_DRAIN_TIMEOUT`), then re-runs admission once.
+
+#### As built in M1
+
+Where each correction lives (`live_tv.rs`, `live_tv/dvr.rs`):
+
+- **D1** — `run_transport` probes the prefix with `probe_live_source` into
+  the transport's own folder and publishes the result on a watch channel
+  (`DvrTransport::publish_source`); viewers wait on it
+  (`wait_for_source`, bounded by their own start deadline) and plan from
+  it. A probe failure fails the viewers and nothing else. `source` is set
+  from the same facts, so DVR sidecars now carry them.
+- **D2** — viewer admission (`LiveTvRegistry::viewer_admission`, applied
+  in `start_local_inner`) and DVR admission (`attach_sink`) each decide and
+  reserve in one registry lock hold: a new transport is inserted with the
+  opener's seat already reserved, a joined one has a seat reserved on it,
+  and an entry is never overwritten (a DVR attach that cannot share an
+  entry closes it first, or is refused).
+- **D3** — consumers attach with a reserved seat, pushed under the
+  consumer list's own lock after checking the transport is not cancelled
+  (the close cancels before it takes that list), so a consumer is either
+  seen by the close or refused; this gives the plan's "under the registry
+  lock" guarantee without nesting the two locks. The fan-out, the DVR
+  tick's `close_finished_transports` and the DVR-disabled path
+  (`close_recordings`) all key on "no live consumer and no reserved seat",
+  retired atomically (`try_retire`). `transport_holders` lists recording
+  transports only.
+- **D4** — the order is kept; a start that needs a transport gone waits on
+  `closed()`, which fires after the worker (the tuner response's owner) is
+  joined.
+- **D5** — a viewer's `source_format_changed` marks its transport stale;
+  a stale transport admits no joiner.
+- **D6** — the fan-out keeps `TUNER_READ_TIMEOUT` on its tuner read; the
+  per-viewer pump (`pump_viewer_feed`) keeps it on its stdin write.
+- **D8** — `stray_to_evict` only offers a stray that is its transport's
+  sole consumer and seat-holder; the start cancels it, waits for that
+  transport's close (bounded by the drain timeout and the start deadline)
+  and decides once more. A viewer who stopped one channel and started
+  another waits the same way for the old transport's close instead of
+  being refused while it is on its way out.
 
 #### Captions: what the code and fixtures establish, before any audit run
 
@@ -419,7 +474,7 @@ transport holds no slot. The start path (`:3170-3187`) becomes:
 
 ```
 if a transport exists for (device_id, channel_id):
-    if its generation != the request's                     → settings_conflict (never a join)
+    if its generation != the request's                     → settings_conflict (never a join)   [superseded by §2.4 D7: device, address and serving generation, not config generation]
     else if consumers.len() < MAX_CONSUMERS_PER_TRANSPORT  → join, no slot, no stray eviction
     else                                                   → tuner_capacity "this channel is full"
                                                              (never a second transport for one key)
@@ -462,7 +517,9 @@ starting voter and serving generation (`activation_is_bound_to_the_starting_vote
 transport's `(generation, device_id, channel_id)` to equal the request's;
 a request with a different `config_generation` is refused with
 `settings_conflict` as today rather than joining a transport opened under
-another configuration. Each viewer resolves its own `LiveDeliveryPlan`
+another configuration. **Superseded by the §2.4 D7 decision (option (b)):**
+the request's own `config_generation` is still validated against the
+current settings exactly as before, but the transport's is not compared. Each viewer resolves its own `LiveDeliveryPlan`
 from the transport's `source` and its own `playback` capabilities — two
 clients on one transport may get two different plans — and each runs its
 own FFmpeg in step 1.
@@ -545,7 +602,9 @@ is).
   one viewer = one activation. The transport is a byte fan-out.
 - **A join never crosses a generation.** `(generation, device_id,
   channel_id)` equality is required; `drain_before` still closes by
-  generation.
+  generation. **Relaxed by the §2.4 D7 decision:** a join never crosses a
+  device, a device address or a serving generation; it may cross a
+  configuration generation, and `drain_before` still closes by generation.
 - **The reader never awaits a consumer.** Eviction is by bounded queue;
   `TUNER_READ_TIMEOUT` lives in pumps and writers only.
 - **Tuner slots cannot grow.** `live_tv.max_sessions` keeps its key,
