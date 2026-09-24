@@ -9,13 +9,23 @@ cannot invalidate it — which is the whole reason it replaces the per-commit
 short-SHA receipts in `validation/regressions.d/`.
 
 There are two carriers because there are two questions. *Pre-merge* — here —
-the PR description carries it, and the fast lane checks it against the
-**merge candidate** it has checked out, because that is the tree the field
-will be true of. *At merge*, the landing commit carries the same line as a
-trailer and `validation.history.audit_merge_regressions` checks it against
-that commit's own immutable tree. This module is what makes a typo fixable:
-once a landing commit exists it cannot be amended, and the only remaining
-remedy is a permanent row in `validation/merge-errata.toml`.
+the PR description carries it and this module checks it against the tree the
+merge will produce. *At merge*, the landing commit's message carries the same
+lines and `validation.history.audit_merge_regressions` checks them against
+that commit's own immutable tree. Both go through one resolver,
+`validation.history.resolve_regression_test`, so they cannot disagree about
+what resolves. This module is what makes a typo fixable: once a landing
+commit exists it cannot be amended, and the only remaining remedy is a
+permanent row in `validation/merge-errata.toml`.
+
+**Which tree.** The plan assumed the fast lane's `pull_request` checkout is
+the merge candidate. On this Forgejo it is not: the checkout step runs
+`git checkout refs/remotes/pull/<N>/head`, the branch head (task 11298, PR
+#480, 2026-09-24). So when the lane supplies the base and head revisions this
+module builds the merge candidate's tree itself with `git merge-tree
+--write-tree` and judges the fields against that; only when that cannot be
+built (a conflicted merge, or a Git older than 2.38) does it fall back to the
+checked-out head, and it says so.
 """
 
 from __future__ import annotations
@@ -27,12 +37,21 @@ import re
 import sys
 
 
-from validation.history import CORRECTIVE_RE, REGRESSION_TRAILER, _git
+from validation.history import (
+    CORRECTIVE_RE,
+    REGRESSION_TRAILER,
+    HistoryError,
+    TreeReader,
+    _git,
+    git_tree_reader,
+    load_merge_ledger,
+    parse_regression_fields,
+    resolve_regression_test,
+    worktree_reader,
+)
 from validation.runner import REPO_ROOT
-from validation.test_markers import defines_test
 
 
-FIELD_RE = re.compile(rf"^\s*{REGRESSION_TRAILER}:\s*(?P<value>\S.*?)\s*$", re.MULTILINE)
 _JOB_RE = re.compile(r"^  (?P<name>[A-Za-z0-9_-]+):$", re.MULTILINE)
 _NODE_SUITE_RE = re.compile(r"\bnode\s+(?P<path>[\w./-]+\.(?:test\.)?js)\b")
 _DISCOVER_RE = re.compile(r"\bunittest\s+discover\s+-s\s+(?P<path>[\w./-]+)")
@@ -88,31 +107,25 @@ def executed_suites(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
 
 
 def parse_fields(body: str) -> tuple[str, ...]:
-    return tuple(match.group("value") for match in FIELD_RE.finditer(body))
+    return parse_regression_fields(body)
 
 
-def check_field(root: Path, value: str) -> tuple[str | None, str | None]:
-    """(error, warning) for one field value, against the checked-out tree."""
+def check_field(
+    root: Path,
+    value: str,
+    read: TreeReader | None = None,
+    where: str = "this tree",
+) -> tuple[str | None, str | None]:
+    """(error, warning) for one field value, against one tree.
 
-    path, separator, name = value.partition("::")
-    if not separator or not path.strip() or not name.strip():
-        return f"{REGRESSION_TRAILER} {value!r} is not <path>::<name>", None
-    path, name = path.strip(), name.strip()
-    target = root / path
-    if not target.is_file():
-        return f"{REGRESSION_TRAILER} names {path}, which this tree does not carry", None
-    try:
-        source = target.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return f"{REGRESSION_TRAILER} cannot read {path}: {exc}", None
-    if not defines_test(source, name):
-        return (
-            f"{REGRESSION_TRAILER} names {name}, which {path} does not define "
-            f"as a test (searched {path} for a Node title, or a declaration "
-            f"under #[test]/#[tokio::test]/@Test, or a name beginning `test`)",
-            None,
-        )
+    `read` defaults to the checkout on disk, which is what a local run wants;
+    the lane passes the merge candidate's tree.
+    """
 
+    problem = resolve_regression_test(value, read or worktree_reader(root), where)
+    if problem is not None:
+        return problem, None
+    path = value.partition("::")[0].strip()
     files, directories = executed_suites(root)
     if path in files or any(
         path == directory or path.startswith(f"{directory.rstrip('/')}/")
@@ -130,6 +143,21 @@ def check_field(root: Path, value: str) -> tuple[str | None, str | None]:
     )
 
 
+def merge_candidate_tree(root: Path, base: str, head: str) -> str | None:
+    """The tree merging `head` into `base` would produce, or None.
+
+    `git merge-tree --write-tree` exits 1 on a conflicted merge and is
+    missing before Git 2.38; either way there is no clean candidate to judge.
+    """
+
+    try:
+        output = _git(root, "merge-tree", "--write-tree", base, head)
+    except HistoryError:
+        return None
+    tree = output.split("\n", 1)[0].strip()
+    return tree if re.fullmatch(r"[0-9a-f]{40,64}", tree) else None
+
+
 def corrective_subjects(root: Path, base: str, head: str) -> tuple[str, ...]:
     log = _git(root, "log", "--no-merges", "--format=%s", f"{base}..{head}", "--")
     return tuple(
@@ -141,14 +169,25 @@ def corrective_subjects(root: Path, base: str, head: str) -> tuple[str, ...]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Check a pull request's Regression-Test fields against this tree."
+        description="Check a pull request's Regression-Test fields against the tree it merges to."
     )
     parser.add_argument("--root", type=Path, default=REPO_ROOT)
     parser.add_argument("--body", help="the pull request description")
     parser.add_argument("--body-file", type=Path, help="read the description from a file")
-    parser.add_argument("--title", help="the pull request title, for the prefix note")
+    parser.add_argument("--title", help="the pull request title")
     parser.add_argument("--base", help="base revision of the pull request's range")
     parser.add_argument("--head", help="head revision of the pull request's range")
+    parser.add_argument(
+        "--rev",
+        help="judge the fields in this commit or tree rather than the merge "
+        "candidate (with --base/--head) or the checkout on disk (without)",
+    )
+    parser.add_argument(
+        "--landing-lines",
+        action="store_true",
+        help="print only the checked Regression-Test lines, for the landing "
+        "commit's message; exits 1 if any does not resolve",
+    )
     args = parser.parse_args(argv)
 
     root = args.root
@@ -161,6 +200,33 @@ def main(argv: list[str] | None = None) -> int:
     title = args.title if args.title is not None else os.environ.get("PR_TITLE", "")
     base = args.base or os.environ.get("PR_BASE_SHA", "")
     head = args.head or os.environ.get("PR_HEAD_SHA", "")
+    say = (lambda *_args, **_kwargs: None) if args.landing_lines else print
+
+    if args.rev:
+        read, where = git_tree_reader(root, args.rev), f"revision {args.rev}"
+    elif base and head:
+        checkout = _git(root, "rev-parse", "HEAD").strip()
+        say(
+            f"checkout HEAD {checkout[:12]}; pull request head {head[:12]} — "
+            + (
+                "the lane checked out the branch head, not a merge candidate"
+                if checkout.startswith(head) or head.startswith(checkout)
+                else "the checkout is not the pull request head"
+            )
+        )
+        tree = merge_candidate_tree(root, base, head)
+        if tree is not None:
+            read, where = git_tree_reader(root, tree), "the merge candidate"
+            say(f"judging against the merge candidate of {base[:12]} and {head[:12]}: tree {tree[:12]}")
+        else:
+            read, where = git_tree_reader(root, head), "the pull request head"
+            say(
+                "warning: no clean merge candidate could be built "
+                "(a conflicted merge, or Git older than 2.38); judging "
+                "against the pull request head instead"
+            )
+    else:
+        read, where = worktree_reader(root), "this tree"
 
     # §3.2's second mitigation: a reviewer should see `feat(` on a pull
     # request whose body describes a repair, so print the prefix beside the
@@ -168,38 +234,57 @@ def main(argv: list[str] | None = None) -> int:
     if title:
         prefix = title.split(":", 1)[0] if ":" in title else title.split(" ", 1)[0]
         judged = "corrective" if CORRECTIVE_RE.match(title) else "not corrective"
-        print(f"pull request subject prefix: {prefix!r} — {judged} under §3.2")
+        say(f"pull request subject prefix: {prefix!r} — {judged} under §3.2")
 
     fields = parse_fields(body)
     errors: list[str] = []
     for value in fields:
-        error, warning = check_field(root, value)
+        error, warning = check_field(root, value, read, where)
         if error:
             errors.append(error)
         elif warning:
-            print(f"warning: {warning}")
+            say(f"warning: {warning}")
         else:
-            print(f"ok: {value}")
+            say(f"ok: {value}")
 
-    if not fields and base and head:
-        try:
-            subjects = corrective_subjects(root, base, head)
-        except Exception as exc:  # noqa: BLE001 - reported, never swallowed
-            print(f"warning: cannot read the pull request range: {exc}")
-            subjects = ()
-        if subjects:
+    if not fields:
+        needs: str | None = None
+        if title and CORRECTIVE_RE.match(title):
+            needs = title
+        elif base and head:
+            try:
+                subjects = corrective_subjects(root, base, head)
+            except HistoryError as exc:
+                say(f"warning: cannot read the pull request range: {exc}")
+                subjects = ()
+            needs = subjects[0] if subjects else None
+        if needs:
             errors.append(
-                f"this pull request carries a corrective commit and no "
-                f"{REGRESSION_TRAILER}: field: {subjects[0]}"
+                f"this pull request is corrective and carries no "
+                f"{REGRESSION_TRAILER}: field: {needs}"
             )
 
     if errors:
         print(f"{REGRESSION_TRAILER} field check failed:", file=sys.stderr)
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
+        try:
+            phase_b = load_merge_ledger(root / "validation" / "merge-errata.toml").enforce_after
+        except HistoryError:
+            phase_b = None
+        if not phase_b and not args.landing_lines:
+            print(
+                "  (phase A: no boundary is set in validation/merge-errata.toml, "
+                "so the fast lane reports this and does not block on it)",
+                file=sys.stderr,
+            )
         return 1
+    if args.landing_lines:
+        for value in fields:
+            print(f"{REGRESSION_TRAILER}: {value}")
+        return 0
     if not fields:
-        print(f"no {REGRESSION_TRAILER}: field, and no corrective commit that needs one")
+        print(f"no {REGRESSION_TRAILER}: field, and nothing corrective that needs one")
     return 0
 
 

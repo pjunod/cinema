@@ -18,7 +18,6 @@ from validation.history import (
     load_merge_ledger,
     verify_migration_fidelity,
 )
-
 from validation.runner import load_catalog
 
 
@@ -52,7 +51,6 @@ class RepositoryFixture(unittest.TestCase):
     """
 
     def repository(self):
-
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -94,7 +92,6 @@ class RepositoryFixture(unittest.TestCase):
 
 class HistoryAuditCase(RepositoryFixture):
     def test_fix_with_a_direct_regression_test_needs_no_ledger_entry(self):
-
         root, catalog, coverage = self.repository()
         (root / "src/app.rs").write_text("pub fn answer() -> u8 { 1 }\n", encoding="utf-8")
         self.commit(root, "feat: seed")
@@ -710,7 +707,6 @@ class CoverageDirectoryCase(unittest.TestCase):
 
 
 class CorrectiveBoundaryCase(RepositoryFixture):
-
     """The freeze of §3.1/§3.2, proved on both sides of the boundary.
 
     Narrowing the corrective rule weakens the audit this repository has lived
@@ -771,7 +767,7 @@ class CorrectiveBoundaryCase(RepositoryFixture):
 
         (root / "crates/app.rs").write_text("pub fn a() -> u8 { 2 }\n", encoding="utf-8")
         before = self.commit(root, "chore: keep the reader bounded")
-        (root / "docs/line.md").write_text("the boundary\n", encoding="utf-8")
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
         boundary = self.commit(root, "docs: draw the boundary")
         (root / "crates/other.rs").write_text("pub fn b() -> u8 { 1 }\n", encoding="utf-8")
         after = self.commit(root, "chore: keep the writer bounded")
@@ -797,23 +793,265 @@ class CorrectiveBoundaryCase(RepositoryFixture):
         self.assertTrue(any(before[:8] in error for error in phase_a.errors))
         self.assertTrue(any(after[:8] in error for error in phase_a.errors))
 
-    def test_a_fix_past_the_boundary_is_still_corrective(self):
-        """The narrow rule has to bite, or the freeze is just an amnesty."""
+    def merge(self, root: Path, topic: str, message: str) -> str:
+        subprocess.run(
+            ["git", "merge", "--no-ff", "-q", "-m", message, topic], cwd=root, check=True
+        )
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True, text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+    def test_a_fix_past_the_boundary_awaits_its_landing_then_needs_its_line(self):
+        """The narrow rule has to bite, or the freeze is just an amnesty.
+
+        Past the boundary a `fix(` commit is corrective. Until it lands it is
+        on a pull request branch, where the description carries its field and
+        the fast lane's field check judges it, so the history audit reports
+        it as awaiting its landing rather than failing a branch whose author
+        cannot yet write a landing commit. Once it lands, the landing commit
+        must carry a line that resolves.
+        """
 
         root, catalog, coverage = self.repository()
         (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
         self.commit(root, "feat: seed")
-        (root / "docs/line.md").write_text("the boundary\n", encoding="utf-8")
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
         boundary = self.commit(root, "docs: draw the boundary")
+        base = self.branch(root)
+        ledger = self.ledger(root, boundary)
+
+        subprocess.run(["git", "checkout", "-q", "-b", "topic"], cwd=root, check=True)
         (root / "crates/app.rs").write_text("pub fn a() -> u8 { 2 }\n", encoding="utf-8")
-        after = self.commit(root, "fix(app): stop the reader stalling")
+        (root / "tests/app_test.rs").write_text(
+            "#[test]\nfn the_reader_stops_stalling() { assert!(true); }\n",
+            encoding="utf-8",
+        )
+        fix = self.commit(root, "fix(app): stop the reader stalling")
+
+        on_branch = audit_history(root, catalog, coverage, merge_ledger_path=ledger)
+        self.assertIn(fix, {issue.sha for issue in on_branch.issues})
+        self.assertEqual(on_branch.pending, (fix,))
+        self.assertEqual(on_branch.errors, ())
+
+        subprocess.run(["git", "checkout", "-q", base], cwd=root, check=True)
+        bare = self.merge(
+            root, "topic",
+            "Merge pull request 'fix(app): stop the reader stalling' (#3) from topic into main",
+        )
+        landed_bare = audit_history(root, catalog, coverage, merge_ledger_path=ledger)
+        self.assertEqual(landed_bare.pending, ())
+        self.assertTrue(
+            any(fix[:8] in error and bare[:8] in error for error in landed_bare.errors),
+            f"a fix( that landed with no line escaped the audit: {landed_bare.errors}",
+        )
+
+        subprocess.run(["git", "reset", "-q", "--hard", "HEAD^"], cwd=root, check=True)
+        self.merge(
+            root, "topic",
+            "Merge pull request 'fix(app): stop the reader stalling' (#3) from topic into main\n\n"
+            "Regression-Test: tests/app_test.rs::the_reader_stops_stalling\n",
+        )
+        landed = audit_history(root, catalog, coverage, merge_ledger_path=ledger)
+        self.assertEqual(landed.errors, ())
+        self.assertEqual(landed.covered_by_trailer, (fix,))
+
+    def test_a_runtime_fix_past_the_boundary_needs_no_fragment(self):
+        """Phase B must not demand the evidence it forbids.
+
+        Past the client-fix boundary a corrective commit under `crates/`
+        needs "an explicit regressions.d mapping" -- and past the merge
+        boundary a regressions.d mapping is refused. Without this the two
+        rules together would make every runtime fix unlandable. The landing
+        commit's `Regression-Test:` line is the explicit mapping now.
+        """
+
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        seed = self.commit(root, "feat: seed")
+        (root / "tests/client-fixes.toml").write_text(
+            f'version = 1\nenforce_after = "{seed[:8]}"\nfixes = []\n', encoding="utf-8"
+        )
+        boundary = self.commit(root, "docs: draw the boundary")
+        base = self.branch(root)
+
+        subprocess.run(["git", "checkout", "-q", "-b", "topic"], cwd=root, check=True)
+        (root / "crates/app.rs").write_text(
+            "pub fn a() -> u8 { 2 }\n#[test]\nfn a_is_two() { assert_eq!(a(), 2); }\n",
+            encoding="utf-8",
+        )
+        fix = self.commit(root, "fix(app): return two")
+        subprocess.run(["git", "checkout", "-q", base], cwd=root, check=True)
+        self.merge(
+            root, "topic",
+            "Merge pull request 'fix(app): return two' (#4) from topic into main\n\n"
+            "Regression-Test: crates/app.rs::a_is_two\n",
+        )
 
         report = audit_history(
             root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
         )
+        self.assertEqual(report.errors, ())
+        self.assertEqual(report.covered_by_trailer, (fix,))
+
+    def test_a_fix_that_reached_main_outside_a_landing_commit_is_an_error(self):
+        """A direct push has no landing commit to carry its line.
+
+        It is caught once a later landing commit has it as an ancestor, and
+        an erratum naming the commit is the only way past it.
+        """
+
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
+        boundary = self.commit(root, "docs: draw the boundary")
+        base = self.branch(root)
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 2 }\n", encoding="utf-8")
+        pushed = self.commit(root, "fix(app): pushed straight to main")
+
+        subprocess.run(["git", "checkout", "-q", "-b", "topic"], cwd=root, check=True)
+        (root / "src/note.txt").write_text("later\n", encoding="utf-8")
+        self.commit(root, "docs: a later change")
+        subprocess.run(["git", "checkout", "-q", base], cwd=root, check=True)
+        self.merge(
+            root, "topic",
+            "Merge pull request 'docs: a later change' (#5) from topic into main",
+        )
+
+        report = audit_history(
+            root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
+        )
+        outside = [error for error in report.errors if pushed[:8] in error]
+        self.assertTrue(outside, f"a direct push escaped the audit: {report.errors}")
+        self.assertIn("outside any landing commit", outside[0])
+
+        excused = audit_history(
+            root, catalog, coverage,
+            merge_ledger_path=self.ledger(
+                root, boundary, errata=((pushed[:12], "pushed without a PR"),)
+            ),
+        )
+        self.assertEqual(excused.errors, ())
+
+    def test_an_integration_merge_carries_the_line_for_the_plan_it_brings(self):
+        """`Merge plan/X (#N) at <sha>` is a landing commit too.
+
+        Plans reach `main` through an integration branch: each plan PR is
+        merged into it as `Merge plan/X (#N) at <sha>`, and the integration PR
+        then lands. The line may sit on either merge.
+        """
+
+        self.assertEqual(
+            landing_commit_title(
+                "Merge plan/C-08 (#461) at 7218b96ce92c059ce4e9cea0d0538cbfc770c012"
+            ),
+            ("plan/C-08", "461"),
+        )
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
+        boundary = self.commit(root, "docs: draw the boundary")
+        base = self.branch(root)
+        subprocess.run(["git", "checkout", "-q", "-b", "integ"], cwd=root, check=True)
+        subprocess.run(["git", "checkout", "-q", "-b", "plan/X"], cwd=root, check=True)
+        (root / "tests/app_test.rs").write_text(
+            "#[test]\nfn the_plan_holds() { assert!(true); }\n", encoding="utf-8"
+        )
+        fix = self.commit(root, "fix(app): the plan's repair")
+        subprocess.run(["git", "checkout", "-q", "integ"], cwd=root, check=True)
+        self.merge(
+            root, "plan/X",
+            f"Merge plan/X (#9) at {fix}\n\nRegression-Test: tests/app_test.rs::the_plan_holds\n",
+        )
+        subprocess.run(["git", "checkout", "-q", base], cwd=root, check=True)
+        self.merge(
+            root, "integ",
+            "Merge pull request 'Integration wave' (#10) from integ into main",
+        )
+        report = audit_history(
+            root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
+        )
+        self.assertEqual(report.errors, ())
+        self.assertEqual(report.covered_by_trailer, (fix,))
+        self.assertEqual({row.pull for row in report.merges}, {"9", "10"})
+
+    def test_a_landing_line_is_read_wherever_the_message_carries_it(self):
+        """The same parse as the pull request description.
+
+        A merge tool may put the description's lines above its own trailer
+        paragraph; Git's trailer parser would see only the last paragraph and
+        call a correctly carried line absent.
+        """
+
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
+        boundary = self.commit(root, "docs: draw the boundary")
+        base = self.branch(root)
+        subprocess.run(["git", "checkout", "-q", "-b", "topic"], cwd=root, check=True)
+        (root / "tests/app_test.rs").write_text(
+            "#[test]\nfn it_holds() { assert!(true); }\n", encoding="utf-8"
+        )
+        fix = self.commit(root, "fix(app): hold")
+        subprocess.run(["git", "checkout", "-q", base], cwd=root, check=True)
+        self.merge(
+            root, "topic",
+            "Merge pull request 'fix(app): hold' (#6) from topic into main\n\n"
+            "Regression-Test: tests/app_test.rs::it_holds\n\n"
+            "Reviewed-on: http://forge.invalid/pulls/6\n",
+        )
+        report = audit_history(
+            root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
+        )
+        self.assertEqual(report.errors, ())
+        self.assertEqual(report.covered_by_trailer, (fix,))
+
+    def test_the_freeze_refuses_a_later_commit_added_to_an_old_fragment(self):
+        """Growing an existing fragment is growing the ledger too."""
+
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 2 }\n", encoding="utf-8")
+        early = self.commit(root, "fix(app): the first stall")
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
+        boundary = self.commit(root, "docs: draw the boundary")
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 3 }\n", encoding="utf-8")
+        late = self.commit(root, "fix(app): the second stall")
+        self.write_coverage(
+            coverage,
+            f"{early[:8]}-app.toml",
+            f"""
+            commits = ["{early[:8]}", "{late[:8]}"]
+            points = ["app"]
+            checks = ["baseline"]
+            reason = "The baseline exercises both."
+            """,
+        )
+        self.commit(root, "validation: map both stalls")
+        report = audit_history(
+            root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
+        )
+        frozen = [error for error in report.errors if "frozen boundary" in error]
+        self.assertEqual(len(frozen), 1, report.errors)
+        self.assertIn(late[:8], frozen[0])
+
+    def test_an_erratum_that_names_no_commit_past_the_boundary_is_an_error(self):
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        seed = self.commit(root, "feat: seed")
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
+        boundary = self.commit(root, "docs: draw the boundary")
+        report = audit_history(
+            root, catalog, coverage,
+            merge_ledger_path=self.ledger(root, boundary, errata=((seed[:12], "wrong"),)),
+        )
         self.assertTrue(
-            any(after[:8] in error for error in report.errors),
-            f"a fix( past the boundary escaped the audit: {report.errors}",
+            any("errata row" in error and seed[:12] in error for error in report.errors),
+            report.errors,
         )
 
     def test_a_fragment_for_a_commit_past_the_boundary_is_refused(self):
@@ -867,8 +1105,7 @@ class CorrectiveBoundaryCase(RepositoryFixture):
         root, catalog, coverage = self.repository()
         (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
         self.commit(root, "feat: seed")
-        (root / "docs/line.md").write_text("the boundary\n", encoding="utf-8")
-
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
         boundary = self.commit(root, "docs: draw the boundary")
         base = self.branch(root)
 
@@ -914,7 +1151,7 @@ class CorrectiveBoundaryCase(RepositoryFixture):
         root, catalog, coverage = self.repository()
         (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
         self.commit(root, "feat: seed")
-        (root / "docs/line.md").write_text("the boundary\n", encoding="utf-8")
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
         boundary = self.commit(root, "docs: draw the boundary")
         base = self.branch(root)
 
@@ -962,7 +1199,7 @@ class CorrectiveBoundaryCase(RepositoryFixture):
         root, catalog, coverage = self.repository()
         (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
         self.commit(root, "feat: seed")
-        (root / "docs/line.md").write_text("the boundary\n", encoding="utf-8")
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
         boundary = self.commit(root, "docs: draw the boundary")
         base = self.branch(root)
 
@@ -1029,4 +1266,3 @@ class CorrectiveBoundaryCase(RepositoryFixture):
 
 if __name__ == "__main__":
     unittest.main()
-

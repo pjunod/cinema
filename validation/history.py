@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tomllib
+from typing import Callable
 
 from validation.runner import Catalog, REPO_ROOT, load_catalog, matches
 from validation.test_markers import TEST_ADDITION_RE, defines_test
@@ -65,14 +66,31 @@ ISSUE_RE = re.compile(
 # rather than swapped wholesale.
 CORRECTIVE_RE = re.compile(r"^(fix|perf)(\([^)]*\))?[:!]")
 # `Regression-Test: <path>::<name>` — the PR-level field of §3.1, carried onto
-# the landing commit as a trailer. Not a SHA, so a rebase cannot invalidate it.
+# the landing commit. Not a SHA, so a rebase cannot invalidate it. One parser
+# reads both carriers, the pull request description before merge and the
+# landing commit's message after it, so "the same line" means the same thing
+# in both places: a line anywhere in the text, not only in a final trailer
+# paragraph that a merge tool is free to reflow.
 REGRESSION_TRAILER = "Regression-Test"
-# The two shapes a landing commit on `main` takes. Kept identical to
-# `tests/operations/test_status_pr_claims.py:87-90` so a squashed PR is
-# covered as well as a merge commit.
+REGRESSION_FIELD_RE = re.compile(
+    rf"^[ \t]*{REGRESSION_TRAILER}:[ \t]*(?P<value>\S.*?)[ \t]*$", re.MULTILINE
+)
+# The shapes a landing commit takes. The first two are
+# `tests/operations/test_status_pr_claims.py`'s, so a squashed PR is covered
+# as well as a Forgejo merge commit. The third is how an integration branch
+# carries a plan PR — `Merge plan/C-08 (#461) at <sha>` — before the
+# integration PR itself lands; its trailers count for the commits it brings.
 MERGE_SUBJECT_RE = re.compile(r"^Merge pull request '(?P<title>.*)' \(#(?P<pull>\d+)\)")
 SQUASH_SUBJECT_RE = re.compile(r"^(?P<title>.*) \(#(?P<pull>\d+)\)$")
+INTEGRATION_SUBJECT_RE = re.compile(
+    r"^Merge (?P<title>[^\s']+) \(#(?P<pull>\d+)\)(?: at [0-9a-f]{7,64})?$"
+)
 
+
+def parse_regression_fields(text: str) -> tuple[str, ...]:
+    """Every `Regression-Test:` value in a description or a commit message."""
+
+    return tuple(match.group("value") for match in REGRESSION_FIELD_RE.finditer(text))
 
 
 class HistoryError(ValueError):
@@ -157,7 +175,8 @@ class HistoryReport:
     ignored: tuple[str, ...]
     errors: tuple[str, ...]
     merges: tuple[MergeRegression, ...] = ()
-
+    pending: tuple[str, ...] = ()
+    covered_by_trailer: tuple[str, ...] = ()
 
     @property
     def direct_count(self) -> int:
@@ -410,22 +429,20 @@ def load_merge_ledger(path: Path = DEFAULT_MERGE_LEDGER) -> MergeLedger:
 def landing_commit_title(subject: str) -> tuple[str, str] | None:
     """The PR title and number a landing commit's subject carries, if any.
 
-    Both shapes, because `main` carries both: Forgejo's merge commit
-    (`Merge pull request '<title>' (#N) from <branch> into main`) and a
-    squashed PR (`<title> (#N)`).
+    Every shape `main` carries: Forgejo's merge commit
+    (`Merge pull request '<title>' (#N) from <branch> into main`), an
+    integration branch's plan merge (`Merge plan/C-08 (#461) at <sha>`, whose
+    "title" is the branch), and a squashed PR (`<title> (#N)`).
     """
 
-    merge = MERGE_SUBJECT_RE.match(subject)
-    if merge:
-        return merge.group("title"), merge.group("pull")
-    squash = SQUASH_SUBJECT_RE.match(subject)
-    if squash:
-        return squash.group("title"), squash.group("pull")
+    for shape in (MERGE_SUBJECT_RE, INTEGRATION_SUBJECT_RE, SQUASH_SUBJECT_RE):
+        landed = shape.match(subject)
+        if landed:
+            return landed.group("title"), landed.group("pull")
     return None
 
 
 def _git(root: Path, *args: str) -> str:
-
     env = os.environ.copy()
     # Hooks export repository-local paths for the outer checkout. History may
     # intentionally inspect a linked worktree or a fixture repository, where
@@ -543,127 +560,207 @@ def is_corrective(subject: str, sha: str, post_boundary: frozenset[str]) -> bool
     rule it never saw would either discard that evidence or demand new
     evidence for a commit nobody can amend. A commit past the boundary is
     judged by §3.2's prefix rule and carries its evidence as a
-    `Regression-Test:` trailer on its landing commit instead.
+    `Regression-Test:` line on the commit that lands it instead.
     """
 
     rule = CORRECTIVE_RE if sha in post_boundary else ISSUE_RE
     return bool(rule.search(subject))
 
 
-def _regression_trailers(root: Path, sha: str) -> tuple[str, ...]:
-    raw = _git(
-        root,
-        "show",
-        "-s",
-        f"--format=%(trailers:key={REGRESSION_TRAILER},valueonly=true)",
-        sha,
-    )
-    return tuple(line.strip() for line in raw.splitlines() if line.strip())
+# Reads one repository-relative file out of some tree, or None when that tree
+# does not carry it as a file.
+TreeReader = Callable[[str], "str | None"]
 
 
-def _unresolved_trailer(root: Path, sha: str, value: str) -> str | None:
-    """Why this trailer does not resolve **in the landing commit's own tree**.
+def git_tree_reader(root: Path, treeish: str) -> TreeReader:
+    """Files as they are in one commit or tree, never as they are on disk."""
 
-    Not in the tree as it is today: a landing commit on `main` is immutable
-    and so is its tree, and that exact-tree binding is the entire reason the
-    field is a path and a name rather than a short SHA.
+    def read(path: str) -> str | None:
+        try:
+            kind = _git(root, "cat-file", "-t", f"{treeish}:{path}").strip()
+        except HistoryError:
+            return None
+        if kind != "blob":
+            return None
+        return _git(root, "cat-file", "blob", f"{treeish}:{path}")
+
+    return read
+
+
+def worktree_reader(root: Path) -> TreeReader:
+    """Files as they are in the checkout, for a local run with no revision."""
+
+    base = root.resolve()
+
+    def read(path: str) -> str | None:
+        target = (base / path).resolve()
+        if base not in target.parents or not target.is_file():
+            return None
+        try:
+            return target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+    return read
+
+
+def resolve_regression_test(value: str, read: TreeReader, where: str) -> str | None:
+    """Why one `<path>::<name>` value does not resolve in a tree, or None.
+
+    The single resolver both carriers use: the pre-merge check hands it the
+    pull request's merge candidate, the merge audit hands it a landing
+    commit's own tree. `where` names that tree in the message.
     """
 
     path, separator, name = value.partition("::")
-    if not separator or not path.strip() or not name.strip():
-        return f"carries {value!r}, which is not <path>::<name>"
     path, name = path.strip(), name.strip()
-    try:
-        _git(root, "cat-file", "-e", f"{sha}:{path}")
-    except HistoryError:
-        return f"names {path}, which its own tree does not carry"
-    try:
-        blob = _git(root, "show", f"{sha}:{path}")
-    except HistoryError:
-        return f"names {path}, which its own tree does not carry"
-    if not defines_test(blob, name):
-        return f"names {name}, which {path} does not define as a test at that merge"
+    if not separator or not path or not name:
+        return f"{REGRESSION_TRAILER} {value!r} is not <path>::<name>"
+    parts = path.split("/")
+    if path.startswith("/") or "\\" in path or any(part in ("", ".", "..") for part in parts):
+        return (
+            f"{REGRESSION_TRAILER} names {path}, which is not a normalised "
+            f"repository-relative path"
+        )
+    source = read(path)
+    if source is None:
+        return f"{REGRESSION_TRAILER} names {path}, which {where} does not carry"
+    if not defines_test(source, name):
+        return (
+            f"{REGRESSION_TRAILER} names {name}, which {path} does not define "
+            f"as a test in {where} (searched {path} for a Node title, a "
+            f"declaration under #[test]/#[tokio::test]/@Test, or a name "
+            f"beginning `test`)"
+        )
     return None
+
+
+@dataclasses.dataclass(frozen=True)
+class LandingAudit:
+    """What the landing commits past the boundary say, and what they cover.
+
+    `covers` is every commit brought in by a landing commit whose
+    `Regression-Test:` lines all resolve in its own tree (or which an erratum
+    excuses). `introduced` is every commit brought in by any landing commit at
+    all, and `landed` every commit some landing commit has as an ancestor. A
+    corrective commit past the boundary in none of them is still on its way to
+    `main` and is the pre-merge check's to judge; one that is `landed` but not
+    `introduced` reached `main` without going through a pull request.
+    """
+
+    rows: tuple[MergeRegression, ...] = ()
+    errors: tuple[str, ...] = ()
+    covers: frozenset[str] = frozenset()
+    introduced: dict[str, tuple[str, ...]] = dataclasses.field(default_factory=dict)
+    landed: frozenset[str] = frozenset()
+
+
+def _excuse(ledger: MergeLedger, sha: str) -> str | None:
+    return next(
+        (erratum.reason for erratum in ledger.errata if sha.startswith(erratum.commit)),
+        None,
+    )
 
 
 def audit_merge_regressions(
     root: Path,
     history_heads: tuple[str, ...],
     ledger: MergeLedger,
-) -> tuple[tuple[MergeRegression, ...], tuple[str, ...]]:
-    """Audit `Regression-Test:` trailers on the landing commits past the boundary.
+    boundary: str | None,
+    post_boundary: frozenset[str],
+) -> LandingAudit:
+    """Audit the `Regression-Test:` lines on landing commits past the boundary.
 
-    Returns the rows for the audit report and the errors. With no boundary set
-    there is nothing to audit and both are empty, which is phase A.
+    Each line is resolved against **the landing commit's own tree**, not the
+    tree as it is today: a landing commit on `main` is immutable and so is its
+    tree, and that exact-tree binding is the reason the field is a path and a
+    name rather than a short SHA. With no boundary there is nothing to audit,
+    which is phase A.
     """
 
-    if not ledger.enforce_after:
-        return (), ()
-    try:
-        boundary = _git(
-            root, "rev-parse", "--verify", f"{ledger.enforce_after}^{{commit}}"
-        ).strip()
-    except HistoryError:
-        return (), (
-            f"merge ledger enforce_after does not resolve: {ledger.enforce_after}",
-        )
-
+    if boundary is None:
+        return LandingAudit()
     rows: list[MergeRegression] = []
     errors: list[str] = []
+    covers: set[str] = set()
+    introduced: dict[str, list[str]] = {}
+    landings: list[str] = []
+
+    for erratum in ledger.errata:
+        if not any(sha.startswith(erratum.commit) for sha in post_boundary):
+            errors.append(
+                f"merge errata row {erratum.commit} names no commit past the "
+                f"boundary {ledger.enforce_after}"
+            )
+
     log = _git(
-        root,
-        "log",
-        "--format=%H%x1f%s%x1e",
-        *history_heads,
-        "--not",
-        boundary,
-        "--",
+        root, "log", "--format=%H%x1f%P%x1f%s%x1e", *history_heads, "--not", boundary, "--"
     )
     for record in log.split("\x1e"):
         record = record.strip("\n")
         if not record:
             continue
-        sha, subject = record.split("\x1f", 1)
+        sha, parents, subject = record.split("\x1f", 2)
         landed = landing_commit_title(subject)
         if landed is None:
             continue
         title, pull = landed
-        excuse = next(
-            (
-                erratum.reason
-                for erratum in ledger.errata
-                if sha.startswith(erratum.commit)
-            ),
-            None,
+        landings.append(sha)
+        parent_list = parents.split()
+        brought = (
+            _git(root, "rev-list", f"{parent_list[0]}..{sha}", "--").split()
+            if len(parent_list) > 1
+            else [sha]
         )
+        for commit in brought:
+            introduced.setdefault(commit, []).append(sha)
+
+        excuse = _excuse(ledger, sha)
+        message = _git(root, "show", "-s", "--format=%B", sha)
+        fields = parse_regression_fields(message)
+        read = git_tree_reader(root, sha)
+        problems = [
+            problem
+            for problem in (
+                resolve_regression_test(value, read, "its own tree") for value in fields
+            )
+            if problem is not None
+        ]
         corrective = bool(CORRECTIVE_RE.match(title))
-        trailers = _regression_trailers(root, sha)
-        resolved = True
-        for trailer in trailers:
-            problem = _unresolved_trailer(root, sha, trailer)
-            if problem is None:
-                continue
-            resolved = False
-            if excuse is None:
-                errors.append(f"landing commit {sha[:8]} (#{pull}) {problem}")
-        if corrective and not trailers:
-            resolved = False
-            if excuse is None:
+        resolved = bool(fields) and not problems
+        if excuse is None:
+            for problem in problems:
+                errors.append(f"landing commit {sha[:8]} (#{pull}): {problem}")
+            if corrective and not fields:
                 errors.append(
-                    f"corrective landing commit {sha[:8]} (#{pull}) has no "
-                    f"{REGRESSION_TRAILER}: trailer: {title}"
+                    f"corrective landing commit {sha[:8]} (#{pull}) carries no "
+                    f"{REGRESSION_TRAILER}: line: {title}"
                 )
+        if resolved or excuse is not None:
+            covers.update(brought)
         rows.append(
             MergeRegression(
                 landing=sha,
                 pull=pull,
                 title=title,
                 corrective=corrective,
-                tests=trailers,
+                tests=fields,
                 resolved=resolved,
             )
         )
-    return tuple(rows), tuple(errors)
+
+    landed_set = (
+        frozenset(_git(root, "rev-list", *landings, "--not", boundary, "--").split())
+        if landings
+        else frozenset()
+    )
+    return LandingAudit(
+        rows=tuple(rows),
+        errors=tuple(errors),
+        covers=frozenset(covers),
+        introduced={commit: tuple(by) for commit, by in introduced.items()},
+        landed=landed_set,
+    )
 
 
 def discover_issues(
@@ -682,7 +779,6 @@ def discover_issues(
             sha.startswith(prefix) for prefix in explicit_prefixes
         ):
             continue
-
         paths = tuple(
             path
             for path in _git(
@@ -738,6 +834,7 @@ def audit_history(
     history_heads = _history_heads(root)
     errors: list[str] = []
     post_boundary: frozenset[str] = frozenset()
+    boundary: str | None = None
     if merge_ledger.enforce_after:
         try:
             boundary = _git(
@@ -747,6 +844,7 @@ def audit_history(
                 _git(root, "rev-list", *history_heads, "--not", boundary, "--").split()
             )
         except HistoryError:
+            boundary = None
             errors.append(
                 "merge ledger enforce_after does not resolve: "
                 f"{merge_ledger.enforce_after}"
@@ -759,8 +857,10 @@ def audit_history(
         history_heads,
         post_boundary,
     )
-    merges, merge_errors = audit_merge_regressions(root, history_heads, merge_ledger)
-    errors.extend(merge_errors)
+    landing = audit_merge_regressions(
+        root, history_heads, merge_ledger, boundary, post_boundary
+    )
+    errors.extend(landing.errors)
 
     by_sha = {issue.sha: issue for issue in issues}
     resolved: dict[str, CoverageEntry] = {}
@@ -769,21 +869,21 @@ def audit_history(
     for entry in entries:
         where = entry.origin
         # The freeze, phase B. A fragment is evidence for the pre-boundary
-        # range and nothing else; a corrective commit past the boundary
-        # carries its evidence on its landing commit, where the tree it names
-        # can never change under it.
-        if entry.commits and post_boundary:
-            lead = entry.commits[0]
-            if any(sha.startswith(lead) for sha in post_boundary):
+        # range and nothing else: neither a new fragment nor a commit added to
+        # an old one may name a commit past the boundary. Such a commit
+        # carries its evidence on the commit that lands it, where the tree it
+        # names can never change under it.
+        for prefix in entry.commits:
+            if any(sha.startswith(prefix) for sha in post_boundary):
                 errors.append(
-                    f"{where} maps {lead}, which landed past the frozen "
-                    f"boundary {merge_ledger.enforce_after}: record a "
-                    f"`{REGRESSION_TRAILER}: <path>::<name>` trailer on its "
-                    f"landing commit instead of a regressions.d fragment"
+                    f"{where} maps {prefix}, which is past the frozen "
+                    f"boundary {merge_ledger.enforce_after}: name its test in "
+                    f"the pull request as `{REGRESSION_TRAILER}: <path>::<name>` "
+                    f"so its landing commit carries it, instead of adding to "
+                    f"validation/regressions.d"
                 )
         if not entry.commits:
             errors.append(f"{where} has no commits")
-
         if not entry.reason:
             errors.append(f"{where} has no reason")
         if entry.ignore and (entry.points or entry.checks):
@@ -880,10 +980,42 @@ def audit_history(
                 f"client fix enforce_after does not resolve: {client_fixes.enforce_after}"
             )
 
+    pending: set[str] = set()
+    trailer_covered: set[str] = set()
     for issue in issues:
         client_anchor_required = issue.sha in explicit_commits and any(
             path.startswith("clients/") for path in issue.paths
         )
+        if issue.sha in post_boundary:
+            # Phase B. The client anchor rule is not part of the ledger this
+            # plan freezes, so it still applies; everything else a pre-boundary
+            # commit could offer (a fragment, a direct test change) is replaced
+            # by the `Regression-Test:` lines on the commit that lands it.
+            if client_anchor_required and issue.sha not in anchored:
+                errors.append(
+                    f"corrective client commit {issue.sha[:8]} needs a "
+                    f"tests/client-fixes.toml anchor row: {issue.subject}"
+                )
+            if issue.sha in landing.covers:
+                trailer_covered.add(issue.sha)
+            elif issue.sha in landing.introduced:
+                by = ", ".join(sha[:8] for sha in landing.introduced[issue.sha])
+                errors.append(
+                    f"corrective commit {issue.sha[:8]} landed in {by} with no "
+                    f"{REGRESSION_TRAILER}: line that resolves: {issue.subject}"
+                )
+            elif issue.sha in landing.landed and _excuse(merge_ledger, issue.sha) is None:
+                errors.append(
+                    f"corrective commit {issue.sha[:8]} reached main outside any "
+                    f"landing commit, so nothing can carry its "
+                    f"{REGRESSION_TRAILER}: line: {issue.subject}"
+                )
+            elif issue.sha not in landing.landed:
+                # Not on `main` yet. Its pull request's description is where
+                # the field lives until it lands, and the fast lane's
+                # `validation.regression_field` step is what judges it.
+                pending.add(issue.sha)
+            continue
         if client_anchor_required:
             if issue.sha not in anchored:
                 errors.append(
@@ -917,9 +1049,10 @@ def audit_history(
         covered_by_anchor=tuple(sorted(anchored)),
         ignored=tuple(sorted(sha for sha, entry in resolved.items() if entry.ignore)),
         errors=tuple(errors),
-        merges=merges,
+        merges=landing.rows,
+        pending=tuple(sorted(pending)),
+        covered_by_trailer=tuple(sorted(trailer_covered)),
     )
-
 
 
 def _write_report(path: Path, report: HistoryReport) -> None:
@@ -927,6 +1060,8 @@ def _write_report(path: Path, report: HistoryReport) -> None:
     mapped = set(report.covered_by_entry)
     anchored = set(report.covered_by_anchor)
     ignored = set(report.ignored)
+    trailer_covered = set(report.covered_by_trailer)
+    pending = set(report.pending)
     payload = {
         "summary": {
             "corrective_commits": len(report.issues),
@@ -935,6 +1070,8 @@ def _write_report(path: Path, report: HistoryReport) -> None:
             "client_fix_anchor": report.anchored_count,
             "non_runtime_correction": report.ignored_count,
             "landing_commits_past_boundary": len(report.merges),
+            "landing_trailer": len(report.covered_by_trailer),
+            "awaiting_landing": len(report.pending),
             "errors": len(report.errors),
         },
         # Generated, never tracked. The whole point of the merge trailer is
@@ -943,20 +1080,24 @@ def _write_report(path: Path, report: HistoryReport) -> None:
             {
                 "landing": merge.landing,
                 "pull": merge.pull,
+                "title": merge.title,
                 "corrective": merge.corrective,
                 "tests": list(merge.tests),
                 "resolved": merge.resolved,
             }
             for merge in report.merges
         ],
-
         "commits": [
             {
                 "commit": issue.sha,
                 "subject": issue.subject,
                 "points": list(issue.point_ids),
                 "coverage": (
-                    "client-fix-anchor"
+                    "landing-trailer"
+                    if issue.sha in trailer_covered
+                    else "awaiting-landing"
+                    if issue.sha in pending
+                    else "client-fix-anchor"
                     if issue.sha in anchored
                     else "direct-test"
                     if issue.direct_test_evidence
@@ -1008,9 +1149,10 @@ def main(argv: list[str] | None = None) -> int:
         f"{report.mapped_count} explicit current-check mappings · "
         f"{report.anchored_count} client-fix anchors · "
         f"{report.ignored_count} non-runtime corrections · "
-        f"{len(report.merges)} landing commits past the boundary"
+        f"{len(report.merges)} landing commits past the boundary · "
+        f"{len(report.covered_by_trailer)} covered by a landing trailer · "
+        f"{len(report.pending)} awaiting their landing commit"
     )
-
     return 0
 
 
