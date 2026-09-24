@@ -287,6 +287,18 @@ pub fn normalize_sup_cancellable(
     process_sup(File::open(path)?, limits, true, Some(cancelled))
 }
 
+/// Normalize one display set at a time so a server can encode each bitmap
+/// before reading the next one. The RGBA limit applies to the in-flight
+/// composition; the caller must bound its accumulated output separately.
+pub fn normalize_sup_cancellable_into(
+    path: impl AsRef<Path>,
+    limits: &ParserLimits,
+    cancelled: &AtomicBool,
+    emit: &mut dyn FnMut(NormalizedComposition) -> Result<(), AdapterError>,
+) -> Result<InspectionReport, AdapterError> {
+    Ok(process_sup_with_sink(File::open(path)?, limits, Some(cancelled), emit)?.report)
+}
+
 // Test-only seam for the one window a regression cannot otherwise reach: the
 // gap between the preflight digest and the parsing pass over the same pinned
 // handle. Production builds do not compile it, so the boundary it exercises is
@@ -310,6 +322,25 @@ fn process_sup(
     limits: &ParserLimits,
     retain_rgba: bool,
     cancelled: Option<&AtomicBool>,
+) -> Result<NormalizedTrack, AdapterError> {
+    process_sup_impl(source, limits, retain_rgba, cancelled, None)
+}
+
+fn process_sup_with_sink(
+    source: File,
+    limits: &ParserLimits,
+    cancelled: Option<&AtomicBool>,
+    emit: &mut dyn FnMut(NormalizedComposition) -> Result<(), AdapterError>,
+) -> Result<NormalizedTrack, AdapterError> {
+    process_sup_impl(source, limits, true, cancelled, Some(emit))
+}
+
+fn process_sup_impl(
+    source: File,
+    limits: &ParserLimits,
+    retain_rgba: bool,
+    cancelled: Option<&AtomicBool>,
+    emit: Option<&mut dyn FnMut(NormalizedComposition) -> Result<(), AdapterError>>,
 ) -> Result<NormalizedTrack, AdapterError> {
     let source_bytes = source.metadata()?.len();
     if source_bytes > limits.max_sup_bytes {
@@ -355,7 +386,8 @@ fn process_sup(
         limits,
         &mut state,
         &mut report,
-        retain_rgba.then_some(&mut compositions),
+        (retain_rgba && emit.is_none()).then_some(&mut compositions),
+        emit,
         &mut normalized_rgba_bytes,
         cancelled,
     )?;
@@ -602,6 +634,7 @@ fn parse_display_sets(
     state: &mut NormalizerState,
     report: &mut InspectionReport,
     mut output: Option<&mut Vec<NormalizedComposition>>,
+    mut emit: Option<&mut dyn FnMut(NormalizedComposition) -> Result<(), AdapterError>>,
     normalized_rgba_bytes: &mut usize,
     cancelled: Option<&AtomicBool>,
 ) -> Result<[u8; 32], AdapterError> {
@@ -613,6 +646,7 @@ fn parse_display_sets(
     let mut current_payload_bytes = 0usize;
     let mut display_sets = 0u64;
     let mut bytes_read = 0u64;
+    let streaming = emit.is_some();
 
     while read_header_or_eof(reader, &mut header)? {
         check_cancelled(cancelled)?;
@@ -716,9 +750,15 @@ fn parse_display_sets(
                 state,
                 report,
                 output.as_deref_mut(),
+                &mut emit,
                 normalized_rgba_bytes,
                 cancelled,
             )?;
+            // The sink has already consumed this composition, so only its
+            // peak RGBA allocation counts against the in-flight memory cap.
+            if streaming {
+                *normalized_rgba_bytes = 0;
+            }
         }
     }
     if current_pts.is_some() || !current_segments.is_empty() {
@@ -793,12 +833,14 @@ fn parse_pcs_owned(payload: &[u8]) -> Result<OwnedPcs, AdapterError> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn normalize_display_set(
     display_set: &RawDisplaySet,
     limits: &ParserLimits,
     state: &mut NormalizerState,
     report: &mut InspectionReport,
     output: Option<&mut Vec<NormalizedComposition>>,
+    emit: &mut Option<&mut dyn FnMut(NormalizedComposition) -> Result<(), AdapterError>>,
     normalized_rgba_bytes: &mut usize,
     cancelled: Option<&AtomicBool>,
 ) -> Result<(), AdapterError> {
@@ -917,9 +959,8 @@ fn normalize_display_set(
     composition_hasher.update(pcs.video_width.to_be_bytes());
     composition_hasher.update(pcs.video_height.to_be_bytes());
 
-    let mut normalized_objects = output
-        .as_ref()
-        .map(|_| Vec::with_capacity(pcs.objects.len()));
+    let mut normalized_objects =
+        (output.is_some() || emit.is_some()).then(|| Vec::with_capacity(pcs.objects.len()));
     for placement in &pcs.objects {
         check_cancelled(cancelled)?;
         let object = state.objects.get(&placement.object_id).ok_or_else(|| {
@@ -1018,14 +1059,19 @@ fn normalize_display_set(
         object_count,
         sha256: hex::encode(composition_hasher.finalize()),
     });
-    if let (Some(output), Some(objects)) = (output, normalized_objects) {
-        output.push(NormalizedComposition {
+    if let Some(objects) = normalized_objects {
+        let composition = NormalizedComposition {
             pts_90khz: display_set.pts_90khz,
             start_ms: display_set.pts_90khz as f64 / 90.0,
             canvas_width: pcs.video_width,
             canvas_height: pcs.video_height,
             objects,
-        });
+        };
+        if let Some(emit) = emit.as_mut() {
+            emit(composition)?;
+        } else if let Some(output) = output {
+            output.push(composition);
+        }
     }
 
     Ok(())
@@ -1667,6 +1713,54 @@ mod tests {
         assert!(error
             .to_string()
             .contains("normalized RGBA output exceeds 15 bytes"));
+    }
+
+    #[test]
+    fn streamed_output_bounds_each_composition_without_rejecting_a_long_track() {
+        let rle = encode_rle(&[1, 1, 1, 1], 2, 2).expect("encode fixture");
+        let mut bytes = display_set(vec![
+            pcs(1000, CompositionState::EpochStart, vec![placement(7)]),
+            palette(1000, 235, 128, 128),
+            object(1000, 7, 2, 2, rle),
+            PgsSegment::end_segment(90_000, 0),
+        ]);
+        bytes.extend(display_set(vec![
+            pcs(2000, CompositionState::Normal, vec![placement(7)]),
+            PgsSegment::end_segment(180_000, 0),
+        ]));
+        let file = write_sup(&bytes);
+        let limits = ParserLimits {
+            max_normalized_rgba_bytes: 20,
+            ..ParserLimits::default()
+        };
+        assert!(normalize_sup(file.path(), &limits).is_err());
+
+        let mut sizes = Vec::new();
+        let report = normalize_sup_cancellable_into(
+            file.path(),
+            &limits,
+            &AtomicBool::new(false),
+            &mut |composition| {
+                sizes.push(composition.objects[0].rgba.len());
+                Ok(())
+            },
+        )
+        .expect("streamed compositions");
+        assert_eq!(sizes, [16, 16]);
+        assert_eq!(report.display_sets, 2);
+
+        let small_limit = ParserLimits {
+            max_normalized_rgba_bytes: 15,
+            ..ParserLimits::default()
+        };
+        let error = normalize_sup_cancellable_into(
+            file.path(),
+            &small_limit,
+            &AtomicBool::new(false),
+            &mut |_| Ok(()),
+        )
+        .expect_err("a single oversized composition still fails");
+        assert!(matches!(error, AdapterError::Limit(_)));
     }
 
     #[test]

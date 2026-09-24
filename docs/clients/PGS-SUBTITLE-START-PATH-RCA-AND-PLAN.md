@@ -1,12 +1,13 @@
 # PGS subtitles on the start path — why a 79.5 GB read blocks playback, and the three fixes
 
-**Status:** every fix planned here has merged; **nothing here is deployed** ·
+**Status:** the fixes below are deployed through `99d4abf8c` on the four server
+nodes; §5.5 physical acceptance **failed** on Android and remains open ·
 §3 #437 · §4 #445 · §5: B1 and most of B5 in #447, B2 built and deliberately
 reverted, B3 and B4 in #453 · §6 (Fix C, the subtitle ride-along on the index
 pass) in #456 (the store's readers), #466 (the producer; first merged as #460,
 which the forge did not keep — see `STATUS.md`) and #463 (attribution) · the
-overlay gate `subtitles.pgs_overlay` is still **off** pending §5.5's
-two-device check · reviewed — see
+overlay gate `subtitles.pgs_overlay` was enabled for the 2026-09-24 check;
+it is not qualified for release · reviewed — see
 [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
 **Reviewer:** Fable, adversarial · **Written:** 2026-09-22, revised 2026-09-23 ·
 **Reported by:** Paul, 2026-09-21 ~18:50 ET, Android on the TCL tablet
@@ -496,6 +497,26 @@ equivalent.
 > equivalent is still open.
 
 ### 5.5 The proof bar — deliberately not a matrix
+
+#### 2026-09-24 physical check: failed, acceptance open
+
+The Google TV Streamer ran Android client `0.3.0` (versionCode `119`) against
+server build `v0.3.0-3649-g99d4abf8c`. *Casino* (file `5226`) is HDR10 with
+English SDH PGS at subtitle index `0`. The client selected that track and the
+server reported remux delivery. Playback time advanced and a forward seek
+reached 15:02, but no cue appeared. On nynuc the overlay preparation ended
+after 584,654 ms with `PGS safety limit exceeded: normalized RGBA output
+exceeds 268435456 bytes`. The client therefore did not reach cue timing,
+placement, or backward-seek acceptance. A protected-video screenshot cannot
+establish visible picture or HDR output, so those observations remain open.
+
+The browser check on the same server build passed its narrower contract:
+*Casino* opened with subtitles Off; manually selecting PGS displayed “That
+subtitle requires an SDR burn-in. HDR playback was kept unchanged.” No Apple
+PGS cue or seek was observed. The iPad Pro was locked, and the Apple TV had an
+active viewer during the first attempt. The two-device proof bar below has
+not been met. A parser change that streams one normalized composition at a
+time is being validated separately; it does not count as hardware evidence.
 
 The plan's M4/M5 acceptance asks for an "executed compatibility matrix" and a
 "complete physical validation matrix". Those are ceremony for this feature. A
