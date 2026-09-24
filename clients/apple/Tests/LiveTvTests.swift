@@ -1959,7 +1959,19 @@ final class LiveTvTests: XCTestCase {
             contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
             encoding: .utf8)
         XCTAssertFalse(source.contains(".onChange(of: live.playing) { _, playing in if !playing { fullscreen = false } }"))
-        XCTAssertTrue(source.contains("if !busy && !live.playing { fullscreen = false }"))
+        // Both edges that can end a session route through one predicate that
+        // refuses while a tune is in flight. `playing` alone (861c6e24f) left
+        // a failed tune on a black cover — its `busy` edge was never observed;
+        // `busy` alone (9268f5f6e) left a stopped session on one.
+        let close = try XCTUnwrap(source.range(of: "private func closeSurfaceIfSessionFinished() {"))
+        let body = String(source[close.upperBound...].prefix(160))
+        XCTAssertTrue(body.contains("guard !live.playing && !live.busy else { return }"),
+                      "a tune in flight must never close the surface")
+        XCTAssertTrue(body.contains("fullscreen = false"))
+        XCTAssertTrue(source.contains(".onChange(of: live.playing) { _, _ in closeSurfaceIfSessionFinished() }"),
+                      "a stop ends on the playing edge")
+        XCTAssertTrue(source.contains(".onChange(of: live.busy) { _, _ in closeSurfaceIfSessionFinished() }"),
+                      "a failed tune ends on the busy edge")
     }
 
     func testTheGuideRefreshAndHeartbeatOutliveTheViewThatStartedThem() throws {
