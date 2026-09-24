@@ -107,13 +107,13 @@ the other — is the single most reusable thing the browser built.
 | `severeEstimateRatio` | 0.7 | below this fraction of source bitrate the link is "bandwidth-limited" |
 | `mildHeadroom` | 1.3 | margin a rung must clear on a mild downgrade |
 | `mildSamples` | 2 | consecutive mild samples before a mild downgrade |
-| `cooldownMs` | 20 000 | minimum gap between switches |
+| `cooldownMs` | 20 000 | minimum gap between voluntary switches; an `emergency` decision is exempt. The browser's voluntary gate is in fact `max(cooldownMs, dwellMs)` (build plan M0.2) |
 | `upgradeHeadroom` | 1.8 | estimate margin required to go up |
 | `upgradeHoldMs` | 45 000 | how long that margin must hold |
 | `upgradeSpeedFloor` | 1.15 | predicted post-switch encode pace, x realtime |
 | `stallWindowMs` | 60 000 | window over which stall events are counted |
 | `dwellMs` | 60 000 | the horizon the restart-cost model amortises over |
-| `nearEmptyRunwaySeconds` | 1.5 | emergency threshold |
+| `nearEmptyRunwaySeconds` | 1.5 | runway at or under which the player counts as starving (`nearEmpty`, one input to `starvation`). Urgency, not cause: on its own it makes `decideRung` **suppress** (`insufficient-evidence`), never switch, and it never makes a decision `emergency` — only a fresh bandwidth cliff does (§3.4) |
 | `restartCostSeconds` | 2.5 | what a reopen costs the viewer |
 | `causeMaxAgeMs` | 15 000 | cause evidence older than three ticks explains nothing |
 | `recentSampleMaxAgeMs` | 15 000 | same, for the throughput sample |
@@ -368,8 +368,8 @@ endpoint:
 |---|---|---|---|
 | **Constrained delivery** | `link:` | throughput below `severeEstimateRatio` x source, or a `publication`/`segment_`/`response_` refusal | step down by the estimate; this is the only class that may step more than one rung |
 | **Producer capacity** | `encode:` | `0 < recent_speed < 1` with `producer_state` in `{running, held}` | step down one rung; **never** step up, whatever the estimate says |
-| **Decoder failure** | `decode:` | a codec error, a repeated decode stall at an unchanged presentation time with a healthy buffer | add this height to `blockedHeights` and step down; a rung change is not a cure for a codec the device cannot decode, so a second failure must escalate to a delivery change, not a third rung |
-| **Deliberate hold** | `hold:` | `loader-suspended`, `producer_state == "held"`, a control verdict of `hold`/`retry` | **do nothing to quality.** Repair the transport or wait out the verdict |
+| **Decoder failure** | `decode:` | a codec error, a repeated decode stall at an unchanged presentation time with a healthy buffer | add this height to `blockedHeights` and step down **one** rung. That is the quality controller's whole response, and it never changes delivery method (§4). A rung change is not a cure for a codec the device cannot decode, so a second decode failure is **not** answered with a third rung: the controller takes no further decode move, and the item failure belongs to the platform's compatibility owner (Apple's compatibility ladder, Android's compatibility budget, the web's decode rescue), the only thing allowed to change delivery |
+| **Deliberate hold** | `hold:` | `loader-suspended`, or a `hold`/`retry_resource` verdict that answered **this client's own `stalled` ask** (fixture kind `control-stall-verdict`) | **no downward move** while it is in force, bounded by the client's stall deferral (20 s on the web). Repair the transport or wait out the verdict. Upgrades need no rule of their own: the stall that prompted the ask already refuses them through `stallFree`. **Not** fed by the routine advisory hold or by `producer_state == "held"`, which are the healthy paced steady state (below) |
 | **Denied authority** | `authority:` | 401/403/410, `owner_lost`, `owner_transition`, `node_removal_fenced`, `learner_route_ineligible` | **do nothing to quality.** Re-establish ownership; a rung change on a session you no longer own is a second session |
 | *(unknown / stale)* | `unknown:` | nothing fresher than `causeMaxAgeMs` | **do nothing.** Not bandwidth pressure (§2.3) |
 
@@ -377,9 +377,60 @@ Android's existing refusal (§2.5) is exactly the last row, and is preserved
 by construction: a stationary presentation with no fresh cause is
 `unknown`, and `unknown` never moves the rung.
 
-The two "do nothing to quality" rows are the ones a naive port would get
-wrong, and they are why the classifier is part of the shared policy rather
-than each platform's own reading of "it stalled".
+The `hold:` and `authority:` rows are the ones a naive port would get
+wrong — `hold:` in both directions, as the next paragraphs show — and they
+are why the classifier is part of the shared policy rather than each
+platform's own reading of "it stalled".
+
+**What the server calls a hold, and which half of it is evidence.** Most
+`hold`s on the wire are not trouble. `resolve_action`
+(`crates/plurxd/src/playback_control.rs:2027-2087`) runs on every control
+exchange (`http/hls.rs:4911`) and returns `ControlAction::Hold` whenever
+`delivery.hold_reason` is set, and the reasons include the rolling
+producer's ahead-window `demand`/`time`/`bytes`/`global` (`HoldReason`,
+`:1634-1642`, mapped from `AheadHoldReason` at `:1143-1150`). The only
+exception, `recovery_outranks_hold` (`:2017-2025`), withholds it from a
+client that reports `Stalled` with loaded or fetchable media, and its own
+doc says "A quiet or paused player must still receive the producer hold it
+asked for" (`:2016`). `producer_state` likewise reads `"held"` whenever the
+producer is suspended (`transcode.rs:8372-8373`). So a hold with a big
+buffer, a fast link and encode headroom is the ordinary steady state of a
+JIT producer paced ahead of its viewer, which is the state upward recovery
+is supposed to happen in, and §2.3's `capacity-shortfall` already counts
+`held` as a live producer. That half is **not evidence in either
+direction**; the fixture names it `producer-paced` and lists it under
+`not_evidence`, and a case pins that it never blocks an upgrade.
+
+`retry_resource` is a different kind of answer: `resolve_action` builds it
+only from a non-permanent `producer_decision` (`:2039-2068`), a producer
+that stopped, never from pacing. On a routine exchange no client retains it
+and it is not evidence on its own; if a stall follows, the ask that stall
+prompts returns it again.
+
+The half that *is* evidence is the verdict that answered the client's own
+`stalled` ask, and that is also the only place any client consumes one
+today. The web keeps only `terminal` verdicts from routine exchanges
+(`web/player/directed-change.js:426-430`) and acts on a
+`hold`/`retry_resource` only inside `persistentWait`
+(`web/player/measurements.js:498-549`), after that wait has already
+recorded the stall (`:416` → `recordWaitStall` → `noteAutoStall`, which sets
+`abr.lastStallAtMs`, `:271-284`). Android's `hold`/`retry_resource` arm is
+in `applyStallVerdict` (`Controller.kt:1849`), reached only from `onStall`
+(`:1945`). The web's deferral is capped at `CONTROL_STALL_DEFER_DEADLINE_MS
+= 20000` (`measurements.js:244`), well inside `stallWindowMs = 60000`, so
+while a web stall verdict is in force `stallFree`
+(`playback-policy.js:507-508`) already refuses every upgrade. What no
+platform does is hand the verdict to `decideRung`, so a fresh slow transfer
+during a held stall — which on a JIT server measures the paused producer,
+not the link — can still take the emergency downswitch. That downward gap
+is the fixture's `control-stall-verdict` case and the build plan's M0.1.
+
+An earlier draft of this section fed `hold:` from `producer_state == "held"`
+and any `hold`/`retry` verdict, told the policy to "do nothing to quality",
+and called the missing verdict "a live web defect" that let a hold with a
+healthy buffer be upgraded through. That premise was wrong for the reasons
+above, and built as written it would have stopped Auto upgrading on every
+session whose producer is paced ahead.
 
 ### 3.3 Prepared handoff when healthy, bounded recovery when stalled
 
@@ -414,12 +465,22 @@ exchange, not after — the `p.autoRequestedHeight` ordering at
 `stall-diagnosis.js:305-308`. On Apple and Android the equivalent is
 setting the desired quality on `PlaybackIntent` / the controller's pending
 selection before the next `reportControlEvidence`, and both clients already
-have that seam (`PlaybackIntent.adoptQuality`, `Controller.kt:64`).
+have that seam (`PlaybackIntent.adoptQuality`, `PlaybackIntent.kt:64`).
 
 ### 3.4 Hysteresis, budget, and going back up safely
 
-- **Cooldown.** No switch within `cooldownMs` of the last one, except an
-  `emergency` decision (runway below `nearEmptyRunwaySeconds`).
+- **Cooldown.** No voluntary switch within `cooldownMs` of the last one
+  (the browser's gate is in fact `max(cooldownMs, dwellMs)`, build plan
+  M0.2). The one exemption is an `emergency` decision, and only a **fresh
+  bandwidth cliff** makes one: a completed-transfer sample no older than
+  `recentSampleMaxAgeMs` below `severeEstimateRatio` x the current rung
+  (`freshBandwidthCliff`, `playback-policy.js:361-363`; `severe`, `:402`).
+  A runway at or under `nearEmptyRunwaySeconds` is **not** an emergency: it
+  feeds `starvation` (`:359-365`), which without a fresh cliff makes the
+  decision `suppressed`/`insufficient-evidence` (`:382-384`) — "Empty runway
+  establishes urgency, not cause" (`:420`). An adapter that downswitched on
+  an empty runway, cooldown or not, would be inferring bandwidth from a
+  stationary presentation, which §2.5 and §4 forbid.
 - **Mild downgrades need repetition.** `mildSamples` consecutive samples
   over `mildHeadroom`, so a single bad sample does not cost a restart.
 - **Restart cost is amortised, not ignored.** `restartCostSeconds` against
@@ -453,7 +514,7 @@ have that seam (`PlaybackIntent.adoptQuality`, `Controller.kt:64`).
 | **Paused** | off; resume re-arms after one full sample, not immediately | a paused player's runway is meaningless and its estimate is stale |
 | **Background / PiP** | off while not presenting | same reason, plus D2's lifecycle work owns what "backgrounded" means on Android |
 | **HDR fidelity** | a rung change must not silently change `OutputGrade` | an unexpected SDR transition is one of §3.8's named acceptance metrics; the HDR10 rung exists only at specific heights (`hdr10_rung_fits`, `transcode.rs:27619-27637`), so a downward step out of HDR must be *reported*, and preferably refused while the cause is `link:` only |
-| **A control verdict in force** | off until the verdict's deadline | the hold/retry rows of §3.2 |
+| **A stall-scoped control verdict** | no downward move while it is in force (the stall deferral, 20 s on the web). Not a tick gate, and not the routine paced hold, which gates nothing | §3.2's `hold:` row and the paragraphs after it: the server sends `hold` on every exchange while a paced producer is ahead, so a gate keyed on any hold would freeze Auto in the healthy state |
 
 ### 3.6 Shared fixtures, and what belongs in them
 
@@ -515,9 +576,16 @@ Server-side, one metric with bounded labels:
 
 Both label sets are closed enums; the values come from the typed beacon,
 never from a free string. No new settings key: `playback_auto_abr` is the
-switch that already exists, and it is replicated and surfaced in
-Settings → Developer with the advisory readiness list, which is the
-project's standing answer to "this needs a switch".
+switch that already exists. It is replicated (`http/system.rs:71-75`, off
+unless stored as `1`), but it is **not** in Settings → Developer and has no
+readiness information: it is an ordinary toggle, "Adjust Auto quality while
+playing", in the Playback panel's Streaming card
+(`web/pages/settings-panels.js:546`), and `http/system.rs` builds no
+readiness entry for it. The project rule is that optional functionality
+lives in Developer with advisory readiness that never gates enablement, so
+moving it there, with per-platform readiness rows such as "controller
+present on this client" and "shaped trace recorded", is follow-up **F-1** in
+the build plan. A-04 does not move it.
 
 ## 4. Guardrails (non-goals)
 
@@ -543,13 +611,20 @@ project's standing answer to "this needs a switch".
   compatibility budget own codec/HDR fallback
   (`PlayerController.swift:5093-5097`: "Actual item failures remain the
   sole owner of the codec/HDR compatibility ladder"). The quality
-  controller adds a height to `blockedHeights` and steps down; it does not
-  change delivery method.
+  controller adds a height to `blockedHeights` and steps down one rung,
+  once; it does not change delivery method, and a second decode failure is
+  the compatibility owner's, not a third rung (§3.2's `decode:` row says the
+  same).
 - **A6's poll cadence is not touched.** `startStatusPolling`'s 2 s is
   recovery evidence, and this design adds a *reader* of it, which makes
   backing it off worse, not better.
 - **No in-code feature gate.** `playback_auto_abr` is a replicated setting
-  already; the native clients read the same one. Nothing new.
+  already; a native tick reads the same one, exactly as the web tick does,
+  once it merges. "Ships disabled" (§5.4) is not a flag: a platform's tick
+  does not merge until its shaped trace exists, and that trace runs on an
+  unmerged build of the milestone's own branch, sideloaded onto the lab
+  devices (build plan M3). Where the switch lives in the UI is follow-up
+  F-1 (§3.7).
 - **Viewer intent is never silently overridden** (§3.5). A controller that
   moves a rung raises the existing `degraded_notice` surface exactly as the
   web one does, so the change is visible.
@@ -566,10 +641,11 @@ which changes no behaviour; nothing else under A-04 touches runtime code.
 
 ### 5.1 D1 — the shared policy artifact and its fixtures — DELIVERED
 
-`tests/playback/auto-quality-policy.json`, schema 1, 29 cases and 11
+`tests/playback/auto-quality-policy.json`, schema 1, 30 cases and 12
 controller-gate rows, driven by `node tests/playback/web-policy.test.js`.
-Four cases and three gate rows carry a `web_current`/`finding` disagreement;
-they are summarised in §8.4 and §7.6.
+Five cases (M0's four disagreements plus the unimplemented switch budget)
+and three gate rows carry a `web_current`/`finding` disagreement; they are
+summarised in §8.4 and §7.6.
 
 Deliverable: `tests/playback/auto-quality-policy.json` at schema 1 (§3.6),
 plus `web-policy.test.js` extended to drive `decideRung` from it, so the
@@ -662,7 +738,11 @@ The enabling gate, written into that plan and repeated here because it is
 §3.8's own condition: **a platform's controller ships disabled until its
 shaped-network trace shows stalled seconds down and unexpected SDR
 transitions at zero against D3's baseline for that platform.** A green
-`auto-quality-policy.json` run is not that evidence.
+`auto-quality-policy.json` run is not that evidence. The trace runs on an
+unmerged build of that milestone's branch, built from its PR head and
+sideloaded onto the lab devices with `playback_auto_abr` on for the lab
+server; D3's baseline is the same matrix on a `main` build. The PR merges
+after the trace, so `main` never carries an unmeasured tick.
 
 ### 5.5 D5 — the dormant-plumbing decision — DELIVERED
 
@@ -760,9 +840,9 @@ accounting* (`hls.rs`), and neither is the right response to `hold:` or
 `authority:`, where §3.2 says do nothing at all. Adding four variants that all
 behave like `Stall` would make the field's name a lie; adding four variants
 with distinct server behaviour is a server change that needs a shaped trace
-behind it. Both belong to the build plan, which §8 of
-[NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md](NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md)
-binds as M1's first item.
+behind it. Both belong to the build plan, whose M1 (§3 of
+[NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md](NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md))
+owns them.
 
 **What survives on Apple, and is meant to.** `PlayerOpenIntent.stallReopen`,
 `StallReopenTicket`, the ticket branch of `applyOpenIntent`,
@@ -871,8 +951,8 @@ corrected in passing by an executing session. The case is recorded in
 
 The likely settlement, for whoever takes it: `link:` is throughput evidence
 only, and a delivery refusal becomes a sixth class or joins `hold:` — it is a
-"repair the transport, do not change quality" answer, which is exactly what
-`hold:` means.
+"repair the transport, do not change quality" answer. If it joins `hold:`,
+it joins the stall-scoped half (§3.2), never the routine paced hold.
 
 ### 7.7 Can Apple see a cliff at all? — opened by D2
 
@@ -922,8 +1002,9 @@ everything below is `autoControllerTick`'s `sampleMs`, 5 s.
 | `cause` | `autoCauseEvidence(p, now)` | see §2.3 | per tick | `{kind:"unknown"\|"stale"}` |
 
 Tick location: `autoControllerTick`, `crates/plurxd/src/web/player/stall-diagnosis.js`.
-Guards, in the order the function applies them — these are the eight rows the
-fixture's `controller_gates` pins: `playbackOwnsAttachedMedia(p)`,
+Guards, in the order the function applies them — these are the eight guards
+the fixture's `controller_gates` pins, each asserted on its own side of the
+awaited health poll: `playbackOwnsAttachedMedia(p)`,
 `SERVER.playback_auto_abr`, `qualityForce()!=='auto'`, `!p.started`,
 `v.paused`, `p.abr.switching`, `p.autoFallbackInFlight`, and then the whole
 identity tuple (`PLAYER`, `mediaAttachment`, `sessionId`, `streamId`)
@@ -944,7 +1025,7 @@ re-checked after the awaited health poll.
 | `lastStallAtMs`, `lastSwitchAtMs`, `mildSamples`, `upgradeSinceMs` | adapter state; no API | ms / count | per tick | `null`/0 |
 | `playerHeight` | **not wired.** The layer's bounds times the screen scale; nothing in `clients/apple/Sources` reads either for this purpose today | pixels | per tick | `Infinity` — a ceiling only, so an unknown ceiling is safe by construction |
 | `blockedHeights` | new. Apple's compatibility ladder owns codec/HDR fallback and is explicitly *not* this (§4, and `PlayerController.swift`: "Actual item failures remain the sole owner of the codec/HDR compatibility ladder") | set | per decode failure | empty |
-| `cause` | new classifier. The inputs exist: `APIError.httpStatus` and refusal codes for `authority:`/`link:`, `PlaybackSessionStatus.producer_state`/`recent_speed` for `encode:`, the control verdict for `hold:` | see §3.2 | per tick | `unknown` |
+| `cause` | new classifier. The inputs exist: `APIError.httpStatus` and refusal codes for `authority:`/`link:`, `PlaybackSessionStatus.producer_state`/`recent_speed` for `encode:`, the verdict answering its own `stalled` ask for `hold:` (never the routine paced hold, §3.2) | see §3.2 | per tick | `unknown` |
 
 Tick location: its own timer at `sampleMs` (5 s), reading the values
 `startStatusPolling` already samples at 2 s. **Not** folded into the 2 s poll:
@@ -974,7 +1055,7 @@ gate and the wire agree by construction.
 | `lastStallAtMs`, `lastSwitchAtMs`, `mildSamples`, `upgradeSinceMs` | adapter state; no API | ms / count | per tick | `null`/0 |
 | `playerHeight` | **not wired.** `SurfaceView` height × display density; nothing reads it for this purpose today | pixels | per tick | `Infinity` |
 | `blockedHeights` | new; Android's compatibility budget owns codec/HDR fallback and is not this | set | per decode failure | empty |
-| `cause` | new classifier, and the *easiest* of the three: the control verdict is already in hand at the `hold`/`retry_resource` arm, which is the `hold:` row the browser cannot see at all | see §3.2 | per tick | `unknown` |
+| `cause` | new classifier, and the *easiest* of the three: the stall-scoped verdict is already destructured at the `hold`/`retry_resource` arm of `applyStallVerdict`, reached only from `onStall`, which is exactly the `control-stall-verdict` §3.2 wants and nothing broader | see §3.2 | per tick | `unknown` |
 
 Tick location: the existing `openStallTracker` sampling loop in
 `Controller.kt` already runs on its own cadence with the ownership checks in
@@ -1068,16 +1149,22 @@ never strand a downgrade from a rung above it (the fixture pins that). The
 cost of `Infinity` is that a 4K rung can be chosen for a small window, not
 that anything breaks. It is therefore the last thing to wire, not the first.
 
-#### 8.4.6 Nobody has a control-verdict cause, including the browser
+#### 8.4.6 Nobody hands the stall verdict to the policy
 
-§3.2's `hold:` row and §3.5's "a control verdict in force" row have no
-implementation anywhere. `autoCauseEvidence` has no such kind, and
-`autoControllerTick` reads no verdict, so on the web a hold verdict with a
-healthy buffer does not stop an upgrade. The fixture records this as its
-sharpest disagreement. Android is where it is cheapest to fix, because the
-verdict is already destructured at the `hold`/`retry_resource` arm. The web
-is where it must be fixed *first*, because the web is where the policy's
-behaviour is pinned.
+Every client already consumes a `hold`/`retry_resource` verdict, and only
+where it answers its own `stalled` ask: the web inside `persistentWait`,
+Android inside `applyStallVerdict`. Neither passes it to the quality policy:
+`autoCauseEvidence` has no such kind and `autoControllerTick` reads no
+verdict. Upward this costs nothing, because the stall that prompted the ask
+already refuses upgrades through `stallFree` for `stallWindowMs`, longer than
+any deferral. Downward it does: a fresh slow transfer during a held stall
+takes the emergency branch. The fixture records that as its
+`control-stall-verdict` disagreement, and it is the build plan's M0.1.
+
+The routine advisory hold the server sends on every exchange while a paced
+producer is ahead, and `producer_state == "held"`, are deliberately **not**
+this (§3.2): a policy that treated them as evidence would never upgrade a
+paced session.
 
 ### 8.5 Corrections to §3.1's table
 
@@ -1109,3 +1196,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D3 | — | **needs:** one shaped-network trace per platform per profile, on today's build, with all six §5.3 metrics filled. Nothing has been measured and no number in §5.3 has a value. The prompts are in §6; they need a deployed build, three browsers, two Apple devices and four Android devices. Post-merge evidence under the work board's rule 9, appended here through the evidence-only docs PR. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D4 | [#458](http://192.168.4.7:3000/noirr/plurx/pulls/458) | [NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md](NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md), board row A-05, `unclaimed`. Sequenced so nothing can be enabled before D3's baseline exists. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D5 | [#458](http://192.168.4.7:3000/noirr/plurx/pulls/458) | The decision executed: both `stallReopenIntent` overloads and their four test call sites deleted; `PlayerOpenIntent.stallReopen`, `StallReopenTicket`, `applyOpenIntent`'s ticket branch, `unboundStallRetry`, the floor budget's `.stallReopen` arm and the Android parameters all retained. `ReopenReason` deliberately **not** widened — §7.1 says why, and the build plan's M1 owns it. No behavioural change and no new test, because neither deleted function had a production call site; anchored in `tests/client-fixes.toml`. **The Apple target was not compiled and its suite was not run**: no Swift toolchain was reachable from the executing session. That is the one verification this milestone owes. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review of D1–D5 | [#458](http://192.168.4.7:3000/noirr/plurx/pulls/458) | The one adversarial review (comment 4105) found seven things, all taken. **`hold:` was split** (§3.2): the server sends `hold` on every exchange while a paced producer is ahead (`resolve_action`, `playback_control.rs:2027-2087`) and `producer_state` reads `held` whenever it is suspended, so the old row and its fixture case would have stopped Auto upgrading on every paced session. Now only a verdict answering the client's own `stalled` ask is evidence, and it suppresses a downward move; the routine hold is not evidence and a new fixture case pins that it never blocks an upgrade. The "live web defect" premise is withdrawn: while a web stall verdict is in force `stallFree` already refuses upgrades. **`playback_auto_abr` is not in Developer** — it is a Playback-panel toggle with no readiness entry (`settings-panels.js:546`); §3.7 and §4 now say so, and moving it is follow-up F-1 in the build plan, not done here. **Emergency** is defined as the code defines it (§2.2, §3.4): only a fresh bandwidth cliff, never an empty runway. **Decode** has one answer (§3.2, §4): block and step down one rung once, never change delivery; a second failure is the compatibility owner's. **The fixture now pins all eight §8.1 guards**, each on its own side of the awaited poll; deleting `if(p.autoFallbackInFlight) return;` fails "An automatic fallback already claimed: autoControllerTick no longer contains p.autoFallbackInFlight before poll" (proved by revert). **The trace build is named** (§5.4, build plan M3): an unmerged branch build sideloaded onto the lab devices. The Apple watchdog test's doc comment names `.sameDeliveryRepair`. Two citation slips fixed (`PlaybackIntent.kt:64`; §7.1's pointer to the build plan). The D5 row's missing Apple verification is now taken: the target compiles and `make apple-test` on the lab Mac fails the same five iOS cases (`testDetailBadgesCarryTheSourceDynamicRangeAfterTheCodec`, three `LiveTvTests`, one `PlayerResumeTests`) that `main` fails at the same Swift, so the deletion adds none. |
