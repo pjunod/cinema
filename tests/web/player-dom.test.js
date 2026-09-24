@@ -166,102 +166,183 @@ function shipped(name) {
 }
 
 // MediaSession: the OS media keys, a headset button, the lock screen.
-{
-  const build = (navigatorStub, video) => {
-    const toggles = [];
-    const nudges = [];
-    const run = new Function(
-      "navigator", "document", "togglePlay", "nudge", "autoNextOn", "playNextEpisode",
-      [
-        shipped("setPlayerMediaAction"),
-        shipped("installPlayerMediaSession"),
-        shipped("clearPlayerMediaSession"),
-        "return {installPlayerMediaSession, clearPlayerMediaSession};",
-      ].join("\n"),
-    )(
-      navigatorStub,
-      { getElementById: () => video },
-      () => toggles.push(video.paused ? "play" : "pause"),
-      (d) => nudges.push(d),
-      () => navigatorStub.autoNext !== false,
-      () => nudges.push("next"),
-    );
-    return { run, toggles, nudges };
-  };
-
-  // A browser without the API is asked for nothing at all.
-  {
-    const { run } = build({}, { paused: true });
-    assert.equal(run.installPlayerMediaSession(), false, "a browser with no mediaSession was still asked for handlers");
-  }
-
+//
+// The handlers are composed with the shipped routing (`watchRouteInput` over
+// the real contract table) and the shipped intent reader. `togglePlay` is a
+// seam here that flips `PLAYER.wantsPlayback`, which is what the real one does
+// on an attached player; `web-control.test.js` drives the real `togglePlay`
+// through the reattach window, where the element and the intent disagree.
+const PlaybackPolicy = require("../../crates/plurxd/src/web/playback-policy.js");
+function mediaSessionHarness(navigatorStub, { state = "transport", autoNext = true, meta = null, wantsPlayback = false } = {}) {
+  const log = [];
+  const world = { state, autoNext };
+  const video = { paused: true, ended: false, playbackRate: 1 };
+  const PLAYER = { wantsPlayback, meta };
+  const run = new Function(
+    "navigator", "document", "PlaybackPolicy", "PLAYER", "world", "log",
+    [
+      "const WATCH=null, play={}, PLAY_OPEN_GATE={current:()=>false};",
+      "function playerInputState(){return world.state;}",
+      "function togglePlay(){PLAYER.wantsPlayback=!PLAYER.wantsPlayback;log.push(PLAYER.wantsPlayback?'toggle:play':'toggle:pause');}",
+      "function commitPendingSeek(){log.push('commit');}",
+      "function nudge(d){log.push(d);}",
+      "function autoNextOn(){return world.autoNext;}",
+      "function playNextEpisode(){log.push('next');}",
+      shipped("playerInputSurface"), shipped("watchRouteInput"), shipped("playerWantsPlayback"),
+      shipped("setPlayerMediaAction"), shipped("playerMediaPlayPause"), shipped("playerMediaSkip"),
+      shipped("playerNextTrackOffered"), shipped("syncPlayerNextTrack"),
+      shipped("installPlayerMediaSession"), shipped("clearPlayerMediaSession"),
+      "return {installPlayerMediaSession, clearPlayerMediaSession, syncPlayerNextTrack};",
+    ].join("\n"),
+  )(navigatorStub, { getElementById: () => video }, PlaybackPolicy, PLAYER, world, log);
+  return { run, log, world, video, PLAYER };
+}
+function recordingNavigator({ refuse = [] } = {}) {
   const handlers = {};
-  const navigatorStub = {
+  return {
+    handlers,
     mediaSession: {
       playbackState: "none",
       setActionHandler(action, handler) {
         // A browser throws NotSupportedError for an action it does not know.
-        if (action === "nexttrack") throw new Error("NotSupportedError");
+        if (refuse.includes(action)) throw new Error("NotSupportedError");
         handlers[action] = handler;
       },
       setPositionState() {},
     },
   };
-  const video = { paused: true, playbackRate: 1 };
-  const { run, toggles, nudges } = build(navigatorStub, video);
+}
+
+{
+  // A browser without the API is asked for nothing at all.
+  const { run } = mediaSessionHarness({});
+  assert.equal(run.installPlayerMediaSession(), false, "a browser with no mediaSession was still asked for handlers");
+}
+
+{
+  const nav = recordingNavigator({ refuse: ["nexttrack"] });
+  const { run, log, world, PLAYER, video } = mediaSessionHarness(nav);
+  const { handlers } = nav;
   assert.equal(run.installPlayerMediaSession(), true);
   // The unknown action did not take the ones after it down with it.
   assert.deepEqual(Object.keys(handlers).sort(), ["pause", "play", "seekbackward", "seekforward"]);
 
-  // play and pause are separate and each is idempotent. A remote that sends
-  // `play` to a film already playing must leave it playing — togglePlay would
-  // stop it, which is exactly what one shared handler would have done.
+  // play and pause are separate and each is idempotent ON THE VIEWER'S
+  // INTENT. The element here stays paused throughout — the reattach window —
+  // and that must not decide anything.
   handlers.play();
-  assert.deepEqual(toggles, ["play"], "play did not start a paused film");
-  video.paused = false;
+  assert.deepEqual(log, ["toggle:play"], "play did not start a film the viewer had paused");
   handlers.play();
-  assert.deepEqual(toggles, ["play"], "play on a playing film toggled it off");
+  assert.deepEqual(log, ["toggle:play"], "play on a film the viewer wants playing toggled it off (the element was merely paused)");
   handlers.pause();
-  assert.deepEqual(toggles, ["play", "pause"]);
-  video.paused = true;
+  assert.deepEqual(log, ["toggle:play", "toggle:pause"]);
   handlers.pause();
-  assert.deepEqual(toggles, ["play", "pause"], "pause on a paused film toggled it back on");
+  assert.deepEqual(log, ["toggle:play", "toggle:pause"], "pause on a paused film toggled it back on");
+  // An ended element reads as not playing: `play` is the replay, `pause` nothing.
+  PLAYER.wantsPlayback = true; video.ended = true; log.length = 0;
+  handlers.pause();
+  assert.deepEqual(log, [], "pause on an ended film asked togglePlay, which replays it");
+  handlers.play();
+  assert.deepEqual(log, ["toggle:pause"], "play on an ended film did not reach togglePlay's replay");
+  video.ended = false; PLAYER.wantsPlayback = true; log.length = 0;
 
   // Seek uses the browser's own offset when it sends one, and the player's
   // ten seconds when it does not — and never in the wrong direction.
   handlers.seekbackward({});
   handlers.seekforward({});
   handlers.seekbackward({ seekOffset: 30 });
-  handlers.seekforward({ seekOffset: 30 });
-  assert.deepEqual(nudges, [-10, 10, -30, 30]);
+  handlers.seekforward({ seekOffset: -30 });
+  assert.deepEqual(log, [-10, 10, -30, 30]);
+
+  // The contract table decides, as it does for the keys (§5).
+  // failed × play_pause = ignore: a headset press on a blocking prompt.
+  world.state = "failed"; log.length = 0; PLAYER.wantsPlayback = false;
+  handlers.play(); handlers.seekforward({});
+  assert.deepEqual(log, [], "a blocking prompt did not ignore the OS transport");
+  assert.equal(PLAYER.wantsPlayback, false);
+  // scrub × play_pause = commit_then_toggle_play; scrub × skip = ignore.
+  world.state = "scrub"; PLAYER.wantsPlayback = true;
+  handlers.play();
+  assert.deepEqual(log, ["commit"], "play during a pending seek must commit it and keep playing");
+  handlers.pause();
+  assert.deepEqual(log, ["commit", "commit", "toggle:pause"], "pause during a pending seek must commit it, then pause");
+  handlers.seekbackward({}); handlers.seekforward({ seekOffset: 5 });
+  assert.equal(log.length, 3, "a skip during a pending seek replaced its target");
+  // menu and info × skip = ignore; play_pause still toggles.
+  for (const state of ["menu", "info"]) {
+    world.state = state; log.length = 0; PLAYER.wantsPlayback = true;
+    handlers.seekforward({}); handlers.seekbackward({});
+    handlers.pause();
+    assert.deepEqual(log, ["toggle:pause"], `${state}: skips must be ignored and pause must still pause`);
+  }
+  // hidden and timeline skip, as the keys do.
+  for (const state of ["hidden", "timeline"]) {
+    world.state = state; log.length = 0;
+    handlers.seekforward({ seekOffset: 15 });
+    assert.deepEqual(log, [15], `${state}: the OS skip must reach nudge`);
+  }
 
   run.clearPlayerMediaSession();
   assert.deepEqual(Object.values(handlers).filter(Boolean), [], "closing left a handler installed");
-  assert.equal(navigatorStub.mediaSession.playbackState, "none");
-  process.stdout.write("PASS the OS transport installs feature-detected, keeps play and pause apart, and is handed back on close\n");
+  assert.equal(nav.mediaSession.playbackState, "none");
+  process.stdout.write("PASS the OS transport installs feature-detected, routes through the contract table, keeps play and pause apart on intent, and is handed back on close\n");
+}
+
+// Next exists only while autoplay-next is on, and only for what can be an
+// episode: a browser draws a Next button for any action with a handler.
+{
+  const nav = recordingNavigator();
+  const { run, log, world, PLAYER } = mediaSessionHarness(nav, { autoNext: false });
+  run.installPlayerMediaSession();
+  assert.equal(nav.handlers.nexttrack ?? null, null, "Next was registered with autoplay-next off");
+  world.autoNext = true; run.syncPlayerNextTrack();
+  assert.equal(typeof nav.handlers.nexttrack, "function", "turning autoplay-next on did not offer Next");
+  nav.handlers.nexttrack();
+  assert.deepEqual(log, ["next"]);
+  world.autoNext = false; run.syncPlayerNextTrack();
+  assert.equal(nav.handlers.nexttrack, null, "turning autoplay-next off left Next on the lock screen");
+  world.autoNext = true; PLAYER.meta = { kind: "movie" }; run.syncPlayerNextTrack();
+  assert.equal(nav.handlers.nexttrack, null, "a movie was offered a next episode");
+  PLAYER.meta = { kind: "episode" }; run.syncPlayerNextTrack();
+  assert.equal(typeof nav.handlers.nexttrack, "function");
+  run.clearPlayerMediaSession();
+  assert.equal(nav.handlers.nexttrack, null);
+  run.syncPlayerNextTrack();
+  assert.equal(nav.handlers.nexttrack, null, "a settings change after close re-installed Next for a player that is gone");
+  // `setAutoNext` is where the setting changes; it has to re-sync.
+  assert.match(shipped("setAutoNext"), /syncPlayerNextTrack\(\)/, "setAutoNext no longer re-syncs the OS transport's Next");
+  process.stdout.write("PASS the OS transport offers Next only while autoplay-next is on, and follows the setting\n");
 }
 
 // The position goes out on the tick the player already runs, not on a new one.
 {
   const states = [];
+  const PLAYER = { wantsPlayback: true };
   const update = new Function(
-    "navigator", "pbTotalSec", "pbShownSec",
-    `${shipped("updatePlayerMediaSession")}\nreturn updatePlayerMediaSession;`,
+    "navigator", "pbTotalSec", "pbShownSec", "PLAYER",
+    `const play={}, PLAY_OPEN_GATE={current:()=>false};
+     ${shipped("playerWantsPlayback")}
+     ${shipped("updatePlayerMediaSession")}\nreturn updatePlayerMediaSession;`,
   );
   const session = { playbackState: "none", setPositionState: (state) => states.push(state) };
-  const run = update({ mediaSession: session }, () => 7200, () => 900);
-  run({ paused: false, playbackRate: 1 }, {});
+  const run = update({ mediaSession: session }, () => 7200, () => 900, PLAYER);
+  run({ paused: false, playbackRate: 1 }, PLAYER);
   assert.equal(session.playbackState, "playing");
   assert.deepEqual(states, [{ duration: 7200, position: 900, playbackRate: 1 }]);
-  run({ paused: true, playbackRate: 1 }, {});
+  // The reattach window: the element is paused, the viewer is not. The OS
+  // must keep showing Pause, or the next press arrives as `play`.
+  run({ paused: true, playbackRate: 1 }, PLAYER);
+  assert.equal(session.playbackState, "playing", "a reattach's paused element told the OS the viewer had paused");
+  PLAYER.wantsPlayback = false;
+  run({ paused: true, playbackRate: 1 }, PLAYER);
   assert.equal(session.playbackState, "paused");
-  assert.equal(states.length, 2, "a paused player still publishes where it is");
+  assert.equal(states.length, 3, "a paused player still publishes where it is");
 
   // A stream whose duration is still growing reports a position past the
   // duration routinely, and setPositionState throws on it. Say nothing rather
   // than throw out of the half-second tick.
-  const growing = update({ mediaSession: session }, () => 0, () => 900);
-  growing({ paused: false, playbackRate: 1 }, {});
-  assert.equal(states.length, 2, "an unknown duration was published as a position state");
-  process.stdout.write("PASS the OS transport takes its position from the sampling tick and refuses an impossible one\n");
+  const growing = update({ mediaSession: session }, () => 0, () => 900, PLAYER);
+  growing({ paused: false, playbackRate: 1 }, PLAYER);
+  assert.equal(states.length, 3, "an unknown duration was published as a position state");
+  process.stdout.write("PASS the OS transport takes its position from the sampling tick and its play state from the viewer's intent\n");
 }

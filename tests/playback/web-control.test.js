@@ -80,9 +80,13 @@ function fullOpenHarness() {
     "function qualityForce(){return PlaybackPolicy.qualityForce(quality);} function playQuality(){return quality;} function qualityLabel(){return '720p';} function prePlaySelection(){return null;}",
     surfaceSeam(),
     "const loading=[],posted=[],ITEM_FOR_FILE={film:'film-item','new-title':'new-item'};function api(path,{body}={}){posted.push({path,body});return Promise.resolve({});}function wirePlayer(){} function setLoading(...args){loading.push(args);} function toast(){} function closeMenu(){} const location={hash:'#/'};function exitPresentationModes(){}function cancelPendingSeek(){}"
-    // The OS media keys are a seam here: this harness has no navigator, and
-    // `player-dom.test.js` is where the handlers themselves are driven.
-    + "function clearPlayerMediaSession(){}function installPlayerMediaSession(){}function updatePlayerMediaSession(){}",
+    // The OS media keys are shipped here, over a recording MediaSession, so the
+    // installed handlers run against the real `togglePlay`, the real pending
+    // open and the real contract table. The input state is the one seam: the
+    // DOM this harness fakes cannot express a focused scrubber or an open menu,
+    // and `player-dom.test.js` walks the table's states instead.
+    + "const mediaHandlers={};const navigator={mediaSession:{playbackState:'none',setActionHandler(action,handler){mediaHandlers[action]=handler;},setPositionState(){}}};"
+    + "let inputState='transport';function playerInputState(){return inputState;} const mediaLog=[];function commitPendingSeek(){mediaLog.push('commit');} function nudge(d){mediaLog.push(d);} function playNextEpisode(){mediaLog.push('next');}",
     "function clientLog(){} function playbackContext(){return {};} function decodeLimits(){return {};} function playerPixelHeight(){return 1080;}",
     // Capability probing is a seam here; play retains this snapshot for routing.
     "function currentCapsDocument(){return {video:[],audio:[]};}",
@@ -166,7 +170,13 @@ function fullOpenHarness() {
     shippedSource("playbackSeekPublishedRangeMs"),
     shippedSource("playbackSeekBufferCovers"),
     shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("burnSub"),
-    shippedSource("offsetLabel"), shippedSource("setSync"), shippedSource("togglePlay"),
+    shippedSource("offsetLabel"), shippedSource("setSync"),
+    shippedSource("playerWantsPlayback"), shippedSource("togglePlay"),
+    shippedSource("playerInputSurface"), shippedSource("watchRouteInput"),
+    shippedSource("setPlayerMediaAction"), shippedSource("playerMediaPlayPause"), shippedSource("playerMediaSkip"),
+    shippedSource("playerNextTrackOffered"), shippedSource("syncPlayerNextTrack"),
+    shippedSource("installPlayerMediaSession"), shippedSource("clearPlayerMediaSession"),
+    shippedSource("updatePlayerMediaSession"),
     shippedSource("retryPlayback"),
     shippedSource("closePlayer"),
     // The paused-repeat floor is shipped beside `reportProgress` and read by it.
@@ -181,7 +191,7 @@ function fullOpenHarness() {
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("waiting",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
     "function incumbentError(){let handler;const v=Object.create(video);v.addEventListener=(_,fn)=>{handler=fn;};"+
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("error",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
-    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality:qualityMenuPick,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),spendHlsRetry:()=>scheduleHlsNetworkRetry(video,PLAYER,'network'),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
+    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality:qualityMenuPick,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),installPlayerMediaSession,updatePlayerMediaSession,mediaHandlers,mediaLog,mediaSession:navigator.mediaSession,setInputState(value){inputState=value;},spendHlsRetry:()=>scheduleHlsNetworkRetry(video,PLAYER,'network'),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
   ].join("\n"))(policy);
 }
 
@@ -1380,6 +1390,62 @@ async function main() {
     h.video.currentTime=130;h.reportProgress('film');
     assert.equal(h.posted.length,2);
     assert.equal(h.posted[1].body.position_ms,130_000);
+  }
+  {
+    // The OS transport acts on the viewer's INTENT (PR #459 review, finding 1).
+    // A reattach — a transcode seek's reopen, a quality or audio switch, stall
+    // recovery — leaves the element paused while the viewer still wants the
+    // film playing, until applyPlaybackTransportIntent plays it again. The
+    // installed handlers run against the real togglePlay here: judged on the
+    // element, `play` flipped the intent to pause and the stream attached paused.
+    const h=fullOpenHarness(),p=fullPlayer();p.method='transcode';p.wantsPlayback=true;h.attach(p);
+    h.video.paused=true;
+    assert.equal(h.installPlayerMediaSession(),true);
+    h.updatePlayerMediaSession(h.video,p);
+    assert.equal(h.mediaSession.playbackState,'playing','the OS was told a reattaching film had been paused, so the next press arrives as play');
+    h.mediaHandlers.play();
+    assert.equal(p.wantsPlayback,true,'MediaSession play paused a film the viewer wants playing');
+    h.mediaHandlers.pause();
+    assert.equal(p.wantsPlayback,false,'MediaSession pause did not pause');
+    h.mediaHandlers.pause();
+    assert.equal(p.wantsPlayback,false,'a second MediaSession pause played the film again');
+    // A blocking prompt ignores the press, as the table says for the keys.
+    h.setInputState('failed');
+    h.mediaHandlers.play();
+    assert.equal(p.wantsPlayback,false,'a headset play acted behind a blocking prompt');
+    h.setInputState('transport');
+    h.mediaHandlers.play();
+    assert.equal(p.wantsPlayback,true);
+  }
+  {
+    // The same during a pending open, where the intent lives on the open.
+    const h=fullOpenHarness(),p=fullPlayer();p.sessionId='A';p.wantsPlayback=true;h.attach(p);h.video.paused=true;
+    h.installPlayerMediaSession();
+    const opening=h.play('film','Film',10_000,600_000,null);
+    assert.ok(h.play.pendingIntent,'the harness did not reach a pending open');
+    assert.equal(h.play.pendingIntent.wantsPlayback,true);
+    h.mediaHandlers.play();
+    assert.equal(h.play.pendingIntent.wantsPlayback,true,'MediaSession play during a pending open flipped its intent to pause');
+    h.mediaHandlers.pause();
+    assert.equal(h.play.pendingIntent.wantsPlayback,false,'MediaSession pause during a pending open did not reach it');
+    h.mediaHandlers.pause();
+    assert.equal(h.play.pendingIntent.wantsPlayback,false,'a second pause during a pending open resumed it');
+    h.closePlayer();await opening;
+    assert.equal(h.mediaHandlers.play,null,'closing left the OS transport installed');
+  }
+  {
+    // A cold open has no player to mirror the intent onto, so the open's own
+    // intent is the only record of it while the element sits paused.
+    const h=fullOpenHarness();h.video.paused=true;
+    h.installPlayerMediaSession();
+    const opening=h.play('cold','Cold film',0,600_000,null);
+    assert.equal(h.current(),null,'the harness did not reach a cold open');
+    assert.equal(h.play.pendingIntent.wantsPlayback,true);
+    h.mediaHandlers.play();
+    assert.equal(h.play.pendingIntent.wantsPlayback,true,'MediaSession play during a cold open flipped its intent to pause');
+    h.mediaHandlers.pause();
+    assert.equal(h.play.pendingIntent.wantsPlayback,false);
+    h.closePlayer();await opening;
   }
   {
     const h=fullOpenHarness(),p=fullPlayer();p.sessionId='working';h.attach(p);

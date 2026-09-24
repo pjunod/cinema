@@ -878,25 +878,57 @@ document.getElementById("player").addEventListener("focusin",e=>{
 function setPlayerMediaAction(action,handler){
   try{ navigator.mediaSession.setActionHandler(action,handler); }catch(e){}
 }
+// A MediaSession command is one more producer of a contract input, so it asks
+// the same table the keys ask (§5): a blocking prompt (`failed`) ignores a
+// headset press, a pending seek (`scrub`) is committed before the play state
+// changes, and an open menu or panel keeps ignoring skips. Calling
+// `togglePlay` or `nudge` directly, whatever state the player was in, is what
+// the table used to be bypassed by.
+//
+// What the OS transport adds is idempotence. `play` and `pause` are separate
+// handlers, and each only toggles when the viewer's INTENT differs from what
+// was asked — `playerWantsPlayback`, never the element's `paused`. A pending
+// open and every reattach leave the element paused while the viewer still
+// wants the film playing; judged on `paused`, a `play` pressed in that window
+// flipped the intent to pause and the stream attached paused.
+function playerMediaPlayPause(wanted){
+  const outcome=watchRouteInput(playerInputState(),"play_pause");
+  if(outcome!=="toggle_play"&&outcome!=="commit_then_toggle_play") return false;
+  if(outcome==="commit_then_toggle_play") commitPendingSeek();
+  if(playerWantsPlayback(document.getElementById("video"))!==wanted) togglePlay();
+  return true;
+}
+function playerMediaSkip(input,seconds){
+  if(watchRouteInput(playerInputState(),input)!=="skip") return false;
+  nudge(input==="skip_back"?-seconds:seconds);
+  return true;
+}
+// Next is the next EPISODE, and the handler exists only while there can be one
+// the viewer asked for: autoplay-next on, and not a title already known to be
+// something other than an episode. A browser draws a Next control for any
+// action that has a handler, so a handler that does nothing is a button that
+// does nothing. `setAutoNext` re-syncs it when the setting changes mid-film.
+function playerNextTrackOffered(){
+  const kind=PLAYER&&PLAYER.meta&&PLAYER.meta.kind;
+  return autoNextOn()&&(!kind||kind==="episode");
+}
+function syncPlayerNextTrack(){
+  if(!installPlayerMediaSession.installed||!("mediaSession" in navigator)) return;
+  setPlayerMediaAction("nexttrack",playerNextTrackOffered()
+    ?()=>{ if(playerNextTrackOffered()) playNextEpisode(); }:null);
+}
 function installPlayerMediaSession(){
   if(!("mediaSession" in navigator)) return false;
-  const v=()=>document.getElementById("video");
-  // `play` and `pause` are separate handlers and each is idempotent. A remote
-  // that sends `play` to a film already playing must leave it playing;
-  // `togglePlay` would stop it, which is the defect this shape exists to
-  // avoid — the same reason the input contract has `play_pause` as a key and
-  // not as a command.
-  setPlayerMediaAction("play",()=>{ const e=v(); if(e&&e.paused) togglePlay(); });
-  setPlayerMediaAction("pause",()=>{ const e=v(); if(e&&!e.paused) togglePlay(); });
-  setPlayerMediaAction("seekbackward",d=>nudge(-Math.abs((d&&d.seekOffset)||10)));
-  setPlayerMediaAction("seekforward",d=>nudge(Math.abs((d&&d.seekOffset)||10)));
-  // Next is the next EPISODE, and only where the viewer has asked for one:
-  // autoplay-next is the feature this command belongs to, so a viewer who
-  // turned it off does not get it back through the remote.
-  setPlayerMediaAction("nexttrack",()=>{ if(autoNextOn()) playNextEpisode(); });
+  setPlayerMediaAction("play",()=>{ playerMediaPlayPause(true); });
+  setPlayerMediaAction("pause",()=>{ playerMediaPlayPause(false); });
+  setPlayerMediaAction("seekbackward",d=>{ playerMediaSkip("skip_back",Math.abs((d&&d.seekOffset)||10)); });
+  setPlayerMediaAction("seekforward",d=>{ playerMediaSkip("skip_forward",Math.abs((d&&d.seekOffset)||10)); });
+  installPlayerMediaSession.installed=true;
+  syncPlayerNextTrack();
   return true;
 }
 function clearPlayerMediaSession(){
+  installPlayerMediaSession.installed=false;
   if(!("mediaSession" in navigator)) return;
   for(const action of ["play","pause","seekbackward","seekforward","nexttrack"])
     setPlayerMediaAction(action,null);
@@ -909,8 +941,11 @@ function clearPlayerMediaSession(){
 // duration is still growing produces routinely.
 function updatePlayerMediaSession(v,p){
   if(!v||!p||!("mediaSession" in navigator)) return;
+  // The intent, not `v.paused`: during a reattach the element is paused and the
+  // viewer is not, and the OS would otherwise show Play and send `play` for a
+  // press the viewer meant as pause.
   if(navigator.mediaSession.playbackState!==undefined)
-    navigator.mediaSession.playbackState=v.paused?"paused":"playing";
+    navigator.mediaSession.playbackState=playerWantsPlayback(v)?"playing":"paused";
   if(!navigator.mediaSession.setPositionState) return;
   const duration=pbTotalSec(),position=pbShownSec();
   if(!(duration>0)||!isFinite(duration)||!(position>=0)||position>duration) return;

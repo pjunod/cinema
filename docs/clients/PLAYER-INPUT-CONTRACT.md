@@ -506,20 +506,29 @@ Per-surface adapters map inputs as follows; anything not listed is
 | `select` | Select (`onTapGesture` on the focused view) | `DPAD_CENTER`/`ENTER` | tap on a control | Enter; Space when the timeline is focused |
 | `back` | Menu (`onExitCommand`) | `BACK` | system back (Android); iOS has no producer | Escape; `GoBack`/`BrowserBack`; `keyCode` 10009 (Tizen) or 461 (webOS) |
 | `close` (`close_control`, not a table input) | — | — | ✕ (iOS) / back arrow (Android phone) | `✕ Close` |
-| `play_pause` | Play/Pause (`onPlayPauseCommand`, **on every state's root**, not only the hidden surface) | `MEDIA_PLAY_PAUSE` | lock-screen / headset commands | Space or K when the timeline is not focused; MediaSession `play` and `pause` as two idempotent handlers |
-| `skip_back`/`skip_forward` | — (no producer) | `MEDIA_REWIND`/`MEDIA_FAST_FORWARD` | remote-command skips | J / L; MediaSession `seekbackward`/`seekforward`, honouring the browser's own `seekOffset` |
+| `play_pause` | Play/Pause (`onPlayPauseCommand`, **on every state's root**, not only the hidden surface) | `MEDIA_PLAY_PAUSE` | lock-screen / headset commands | Space or K when the timeline is not focused; MediaSession `play` and `pause` as two handlers, each routed through this table and idempotent on the viewer's intent |
+| `skip_back`/`skip_forward` | — (no producer) | `MEDIA_REWIND`/`MEDIA_FAST_FORWARD` | remote-command skips | J / L; MediaSession `seekbackward`/`seekforward`, routed through this table, honouring the browser's own `seekOffset` |
 | `tap_surface` | — | — | tap on the video | click on the video |
 | `idle` | hide timer | hide timer | hide timer | hide timer |
 
 On the web the MediaSession commands are decoded in the same
 `player-input-adapter` region as the keys, because they are the same question
 asked by a different producer — the OS media keys, a headset button, the lock
-screen. `play` and `pause` are separate handlers and each is idempotent: a
-remote that sends `play` to a film already playing leaves it playing, which one
-shared toggle would not. Every handler is installed behind a feature check for
-`mediaSession` and again per action, because a browser throws on an action it
-does not implement. `nexttrack` is offered only while autoplay-next is on, and
-there is no Remote Playback or Chromecast claim.
+screen. They are routed through the same table as the keys
+(`watchRouteInput(playerInputState(), …)`): `failed` ignores `play_pause` and
+both skips, `scrub` commits the pending seek before `play_pause` acts and
+ignores the skips, and `menu`/`info` ignore the skips. `play` and `pause` are
+separate handlers and each is idempotent on the viewer's **intent** (the
+pending open's, else the player's `wantsPlayback`), never on the element's
+`paused`: a pending open and every reattach leave the element paused while the
+viewer still wants playback, so a `play` sent then leaves it playing and a
+`pause` pauses it. The `playbackState` the OS shows is the same intent. Every
+handler is installed behind a feature check for `mediaSession` and again per
+action, because a browser throws on an action it does not implement.
+`nexttrack` has a handler only while autoplay-next is on and the title is not
+known to be something other than an episode — a browser shows a Next control
+for any action that has a handler — and changing the setting re-registers or
+removes it. There is no Remote Playback or Chromecast claim.
 
 On Apple, every explicit Play/Pause producer—including the tvOS Siri Remote and
 iOS lock-screen/headset commands—routes through the same playback-request
