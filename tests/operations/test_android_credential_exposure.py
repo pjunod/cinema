@@ -410,6 +410,77 @@ def _clean_environment(**extra: str) -> dict[str, str]:
     return env
 
 
+class AndroidReleaseMakeTargetCase(unittest.TestCase):
+    """`make android-release` / `android-publish`, run against a `docker` stub.
+
+    These run the real recipes. `docker` is replaced by a stub on `PATH` that
+    records its arguments, so what is asserted is what the recipe actually
+    hands Docker.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        _write_executable(
+            bin_dir / "docker",
+            '#!/bin/sh\nprintf \'%s\\n\' "$@" >> "$DOCKER_LOG"\nexit 0\n',
+        )
+        self.docker_log = self.tmp / "docker.log"
+        self.env = _clean_environment(
+            PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            DOCKER_LOG=str(self.docker_log),
+            PLURX_ANDROID_IMAGE_READY="1",
+            PLURX_ANDROID_KEYSTORE="plurx-upload.jks",
+        )
+        # PUBLISHING.md's `keytool` line leaves the keystore in the cwd under
+        # this bare name; that is the case Docker mistakes for a volume name.
+        (self.tmp / "plurx-upload.jks").write_bytes(b"not really a keystore")
+        self.outputs = self.tmp / "outputs"
+        self.data = self.tmp / "data"
+        self.data.mkdir()
+
+    def _make(self, target: str, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["make", "-s", "-f", str(ROOT / "Makefile"), target, *args],
+            cwd=self.tmp,
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=60,
+        )
+
+    def test_a_relative_keystore_reaches_docker_as_an_absolute_bind_path(self) -> None:
+        """Docker reads a non-absolute `-v` source as a named volume.
+
+        Before the fix, `-v plurx-upload.jks:/signing/upload.jks:ro` created an
+        empty named volume and mounted a *directory* at the keystore path, so
+        the build failed on a keystore that existed on the host.
+        """
+        result = self._make("android-release")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        words = self.docker_log.read_text(encoding="utf-8").splitlines()
+        mounts = [
+            words[index + 1]
+            for index, word in enumerate(words[:-1])
+            if word == "-v" and words[index + 1].endswith(":/signing/upload.jks:ro")
+        ]
+        self.assertEqual(len(mounts), 1, words)
+        source = mounts[0].rsplit(":/signing/upload.jks:ro", 1)[0]
+        self.assertTrue(
+            os.path.isabs(source),
+            f"docker -v source {source!r} is not absolute; Docker would treat it "
+            "as a volume name and mount an empty directory",
+        )
+        self.assertEqual(
+            os.path.realpath(source),
+            os.path.realpath(self.tmp / "plurx-upload.jks"),
+        )
+
+
 class ShipPhysicalReleaseVariantCase(unittest.TestCase):
     """`scripts/ship-physical`, the documented no-Ansible device path.
 

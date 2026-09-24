@@ -1773,10 +1773,17 @@ apk: android ## Build the Android debug APK (alias for android)
 # fails naming whichever is missing (`requiredSigningValue` in
 # clients/android/app/build.gradle.kts), so an unsigned or debug-signed
 # "release" is not a reachable outcome.
+#
+# The keystore path is resolved to an absolute one before `docker run -v`
+# sees it. Docker reads a source that is not absolute as a *volume name*: the
+# `plurx-upload.jks` that PUBLISHING.md's `keytool` line leaves in the cwd
+# would become an empty named volume, mounted as a directory at
+# /signing/upload.jks, and the build would fail on a keystore that exists.
 .PHONY: android-release
 android-release: android-image ## Build the SIGNED Android release APK (needs PLURX_ANDROID_KEYSTORE etc.)
 	@test -n "$${PLURX_ANDROID_KEYSTORE:-}" || { echo "set PLURX_ANDROID_KEYSTORE to the upload keystore's path on this host (streamed from the vault, not stored in the repo)"; exit 1; }
 	@test -f "$${PLURX_ANDROID_KEYSTORE}" || { echo "PLURX_ANDROID_KEYSTORE=$${PLURX_ANDROID_KEYSTORE} is not a file"; exit 1; }
+	keystore="$$(cd "$$(dirname "$${PLURX_ANDROID_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_KEYSTORE}")" && \
 	docker run --rm \
 	  --platform $(ANDROID_PLATFORM) \
 	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
@@ -1784,7 +1791,7 @@ android-release: android-image ## Build the SIGNED Android release APK (needs PL
 	  -e PLURX_ANDROID_KEYSTORE_PASSWORD -e PLURX_ANDROID_KEY_ALIAS \
 	  -e PLURX_ANDROID_KEY_PASSWORD \
 	  -e PLURX_ANDROID_KEYSTORE=/signing/upload.jks \
-	  -v "$${PLURX_ANDROID_KEYSTORE}":/signing/upload.jks:ro \
+	  -v "$$keystore":/signing/upload.jks:ro \
 	  -v "$(CURDIR)":/workspace -w /workspace/clients/android \
 	  $(ANDROID_IMAGE) ./gradlew --no-daemon :app:assembleRelease
 	@echo "→ clients/android/app/build/outputs/apk/release/app-release.apk"
