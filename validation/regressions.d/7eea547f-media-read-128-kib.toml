@@ -1,0 +1,48 @@
+version = 1
+
+[[coverage]]
+commits = ["7eea547f"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+S-02 Decision 1 (`docs/streaming/MEDIA-BODY-BUFFERS.md` §7, §5.1.1 and \
+§5.1.2). M1 (`ed98c6ab`) gave every file-backed media body one shared \
+`ReaderStream::with_capacity(reader, MEDIA_BODY_READ_BUFFER)` read of \
+256 KiB. The §5.1 before/after measurement \
+(`docs/evidence/media-body-buffers-m1-measurement-2026-09-24.md`) found that \
+this regressed the plan's own peak-RSS acceptance: because \
+`with_capacity` allocates its `BytesMut` eagerly and tokio sizes its \
+blocking read to match, the reservation is paid by every open body, and 8 \
+concurrent large viewers grew 14.3 to 16.1 MiB against 1.0 to 1.3 MiB at \
+4 KiB, above the ~1 MiB per body budget in §2.1. 128 KiB measured the same \
+on direct-play throughput (3341 against 3172 MB/s median) and HLS latency, \
+at 9.3 to 10.9 MiB for the same group and a lower small-object (group B) \
+median, 41.9 against 53.1 MiB. This commit sets \
+`MEDIA_BODY_READ_BUFFER = 128 * 1024` in \
+`crates/plurxd/src/media_sessions.rs`, which moves all six sites that share \
+it (`serve_file_range` twice, both HLS pumps, `offline.rs`, \
+`internal_media.rs`). `MEDIA_BODY_ACK_GRANULARITY`, the 4 KiB unit the HLS \
+pumps prove delivery in, is unchanged and still split out of each read.
+
+`http::hls::tests::the_shared_media_read_is_128_kib_and_the_delivery_proof_stays_4_kib` \
+is added here and pins both values separately: the read is exactly \
+128 KiB, the acknowledgement unit is exactly 4 KiB, and one read is 32 \
+acknowledgements. Reverting the constant to `256 * 1024` fails the first \
+assertion (`left: 262144, right: 131072`). Defining the acknowledgement unit \
+from the read size (`MEDIA_BODY_ACK_GRANULARITY = MEDIA_BODY_READ_BUFFER`) \
+stops the test binary compiling, on the \
+`const { assert!(MEDIA_BODY_ACK_GRANULARITY < MEDIA_BODY_READ_BUFFER) }` in \
+the behavioural pin. That behavioural pin, \
+`http::hls::tests::a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units`, \
+keeps working at 128 KiB because its 64 KiB fixture is still inside one \
+storage read; restoring `bytes.len().min(MEDIA_BODY_READ_BUFFER)` at the \
+pump split re-couples the proof to the read and fails it with \
+`left: 65536, right: 4096`. All three reverts were run on this branch. Both \
+tests are `crates/plurxd` unit tests in the `plurxd` binary target, run by \
+`make rust-check` under `rust-gate` and by `make ci-rust-gate` under \
+`rust-gate-ci`.
+
+Not covered by these checks: the memory and throughput effect itself, which \
+is a measurement and is recorded in the plan (§5.1.2) and the evidence file, \
+not a unit test.
+"""
