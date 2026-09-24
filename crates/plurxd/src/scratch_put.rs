@@ -15,9 +15,9 @@
 //! upload goes to a loopback listener owned by the session, which
 //! authorizes each piece of body against the scratch ledger before writing
 //! it into the session directory. When the budget refuses, the receiver
-//! stops reading the socket. The bytes then wait in kernel socket buffers
-//! instead of the scratch directory, and the flow controller's own hold
-//! suspends FFmpeg.
+//! stops reading the socket and marks the allocation starved, which the flow
+//! controller turns into a hold. The bytes FFmpeg could not write wait in
+//! kernel socket buffers instead of the scratch directory.
 //!
 //! What stays the same for everything downstream:
 //!
@@ -27,8 +27,8 @@
 //! * A playlist is only renamed into place once every object it names has
 //!   been renamed into place. FFmpeg opens a separate connection per object
 //!   and does not wait for a response, so arrival order alone would not
-//!   give that guarantee. File output gives it, and nothing downstream is
-//!   written to cope with a playlist that names a missing segment.
+//!   give that guarantee. A playlist that arrives early is held as the
+//!   lane's pending version and promoted by the commit that completes it.
 //! * Every request holds a scratch writer registration for as long as it
 //!   can write, so retirement's writer barrier covers these writes the same
 //!   way it covers the copy reader. FFmpeg's exit is not the end of its
@@ -36,15 +36,18 @@
 //!   [`PutSink::drain`] is the exact point after which it is.
 //!
 //! Each producer attempt writes to its own lane (`/<token>/<lane>/<name>`).
-//! A request on a lane older than the newest one seen is refused and never
-//! committed, so a late upload from a replaced attempt cannot overwrite its
-//! successor's objects.
+//! Lanes only move forward: an attempt's retry always has a higher lane than
+//! the attempt it replaces. The first request on a higher lane retires the
+//! one before it, and every lane below the writing one is refused for good,
+//! so a late upload from a replaced attempt -- even one whose first request
+//! arrives after its successor's -- can never overwrite the successor's
+//! objects.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -65,24 +68,20 @@ const GRANT_WAIT_POLL: Duration = Duration::from_millis(250);
 /// starved writer is the flow controller's hold and waits as long as the
 /// session lives.
 const PREPUBLICATION_GRANT_WAIT: Duration = Duration::from_secs(120);
-/// How long a playlist waits for the objects it names. FFmpeg writes a
-/// segment completely before it writes the playlist that names it, so in
-/// practice this is the time the receiver takes to finish that segment.
-/// Expiry drops this one playlist version. The next one supersedes it.
-const PLAYLIST_ORDER_WAIT: Duration = Duration::from_secs(30);
+/// How long a connection may take to send its request head. FFmpeg sends
+/// the head in the same write as the connect; anything slower is not FFmpeg,
+/// and must not hold `drain` or keep the endpoint alive.
+const REQUEST_HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REQUEST_HEAD: usize = 16 * 1024;
+const MAX_TRAILER_LINES: usize = 32;
 const MAX_PLAYLIST_BYTES: usize = 8 << 20;
 const PIECE_BYTES: usize = 64 * 1024;
 
-/// Called when a writer is refused a grant, so the flow controller can hold
-/// the producer now instead of at its next scheduled evaluation.
-pub(crate) type StarvedHook = Box<dyn Fn() + Send + Sync>;
-
 /// The upload endpoint for one rolling session's FFmpeg producers.
 ///
-/// Owned by the session. Dropping it stops accepting, wakes every request
-/// that is waiting, and lets each one remove its temporary file and release
-/// its writer registration.
+/// Owned by the session. Dropping it stops accepting, closes the listening
+/// socket, wakes every request that is waiting, and lets each one remove its
+/// temporary file and release its writer registration.
 pub(crate) struct PutSink {
     shared: Arc<Shared>,
     acceptor: tokio::task::JoinHandle<()>,
@@ -101,25 +100,34 @@ struct Shared {
     addr: SocketAddr,
     /// A duplicate of the accepting socket. A drain sweep accepts through
     /// it without waiting for readiness, which is what makes "nothing is
-    /// queued" an observation rather than a guess.
-    drain_listener: std::net::TcpListener,
+    /// queued" an observation rather than a guess. Taken on drop, so the
+    /// port stops listening with the sink rather than with the last task.
+    drain_listener: Mutex<Option<std::net::TcpListener>>,
     grants: Option<WriteGrants>,
     closed: AtomicBool,
+    /// The producer has exited. Its remaining uploads are bytes it already
+    /// handed the kernel, bounded by socket buffers, and waiting on the
+    /// budget for them could only turn a complete title into a failed one.
+    exited: AtomicBool,
     in_flight: AtomicUsize,
     idle: tokio::sync::Notify,
-    /// Wakes playlist commits waiting on a segment, and requests waiting on
-    /// the sink closing.
+    /// Wakes requests waiting on the sink closing.
     changed: tokio::sync::Notify,
-    /// Serializes the lane check and the rename that follows it.
+    /// Serializes a lane switch, the lane check before a rename, the rename
+    /// and the bookkeeping after it.
     commit: tokio::sync::Mutex<()>,
     state: Mutex<State>,
-    starved: OnceLock<StarvedHook>,
     next_request: AtomicU64,
 }
 
 #[derive(Default)]
 struct State {
-    lane: u32,
+    /// The lane that is writing, once its first request has arrived.
+    lane: Option<u32>,
+    /// Every lane below this one has been replaced and is refused for good.
+    /// Raised past the writing lane when it is retired, and to a new lane
+    /// when that lane's first request arrives.
+    floor: u32,
     /// Every object name this lane has renamed into place. Pruning by the
     /// segment GC does not remove a name: the playlist still lists it, and
     /// it did land.
@@ -127,7 +135,34 @@ struct State {
     /// `(media entries, ENDLIST)` of the last playlist renamed into place in
     /// this lane. An EVENT playlist only grows, so a smaller one is stale.
     playlist_rank: Option<(usize, bool)>,
+    /// The newest playlist version that arrived before everything it names
+    /// had landed. Promoted by the commit that completes it.
+    pending: Option<PendingPlaylist>,
     published: bool,
+    /// Why this lane can no longer publish, if a write it needed failed.
+    failure: Option<String>,
+}
+
+struct PendingPlaylist {
+    name: String,
+    temporary: PathBuf,
+    named: Vec<String>,
+    rank: (usize, bool),
+}
+
+impl State {
+    /// Retire the writing lane, if any. Returns the pending playlist's
+    /// temporary for the caller to remove outside the lock.
+    fn retire_lane(&mut self) -> Option<PathBuf> {
+        // With no request seen yet the writing attempt is still the initial
+        // one, lane 0: its uploads may simply not have arrived.
+        let writing = self.lane.take().unwrap_or(self.floor);
+        self.floor = self.floor.max(writing.saturating_add(1));
+        self.committed.clear();
+        self.playlist_rank = None;
+        self.failure = None;
+        self.pending.take().map(|pending| pending.temporary)
+    }
 }
 
 impl Shared {
@@ -148,6 +183,33 @@ impl Shared {
             let _flight = Flight(Arc::clone(&shared));
             serve_connection(&shared, stream).await;
         });
+    }
+
+    /// Record a failure that stops this lane publishing, unless the lane has
+    /// already been replaced, in which case it is nobody's failure.
+    fn fail_lane(&self, lane: u32, reason: String) {
+        let mut state = self.lock();
+        if state.lane == Some(lane) {
+            tracing::warn!(%reason, "scratch upload failed; this attempt can no longer publish");
+            state.failure.get_or_insert(reason);
+        }
+    }
+
+    fn lane_is_current(&self, lane: u32) -> Result<(), Refused> {
+        if self.is_closed() {
+            return Err(Refused::gone("the session ended"));
+        }
+        if self.grants.as_ref().is_some_and(WriteGrants::fenced) {
+            return Err(Refused::gone("the session was retired"));
+        }
+        let state = self.lock();
+        if state.lane != Some(lane) {
+            return Err(Refused::new(
+                "409 Conflict",
+                format!("lane {lane} is not the writing lane"),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -177,15 +239,15 @@ impl PutSink {
             dir,
             token: uuid::Uuid::new_v4().simple().to_string(),
             addr,
-            drain_listener,
+            drain_listener: Mutex::new(Some(drain_listener)),
             grants,
             closed: AtomicBool::new(false),
+            exited: AtomicBool::new(false),
             in_flight: AtomicUsize::new(0),
             idle: tokio::sync::Notify::new(),
             changed: tokio::sync::Notify::new(),
             commit: tokio::sync::Mutex::new(()),
             state: Mutex::new(State::default()),
-            starved: OnceLock::new(),
             next_request: AtomicU64::new(0),
         });
         let (drains, requests) = tokio::sync::mpsc::unbounded_channel();
@@ -203,20 +265,47 @@ impl PutSink {
         format!("http://{}/{}/{lane}", self.shared.addr, self.shared.token)
     }
 
-    /// Install the hook that asks the flow controller for an evaluation when
-    /// a writer is refused a grant. Set once, after the session exists.
-    pub(crate) fn on_starved(&self, hook: StarvedHook) {
-        let _ = self.shared.starved.set(hook);
+    /// Why the writing lane can no longer publish, if a write it needed
+    /// failed. The publication clock turns this into the session's failure.
+    pub(crate) fn failure(&self) -> Option<String> {
+        self.shared.lock().failure.clone()
     }
 
-    /// Wait until every upload the producer has already made is either in
-    /// place or refused.
+    /// Retire the writing lane before its directory is cleared for a retry.
+    ///
+    /// The replaced producer has been reaped, but uploads it had already
+    /// handed the kernel can still be queued, mid-body, or pending as a
+    /// playlist. Every one of them is refused from here on, and the drain
+    /// that follows waits for them to finish refusing, so nothing of the
+    /// old attempt can land in the directory the retry is about to use.
+    pub(crate) async fn retire_writing_lane(&self) {
+        let pending = {
+            let _commit = self.shared.commit.lock().await;
+            self.shared.exited.store(false, Ordering::Release);
+            self.shared.lock().retire_lane()
+        };
+        if let Some(temporary) = pending {
+            let _ = tokio::fs::remove_file(temporary).await;
+        }
+        self.shared.changed.notify_waiters();
+        self.drain_queued().await;
+    }
+
+    /// Wait until every upload the producer made is in place or refused.
     ///
     /// Call this after the producer has exited. A loopback `connect` does
     /// not return until the kernel has queued the connection, so once the
     /// process is gone the set of connections is closed: this accepts every
-    /// queued one directly, then waits for the requests to settle.
+    /// queued one directly, then waits for the requests to settle. The
+    /// exited producer's remaining pieces are admitted without waiting for
+    /// the budget -- they are bounded by the socket buffers it filled, they
+    /// are still charged, and holding them could only fail a finished title.
     pub(crate) async fn drain(&self) {
+        self.shared.exited.store(true, Ordering::Release);
+        self.drain_queued().await;
+    }
+
+    async fn drain_queued(&self) {
         let shared = &self.shared;
         let (swept, sweep) = tokio::sync::oneshot::channel();
         if self.drains.send(swept).is_ok() {
@@ -248,6 +337,13 @@ impl Drop for PutSink {
         // file write, and a write abandoned mid-flight is not proof that it
         // stopped. They see `closed` and finish on their own.
         self.acceptor.abort();
+        drop(
+            self.shared
+                .drain_listener
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
     }
 }
 
@@ -288,8 +384,16 @@ async fn accept_loop(
 /// Accept every connection the kernel has already queued, without waiting
 /// for readiness, and hand each one to its task.
 fn sweep(shared: &Arc<Shared>) {
+    let listener = shared
+        .drain_listener
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let Some(listener) = listener.as_ref() else {
+        return;
+    };
+    let mut exhausted = 0_u32;
     loop {
-        match shared.drain_listener.accept() {
+        match listener.accept() {
             Ok((stream, _)) => {
                 let adopted = stream
                     .set_nonblocking(true)
@@ -302,10 +406,22 @@ fn sweep(shared: &Arc<Shared>) {
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            // A queued connection reset before it was accepted. The ones
+            // behind it are still there.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::ConnectionAborted
+                ) => {}
             Err(error) => {
-                tracing::warn!(%error, "scratch upload: draining the listener failed");
-                return;
+                // Descriptor exhaustion is the realistic case. Give it a
+                // moment rather than report a queue as empty that is not.
+                exhausted += 1;
+                if exhausted > 20 {
+                    tracing::warn!(%error, "scratch upload: draining the listener failed");
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
             }
         }
     }
@@ -325,13 +441,17 @@ impl Refused {
             reason: reason.into(),
         }
     }
+
+    fn gone(reason: &str) -> Refused {
+        Refused::new("410 Gone", reason)
+    }
 }
 
 async fn serve_connection(shared: &Arc<Shared>, stream: tokio::net::TcpStream) {
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::with_capacity(PIECE_BYTES, read);
     let status = match receive(shared, &mut reader).await {
-        Ok(()) => "201 Created",
+        Ok(status) => status,
         Err(refused) => {
             tracing::debug!(reason = %refused.reason, "scratch upload refused");
             refused.status
@@ -360,11 +480,16 @@ enum BodyMode {
     Length(u64),
 }
 
-async fn receive<R>(shared: &Arc<Shared>, reader: &mut R) -> Result<(), Refused>
+async fn receive<R>(shared: &Arc<Shared>, reader: &mut R) -> Result<&'static str, Refused>
 where
     R: AsyncBufRead + Unpin,
 {
-    let request = read_request(shared, reader).await?;
+    let request = tokio::select! {
+        request = tokio::time::timeout(REQUEST_HEAD_TIMEOUT, read_request(shared, reader)) => {
+            request.map_err(|_| Refused::new("408 Request Timeout", "no request head"))??
+        }
+        () = closed(shared) => return Err(Refused::gone("the session ended")),
+    };
     let playlist = request.name.ends_with(".m3u8");
     // Registration comes before the first byte and is held to the rename.
     // `None` means retirement fenced this allocation: its final inventory
@@ -373,36 +498,25 @@ where
         Some(grants) => Some(
             grants
                 .register_writer()
-                .ok_or_else(|| Refused::new("410 Gone", "the session was retired"))?,
+                .ok_or_else(|| Refused::gone("the session was retired"))?,
         ),
         None => None,
     };
-    {
-        let mut state = shared.lock();
-        if request.lane < state.lane {
-            return Err(Refused::new(
-                "409 Conflict",
-                format!("lane {} was replaced by lane {}", request.lane, state.lane),
-            ));
-        }
-        if request.lane > state.lane {
-            state.lane = request.lane;
-            state.committed.clear();
-            state.playlist_rank = None;
-        }
+    enter_lane(shared, request.lane).await?;
+    if shared.is_closed() {
+        return Err(Refused::gone("the session ended"));
     }
     let sequence = shared.next_request.fetch_add(1, Ordering::Relaxed);
     let temporary = shared.dir.join(format!("{}.{sequence}.tmp", request.name));
-    let written = write_body(shared, reader, &request, &temporary, playlist).await;
-    let copy = match written {
-        Ok(written) => written,
+    let copy = match write_body(shared, reader, &request, &temporary, playlist).await {
+        Ok(copy) => copy,
         Err(refused) => {
             let _ = tokio::fs::remove_file(&temporary).await;
             return Err(refused);
         }
     };
     let committed = if playlist {
-        commit_playlist(shared, &request, &temporary, &copy).await
+        commit_playlist(shared, &request, temporary.clone(), &copy).await
     } else {
         commit_object(shared, &request, &temporary).await
     };
@@ -410,6 +524,49 @@ where
         let _ = tokio::fs::remove_file(&temporary).await;
     }
     committed
+}
+
+/// Admit a request to its lane. The first request on a new lane retires the
+/// one before it, under the same lock as every rename, so no old-lane commit
+/// can be halfway through when the switch happens.
+async fn enter_lane(shared: &Arc<Shared>, lane: u32) -> Result<(), Refused> {
+    {
+        let state = shared.lock();
+        if lane < state.floor {
+            return Err(Refused::new(
+                "409 Conflict",
+                format!("lane {lane} was replaced"),
+            ));
+        }
+        if state.lane == Some(lane) {
+            return Ok(());
+        }
+    }
+    let pending = {
+        let _commit = shared.commit.lock().await;
+        let mut state = shared.lock();
+        if lane < state.floor || state.lane.is_some_and(|writing| lane < writing) {
+            return Err(Refused::new(
+                "409 Conflict",
+                format!("lane {lane} was replaced"),
+            ));
+        }
+        if state.lane == Some(lane) {
+            None
+        } else {
+            let pending = state.retire_lane();
+            state.lane = Some(lane);
+            state.floor = lane;
+            // A new attempt is a running producer again.
+            shared.exited.store(false, Ordering::Release);
+            pending
+        }
+    };
+    if let Some(temporary) = pending {
+        let _ = tokio::fs::remove_file(temporary).await;
+    }
+    shared.changed.notify_waiters();
+    Ok(())
 }
 
 async fn read_request<R>(shared: &Shared, reader: &mut R) -> Result<Request, Refused>
@@ -423,7 +580,7 @@ where
     let mut parts = request_line.split(' ');
     let method = parts.next().unwrap_or_default().to_owned();
     let target = parts.next().unwrap_or_default().to_owned();
-    let mut chunked = false;
+    let mut chunked = None;
     let mut length = None;
     loop {
         let header = read_line(reader, &mut line, &mut head).await?;
@@ -435,10 +592,17 @@ where
         };
         let value = value.trim();
         if key.eq_ignore_ascii_case("transfer-encoding") {
-            chunked = value
-                .split(',')
-                .any(|coding| coding.trim().eq_ignore_ascii_case("chunked"));
+            if chunked.is_some() {
+                return Err(bad("more than one Transfer-Encoding"));
+            }
+            chunked = Some(value.eq_ignore_ascii_case("chunked"));
         } else if key.eq_ignore_ascii_case("content-length") {
+            if length.is_some() {
+                return Err(bad("more than one Content-Length"));
+            }
+            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(bad("bad content length"));
+            }
             length = Some(
                 value
                     .parse::<u64>()
@@ -465,14 +629,19 @@ where
     if !constant_time_eq(token.as_bytes(), shared.token.as_bytes()) {
         return Err(Refused::new("403 Forbidden", "wrong upload token"));
     }
+    if lane.is_empty() || !lane.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(not_found());
+    }
     let lane = lane.parse::<u32>().map_err(|_| not_found())?;
     if !valid_object_name(name) {
         return Err(bad("not an HLS object name"));
     }
     let body = match (chunked, length) {
-        (true, _) => BodyMode::Chunked,
-        (false, Some(length)) => BodyMode::Length(length),
-        (false, None) => return Err(Refused::new("411 Length Required", "no body framing")),
+        (Some(true), None) => BodyMode::Chunked,
+        (None, Some(length)) => BodyMode::Length(length),
+        (Some(_), Some(_)) => return Err(bad("both Transfer-Encoding and Content-Length")),
+        (Some(false), None) => return Err(bad("an unsupported transfer coding")),
+        (None, None) => return Err(Refused::new("411 Length Required", "no body framing")),
     };
     Ok(Request {
         lane,
@@ -515,7 +684,7 @@ async fn write_body<R>(
     shared: &Arc<Shared>,
     reader: &mut R,
     request: &Request,
-    temporary: &std::path::Path,
+    temporary: &Path,
     playlist: bool,
 ) -> Result<Vec<u8>, Refused>
 where
@@ -524,12 +693,19 @@ where
     let io = |what: &str, error: std::io::Error| {
         Refused::new("500 Internal Server Error", format!("{what}: {error}"))
     };
-    let mut file = tokio::fs::OpenOptions::new()
+    let mut file = match tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(temporary)
         .await
-        .map_err(|error| io("creating the temporary object", error))?;
+    {
+        Ok(file) => file,
+        Err(error) => {
+            let refused = io("creating the temporary object", error);
+            shared.fail_lane(request.lane, refused.reason.clone());
+            return Err(refused);
+        }
+    };
     let mut body = Body::new(request.body);
     let mut piece = vec![0_u8; PIECE_BYTES];
     let mut copy = Vec::new();
@@ -537,9 +713,7 @@ where
         loop {
             let read = tokio::select! {
                 read = body.read(reader, &mut piece) => read,
-                () = closed(shared) => {
-                    return Err(Refused::new("410 Gone", "the session ended"));
-                }
+                refused = superseded(shared, request.lane) => return Err(refused),
             }
             .map_err(|error| {
                 Refused::new("400 Bad Request", format!("reading the body: {error}"))
@@ -547,12 +721,21 @@ where
             if read == 0 {
                 break;
             }
+            // A replaced lane stops here, rather than spending the budget on
+            // bytes its commit would refuse anyway.
+            shared.lane_is_current(request.lane)?;
             let read_bytes = i64::try_from(read).unwrap_or(i64::MAX);
             let authorized = match shared.grants.as_ref() {
-                Some(grants) => Some(authorize(shared, grants, &request.name, read_bytes).await?),
+                Some(grants) => Some(authorize(shared, grants, request, read_bytes).await?),
                 None => None,
             };
-            let written = file.write_all(&piece[..read]).await;
+            // Flushed before it is landed: a tokio file write returns before
+            // the bytes reach the file, and a directory walk that started
+            // after `landed` must be able to see them.
+            let written = match file.write_all(&piece[..read]).await {
+                Ok(()) => file.flush().await,
+                Err(error) => Err(error),
+            };
             // Landed whether or not the write succeeded: a failed write can
             // still have put part of the piece on the disk, and the
             // temporary file stays charged as written until the caller
@@ -560,7 +743,11 @@ where
             if let Some(authorized) = authorized {
                 authorized.landed(read_bytes);
             }
-            written.map_err(|error| io("writing the temporary object", error))?;
+            if let Err(error) = written {
+                let refused = io("writing the temporary object", error);
+                shared.fail_lane(request.lane, refused.reason.clone());
+                return Err(refused);
+            }
             if playlist {
                 if copy.len().saturating_add(read) > MAX_PLAYLIST_BYTES {
                     return Err(Refused::new(
@@ -571,16 +758,24 @@ where
                 copy.extend_from_slice(&piece[..read]);
             }
         }
-        // A tokio file write returns before the bytes reach the file; the
-        // flush is what makes the rename that follows publish them.
-        file.flush()
-            .await
-            .map_err(|error| io("flushing the temporary object", error))?;
         Ok(())
     }
     .await;
     drop(file);
     result.map(|()| copy)
+}
+
+/// Resolves when the sink closes or `lane` stops being the writing lane, so
+/// a body that is waiting on the socket stops as soon as its attempt is
+/// replaced rather than when its producer next sends a byte.
+async fn superseded(shared: &Shared, lane: u32) -> Refused {
+    loop {
+        let changed = shared.changed.notified();
+        if let Err(refused) = shared.lane_is_current(lane) {
+            return refused;
+        }
+        changed.await;
+    }
 }
 
 async fn closed(shared: &Shared) {
@@ -593,45 +788,53 @@ async fn closed(shared: &Shared) {
     }
 }
 
-/// Wait until the budget authorizes `bytes`, the session goes away, or a
-/// session that has never published has waited long enough.
+/// Wait until the budget authorizes `bytes`, the lane or the session goes
+/// away, or a session that has never published has waited long enough.
+///
+/// A refusal marks the allocation starved for as long as this writer waits,
+/// which is what makes the flow controller hold the producer: FFmpeg is
+/// blocked on a socket write meanwhile, and without a hold its progress
+/// deadline would read the wait as a stall.
 async fn authorize(
     shared: &Shared,
     grants: &WriteGrants,
-    name: &str,
+    request: &Request,
     bytes: i64,
 ) -> Result<ScratchWrite, Refused> {
+    if shared.exited.load(Ordering::Acquire) {
+        return grants
+            .authorize_after_exit(bytes)
+            .ok_or_else(|| Refused::gone("the session was retired"));
+    }
+    if let Some(write) = grants.authorize(usize::try_from(bytes).unwrap_or(usize::MAX)) {
+        return Ok(write);
+    }
     let started = tokio::time::Instant::now();
-    let mut asked = false;
+    let _starved = grants.starve();
     loop {
-        if shared.is_closed() {
-            return Err(Refused::new("410 Gone", "the session ended"));
+        tokio::select! {
+            () = tokio::time::sleep(GRANT_WAIT_POLL) => {}
+            () = closed(shared) => {}
         }
-        if grants.fenced() {
-            return Err(Refused::new("410 Gone", "the session was retired"));
+        shared.lane_is_current(request.lane)?;
+        if shared.exited.load(Ordering::Acquire) {
+            return grants
+                .authorize_after_exit(bytes)
+                .ok_or_else(|| Refused::gone("the session was retired"));
         }
         if let Some(write) = grants.authorize(usize::try_from(bytes).unwrap_or(usize::MAX)) {
             return Ok(write);
         }
-        if !asked {
-            asked = true;
-            if let Some(hook) = shared.starved.get() {
-                hook();
-            }
-        }
         let published = shared.lock().published;
         if !published && started.elapsed() >= PREPUBLICATION_GRANT_WAIT {
             let reason = format!(
-                "rolling_insufficient_capacity: {name} needs {bytes} bytes before this session \
+                "rolling_insufficient_capacity: {} needs {bytes} bytes before this session \
                  can publish anything, and the global budget did not free any in {}s",
+                request.name,
                 PREPUBLICATION_GRANT_WAIT.as_secs()
             );
-            tracing::warn!("{reason}");
+            shared.fail_lane(request.lane, reason.clone());
             return Err(Refused::new("507 Insufficient Storage", reason));
-        }
-        tokio::select! {
-            () = tokio::time::sleep(GRANT_WAIT_POLL) => {}
-            () = closed(shared) => {}
         }
     }
 }
@@ -639,114 +842,124 @@ async fn authorize(
 async fn commit_object(
     shared: &Arc<Shared>,
     request: &Request,
-    temporary: &std::path::Path,
-) -> Result<(), Refused> {
-    let _commit = shared.commit.lock().await;
-    check_current(shared, request.lane)?;
-    tokio::fs::rename(temporary, shared.dir.join(&request.name))
-        .await
-        .map_err(|error| {
-            Refused::new(
-                "500 Internal Server Error",
-                format!("publishing {}: {error}", request.name),
-            )
-        })?;
-    shared.lock().committed.insert(request.name.clone());
-    shared.changed.notify_waiters();
-    Ok(())
+    temporary: &Path,
+) -> Result<&'static str, Refused> {
+    let promoted = {
+        let _commit = shared.commit.lock().await;
+        shared.lane_is_current(request.lane)?;
+        if let Err(error) = tokio::fs::rename(temporary, shared.dir.join(&request.name)).await {
+            let reason = format!("publishing {}: {error}", request.name);
+            shared.fail_lane(request.lane, reason.clone());
+            return Err(Refused::new("500 Internal Server Error", reason));
+        }
+        let pending = {
+            let mut state = shared.lock();
+            state.committed.insert(request.name.clone());
+            let ready = state.pending.as_ref().is_some_and(|pending| {
+                pending
+                    .named
+                    .iter()
+                    .all(|name| state.committed.contains(name.as_str()))
+            });
+            if ready {
+                state.pending.take()
+            } else {
+                None
+            }
+        };
+        match pending {
+            Some(pending) => promote(shared, request.lane, pending).await,
+            None => Ok(()),
+        }
+    };
+    promoted.map(|()| "201 Created")
 }
 
 async fn commit_playlist(
     shared: &Arc<Shared>,
     request: &Request,
-    temporary: &std::path::Path,
+    temporary: PathBuf,
     body: &[u8],
-) -> Result<(), Refused> {
+) -> Result<&'static str, Refused> {
     let text = std::str::from_utf8(body)
         .map_err(|_| Refused::new("400 Bad Request", "the playlist is not UTF-8"))?;
-    let named = playlist_references(text);
-    let rank = playlist_rank(text);
-    let deadline = tokio::time::Instant::now() + PLAYLIST_ORDER_WAIT;
-    loop {
-        let changed = shared.changed.notified();
-        {
-            let state = shared.lock();
-            check_lane(shared, &state, request.lane)?;
-            if named
-                .iter()
-                .all(|name| state.committed.contains(name.as_str()))
-            {
-                break;
-            }
-        }
-        if tokio::time::timeout_at(deadline, changed).await.is_err() {
-            let missing = {
-                let state = shared.lock();
-                named
-                    .iter()
-                    .filter(|name| !state.committed.contains(name.as_str()))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            };
-            tracing::warn!(
-                ?missing,
-                "scratch upload: dropped a playlist version whose objects never landed"
-            );
-            return Err(Refused::new(
-                "409 Conflict",
-                "the playlist names objects that never landed",
-            ));
-        }
-    }
+    let playlist = PendingPlaylist {
+        name: request.name.clone(),
+        temporary,
+        named: playlist_references(text),
+        rank: playlist_rank(text),
+    };
     let _commit = shared.commit.lock().await;
-    {
-        let state = shared.lock();
-        check_lane(shared, &state, request.lane)?;
+    shared.lane_is_current(request.lane)?;
+    let mut playlist = Some(playlist);
+    let (stale, ready) = {
+        let mut state = shared.lock();
+        let rank = playlist
+            .as_ref()
+            .map_or((0, false), |playlist| playlist.rank);
         if state
             .playlist_rank
             .is_some_and(|committed| rank < committed)
+            || state
+                .pending
+                .as_ref()
+                .is_some_and(|pending| rank < pending.rank)
         {
-            // A newer version is already in place. This one is not an
-            // error, it is simply late.
+            // A newer version is already in place or waiting. This one is
+            // not an error, it is simply late.
             return Err(Refused::new("200 OK", "superseded by a newer playlist"));
         }
-    }
-    tokio::fs::rename(temporary, shared.dir.join(&request.name))
-        .await
-        .map_err(|error| {
-            Refused::new(
-                "500 Internal Server Error",
-                format!("publishing {}: {error}", request.name),
+        let complete = playlist.as_ref().is_some_and(|playlist| {
+            playlist
+                .named
+                .iter()
+                .all(|name| state.committed.contains(name.as_str()))
+        });
+        if complete {
+            (state.pending.take(), playlist.take())
+        } else {
+            // Held for the commit that completes it. The request is done:
+            // FFmpeg does not read the reply, and a waiter holding a writer
+            // registration would hold up retirement for nothing.
+            (
+                playlist
+                    .take()
+                    .and_then(|playlist| state.pending.replace(playlist)),
+                None,
             )
-        })?;
+        }
+    };
+    if let Some(stale) = stale {
+        let _ = tokio::fs::remove_file(stale.temporary).await;
+    }
+    match ready {
+        Some(playlist) => {
+            promote(shared, request.lane, playlist).await?;
+            Ok("201 Created")
+        }
+        None => Ok("202 Accepted"),
+    }
+}
+
+/// Rename a playlist whose every object is in place. Called with the commit
+/// lock held.
+async fn promote(
+    shared: &Arc<Shared>,
+    lane: u32,
+    playlist: PendingPlaylist,
+) -> Result<(), Refused> {
+    if let Err(error) =
+        tokio::fs::rename(&playlist.temporary, shared.dir.join(&playlist.name)).await
     {
-        let mut state = shared.lock();
-        state.committed.insert(request.name.clone());
-        state.playlist_rank = Some(rank);
-        state.published = true;
+        let _ = tokio::fs::remove_file(&playlist.temporary).await;
+        let reason = format!("publishing {}: {error}", playlist.name);
+        shared.fail_lane(lane, reason.clone());
+        return Err(Refused::new("500 Internal Server Error", reason));
     }
-    shared.changed.notify_waiters();
-    Ok(())
-}
-
-fn check_current(shared: &Shared, lane: u32) -> Result<(), Refused> {
-    let state = shared.lock();
-    check_lane(shared, &state, lane)
-}
-
-fn check_lane(shared: &Shared, state: &State, lane: u32) -> Result<(), Refused> {
-    if shared.is_closed() {
-        return Err(Refused::new("410 Gone", "the session ended"));
-    }
-    if shared.grants.as_ref().is_some_and(WriteGrants::fenced) {
-        return Err(Refused::new("410 Gone", "the session was retired"));
-    }
-    if state.lane != lane {
-        return Err(Refused::new(
-            "409 Conflict",
-            format!("lane {lane} was replaced by lane {}", state.lane),
-        ));
-    }
+    let mut state = shared.lock();
+    state.committed.insert(playlist.name);
+    state.playlist_rank = Some(playlist.rank);
+    state.published = true;
     Ok(())
 }
 
@@ -949,6 +1162,12 @@ where
         .next()
         .unwrap_or_default()
         .trim();
+    if size.is_empty() || size.len() > 16 || !size.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "a chunk size is not hex",
+        ));
+    }
     u64::from_str_radix(size, 16).map_err(|_| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "a chunk size is not hex")
     })
@@ -958,12 +1177,16 @@ async fn skip_trailers<R>(reader: &mut R) -> std::io::Result<()>
 where
     R: AsyncBufRead + Unpin,
 {
-    loop {
+    for _ in 0..MAX_TRAILER_LINES {
         let line = read_small_line(reader).await?;
         if line.trim_end_matches(['\r', '\n']).is_empty() {
             return Ok(());
         }
     }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "too many trailer lines",
+    ))
 }
 
 #[cfg(test)]
@@ -1231,6 +1454,10 @@ mod tests {
             fixture.ledger.charge_of(fixture.permit.key()) <= Some(allowance),
             "the charge never exceeds what the budget admitted"
         );
+        assert!(
+            fixture.ledger.starved(fixture.permit.key()),
+            "a writer waiting on a refused grant marks the allocation starved, so it is held"
+        );
 
         fixture.configured.store(64 << 20, Ordering::Relaxed);
         let reply = tokio::time::timeout(Duration::from_secs(10), sender)
@@ -1241,6 +1468,10 @@ mod tests {
         assert_eq!(
             std::fs::read(fixture.dir.join("seg00000.ts")).expect("landed"),
             body
+        );
+        assert!(
+            !fixture.ledger.starved(fixture.permit.key()),
+            "and the wait ending releases the hold"
         );
         drop(fixture.permit);
     }
@@ -1266,6 +1497,10 @@ mod tests {
                 .await
             })
         };
+        // The playlist request itself is finished at once -- FFmpeg does
+        // not wait for replies -- and held as the lane's pending version.
+        let reply = playlist.await.expect("playlist");
+        assert!(reply.starts_with("HTTP/1.1 202"), "{reply}");
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
             !fixture.dir.join("index.m3u8").exists(),
@@ -1273,9 +1508,10 @@ mod tests {
         );
         chunk(&mut segment, &[2_u8; 4096]).await;
         assert!(finish(segment).await.starts_with("HTTP/1.1 201"));
-        let reply = playlist.await.expect("playlist");
-        assert!(reply.starts_with("HTTP/1.1 201"), "{reply}");
-        assert!(fixture.dir.join("index.m3u8").exists());
+        assert!(
+            fixture.dir.join("index.m3u8").exists(),
+            "the commit that completed it promoted it"
+        );
 
         // And a stale version never replaces a newer one.
         let newer = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n";
@@ -1302,7 +1538,14 @@ mod tests {
         assert!(put(&new, "seg00000.ts", b"new")
             .await
             .starts_with("HTTP/1.1 201"));
-        assert!(finish(late).await.starts_with("HTTP/1.1 409"));
+        // Refused at its head or at its commit, depending on which request
+        // the receiver reached first; a refusal at the head can reset the
+        // connection before the reply is read.
+        let reply = finish(late).await;
+        assert!(
+            reply.is_empty() || reply.starts_with("HTTP/1.1 409"),
+            "{reply}"
+        );
         assert!(put(&old, "seg00001.ts", b"old")
             .await
             .starts_with("HTTP/1.1 409"));
@@ -1519,5 +1762,153 @@ mod tests {
             );
         }
         drop(fixture.permit);
+    }
+
+    /// A retry clears the directory the reaped attempt wrote. Uploads that
+    /// attempt had already handed the kernel must be refused from that
+    /// moment, not from when the retry's own first upload arrives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scratch_put_a_retired_lane_is_refused_before_its_successor_writes() {
+        let fixture = fixture(64 << 20, 64 << 20);
+        let old = fixture.sink.base_url(0);
+        assert!(put(&old, "seg00000.ts", b"first")
+            .await
+            .starts_with("HTTP/1.1 201"));
+        let mut late = open_put(&old, "seg00001.ts", None).await;
+        chunk(&mut late, b"late").await;
+        assert!(
+            eventually(|| !fixture.ledger.writers_settled(fixture.permit.key())).await,
+            "the late upload is under way"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            // Retiring does not wait for the late upload's producer to send
+            // another byte: the upload stops the moment its lane is retired.
+            fixture.sink.retire_writing_lane().await;
+            let reply = finish(late).await;
+            assert!(
+                reply.is_empty() || reply.starts_with("HTTP/1.1 409"),
+                "{reply}"
+            );
+        })
+        .await
+        .expect("retiring waits only for the refusals");
+        assert!(put(&old, "seg00002.ts", b"old")
+            .await
+            .starts_with("HTTP/1.1 409"));
+        assert!(!fixture.dir.join("seg00001.ts").exists());
+        assert!(!fixture.dir.join("seg00002.ts").exists());
+        let new = fixture.sink.base_url(1);
+        assert!(put(&new, "seg00000.ts", b"retry")
+            .await
+            .starts_with("HTTP/1.1 201"));
+        assert_eq!(
+            std::fs::read(fixture.dir.join("seg00000.ts")).expect("landed"),
+            b"retry"
+        );
+        drop(fixture.permit);
+    }
+
+    /// An exited producer's last uploads are bytes it already handed the
+    /// kernel. `drain` admits them without waiting on the budget, charged,
+    /// so a finished title is never classified as a failure because its
+    /// final playlist was waiting on a grant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scratch_put_drain_admits_an_exited_producers_tail() {
+        let fixture = fixture(MIB, MIB);
+        let base = fixture.sink.base_url(0);
+        let body = vec![5_u8; (2 * MIB) as usize];
+        let sender = {
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut stream = open_put(&base, "seg00009.ts", Some(body.len())).await;
+                let _ = stream.write_all(&body).await;
+                let mut reply = String::new();
+                let _ = stream.read_to_string(&mut reply).await;
+                reply
+            })
+        };
+        assert!(
+            eventually(|| fixture.ledger.starved(fixture.permit.key())).await,
+            "the upload is waiting on the budget"
+        );
+        tokio::time::timeout(Duration::from_secs(10), fixture.sink.drain())
+            .await
+            .expect("drain completes without the budget growing");
+        assert!(fixture.sink.committed("seg00009.ts"));
+        assert!(sender.await.expect("sender").starts_with("HTTP/1.1 201"));
+        assert!(
+            fixture.ledger.charge_of(fixture.permit.key()) >= Some(2 * MIB),
+            "the tail is charged, not hidden"
+        );
+        drop(fixture.permit);
+    }
+
+    /// FFmpeg never reads the reply, so a write the lane needed failing
+    /// would otherwise leave it producing objects no playlist can name.
+    /// The failure is recorded for the publication clock to act on.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scratch_put_a_failed_write_is_reported_for_the_lane() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = fixture(64 << 20, 64 << 20);
+        let base = fixture.sink.base_url(0);
+        assert!(fixture.sink.failure().is_none());
+        std::fs::set_permissions(&fixture.dir, std::fs::Permissions::from_mode(0o500))
+            .expect("read-only session dir");
+        let reply = put(&base, "seg00000.ts", b"x").await;
+        std::fs::set_permissions(&fixture.dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore");
+        if reply.starts_with("HTTP/1.1 201") {
+            // Running with privileges that ignore directory permissions;
+            // nothing failed, so there is nothing to report.
+            return;
+        }
+        assert!(reply.starts_with("HTTP/1.1 500"), "{reply}");
+        assert!(
+            fixture.sink.failure().is_some(),
+            "the failure is recorded for the publication clock"
+        );
+        // A replaced lane's failure is nobody's: the retry starts clean.
+        fixture.sink.retire_writing_lane().await;
+        assert!(fixture.sink.failure().is_none());
+        drop(fixture.permit);
+    }
+
+    /// Lanes only move forward. A replaced attempt's first upload can reach
+    /// the receiver after its successor's -- the connections race -- and it
+    /// must be refused rather than take the endpoint back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scratch_put_an_older_lane_never_takes_the_endpoint_back() {
+        let first = fixture(64 << 20, 64 << 20);
+        let old = first.sink.base_url(0);
+        let new = first.sink.base_url(1);
+        assert!(put(&new, "seg00000.ts", b"new")
+            .await
+            .starts_with("HTTP/1.1 201"));
+        assert!(put(&old, "seg00000.ts", b"old")
+            .await
+            .starts_with("HTTP/1.1 409"));
+        assert!(put(&new, "seg00001.ts", b"new")
+            .await
+            .starts_with("HTTP/1.1 201"));
+        assert_eq!(
+            std::fs::read(first.dir.join("seg00000.ts")).expect("landed"),
+            b"new"
+        );
+
+        // And a lane retired before any of its uploads arrived is still
+        // retired: its stragglers must not claim the cleared directory.
+        let fresh = fixture(64 << 20, 64 << 20);
+        fresh.sink.retire_writing_lane().await;
+        let straggler = fresh.sink.base_url(0);
+        assert!(put(&straggler, "seg00000.ts", b"late")
+            .await
+            .starts_with("HTTP/1.1 409"));
+        assert!(!fresh.dir.join("seg00000.ts").exists());
+        assert!(put(&fresh.sink.base_url(1), "seg00000.ts", b"retry")
+            .await
+            .starts_with("HTTP/1.1 201"));
+        drop(first.permit);
+        drop(fresh.permit);
     }
 }

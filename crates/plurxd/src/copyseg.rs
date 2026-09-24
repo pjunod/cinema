@@ -198,6 +198,10 @@ pub struct WriteGrants {
     /// Granted alongside each slice so a session that is writing steadily is
     /// not renegotiating the budget on every segment.
     headroom: i64,
+    /// Rung when this allocation becomes starved or stops being starved, so
+    /// the manager can hold or resume the producer without waiting for its
+    /// next scheduled evaluation.
+    starved_signal: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 impl WriteGrants {
@@ -212,7 +216,35 @@ impl WriteGrants {
             key,
             configured,
             headroom,
+            starved_signal: None,
         }
+    }
+
+    /// Ring `signal` whenever this allocation starts or stops waiting on a
+    /// refused grant.
+    pub fn with_starved_signal(mut self, signal: std::sync::Arc<tokio::sync::Notify>) -> Self {
+        self.starved_signal = Some(signal);
+        self
+    }
+
+    /// Mark this allocation starved until the returned guard is dropped.
+    pub(crate) fn starve(&self) -> Starved<'_> {
+        if self.ledger.starve(self.key) {
+            if let Some(signal) = self.starved_signal.as_ref() {
+                signal.notify_one();
+            }
+        }
+        Starved { grants: self }
+    }
+
+    /// Authorize bytes an exited producer already handed the kernel. They
+    /// are bounded by its socket buffers and still charged; refusing them
+    /// could only turn a finished title into a failed one.
+    pub(crate) fn authorize_after_exit(
+        &self,
+        bytes: i64,
+    ) -> Option<crate::scratch_ledger::ScratchWrite> {
+        self.ledger.authorize_write(self.key, bytes, 0, 0)
     }
 
     pub(crate) fn authorize(&self, bytes: usize) -> Option<crate::scratch_ledger::ScratchWrite> {
@@ -236,6 +268,21 @@ impl WriteGrants {
     /// byte. `None` means retirement already fenced it.
     pub(crate) fn register_writer(&self) -> Option<crate::scratch_ledger::ScratchWriter> {
         self.ledger.register_writer(self.key)
+    }
+}
+
+/// One writer waiting on a refused grant. Dropping it ends the wait.
+pub(crate) struct Starved<'a> {
+    grants: &'a WriteGrants,
+}
+
+impl Drop for Starved<'_> {
+    fn drop(&mut self) {
+        if self.grants.ledger.unstarve(self.grants.key) {
+            if let Some(signal) = self.grants.starved_signal.as_ref() {
+                signal.notify_one();
+            }
+        }
     }
 }
 
@@ -352,6 +399,10 @@ impl SessionDir {
         // Only a session that has never published can wait forever for
         // nothing, so only that one gets a deadline. Measured in polls, so
         // the bound is the same on a paused test clock as on a real one.
+        // While it waits the allocation is starved, which the flow
+        // controller turns into a hold: ffmpeg is blocked on the pipe
+        // meanwhile, and its progress deadline must not read that as a stall.
+        let _starved = grants.starve();
         let mut waited = std::time::Duration::ZERO;
         loop {
             if !self.started && waited >= GRANT_WAIT_BUDGET {
@@ -2335,7 +2386,14 @@ mod grant_wait_tests {
     async fn scratch_charge_grant_wait_gives_up_only_before_first_publication() {
         let root = tempfile::tempdir().expect("tempdir");
         let (never, _never_permit) = starved(root.path().to_path_buf(), false);
-        let Err(error) = never.authorize_write("seg00000.m4s", 5_000).await else {
+        // Bounded, so the inverted deadline fails this test rather than
+        // hanging it: with the deadline on the wrong side, this waits forever.
+        let Ok(Err(error)) = tokio::time::timeout(
+            GRANT_WAIT_BUDGET * 2,
+            never.authorize_write("seg00000.m4s", 5_000),
+        )
+        .await
+        else {
             panic!("a session that cannot publish stops waiting");
         };
         assert!(
@@ -2355,5 +2413,39 @@ mod grant_wait_tests {
             waiting.is_err(),
             "a published session waits out a hold for as long as it lives"
         );
+    }
+}
+
+#[cfg(test)]
+mod starvation_tests {
+    use super::*;
+    use std::sync::atomic::AtomicI64;
+    use std::sync::Arc;
+
+    /// A writer waiting on a refused grant has blocked its producer on a
+    /// write. The allocation has to read as starved for exactly as long as
+    /// any writer waits, and the manager has to hear both edges, or the
+    /// producer is either never held (its progress deadline reads the wait
+    /// as a stall) or never resumed.
+    #[tokio::test]
+    async fn scratch_charge_a_starved_writer_rings_the_hold_signal_on_both_edges() {
+        let ledger = crate::scratch_ledger::ScratchLedger::new();
+        let permit = ledger.reserve(1_000, 1_000).expect("admission");
+        let key = permit.key();
+        let signal = Arc::new(tokio::sync::Notify::new());
+        let grants = WriteGrants::new(Arc::clone(&ledger), key, Arc::new(AtomicI64::new(1_000)), 0)
+            .with_starved_signal(Arc::clone(&signal));
+        let ring = || tokio::time::timeout(std::time::Duration::from_secs(1), signal.notified());
+
+        let first = grants.starve();
+        assert!(ledger.starved(key));
+        ring().await.expect("becoming starved rings");
+        let second = grants.starve();
+        drop(first);
+        assert!(ledger.starved(key), "one writer is still waiting");
+        drop(second);
+        assert!(!ledger.starved(key));
+        ring().await.expect("the last waiter leaving rings");
+        drop(permit);
     }
 }
