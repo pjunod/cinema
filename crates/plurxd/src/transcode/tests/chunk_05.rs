@@ -1501,17 +1501,26 @@
     /// transcode test per full run.
     ///
     /// One frame every fifty seconds keeps the encode to 120 4K frames, about
-    /// a second with libx265 ultrafast, once per test process.
+    /// a second with libx265 ultrafast and under a megabyte. The file lives
+    /// at one fixed, shape-named path under the system temp dir and is
+    /// reused by every later test process on the host; it is encoded to a
+    /// process-private name and renamed into place, so two processes
+    /// starting at once cannot read a half-written file, and nothing is
+    /// left behind but that one file.
     async fn placeholder_source() -> String {
         static SOURCE: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
         SOURCE
             .get_or_init(|| async {
-                let dir = std::env::temp_dir().join(format!(
-                    "plurxd-placeholder-source-{}",
+                let dir = std::fs::canonicalize(std::env::temp_dir())
+                    .expect("canonical system temporary directory");
+                let path = dir.join("plurxd-placeholder-source-hevc-3840x2160-6000s.mkv");
+                if std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false) {
+                    return path.to_string_lossy().into_owned();
+                }
+                let staging = dir.join(format!(
+                    "plurxd-placeholder-source-{}.mkv.part",
                     std::process::id()
                 ));
-                std::fs::create_dir_all(&dir).expect("placeholder source directory");
-                let path = dir.join("Heat.mkv");
                 let mut command = tokio::process::Command::new(
                     std::env::var("PLURX_FFMPEG").unwrap_or_else(|_| "ffmpeg".into()),
                 );
@@ -1537,7 +1546,7 @@
                         "matroska",
                         "-y",
                     ])
-                    .arg(&path);
+                    .arg(&staging);
                 let output =
                     tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
                         .await
@@ -1548,6 +1557,7 @@
                     "placeholder source encode failed — this suite needs an ffmpeg with libx265: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
+                std::fs::rename(&staging, &path).expect("placeholder source rename");
                 path.to_string_lossy().into_owned()
             })
             .await
