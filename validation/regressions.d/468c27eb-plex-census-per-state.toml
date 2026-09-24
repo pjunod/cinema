@@ -1,0 +1,31 @@
+version = 1
+
+[[coverage]]
+commits = ["468c27eb"]
+points = ["server.api"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+C-07's façade census counter (`plurx_plex_requests_total`) was a process-wide
+static shared by every `test_app()`, so the census tests that assert an exact
+delta also counted the façade traffic of other tests running on libtest's
+parallel threads (`plex_facade_requires_a_valid_token`,
+`plex_facade_serves_seeded_content`, `plex_write_image_and_part_paths`). The
+PR #462 review measured 34 failing runs in 400. The cells now live in a
+`PlexCensus` on `AppState`; the façade layer, `root_dispatch` and
+`MetricsState` all use that state's census.
+
+`http::tests::each_router_counts_only_its_own_facade_requests` sends three
+tokenless `/library/sections` requests through a second router and requires
+the first router's census exposition to be unchanged, then sends one through
+the first router and requires its `/metrics` to show `sections/unauthorized`
+moved by exactly one. Putting `PlexCensus::record` and `prometheus` back on a
+process-global array fails it deterministically ("another router's façade
+request moved this router's census", 3 != 0); that revert was run on
+2026-09-24. With the fix, the 400-iteration loop of the census and façade
+tests at `--test-threads=16` failed 0 times; the reverted binary failed all
+400 (the new test every time) and the three original exact-delta tests raced
+again in 24, 11 and 4 of those runs. `an_unauthenticated_facade_request_is_counted_as_a_client_that_tried`,
+`the_public_facade_routes_are_counted_and_the_web_app_is_not` and
+`a_native_request_never_reaches_the_census` keep their exact-delta
+assertions, now against their own state. Run `cargo test -p plurxd census`.
+"""
