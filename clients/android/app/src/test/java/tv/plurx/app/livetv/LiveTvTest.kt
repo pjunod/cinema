@@ -59,6 +59,29 @@ class LiveTvTest {
         assertFalse(wire.containsKey("compatibility"))
     }
 
+    @Test fun liveEnvelopeCarriesTheSinkFactsAndBothHevcContainers() {
+        val caps = Net.json.decodeFromString<tv.plurx.app.data.DeviceCaps>("""{
+            "v":2,"client":{"kind":"android","build":"test","ua":"fixture"},
+            "video":[{"codec":"hevc","profiles":["main10"],"present":["sdr"]},{"codec":"mpeg2video","present":["sdr"]}],
+            "audio":["aac","ac3"],"containers":["ts"],"transports":["hls"],
+            "display":{"hdr":false,"dolby_vision":false}
+        }""")
+        val television = LiveTvPlaybackEnvelope.from(
+            caps, sink = tv.plurx.app.data.LiveSinkFacts(deinterlaces = true, aacChannels = 6),
+        )
+        assertTrue(television.video_limits.all { it.interlaced })
+        assertEquals(6, television.audio_limits.single { it.codec == "aac" }.max_channels)
+        assertEquals(8, television.audio_limits.single { it.codec == "ac3" }.max_channels)
+        assertTrue(television.hls_formats.contains(LiveTvHlsFormat("fmp4", "hevc", "ac3")))
+        assertTrue(television.hls_formats.contains(LiveTvHlsFormat("mpegts", "hevc", "ac3")))
+        assertTrue(television.hls_formats.contains(LiveTvHlsFormat("mpegts", "mpeg2video", "ac3")))
+        assertFalse(television.hls_formats.contains(LiveTvHlsFormat("fmp4", "mpeg2video", "ac3")))
+
+        val handset = LiveTvPlaybackEnvelope.from(caps)
+        assertTrue(handset.video_limits.none { it.interlaced })
+        assertEquals(2, handset.audio_limits.single { it.codec == "aac" }.max_channels)
+    }
+
     private val channel = LiveTvChannel("one", "7.1", "Fixture News")
 
     /**
