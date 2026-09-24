@@ -2339,8 +2339,10 @@ final class AppleClientTests: XCTestCase {
     ///
     /// What intent that reopen carries is no longer asserted here, because
     /// there is no longer a client function that decides it: A-04 deleted the
-    /// `stallReopenIntent` minter, so every reopen this arm produces is
-    /// `.normal`. The wire it used to mint onto is untouched.
+    /// `stallReopenIntent` minter. `retrySameDeliveryAfterStall` reopens with
+    /// `intent: .sameDeliveryRepair`, which keeps the recovery budgets and
+    /// carries no server ticket, so nothing this arm produces is
+    /// `.stallReopen`. The wire it used to mint onto is untouched.
     func testTheDeliveryWatchdogIsBoundedByItsFloorAndStopsWithItsOwnMessage() {
         var storm = RecoveryReopenBudget()
 
