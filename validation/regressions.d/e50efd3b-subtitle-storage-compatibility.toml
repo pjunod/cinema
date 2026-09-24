@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e50efd3b"]
+points = ["playback.pipeline", "persistence.upgrades"]
+checks = ["rust-gate"]
+reason = "The core storage suite exercises every_replicated_placeholder_is_introduced_in_order with the complete interpolated caption publication SQL, the_downgrade_fixture_undoes_every_migration_after_the_guard with the appended caption column, and sqlite_v43_guard_migration_refuses_an_unrecoverable_committed_claim through a real upgrade replay. Both legacy SQLite downgrade fixtures remove downloaded_subtitles. The existing rolling-producer ownership inventory test checks the four bounded acquisition task spawns, four timers and two HTTP status reads documented in this change. The PR also records and locally runs the three-backend downloaded_subtitles_survive_rescan_and_reject_stale_or_duplicate_writes contract; no SQL fragment allowance is widened."

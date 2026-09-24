@@ -339,6 +339,8 @@ const LIBRARY_CHANNEL_METHODS: &[&str] = &[
 ];
 const CLASSIFICATION_METHODS: &[&str] = &["classification_page", "write_classification"];
 const MEDIA_METHODS: &[&str] = &[
+    "add_downloaded_subtitle",
+    "subtitle_candidate_file_ids",
     "item_by_external_id",
     "find_movie",
     "find_movies_by_directory",
@@ -635,6 +637,7 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "validation_corrupt_recovery_restriction",
 ];
 const FENCED_PUBLICATION_METHODS: &[&str] = &[
+    "add_downloaded_subtitle_fenced",
     "put_setting_fenced",
     "put_setting_if_absent_fenced",
     "put_setting_if_absent_if_artwork_repair_current_fenced",
@@ -16724,7 +16727,9 @@ fn contract_inventory_matches_every_store_method() {
     // expiry policy read in the same snapshot as its row. `user_for_token`
     // stays, now a provided method over it so every older caller honours
     // expiry. Named in `USER_METHODS` above; no new trait or supertrait.
-    assert_eq!(declared.len(), 385, "review the Store method count");
+    // 385 -> 388: acquired-caption publication, its fenced form, and the
+    // bounded candidate cursor. The downloaded-subtitle contract covers all three.
+    assert_eq!(declared.len(), 388, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -26832,12 +26837,25 @@ async fn downloaded_subtitles_survive_rescan_and_reject_stale_or_duplicate_write
                 original.mtime,
                 &ProbeResult {
                     raw_json: Some("{}".into()),
+                    video_codec: Some("h264".into()),
                     subtitle_streams: vec![embedded.clone()],
                     ..Default::default()
                 },
             )
             .await
             .expect("first successful probe");
+        assert_eq!(
+            store
+                .subtitle_candidate_file_ids(0, 16)
+                .await
+                .expect("caption candidates"),
+            vec![id]
+        );
+        assert!(store
+            .subtitle_candidate_file_ids(id, 16)
+            .await
+            .expect("candidate cursor")
+            .is_empty());
         let clock = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("subtitle contract fixture")
