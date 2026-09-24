@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use plurx_core::dvr::{
@@ -194,6 +194,15 @@ pub(crate) struct DvrTransport {
     /// Where the prefix probe writes its sample.
     pub(crate) scratch: PathBuf,
     metrics: Arc<LiveTvMetrics>,
+    /// A warm opening (plan L-02 §3.3): the opener already planned from
+    /// cached facts, so the fan-out feeds it from the first byte instead of
+    /// holding a prefix, and probes the opening sample beside the feed as
+    /// verification. Set before the worker starts; never changes after.
+    warm_opening: AtomicBool,
+    /// The probe of the opening sample (epoch 1), kept apart from the newest
+    /// publication so a warm opener reads the verdict on *this tune's first
+    /// bytes* even if a later re-probe has already replaced it.
+    opening: std::sync::Mutex<Option<Result<LiveSourceFacts, LiveTvError>>>,
 }
 
 pub(crate) struct TransportInit {
@@ -239,6 +248,39 @@ impl DvrTransport {
             closed: CancellationToken::new(),
             scratch: init.scratch,
             metrics: init.metrics,
+            warm_opening: AtomicBool::new(false),
+            opening: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// Mark this transport's opening as warm. Only its opener may call this,
+    /// and only before `spawn_transport_worker`.
+    pub(crate) fn open_warm(&self) {
+        self.warm_opening.store(true, Ordering::Release);
+    }
+
+    fn is_warm_opening(&self) -> bool {
+        self.warm_opening.load(Ordering::Acquire)
+    }
+
+    /// The verdict of the opening sample's probe: `None` while it is still
+    /// being collected or probed; the transport's own end if it stopped first.
+    pub(crate) fn opening_facts(&self) -> Option<Result<LiveSourceFacts, LiveTvError>> {
+        if let Some(opening) = self
+            .opening
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return Some(opening);
+        }
+        let ended = self.probe.borrow().ended;
+        ended.then(|| {
+            Err(self.terminal_error().unwrap_or_else(|| {
+                LiveTvError::StreamFailed(
+                    "the tuner transport stopped before its source was observed".into(),
+                )
+            }))
         })
     }
 
@@ -455,6 +497,12 @@ impl DvrTransport {
     /// Publish the probe of sample `epoch`. Never replaces newer facts, and
     /// nothing is published once the worker has ended.
     fn publish_source(&self, epoch: u64, result: Result<LiveSourceFacts, LiveTvError>) {
+        if epoch == 1 {
+            self.opening
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_or_insert_with(|| result.clone());
+        }
         let probe = match result {
             Ok(facts) => {
                 // A recording's sidecar describes the first facts this
@@ -3063,7 +3111,19 @@ async fn run_transport(
         _ = transport.cancel.cancelled() => return Ok(()),
         response = open_tuner_stream(&client, url, deadline) => response?,
     };
-    let input = collect_live_prefix(response, &transport.cancel).await?;
+    // A warm opening keeps no prefix: its opener's FFmpeg was planned from
+    // cached facts and is fed from the first byte, while the fan-out probes
+    // those same first bytes as the opening sample (plan L-02 §3.3).
+    let warm = transport.is_warm_opening();
+    let input = if warm {
+        LiveTunerInput {
+            prefix: bytes::Bytes::new(),
+            queued: None,
+            remainder: futures_util::StreamExt::boxed(response.bytes_stream()),
+        }
+    } else {
+        collect_live_prefix(response, &transport.cancel).await?
+    };
     // Probe the prefix here, for every consumer (plan L-03 §2.4 D1): the
     // opener plans from these facts and every sidecar this transport writes
     // describes them. Before this the transport never probed, so `source`
@@ -3083,6 +3143,9 @@ async fn run_transport(
             }
             let system = Arc::clone(&manager.system);
             drop(manager);
+            if warm {
+                return pump_tuner_fanout(input, serving, transport, Some(system)).await;
+            }
             let source = probe_live_source(&system, &transport.scratch, &input.prefix).await;
             (Some(system), source)
         }
@@ -3154,6 +3217,7 @@ async fn pump_tuner_fanout(
     let mut stream = input.remainder;
     let mut pending = std::iter::once(input.prefix)
         .chain(input.queued)
+        .filter(|held| !held.is_empty())
         .collect::<std::collections::VecDeque<_>>();
     // A viewer handed the held prefix starts that far behind the live edge.
     let held_bytes = pending
@@ -3166,7 +3230,13 @@ async fn pump_tuner_fanout(
     if !transport.await_first_consumer().await {
         return Ok(());
     }
-    let mut sample: Option<ReprobeSample> = None;
+    // A warm opening's sample is epoch 1, begun with the first byte its
+    // opener's FFmpeg is fed; its probe is the opener's verification.
+    let mut sample: Option<ReprobeSample> = transport.is_warm_opening().then(|| ReprobeSample {
+        epoch: 1,
+        bytes: Vec::new(),
+        started: tokio::time::Instant::now(),
+    });
     let mut probing: Option<ProbeInFlight> = None;
     loop {
         let (bytes, held) = match pending.pop_front() {
