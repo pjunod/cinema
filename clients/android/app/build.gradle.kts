@@ -47,9 +47,11 @@ val generateReaderAssets = tasks.register<GenerateReaderAssets>("generateReaderA
  *
  * Every Gradle entry point in this repository names its tasks explicitly
  * (`Makefile`: `:app:assembleDebug`, `testDebugUnitTest lintDebug`,
- * `assembleDebug assembleDebugAndroidTest`, `:app:assembleRelease`), so no
- * supported path packages the release variant without a "Release" task name;
- * tests/operations/test_android_credential_exposure.py keeps that true.
+ * `assembleDebug assembleDebugAndroidTest`, `:app:assembleRelease`;
+ * `scripts/ship-physical`: `:app:assembleRelease`), so no supported path
+ * packages the release variant without a "Release" task name;
+ * tests/operations/test_android_credential_exposure.py scans the Makefile and
+ * scripts/ to keep that true.
  */
 val releaseTaskRequested: Boolean =
     gradle.startParameter.taskNames.any { it.contains("Release") }
