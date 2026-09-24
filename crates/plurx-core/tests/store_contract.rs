@@ -567,6 +567,11 @@ const FRAGMENT_INDEX_METHODS: &[&str] = &[
     // `delete_files`.
     "vod_row_file_ids",
     "surviving_file_ids",
+    // Fix C's subtitle-source store asks it, off the lookup path, why a
+    // lookup found no directory: an index this node built for the same
+    // source means the pass that keeps PGS tracks ran here. Node-local and
+    // read-only.
+    "holds_fragment_index_for_source",
 ];
 const RENDITION_PLAN_METHODS: &[&str] = &[
     "put_rendition_plan",
@@ -16518,7 +16523,14 @@ fn contract_inventory_matches_every_store_method() {
     // above, both exist on SQLite and hiqlite, and neither adds a trait or a
     // supertrait of `Store`. C-06's telemetry method and C-04's two user
     // methods are independent additions, so the wave total is the sum.
-    assert_eq!(declared.len(), 383, "review the Store method count");
+    //
+    // 383 -> 384 for the one `FragmentIndexStore` method Fix C's producer
+    // adds, `holds_fragment_index_for_source`, a node-local read the
+    // subtitle-source store uses to classify a missing directory. It is named
+    // in `FRAGMENT_INDEX_METHODS` above; no new trait and no new supertrait of
+    // `Store`. Its sibling `fragment_index_builders_held_by` is on the cluster
+    // trait, which this inventory does not walk.
+    assert_eq!(declared.len(), 384, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -29871,6 +29883,111 @@ async fn classification_search_fences_and_corrections() {
                 .len(),
             1,
             "{backend}"
+        );
+    })
+    .await;
+}
+
+/// `fragment_index_builders_held_by` answers the same on every backend: the
+/// node that built an index names itself, a node that only holds a location
+/// for it names the builder, and another node or another source holds none.
+/// The subtitle-source store reads it to tell a `hydrated_only` miss from a
+/// `never_indexed` one.
+#[tokio::test]
+async fn fragment_index_builders_held_by_names_the_builder_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "builders-held").await;
+        let source_sha256 = "a".repeat(64);
+        let pipeline_sha256 = "e".repeat(64);
+        let key = cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+            .expect("cache key");
+        let job = NewClusterFragmentIndexJob {
+            cache_key: key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: "builder-node".to_owned(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        assert!(
+            store
+                .enqueue_cluster_fragment_index(&job)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}")),
+            "backend {backend}"
+        );
+        let claimed = store
+            .claim_cluster_fragment_index("builder-node", &[], 10, 1_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the job is claimable"));
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256,
+            pipeline_sha256,
+            blob_sha256: "d".repeat(64),
+            bytes: 128,
+            built_by_node_id: "builder-node".to_owned(),
+            built_at_ms: 11,
+        };
+        let location = |node_id: &str, at: i64| ClusterFragmentIndexLocation {
+            cache_key: key.clone(),
+            node_id: node_id.to_owned(),
+            bytes: 128,
+            verified_at_ms: at,
+            last_seen_at_ms: at,
+        };
+        assert!(
+            store
+                .complete_cluster_fragment_index(
+                    &claimed,
+                    &artifact,
+                    &location("builder-node", 11),
+                    11
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: complete: {error}")),
+            "backend {backend}"
+        );
+        store
+            .put_cluster_fragment_index_location(&location("hydrating-node", 12))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: hydrated location: {error}"));
+
+        let held_by = |node_id: &'static str, size: i64| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .fragment_index_builders_held_by(node_id, file_id, size, 1)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read {node_id}: {error}"))
+            }
+        };
+        assert_eq!(
+            held_by("builder-node", 10_000).await,
+            vec!["builder-node".to_owned()],
+            "backend {backend}"
+        );
+        assert_eq!(
+            held_by("hydrating-node", 10_000).await,
+            vec!["builder-node".to_owned()],
+            "backend {backend}"
+        );
+        assert!(
+            held_by("other-node", 10_000).await.is_empty(),
+            "backend {backend}"
+        );
+        assert!(
+            held_by("builder-node", 10_001).await.is_empty(),
+            "backend {backend}: another source"
         );
     })
     .await;

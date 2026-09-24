@@ -385,16 +385,12 @@ final class PlayerSurfaceView: UIView {
 
         for renderable in window.cues {
             let cue = renderable.cue
-            let unclampedStart = PGSOverlayPolicy.itemTimeMs(
-                sourceTimeMs: cue.startMs,
+            guard let interval = PGSOverlayPolicy.itemInterval(
+                cue: cue,
                 baseMs: window.baseMs
-            )
-            let itemEnd = PGSOverlayPolicy.itemTimeMs(
-                sourceTimeMs: cue.endMs,
-                baseMs: window.baseMs
-            )
-            let itemStart = max(0, unclampedStart)
-            guard itemEnd > itemStart else { continue }
+            ) else { continue }
+            let itemStart = interval.lowerBound
+            let itemEnd = interval.upperBound
 
             for object in renderable.objects {
                 let imageLayer = CALayer()
