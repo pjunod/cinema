@@ -98,12 +98,11 @@ final class AppModel: ObservableObject {
         let savedToken = settings.token
         guard !savedOrigin.isEmpty else { phase = .needServer; return }
 
-        Session.shared.origin = savedOrigin
+        Session.shared.setCredentials(origin: savedOrigin, token: savedToken)
         origin = savedOrigin
         api = PlurxAPI(origin: savedOrigin)
 
         guard let savedToken else { phase = .needLogin; return }
-        Session.shared.token = savedToken
         do {
             let me = try await requireAPI().me()
             username = me.username
@@ -115,7 +114,7 @@ final class AppModel: ObservableObject {
             discovery.stop()
             await loadHome()
         } catch APIError.http(let code) where code == 401 || code == 403 {
-            Session.shared.token = nil       // token rotated / server reset
+            Session.shared.setCredentials(origin: savedOrigin, token: nil) // token rotated / server reset
             settings.clearToken()
             // "Signed out after 90 days of inactivity." when that is why.
             authError = Session.shared.takeSessionExpiryNotice()
@@ -149,8 +148,7 @@ final class AppModel: ObservableObject {
         // any in-memory bearer in the same breath: a token belongs to exactly
         // one origin, so not even a failed probe may leave the previous
         // server's credential attached to this address.
-        Session.shared.origin = normalized
-        Session.shared.token = nil
+        Session.shared.setCredentials(origin: normalized, token: nil)
         let a = PlurxAPI(origin: normalized)
         do {
             let info = try await a.serverInfo()
@@ -176,7 +174,7 @@ final class AppModel: ObservableObject {
             let resp = try await requireAPI().login(
                 LoginRequest(username: user.trimmingCharacters(in: .whitespaces), password: pass)
             )
-            Session.shared.token = resp.token
+            Session.shared.setCredentials(origin: origin, token: resp.token)
             // A reason left over from the credential this one replaces
             // belongs to no future sign-out.
             _ = Session.shared.takeSessionExpiryNotice()
@@ -312,7 +310,7 @@ final class AppModel: ObservableObject {
 
     func logout() {
         guard !busy else { return }
-        guard let token = Session.shared.token else {
+        guard let token = Session.shared.credentials.token else {
             signOutLocally(message: "Signed out on this device.")
             return
         }
@@ -331,7 +329,7 @@ final class AppModel: ObservableObject {
             }
             // The result belongs only to the session that launched it. A login
             // or server change while the request was in flight wins.
-            guard self.origin == capturedOrigin, Session.shared.token == token else {
+            guard self.origin == capturedOrigin, Session.shared.credentials.token == token else {
                 self.busy = false
                 return
             }
@@ -346,7 +344,7 @@ final class AppModel: ObservableObject {
 
     private func signOutLocally(message: String? = nil) {
         settings.clearToken()
-        Session.shared.token = nil
+        Session.shared.setCredentials(origin: origin, token: nil)
         userId = nil
         settings.userId = nil
         AuthImageCache.shared.clear()
@@ -368,7 +366,7 @@ final class AppModel: ObservableObject {
         // the connect screen's manual-entry prefill — it is an address, not a
         // credential, and both copies of the credential are gone.
         settings.clearServer()
-        Session.shared.token = nil
+        Session.shared.setCredentials(origin: origin, token: nil)
         userId = nil
         // Artwork is cached per origin, but the bytes belong to the server that
         // served them; leaving them behind wastes memory the next server will
@@ -382,8 +380,7 @@ final class AppModel: ObservableObject {
         origin = recovered.origin
         serverName = recovered.name
         api = PlurxAPI(origin: recovered.origin)
-        Session.shared.origin = recovered.origin
-        Session.shared.token = token
+        Session.shared.setCredentials(origin: recovered.origin, token: token)
         // The same server instance at a new address: a move, not a change of
         // identity, so this token stays with it. `matchesSavedServer` already
         // proved the instance id matches before we got here.
@@ -404,7 +401,7 @@ final class AppModel: ObservableObject {
             await refreshClusterIngress()
             await loadHome()
         } catch APIError.http(let code) where code == 401 || code == 403 {
-            Session.shared.token = nil
+            Session.shared.setCredentials(origin: recovered.origin, token: nil)
             settings.clearToken()
             authError = Session.shared.takeSessionExpiryNotice()
             phase = .needLogin

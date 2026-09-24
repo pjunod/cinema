@@ -911,8 +911,7 @@ final class AppleClientTests: XCTestCase {
     }
 
     override func tearDown() {
-        Session.shared.origin = ""
-        Session.shared.token = nil
+        Session.shared.setCredentials(origin: "", token: nil)
         super.tearDown()
     }
 
@@ -7617,8 +7616,7 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testRelativeMediaURLCarriesTokenAndPreservesExistingQuery() throws {
-        Session.shared.origin = "http://media-box:32400"
-        Session.shared.token = "secret token"
+        Session.shared.setCredentials(origin: "http://media-box:32400", token: "secret token")
 
         let url = try XCTUnwrap(Session.shared.mediaURL("/api/v1/files/42/direct?download=1"))
         let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
@@ -7632,12 +7630,34 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testAuthorizationHeaderUsesTheCurrentSessionToken() throws {
-        Session.shared.token = "bearer-token"
+        Session.shared.setCredentials(origin: Session.shared.credentials.origin, token: "bearer-token")
         var request = URLRequest(url: try XCTUnwrap(URL(string: "https://media.example.test/api/v1/me")))
 
         Session.shared.authorize(&request)
 
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer bearer-token")
+    }
+
+    func testConcurrentCredentialReadsNeverCombineTwoSessions() {
+        let first = (origin: "https://first.example.test", token: "first-token")
+        let second = (origin: "https://second.example.test", token: "second-token")
+        let mismatchLock = NSLock()
+        var mismatches = 0
+        DispatchQueue.concurrentPerform(iterations: 10_000) { iteration in
+            if iteration.isMultiple(of: 2) {
+                Session.shared.setCredentials(origin: first.origin, token: first.token)
+            } else {
+                Session.shared.setCredentials(origin: second.origin, token: second.token)
+            }
+            let pair = Session.shared.credentials
+            if !((pair.origin == first.origin && pair.token == first.token)
+                || (pair.origin == second.origin && pair.token == second.token)) {
+                mismatchLock.lock()
+                mismatches += 1
+                mismatchLock.unlock()
+            }
+        }
+        XCTAssertEqual(mismatches, 0)
     }
 
     func testAutoHlsRequestLeavesHeightUnsetAndCreatesAnIdempotencyKey() throws {

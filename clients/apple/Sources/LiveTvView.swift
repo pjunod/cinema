@@ -1892,8 +1892,8 @@ struct LiveTvView: View {
         #endif
         .background(Palette.bg)
 
-        .task { await live.load(origin: model.origin, token: Session.shared.token) }
-        .task { await dvr.load(origin: model.origin, token: Session.shared.token) }
+        .task { await live.load(origin: model.origin, token: Session.shared.credentials.token) }
+        .task { await dvr.load(origin: model.origin, token: Session.shared.credentials.token) }
         // One read of the schedule and the reminders per guide load, and none
         // in between. A plan changes when somebody changes it — every mutation
         // re-reads for itself — so a page that polled would spend a
@@ -2185,7 +2185,7 @@ struct LiveTvView: View {
             #endif
             Button("Refresh channels") {
                 showingMore = false
-                Task { await live.load(origin: model.origin, token: Session.shared.token) }
+                Task { await live.load(origin: model.origin, token: Session.shared.credentials.token) }
             }
             #if os(tvOS)
             .buttonStyle(TVReadableButtonStyle(prominent: false))
@@ -2504,7 +2504,7 @@ struct LiveTvView: View {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 Button("Refresh channels") {
-                    Task { await live.load(origin: model.origin, token: Session.shared.token) }
+                    Task { await live.load(origin: model.origin, token: Session.shared.credentials.token) }
                 }
                 Button(hideProtected ? "Show protected" : "Hide protected") { hideProtected.toggle() }
                 if live.message.contains("Cleanup is unconfirmed") {
