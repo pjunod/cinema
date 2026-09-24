@@ -60,8 +60,11 @@ finding.
 3. Logs can be emitted as JSON, and never carry ANSI escapes into a
    non-terminal.
 4. A panic anywhere reaches `tracing::error!` with redaction, a bounded
-   backtrace, a recursion guard and the default hook still running after
-   it — and increments a bounded counter.
+   backtrace, a reporting path that cannot itself panic, and the default hook
+   still running after it — and increments a bounded counter. (Corrected by
+   the #461 review: this said "a recursion guard", but std never re-enters a
+   panic hook — a nested panic aborts the process — so no guard can protect
+   anything; see §3.4.)
 5. The eight §4.9 release-evidence measurements each name a real series:
    the one that exists, or the one this plan creates, with labels,
    denominator, observation interval and an owner.
@@ -355,6 +358,17 @@ Four properties the assessment asked for by name:
 - **Bounded backtrace.** `MAX_BACKTRACE_FRAMES = 32`, captured only when
   `RUST_BACKTRACE` is set, each frame's text redacted and truncated.
 - **Recursion protection.** The thread-local guard above.
+  **Corrected by the #461 review — this bullet and the sketch's comment were
+  wrong.** std never re-enters a panic hook: a panic raised while one is
+  running is `MustAbort::PanicInHook`, which prints "panicked while processing
+  panic" and aborts the process before anything unwinds. The guard's `else`
+  branch can never run, and no `catch_unwind` anywhere can intercept the
+  abort. What actually protects the process is that the reporting path is
+  panic-free by construction (payload only downcast to `&str`/`String`, no
+  third-party `Debug`/`Display`, `char`-wise truncation, `get` instead of
+  indexing, string-only `tracing` fields). The shipped hook has no guard;
+  `panics.rs` documents each step, and
+  `a_panic_inside_the_reporting_path_aborts_the_process` pins the abort.
 - **Deliberate default-hook chaining.** `previous(info)` always runs, at
   the end, outside the guard. The process's abort/unwind behaviour does not
   change.
@@ -495,7 +509,11 @@ setting and nothing appears in Settings → Developer.
   the panic hook reuses `redact_operator_text`'s rule set rather than
   writing a weaker second one.
 - **Recursive logging is avoided** (F-core-12: "avoid recursive logging").
-  A thread-local guard, checked before any tracing call in the hook.
+  ~~A thread-local guard, checked before any tracing call in the hook.~~
+  Corrected by the #461 review: a guard cannot do this, because std aborts
+  on a panic inside the hook instead of re-entering it. Recursion is avoided
+  by std; the process survives only if the reporting path does not panic,
+  which is how it is built (§3.4).
 - **The default hook is chained deliberately** (F-build-ops-codehealth-12).
   `previous(info)` always runs; stderr output and abort behaviour do not
   change.
@@ -601,7 +619,11 @@ node running the new build.
 2. Tests:
    `a_panic_reaches_the_log_buffer_with_its_location`;
    `a_panic_payload_containing_a_bearer_is_redacted`;
-   `a_panic_inside_the_hook_does_not_recurse` (a formatter that panics);
+   `a_panic_inside_the_hook_does_not_recurse` (a formatter that panics) —
+   shipped as `a_panic_inside_the_reporting_path_aborts_the_process`, because
+   what a panicking formatter inside the hook actually does is abort the
+   process (§3.4), plus `hostile_payloads_are_reported_without_a_second_panic`
+   for the property that keeps that from happening;
    `the_previous_hook_still_runs`;
    `the_subsystem_label_is_from_the_allowlist` (a synthetic location
    outside it reports `other`);
@@ -816,6 +838,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 — RED on the matched route | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | `plurx_http_requests_total{route_group,method,status}`, `plurx_http_body_seconds{route_group}` and `plurx_http_bodies_total{route_group,outcome}`, recorded by a layer outside `cluster_capacity_gate` so its 503s are counted. Header latency was **not** re-implemented: K-04's `plurx_http_route_seconds` already is it (§7.6.1). The route label is `route_group`, not the template (§7.6.2). Six tests, each shown failing with its change reverted. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 — request ids | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | `x-request-id` adopted when it is at most 64 characters of `[A-Za-z0-9_-]` and minted otherwise, on the request, on the `http_request` span and on the response; never a metric label. Hand-written layer, no `tower-http` feature added; `uuid` was already a real dependency (§7.6.4). Three tests, one of which asserts the discarded value reaches neither the response nor the log. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — log format and ANSI | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | `PLURX_LOG_FORMAT=json\|text`; `with_ansi` set explicitly from `std::io::stdout().is_terminal()` and forced off under JSON. **Confirmed on the fleet before the change**: `docker logs plurxd` on nuc4 carries `ESC[2m` / `ESC[31m` escape bytes in every line, so the plan's §2.3 claim was not only true of the vendored source but true of a running node. The 5xx access line is throttled (§7.6.3). Four tests; the ANSI one asserts the flag is load-bearing in both directions. |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 — panic hook | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | `crates/plurxd/src/panics.rs` and `crates/plurxd/src/redact.rs`; `redact_operator_text` lifted out of `http/cluster_operations.rs` unchanged and reused for panic payloads; recursion guard, opt-in path-free bounded backtrace, chained previous hook, `plurx_panics_total{subsystem}` over a fixed 13-name allowlist. Five tests, one of which installs the real hook and panics for real. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 — panic hook | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | `crates/plurxd/src/panics.rs` and `crates/plurxd/src/redact.rs`; `redact_operator_text` lifted out of `http/cluster_operations.rs` unchanged and reused for panic payloads; ~~recursion guard~~ (removed by the #461 review: it could never fire — see §3.4), opt-in path-free bounded backtrace, chained previous hook, `plurx_panics_total{subsystem}` over a fixed 13-name allowlist. Five tests, one of which installs the real hook and panics for real. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — release-evidence set | — | **Not started**, deliberately. See §7.6. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | #461 review, P1 — body outcome | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | **The M1 row's claim that `plurx_http_bodies_total` separates a finished body from an abandoned one was false for fixed-length bodies**, i.e. for every direct play range and HLS segment: hyper drops a `Content-Length` body unpolled once the declared bytes are written, and a stream body is not `is_end_stream()` until polled to `None`, so every one was counted `aborted`. `MeasuredBody` now records the declared length (the `Content-Length` header, else the exact size hint; zero for HEAD/1xx/204/304) and counts yielded data bytes, and classifies a drop as `complete` once the declared length is yielded. Pinned by `a_fully_delivered_body_counts_complete_over_a_real_connection_whatever_its_framing` (real `axum::serve` listener, raw HTTP/1.1 socket, chunked and `Content-Length` and HEAD) and `a_fixed_length_body_is_complete_at_its_declared_length_and_aborted_short_of_it`; both shown failing with the production hunk reverted. OPERATIONS.md's "a healthy node aborts bodies constantly" removed. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | #461 review, P2 — panic hook | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | The recursion guard and every claim that it protected the process are gone (§3.4 corrected in place). std aborts on a panic inside a hook; the reporting path is now documented step by step as panic-free by construction, reaches the counter and label with `get`, and has no `catch_unwind` because none could work. The stand-in `a_nested_report_is_suppressed_by_the_guard` is replaced by two child-process tests: `a_panic_inside_the_reporting_path_aborts_the_process` (the real hook behind a panicking log writer → SIGABRT and std's nested-panic message) and `hostile_payloads_are_reported_without_a_second_panic` (a payload whose `Debug` and `Display` panic, a non-string, an empty and a multi-byte payload cut at 512 characters all come out as log lines). The guard's removal changes no behaviour — it never fired — so there is no revert to show failing; the abort test pins std's behaviour, and the hostile-payload test was shown catching a byte-slicing truncation in `redact_bounded` (the child aborts, exit 134). Fix commits `7611d398` (P1) and `20700f81` (P2). |
 | | | | | | `needs:` the §6.3 fleet observations. Nothing in this branch has been deployed or scraped on a node; the exposition-size, label-hygiene, journald-ANSI-after, JSON-mode and RED-sanity steps are all unrun. |
