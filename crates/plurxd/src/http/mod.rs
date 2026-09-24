@@ -507,10 +507,22 @@ async fn http_store_attribution(
         state.membership.local_serving_role().await.map_err(|_| ()),
     );
     let counts = plurx_core::store::HttpStoreOperationCounts::default();
+    let watch_ack = plurx_core::store::HttpWatchWriteAck::default();
     let started_at = Instant::now();
-    let response =
-        plurx_core::store::scope_http_store_operations(counts.clone(), next.run(request)).await;
+    let mut response = plurx_core::store::scope_http_store_operations(
+        counts.clone(),
+        plurx_core::store::scope_http_watch_write_ack(watch_ack.clone(), next.run(request)),
+    )
+    .await;
     HTTP_ROUTE_METRICS.record(group, role, counts.snapshot(), started_at.elapsed());
+    // K-04 M2: offer the acknowledged watch-write position so a client can
+    // echo it as `X-Plurx-Read-After` to whichever node serves its next read.
+    if let Some(index) = watch_ack.commit_index() {
+        response.headers_mut().insert(
+            extract::COMMIT_INDEX_HEADER,
+            axum::http::HeaderValue::from(index),
+        );
+    }
     response
 }
 
@@ -2414,6 +2426,20 @@ mod tests {
         "ok"
     }
 
+    async fn watch_write_handler(
+        axum::extract::Path(case): axum::extract::Path<String>,
+    ) -> &'static str {
+        let writes: &[Option<u64>] = match case.as_str() {
+            "two" => &[Some(41), Some(45)],
+            "unprovable" => &[Some(41), None],
+            _ => &[],
+        };
+        for write in writes {
+            plurx_core::store::validation_record_http_watch_write(*write);
+        }
+        "ok"
+    }
+
     async fn recorded_store_handler() -> &'static str {
         for class in 0..3 {
             plurx_core::store::validation_time_http_store_operation(class).await;
@@ -3299,6 +3325,47 @@ mod tests {
         assert!(metrics < id, "request id is outermost");
     }
 
+    /// K-04 M2: a request whose watch writes all reported a log index offers
+    /// the highest as `X-Plurx-Commit-Index`; one unknown index, or no watch
+    /// write at all, offers nothing.
+    #[tokio::test]
+    async fn commit_index_header_offers_only_a_fully_acknowledged_watch_write_position() {
+        let (_, state) = test_app_with_state();
+        let app = Router::new()
+            .route(
+                "/api/v1/items/{case}/watched",
+                axum::routing::post(watch_write_handler),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                http_store_attribution,
+            ))
+            .with_state(state);
+        let header = |response: &Response| {
+            response
+                .headers()
+                .get(extract::COMMIT_INDEX_HEADER)
+                .map(|value| value.to_str().expect("ascii").to_owned())
+        };
+        let post = |case: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/items/{case}/watched"))
+                .body(Body::empty())
+                .expect("request")
+        };
+        let response = app.clone().oneshot(post("two")).await.expect("two writes");
+        assert_eq!(header(&response).as_deref(), Some("45"));
+        let response = app
+            .clone()
+            .oneshot(post("unprovable"))
+            .await
+            .expect("unprovable write");
+        assert_eq!(header(&response), None);
+        let response = app.oneshot(post("none")).await.expect("no write");
+        assert_eq!(header(&response), None);
+    }
+
     #[tokio::test]
     async fn metrics_route_attribution_renders_fixed_labels_and_scoped_store_counts() {
         let (_, state) = test_app_with_state();
@@ -4130,6 +4197,7 @@ mod tests {
             &[
                 "get_library",
                 "list_top_items_in_genre",
+                "watch_summary",
                 "item_max_heights",
                 "item_media_facts",
                 "child_counts",
@@ -4147,6 +4215,7 @@ mod tests {
                 "item_media_facts",
                 "files_for_item",
                 "get_file_probe_json",
+                "watch_summary",
             ],
         );
         assert_catalogue_methods(
@@ -4154,14 +4223,48 @@ mod tests {
             &[
                 "list_libraries",
                 "home_preview_pages",
+                "watch_summary",
                 "item_max_heights",
                 "child_counts",
             ],
         );
         assert_catalogue_methods(
             &compact_handler(browse, "pub async fn hubs", "pub async fn search"),
-            &["recently_added", "child_counts", "item_max_heights"],
+            &[
+                "progress_rails",
+                "recently_added",
+                "child_counts",
+                "item_max_heights",
+            ],
         );
+        // K-04 M2: every watch-state read on the browse path goes through the
+        // reader's read-your-write fence. None may reach the Store directly,
+        // where it would be neither fenced nor counted as one read.
+        let watch_helper =
+            compact_handler(browse, "async fn watch_lookup", "fn annotate_with_counts");
+        assert!(watch_helper.contains("state.catalogue.watch_map"));
+        let browse_source = browse
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(browse);
+        let browse_compact: String = browse_source
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        for direct in [
+            "state.store.watch_map",
+            "state.store.watch_rollup",
+            "state.store.watch_rollups",
+            "state.store.watch_summary",
+            "state.store.continue_watching",
+            "state.store.next_up",
+            "state.store.progress_rails",
+        ] {
+            assert!(
+                !browse_compact.contains(direct),
+                "browse reads watch state around the fence: {direct}"
+            );
+        }
         assert_catalogue_methods(
             &compact_handler(browse, "pub async fn search", "Ok(Json(SearchResponse"),
             &["search_items"],

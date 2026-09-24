@@ -78,12 +78,19 @@ mod hiqlite_sessions;
 mod hiqlite_shared_cache;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_timeline_annotations;
+#[cfg(feature = "hiqlite-store")]
+mod watch_fence;
 
 /// The placeholder-order census over every replicated slice above. It is a
 /// test module rather than a lint because the rule it enforces is the one
 /// `hiqlite::validate_sql` applies at runtime, and the two must not drift.
 #[cfg(all(test, feature = "hiqlite-store"))]
 mod placeholder_census;
+
+/// K-04 M3: a source census of consistent reads per replicated slice. Not a
+/// latency or request-rate measurement; see the module documentation.
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod consistent_read_census;
 
 pub mod replicated;
 
@@ -3320,6 +3327,20 @@ pub trait WatchStore: Send + Sync + 'static {
     /// unwatched, not-in-progress episode after the last watched one. Pairs
     /// with continue-watching (resume) — this is "start the next episode".
     async fn next_up(&self, user_id: i64, limit: i64) -> Result<Vec<RecentItem>, StoreError>;
+    /// [`WatchStore::watch_map`] over `item_ids` and
+    /// [`WatchStore::watch_rollups`] over `container_ids`, answered from one
+    /// read of the same state: one replicated statement, or one SQLite read
+    /// transaction. Same per-half contracts as the two methods it replaces.
+    async fn watch_summary(
+        &self,
+        user_id: i64,
+        item_ids: &[i64],
+        container_ids: &[i64],
+    ) -> Result<WatchSummary, StoreError>;
+    /// [`WatchStore::continue_watching`] and [`WatchStore::next_up`] from one
+    /// read of the same progress state, each rail in its own established
+    /// order and limit.
+    async fn progress_rails(&self, user_id: i64, limit: i64) -> Result<ProgressRails, StoreError>;
     /// Write a watch fact that arrived from an external source (Trakt sync):
     /// unlike [`put_progress`] the caller controls `updated_at`, so remote
     /// timestamps land verbatim and later merges compare correctly.
@@ -5338,6 +5359,97 @@ pub(super) fn record_http_store_operation(class_index: usize) {
     let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index));
 }
 
+/// Both halves of [`WatchStore::watch_summary`].
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct WatchSummary {
+    /// [`WatchStore::watch_map`]'s rows for the requested items.
+    pub watch: Vec<(i64, WatchState)>,
+    /// [`WatchStore::watch_rollups`]'s answer: every requested container,
+    /// `0/0` when nothing playable sits under it.
+    pub rollups: std::collections::HashMap<i64, WatchRollup>,
+}
+
+/// Both rails of [`WatchStore::progress_rails`].
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct ProgressRails {
+    pub continue_watching: Vec<InProgressItem>,
+    pub next_up: Vec<RecentItem>,
+}
+
+/// The watch-state commit position acknowledged inside one HTTP request
+/// (K-04 M2), offered to the client as `X-Plurx-Commit-Index`.
+///
+/// Only a request whose every watch write reported its Raft log index has a
+/// position to offer: echoing the index of one write while another in the
+/// same request is unknown would let a peer serve a read that misses the
+/// unknown one.
+#[derive(Clone, Default)]
+pub struct HttpWatchWriteAck {
+    state: std::sync::Arc<HttpWatchWriteAckState>,
+}
+
+#[derive(Default)]
+struct HttpWatchWriteAckState {
+    max_index: std::sync::atomic::AtomicU64,
+    unprovable: std::sync::atomic::AtomicBool,
+}
+
+impl HttpWatchWriteAck {
+    /// The index to offer, if every watch write in the request reported one.
+    #[must_use]
+    pub fn commit_index(&self) -> Option<u64> {
+        use std::sync::atomic::Ordering;
+
+        if self.state.unprovable.load(Ordering::Acquire) {
+            return None;
+        }
+        let index = self.state.max_index.load(Ordering::Acquire);
+        (index > 0).then_some(index)
+    }
+
+    /// Record one acknowledged watch write. Exposed so HTTP-layer tests can
+    /// drive the response header without a replicated store.
+    pub fn record(&self, log_index: Option<u64>) {
+        use std::sync::atomic::Ordering;
+
+        match log_index {
+            Some(index) => {
+                self.state.max_index.fetch_max(index, Ordering::AcqRel);
+            }
+            None => self.state.unprovable.store(true, Ordering::Release),
+        }
+    }
+}
+
+tokio::task_local! {
+    static HTTP_WATCH_WRITE_ACK: HttpWatchWriteAck;
+}
+
+/// Scope one HTTP request so the watch writes it acknowledges can be offered
+/// back to the client after its response is ready.
+pub async fn scope_http_watch_write_ack<T>(
+    ack: HttpWatchWriteAck,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    HTTP_WATCH_WRITE_ACK.scope(ack, future).await
+}
+
+/// Record a watch write into the current request's acknowledgement, if the
+/// write runs inside one. Background writers (the progress coalescer's
+/// trailing flush, Trakt sync) have no request and record nothing here; the
+/// per-process fence still covers them.
+#[cfg_attr(not(feature = "hiqlite-store"), allow(dead_code))]
+pub(crate) fn record_http_watch_write(log_index: Option<u64>) {
+    let _ = HTTP_WATCH_WRITE_ACK.try_with(|ack| ack.record(log_index));
+}
+
+/// Record a watch write into the current request exactly as the replicated
+/// store does, for HTTP-layer contracts that run without one.
+#[doc(hidden)]
+pub fn validation_record_http_watch_write(log_index: Option<u64>) {
+    record_http_watch_write(log_index);
+}
+
 /// The only application-facing boundary for catalogue consistency choices.
 ///
 /// Ordinary [`Store`] methods remain Authority. This wrapper may run one
@@ -5429,10 +5541,45 @@ impl CatalogueReader {
         F: FnOnce(Arc<HiqliteAuthStore>) -> Fut,
         Fut: std::future::Future<Output = Result<T, StoreError>>,
     {
+        self.bounded_after(|_| Some(0), local_read).await
+    }
+
+    /// A bounded read of per-user watch state (K-04 M2). On top of the
+    /// catalogue permit, the local replica must have applied the user's
+    /// read-your-write fence — the latest watch write this process
+    /// acknowledged for them, or the client's echoed `read_after`, whichever
+    /// is larger. With neither there is nothing to prove against and
+    /// Authority answers; see [`watch_fence`].
+    #[cfg(feature = "hiqlite-store")]
+    async fn bounded_watch<T, F, Fut>(
+        &self,
+        user_id: i64,
+        read_after: Option<u64>,
+        local_read: F,
+    ) -> Option<T>
+    where
+        F: FnOnce(Arc<HiqliteAuthStore>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, StoreError>>,
+    {
+        self.bounded_after(
+            |store| store.watch_read_fence(user_id, read_after),
+            local_read,
+        )
+        .await
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn bounded_after<T, R, F, Fut>(&self, min_applied_index: R, local_read: F) -> Option<T>
+    where
+        R: FnOnce(&HiqliteAuthStore) -> Option<u64>,
+        F: FnOnce(Arc<HiqliteAuthStore>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, StoreError>>,
+    {
         let bounded = self.bounded.as_ref()?;
         if !bounded.enabled {
             return None;
         }
+        let min_applied_index = min_applied_index(&bounded.store)?;
         let store = Arc::clone(&bounded.store);
         #[cfg(feature = "cluster-read-cost-validation")]
         let revoke_after_local = Arc::clone(&bounded.revoke_after_next_local);
@@ -5444,16 +5591,117 @@ impl CatalogueReader {
         // SQL/row-mapping failure the same way and retry the existing Authority
         // path below. The Authority result remains the caller's result.
         metrics
-            .run_bounded_replica(bounded.max_apply_lag_entries, move || async move {
-                let result = local_read(store).await;
-                #[cfg(feature = "cluster-read-cost-validation")]
-                if revoke_after_local.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    post_query_metrics.validation_revoke_bounded_proof();
-                }
-                result
-            })
+            .run_bounded_replica_after(
+                bounded.max_apply_lag_entries,
+                min_applied_index,
+                move || async move {
+                    let result = local_read(store).await;
+                    #[cfg(feature = "cluster-read-cost-validation")]
+                    if revoke_after_local.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        post_query_metrics.validation_revoke_bounded_proof();
+                    }
+                    result
+                },
+            )
             .await?
             .ok()
+    }
+
+    /// Per-user watch state for `item_ids`. Local only behind the
+    /// read-your-write fence ([`Self::bounded_watch`]); Authority otherwise.
+    pub async fn watch_map(
+        &self,
+        user_id: i64,
+        item_ids: &[i64],
+        read_after: Option<u64>,
+    ) -> Result<Vec<(i64, WatchState)>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let ids = item_ids.to_vec();
+            if let Some(result) = self
+                .bounded_watch(user_id, read_after, move |store| async move {
+                    store.local_watch_map(user_id, &ids).await
+                })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        #[cfg(not(feature = "hiqlite-store"))]
+        let _ = read_after;
+        self.authority.watch_map(user_id, item_ids).await
+    }
+
+    /// One container's watched rollup, behind the same fence.
+    pub async fn watch_rollup(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        read_after: Option<u64>,
+    ) -> Result<WatchRollup, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded_watch(user_id, read_after, move |store| async move {
+                store.local_watch_rollup(user_id, item_id).await
+            })
+            .await
+        {
+            return Ok(result);
+        }
+        #[cfg(not(feature = "hiqlite-store"))]
+        let _ = read_after;
+        self.authority.watch_rollup(user_id, item_id).await
+    }
+
+    /// [`WatchStore::watch_summary`] behind the same fence.
+    pub async fn watch_summary(
+        &self,
+        user_id: i64,
+        item_ids: &[i64],
+        container_ids: &[i64],
+        read_after: Option<u64>,
+    ) -> Result<WatchSummary, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let items = item_ids.to_vec();
+            let containers = container_ids.to_vec();
+            if let Some(result) = self
+                .bounded_watch(user_id, read_after, move |store| async move {
+                    store
+                        .local_watch_summary(user_id, &items, &containers)
+                        .await
+                })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        #[cfg(not(feature = "hiqlite-store"))]
+        let _ = read_after;
+        self.authority
+            .watch_summary(user_id, item_ids, container_ids)
+            .await
+    }
+
+    /// [`WatchStore::progress_rails`] behind the same fence.
+    pub async fn progress_rails(
+        &self,
+        user_id: i64,
+        limit: i64,
+        read_after: Option<u64>,
+    ) -> Result<ProgressRails, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded_watch(user_id, read_after, move |store| async move {
+                store.local_progress_rails(user_id, limit).await
+            })
+            .await
+        {
+            return Ok(result);
+        }
+        #[cfg(not(feature = "hiqlite-store"))]
+        let _ = read_after;
+        self.authority.progress_rails(user_id, limit).await
     }
 
     pub async fn get_library(&self, id: i64) -> Result<Option<Library>, StoreError> {

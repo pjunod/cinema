@@ -15,7 +15,7 @@ use super::dto::{
     chapters_from_probe_json, in_progress_dto, recent_dto, FileDto, ItemDto, LibraryDto, ReadingDto,
 };
 use super::error::ApiError;
-use super::extract::AuthUser;
+use super::extract::{AuthUser, ReadAfter};
 use crate::state::AppState;
 
 const DEFAULT_LIMIT: i64 = 60;
@@ -118,15 +118,27 @@ fn clamp_limit(limit: Option<i64>) -> i64 {
     limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
 }
 
-/// Fetch this user's watch state for a set of items as a lookup map.
+/// Fetch this user's watch state for a set of items as a lookup map. Watch
+/// state is read-your-write state: the reader serves it locally only behind
+/// the user's write fence (K-04 M2), and from Authority otherwise.
 async fn watch_lookup(
     state: &AppState,
     user_id: i64,
     items: &[Item],
+    read_after: ReadAfter,
 ) -> Result<HashMap<i64, WatchState>, ApiError> {
     let ids: Vec<i64> = items.iter().map(|i| i.id).collect();
-    let map = state.store.watch_map(user_id, &ids).await?;
+    let map = state
+        .catalogue
+        .watch_map(user_id, &ids, read_after.0)
+        .await?;
     Ok(map.into_iter().collect())
+}
+
+/// Shows, seasons and folders carry no watch row of their own; their state
+/// is a rollup over the playable leaves beneath them.
+fn is_rollup_container(kind: ItemKind) -> bool {
+    matches!(kind, ItemKind::Show | ItemKind::Season | ItemKind::Folder)
 }
 
 /// Map items to DTOs with per-user watch state, and (for folders) how many
@@ -184,6 +196,7 @@ pub struct ItemListResponse {
 pub async fn list_items(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
+    read_after: ReadAfter,
     Path(library_id): Path<i64>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<ItemListResponse>, ApiError> {
@@ -205,7 +218,26 @@ pub async fn list_items(
         .catalogue
         .list_top_items_in_genre(library_id, sort, offset, limit, genre)
         .await?;
-    let watch = watch_lookup(&state, user.id, &page.items).await?;
+    // Containers carry no watch row of their own, so a grid filtering by
+    // "Watched"/"In progress" has nothing to filter a show on — the state
+    // lives on its episodes, which aren't in this response. One batched
+    // rollup answers it for every container at once; the per-card version
+    // would be an N+1 over a recursive walk. Leaves keep `watch` only, which
+    // already tells the whole truth about them. Both halves come from one
+    // read of the same watch state (K-04 M3).
+    let item_ids: Vec<i64> = page.items.iter().map(|i| i.id).collect();
+    let container_ids: Vec<i64> = page
+        .items
+        .iter()
+        .filter(|i| is_rollup_container(i.kind))
+        .map(|i| i.id)
+        .collect();
+    let summary = state
+        .catalogue
+        .watch_summary(user.id, &item_ids, &container_ids, read_after.0)
+        .await?;
+    let watch: HashMap<i64, WatchState> = summary.watch.into_iter().collect();
+    let rollups = summary.rollups;
     // Per-item resolution so the grid can badge/section it. Home videos carry
     // a badge for the same reason movies do — phone footage ranges from 480p
     // to 4K in the same folder.
@@ -245,20 +277,6 @@ pub async fn list_items(
         .map(|i| i.id)
         .collect();
     let counts = state.catalogue.child_counts(&folder_ids).await?;
-    // Containers carry no watch row of their own, so a grid filtering by
-    // "Watched"/"In progress" has nothing to filter a show on — the state
-    // lives on its episodes, which aren't in this response. One batched
-    // rollup query per page answers it for every container at once; the
-    // per-card version would be an N+1 over a recursive walk. Gated by kind
-    // exactly as `item_detail` gates its single rollup; leaves keep `watch`
-    // only, which already tells the whole truth about them.
-    let container_ids: Vec<i64> = page
-        .items
-        .iter()
-        .filter(|i| matches!(i.kind, ItemKind::Show | ItemKind::Season | ItemKind::Folder))
-        .map(|i| i.id)
-        .collect();
-    let rollups = state.store.watch_rollups(user.id, &container_ids).await?;
     let items = page
         .items
         .into_iter()
@@ -304,6 +322,7 @@ pub struct ItemDetail {
 pub async fn item_detail(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
+    read_after: ReadAfter,
     Path(id): Path<i64>,
 ) -> Result<Json<ItemDetail>, ApiError> {
     let item = state
@@ -466,20 +485,25 @@ pub async fn item_detail(
         file_dtos.push(dto);
     }
 
-    // Annotate the item and its children with watch state in one lookup.
-    let mut all = children.clone();
-    all.push(item.clone());
-    let watch = watch_lookup(&state, user.id, &all).await?;
-
-    // Containers have no watch row of their own, so the client would have no
-    // way to know a series is finished — its seasons carry nothing, and their
-    // episodes aren't in this response at all. One rollup query answers it.
-    let rollup = match item.kind {
-        ItemKind::Show | ItemKind::Season | ItemKind::Folder => {
-            Some(state.store.watch_rollup(user.id, id).await?)
-        }
-        _ => None,
+    // Annotate the item and its children with watch state. Containers have
+    // no watch row of their own, so the client would have no way to know a
+    // series is finished — its seasons carry nothing, and their episodes
+    // aren't in this response at all — so a container also gets its rollup,
+    // from the same read (K-04 M3).
+    let mut all_ids: Vec<i64> = children.iter().map(|child| child.id).collect();
+    all_ids.push(item.id);
+    let rollup_ids: Vec<i64> = if is_rollup_container(item.kind) {
+        vec![id]
+    } else {
+        Vec::new()
     };
+    let summary = state
+        .catalogue
+        .watch_summary(user.id, &all_ids, &rollup_ids, read_after.0)
+        .await?;
+    let watch: HashMap<i64, WatchState> = summary.watch.into_iter().collect();
+    let rollup = is_rollup_container(item.kind)
+        .then(|| summary.rollups.get(&id).copied().unwrap_or_default());
 
     let reading = if item.kind == ItemKind::Book {
         state
@@ -542,6 +566,7 @@ pub struct HomeLibraryPreview {
 pub async fn home_previews(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
+    read_after: ReadAfter,
 ) -> Result<Json<HomePreviews>, ApiError> {
     // Home has one card budget. Keeping it server-owned prevents a caller
     // from widening the replicated read while preserving a parameter surface
@@ -566,21 +591,20 @@ pub async fn home_previews(
         .collect();
     let container_ids: Vec<i64> = all_items
         .iter()
-        .filter(|item| {
-            matches!(
-                item.kind,
-                ItemKind::Show | ItemKind::Season | ItemKind::Folder
-            )
-        })
+        .filter(|item| is_rollup_container(item.kind))
         .map(|item| item.id)
         .collect();
-    let (watch, heights, counts, rollups) = tokio::try_join!(
-        state.store.watch_map(user.id, &item_ids),
+    // Watch state and rollups for every preview card are one read of the
+    // same state (K-04 M3): one consistent round trip, not two.
+    let (summary, heights, counts) = tokio::try_join!(
+        state
+            .catalogue
+            .watch_summary(user.id, &item_ids, &container_ids, read_after.0),
         state.catalogue.item_max_heights(&badged),
         state.catalogue.child_counts(&folder_ids),
-        state.store.watch_rollups(user.id, &container_ids),
     )?;
-    let watch: HashMap<i64, WatchState> = watch.into_iter().collect();
+    let watch: HashMap<i64, WatchState> = summary.watch.into_iter().collect();
+    let rollups = summary.rollups;
     let mut pages: HashMap<_, _> = pages
         .into_iter()
         .map(|page| (page.library_id, page))
@@ -621,16 +645,19 @@ pub async fn home_previews(
 pub async fn hubs(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
+    read_after: ReadAfter,
     Query(q): Query<HubsQuery>,
 ) -> Result<Json<Hubs>, ApiError> {
     // Recently-added is independent of playback progress, so it can overlap
     // the two progress-derived rails. Continue-watching and next-up both
-    // interpret the same progress state and retain their established ordering;
-    // the store does not expose a combined snapshot for those two queries.
+    // interpret the same progress state, so they are one read of it (K-04
+    // M3), each rail in its own established order.
     let progress_rows = async {
-        let in_progress = state.store.continue_watching(user.id, 20).await?;
-        let next = state.store.next_up(user.id, 20).await?;
-        Ok::<_, ApiError>((in_progress, next))
+        let rails = state
+            .catalogue
+            .progress_rails(user.id, 20, read_after.0)
+            .await?;
+        Ok::<_, ApiError>((rails.continue_watching, rails.next_up))
     };
     let recent_rows = async {
         state
@@ -653,13 +680,16 @@ pub async fn hubs(
         .filter(|i| i.kind == ItemKind::Folder)
         .map(|i| i.id)
         .collect();
-    let (watch, counts) = tokio::try_join!(watch_lookup(&state, user.id, &recent_items), async {
-        state
-            .catalogue
-            .child_counts(&folder_ids)
-            .await
-            .map_err(ApiError::from)
-    },)?;
+    let (watch, counts) = tokio::try_join!(
+        watch_lookup(&state, user.id, &recent_items, read_after),
+        async {
+            state
+                .catalogue
+                .child_counts(&folder_ids)
+                .await
+                .map_err(ApiError::from)
+        },
+    )?;
     let mut recently_added: Vec<ItemDto> = recent
         .into_iter()
         .map(|r| {
@@ -714,13 +744,14 @@ pub struct SearchResponse {
 pub async fn search(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
+    read_after: ReadAfter,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let query = q.q.unwrap_or_default();
     let limit = clamp_limit(q.limit);
     let hits = state.catalogue.search_items(&query, limit).await?;
     let items: Vec<Item> = hits.iter().map(|r| r.item.clone()).collect();
-    let watch = watch_lookup(&state, user.id, &items).await?;
+    let watch = watch_lookup(&state, user.id, &items, read_after).await?;
     let results = hits
         .into_iter()
         .map(|r| {
@@ -733,6 +764,80 @@ pub async fn search(
 
 #[cfg(test)]
 mod tests {
+    fn handler_body(start: &str, end: &str) -> String {
+        let source = include_str!("browse.rs");
+        let source = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(source);
+        source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("missing {start}"))
+            .1
+            .split_once(end)
+            .unwrap_or_else(|| panic!("missing {end}"))
+            .0
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    fn watch_reads(body: &str) -> Vec<&'static str> {
+        [
+            ".watch_summary(",
+            ".watch_map(",
+            ".watch_rollup(",
+            ".watch_rollups(",
+            ".progress_rails(",
+            ".continue_watching(",
+            ".next_up(",
+            "watch_lookup(",
+        ]
+        .into_iter()
+        .flat_map(|call| std::iter::repeat_n(call, body.matches(call).count()))
+        .collect()
+    }
+
+    /// K-04 M3: Home's library previews read watch state exactly once — one
+    /// `watch_summary` for every card's watch row and every container's
+    /// rollup. That call is one consistent statement on the replicated store
+    /// (`watch_summary_and_progress_rails_are_one_read_matching_the_separate_reads`
+    /// in the store contract counts it), so the page costs one Authority read
+    /// for watch state, down from two.
+    #[test]
+    fn home_previews_reads_watch_state_exactly_once() {
+        let body = handler_body("pub async fn home_previews", "pub async fn hubs");
+        assert_eq!(watch_reads(&body), [".watch_summary("]);
+        assert!(body.contains("state.catalogue.watch_summary("));
+    }
+
+    /// The same for the other browse pages that used to issue two watch
+    /// reads: the item page asks once for its children and its rollup, the
+    /// grid once for its cards and its containers, and Home's rails once for
+    /// both progress-derived rails (recently-added keeps its own lookup,
+    /// which depends on the catalogue rows it annotates).
+    #[test]
+    fn home_hubs_grid_and_item_pages_read_watch_state_once_per_dependency() {
+        assert_eq!(
+            watch_reads(&handler_body(
+                "pub async fn list_items",
+                "pub struct ItemDetail"
+            )),
+            [".watch_summary("]
+        );
+        assert_eq!(
+            watch_reads(&handler_body(
+                "pub async fn item_detail",
+                "pub async fn home_previews"
+            )),
+            [".watch_summary("]
+        );
+        assert_eq!(
+            watch_reads(&handler_body("pub async fn hubs", "pub struct SearchQuery")),
+            [".progress_rails(", "watch_lookup("]
+        );
+    }
+
     use super::index_refusal_summary;
     use plurx_core::segplan::{FragmentIndexOutcome, IndexRefusal, SourceIdentity};
 

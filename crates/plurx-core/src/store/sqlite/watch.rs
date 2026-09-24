@@ -6,7 +6,7 @@ use rusqlite::{params, OptionalExtension};
 use super::{item_cols, item_from_row, SqliteStore, ITEM_COL_COUNT};
 use crate::domain::{InProgressItem, RecentItem, WatchRollup, WatchState};
 use crate::error::StoreError;
-use crate::store::WatchStore;
+use crate::store::{ProgressRails, WatchStore, WatchSummary};
 
 /// Fraction of runtime past which an item is considered watched.
 const WATCHED_THRESHOLD: f64 = 0.95;
@@ -48,6 +48,86 @@ fn watch_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<Watc
     })
 }
 
+fn watch_map_on(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    item_ids: &[i64],
+) -> Result<Vec<(i64, WatchState)>, StoreError> {
+    if item_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // rarray would need a feature; a temp-free IN via json_each keeps
+    // the query parameter-count bounded regardless of list length.
+    let ids_json =
+        serde_json::to_string(item_ids).map_err(|e| StoreError::Database(e.to_string()))?;
+    let mut stmt = conn.prepare(
+        "SELECT w.item_id, w.position_ms, w.duration_ms, w.watched, w.updated_at
+         FROM watch_state w
+         JOIN json_each(?2) j ON j.value = w.item_id
+         WHERE w.user_id = ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![user_id, ids_json], |row| {
+            Ok((row.get::<_, i64>(0)?, watch_from_row(row, 1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn watch_rollups_on(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    ids: &[i64],
+) -> Result<std::collections::HashMap<i64, WatchRollup>, StoreError> {
+    if ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    // ids are our own row ids (trusted i64s), so an inline IN-list is
+    // safe — same reasoning `child_counts` runs on.
+    let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+    // One walk for the whole page: the recursion carries the root it
+    // started from alongside each descendant, so a single pass can
+    // group the leaf counts back onto the containers that asked.
+    // UNION (not UNION ALL) still dedupes, so a parent cycle
+    // terminates — and a (root, id) pair is unique per root, so two
+    // containers on the same page never contaminate each other's
+    // count.
+    let mut stmt = conn.prepare(&format!(
+        "WITH RECURSIVE tree(root, id) AS (
+                 SELECT id, id FROM items WHERE id IN ({list})
+                 UNION
+                 SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id
+             )
+             SELECT t.root, COUNT(*), COALESCE(SUM(w.watched), 0)
+             FROM tree t
+             JOIN items i ON i.id = t.id
+             LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
+             WHERE i.kind IN ({PLAYABLE_KINDS})
+             GROUP BY t.root"
+    ))?;
+    let rows = stmt
+        .query_map(params![user_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                WatchRollup {
+                    leaves: row.get(1)?,
+                    watched: row.get(2)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // A container with nothing playable under it produces no group,
+    // and the single-item version answers 0/0 for exactly that case.
+    // Seed the map so both agree.
+    let mut out: std::collections::HashMap<i64, WatchRollup> = ids
+        .iter()
+        .copied()
+        .map(|id| (id, WatchRollup::default()))
+        .collect();
+    out.extend(rows);
+    Ok(out)
+}
+
 #[async_trait]
 impl WatchStore for SqliteStore {
     async fn watch_state(
@@ -77,23 +157,59 @@ impl WatchStore for SqliteStore {
             return Ok(Vec::new());
         }
         let item_ids = item_ids.to_vec();
+        self.with_conn(move |conn| watch_map_on(conn, user_id, &item_ids))
+            .await
+    }
+
+    async fn watch_summary(
+        &self,
+        user_id: i64,
+        item_ids: &[i64],
+        container_ids: &[i64],
+    ) -> Result<WatchSummary, StoreError> {
+        let item_ids = item_ids.to_vec();
+        let container_ids = container_ids.to_vec();
+        // One closure on the one connection: nothing can write between the
+        // two statements, so both halves describe the same watch state.
         self.with_conn(move |conn| {
-            // rarray would need a feature; a temp-free IN via json_each keeps
-            // the query parameter-count bounded regardless of list length.
-            let ids_json = serde_json::to_string(&item_ids)
-                .map_err(|e| StoreError::Database(e.to_string()))?;
-            let mut stmt = conn.prepare(
-                "SELECT w.item_id, w.position_ms, w.duration_ms, w.watched, w.updated_at
-                 FROM watch_state w
-                 JOIN json_each(?2) j ON j.value = w.item_id
-                 WHERE w.user_id = ?1",
-            )?;
-            let rows = stmt
-                .query_map(params![user_id, ids_json], |row| {
-                    Ok((row.get::<_, i64>(0)?, watch_from_row(row, 1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
+            Ok(WatchSummary {
+                watch: watch_map_on(conn, user_id, &item_ids)?,
+                rollups: watch_rollups_on(conn, user_id, &container_ids)?,
+            })
+        })
+        .await
+    }
+
+    async fn progress_rails(&self, user_id: i64, limit: i64) -> Result<ProgressRails, StoreError> {
+        self.with_conn(move |conn| {
+            let sql =
+                super::super::sql_source::progress_rails(&item_cols("i"), &item_cols("e")).sqlite();
+            let mut stmt = conn.prepare(&sql)?;
+            let mut rails = ProgressRails::default();
+            let mut rows = stmt.query(params![user_id, limit])?;
+            // Columns: rail, rail_key_int, rail_key_text, items…, show title,
+            // season poster, four watch columns, ord.
+            const ITEM_BASE: usize = 3;
+            while let Some(row) = rows.next()? {
+                let item = item_from_row(row, ITEM_BASE)?;
+                let show_title = row.get(ITEM_BASE + ITEM_COL_COUNT)?;
+                let season_poster = row.get(ITEM_BASE + ITEM_COL_COUNT + 1)?;
+                if row.get::<_, i64>(0)? == 0 {
+                    rails.continue_watching.push(InProgressItem {
+                        item,
+                        show_title,
+                        state: watch_from_row(row, ITEM_BASE + ITEM_COL_COUNT + 2)?,
+                        season_poster,
+                    });
+                } else {
+                    rails.next_up.push(RecentItem {
+                        item,
+                        show_title,
+                        season_poster,
+                    });
+                }
+            }
+            Ok(rails)
         })
         .await
     }
@@ -390,56 +506,9 @@ impl WatchStore for SqliteStore {
         user_id: i64,
         ids: &[i64],
     ) -> Result<std::collections::HashMap<i64, WatchRollup>, StoreError> {
-        if ids.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-        // ids are our own row ids (trusted i64s), so an inline IN-list is
-        // safe — same reasoning `child_counts` runs on.
-        let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
         let ids = ids.to_vec();
-        self.with_conn(move |conn| {
-            // One walk for the whole page: the recursion carries the root it
-            // started from alongside each descendant, so a single pass can
-            // group the leaf counts back onto the containers that asked.
-            // UNION (not UNION ALL) still dedupes, so a parent cycle
-            // terminates — and a (root, id) pair is unique per root, so two
-            // containers on the same page never contaminate each other's
-            // count.
-            let mut stmt = conn.prepare(&format!(
-                "WITH RECURSIVE tree(root, id) AS (
-                     SELECT id, id FROM items WHERE id IN ({list})
-                     UNION
-                     SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id
-                 )
-                 SELECT t.root, COUNT(*), COALESCE(SUM(w.watched), 0)
-                 FROM tree t
-                 JOIN items i ON i.id = t.id
-                 LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
-                 WHERE i.kind IN ({PLAYABLE_KINDS})
-                 GROUP BY t.root"
-            ))?;
-            let rows = stmt
-                .query_map(params![user_id], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        WatchRollup {
-                            leaves: row.get(1)?,
-                            watched: row.get(2)?,
-                        },
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            // A container with nothing playable under it produces no group,
-            // and the single-item version answers 0/0 for exactly that case.
-            // Seed the map so both agree.
-            let mut out: std::collections::HashMap<i64, WatchRollup> = ids
-                .into_iter()
-                .map(|id| (id, WatchRollup::default()))
-                .collect();
-            out.extend(rows);
-            Ok(out)
-        })
-        .await
+        self.with_conn(move |conn| watch_rollups_on(conn, user_id, &ids))
+            .await
     }
 
     async fn continue_watching(

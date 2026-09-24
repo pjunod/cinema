@@ -12,10 +12,11 @@ use super::{
     directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
     item_sort_order_by, normalized_directory, ArtworkInventoryItem, ArtworkRepairFence,
     IdentityRepairBlocker, IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot,
-    IdentityRepairWatch, MediaStore, MissingFieldOrder, MissingVideoCodecTag, ReconcileOutcome,
-    RootFingerprintStatus, SeriesHintOutcome, WatchStore, IDENTITY_REPAIR_EPISODES_MAX,
-    IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX,
-    IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
+    IdentityRepairWatch, MediaStore, MissingFieldOrder, MissingVideoCodecTag, ProgressRails,
+    ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, WatchStore, WatchSummary,
+    IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX,
+    IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX,
+    TOP_LEVEL_ITEM_PREDICATE,
 };
 use crate::domain::DolbyVisionFacts;
 use crate::domain::{
@@ -3785,23 +3786,8 @@ impl WatchStore for HiqliteAuthStore {
         user_id: i64,
         item_ids: &[i64],
     ) -> Result<Vec<(i64, WatchState)>, StoreError> {
-        if item_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let ids_json = serde_json::to_string(item_ids).map_err(database_error)?;
-        Ok(self
-            .client()
-            .query_consistent_map::<WatchMapRow, _>(
-                "SELECT w.item_id, w.position_ms, w.duration_ms, w.watched, w.updated_at \
-                 FROM watch_state w JOIN json_each($1) j ON j.value = w.item_id \
-                 WHERE w.user_id = $2",
-                params!(ids_json, user_id),
-            )
+        self.read_watch_map(WatchRead::Authority, user_id, item_ids)
             .await
-            .map_err(database_error)?
-            .into_iter()
-            .map(|row| (row.item_id, row.state.into()))
-            .collect())
     }
 
     async fn put_progress_at(
@@ -3842,8 +3828,8 @@ impl WatchStore for HiqliteAuthStore {
                    RETURNING position_ms, duration_ms, watched, updated_at";
         validate_sql(sql)?;
         let returned = self
-            .client()
-            .execute_returning_map::<_, WatchRow>(
+            .watch_write_returning::<WatchRow>(
+                user_id,
                 sql,
                 params!(
                     item_id,
@@ -3854,11 +3840,7 @@ impl WatchStore for HiqliteAuthStore {
                     recorded_at.is_none()
                 ),
             )
-            .await
-            .map_err(database_error)?
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
+            .await?;
         if let Some(row) = returned.into_iter().next() {
             return Ok(row.into());
         }
@@ -3902,8 +3884,8 @@ impl WatchStore for HiqliteAuthStore {
                    RETURNING position_ms, duration_ms, watched, updated_at";
         validate_sql(sql)?;
         let rows = self
-            .client()
-            .execute_returning_map::<_, WatchRow>(
+            .watch_write_returning::<WatchRow>(
+                user_id,
                 sql,
                 params!(
                     item_id,
@@ -3917,11 +3899,7 @@ impl WatchStore for HiqliteAuthStore {
                     expected.updated_at
                 ),
             )
-            .await
-            .map_err(database_error)?
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
+            .await?;
         Ok(rows.into_iter().next().map(Into::into))
     }
 
@@ -3933,7 +3911,8 @@ impl WatchStore for HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         let now = self.now()?;
         if watched {
-            self.execute(
+            self.watch_write(
+                user_id,
                 "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
                  VALUES ($1, $2, 0, 1, $3) \
                  ON CONFLICT(user_id, item_id) DO UPDATE SET watched = 1, updated_at = $3",
@@ -3941,7 +3920,8 @@ impl WatchStore for HiqliteAuthStore {
             )
             .await?;
         } else {
-            self.execute(
+            self.watch_write(
+                user_id,
                 "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
                  VALUES ($1, $2, 0, 0, $3) \
                  ON CONFLICT(user_id, item_id) DO UPDATE SET \
@@ -3989,13 +3969,8 @@ impl WatchStore for HiqliteAuthStore {
         };
         validate_sql(&sql)?;
         let mut changed = self
-            .client()
-            .execute_returning_map::<_, IdRow>(sql, params!(item_id, user_id, now))
-            .await
-            .map_err(database_error)?
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?
+            .watch_write_returning::<IdRow>(user_id, sql, params!(item_id, user_id, now))
+            .await?
             .into_iter()
             .map(|row| row.id)
             .collect::<Vec<_>>();
@@ -4004,9 +3979,303 @@ impl WatchStore for HiqliteAuthStore {
     }
 
     async fn watch_rollup(&self, user_id: i64, item_id: i64) -> Result<WatchRollup, StoreError> {
-        let rows = self
+        self.read_watch_rollup(WatchRead::Authority, user_id, item_id)
+            .await
+    }
+
+    async fn watch_rollups(
+        &self,
+        user_id: i64,
+        ids: &[i64],
+    ) -> Result<HashMap<i64, WatchRollup>, StoreError> {
+        self.read_watch_rollups(WatchRead::Authority, user_id, ids)
+            .await
+    }
+
+    async fn continue_watching(
+        &self,
+        user_id: i64,
+        limit: i64,
+    ) -> Result<Vec<InProgressItem>, StoreError> {
+        self.read_continue_watching(WatchRead::Authority, user_id, limit)
+            .await
+    }
+
+    async fn next_up(&self, user_id: i64, limit: i64) -> Result<Vec<RecentItem>, StoreError> {
+        self.read_next_up(WatchRead::Authority, user_id, limit)
+            .await
+    }
+
+    async fn watch_summary(
+        &self,
+        user_id: i64,
+        item_ids: &[i64],
+        container_ids: &[i64],
+    ) -> Result<WatchSummary, StoreError> {
+        self.read_watch_summary(WatchRead::Authority, user_id, item_ids, container_ids)
+            .await
+    }
+
+    async fn progress_rails(&self, user_id: i64, limit: i64) -> Result<ProgressRails, StoreError> {
+        self.read_progress_rails(WatchRead::Authority, user_id, limit)
+            .await
+    }
+
+    async fn apply_remote_watch(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        watched: bool,
+        position_ms: i64,
+        duration_ms: Option<i64>,
+        updated_at: i64,
+    ) -> Result<(), StoreError> {
+        let at = updated_at.clamp(0, self.now()?);
+        self.watch_write(
+            user_id,
+            "INSERT INTO watch_state \
+                 (user_id, item_id, position_ms, duration_ms, watched, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT(user_id, item_id) DO UPDATE SET \
+                 position_ms = excluded.position_ms, \
+                 duration_ms = COALESCE(excluded.duration_ms, watch_state.duration_ms), \
+                 watched = excluded.watched, updated_at = excluded.updated_at",
+            params!(user_id, item_id, position_ms, duration_ms, watched, at),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// Which read path a watch-state query takes. Authority is the Store
+/// contract; `Local` is only ever chosen by `CatalogueReader` behind the
+/// bounded permit and the read-your-write fence (K-04 M2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WatchRead {
+    Authority,
+    Local,
+}
+
+impl HiqliteAuthStore {
+    async fn watch_query<T>(
+        &self,
+        read: WatchRead,
+        sql: impl Into<std::borrow::Cow<'static, str>>,
+        params: hiqlite::Params,
+    ) -> Result<Vec<T>, StoreError>
+    where
+        T: for<'a, 'r> From<&'a mut Row<'r>> + Send + 'static,
+    {
+        match read {
+            WatchRead::Authority => self.client().query_consistent_map(sql, params).await,
+            WatchRead::Local => self.client().query_map(sql, params).await,
+        }
+        .map_err(database_error)
+    }
+
+    /// One watch mutation, fenced: its acknowledged log index raises this
+    /// user's read-your-write fence. A failed or timed-out write may still
+    /// commit, so it marks the user unprovable rather than recording nothing.
+    async fn watch_write(
+        &self,
+        user_id: i64,
+        sql: &'static str,
+        params: hiqlite::Params,
+    ) -> Result<usize, StoreError> {
+        match self.client().execute_acked(sql, params).await {
+            Ok(ack) => {
+                self.record_watch_write(user_id, ack.log_index);
+                Ok(ack.result)
+            }
+            Err(error) => {
+                self.record_watch_write(user_id, None);
+                Err(error)
+            }
+        }
+    }
+
+    /// [`Self::watch_write`] for a statement with a `RETURNING` clause.
+    async fn watch_write_returning<T>(
+        &self,
+        user_id: i64,
+        sql: impl Into<std::borrow::Cow<'static, str>>,
+        params: hiqlite::Params,
+    ) -> Result<Vec<T>, StoreError>
+    where
+        T: for<'a, 'r> From<&'a mut Row<'r>> + Send + 'static,
+    {
+        match self
             .client()
-            .query_consistent_map::<RollupRow, _>(
+            .execute_returning_map_acked::<_, T>(sql, params)
+            .await
+        {
+            Ok(ack) => {
+                self.record_watch_write(user_id, ack.log_index);
+                ack.result
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(database_error)
+            }
+            Err(error) => {
+                self.record_watch_write(user_id, None);
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) async fn local_watch_map(
+        &self,
+        user_id: i64,
+        item_ids: &[i64],
+    ) -> Result<Vec<(i64, WatchState)>, StoreError> {
+        self.read_watch_map(WatchRead::Local, user_id, item_ids)
+            .await
+    }
+
+    pub(super) async fn local_watch_rollup(
+        &self,
+        user_id: i64,
+        item_id: i64,
+    ) -> Result<WatchRollup, StoreError> {
+        self.read_watch_rollup(WatchRead::Local, user_id, item_id)
+            .await
+    }
+
+    pub(super) async fn local_watch_summary(
+        &self,
+        user_id: i64,
+        item_ids: &[i64],
+        container_ids: &[i64],
+    ) -> Result<WatchSummary, StoreError> {
+        self.read_watch_summary(WatchRead::Local, user_id, item_ids, container_ids)
+            .await
+    }
+
+    pub(super) async fn local_progress_rails(
+        &self,
+        user_id: i64,
+        limit: i64,
+    ) -> Result<ProgressRails, StoreError> {
+        self.read_progress_rails(WatchRead::Local, user_id, limit)
+            .await
+    }
+
+    async fn read_watch_map(
+        &self,
+        read: WatchRead,
+        user_id: i64,
+        item_ids: &[i64],
+    ) -> Result<Vec<(i64, WatchState)>, StoreError> {
+        if item_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids_json = serde_json::to_string(item_ids).map_err(database_error)?;
+        Ok(self
+            .watch_query::<WatchMapRow>(
+                read,
+                "SELECT w.item_id, w.position_ms, w.duration_ms, w.watched, w.updated_at \
+                 FROM watch_state w JOIN json_each($1) j ON j.value = w.item_id \
+                 WHERE w.user_id = $2",
+                params!(ids_json, user_id),
+            )
+            .await?
+            .into_iter()
+            .map(|row| (row.item_id, row.state.into()))
+            .collect())
+    }
+
+    /// Both halves of `watch_summary` in one statement: `part` 0 rows are
+    /// `watch_map`'s, `part` 1 rows are `watch_rollups`' (root in `item_id`,
+    /// leaf count in `leaves`, watched leaves in `watched`).
+    async fn read_watch_summary(
+        &self,
+        read: WatchRead,
+        user_id: i64,
+        item_ids: &[i64],
+        container_ids: &[i64],
+    ) -> Result<WatchSummary, StoreError> {
+        let mut summary = WatchSummary {
+            watch: Vec::new(),
+            rollups: container_ids
+                .iter()
+                .copied()
+                .map(|id| (id, WatchRollup::default()))
+                .collect(),
+        };
+        if item_ids.is_empty() && container_ids.is_empty() {
+            return Ok(summary);
+        }
+        let rows = self
+            .watch_query::<WatchSummaryRow>(
+                read,
+                format!(
+                    "WITH RECURSIVE tree(root, id) AS ( \
+                         SELECT id, id FROM items \
+                         WHERE id IN (SELECT value FROM json_each($1)) \
+                         UNION SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id \
+                     ) \
+                     SELECT 0 AS part, w.item_id AS item_id, w.position_ms AS position_ms, \
+                            w.duration_ms AS duration_ms, w.watched AS watched, \
+                            w.updated_at AS updated_at, NULL AS leaves \
+                     FROM watch_state w JOIN json_each($2) j ON j.value = w.item_id \
+                     WHERE w.user_id = $3 \
+                     UNION ALL \
+                     SELECT 1, t.root, NULL, NULL, COALESCE(SUM(w.watched), 0), NULL, COUNT(*) \
+                     FROM tree t JOIN items i ON i.id = t.id \
+                     LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = $3 \
+                     WHERE i.kind IN ({PLAYABLE_KINDS}) GROUP BY t.root"
+                ),
+                params!(ids_json(container_ids)?, ids_json(item_ids)?, user_id),
+            )
+            .await?;
+        for row in rows {
+            match row {
+                WatchSummaryRow::Watch(row) => summary.watch.push((row.item_id, row.state.into())),
+                WatchSummaryRow::Rollup(row) => {
+                    summary.rollups.insert(
+                        row.root,
+                        WatchRollup {
+                            leaves: row.leaves,
+                            watched: row.watched,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(summary)
+    }
+
+    async fn read_progress_rails(
+        &self,
+        read: WatchRead,
+        user_id: i64,
+        limit: i64,
+    ) -> Result<ProgressRails, StoreError> {
+        let sql = super::sql_source::progress_rails(&item_cols("i"), &item_cols("e")).hiqlite();
+        let rows = self
+            .watch_query::<ProgressRailRow>(read, sql, params!(user_id, limit))
+            .await?;
+        let mut rails = ProgressRails::default();
+        for row in rows {
+            match row {
+                ProgressRailRow::ContinueWatching(row) => {
+                    rails.continue_watching.push(row.try_into()?);
+                }
+                ProgressRailRow::NextUp(row) => rails.next_up.push(row.try_into()?),
+            }
+        }
+        Ok(rails)
+    }
+
+    async fn read_watch_rollup(
+        &self,
+        read: WatchRead,
+        user_id: i64,
+        item_id: i64,
+    ) -> Result<WatchRollup, StoreError> {
+        let rows = self
+            .watch_query::<RollupRow>(
+                read,
                 format!(
                     "WITH RECURSIVE tree(id) AS ( \
                          SELECT id FROM items WHERE id = $1 \
@@ -4020,8 +4289,7 @@ impl WatchStore for HiqliteAuthStore {
                 ),
                 params!(item_id, user_id),
             )
-            .await
-            .map_err(database_error)?;
+            .await?;
         let row = rows
             .into_iter()
             .next()
@@ -4032,8 +4300,9 @@ impl WatchStore for HiqliteAuthStore {
         })
     }
 
-    async fn watch_rollups(
+    async fn read_watch_rollups(
         &self,
+        read: WatchRead,
         user_id: i64,
         ids: &[i64],
     ) -> Result<HashMap<i64, WatchRollup>, StoreError> {
@@ -4042,8 +4311,8 @@ impl WatchStore for HiqliteAuthStore {
         }
         let ids_json = ids_json(ids)?;
         let rows = self
-            .client()
-            .query_consistent_map::<RollupRow, _>(
+            .watch_query::<RollupRow>(
+                read,
                 format!(
                     "WITH RECURSIVE tree(root, id) AS ( \
                          SELECT id, id FROM items \
@@ -4058,8 +4327,7 @@ impl WatchStore for HiqliteAuthStore {
                 ),
                 params!(ids_json, user_id),
             )
-            .await
-            .map_err(database_error)?;
+            .await?;
         let mut rollups: HashMap<_, _> = ids
             .iter()
             .copied()
@@ -4077,8 +4345,9 @@ impl WatchStore for HiqliteAuthStore {
         Ok(rollups)
     }
 
-    async fn continue_watching(
+    async fn read_continue_watching(
         &self,
+        read: WatchRead,
         user_id: i64,
         limit: i64,
     ) -> Result<Vec<InProgressItem>, StoreError> {
@@ -4096,47 +4365,62 @@ impl WatchStore for HiqliteAuthStore {
              ORDER BY w.updated_at DESC LIMIT $2",
             i = item_cols("i")
         );
-        self.client()
-            .query_consistent_map::<InProgressRow, _>(sql, params!(user_id, limit))
-            .await
-            .map_err(database_error)?
+        self.watch_query::<InProgressRow>(read, sql, params!(user_id, limit))
+            .await?
             .into_iter()
             .map(TryInto::try_into)
             .collect()
     }
 
-    async fn next_up(&self, user_id: i64, limit: i64) -> Result<Vec<RecentItem>, StoreError> {
+    async fn read_next_up(
+        &self,
+        read: WatchRead,
+        user_id: i64,
+        limit: i64,
+    ) -> Result<Vec<RecentItem>, StoreError> {
         let sql = super::sql_source::next_up(&item_cols("e")).hiqlite();
         recent_items(
-            self.client()
-                .query_consistent_map::<RecentItemRow, _>(sql, params!(user_id, limit))
-                .await
-                .map_err(database_error)?,
+            self.watch_query::<RecentItemRow>(read, sql, params!(user_id, limit))
+                .await?,
         )
     }
+}
 
-    async fn apply_remote_watch(
-        &self,
-        user_id: i64,
-        item_id: i64,
-        watched: bool,
-        position_ms: i64,
-        duration_ms: Option<i64>,
-        updated_at: i64,
-    ) -> Result<(), StoreError> {
-        let at = updated_at.clamp(0, self.now()?);
-        self.execute(
-            "INSERT INTO watch_state \
-                 (user_id, item_id, position_ms, duration_ms, watched, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6) \
-             ON CONFLICT(user_id, item_id) DO UPDATE SET \
-                 position_ms = excluded.position_ms, \
-                 duration_ms = COALESCE(excluded.duration_ms, watch_state.duration_ms), \
-                 watched = excluded.watched, updated_at = excluded.updated_at",
-            params!(user_id, item_id, position_ms, duration_ms, watched, at),
-        )
-        .await?;
-        Ok(())
+/// One row of `read_watch_summary`'s two-part statement.
+enum WatchSummaryRow {
+    Watch(WatchMapRow),
+    Rollup(RollupRow),
+}
+
+impl From<&mut Row<'_>> for WatchSummaryRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let part: i64 = row.get("part");
+        if part == 0 {
+            Self::Watch(WatchMapRow::from(&mut *row))
+        } else {
+            Self::Rollup(RollupRow {
+                root: row.get("item_id"),
+                leaves: row.get("leaves"),
+                watched: row.get("watched"),
+            })
+        }
+    }
+}
+
+/// One row of `sql_source::progress_rails`.
+enum ProgressRailRow {
+    ContinueWatching(InProgressRow),
+    NextUp(RecentItemRow),
+}
+
+impl From<&mut Row<'_>> for ProgressRailRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let rail: i64 = row.get("rail");
+        if rail == 0 {
+            Self::ContinueWatching(InProgressRow::from(&mut *row))
+        } else {
+            Self::NextUp(RecentItemRow::from(&mut *row))
+        }
     }
 }
 
