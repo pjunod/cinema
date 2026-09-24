@@ -286,6 +286,7 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}
       <div class="setsection" id="enable-subtitle-sources"><h2>Stored subtitle tracks</h2><p>Keep each PGS track while the file is indexed, and read it instead of the whole source.</p></div>${subtitleStoredSourcesCard(settings,readiness)}
+      <div class="setsection" id="enable-chapter-thumbnails"><h2>Chapter thumbnails</h2><p>A frame per chapter for the watch view's chapter rail, made the first time a page asks for it.</p></div>${chapterThumbnailsCard(settings,readiness)}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}`;
 }
 // Automatic decode recovery.
@@ -349,6 +350,30 @@ function subtitleStoredSourcesCard(s,readiness){
       </div></details>
       <div class="err" id="subsrcerr" role="alert"></div>
       ${setCardFoot("saveSubtitleStoredSources")}`,{id:"subsrccard"});
+}
+// Chapter thumbnails.
+//
+// One ffmpeg seek per chapter, on request, kept under the runtime cache.
+// There is no background producer: nothing runs unless a watch page asks
+// for that chapter, and the rows below say how much has run. The switch is
+// the enable path; off answers the route 404 and the rail shows numbered
+// tiles instead of pictures.
+function chapterThumbnailsCard(s,readiness){
+  const enabled=s.chapter_thumbnails!==false;
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Make chapter thumbnails","Extract one small frame per chapter the first time the watch view asks for it, and keep it on this node.",state)}
+      ${togRow("chthumb",`Make chapter thumbnails on request`,`Applies to the next thumbnail a watch page asks for. This checkbox is authoritative: nothing below turns it on or off.`,enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> Off runs no ffmpeg for thumbnails and the chapter rail shows numbered tiles; what is already cached stays on disk and is served again when the switch comes back.</div>
+      <details class="setdetails" open><summary>What it needs</summary><div class="setdetails-body">
+      ${devReq(readiness,"chapter_thumbnails","chapter_thumbs_ffmpeg","ffmpeg can decode a frame","The configured ffmpeg answered -version at startup. Every thumbnail is one seek into the source and one decoded frame scaled to 320 px, CPU only.")}
+      ${devReq(readiness,"chapter_thumbnails","chapter_thumbs_cache_space","The runtime cache has room","Thumbnails are tens of kilobytes each and live under the runtime cache beside the other node-local stores; a full cache fails every write.")}
+      ${devReq(readiness,"chapter_thumbnails","chapter_thumbs_work","What this process has extracted","Made, served from cache, failed and running now since this process started, and what the cache holds on disk. At most two extractions run at once, each bounded to 15 seconds.")}
+      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice.</p>
+      </div></details>
+      <div class="err" id="chthumberr" role="alert"></div>
+      ${setCardFoot("saveChapterThumbnails")}`,{id:"chthumbcard"});
 }
 function decodeRecoveryCard(s){
   const q=s.decoder_health_qualification||{};

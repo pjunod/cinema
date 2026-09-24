@@ -339,6 +339,7 @@ pub(crate) fn local_filesystem(_path: &Path) -> Result<String, String> {
 /// with the index blob a pass is about to publish, so near full the ride
 /// must give way before it can turn a pass the index would have finished into
 /// an `ENOSPC` on every retry.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn free_space_margin(total_bytes: u64) -> u64 {
     (1_u64 << 30).max(total_bytes / 50)
 }
@@ -381,6 +382,7 @@ pub(crate) fn free_space(_path: &Path) -> Result<String, String> {
     Err("the free-space check is implemented for Linux only".to_owned())
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn free_space_verdict(available: u64, total: u64) -> Result<String, String> {
     let margin = free_space_margin(total);
     let gib = |bytes: u64| bytes as f64 / f64::from(1_u32 << 30);

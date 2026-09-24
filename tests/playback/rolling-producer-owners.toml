@@ -1953,7 +1953,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # reads, one counter increment, then it returns. At most eight run at once (an
 # atomic in-flight count); past that the miss is counted `absent` inline. No
 # timer, no process, no producer, and no request waits on it.
-expected_occurrences = 573
+# +1 for `http/developer.rs`'s chapter-thumbnail readiness card: one
+# `tokio::task::spawn_blocking` that walks the small thumbnail cache and
+# takes a statvfs, awaited to completion inside the request. It owns no
+# producer, no process and no timer; it exists so two synchronous filesystem
+# reads do not run on the async runtime.
+expected_occurrences = 574
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2605,7 +2610,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # test's own calls to `work_cluster_fragment_index_queue` while the queued
 # request resolves, is claimed and builds (at most 40 rounds). It owns no
 # producer and outlives nothing: the test awaits each round.
-expected_occurrences = 875
+# +2 for `http/chapter_thumbs.rs`: `tokio::time::timeout` bounding the wait
+# for one of the two extraction permits (10 s), and `tokio::time::timeout`
+# bounding the one-frame ffmpeg child (15 s). Both are request-scoped waits
+# that end with the request; neither selects a recipe, publishes anything
+# or starts a rolling producer.
+expected_occurrences = 877
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2781,7 +2791,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # `subtitle_ride_along::testing::run_ffmpeg_to_completion`, a
 # `std::process::Command` run to completion through `testfixtures::run`
 # before its test proceeds.
-expected_occurrences = 151
+# +1 for `http/chapter_thumbs.rs`: the one-frame chapter thumbnail child,
+# built by `extract_command` and spawned through
+# `BoundedDiagnosticChild::spawn_piped_output`, so it inherits
+# `kill_on_drop`, an output cap (2 MiB) and a 15 s timeout. It runs only for
+# the chapter a watch page asked for, two at a time behind a semaphore, and
+# nothing owns it beyond the request's await.
+expected_occurrences = 152
 
 [[module_structures]]
 id = "process-capable-launch-method"
