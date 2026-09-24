@@ -630,7 +630,10 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   const initialAudio=presentPlayerChrome(attempt,decided,prepared,openIsAttached);
   const initialRoute=choosePlayRoute(attempt,decided,prepared,initialAudio);
   if(initialRoute==null) return;
-  if(!await attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,initialAudio,initialRoute)) return;
+  const attached=attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,initialAudio,initialRoute);
+  // Direct and progressive routes finish in this turn, as they did before
+  // extraction; only session and copy-HLS routes wait for a server response.
+  if(attached!==true && !await attached) return;
   finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached);
 }
 function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent){
@@ -1026,12 +1029,12 @@ function choosePlayRoute(attempt,decided,prepared,initialAudio){
   prepared.nativeHls=nativeHls;
   return initialRoute;
 }
-async function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,initialAudio,initialRoute){
+function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,initialAudio,initialRoute){
   const {decision}=decided;
   const {fileId,video,openAttempt,preparation,failPreparation}=attempt;
   const {startSec,retireOutgoing}=prepared;
   const nativeHls=prepared.nativeHls;
-  if(initialRoute==='transcode_hls'){
+  if(initialRoute==='transcode_hls') return (async()=>{
     // Transcode: start an HLS session (server re-encodes + tone-maps).
     // Read from PLAYER, not the decision: they hold the same array on the
     // ordinary path, and on the forced-burn path above PLAYER is the one that
@@ -1057,7 +1060,9 @@ async function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttac
       detail:(PLAYER.encoder?("encoder: "+PLAYER.encoder+" — "):"")+
         (PLAYER.vod?"already transcoded — playing from the cache":"buffering the first segments")});
     armStall(from);
-  } else if(initialRoute==='copy_hls'){
+    return true;
+  })();
+  if(initialRoute==='copy_hls') return (async()=>{
     // Two different reasons to land here, same destination.
     //
     // Safari can't play a progressive fragmented-MP4 remux at all, but it plays
@@ -1079,7 +1084,9 @@ async function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttac
       if(openIsAttached())failPreparation(e,attempt);
       return false;
     }
-  } else {
+    return true;
+  })();
+  {
     // Direct play, or remux for a browser that plays progressive fMP4 (Chrome).
     // A raw direct-play file gives the browser control of its mux defaults, not
     // the server's language choice. If the preferred track is not stream zero,
