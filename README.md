@@ -1,7 +1,11 @@
 # noirr cinema
 
-Ready pull requests run the [Main promotion gate](docs/DEVELOPMENT_PIPELINE.md).
-See [validation](docs/VALIDATION.md) for the checks it covers.
+[![PR gate](../badges-pr-ci/ci.svg)](docs/DEVELOPMENT_PIPELINE.md)
+[![PR lint](../badges-pr-lint/lint.svg)](docs/VALIDATION.md)
+[![unit coverage](../badges/coverage.svg)](docs/VALIDATION.md)
+
+The PR badges show the latest passing ready-PR gate and Rust lint result.
+Coverage is the last manual full-CI measurement on `main`.
 
 A self-hosted media server for movies, TV, anime, ebooks, audiobooks, home
 videos, and photos. Cinema combines a Rust server, a browser player and admin

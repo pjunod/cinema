@@ -225,9 +225,11 @@ For executable changes, the portable Rust and focused Linux contracts remain
 one baseline job. Browser layout, Android JVM, Apple simulator, Android device,
 release-build, and container checks run as parallel jobs only when the diff can
 affect their contracts. Ready pull requests run the unit suite in the fast Rust
-lane. Coverage runs only when the full CI sweep is manually dispatched on
-`main`; its historical badge is not a current merge verdict and is no longer
-shown in the README. [CI_TEST_OVERHAUL_PLAN.md](ci/CI_TEST_OVERHAUL_PLAN.md)
+lane. After the current-head and base gate passes, it publishes the PR gate
+badge; the PR lint badge updates when that PR also ran the Rust lane. Coverage
+runs only when the full CI sweep is manually dispatched on `main`, so its badge
+reports the last measurement rather than the current PR verdict.
+[CI_TEST_OVERHAUL_PLAN.md](ci/CI_TEST_OVERHAUL_PLAN.md)
 records the measured failure history and the remaining suite-splitting,
 invalidation, rebase-evidence, and telemetry milestones.
 
