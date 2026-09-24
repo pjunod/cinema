@@ -1592,6 +1592,13 @@ async fn boot(
         .get_or_init_setting(keys::SERVER_NAME, &config.server.name)
         .await
         .context("initializing replicated server name")?;
+    // "Sign-ins expire" defaults to on; this is the moment it takes effect on
+    // an upgraded server, and no device's idle window starts before it.
+    let expiry_since =
+        http::users::start_token_expiry_clock(store.as_ref(), http::users::unix_now())
+            .await
+            .context("starting the sign-in expiry clock")?;
+    tracing::debug!(expiry_since, "sign-in expiry clock");
     log_startup(&config, &identity);
 
     let instance_id = identity.cluster_id;
@@ -5864,13 +5871,58 @@ mod startup_tests {
 
     /// The whole boot below the ffmpeg probes: an empty data dir becomes a
     /// server that answers, and a shutdown drains it back out again.
+    ///
+    /// Boot is also the only thing that turns "Sign-ins expire" on for an
+    /// upgraded server: without `auth.token_expiry_since` no token can expire,
+    /// so the first boot must start that clock, and a later boot on the same
+    /// data dir must keep the first start rather than restart it.
     #[tokio::test]
     async fn a_measured_node_boots_serves_and_drains() {
         let tmp = crate::test_tempdir().expect("tempdir");
         let config = config_in(tmp.path());
-        let handle = plurx_core::cluster::open_store(&config)
+
+        let before = http::users::unix_now();
+        let first = boot_serve_and_drain(&config, tmp.path()).await;
+        let started = first
+            .get_setting(keys::AUTH_TOKEN_EXPIRY_SINCE)
+            .await
+            .expect("read")
+            .expect("boot must start the sign-in expiry clock, or nothing ever expires");
+        let started: i64 = started.parse().expect("a unix time");
+        assert!(
+            (before..=http::users::unix_now()).contains(&started),
+            "the clock starts at this boot, not {started}"
+        );
+
+        // A server that first started long ago: a restart must not move the
+        // clock forward, or every restart would postpone every expiry.
+        first
+            .put_setting(keys::AUTH_TOKEN_EXPIRY_SINCE, "1000")
+            .await
+            .expect("an earlier first start");
+        drop(first);
+        let second = boot_serve_and_drain(&config, tmp.path()).await;
+        assert_eq!(
+            second
+                .get_setting(keys::AUTH_TOKEN_EXPIRY_SINCE)
+                .await
+                .expect("read")
+                .as_deref(),
+            Some("1000"),
+            "a second boot keeps the first start of the clock"
+        );
+    }
+
+    /// Boots `config` over `root`, checks it is serving, shuts it down, and
+    /// hands back the store it ran on.
+    async fn boot_serve_and_drain(
+        config: &Config,
+        root: &std::path::Path,
+    ) -> Arc<dyn plurx_core::store::Store> {
+        let handle = plurx_core::cluster::open_store(config)
             .await
             .expect("store");
+        let store = Arc::clone(&handle.store);
         let catalogue = plurx_core::store::CatalogueReader::authority(Arc::clone(&handle.store));
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 
@@ -5884,7 +5936,7 @@ mod startup_tests {
                 identity: handle.identity,
                 credential_key: handle.credential_key,
                 backup_client: None,
-                dirs: create_dirs(tmp.path()).expect("dirs"),
+                dirs: create_dirs(root).expect("dirs"),
                 encoder_caps: Default::default(),
                 system: Default::default(),
                 logs: logbuf::LogBuffers {
@@ -5901,8 +5953,8 @@ mod startup_tests {
         // The data dir is laid out and the store is open before anything is
         // served — a boot that answered before that would serve 500s.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(tmp.path().join("plurx.db").is_file());
-        assert!(tmp.path().join("transcode").is_dir());
+        assert!(root.join("plurx.db").is_file());
+        assert!(root.join("transcode").is_dir());
         assert!(!booted.is_finished(), "the server must still be running");
 
         stop.send(()).expect("stop");
@@ -5911,6 +5963,7 @@ mod startup_tests {
             .expect("boot must return once shutdown fires")
             .expect("join")
             .expect("an orderly shutdown is exit 0");
+        store
     }
 
     /// The Dolby Vision conversion is on unless an operator says otherwise,

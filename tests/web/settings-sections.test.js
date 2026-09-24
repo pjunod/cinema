@@ -84,7 +84,7 @@ test("every section is a route, grouped in the rail's order", () => {
     livetv: "liveTvPanel(d.settings,d.developerReadiness)",
     analysis: "analysisSettingsPanel(d.settings,d.analysis)",
     maintenance: "maintenancePanel(d.settings,d.dvConversions,d.developerReadiness)",
-    users: "usersPanel(d.users)",
+    users: "usersPanel(d.users,d.settings)",
     system: "systemPanel(d.sys,d.playbackEvents)",
     cluster: "clusterPanel(d)",
     integrations: "integrationsPanel(d.settings,d.trakt)",

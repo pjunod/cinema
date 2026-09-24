@@ -4534,6 +4534,40 @@ final class AppleClientTests: XCTestCase {
         }
     }
 
+    func testAnIdleExpiredSignInStillSignsOutAndKeepsItsReasonForTheLoginScreen() throws {
+        _ = Session.shared.takeSessionExpiryNotice()
+        let url = try XCTUnwrap(URL(string: "http://server.local/api/v1/me"))
+        let response = try XCTUnwrap(
+            HTTPURLResponse(url: url, statusCode: 401, httpVersion: "HTTP/1.1", headerFields: nil)
+        )
+        let expired = Data(
+            #"{"code":"session_expired","message":"Signed out after 90 days of inactivity. Sign in again to continue.","idle_days":90}"#.utf8
+        )
+        XCTAssertThrowsError(try PlurxAPI.check(response, data: expired)) { error in
+            XCTAssertTrue(AppModel.isSessionExpired(error), "an expired sign-in is still a sign-out")
+            guard let api = error as? APIError, case .http(401) = api else {
+                XCTFail("a 401 must stay status-shaped")
+                return
+            }
+        }
+        XCTAssertEqual(
+            Session.shared.takeSessionExpiryNotice(),
+            "Signed out after 90 days of inactivity. Sign in again to continue."
+        )
+        XCTAssertNil(Session.shared.takeSessionExpiryNotice(), "the reason is taken once")
+
+        // Any other 401 carries no reason, and neither does a 403.
+        let other = Data(#"{"code":"token_expired","message":"Sign in again."}"#.utf8)
+        XCTAssertThrowsError(try PlurxAPI.check(response, data: other))
+        XCTAssertNil(Session.shared.takeSessionExpiryNotice())
+        let forbidden = try XCTUnwrap(
+            HTTPURLResponse(url: url, statusCode: 403, httpVersion: "HTTP/1.1", headerFields: nil)
+        )
+        XCTAssertThrowsError(try PlurxAPI.check(forbidden, data: expired))
+        XCTAssertNil(Session.shared.takeSessionExpiryNotice())
+        XCTAssertNil(PlurxAPI.sessionExpiryMessage(status: 401, data: nil))
+    }
+
     func testRefusalBodiesAreKeptWithoutDisturbingTheMatchersThatPredateThem() throws {
         let url = try XCTUnwrap(URL(string: "http://server.local/api/v1/files/1/hls"))
 

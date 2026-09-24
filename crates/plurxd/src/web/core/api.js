@@ -31,11 +31,21 @@ async function api(path, {method="GET", body=null, raw=false, signal=null, keepS
     // caller, and the panel paints it.
     try{ await api("/me"); }catch(probe){ void probe; }
   }else if(res.status===401){
+    // A sign-in that sat unused past the server's idle window says so
+    // (`session_expired`), and the login screen repeats the server's sentence
+    // — "Signed out after 90 days of inactivity" — instead of the generic one.
+    // Never throws: an unreadable body is an ordinary session end.
+    let expired=null;
+    try{
+      const reason=JSON.parse(await res.text());
+      if(reason&&reason.code==="session_expired"&&typeof reason.message==="string"&&reason.message) expired=reason.message;
+    }catch(e){ void e; }
     // Parallel requests from an expired credential may finish after the user
     // has already signed in again. Only the credential generation that sent
     // this request may clear the current session.
-    if(authGeneration===AUTH_GENERATION) void logout({revoke:false,notice:"Your session ended on the server."});
+    if(authGeneration===AUTH_GENERATION) void logout({revoke:false,notice:expired||"Your session ended on the server."});
     const error=new Error("unauthorized"); error.status=401;
+    if(expired) error.code="session_expired";
     throw error;
   }
   // `{error}` is the legacy body; `{code, message}` is the typed one routes

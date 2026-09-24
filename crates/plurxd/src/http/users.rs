@@ -7,9 +7,10 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use plurx_core::auth;
-use plurx_core::store::{DeleteTokenByPrefixOutcome, TokenSummary};
-use serde::Deserialize;
+use plurx_core::auth::{self, TokenIdlePolicy};
+use plurx_core::error::StoreError;
+use plurx_core::store::{keys, DeleteTokenByPrefixOutcome, Store, TokenSummary};
+use serde::{Deserialize, Serialize};
 
 use super::dto::UserDto;
 use super::error::ApiError;
@@ -17,11 +18,73 @@ use super::extract::{AdminUser, AuthUser, RawToken};
 use super::internal_auth_revocation::ClusterCacheRevocation;
 use crate::state::AppState;
 
+/// Unix seconds, for stamping when sign-in expiry takes effect.
+pub(crate) fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Start the sign-in expiry clock the first time this server runs a build
+/// that has the option, and return when it started.
+///
+/// "Sign-ins expire" defaults to on, so the moment an upgraded server first
+/// starts is the moment expiry takes effect. Every token's idle window is
+/// measured from no earlier than this, which is what keeps the upgrade from
+/// signing out every device that was idle for a while before it. The seed is
+/// written once and the first committed value wins on every voter; later
+/// starts, and every other node, read it back unchanged.
+pub(crate) async fn start_token_expiry_clock(
+    store: &dyn Store,
+    now: i64,
+) -> Result<i64, StoreError> {
+    let stored = store
+        .get_or_init_setting(keys::AUTH_TOKEN_EXPIRY_SINCE, &now.to_string())
+        .await?;
+    Ok(stored.trim().parse().unwrap_or(now))
+}
+
+/// The expiry policy in force, from one settings snapshot.
+pub(crate) fn token_expiry_policy(
+    settings: &std::collections::BTreeMap<String, String>,
+) -> Option<TokenIdlePolicy> {
+    TokenIdlePolicy::from_settings(
+        settings
+            .get(keys::AUTH_TOKEN_EXPIRY_ENABLED)
+            .map(String::as_str),
+        settings.get(keys::AUTH_TOKEN_IDLE_DAYS).map(String::as_str),
+        settings
+            .get(keys::AUTH_TOKEN_EXPIRY_SINCE)
+            .map(String::as_str),
+    )
+}
+
+/// One row of a devices list: the Store's privacy-safe summary plus when the
+/// device will be signed out if it stays unused. `expires_at` is absent while
+/// sign-ins do not expire.
+#[derive(Debug, Serialize)]
+pub struct DeviceDto {
+    #[serde(flatten)]
+    pub token: TokenSummary,
+    pub expires_at: Option<i64>,
+    pub expired: bool,
+}
+
+fn device_dto(token: TokenSummary, policy: Option<TokenIdlePolicy>, now: i64) -> DeviceDto {
+    let expires_at = policy.map(|policy| policy.expires_at(token.last_seen_at));
+    DeviceDto {
+        expired: expires_at.is_some_and(|at| now >= at),
+        expires_at,
+        token,
+    }
+}
+
 /// GET /api/v1/me/devices
 pub async fn list_my_devices(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
-) -> Result<Json<Vec<TokenSummary>>, ApiError> {
+) -> Result<Json<Vec<DeviceDto>>, ApiError> {
     list_devices_for_user(&state, user.id).await
 }
 
@@ -40,7 +103,7 @@ pub async fn list_user_devices(
     AdminUser(_admin): AdminUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
-) -> Result<Json<Vec<TokenSummary>>, ApiError> {
+) -> Result<Json<Vec<DeviceDto>>, ApiError> {
     state
         .store
         .get_user(id)
@@ -67,8 +130,16 @@ pub async fn revoke_user_device(
 async fn list_devices_for_user(
     state: &AppState,
     user_id: i64,
-) -> Result<Json<Vec<TokenSummary>>, ApiError> {
-    Ok(Json(state.store.list_tokens_for_user(user_id).await?))
+) -> Result<Json<Vec<DeviceDto>>, ApiError> {
+    let tokens = state.store.list_tokens_for_user(user_id).await?;
+    let policy = token_expiry_policy(&state.store.settings_snapshot().await?);
+    let now = unix_now();
+    Ok(Json(
+        tokens
+            .into_iter()
+            .map(|token| device_dto(token, policy, now))
+            .collect(),
+    ))
 }
 
 async fn revoke_device_for_user(
