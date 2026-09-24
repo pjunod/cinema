@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Cut the mechanical half of a plurx release, and refuse the unsafe half.
+
+docs/RELEASING.md "Cutting a release" is the procedure; this is steps 1-3 of
+it done the same way every time, because they are the steps a person gets
+wrong at 1 a.m.:
+
+1. refuse an empty `## [Unreleased]`, and refuse a version whose changelog
+   section or tag already exists;
+2. move `[Unreleased]` under a dated `## [X.Y.Z] — YYYY-MM-DD` heading and
+   rewrite the link definitions at the bottom of CHANGELOG.md;
+3. set the one workspace version in Cargo.toml, keep both native apps'
+   marketing versions equal to it and advance both native build counters
+   (validation/mobile_versions.py requires all of that of any branch that
+   moves the workspace version), then let Cargo relock both lockfiles.
+
+It never tags. Under the weekly cadence (docs/RELEASING.md "The weekly
+release tag") the tag is cut by the scheduled release-readiness run, and only
+after that run is green on the merged release commit. `--pending` is the
+question that run asks first: is the version on this commit untagged and
+dated in the changelog?
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tomllib
+
+ROOT = Path(__file__).resolve().parents[1]
+ANDROID = "clients/android/app/build.gradle.kts"
+APPLE = "clients/apple/project.yml"
+SPIKE_MANIFEST = "spikes/hiqlite-m0/Cargo.toml"
+SEMVER = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
+UNRELEASED = "## [Unreleased]"
+
+
+class CutError(ValueError):
+    """A release cannot be cut from this tree, and why."""
+
+
+def workspace_version(cargo: str) -> str:
+    try:
+        version = tomllib.loads(cargo)["workspace"]["package"]["version"]
+    except (KeyError, tomllib.TOMLDecodeError) as exc:
+        raise CutError("Cargo.toml declares no [workspace.package] version") from exc
+    if not SEMVER.fullmatch(version):
+        raise CutError(f"workspace version {version!r} is not MAJOR.MINOR.PATCH")
+    return version
+
+
+def next_version(current: str, part: str) -> str:
+    major, minor, patch = (int(value) for value in SEMVER.fullmatch(current).groups())
+    if part == "minor":
+        return f"{major}.{minor + 1}.0"
+    return f"{major}.{minor}.{patch + 1}"
+
+
+def set_workspace_version(cargo: str, version: str) -> str:
+    section = re.search(r"(?ms)^\[workspace\.package\]\n(.*?)(?=^\[|\Z)", cargo)
+    if section is None:
+        raise CutError("Cargo.toml has no [workspace.package] table")
+    body, count = re.subn(
+        r'(?m)^version = "[^"]*"$', f'version = "{version}"', section.group(1), count=1
+    )
+    if count != 1:
+        raise CutError("[workspace.package] has no version line")
+    return cargo[: section.start(1)] + body + cargo[section.end(1) :]
+
+
+def roll_changelog(changelog: str, version: str, date: str) -> str:
+    """`[Unreleased]` becomes `[version] — date`, with the link definitions."""
+
+    if changelog.count(UNRELEASED + "\n") != 1:
+        raise CutError("CHANGELOG.md must carry exactly one '## [Unreleased]' heading")
+    if re.search(rf"(?m)^## \[{re.escape(version)}\]", changelog):
+        raise CutError(f"CHANGELOG.md already has a '## [{version}]' section")
+    start = changelog.index(UNRELEASED + "\n") + len(UNRELEASED) + 1
+    following = re.search(r"(?m)^## \[", changelog[start:])
+    end = start + following.start() if following else len(changelog)
+    body = changelog[start:end]
+    if not any(
+        line.strip() and not line.lstrip().startswith("#") for line in body.splitlines()
+    ):
+        raise CutError("CHANGELOG.md's [Unreleased] section is empty — nothing to release")
+
+    link = re.search(
+        r"(?m)^\[Unreleased\]: (?P<base>\S+)/compare/v(?P<previous>[^.\s]+\.[^.\s]+\.[^.\s]+)\.\.\.HEAD$",
+        changelog,
+    )
+    if link is None:
+        raise CutError(
+            "CHANGELOG.md has no '[Unreleased]: <repo>/compare/v<previous>...HEAD' link"
+        )
+    base, previous = link.group("base"), link.group("previous")
+    rolled = (
+        changelog[:start]
+        + f"\n## [{version}] — {date}\n"
+        + ("" if body.startswith("\n") else "\n")
+        + changelog[start:]
+    )
+    return rolled.replace(
+        link.group(0),
+        f"[Unreleased]: {base}/compare/v{version}...HEAD\n"
+        f"[{version}]: {base}/compare/v{previous}...v{version}",
+        1,
+    )
+
+
+def set_mobile_versions(android: str, apple: str, version: str) -> tuple[str, str]:
+    """Both apps' marketing versions follow the workspace; both counters advance."""
+
+    def one(pattern: str, text: str, label: str) -> re.Match[str]:
+        found = list(re.finditer(pattern, text, re.MULTILINE))
+        if len(found) != 1:
+            raise CutError(f"expected exactly one {label}, found {len(found)}")
+        return found[0]
+
+    def put(text: str, match: re.Match[str], value: str) -> str:
+        return text[: match.start(1)] + value + text[match.end(1) :]
+
+    name = one(r'^\s*versionName\s*=\s*"([^"]+)"\s*$', android, "Android versionName")
+    android = put(android, name, version)
+    code = one(r"^\s*versionCode\s*=\s*(\d+)\s*$", android, "Android versionCode")
+    android = put(android, code, str(int(code.group(1)) + 1))
+    marketing = one(r'^\s*MARKETING_VERSION:\s*"([^"]+)"\s*$', apple, "Apple MARKETING_VERSION")
+    apple = put(apple, marketing, version)
+    build = one(
+        r'^\s*CURRENT_PROJECT_VERSION:\s*"(\d+)"\s*$', apple, "Apple CURRENT_PROJECT_VERSION"
+    )
+    apple = put(apple, build, str(int(build.group(1)) + 1))
+    return android, apple
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ("git", *args), cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+
+
+def pending(root: Path) -> dict[str, str]:
+    """What the scheduled run needs to decide whether this commit is a release."""
+
+    version = workspace_version((root / "Cargo.toml").read_text(encoding="utf-8"))
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    dated = bool(
+        re.search(rf"(?m)^## \[{re.escape(version)}\] — \d{{4}}-\d{{2}}-\d{{2}}$", changelog)
+    )
+    tagged = _git(root, "rev-parse", "-q", "--verify", f"refs/tags/v{version}").returncode == 0
+    sha = _git(root, "rev-parse", "HEAD").stdout.strip()
+    return {
+        "version": version,
+        "tag": f"v{version}",
+        "sha": sha,
+        "dated": "true" if dated else "false",
+        "tagged": "true" if tagged else "false",
+        "pending": "true" if dated and not tagged else "false",
+    }
+
+
+def cut(root: Path, version: str, date: str) -> list[str]:
+    """Rewrite the release files in place and return the paths it changed."""
+
+    cargo_path = root / "Cargo.toml"
+    current = workspace_version(cargo_path.read_text(encoding="utf-8"))
+    if tuple(map(int, SEMVER.fullmatch(version).groups())) <= tuple(
+        map(int, SEMVER.fullmatch(current).groups())
+    ):
+        raise CutError(f"{version} is not newer than the workspace version {current}")
+    if _git(root, "rev-parse", "-q", "--verify", f"refs/tags/v{version}").returncode == 0:
+        raise CutError(f"tag v{version} already exists")
+    changelog = roll_changelog(
+        (root / "CHANGELOG.md").read_text(encoding="utf-8"), version, date
+    )
+    cargo = set_workspace_version(cargo_path.read_text(encoding="utf-8"), version)
+    android, apple = set_mobile_versions(
+        (root / ANDROID).read_text(encoding="utf-8"),
+        (root / APPLE).read_text(encoding="utf-8"),
+        version,
+    )
+    # Every refusal above happens before any file is written.
+    (root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+    cargo_path.write_text(cargo, encoding="utf-8")
+    (root / ANDROID).write_text(android, encoding="utf-8")
+    (root / APPLE).write_text(apple, encoding="utf-8")
+    return ["CHANGELOG.md", "Cargo.toml", ANDROID, APPLE]
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    parser.add_argument("--root", type=Path, default=ROOT)
+    which = parser.add_mutually_exclusive_group()
+    which.add_argument("--part", choices=("patch", "minor"), default="patch")
+    which.add_argument("--version", help="the exact MAJOR.MINOR.PATCH to cut")
+    parser.add_argument("--date", help="the release date, YYYY-MM-DD (default: today, UTC)")
+    parser.add_argument(
+        "--pending",
+        action="store_true",
+        help="print key=value lines saying whether HEAD is an untagged, dated release",
+    )
+    parser.add_argument(
+        "--no-lockfiles",
+        action="store_true",
+        help="do not run cargo to rewrite Cargo.lock and the spike lockfile",
+    )
+    args = parser.parse_args(argv)
+    root = args.root
+
+    try:
+        if args.pending:
+            for key, value in pending(root).items():
+                print(f"{key}={value}")
+            return 0
+        current = workspace_version((root / "Cargo.toml").read_text(encoding="utf-8"))
+        version = args.version or next_version(current, args.part)
+        if not SEMVER.fullmatch(version):
+            raise CutError(f"{version!r} is not MAJOR.MINOR.PATCH")
+        date = args.date or dt.datetime.now(dt.timezone.utc).date().isoformat()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+            raise CutError(f"{date!r} is not YYYY-MM-DD")
+        changed = cut(root, version, date)
+    except CutError as exc:
+        print(f"release-cut: {exc}", file=sys.stderr)
+        return 1
+
+    if not args.no_lockfiles:
+        # `cargo metadata` relocks only what the version change touched (the
+        # workspace members' own entries) and upgrades nothing; the spike is a
+        # separate workspace that path-depends on plurx-core, so its lockfile
+        # records plurx-core's version too (see `make spike-lock-check`).
+        for command in (
+            ["cargo", "metadata", "--offline", "--format-version", "1"],
+            ["cargo", "metadata", "--offline", "--manifest-path", SPIKE_MANIFEST,
+             "--format-version", "1"],
+        ):
+            result = subprocess.run(command, cwd=root, stdout=subprocess.DEVNULL)
+            if result.returncode != 0:
+                print(
+                    f"release-cut: `{' '.join(command)}` failed; run it before committing",
+                    file=sys.stderr,
+                )
+                return 1
+        changed += ["Cargo.lock", "spikes/hiqlite-m0/Cargo.lock"]
+
+    print(f"release-cut: v{current} -> v{version}, dated {date}")
+    for path in changed:
+        print(f"  changed {path}")
+    print(
+        "\nNext, per docs/RELEASING.md:\n"
+        f"  1. commit these as `release: v{version}` on a branch and open a pull request;\n"
+        "  2. merge it once its fast lane is green;\n"
+        "  3. the next scheduled release-readiness run (Mondays 06:00 UTC) runs\n"
+        "     `make release-check` on the merged commit and, only if it is green,\n"
+        f"     pushes the annotated tag v{version}. Tagging by hand stays possible:\n"
+        f"     make release-check && git tag -a v{version} -m 'v{version}' && git push origin v{version}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

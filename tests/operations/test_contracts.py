@@ -3220,7 +3220,10 @@ assert.equal(context.ACT_TIMER, null);
             "<Registry>http://forge.lan:3000/noirr/-/packages/container/plurxd/main</Registry>",
             unraid,
         )
-        self.assertNotIn("schedule:", readiness)
+        # Weekly, from a green scheduled run: the cadence Paul chose on
+        # 2026-09-23 (docs/RELEASING.md "The weekly release tag"). The tag
+        # job itself is pinned in tests/operations/test_release_cut.py.
+        self.assertIn('  schedule:\n    - cron: "0 6 * * 1"\n', readiness)
         self.assertIn("workflow_dispatch:", readiness)
         self.assertIn("run: make release-check", readiness)
         self.assertIn("fetch-depth: 0", readiness)
