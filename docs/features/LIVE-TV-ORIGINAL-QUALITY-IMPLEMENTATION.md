@@ -128,10 +128,15 @@ fn resolve_live_delivery(
 ```
 
 The plan freezes `video_action` (`copy` / `encode`), `audio_action` (`copy` /
-`encode`), output codec and presentation facts, container (`mpegts` / `fmp4`),
+`encode`), `audio_track` (the ordinal of the source audio stream it selected —
+since 2026-09-24 the probe lists every audio stream and the plan takes the one
+the player can copy, see [direct play and surround](../streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md)),
+output codec and presentation facts, container (`mpegts` / `fmp4`),
 required filters, execution workload, and a nonempty explanation for every
 conversion or reduction. Command construction consumes this plan; it must
 not independently choose a different encoder, size, channel count, or grade.
+On an encoded audio route `output.audio_channels` is the ceiling the encode
+negotiates its layout under, not a pinned count.
 
 ```text
  one authenticated tune

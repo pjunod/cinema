@@ -2385,6 +2385,16 @@ final class LiveTvTests: XCTestCase {
                        "the one already scheduled at the right instant is left alone")
     }
     #endif
+    func testLiveEnvelopeClaimsTheRouteChannelsForAac() {
+        XCTAssertEqual(LiveTvPlaybackEnvelope.aacChannelCeiling(routeChannels: 0), 2)
+        XCTAssertEqual(LiveTvPlaybackEnvelope.aacChannelCeiling(routeChannels: 2), 2)
+        XCTAssertEqual(LiveTvPlaybackEnvelope.aacChannelCeiling(routeChannels: 6), 6)
+        XCTAssertEqual(LiveTvPlaybackEnvelope.aacChannelCeiling(routeChannels: 8), 6)
+        let envelope = LiveTvPlaybackEnvelope.current(compatibility: nil, aacChannels: 6)
+        XCTAssertEqual(envelope.audioLimits.first { $0.codec == "aac" }?.maxChannels, 6)
+        XCTAssertTrue(envelope.audioLimits.filter { $0.codec != "aac" }.allSatisfy { $0.maxChannels == 8 })
+    }
+
 }
 
 /// Counts what actually reached the server. The coalescing test asserted a

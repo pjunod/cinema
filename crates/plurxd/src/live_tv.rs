@@ -5981,7 +5981,7 @@ async fn run_live_session_inner(
     *session
         .source_format
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observed);
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observed.clone());
     let policy = if session.request.playback.is_some() {
         LiveQualityPolicy {
             max_height: (config.max_output_height > 0).then_some(config.max_output_height),
@@ -6010,6 +6010,17 @@ async fn run_live_session_inner(
         },
     )
     .map_err(LiveTvError::CodecUnsupported)?;
+    if delivery.audio_track != 0 {
+        let selected = LiveTvSourceFormat {
+            audio_channels: delivery.source.audio_channels,
+            audio_layout: delivery.source.audio_layout.clone(),
+            ..observed
+        };
+        *session
+            .source_format
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(selected);
+    }
     let admission = if delivery.video_action == LiveTrackAction::Encode {
         let source_height = source.height.unwrap_or(delivery.output.height);
         let source_codec = source.video_codec.as_deref().unwrap_or("unknown");
@@ -6543,16 +6554,60 @@ fn parse_probe_facts(bytes: &[u8]) -> Result<LiveSourceFacts, LiveTvError> {
                 "source_probe_incomplete: no video stream was observed".into(),
             )
         })?;
-    let audio = streams
+    let audio_tracks: Vec<crate::live_tv_delivery::LiveSourceAudioTrack> = streams
         .iter()
-        .find(|stream| {
+        .filter(|stream| {
             stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("audio")
         })
-        .ok_or_else(|| {
-            LiveTvError::InvalidResponse(
-                "source_probe_incomplete: no audio stream was observed".into(),
-            )
-        })?;
+        .take(usize::from(u8::MAX))
+        .enumerate()
+        .map(
+            |(index, audio)| crate::live_tv_delivery::LiveSourceAudioTrack {
+                index: u8::try_from(index).unwrap_or(u8::MAX),
+                // FFprobe prints the MPEG-TS PID as `"0x33"`.
+                id: audio
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| {
+                        u32::from_str_radix(value.trim().trim_start_matches("0x"), 16).ok()
+                    })
+                    .filter(|value| *value > 0),
+                codec: json_string(audio, "codec_name"),
+                sample_rate: audio
+                    .get("sample_rate")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .filter(|value| *value > 0),
+                channels: audio
+                    .get("channels")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u8::try_from(value).ok())
+                    .filter(|value| *value > 0),
+                layout: json_string(audio, "channel_layout"),
+                language: audio
+                    .get("tags")
+                    .and_then(|tags| json_string(tags, "language")),
+                described: audio.get("disposition").is_some_and(|disposition| {
+                    [
+                        "visual_impaired",
+                        "hearing_impaired",
+                        "comment",
+                        "descriptions",
+                    ]
+                    .into_iter()
+                    .any(|flag| {
+                        disposition
+                            .get(flag)
+                            .and_then(serde_json::Value::as_i64)
+                            .is_some_and(|value| value != 0)
+                    })
+                }),
+            },
+        )
+        .collect();
+    let first_audio = audio_tracks.first().ok_or_else(|| {
+        LiveTvError::InvalidResponse("source_probe_incomplete: no audio stream was observed".into())
+    })?;
     let pixel_format = json_string(video, "pix_fmt");
     let bit_depth = video
         .get("bits_per_raw_sample")
@@ -6601,18 +6656,11 @@ fn parse_probe_facts(bytes: &[u8]) -> Result<LiveSourceFacts, LiveTvError> {
         color_transfer,
         color_space: json_string(video, "color_space"),
         hdr,
-        audio_codec: json_string(audio, "codec_name"),
-        audio_sample_rate: audio
-            .get("sample_rate")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|value| value.parse::<u32>().ok())
-            .filter(|value| *value > 0),
-        audio_channels: audio
-            .get("channels")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|value| u8::try_from(value).ok())
-            .filter(|value| *value > 0),
-        audio_layout: json_string(audio, "channel_layout"),
+        audio_codec: first_audio.codec.clone(),
+        audio_sample_rate: first_audio.sample_rate,
+        audio_channels: first_audio.channels,
+        audio_layout: first_audio.layout.clone(),
+        audio_tracks,
     })
 }
 
@@ -6809,7 +6857,15 @@ fn live_ffmpeg_command_for_input(
     let audio_map = match input {
         LiveTvFfmpegInput::Tuner => {
             command.args(["-i", "pipe:0"]);
-            "0:a:0"
+            plan.delivery
+                .source
+                .audio_tracks
+                .iter()
+                .find(|track| track.index == plan.delivery.audio_track)
+                .map_or_else(
+                    || format!("0:a:{}", plan.delivery.audio_track),
+                    crate::live_tv_delivery::LiveSourceAudioTrack::map_specifier,
+                )
         }
         LiveTvFfmpegInput::GraphProbe => {
             command.args([
@@ -6824,10 +6880,10 @@ fn live_ffmpeg_command_for_input(
                 "-t",
                 "4.25",
             ]);
-            "1:a:0"
+            "1:a:0".to_owned()
         }
     };
-    command.args(["-map", plan.video_map, "-map", audio_map, "-sn", "-dn"]);
+    command.args(["-map", plan.video_map, "-map", &audio_map, "-sn", "-dn"]);
     match plan.delivery.video_action {
         LiveTrackAction::Copy => {
             command.args(["-c:v", "copy"]);
@@ -6869,13 +6925,22 @@ fn live_ffmpeg_command_for_input(
             command.args(["-c:a", "copy"]);
         }
         LiveTrackAction::Encode => {
-            let channels = plan.delivery.output.audio_channels.to_string();
+            // `-ac N` would upmix a stereo broadcast to a 5.1 ceiling and
+            // could not be chosen at all for a track whose layout the probe
+            // never learned. The layout list lets FFmpeg keep the decoded
+            // layout when it fits the ceiling and fold only what exceeds it.
+            let layouts = format!(
+                "aformat=channel_layouts={}",
+                crate::live_tv_delivery::encoded_channel_layouts(
+                    plan.delivery.output.audio_channels
+                )
+            );
             let bitrate = if plan.delivery.output.audio_channels > 2 {
                 "384k"
             } else {
                 "192k"
             };
-            command.args(["-c:a", "aac", "-b:a", bitrate, "-ac", &channels]);
+            command.args(["-c:a", "aac", "-b:a", bitrate, "-af", &layouts]);
         }
     }
     command.args(LIVE_HLS_OUTPUT_ARGS);
@@ -8351,6 +8416,7 @@ fn graph_probe_delivery(height: u16) -> LiveDeliveryPlan {
         },
         video_action: LiveTrackAction::Encode,
         audio_action: LiveTrackAction::Encode,
+        audio_track: 0,
         packaging: LivePackaging::Mpegts,
         reasons: vec![crate::live_tv_delivery::LiveDeliveryReason {
             code: "graph_probe".into(),
@@ -8486,6 +8552,7 @@ mod tests {
             },
             video_action: LiveTrackAction::Encode,
             audio_action: LiveTrackAction::Encode,
+            audio_track: 0,
             packaging: LivePackaging::Mpegts,
             reasons: vec![crate::live_tv_delivery::LiveDeliveryReason {
                 code: "test_fixture".into(),
@@ -11243,8 +11310,8 @@ Output #0, hls, to 'index.m3u8':
             "aac",
             "-b:a",
             "192k",
-            "-ac",
-            "2",
+            "-af",
+            "aformat=channel_layouts=stereo|mono",
             "-f",
             "hls",
             "-hls_time",

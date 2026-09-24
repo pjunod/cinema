@@ -20,7 +20,7 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `121` — native viewer parity across phone, foldable,
+> Status: **v0.3.0**, build `122` — native viewer parity across phone, foldable,
 > and TV. Build 121 lands on the login screen with the server's sentence when a
 > sign-in expires after its idle window, instead of leaving an HTTP 401 on Home,
 > and gives a system interruption (a call, another app taking audio) its own

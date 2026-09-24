@@ -1758,6 +1758,18 @@ async function main() {
     assert.equal(liveTv.dvrRecordingDetail(airing({ capture_end: NOW - 600 }), NOW), "7.1 WABC · 0 min left");
     assert.equal(liveTv.dvrRecordingDetail(null, NOW), "");
   });
+
+  await test("the live envelope claims the audio output's channels for AAC, not a fixed stereo", () => {
+    const ceiling = new Function(`${shipped("liveTvAacChannelCeiling")}; return liveTvAacChannelCeiling;`)();
+    assert.equal(ceiling(undefined), 2);
+    assert.equal(ceiling(1), 2);
+    assert.equal(ceiling(2), 2);
+    assert.equal(ceiling(6), 6);
+    assert.equal(ceiling(8), 6);
+    const envelope = shipped("liveTvPlaybackEnvelope");
+    assert.match(envelope, /max_channels:codec==="aac"\?aacChannels:8/);
+    assert.doesNotMatch(envelope, /max_channels:codec==="aac"\?2:8/);
+  });
 }
 
 main().catch((error) => {

@@ -11,6 +11,30 @@ describes the state on the day it was written, and
 `tests/operations/test_status_pr_claims.py` keeps holding it to the same
 merged-pull-request rule it held in `STATUS.md`.
 
+## 2026-09-20 · End-to-end architecture review — ten verified do-first items, ranked
+
+**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
+(the verdict) and its
+[appendix](../reviews/ARCHITECTURE-REVIEW-2026-09-20-APPENDIX.md) (nine area
+reports, ~120 findings with `file:line`).** Nine parallel reviews of `main` @
+`a1414368` covering the streaming pipeline, server core, store/cluster, Live
+TV, the three clients, build/CI/ops, and the month's git history; every P0/P1
+re-verified against the tree before it was written down. The four system-level
+findings: the merge gate has run no Rust test since `3cd127e2` (2026-09-10)
+and nothing is scheduled after; the hot paths run unsized defaults (4 KiB media
+bodies through a blocking-pool hop per chunk, no listener timeouts, encoded-VOD
+respawning ffmpeg every control beat, `fc-list` per segment on text burns,
+1-pass ABR with `-bf 0`, stereo-only audio, no deinterlacer); the cluster pays
+consensus for reads and heartbeats that do not need it and has no backup; and
+four files hold 65k product lines at 50–75 % fix density. One live regression
+is still on `main`: `process_control::output_job_owned` never pipes the child's
+output (`2e3a3bb5`, 2026-09-13), so `dovi_probe_output` always fails — every
+Dolby Vision Profile 5 transcode has been refused since the 09-14 deploy — and
+`probe_media_origin` always falls back. §5 of the review sequences the work:
+twelve small PRs this week, the encoder-defaults set and cluster backup this
+month, the `transcode.rs`/`hls.rs`/`vodserve.rs` decomposition this quarter.
+Nothing in the tree was changed by this PR.
+
 ## 2026-09-17 · A held source is compared on its media facts, not its reporter's schema
 
 **[#354](http://forge.lan:3000/noirr/plurx/pulls/354) from
