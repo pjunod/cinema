@@ -117,6 +117,8 @@ final class AppModel: ObservableObject {
         } catch APIError.http(let code) where code == 401 || code == 403 {
             Session.shared.token = nil       // token rotated / server reset
             settings.clearToken()
+            // "Signed out after 90 days of inactivity." when that is why.
+            authError = Session.shared.takeSessionExpiryNotice()
             phase = .needLogin
         } catch {
             if let recovered = await rediscoverSavedServer(
@@ -175,6 +177,9 @@ final class AppModel: ObservableObject {
                 LoginRequest(username: user.trimmingCharacters(in: .whitespaces), password: pass)
             )
             Session.shared.token = resp.token
+            // A reason left over from the credential this one replaces
+            // belongs to no future sign-out.
+            _ = Session.shared.takeSessionExpiryNotice()
             username = resp.user.username
             userId = resp.user.id
             settings.token = resp.token
@@ -301,7 +306,7 @@ final class AppModel: ObservableObject {
         // Only after bootstrap: the launch paths clear their own token and
         // choose between `.needLogin` and `.reconnectFailed` themselves.
         guard case .ready = phase, Self.isSessionExpired(error) else { return false }
-        signOutLocally()
+        signOutLocally(message: Session.shared.takeSessionExpiryNotice())
         return true
     }
 
@@ -401,6 +406,7 @@ final class AppModel: ObservableObject {
         } catch APIError.http(let code) where code == 401 || code == 403 {
             Session.shared.token = nil
             settings.clearToken()
+            authError = Session.shared.takeSessionExpiryNotice()
             phase = .needLogin
         } catch {
             showReconnectFailure()
