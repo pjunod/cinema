@@ -75,9 +75,13 @@ CI passes the tag name automatically when it publishes an image.
    `## [X.Y.Z] — YYYY-MM-DD` heading, rewrites the two link definitions at the
    bottom, sets the workspace version in `Cargo.toml`, sets both native apps'
    marketing versions to it and advances both native build counters (the
-   mobile-version contract requires all of that of a version bump), and lets
-   Cargo relock `Cargo.lock` and `spikes/hiqlite-m0/Cargo.lock`. It never
-   tags.
+   mobile-version contract requires all of that of a version bump), rewrites
+   the status lines that quote the version or a build counter
+   (`clients/apple/README.md`, `clients/android/README.md`,
+   `docs/clients/APPLE-CLIENT-PARITY.md`, `docs/STATUS.html`, the Apple ones
+   through `validation/apple_build.py`'s generator) so the tree it leaves
+   passes `make operations-check`, and lets Cargo relock `Cargo.lock` and
+   `spikes/hiqlite-m0/Cargo.lock`. It never tags.
 
 3. **Read the changelog it dated.** Entries are for people running the server,
    not for people reading the diff; edit them in the release pull request.
@@ -89,12 +93,15 @@ CI passes the tag name automatically when it publishes an image.
    machine; every unavailable check is recorded as a skip rather than disguised
    as a pass.
 
-5. **Merge the release commit; the weekly run tags that exact green commit.**
+5. **Merge the release pull request; the weekly run tags its landing commit.**
    Open a pull request for the release commit (`release: vX.Y.Z`), wait for its
-   required checks, and merge it. The next scheduled release-readiness run
-   (below) runs `make release-check` on the merged commit and pushes the
-   annotated tag only if it is green. Tagging by hand remains possible and is
-   the same act the workflow performs:
+   required checks, and merge it. The commit that lands it on `main` is the
+   **release commit**: the first commit on `main`'s first-parent line whose
+   `CHANGELOG.md` carries the dated `## [X.Y.Z]` heading. The next scheduled
+   release-readiness run (below) checks that commit out, runs
+   `make release-check` there, and pushes the annotated tag onto it only if it
+   is green, however many pull requests have merged on top of it since.
+   Tagging by hand remains possible and is the same act the workflow performs:
 
    ```sh
    make release-check
@@ -119,17 +126,23 @@ CI passes the tag name automatically when it publishes an image.
 Releases are cut **weekly, from a green scheduled run** — the cadence Paul
 chose on 2026-09-23 ([LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
 §3.5 option (a)). `.github/workflows/release-readiness.yml` runs every Monday
-at 06:00 UTC on `main`'s tip:
+at 06:00 UTC and starts from `main`'s tip:
 
-- `scripts/release-cut --pending` asks whether that commit is a release: its
-  workspace version is dated in `CHANGELOG.md` and `v<version>` is not yet a
-  tag. That is true exactly when a release pull request has merged since the
-  last tag.
-- If it is, the gate is `make release-check`; if it is not, the gate is the
-  same `scripts/validate run --profile ci --all --strict` sweep, so every week
+- `scripts/release-cut --pending` asks whether a release is waiting: the
+  tip's workspace version is dated in `CHANGELOG.md` and `v<version>` is not
+  yet a tag. That is true exactly when a release pull request has merged since
+  the last tag. It then names the **release commit** (step 5), never the tip:
+  every commit merged after the release still carries the same version and
+  dated section, but none of them is the release. It refuses, and the run
+  fails, when that commit is not one the changelog describes: it does not
+  declare the version, it still has entries under `[Unreleased]`, or `main`
+  has since edited the release's section.
+- If a release is waiting, the run checks the release commit out and the gate
+  there is `make release-check`; if not, the gate on the tip is the same
+  `scripts/validate run --profile ci --all --strict` sweep, so every week
   answers "is `main` releasable" whether or not anything is waiting.
 - Only when that gate is green, on a scheduled run, for a pending release,
-  does the `tag` job push the annotated tag, onto the exact commit the gate
+  does the `tag` job push the annotated tag, onto the release commit the gate
   passed. The tag starts `ci.yml`'s full sweep and the image publication in
   step 6.
 
@@ -223,8 +236,9 @@ make recovery pass; a mismatch is an incident to investigate, not an alias to
 overwrite.
 
 The weekly release-readiness run is described above. A red run means the
-gate failed on `main`'s tip (or, for a pending release, that the tag push
-could not happen); it is never a reason to move or overwrite an existing tag.
+gate failed on `main`'s tip or, for a pending release, on the release commit
+(or that `--pending` refused the release commit, or that the tag push could
+not happen); it is never a reason to move or overwrite an existing tag.
 
 ## Checking what a build reports
 
