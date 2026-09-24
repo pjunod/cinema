@@ -1,0 +1,32 @@
+version = 1
+
+[[coverage]]
+commits = ["6727d7ba"]
+points = ["core.media", "library.catalog", "server.api", "api.contract"]
+checks = ["rust-gate", "rust-gate-ci", "unit-core"]
+reason = """
+The library `resolution` sort ranked every top-level row by its best file
+height, but `ItemDto.resolution` is decorated for movies and home videos only.
+A root photo in a Home library is probed and has a real height, so the server
+put it at the head of its cursor while a native client merging library cursors
+on `resolution ?? -1` read it as -1. `item_sort_order_by(Resolution)` now ranks
+by height exactly the kinds `ItemKind::carries_resolution` names and every other
+kind at -1, and `http/browse.rs` decorates with the same predicate.
+
+`store::item_sort_order_tests::resolution_ranks_exactly_the_kinds_that_carry_one`
+reads the kind list out of the clause and requires it to equal
+`carries_resolution` for every `ItemKind`.
+`library_sort_fixture_matches_order` in crates/plurx-core/tests/store_contract.rs
+replays tests/contracts/library-sort-cases.json, which now holds root photos
+31 and 32 with 3024- and 4032-px files, asserts each item's `resolution` is what
+the DTO carries, and requires the photos in the -1 group of the `resolution`
+order. `http::tests::library_resolution_sort_is_ordered_by_the_resolution_each_row_carries`
+requires a Home library's `?sort=resolution` response to be sorted under the
+client's comparator applied to the keys it returned, with the photo carrying
+no `resolution`. Restoring the old height-for-every-kind clause fails all three
+(the replay puts 32, 31 first; the HTTP test puts the photo first); that revert
+was run on nuc3 on 2026-09-24. Run
+`cargo test -p plurx-core item_sort_order`,
+`cargo test -p plurx-core --test store_contract library_sort` and
+`cargo test -p plurxd library_resolution_sort`.
+"""

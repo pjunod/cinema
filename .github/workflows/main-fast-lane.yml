@@ -368,3 +368,32 @@ jobs:
             "+refs/heads/$BASE_REF:refs/plurx/current-base"
           test "$(git rev-parse refs/plurx/current-head)" = "$EVENT_HEAD_SHA"
           test "$(git rev-parse refs/plurx/current-base)" = "$EVENT_BASE_SHA"
+      - name: Publish the qualified Rust lint badge
+        if: needs.rust_compile.result == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          scripts/publish-badge \
+            --branch badges-pr-lint \
+            --alias codex/badges-pr-lint \
+            --filename lint \
+            --label "PR lint" \
+            --message passing \
+            --fill '#4c1' \
+            --json-color brightgreen \
+            --label-width 46 \
+            --message-width 48
+      - name: Publish the qualified PR gate badge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          scripts/publish-badge \
+            --branch badges-pr-ci \
+            --alias codex/badges-pr-ci \
+            --filename ci \
+            --label "PR gate" \
+            --message passing \
+            --fill '#4c1' \
+            --json-color brightgreen \
+            --label-width 48 \
+            --message-width 48

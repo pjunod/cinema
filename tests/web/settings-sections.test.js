@@ -15,6 +15,12 @@ const {shellSource} = require("./shell-source.js");
 // the app's body rows, joined in served order. See tests/web/shell-source.js.
 const SHIPPED_UI = shellSource().bodyScript;
 const DECLARATIONS = ["\nfunction ", "\nasync function "];
+// A slice ends at the next top-level declaration of ANY kind, not only the
+// next function. A row that declares `const X=…` between two functions used to
+// be swallowed into the slice above it, so composing that same const beside the
+// function — which this file does for `DEV_READINESS_LABEL` — declared it twice
+// and the panel harness died on a SyntaxError instead of an assertion.
+const TERMINATORS = DECLARATIONS.concat(["\nconst ", "\nlet ", "\nvar "]);
 
 function shippedSource(name) {
   const start = DECLARATIONS.map((kind) =>
@@ -22,7 +28,7 @@ function shippedSource(name) {
   ).find((at) => at !== -1);
   assert.notEqual(start, undefined, `index.html no longer declares ${name}`);
   const rest = SHIPPED_UI.slice(start + 1);
-  const ends = DECLARATIONS.map((kind) => rest.indexOf(kind, 1)).filter((at) => at !== -1);
+  const ends = TERMINATORS.map((kind) => rest.indexOf(kind, 1)).filter((at) => at !== -1);
   const end = ends.length ? Math.min(...ends) : -1;
   return (end === -1 ? rest : rest.slice(0, end)).trimEnd();
 }
@@ -372,15 +378,17 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
       shippedSource("subtitleStoredSourcesCard"),
+      shippedSource("chapterThumbnailsCard"),
       shippedSource("seekScratchReservationsCard"),
       shippedSource("liveTvGuideCard"), shippedSource("liveTvDeinterlaceCard"),
-      // `clusterBackupCard`'s extracted source runs to the next function and
-      // so already carries `DEV_READINESS_LABEL`; composing both declares it
-      // twice.
-      shippedSource("clusterBackupCard"),
+      shippedConst("DEV_READINESS_LABEL"), shippedConst("LIVE_TV_GUIDE_DRAFT"),
       shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
       shippedSource("devReadinessEvidence"), shippedSource("devReq"),
       shippedSource("devStaticReq"), shippedSource("clusterTransportRecoveryCard"),
+      // The fourth time (see above): `clusterBackupCard` shipped with the
+      // portable backup and fenced restore and reached `developerPanel`
+      // without being composed here, so this whole gate died on its name.
+      shippedSource("clusterBackupCard"),
       shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
@@ -445,8 +453,15 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503", "subsrc"])
+  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503", "subsrc", "chthumb"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
+  // Absent from the settings document is on: chapter thumbnails default on.
+  assert.match(html, /TOG:chthumb\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(html, /FOOT:saveChapterThumbnails/);
+  assert.match(
+    panels.developerPanel({ ...settings, chapter_thumbnails: false }, readiness),
+    /TOG:chthumb\|[^|]*\|[^|]*\|checked=false/,
+  );
   // Absent from the settings document is on: the store's switch defaults on.
   assert.match(html, /TOG:subsrc\|[^|]*\|[^|]*\|checked=true/);
   assert.match(html, /FOOT:saveSubtitleStoredSources/);

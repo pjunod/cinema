@@ -1737,6 +1737,10 @@ pub struct SettingsDto {
     /// store kept instead of the whole source. On by default; off makes both
     /// ignore the store entirely.
     pub subtitle_stored_sources: bool,
+    /// Make a chapter thumbnail the first time a watch page asks for one.
+    /// On by default; off answers the thumbnail route 404 and runs no
+    /// ffmpeg. The Developer tab's readiness rows are advisory.
+    pub chapter_thumbnails: bool,
     /// What the subtitle-source store occupies on this node and what its
     /// producer is doing: the footprint its last sweep measured, its cap, the
     /// ride-alongs running now and the verdicts since this process started.
@@ -2133,6 +2137,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
             true,
         ),
+        chapter_thumbnails: plurx_core::store::stored_switch(
+            setting(keys::CHAPTER_THUMBNAILS).as_deref(),
+            true,
+        ),
         subtitle_store: subtitle_store_diagnostics(
             state,
             plurx_core::store::stored_switch(
@@ -2372,6 +2380,7 @@ pub struct UpdateSettings {
     pub subtitle_window_secs: Option<i64>,
     pub subtitle_not_ready_503: Option<bool>,
     pub subtitle_stored_sources: Option<bool>,
+    pub chapter_thumbnails: Option<bool>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -2527,6 +2536,7 @@ impl UpdateSettings {
             || self.subtitle_window_secs.is_some()
             || self.subtitle_not_ready_503.is_some()
             || self.subtitle_stored_sources.is_some()
+            || self.chapter_thumbnails.is_some()
             || self.live_tv_deinterlace_output.is_some()
             || self.default_audio_lang.is_some()
             || self.default_sub_lang.is_some()
@@ -3306,6 +3316,12 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::SUBTITLE_STORED_SOURCES, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.chapter_thumbnails {
+        state
+            .store
+            .put_setting(keys::CHAPTER_THUMBNAILS, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(name) = server_name {
@@ -4786,7 +4802,9 @@ pub(crate) struct MetricsState {
     passive_membership: plurx_core::cluster::membership::PassiveMembershipMetrics,
     blocked_gets: Arc<crate::waitpool::BlockedGetMetrics>,
     live_tv: Arc<crate::live_tv::LiveTvMetrics>,
+    live_tv_peers: Arc<crate::http::live_tv::LiveTvPeerMetrics>,
     backup: Arc<crate::backup::BackupMetrics>,
+    plex_census: Arc<super::PlexCensus>,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -4805,7 +4823,9 @@ impl FromRef<AppState> for MetricsState {
             // this node is actually serving from.
             blocked_gets: state.transcode.blocked_get_metrics_handle(),
             live_tv: state.live_tv.metrics_handle(),
+            live_tv_peers: state.live_tv_peers.metrics_handle(),
             backup: state.backup.metrics(),
+            plex_census: Arc::clone(&state.plex_census),
         }
     }
 }
@@ -5209,7 +5229,7 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
         plurx_core::store::prometheus_store_operations(),
         crate::store_result::prometheus(),
@@ -5225,11 +5245,14 @@ pub(crate) async fn metrics(
         super::prometheus_handler_deadlines(),
         crate::ffmpeg::engine_attestation_prometheus(),
         super::prometheus_http_store_attribution(),
+        state.plex_census.prometheus(),
+        super::prometheus_http_request_metrics(),
+        crate::panics::prometheus_panics(),
         crate::state::fragment_index_validation_prometheus(),
         crate::subtitle_source::prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
-    let live_tv_metrics = state.live_tv.prometheus();
+    let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();
     let backup_metrics = state.backup.prometheus();
     let codec_qualification_metrics = state.transcode.codec_qualification_prometheus();
 

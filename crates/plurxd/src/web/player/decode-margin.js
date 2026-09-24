@@ -519,6 +519,11 @@ function armPlaybackSampling(v,p){
     reportProgress(p.fileId); reportHitches(); maybeDecodeRescue();
     autoControllerTick().catch(()=>{}); refreshSegTimes(); libraryChannelTick();
   }, PlaybackPolicy.AUTO_DEFAULTS.sampleMs);
+  // The OS transport belongs to whatever stream is attached now, and this is
+  // where a stream that attaches gets its timers. Re-arming re-installs, which
+  // is what a Force transcode out of a stall needs: the same handlers pointing
+  // at the element that is actually playing.
+  installPlayerMediaSession();
   p.samplingStopped=false;
 }
 

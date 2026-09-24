@@ -1092,6 +1092,65 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("-decoders", dockerfile)
         self.assertIn("AC-4 decoder", dockerfile)
 
+    def test_dockerfile_base_images_are_pinned_by_digest(self):
+        # `rust:1-bookworm` and `debian:bookworm-slim` are moving tags. The
+        # compiler was never the exposure -- `COPY . .` puts rust-toolchain.toml
+        # in the build context and rustup honours it -- but the Debian system
+        # libraries the daemon links against and the entire runtime userland
+        # were whatever those tags pointed at on the day of the build. Two
+        # images built from one commit could ship different libc, different
+        # OpenSSL, and different fontconfig, and nothing in the tree would say
+        # so.
+        #
+        # Digests are index digests (multi-platform), because the image is
+        # built for amd64 and arm64 from the same `FROM`.
+        dockerfile = read("Dockerfile")
+        registry_bases = re.findall(
+            r"(?m)^FROM\s+(\S+)\s+AS\s+(\S+)",
+            dockerfile,
+        )
+        # `FROM runtime-assets AS runtime` names an earlier stage of this same
+        # file, which has no registry reference to pin.
+        stages = {stage for _, stage in registry_bases}
+        unpinned = [
+            (ref, stage)
+            for ref, stage in registry_bases
+            if ref not in stages and "@sha256:" not in ref
+        ]
+        self.assertEqual(unpinned, [], "a base image is not pinned by digest")
+        self.assertIn(
+            "FROM rust:1-bookworm@sha256:"
+            "93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build",
+            dockerfile,
+        )
+        self.assertIn(
+            "FROM debian:bookworm-slim@sha256:"
+            "3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251"
+            " AS runtime-assets",
+            dockerfile,
+        )
+
+    def test_base_image_pin_drift_is_reported_weekly_and_gates_nothing(self):
+        # A pin nobody looks at is a stale pin. The weekly dependency audit is
+        # the job that already exists to say "upstream moved", so the report
+        # rides it -- and rides it without a verdict, because updating the
+        # userland the daemon ships is a decision, not a build failure.
+        workflow = read(".github/workflows/rust-audit.yml")
+        step = workflow.split("- name: Report base-image pin drift")
+        self.assertEqual(len(step), 2, "the drift report step is missing")
+        body = step[1].split("- name:")[0]
+        self.assertIn("continue-on-error: true", body)
+        # `continue-on-error` does not make a step run after an earlier one
+        # failed; only a status condition does. Without it the report is
+        # skipped in exactly the weeks the audit it rides on goes red.
+        self.assertRegex(
+            body,
+            r"(?m)^\s+if: \$\{\{ (!cancelled\(\)|always\(\)) \}\}\s*$",
+            "the drift report is skipped whenever an earlier audit step fails",
+        )
+        self.assertIn("scripts/image-base-drift Dockerfile", step[1])
+        self.assertTrue((ROOT / "scripts/image-base-drift").exists())
+
     def test_docker_build_pins_and_verifies_disk_conversion_tools(self):
         dockerfile = read("Dockerfile")
         self.assertIn("ARG DOVI_TOOL_VERSION=2.3.3", dockerfile)
@@ -1123,7 +1182,11 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("platforms: linux/${{ matrix.arch }}", workflow)
         self.assertIn("file: Dockerfile.release", workflow)
 
-        runtime_assets_marker = "FROM debian:bookworm-slim AS runtime-assets"
+        # The stage boundary, not the image reference: this test is about
+        # what the runtime-assets stage contains and in what order, and
+        # the base image now carries a digest that will be refreshed
+        # without anything here changing meaning.
+        runtime_assets_marker = " AS runtime-assets"
         runtime_image_marker = "FROM runtime-assets AS runtime"
         runtime_assets = dockerfile.index(runtime_assets_marker)
         runtime_image = dockerfile.index(runtime_image_marker)
@@ -1233,7 +1296,12 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("generic/platform=iOS", script)
         self.assertIn("generic/platform=tvOS", script)
         self.assertIn("-configuration Release", script)
-        self.assertIn(":app:assembleDebug", script)
+        # Android ships the signed release variant: the debug APK is
+        # `debuggable`, which lets `adb shell run-as` read the bearer.
+        self.assertIn(":app:assembleRelease", script)
+        self.assertIn("apk/release/app-release.apk", script)
+        self.assertNotIn(":app:assembleDebug", script)
+        self.assertNotIn("app-debug.apk", script)
 
         # Neither artifact reaches a device unverified.
         self.assertIn("codesign --verify --deep --strict", script)
@@ -1565,13 +1633,12 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--branch badges", coverage)
         self.assertIn('--message "${msg}%"', coverage)
 
-        # Branch-relative badge paths render through the viewer's authenticated
-        # Forgejo or GitHub session. From main, `../badges/coverage.svg` moves
-        # from the main branch segment to the sibling badges branch segment.
+        # The README shows badges from the ready-PR gate and the last manual
+        # coverage measurement, rather than the retired full-CI snapshots.
         readme = read("README.md")
         for badge in (
-            "../badges-ci/ci.svg",
-            "../badges-lint/lint.svg",
+            "../badges-pr-ci/ci.svg",
+            "../badges-pr-lint/lint.svg",
             "../badges/coverage.svg",
         ):
             self.assertIn(badge, readme)
@@ -1579,6 +1646,9 @@ assert.equal(context.ACT_TIMER, null);
             sum(line.startswith("[![") for line in readme.splitlines()),
             3,
         )
+        self.assertNotIn("../badges-ci/ci.svg", readme)
+        self.assertNotIn("../badges-lint/lint.svg", readme)
+        self.assertIn("last manual full-CI measurement", readme)
         self.assertNotIn("docs/img/badges/", readme)
         self.assertNotRegex(
             readme,
@@ -1598,6 +1668,18 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--branch badges-ci", badge)
         self.assertIn("--message \"$message\"", badge)
         self.assertIn("success|skipped", badge)
+
+        fast_gate = workflow_job_blocks(".github/workflows/main-fast-lane.yml")[
+            "promotion_gate"
+        ]
+        self.assertIn("Require the reviewed head and base to remain current", fast_gate)
+        self.assertIn("--branch badges-pr-ci", fast_gate)
+        self.assertIn("--branch badges-pr-lint", fast_gate)
+        self.assertIn("if: needs.rust_compile.result == 'success'", fast_gate)
+        self.assertLess(
+            fast_gate.index("Require the reviewed head and base to remain current"),
+            fast_gate.index("Publish the qualified PR gate badge"),
+        )
 
         package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
         self.assertNotIn("needs: check", package)

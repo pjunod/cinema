@@ -1623,7 +1623,12 @@ explicit enable choice.
   in the published range at least one playlist target duration behind the
   edge; progressive remux uses buffered ranges only. A local seek that neither
   emits `seeked` nor gains target coverage within three seconds reopens once at
-  the same film target. Android still reopens for every non-VOD seek; adopting
+  the same film target. Immutable VOD seeks stay local even outside the browser
+  buffer: a missing target gets the existing 20-second seek deadline, then one
+  fenced reopen at the same film target. `seeked` alone does not settle a VOD
+  seek; target coverage or presentation does. The generic eight-second stall
+  clock cannot spend recovery while that target is still missing, and target
+  coverage starts a fresh presentation-stall observation. Android still reopens for every non-VOD seek; adopting
   the same window routing there is open work.
 - **Auto adapts by restarting one encode, not by running a multivariant
   ladder.** The web controller consumes the server ladder and changes the one

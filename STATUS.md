@@ -87,7 +87,8 @@ thing it did differently from every merge that stuck — worth avoiding
 (merge stacks bottom-up and open the upper PR against `main` fresh) until the
 cause is known.
 
-**Not deployed, and nothing has run on hardware.** Still open: the overlay's
+**Deployed to all four nodes 2026-09-23 19:28 UTC** (`v0.3.0-3626-gfad591a46`, each node's own build report; the ride-along self-test passed on ffmpeg 8.1.2-Jellyfin). The first `deploy.yml` run called nuc4 and m6 "already at" that build while their containers were a day old, because their checkouts had moved without a rebuild; `-e force=true` rebuilt them, and `pjunod/ansible#4` now rebuilds whenever the running image's revision label differs from the checkout. **The mobile apps and the overlay switch are not done**: devices need Apple 179 / Android 119, then
+the overlay's
 enablement check — two devices, one Android and one Apple, one playing a DV
 title and one an HDR10 title, a seek each way — before the gate
 (`subtitles.pgs_overlay`) is turned on, and the Developer and Maintenance page

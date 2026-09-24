@@ -9,6 +9,7 @@ mod analysis;
 mod auth;
 pub(crate) use auth::LoginThrottle;
 mod browse;
+mod chapter_thumbs;
 mod cluster;
 pub(crate) mod cluster_operations;
 pub mod comingsoon;
@@ -31,7 +32,7 @@ mod items;
 mod keys;
 mod libraries;
 pub(crate) mod library_channels;
-mod live_tv;
+pub(crate) mod live_tv;
 mod network;
 mod offline;
 pub(crate) mod peer_transport;
@@ -309,7 +310,8 @@ fn http_route_group(path: &str) -> usize {
         | "/library/metadata/{key}"
         | "/library/metadata/{key}/children"
         | "/library/metadata/{key}/{kind}"
-        | "/api/v1/images/{filename}" => 3,
+        | "/api/v1/images/{filename}"
+        | "/api/v1/files/{id}/chapters/{index}/thumb" => 3,
 
         // Search only; maintenance of the search index is a settings action.
         "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
@@ -512,6 +514,690 @@ pub(crate) fn prometheus_http_store_attribution() -> String {
     HTTP_ROUTE_METRICS.render()
 }
 
+// ---------------------------------------------------------------------------
+// Plex façade request census (C-07 M0).
+//
+// C-07's board row says the M0 census decides whether the façade gets paging
+// work, and the plan's §5.0 says to read it out of the access log. There is no
+// access log — that is C-08's finding and it is accurate — and no metric
+// separates the façade from the native API either: `http_route_group` folds
+// `/library/sections/{id}/all` in with `/api/v1/libraries` under `library`,
+// and `/library/parts/{file_id}/{mtime}/{name}` in with the native media
+// routes under `playback`. So the question "is any Plex-family client using
+// this" is not answerable from what a node exposes today, and the census
+// cannot be completed by reading harder.
+//
+// This is the instrument that makes it answerable, and it is all this change
+// is: fourteen bounded handler labels times four bounded outcomes, recorded by
+// a layer over the façade sub-router so nothing native can reach it. No
+// handler is touched, no response changes, and no paging is built.
+const PLEX_HANDLERS: [&str; 14] = [
+    "root",
+    "identity",
+    "library_root",
+    "sections",
+    "section_all",
+    "metadata",
+    "children",
+    "image",
+    "part",
+    "photo_transcode",
+    "timeline",
+    "scrobble",
+    "unscrobble",
+    "search",
+];
+/// `unauthorized` is separate from `error` deliberately, and is the plan's
+/// three outcomes plus one. Every façade route but `root` and `identity`
+/// requires a plurx token presented as `X-Plex-Token`, so a Kodi or
+/// PlexKodiConnect box that is configured but not yet paired shows up here and
+/// nowhere else — and for a census "somebody tried" is the single most
+/// interesting thing that can happen.
+const PLEX_OUTCOMES: [&str; 4] = ["ok", "not_found", "unauthorized", "error"];
+
+/// The census cells, one per `(handler, outcome)`.
+///
+/// Held on `AppState` behind an `Arc`, not in a process-wide `static`, so a
+/// router counts only the requests that router served. In production that is
+/// the same thing — one state per process — but it is what lets a test assert
+/// an exact delta: a process-global counter is also moved by every other test
+/// in the binary that sends façade traffic, on libtest's parallel threads, and
+/// the adversarial review of PR #462 measured that race failing 34 runs in
+/// 400.
+pub(crate) struct PlexCensus {
+    cells: [AtomicU64; PLEX_HANDLERS.len() * PLEX_OUTCOMES.len()],
+}
+
+impl Default for PlexCensus {
+    fn default() -> Self {
+        Self {
+            cells: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+/// The façade's registered templates, and nothing else.
+///
+/// `/search` and `/hubs/search` are one label because they are one handler
+/// (`plex::search`) per API.md §20. A template that is not on this list cannot
+/// reach this function: the layer is attached to the façade sub-router, so the
+/// `None` arm means axum matched a façade route this list has not been told
+/// about, which a test asserts cannot happen.
+fn plex_handler_index(template: &str) -> Option<usize> {
+    let name = match template {
+        "/identity" => "identity",
+        "/library" => "library_root",
+        "/library/sections" => "sections",
+        "/library/sections/{id}/all" => "section_all",
+        "/library/metadata/{key}" => "metadata",
+        "/library/metadata/{key}/children" => "children",
+        "/library/metadata/{key}/{kind}" => "image",
+        "/library/parts/{file_id}/{mtime}/{name}" => "part",
+        "/photo/:/transcode" => "photo_transcode",
+        "/:/timeline" => "timeline",
+        "/:/scrobble" => "scrobble",
+        "/:/unscrobble" => "unscrobble",
+        "/search" | "/hubs/search" => "search",
+        _ => return None,
+    };
+    PLEX_HANDLERS.iter().position(|known| *known == name)
+}
+
+fn plex_outcome_index(status: StatusCode) -> usize {
+    match status.as_u16() {
+        401 | 403 => 2,
+        404 => 1,
+        code if (200..400).contains(&code) => 0,
+        _ => 3,
+    }
+}
+
+impl PlexCensus {
+    pub(crate) fn record(&self, handler: usize, status: StatusCode) {
+        self.cells[handler * PLEX_OUTCOMES.len() + plex_outcome_index(status)]
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn prometheus(&self) -> String {
+        let mut out = String::from(
+            "# HELP plurx_plex_requests_total Plex-compat façade requests by handler and outcome, since this process started. The census that decides whether the façade gets further work.\n\
+             # TYPE plurx_plex_requests_total counter\n",
+        );
+        for (handler_index, handler) in PLEX_HANDLERS.iter().enumerate() {
+            for (outcome_index, outcome) in PLEX_OUTCOMES.iter().enumerate() {
+                let count = self.cells[handler_index * PLEX_OUTCOMES.len() + outcome_index]
+                    .load(Ordering::Relaxed);
+                out.push_str(&format!(
+                    "plurx_plex_requests_total{{handler=\"{handler}\",outcome=\"{outcome}\"}} {count}\n"
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// Counts one façade request. Attached to the façade sub-router only, so a
+/// native `/api/v1/...` request never reaches it and cannot be mistaken for
+/// Plex traffic — which is the whole reason this is a separate layer rather
+/// than another label on `http_route_group`.
+async fn plex_facade_census(
+    State(census): State<std::sync::Arc<PlexCensus>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let handler = request
+        .extensions()
+        .get::<MatchedPath>()
+        .and_then(|path| plex_handler_index(path.as_str()));
+    let response = next.run(request).await;
+    if let Some(handler) = handler {
+        census.record(handler, response.status());
+    }
+    response
+}
+
+/// `root` is not a façade route: `/` serves the web app to a browser and the
+/// Plex capabilities container to a Plex client, from one handler. Counting it
+/// by path would count every page load as Plex traffic, so `root_dispatch`
+/// records it itself, on the branch it actually took.
+pub(crate) const PLEX_ROOT_HANDLER: usize = 0;
+
+// ---------------------------------------------------------------------------
+// Request outcome and body delivery (observability baseline, C-08 M1).
+//
+// `http_store_attribution` above already times the matched route by bounded
+// group and serving role. That timer stops when the handler returns its
+// `Response`, so it is response-header latency and nothing else. Two things
+// F-core-12 asks for are absent from it and are added here:
+//
+//   * the outcome of a request — no method and no status class exist anywhere
+//     in the exposition today, so a node answering every request with 503 and
+//     a node answering every request with 200 render identically;
+//   * how long the response body took to deliver, and whether its consumer
+//     stayed to the end. That is the "streaming-body completion" half of
+//     F-core-12's distinction, and on a media route an abandoned body is the
+//     ordinary end of a seek rather than an error, so the two endings are
+//     counted apart.
+//
+// The route label is `http_route_group`, the same bounded classification the
+// Store attribution uses, and not a per-route template. `http_route_group` is
+// this repository's one exhaustive inventory of registered `MatchedPath`
+// patterns, held by `registered_routes_reach_every_non_other_attribution_family`
+// and by the unclassified-pattern assertion in the route inventory test; a
+// second per-template table would be a second spelling of the same fact with
+// no test holding the two together, and it would have to be maintained by
+// hand because axum exposes no route list at runtime. The cost is real and is
+// stated rather than hidden: a 5xx on one item route and a 5xx on another are
+// one series here. The 5xx WARN line below carries the redacted target and the
+// request id, and that is what takes an operator from a series to a request.
+const HTTP_METHODS: [&str; 7] = ["get", "post", "put", "patch", "delete", "head", "other"];
+const HTTP_STATUS_CLASSES: [&str; 5] = ["2xx", "3xx", "4xx", "5xx", "other"];
+const HTTP_BODY_OUTCOMES: [&str; 2] = ["complete", "aborted"];
+/// Body delivery spans two orders of magnitude more than header latency — a
+/// JSON page finishes in milliseconds and a direct play runs for hours — which
+/// is the whole reason it is a separate family from `plurx_http_route_seconds`
+/// rather than more buckets on it.
+const HTTP_BODY_BUCKETS: [(u64, &str); 6] = [
+    (100_000_000, "0.1"),
+    (1_000_000_000, "1"),
+    (10_000_000_000, "10"),
+    (60_000_000_000, "60"),
+    (600_000_000_000, "600"),
+    (3_600_000_000_000, "3600"),
+];
+
+fn add_saturating(target: &AtomicU64, amount: u64) {
+    let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        (current != u64::MAX).then(|| current.saturating_add(amount))
+    });
+}
+
+/// Bounded by construction: an unlisted method is `other`, so no caller can
+/// mint a series by inventing a verb.
+fn http_method_index(method: &Method) -> usize {
+    match method.as_str() {
+        "GET" => 0,
+        "POST" => 1,
+        "PUT" => 2,
+        "PATCH" => 3,
+        "DELETE" => 4,
+        "HEAD" => 5,
+        _ => 6,
+    }
+}
+
+fn http_status_class_index(status: StatusCode) -> usize {
+    match status.as_u16() {
+        200..=299 => 0,
+        300..=399 => 1,
+        400..=499 => 2,
+        500..=599 => 3,
+        _ => 4,
+    }
+}
+
+#[derive(Default)]
+struct HttpBodyCell {
+    complete: AtomicU64,
+    aborted: AtomicU64,
+    elapsed_nanos: AtomicU64,
+    buckets: [AtomicU64; HTTP_BODY_BUCKETS.len()],
+}
+
+struct HttpRequestMetrics {
+    requests: [AtomicU64; HTTP_ROUTE_GROUPS.len() * HTTP_METHODS.len() * HTTP_STATUS_CLASSES.len()],
+    bodies: [HttpBodyCell; HTTP_ROUTE_GROUPS.len()],
+}
+
+impl Default for HttpRequestMetrics {
+    fn default() -> Self {
+        Self {
+            requests: std::array::from_fn(|_| AtomicU64::new(0)),
+            bodies: std::array::from_fn(|_| HttpBodyCell::default()),
+        }
+    }
+}
+
+impl HttpRequestMetrics {
+    fn record_request(&self, group: usize, method: usize, status: usize) {
+        add_saturating(
+            &self.requests
+                [(group * HTTP_METHODS.len() + method) * HTTP_STATUS_CLASSES.len() + status],
+            1,
+        );
+    }
+
+    fn record_body(&self, group: usize, elapsed: Duration, complete: bool) {
+        let cell = &self.bodies[group];
+        add_saturating(
+            if complete {
+                &cell.complete
+            } else {
+                &cell.aborted
+            },
+            1,
+        );
+        let elapsed_nanos = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+        add_saturating(&cell.elapsed_nanos, elapsed_nanos);
+        if let Some(index) = HTTP_BODY_BUCKETS
+            .iter()
+            .position(|(upper, _)| elapsed_nanos <= *upper)
+        {
+            add_saturating(&cell.buckets[index], 1);
+        }
+    }
+
+    fn render(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = String::from(
+            "# HELP plurx_http_requests_total HTTP requests by bounded route group, method and status class.\n\
+             # TYPE plurx_http_requests_total counter\n",
+        );
+        for (group_index, group) in HTTP_ROUTE_GROUPS.iter().enumerate() {
+            for (method_index, method) in HTTP_METHODS.iter().enumerate() {
+                for (status_index, status) in HTTP_STATUS_CLASSES.iter().enumerate() {
+                    let count = self.requests[(group_index * HTTP_METHODS.len() + method_index)
+                        * HTTP_STATUS_CLASSES.len()
+                        + status_index]
+                        .load(Ordering::Relaxed);
+                    let _ = writeln!(
+                        out,
+                        "plurx_http_requests_total{{route_group=\"{group}\",method=\"{method}\",status=\"{status}\"}} {count}"
+                    );
+                }
+            }
+        }
+        out.push_str(
+            "# HELP plurx_http_body_seconds Response body delivery time, from the handler's response to the body's last frame or its drop.\n\
+             # TYPE plurx_http_body_seconds histogram\n",
+        );
+        for (group_index, group) in HTTP_ROUTE_GROUPS.iter().enumerate() {
+            let cell = &self.bodies[group_index];
+            let mut cumulative = 0_u64;
+            for (bucket_index, (_, upper)) in HTTP_BODY_BUCKETS.iter().enumerate() {
+                cumulative =
+                    cumulative.saturating_add(cell.buckets[bucket_index].load(Ordering::Relaxed));
+                let _ = writeln!(
+                    out,
+                    "plurx_http_body_seconds_bucket{{route_group=\"{group}\",le=\"{upper}\"}} {cumulative}"
+                );
+            }
+            let count = cell
+                .complete
+                .load(Ordering::Relaxed)
+                .saturating_add(cell.aborted.load(Ordering::Relaxed));
+            let _ = writeln!(
+                out,
+                "plurx_http_body_seconds_bucket{{route_group=\"{group}\",le=\"+Inf\"}} {count}"
+            );
+            let seconds = cell.elapsed_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0;
+            let _ = writeln!(
+                out,
+                "plurx_http_body_seconds_sum{{route_group=\"{group}\"}} {seconds:.9}"
+            );
+            let _ = writeln!(
+                out,
+                "plurx_http_body_seconds_count{{route_group=\"{group}\"}} {count}"
+            );
+        }
+        out.push_str(
+            "# HELP plurx_http_bodies_total Response bodies by how they ended. An aborted body is a consumer that went away, which on a media route is the ordinary end of a seek and not an error.\n\
+             # TYPE plurx_http_bodies_total counter\n",
+        );
+        for (group_index, group) in HTTP_ROUTE_GROUPS.iter().enumerate() {
+            let cell = &self.bodies[group_index];
+            for outcome in HTTP_BODY_OUTCOMES {
+                let count = if outcome == "complete" {
+                    cell.complete.load(Ordering::Relaxed)
+                } else {
+                    cell.aborted.load(Ordering::Relaxed)
+                };
+                let _ = writeln!(
+                    out,
+                    "plurx_http_bodies_total{{route_group=\"{group}\",outcome=\"{outcome}\"}} {count}"
+                );
+            }
+        }
+        out
+    }
+}
+
+static HTTP_REQUEST_METRICS: LazyLock<HttpRequestMetrics> =
+    LazyLock::new(HttpRequestMetrics::default);
+
+/// At most one 5xx access line per route group per second, carrying how many
+/// it swallowed since the last one.
+///
+/// Without this the line is a hazard rather than a help. A fenced node, a
+/// learner outside its eligible routes, and a node in maintenance each refuse
+/// **every** request with 503, so at any real request rate one WARN per
+/// request would evict the whole bounded ring behind Settings → System → Logs
+/// — the very place an admin goes to find out why the node is refusing. The
+/// counters stay exact; only the prose is sampled, and the line says by how
+/// much.
+const ACCESS_LINE_INTERVAL_NANOS: u64 = 1_000_000_000;
+
+struct AccessLineThrottle {
+    /// Nanoseconds since `started_at` of the last emitted line, per group.
+    /// Zero means none has been emitted yet.
+    last_nanos: [AtomicU64; HTTP_ROUTE_GROUPS.len()],
+    suppressed: [AtomicU64; HTTP_ROUTE_GROUPS.len()],
+    started_at: Instant,
+}
+
+impl Default for AccessLineThrottle {
+    fn default() -> Self {
+        Self {
+            last_nanos: std::array::from_fn(|_| AtomicU64::new(0)),
+            suppressed: std::array::from_fn(|_| AtomicU64::new(0)),
+            started_at: Instant::now(),
+        }
+    }
+}
+
+impl AccessLineThrottle {
+    /// `Some(n)` when a line may be written, `n` being how many were suppressed
+    /// since the last one; `None` when it must not be.
+    fn admit(&self, group: usize) -> Option<u64> {
+        // `max(1)` so the first request of the process, which may land on
+        // nanosecond zero, still counts as "a line has been emitted".
+        let now = (self
+            .started_at
+            .elapsed()
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64)
+            .max(1);
+        let last = self.last_nanos[group].load(Ordering::Relaxed);
+        if last != 0 && now.saturating_sub(last) < ACCESS_LINE_INTERVAL_NANOS {
+            self.suppressed[group].fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        // Two threads can both pass the check at once. The loser writes a
+        // second line rather than a wrong one, which is the safe way to lose
+        // this race.
+        self.last_nanos[group].store(now, Ordering::Relaxed);
+        Some(self.suppressed[group].swap(0, Ordering::Relaxed))
+    }
+}
+
+static ACCESS_LINES: LazyLock<AccessLineThrottle> = LazyLock::new(AccessLineThrottle::default);
+
+/// Times one response body and classifies how it ended.
+///
+/// `size_hint` and `is_end_stream` are delegated to the inner body unchanged.
+/// That is load-bearing rather than tidy: hyper derives `Content-Length` from
+/// the size hint when the handler has not set the header itself, so a wrapper
+/// that reported an unknown length would silently move range responses onto
+/// chunked framing.
+///
+/// A body is `complete` when it handed the connection everything it promised,
+/// and there are two ways to know that because hyper ends bodies two ways:
+///
+/// - a body polled to its end (`Poll::Ready(None)`). A chunked body always
+///   ends like this: hyper has to see the end to write the terminating chunk.
+/// - a body whose response head declared a length and which has yielded that
+///   many data bytes. hyper **does not poll such a body to its end.** Once its
+///   length encoder has written the declared bytes the dispatcher drops the
+///   body unpolled (hyper 1.x `proto/h1/dispatch.rs`, the `!can_write_body()`
+///   branch), and a stream-backed body — every direct play range and every HLS
+///   segment plurx serves — reports `is_end_stream() == false` until it has
+///   been polled to `None`. Without the byte count every fully delivered media
+///   body would be counted as abandoned.
+///
+/// "Handed the connection" is not "acknowledged by the client": a connection
+/// that dies after the last bytes were yielded but before they reached the
+/// socket still counts `complete`. That is the same line the chunked case
+/// draws, and the last point at which a body can observe its own delivery.
+struct MeasuredBody {
+    inner: axum::body::Body,
+    metrics: &'static HttpRequestMetrics,
+    group: usize,
+    started_at: Instant,
+    /// The number of body bytes the response head promised, when it promised
+    /// a number (see `declared_body_length`).
+    declared: Option<u64>,
+    /// Data bytes this body has yielded to the connection so far.
+    delivered: u64,
+    recorded: bool,
+}
+
+impl MeasuredBody {
+    fn new(
+        metrics: &'static HttpRequestMetrics,
+        group: usize,
+        inner: axum::body::Body,
+        declared: Option<u64>,
+    ) -> Self {
+        Self {
+            inner,
+            metrics,
+            group,
+            started_at: Instant::now(),
+            declared,
+            delivered: 0,
+            recorded: false,
+        }
+    }
+
+    /// Whether everything this body promised has been handed over: it is at
+    /// its end, or it has yielded the length its response head declared.
+    fn delivered_everything(&self) -> bool {
+        http_body::Body::is_end_stream(&self.inner)
+            || self
+                .declared
+                .is_some_and(|declared| self.delivered >= declared)
+    }
+
+    fn finish(&mut self, complete: bool) {
+        if self.recorded {
+            return;
+        }
+        self.recorded = true;
+        self.metrics
+            .record_body(self.group, self.started_at.elapsed(), complete);
+    }
+}
+
+impl http_body::Body for MeasuredBody {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        use std::task::Poll;
+
+        let this = self.get_mut();
+        let polled = std::pin::Pin::new(&mut this.inner).poll_frame(cx);
+        match &polled {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    this.delivered = this.delivered.saturating_add(data.len() as u64);
+                }
+            }
+            Poll::Ready(None) => this.finish(true),
+            // A body that ended in an error did not deliver what it promised,
+            // so it is counted beside the abandoned ones rather than as a
+            // completed delivery.
+            Poll::Ready(Some(Err(_))) => this.finish(false),
+            Poll::Pending => {}
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+impl Drop for MeasuredBody {
+    fn drop(&mut self) {
+        // A body dropped short of what it promised is a consumer that went
+        // away. One dropped after handing over everything — at its end, or
+        // with its declared length yielded, which is how hyper lets go of
+        // every fixed-length body — was delivered.
+        let complete = self.delivered_everything();
+        self.finish(complete);
+    }
+}
+
+/// The number of body bytes a response's head promised, if it promised one.
+///
+/// A response to HEAD, and a 1xx, 204 or 304, promises none whatever its
+/// `Content-Length` says: there the header describes the representation, and
+/// hyper writes no body at all. Otherwise the header wins when present,
+/// because it is what hyper frames the response by; when the handler set none,
+/// hyper derives it from the body's exact size hint, so that is the fallback.
+/// Neither means a chunked body, which is `complete` only at its end.
+fn declared_body_length(
+    head_request: bool,
+    status: StatusCode,
+    response: &Response,
+) -> Option<u64> {
+    if head_request
+        || status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED
+    {
+        return Some(0);
+    }
+    response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .or_else(|| http_body::Body::size_hint(response.body()).exact())
+}
+
+/// Counts every request's outcome and times its body.
+///
+/// Layered outside `http_store_attribution`, and therefore outside
+/// `cluster_capacity_gate`, so the 503s the gate produces for a learner, a
+/// fenced node or a node in maintenance are counted. A refusal is a request,
+/// and a node refusing everything with an uncounted 503 is exactly the failure
+/// this family exists to show.
+async fn http_request_metrics(request: Request<axum::body::Body>, next: Next) -> Response {
+    measure_http_request(&HTTP_REQUEST_METRICS, request, next).await
+}
+
+/// `http_request_metrics` over a metrics table the caller names, so a test can
+/// own one and read exact counts without racing every other router test in
+/// the binary for the process-wide cells.
+async fn measure_http_request(
+    metrics: &'static HttpRequestMetrics,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    // `other` is the last group, and is what both ways of having no template —
+    // the web fallback and a genuinely unmatched path — resolve to.
+    let group = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or(HTTP_ROUTE_GROUPS.len() - 1, |path| {
+            http_route_group(path.as_str())
+        });
+    let method = http_method_index(request.method());
+    let head_request = request.method() == Method::HEAD;
+    let target = safe_trace_target(request.uri());
+    let request_id = request
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let started_at = Instant::now();
+    let response = next.run(request).await;
+    let status = response.status();
+    metrics.record_request(group, method, http_status_class_index(status));
+    if status.is_server_error() {
+        // Only 5xx, and at most one line per route group per second.
+        // `logbuf::LogBuffer` is a bounded ring and it is the only log the
+        // product itself can show; a line per successful request would evict
+        // everything else on a node serving one HLS segment per second per
+        // viewer, and a line per refusal would do the same on a fenced node.
+        // The counters above carry the volume, this ring carries the
+        // exceptions — and `also_suppressed` says what the sampling cost.
+        if let Some(also_suppressed) = ACCESS_LINES.admit(group) {
+            tracing::warn!(
+                target: "plurxd::http",
+                route_group = HTTP_ROUTE_GROUPS[group],
+                status = status.as_u16(),
+                latency_ms = started_at.elapsed().as_millis() as u64,
+                request_id = %request_id,
+                path = %target,
+                also_suppressed,
+                "http request failed"
+            );
+        }
+    }
+    let declared = declared_body_length(head_request, status, &response);
+    response.map(|body| axum::body::Body::new(MeasuredBody::new(metrics, group, body, declared)))
+}
+
+pub(crate) fn prometheus_http_request_metrics() -> String {
+    HTTP_REQUEST_METRICS.render()
+}
+
+// ---------------------------------------------------------------------------
+// Request ids (observability baseline, C-08 M2).
+
+pub(crate) const REQUEST_ID_HEADER: &str = "x-request-id";
+const MAX_REQUEST_ID: usize = 64;
+
+/// An id a caller supplied is adopted only if it is a short, boring token.
+///
+/// Anything else is replaced rather than refused: the id is a correlation aid,
+/// and refusing a request over a malformed log field would make a log field
+/// load-bearing for service. The discarded value is never returned, logged or
+/// stored anywhere — a caller that puts a bearer token in this header must not
+/// get it written into journald or into the in-product log ring.
+fn adopt_or_mint_request_id(incoming: Option<&HeaderValue>) -> HeaderValue {
+    match incoming.and_then(|value| value.to_str().ok()) {
+        Some(value)
+            if !value.is_empty()
+                && value.len() <= MAX_REQUEST_ID
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') =>
+        {
+            HeaderValue::from_str(value).unwrap_or_else(|_| mint_request_id())
+        }
+        _ => mint_request_id(),
+    }
+}
+
+fn mint_request_id() -> HeaderValue {
+    let mut buffer = [0_u8; uuid::fmt::Simple::LENGTH];
+    let text = uuid::Uuid::new_v4().simple().encode_lower(&mut buffer);
+    HeaderValue::from_str(text).expect("lowercase hex is a legal header value")
+}
+
+/// Gives every request an id, on the request, on its span, and on the response.
+///
+/// Outermost of all the layers, because everything inside it — the 5xx access
+/// line, the `http_request` span and any handler — reads the id back out of
+/// the request headers, and only this layer is allowed to decide what that
+/// value is. The id is deliberately **not** a metric label: a per-request label
+/// is unbounded, which is the single most common way a metrics system is
+/// destroyed.
+async fn http_request_id(mut request: Request<axum::body::Body>, next: Next) -> Response {
+    let id = adopt_or_mint_request_id(request.headers().get(REQUEST_ID_HEADER));
+    request.headers_mut().insert(REQUEST_ID_HEADER, id.clone());
+    let mut response = next.run(request).await;
+    // A handler that already answered with an id of its own keeps it.
+    response
+        .headers_mut()
+        .entry(REQUEST_ID_HEADER)
+        .or_insert(id);
+    response
+}
+
 #[derive(Clone, Copy)]
 enum DeadlineGroup {
     JsonShort,
@@ -649,6 +1335,10 @@ pub fn router(state: AppState) -> Router {
         // Browse
         .route("/items/{id}", get(browse::item_detail).patch(items::edit))
         .route("/files/{id}/dv-conversion", get(dv_disk::file_status))
+        .route(
+            "/files/{id}/chapters/{index}/thumb",
+            get(chapter_thumbs::serve),
+        )
         .route("/dv-conversions", get(dv_disk::status))
         .route("/analysis/summary", get(analysis::summary))
         .route("/analysis/jobs", get(analysis::jobs))
@@ -978,6 +1668,16 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             mutable_media_serving_gate,
+        ))
+        // Outside the serving gate, so a request `mutable_media_serving_gate`
+        // refuses is still counted. That is the only refusal it sees.
+        // `cluster_capacity_gate` is layered outside the whole router (below)
+        // and answers 503 before routing — maintenance, a fenced node, a
+        // learner-ineligible route — so those refusals never reach this layer
+        // and are not counted. The plan's §8.5 closing rule accounts for that.
+        .layer(axum::middleware::from_fn_with_state(
+            std::sync::Arc::clone(&state.plex_census),
+            plex_facade_census,
         ));
 
     let public_short = Router::new()
@@ -1156,6 +1856,14 @@ pub fn router(state: AppState) -> Router {
                     method = %request.method(),
                     target = %safe_trace_target(request.uri()),
                     version = ?request.version(),
+                    // Written by `http_request_id` outside this layer, so the
+                    // value here is always a short alphanumeric token this
+                    // process vouches for, never the raw header a caller sent.
+                    request_id = request
+                        .headers()
+                        .get(REQUEST_ID_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default(),
                 )
             }),
         )
@@ -1167,6 +1875,12 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             http_store_attribution,
         ))
+        // Outside the Store attribution, and therefore outside the capacity
+        // gate, so a 503 the gate produces is still counted as a request.
+        .layer(axum::middleware::from_fn(http_request_metrics))
+        // Outermost: every layer inside reads the id back out of the request
+        // headers, so this one has to have written it first.
+        .layer(axum::middleware::from_fn(http_request_id))
         .with_state(state)
 }
 
@@ -1517,10 +2231,15 @@ async fn root_dispatch(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     if plex::looks_like_plex(&headers) {
-        match plex::root(state).await {
+        let census = std::sync::Arc::clone(&state.plex_census);
+        let response = match plex::root(state).await {
             Ok(resp) => resp,
             Err(e) => e.into_response(),
-        }
+        };
+        // Only this branch. A browser loading the web app from the same path
+        // is not façade traffic and must not be counted as any.
+        census.record(PLEX_ROOT_HANDLER, response.status());
+        response
     } else {
         web::index().await.into_response()
     }
@@ -1683,6 +2402,884 @@ mod tests {
             plurx_core::store::validation_time_http_store_operation(class).await;
         }
         "ok"
+    }
+
+    // -- Plex façade census (C-07 M0) ---------------------------------------
+
+    fn plex_cell(exposition: &str, handler: &str, outcome: &str) -> u64 {
+        let prefix =
+            format!("plurx_plex_requests_total{{handler=\"{handler}\",outcome=\"{outcome}\"}} ");
+        exposition
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("a fixed census cell")
+            .parse()
+            .expect("counter")
+    }
+
+    /// The census is only worth reading if its handler list covers every route
+    /// the façade actually registers. This reads the registrations out of
+    /// `router()`'s own source rather than a list somebody kept in step by
+    /// hand, so adding a façade route without a label fails here.
+    #[test]
+    fn every_registered_facade_route_has_a_census_label() {
+        let source = include_str!("mod.rs");
+        let block = source
+            .split_once("    let plex_short = Router::new()")
+            .expect("plex_short")
+            .1
+            .split_once("    let plex_routes = Router::new()")
+            .expect("plex_routes")
+            .0;
+        let templates = block
+            .match_indices(".route(\"")
+            .map(|(index, _)| {
+                let rest = &block[index + ".route(\"".len()..];
+                rest.split_once('"').expect("template").0
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            templates.len(),
+            14,
+            "the façade registers {} routes: {templates:?}",
+            templates.len()
+        );
+        for template in &templates {
+            assert!(
+                plex_handler_index(template).is_some(),
+                "registered façade route has no census label: {template}"
+            );
+        }
+        // `/search` and `/hubs/search` are one handler and share one label, so
+        // fourteen routes map onto thirteen names; `root` is the fourteenth
+        // name and is recorded by `root_dispatch` instead of by a route.
+        let mut labelled = templates
+            .iter()
+            .filter_map(|template| plex_handler_index(template))
+            .collect::<Vec<_>>();
+        labelled.sort_unstable();
+        labelled.dedup();
+        assert_eq!(labelled.len(), 13);
+        assert!(!labelled.contains(&PLEX_ROOT_HANDLER));
+        assert_eq!(PLEX_HANDLERS[PLEX_ROOT_HANDLER], "root");
+    }
+
+    #[test]
+    fn the_census_label_space_is_closed() {
+        let exposition = PlexCensus::default().prometheus();
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_plex_requests_total{"))
+                .count(),
+            PLEX_HANDLERS.len() * PLEX_OUTCOMES.len()
+        );
+        // Nothing outside the façade's own templates can reach a label.
+        assert!(plex_handler_index("/api/v1/libraries").is_none());
+        assert!(plex_handler_index("/library/sections/1/all").is_none());
+        assert_eq!(plex_outcome_index(StatusCode::OK), 0);
+        assert_eq!(plex_outcome_index(StatusCode::NOT_FOUND), 1);
+        assert_eq!(plex_outcome_index(StatusCode::UNAUTHORIZED), 2);
+        assert_eq!(plex_outcome_index(StatusCode::FORBIDDEN), 2);
+        assert_eq!(plex_outcome_index(StatusCode::INTERNAL_SERVER_ERROR), 3);
+        assert_eq!(plex_outcome_index(StatusCode::SERVICE_UNAVAILABLE), 3);
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_facade_request_is_counted_as_a_client_that_tried() {
+        let (app, state) = test_app_with_state();
+        let before = state.plex_census.prometheus();
+        let response = app
+            .oneshot(get("/library/sections", None))
+            .await
+            .expect("response");
+        // No `X-Plex-Token`: the façade refuses, and that refusal is the signal
+        // a census exists to see.
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let after = state.plex_census.prometheus();
+        assert_eq!(
+            plex_cell(&after, "sections", "unauthorized"),
+            plex_cell(&before, "sections", "unauthorized") + 1
+        );
+        assert_eq!(
+            plex_cell(&after, "sections", "ok"),
+            plex_cell(&before, "sections", "ok")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_public_facade_routes_are_counted_and_the_web_app_is_not() {
+        let (app, state) = test_app_with_state();
+        let root_total = |text: &str| {
+            PLEX_OUTCOMES
+                .iter()
+                .map(|outcome| plex_cell(text, "root", outcome))
+                .sum::<u64>()
+        };
+        let before = state.plex_census.prometheus();
+
+        // `/identity` takes no token and is how a Plex client finds a server.
+        let identity = app
+            .clone()
+            .oneshot(get("/identity", None))
+            .await
+            .expect("response");
+        assert_eq!(identity.status(), StatusCode::OK);
+        let after_identity = state.plex_census.prometheus();
+        assert_eq!(
+            plex_cell(&after_identity, "identity", "ok"),
+            plex_cell(&before, "identity", "ok") + 1
+        );
+
+        // `/` from a browser is the web app. `root_dispatch` serves both from
+        // one handler, so the two branches are asserted one at a time: a total
+        // alone cannot tell "the Plex branch counted" from "the web branch
+        // counted instead".
+        let web_root = app.clone().oneshot(get("/", None)).await.expect("response");
+        assert!(web_root.status().is_success());
+        let after_web = state.plex_census.prometheus();
+        assert_eq!(
+            root_total(&after_web),
+            root_total(&after_identity),
+            "a browser page load is not façade traffic"
+        );
+
+        // `/` with Plex headers is the capabilities container.
+        let plex_root = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("x-plex-product", "PlexKodiConnect")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert!(plex_root.status().is_success() || plex_root.status().is_client_error());
+        assert_eq!(
+            root_total(&state.plex_census.prometheus()),
+            root_total(&after_web) + 1,
+            "the Plex branch of root_dispatch is the one that counts"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_native_request_never_reaches_the_census() {
+        let (app, state) = test_app_with_state();
+        let before = state.plex_census.prometheus();
+        for path in ["/api/v1/libraries", "/api/v1/search", "/healthz"] {
+            let _ = app
+                .clone()
+                .oneshot(get(path, None))
+                .await
+                .expect("response");
+        }
+        assert_eq!(
+            state.plex_census.prometheus(),
+            before,
+            "a native request moved a façade counter"
+        );
+    }
+
+    /// The census tests above assert exact deltas, which is only sound if the
+    /// counter they read is moved by nothing but their own requests. With a
+    /// process-global counter every other test in this binary that sends
+    /// façade traffic (`plex_facade_requires_a_valid_token`,
+    /// `plex_facade_serves_seeded_content`, ...) moves it too, on libtest's
+    /// parallel threads. This pins the property deterministically instead of
+    /// by racing: a second router's façade traffic must not reach this one's
+    /// census, and `/metrics` must render this router's census, not another.
+    #[tokio::test]
+    async fn each_router_counts_only_its_own_facade_requests() {
+        let (app, state) = test_app_with_state();
+        let (other_app, _other_state) = test_app_with_state();
+        let before = state.plex_census.prometheus();
+        for _ in 0..3 {
+            let _ = other_app
+                .clone()
+                .oneshot(get("/library/sections", None))
+                .await
+                .expect("response");
+        }
+        assert_eq!(
+            state.plex_census.prometheus(),
+            before,
+            "another router's façade request moved this router's census"
+        );
+
+        let _ = app
+            .clone()
+            .oneshot(get("/library/sections", None))
+            .await
+            .expect("response");
+        let metrics = app.oneshot(get("/metrics", None)).await.expect("response");
+        let body = axum::body::to_bytes(metrics.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let exposition = String::from_utf8(body.to_vec()).expect("utf-8");
+        assert_eq!(
+            plex_cell(&exposition, "sections", "unauthorized"),
+            plex_cell(&before, "sections", "unauthorized") + 1,
+            "/metrics renders the census of the router that served it"
+        );
+    }
+
+    // -- observability baseline (C-08 M1/M2/M3) -----------------------------
+
+    use crate::logbuf::testwriter::CapturedWriter;
+
+    async fn streaming_test_handler() -> Response {
+        // Three frames, 100 ms apart: the response head is available at once
+        // and the body takes a third of a second, which is the whole point of
+        // measuring the two separately.
+        let frames = futures_util::stream::unfold(0_u8, |index| async move {
+            if index >= 3 {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Some((
+                Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"frame")),
+                index + 1,
+            ))
+        });
+        axum::body::Body::from_stream(frames).into_response()
+    }
+
+    /// The two observability layers over three routes with known shapes, in the
+    /// same order `router()` adds them.
+    ///
+    /// The metrics layer records into a table this test owns rather than the
+    /// process-wide one, so its counts are exact: every other router test in
+    /// this binary increments the process-wide cells in parallel, and two of
+    /// these tests share the `search` group.
+    fn observability_probe_router() -> (Router, &'static HttpRequestMetrics) {
+        let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let router = Router::new()
+            .route("/api/v1/items/{id}", axum::routing::get(|| async { "ok" }))
+            .route(
+                "/api/v1/settings",
+                axum::routing::get(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+            )
+            .route(
+                "/api/v1/cluster/status",
+                axum::routing::get(|| async { (StatusCode::SERVICE_UNAVAILABLE, "refused") }),
+            )
+            .route("/api/v1/search", axum::routing::get(streaming_test_handler))
+            .layer(axum::middleware::from_fn(
+                move |request: Request<axum::body::Body>, next: Next| {
+                    measure_http_request(metrics, request, next)
+                },
+            ))
+            .layer(axum::middleware::from_fn(http_request_id));
+        (router, metrics)
+    }
+
+    fn request_cell(exposition: &str, group: &str, method: &str, status: &str) -> u64 {
+        let prefix = format!(
+            "plurx_http_requests_total{{route_group=\"{group}\",method=\"{method}\",status=\"{status}\"}} "
+        );
+        exposition
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("a fixed request cell")
+            .parse()
+            .expect("counter")
+    }
+
+    fn body_cell(exposition: &str, group: &str, outcome: &str) -> u64 {
+        let prefix =
+            format!("plurx_http_bodies_total{{route_group=\"{group}\",outcome=\"{outcome}\"}} ");
+        exposition
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("a fixed body cell")
+            .parse()
+            .expect("counter")
+    }
+
+    fn body_seconds_sum(exposition: &str, group: &str) -> f64 {
+        let prefix = format!("plurx_http_body_seconds_sum{{route_group=\"{group}\"}} ");
+        exposition
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("a fixed body sum")
+            .parse()
+            .expect("seconds")
+    }
+
+    #[tokio::test]
+    async fn a_request_is_labelled_by_its_route_group_and_never_by_its_uri() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let response = app
+            .oneshot(get("/api/v1/items/424242", None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let after = metrics.render();
+        assert_eq!(
+            request_cell(&after, "item", "get", "2xx"),
+            request_cell(&before, "item", "get", "2xx") + 1
+        );
+        // The concrete id reached the template but must not have reached a
+        // label. `424242` is distinctive enough that a stray substring match
+        // would be a real leak rather than a coincidence.
+        assert!(
+            !after.contains("424242"),
+            "a request id reached the exposition"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unmatched_path_uses_one_shared_label_and_mints_no_series() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let before_lines = before
+            .lines()
+            .filter(|line| line.starts_with("plurx_http_requests_total{"))
+            .count();
+        for index in 0..100 {
+            let response = app
+                .clone()
+                .oneshot(get(&format!("/nothing/here/{index}"), None))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        let after = metrics.render();
+        assert!(
+            request_cell(&after, "other", "get", "4xx")
+                >= request_cell(&before, "other", "get", "4xx") + 100
+        );
+        assert_eq!(
+            after
+                .lines()
+                .filter(|line| line.starts_with("plurx_http_requests_total{"))
+                .count(),
+            before_lines,
+            "a hundred distinct paths must not mint a single new series"
+        );
+    }
+
+    #[test]
+    fn the_request_label_space_is_closed() {
+        let exposition = prometheus_http_request_metrics();
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_http_requests_total{"))
+                .count(),
+            HTTP_ROUTE_GROUPS.len() * HTTP_METHODS.len() * HTTP_STATUS_CLASSES.len()
+        );
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_http_bodies_total{"))
+                .count(),
+            HTTP_ROUTE_GROUPS.len() * HTTP_BODY_OUTCOMES.len()
+        );
+        // Every label value in the exposition comes from one of the three
+        // fixed arrays, so the arrays are the whole vocabulary.
+        for line in exposition
+            .lines()
+            .filter(|line| line.starts_with("plurx_http_requests_total{"))
+        {
+            let labels = line
+                .split_once('{')
+                .expect("labels")
+                .1
+                .split_once('}')
+                .expect("labels")
+                .0;
+            let values = labels
+                .split(',')
+                .map(|pair| pair.split_once('=').expect("pair").1.trim_matches('"'))
+                .collect::<Vec<_>>();
+            assert!(HTTP_ROUTE_GROUPS.contains(&values[0]), "{line}");
+            assert!(HTTP_METHODS.contains(&values[1]), "{line}");
+            assert!(HTTP_STATUS_CLASSES.contains(&values[2]), "{line}");
+        }
+        assert_eq!(http_method_index(&Method::TRACE), 6);
+        assert_eq!(http_status_class_index(StatusCode::CONTINUE), 4);
+    }
+
+    #[tokio::test]
+    async fn header_latency_and_body_delivery_are_separate_measurements() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let started_at = Instant::now();
+        let response = app
+            .oneshot(get("/api/v1/search", None))
+            .await
+            .expect("response");
+        // `oneshot` resolves when the handler has returned its response; the
+        // body has not been read yet.
+        let to_headers = started_at.elapsed();
+        let drained = Instant::now();
+        let body = response.into_body().collect().await.expect("body");
+        let to_last_frame = drained.elapsed();
+        assert_eq!(body.to_bytes().len(), 15);
+        assert!(
+            to_headers < Duration::from_millis(80),
+            "the response head took {to_headers:?}"
+        );
+        assert!(
+            to_last_frame >= Duration::from_millis(250),
+            "the body took {to_last_frame:?}"
+        );
+        let after = metrics.render();
+        assert_eq!(
+            body_cell(&after, "search", "complete"),
+            body_cell(&before, "search", "complete") + 1
+        );
+        // The body histogram describes delivery, not the handler: it must have
+        // grown by roughly the streaming time, which is an order of magnitude
+        // more than the response head took.
+        let delivered = body_seconds_sum(&after, "search") - body_seconds_sum(&before, "search");
+        assert!(delivered >= 0.25, "body seconds grew by {delivered}");
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_body_counts_aborted_and_not_as_an_error() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let response = app
+            .oneshot(get("/api/v1/search", None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        // The consumer goes away without reading a frame, exactly as a client
+        // that seeks away from a segment does.
+        drop(response);
+        let after = metrics.render();
+        assert_eq!(
+            body_cell(&after, "search", "aborted"),
+            body_cell(&before, "search", "aborted") + 1
+        );
+        assert_eq!(
+            body_cell(&after, "search", "complete"),
+            body_cell(&before, "search", "complete"),
+            "an abandoned body is not a completed one"
+        );
+        assert_eq!(
+            request_cell(&after, "search", "get", "2xx"),
+            request_cell(&before, "search", "get", "2xx") + 1,
+            "and the request itself still succeeded"
+        );
+    }
+
+    /// Four 5-byte frames from a stream, so the body cannot know it has ended
+    /// until it is polled past its last frame — the shape of every direct play
+    /// range and HLS segment plurx serves.
+    fn four_frame_stream_body() -> axum::body::Body {
+        axum::body::Body::from_stream(futures_util::stream::iter(
+            (0..4).map(|_| Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"frame"))),
+        ))
+    }
+
+    /// `/api/v1/items/length` declares `Content-Length: 20` for the stream the
+    /// way `stream.rs` and `hls.rs` do; any other id leaves hyper to frame it
+    /// chunked.
+    async fn framed_stream_handler(
+        axum::extract::Path(framing): axum::extract::Path<String>,
+    ) -> Response {
+        let mut response = four_frame_stream_body().into_response();
+        if framing == "length" {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, HeaderValue::from_static("20"));
+        }
+        response
+    }
+
+    /// One request on a fresh HTTP/1.1 connection, read until the server
+    /// closes it. `connection: close` makes that close the end of the
+    /// exchange, and hyper closes only after its dispatcher has let go of the
+    /// body, so the body's outcome is recorded by the time this returns.
+    async fn raw_http1_exchange(address: std::net::SocketAddr, method: &str, path: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        stream
+            .write_all(
+                format!(
+                    "{method} {path} HTTP/1.1\r\nhost: plurx.test\r\nconnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("request");
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.expect("response");
+        String::from_utf8(raw).expect("a UTF-8 response")
+    }
+
+    /// The #461 review's reproduction, kept as the regression test: through a
+    /// real hyper connection rather than `oneshot` + `collect()`, which always
+    /// polls a body to its end and so can never see how hyper lets go of a
+    /// fixed-length one.
+    #[tokio::test]
+    async fn a_fully_delivered_body_counts_complete_over_a_real_connection_whatever_its_framing() {
+        let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let app = Router::new()
+            .route(
+                "/api/v1/items/{id}",
+                axum::routing::get(framed_stream_handler),
+            )
+            .layer(axum::middleware::from_fn(
+                move |request: Request<axum::body::Body>, next: Next| {
+                    measure_http_request(metrics, request, next)
+                },
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let chunked = raw_http1_exchange(address, "GET", "/api/v1/items/chunked").await;
+        let length = raw_http1_exchange(address, "GET", "/api/v1/items/length").await;
+        assert!(
+            chunked
+                .to_ascii_lowercase()
+                .contains("transfer-encoding: chunked"),
+            "{chunked}"
+        );
+        assert!(
+            length.to_ascii_lowercase().contains("content-length: 20"),
+            "{length}"
+        );
+        for response in [&chunked, &length] {
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            assert_eq!(response.matches("frame").count(), 4, "{response}");
+        }
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (2, 0),
+            "both bodies reached the client whole, so neither was abandoned"
+        );
+
+        // HEAD: axum answers it from the GET route with the GET's headers, and
+        // hyper writes no body. Nothing was promised, so nothing was abandoned.
+        let head = raw_http1_exchange(address, "HEAD", "/api/v1/items/length").await;
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(!head.contains("frame"), "{head}");
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (3, 0),
+            "a HEAD response has no body to abandon"
+        );
+    }
+
+    /// The other half of the byte count: a fixed-length body let go of before
+    /// it yielded its declared length is still a consumer that went away, and
+    /// one that yielded all of it is complete without ever being polled to
+    /// `None` — which is exactly what hyper does with it.
+    #[tokio::test]
+    async fn a_fixed_length_body_is_complete_at_its_declared_length_and_aborted_short_of_it() {
+        let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let group = http_route_group("/api/v1/items/{id}");
+
+        let mut short = MeasuredBody::new(metrics, group, four_frame_stream_body(), Some(20));
+        short.frame().await.expect("a frame").expect("data");
+        drop(short);
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (0, 1),
+            "5 of 20 declared bytes is an abandoned body"
+        );
+
+        let mut whole = MeasuredBody::new(metrics, group, four_frame_stream_body(), Some(20));
+        for _ in 0..4 {
+            whole.frame().await.expect("a frame").expect("data");
+        }
+        assert!(
+            !http_body::Body::is_end_stream(&whole),
+            "the stream does not know it has ended, which is the whole problem"
+        );
+        drop(whole);
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (1, 1),
+            "20 of 20 declared bytes is a delivered body"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrapping_a_body_preserves_its_exact_length() {
+        // hyper derives Content-Length from the body's size hint when the
+        // handler has not set the header, so a wrapper that reported an unknown
+        // length would silently move fixed-length responses onto chunked
+        // framing.
+        let (app, _) = observability_probe_router();
+        let response = app
+            .oneshot(get("/api/v1/items/1", None))
+            .await
+            .expect("response");
+        assert_eq!(
+            http_body::Body::size_hint(response.body()).exact(),
+            Some(2),
+            "the wrapped body must still know it is two bytes long"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_error_is_counted_as_five_hundred_and_logged_once_at_warn() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let captured = CapturedWriter::new();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(captured.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let failed = app
+            .clone()
+            .oneshot(get("/api/v1/settings", None))
+            .await
+            .expect("response");
+        assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let ok = app
+            .oneshot(get("/api/v1/items/1", None))
+            .await
+            .expect("response");
+        assert_eq!(ok.status(), StatusCode::OK);
+        drop(guard);
+
+        let after = metrics.render();
+        assert_eq!(
+            request_cell(&after, "settings", "get", "5xx"),
+            request_cell(&before, "settings", "get", "5xx") + 1
+        );
+
+        let logged = captured.text();
+        assert_eq!(
+            logged.matches("http request failed").count(),
+            1,
+            "exactly one access line, and only for the 5xx: {logged}"
+        );
+        assert!(logged.contains("route_group=\"settings\""), "{logged}");
+        assert!(
+            logged.contains("request_id="),
+            "the line must carry the request id: {logged}"
+        );
+        assert!(logged.contains("status=500"), "{logged}");
+        assert!(
+            logged.contains("path=/api/v1/settings"),
+            "the line must name the redacted target: {logged}"
+        );
+        // The ring this line lands in is bounded and is the only log the
+        // product itself can show, so a successful request must stay out of it.
+        assert!(
+            !logged.contains("/api/v1/items/1"),
+            "a 200 was logged: {logged}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_storm_is_counted_exactly_and_logged_at_most_once_a_second() {
+        // A fenced node refuses every request with 503. The counter must see
+        // all of them and the bounded ring must not.
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let captured = CapturedWriter::new();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(captured.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        for _ in 0..25 {
+            let refused = app
+                .clone()
+                .oneshot(get("/api/v1/cluster/status", None))
+                .await
+                .expect("response");
+            assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+        drop(guard);
+
+        let after = metrics.render();
+        assert_eq!(
+            request_cell(&after, "cluster", "get", "5xx"),
+            request_cell(&before, "cluster", "get", "5xx") + 25,
+            "every refusal must be counted"
+        );
+        let lines = captured.text().matches("http request failed").count();
+        assert!(
+            (1..=2).contains(&lines),
+            "twenty-five refusals inside one second produced {lines} log lines"
+        );
+        assert!(
+            captured.text().contains("also_suppressed="),
+            "the line must say how many it stood for: {}",
+            captured.text()
+        );
+    }
+
+    #[test]
+    fn an_inbound_request_id_is_adopted_only_when_it_is_short_and_boring() {
+        let adopt = |value: &str| {
+            adopt_or_mint_request_id(Some(&HeaderValue::from_str(value).expect("header")))
+                .to_str()
+                .expect("ascii")
+                .to_owned()
+        };
+        for good in ["abc123", "a-b_c", &"a".repeat(MAX_REQUEST_ID)] {
+            assert_eq!(adopt(good), good);
+        }
+        for bad in [
+            "",
+            "../../etc/passwd",
+            "has space",
+            "semi;colon",
+            "Bearer abc",
+            &"a".repeat(MAX_REQUEST_ID + 1),
+        ] {
+            let minted = adopt(bad);
+            assert_ne!(minted, bad, "{bad} was adopted");
+            assert_eq!(minted.len(), 32, "a minted id is a simple uuid: {minted}");
+            assert!(minted.chars().all(|c| c.is_ascii_hexdigit()), "{minted}");
+        }
+        assert_eq!(adopt_or_mint_request_id(None).len(), 32);
+    }
+
+    #[tokio::test]
+    async fn every_response_carries_a_request_id_and_a_rejected_one_is_never_echoed() {
+        let app = test_app();
+        let minted = app
+            .clone()
+            .oneshot(get("/healthz", None))
+            .await
+            .expect("response");
+        let id = minted
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .expect("every response carries an id")
+            .to_str()
+            .expect("ascii")
+            .to_owned();
+        assert_eq!(id.len(), 32);
+
+        let adopted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header(REQUEST_ID_HEADER, "kodi-refresh-7")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            adopted
+                .headers()
+                .get(REQUEST_ID_HEADER)
+                .expect("id")
+                .to_str()
+                .expect("ascii"),
+            "kodi-refresh-7"
+        );
+
+        let captured = CapturedWriter::new();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(captured.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let replaced = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header(REQUEST_ID_HEADER, "Bearer sk-live-should-never-be-logged")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        drop(guard);
+        let echoed = replaced
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .expect("id")
+            .to_str()
+            .expect("ascii");
+        assert_ne!(echoed, "Bearer sk-live-should-never-be-logged");
+        assert_eq!(echoed.len(), 32);
+        assert!(
+            !captured.text().contains("sk-live-should-never-be-logged"),
+            "the discarded id reached the log: {}",
+            captured.text()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_id_is_never_a_metric_label() {
+        let app = test_app();
+        let _ = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header(REQUEST_ID_HEADER, "corr-9f8e7d6c5b4a")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert!(!prometheus_http_request_metrics().contains("corr-9f8e7d6c5b4a"));
+        assert!(!prometheus_http_store_attribution().contains("corr-9f8e7d6c5b4a"));
+    }
+
+    #[test]
+    fn the_metrics_layer_is_outside_the_capacity_gate_and_the_id_layer_is_outermost() {
+        // Axum applies `.layer(...)` inner-to-outer in source order, so the
+        // layer named last is the outermost. A metrics layer inside the gate
+        // would count none of the 503s the gate produces for a learner, a
+        // fenced node or a node in maintenance — the exact failure the series
+        // exists to show. The id layer has to be outside everything that reads
+        // the id back out of the request headers.
+        let source = include_str!("mod.rs");
+        let router = source
+            .split_once("pub fn router(state: AppState) -> Router {")
+            .expect("router")
+            .1
+            .split_once("\nconst LEARNER_ROUTE_INELIGIBLE_JSON")
+            .expect("end of router")
+            .0;
+        let gate = router.find("cluster_capacity_gate,").expect("gate layer");
+        let attribution = router
+            .find("http_store_attribution,")
+            .expect("attribution layer");
+        let metrics = router
+            .find("from_fn(http_request_metrics)")
+            .expect("metrics layer");
+        let id = router.find("from_fn(http_request_id)").expect("id layer");
+        assert!(gate < attribution, "gate then attribution");
+        assert!(attribution < metrics, "attribution then request metrics");
+        assert!(metrics < id, "request id is outermost");
     }
 
     #[tokio::test]
@@ -7001,7 +8598,7 @@ mod tests {
     /// question) shipped exactly that way in the first draft.
     #[tokio::test]
     async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
         let (status, _) = call(&app, get("/api/v1/developer/readiness", None)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
@@ -7035,6 +8632,7 @@ mod tests {
                 "pgs_overlay",
                 "subtitle_stored_sources",
                 "subtitle_not_ready_503",
+                "chapter_thumbnails",
                 "dolby_vision_convert",
                 "source_probe_comparison"
             ],
@@ -7073,6 +8671,8 @@ mod tests {
         // neither belongs in an exact set. It is asserted on its own below.
         // `stored_source_self_test` reads the process-wide self-test state,
         // which a ride-along test in this binary may have driven either way.
+        // The local-cache row depends on the host filesystem and whether its
+        // classifier is implemented on this platform.
         let green = seen
             .iter()
             .filter(|(_, status)| status.as_str() == "met")
@@ -7080,7 +8680,10 @@ mod tests {
             .filter(|id| {
                 !matches!(
                     *id,
-                    "probe_reporter_named" | "stored_source_self_test" | "stored_source_free_space"
+                    "probe_reporter_named"
+                        | "stored_source_self_test"
+                        | "stored_source_local_cache"
+                        | "stored_source_free_space"
                 )
             })
             .collect::<Vec<_>>();
@@ -7091,6 +8694,23 @@ mod tests {
                 "the ride-along's {id} row is reported: {seen:?}"
             );
         }
+        let store_root = crate::subtitle_source::store_root(&state.runtime_cache_dir);
+        let checked = if store_root.is_dir() {
+            store_root
+        } else {
+            state.runtime_cache_dir.clone()
+        };
+        let expected_cache_status =
+            if crate::subtitle_ride_along::local_filesystem(&checked).is_ok() {
+                "met"
+            } else {
+                "unmet"
+            };
+        assert_eq!(
+            seen.get("stored_source_local_cache").map(String::as_str),
+            Some(expected_cache_status),
+            "the cache row must reflect the host filesystem: {seen:?}"
+        );
         assert!(
             matches!(
                 seen.get("probe_reporter_named").map(String::as_str),
@@ -7102,13 +8722,19 @@ mod tests {
             green,
             vec![
                 "authoritative_store",
+                // The chapter-thumbnail rows read this process: the runtime
+                // cache has room on any host that can run the suite, and the
+                // counters row is a statement of what ran (nothing yet). The
+                // ffmpeg row is absent here because the fixture never probed
+                // a build.
+                "chapter_thumbs_cache_space",
+                "chapter_thumbs_work",
                 "durable_queue",
                 "rolling_contract_built",
                 "runtime",
                 "server_preparation_is_real",
                 "source_fencing",
                 "sources_match_their_scan_whole",
-                "stored_source_local_cache",
                 "stored_source_producer",
                 "tuner_reserve"
             ]
@@ -8531,7 +10157,7 @@ mod tests {
         let (status, _) = request.await.expect("request task");
         assert_eq!(status, StatusCode::NO_CONTENT);
 
-        for _ in 0..100 {
+        for _ in 0..3_000 {
             if state
                 .store
                 .network_prior(original_generation.as_str(), "safari", "198.51.100.0/24")
@@ -12053,7 +13679,7 @@ mod tests {
 
         // Recording is asynchronous, so poll the wire rather than the store.
         let mut decision = json!({});
-        for _ in 0..200 {
+        for _ in 0..3_000 {
             let (status, body) = call(
                 &app,
                 as_client(get(&decision_url, Some(&admin)), CHROME_WINDOWS_UA),
@@ -12228,6 +13854,118 @@ mod tests {
         if let Some(session_id) = session["session_id"].as_str() {
             state.transcode.stop_session(session_id, "test").await;
         }
+    }
+
+    /// The `resolution` sort's order is reproducible from the rows it returns.
+    ///
+    /// A native client merging several libraries' cursors compares rows on
+    /// `(resolution ?? -1) DESC, sort_title ASC, id ASC` — the key the row
+    /// carries, not the one the SQL computed. A root photo in a Home library
+    /// is probed and has a real file height but no `resolution` on its DTO, so
+    /// the server has to rank it where an absent `resolution` puts it; ranked
+    /// by its 3024-px height it would lead a cursor the client reads as
+    /// unsorted, and the merge would have to drain every other cursor to
+    /// place it.
+    #[tokio::test]
+    async fn library_resolution_sort_is_ordered_by_the_resolution_each_row_carries() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let lib = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Home".into(),
+                kind: LibraryKind::Home,
+                paths: vec![std::path::PathBuf::from("/home-media")],
+                anime: false,
+            })
+            .await
+            .expect("lib");
+        let mut ids = std::collections::HashMap::new();
+        for (title, kind, height) in [
+            ("Pier at Dusk", ItemKind::Photo, Some(3024)),
+            ("Beach Day", ItemKind::Video, Some(720)),
+            ("Birthday", ItemKind::Video, Some(2160)),
+            ("Zebra Crossing", ItemKind::Video, None),
+        ] {
+            let id = state
+                .store
+                .insert_item(&NewItem {
+                    library_id: lib.id,
+                    kind,
+                    parent_id: None,
+                    title: title.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            if let Some(height) = height {
+                state
+                    .store
+                    .upsert_file(
+                        id,
+                        &format!("/home-media/{title}"),
+                        1_000,
+                        1,
+                        &ProbeResult {
+                            height: Some(height),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("file");
+            }
+            ids.insert(title, id);
+        }
+
+        let (status, body) = call(
+            &app,
+            get(
+                &format!("/api/v1/libraries/{}/items?sort=resolution", lib.id),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows = body["items"].as_array().expect("items");
+        let photo = rows
+            .iter()
+            .find(|row| row["id"] == ids["Pier at Dusk"])
+            .expect("the photo is on the page");
+        assert!(
+            photo.get("resolution").is_none_or(Value::is_null),
+            "a photo carries no resolution: {photo}"
+        );
+
+        // The client's comparator, applied to what the client received.
+        let key = |row: &Value| {
+            (
+                std::cmp::Reverse(row["resolution"].as_i64().unwrap_or(-1)),
+                row["sort_title"].as_str().expect("sort_title").to_owned(),
+                row["id"].as_i64().expect("id"),
+            )
+        };
+        let returned: Vec<_> = rows.iter().map(key).collect();
+        let mut reordered = returned.clone();
+        reordered.sort();
+        assert_eq!(
+            returned, reordered,
+            "the server's order is not the order of the keys it sent"
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["id"].as_i64().expect("id"))
+                .collect::<Vec<_>>(),
+            vec![
+                ids["Birthday"],
+                ids["Beach Day"],
+                ids["Pier at Dusk"],
+                ids["Zebra Crossing"],
+            ]
+        );
     }
 
     #[tokio::test]
@@ -16455,7 +18193,19 @@ mod tests {
     /// the absence of `media` — is pre-S1's.
     const PRE_S1_LIST_BODY: &str = concat!(
         r#"{"items":[{"id":1,"library_id":1,"kind":"movie","parent_id":null,"#,
-        r#""title":"Neon District 2049","year":2017,"overview":null,"#,
+        r#""title":"Neon District 2049","#,
+        // A-03 landed `sort_title` on ItemDto after this golden was captured,
+        // for the same reason S3's `genres` did: it is additive on its own
+        // terms. It is always present, it is the stored key the library
+        // `ORDER BY` already sorted on rather than anything newly computed,
+        // and the native clients merge library cursors on it. The decoders on
+        // both sides of the fleet skip keys they do not know — Swift's
+        // `JSONDecoder` by default, `Net.kt`'s `Json { ignoreUnknownKeys =
+        // true }` on Android — so an older client reads this body unchanged.
+        // The baseline this test defends therefore moved by exactly one more
+        // field. Anything else appearing here is what it is still watching for.
+        r#""sort_title":"neon district 2049","#,
+        r#""year":2017,"overview":null,"#,
         r#""season_number":null,"episode_number":null,"air_date":null,"#,
         r#""runtime_ms":null,"added_at":{added},"updated_at":{updated},"#,
         // S3 landed `genres` on ItemDto after this golden was captured. It is

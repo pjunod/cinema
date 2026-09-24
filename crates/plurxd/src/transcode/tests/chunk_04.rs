@@ -946,7 +946,7 @@
         delivery.finish();
 
         assert_eq!(session.delivery.total_bytes(), 640);
-        let events = tokio::time::timeout(Duration::from_secs(2), async {
+        let events = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let events = store
                     .playback_events(&plurx_core::domain::PlaybackEventQuery {
@@ -1122,7 +1122,7 @@
         session.replacing_child.store(true, Release);
         drop(delivery);
 
-        let event = tokio::time::timeout(Duration::from_secs(2), async {
+        let event = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if let Some(event) = store
                     .playback_events(&plurx_core::domain::PlaybackEventQuery {

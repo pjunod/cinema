@@ -36,6 +36,49 @@ val generateReaderAssets = tasks.register<GenerateReaderAssets>("generateReaderA
     outputDirectory.set(layout.buildDirectory.dir("generated/reader-assets"))
 }
 
+/**
+ * True when this Gradle invocation asked for a release task.
+ *
+ * `signingConfigs { }` and `buildTypes { }` are both evaluated during
+ * configuration, on every invocation — including `make android` and
+ * `make android-test`, which run on machines that hold no signing material
+ * and must keep working. So the requirement is keyed on the requested task
+ * names rather than on the block being reached.
+ *
+ * Every Gradle entry point in this repository names its tasks explicitly
+ * (`Makefile`: `:app:assembleDebug`, `testDebugUnitTest lintDebug`,
+ * `assembleDebug assembleDebugAndroidTest`, `:app:assembleRelease`;
+ * `scripts/ship-physical`: `:app:assembleRelease`), so no supported path
+ * packages the release variant without a "Release" task name;
+ * tests/operations/test_android_credential_exposure.py scans the Makefile and
+ * scripts/ to keep that true.
+ */
+val releaseTaskRequested: Boolean =
+    gradle.startParameter.taskNames.any { it.contains("Release") }
+
+/**
+ * Resolve one piece of release signing material, or fail the build naming it.
+ *
+ * The signing material never enters the repository: it is streamed into the
+ * build environment from the fleet vault, the same way the Forgejo registry
+ * token is. There is deliberately no default and no fallback to the debug
+ * keystore. A debug-signed "release" installs happily on a test device, so the
+ * mistake stays invisible until the first properly signed build refuses to
+ * upgrade it in place and every device in the fleet needs an uninstall first;
+ * Play refuses such an artifact outright. Failing here, while the mistake
+ * costs one shell variable, is the cheap moment.
+ */
+fun requiredSigningValue(name: String): String =
+    (project.findProperty(name) as String? ?: System.getenv(name))
+        ?.takeIf { it.isNotBlank() }
+        ?: error(
+            "release signing is not configured: $name is unset. " +
+                "assembleRelease needs PLURX_ANDROID_KEYSTORE, " +
+                "PLURX_ANDROID_KEYSTORE_PASSWORD, PLURX_ANDROID_KEY_ALIAS and " +
+                "PLURX_ANDROID_KEY_PASSWORD; see docs/PUBLISHING.md section 5.1. " +
+                "Use `make android` for a local debug build instead."
+        )
+
 android {
     namespace = "tv.plurx.app"
     compileSdk = 37
@@ -45,9 +88,27 @@ android {
         // 23 covers phones and the vast majority of Android TV / Google TV boxes.
         minSdk = 23
         targetSdk = 37
-        versionCode = 119
+        versionCode = 120
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        create("release") {
+            // Populated only when a release task was requested: reading the
+            // four variables unconditionally would fail every debug build on
+            // a machine without the key, and `signingConfigs { }` is
+            // evaluated on every invocation. The guard is exact for this
+            // repository because every Gradle entry point names its tasks
+            // (see `releaseTaskRequested`), and an operations test keeps that
+            // true.
+            if (releaseTaskRequested) {
+                storeFile = file(requiredSigningValue("PLURX_ANDROID_KEYSTORE"))
+                storePassword = requiredSigningValue("PLURX_ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = requiredSigningValue("PLURX_ANDROID_KEY_ALIAS")
+                keyPassword = requiredSigningValue("PLURX_ANDROID_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
@@ -67,6 +128,10 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // The upload key, never the debug key. `release` already clears
+            // `debuggable`, which is what `adb shell run-as` follows; the
+            // signer is a separate property and this is it.
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {

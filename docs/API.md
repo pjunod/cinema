@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 221
+One binary serves everything on one port (`:32400` by default). plurx has 222
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -574,6 +574,7 @@ away.
 | GET, PUT | `/api/v1/search/settings` | bearer for GET; admin for PUT | GET returns `semantic_enabled`, classification progress and semantic status. PUT accepts `{ "semantic_enabled": true }`; readiness remains advisory |
 | GET, PUT | `/api/v1/items/{id}/classification` | bearer for GET; admin for PUT | GET returns the classification record and `pending`. PUT accepts `expected_revision`, `include` and `exclude` label arrays; returns the new revision or 409 on concurrent metadata/correction changes |
 | GET | `/api/v1/images/{filename}` | bearer | Cached artwork, materialized from a peer on miss |
+| GET | `/api/v1/files/{id}/chapters/{index}/thumb` | bearer | One 320 px JPEG for the chapter at `index` (zero-based, the item detail's `chapters` order), made by one bounded ffmpeg seek on first request and kept under the runtime cache; `ETag` + `If-None-Match`; 404 when the `chapter_thumbnails` setting is off or the frame could not be made, 503 + `Retry-After` when both extraction slots are busy |
 
 ### 6.1 Listing a library
 
@@ -593,6 +594,32 @@ as the page, so paging never drifts into empty screens. Every per-row
 decoration — watch state, resolution, `media` facts, child counts, and the
 `{leaves, watched}` rollup on shows, seasons and folders — is a page-wide
 batched query, never an N+1.
+
+**Ordering is total: every sort ends in `id`** — `id DESC` for `added`, which
+already had it, and `id ASC` for the other four. The visible key is not
+unique: three items can all reduce to the sort title `harbor lights`, two can
+share a year, and a whole library can share "no capture date". Without a
+unique final key SQLite may return tied rows in a different order for each
+request, and a client paging by `offset` then reads two adjacent pages of two
+different orderings — showing one item twice and never showing its neighbour.
+
+Each row carries `sort_title`, the server's own key: the title lowercased with
+a leading `the `, `a ` or `an ` removed when something remains (folders keep
+their raw name, because a directory called "The Lake House 2021" is a place,
+not a work). It is there so a native client merging several libraries into one
+grid can merge on the key the server sorted by instead of re-deriving it in
+its own language. **Compare it as UTF-8 bytes** — that is SQLite's BINARY
+collation — and not with a locale-aware or case-insensitive compare, which
+disagrees with the server on accented and non-Latin titles.
+
+`resolution` is carried by movies and home videos only, and the `resolution`
+sort ranks every other kind at -1 — the value a merging client reads from an
+absent `resolution`. That includes a root-level photo in a Home library, which
+is probed and has a real file height: it sorts with the rows that have no
+resolution, not by its pixel count, so the key each row carries is the key the
+server sorted it by.
+`tests/contracts/library-sort-cases.json` pins this order for the server and
+for every client that merges.
 
 `GET /api/v1/search` takes `q` and the same `limit` clamp, and returns
 `{results}` alone — no `total`, no paging. The query is split on every
@@ -813,6 +840,21 @@ no rotation or resize step: browsers honour EXIF orientation on `<img>`
 natively.
 
 ---
+
+**Chapter thumbnails.** `GET /api/v1/files/{id}/chapters/{index}/thumb` is the
+watch view's chapter rail. `index` is the zero-based position in the item
+detail's `chapters` array for that file. The first request for a chapter
+runs one ffmpeg — an input-side seek to the chapter start plus two seconds
+(never past the chapter midpoint), one decoded frame, scaled to 320 px wide,
+JPEG — and keeps the result under the node's runtime cache at
+`chapter-thumbs/<file id>-<size>-<mtime>/<index>.jpg`; later requests are a
+file read. Two extractions run at once per node, each bounded to 15 s and
+2 MiB; a request that cannot get a slot within 10 s is answered 503 with
+`Retry-After`. A failed extraction leaves a marker and the route answers 404
+for that chapter for an hour without running ffmpeg again. The response
+carries `ETag` (file id, size, mtime, index) and `private, max-age=604800`.
+When Settings → Developer → Chapter thumbnails is off the route answers 404
+and runs nothing. See [clients/WATCH-VIEW-LAYOUT.md](clients/WATCH-VIEW-LAYOUT.md).
 
 ## 7. Playback — the decision
 

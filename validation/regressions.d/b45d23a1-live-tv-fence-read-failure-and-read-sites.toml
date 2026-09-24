@@ -1,0 +1,48 @@
+version = 1
+
+[[coverage]]
+commits = ["b45d23a1"]
+points = ["live-tv.integration"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+Answers the two P2 findings of the PR #455 review that sit in
+crates/plurxd/src/live_tv.rs (plan/L-02, review item L2).
+
+Finding 1: the M1 test that claimed to pin "a failed settings read keeps the
+previous observation" never made a read fail, so its assertion held by
+construction. The reviewer changed `observe_fence`'s `Err` arm to clear the
+observation and every M1 test still passed. `LiveTvManager` now reads the
+replicated settings through one `settings_snapshot` seam that a test can make
+fail (a `#[cfg(test)]` injected `StoreError::Database`, the same shape as the
+offline manager's `fail_next_cancel_requeue`; production takes the store read
+unchanged). `live_tv::tests::a_read_that_keeps_failing_is_graced_then_ends_the_session_naming_the_settings_store`
+now publishes a healthy observation at t=0, turns reads to failing, and calls
+`observe_fence` once per paused second: it asserts each failed read leaves the
+t=0 observation in place (`Arc::ptr_eq`, so neither clearing nor re-publishing
+it as new passes), that `site="observer"` counted 1 ok and 9 then 11 failed
+reads, that the session's fence passes at t=9 s in `grace`, ends at t=11 s
+with `owner_unavailable` naming the replicated settings and not the tuner, and
+that the first good read afterwards validates `fresh` again. Proved on nuc3 on
+2026-09-24: re-applying the reviewer's mutant
+(`self.fence.latest.send_replace(None)` in the `Err` arm) fails it at the
+"a failed read keeps the last observation rather than clearing it" expect.
+
+Finding 2a: `plurx_live_tv_settings_reads_total` was documented as one read
+per second plus one per start, but every Live TV API handler reads through
+`config()`, which carried the same counter. The series now has a `site`
+label: `observer` (the 1 Hz loop the session fence validates against),
+`fence` (the direct start and pre-publication fences) and `request`
+(everything else that calls `config()`). The doc comment says what each
+counts. `live_tv::tests::settings_reads_are_counted_by_the_site_that_took_them`
+takes two handler reads, one observer read, one direct fence read and one
+failing observer read, and asserts each site's (ok, failed) pair and the six
+exposition lines. Proved on 2026-09-24: making `observe_fence` read through
+`config()` again (so observer reads land under `request`) fails it with
+`left: (3, 1)` against `right: (2, 0)` for the request site, and fails the
+grace test's observer count too. The three M1 tests that counted reads now
+count per site: the per-second fence test asserts no read at all across
+sites, and the start/publication fence test asserts its read lands under
+`fence`.
+
+Run `cargo test -p plurxd --bin plurxd -- live_tv::tests`.
+"""
