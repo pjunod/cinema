@@ -102,6 +102,25 @@ private struct AppleMarkerPlaybackLog: Encodable {
     }
 }
 
+/// `attempt_stale`: a migrated continuation fence refused the work it was
+/// about to do because an epoch it depends on moved while it was suspended.
+/// `detail` is `PlayerController.attemptStaleDetail(fence:captured:now:)`.
+private struct AppleAttemptStaleLog: Encodable {
+    let level = "info"
+    let event = "attempt_stale"
+    let message: String
+    let method: String
+    let title: String
+    let fileId: Int
+    let detail: String
+    let ua = "Apple AVPlayer"
+
+    enum CodingKeys: String, CodingKey {
+        case level, event, message, method, title, detail, ua
+        case fileId = "file_id"
+    }
+}
+
 struct MarkerOfferLedger {
     private var offered: Set<String> = []
 
@@ -2253,6 +2272,10 @@ final class PlayerController: ObservableObject {
         }
     }
     var openGenerationForTesting: Int { openGeneration }
+    /// The `detail` of the last `attempt_stale` event this controller raised,
+    /// or `nil` if no migrated fence has refused a continuation yet. Only
+    /// ever the latest one, so it holds nothing a long session accumulates.
+    private(set) var lastAttemptStaleDetail: String?
     /// Production-linked overlay seams. Only the decision's track list and the
     /// selection publication are supplied; the selection, window load, tick,
     /// seek and failure paths are the production ones.
@@ -4215,6 +4238,77 @@ final class PlayerController: ObservableObject {
         started && lifecycleGeneration == generation
     }
 
+    /// The nine epochs and the attached item, read in one turn on the main
+    /// actor, so a continuation about to `await` can record which state it
+    /// depends on and compare only that subset when it wakes.
+    ///
+    /// Taking all nine costs nine integer reads and answers the question a
+    /// caller actually has, which is "did the thing *I* depend on move?" —
+    /// `Attempt.stillCurrent(_:scopes:)` is where the subset is named. Reading
+    /// them together also makes the pair of snapshots comparable: both are
+    /// taken with no suspension inside them, so neither can be half of one
+    /// state and half of another.
+    func snapshotAttempt() -> Attempt {
+        Attempt(
+            lifecycle: lifecycleGeneration,
+            open: openGeneration,
+            viewerAction: viewerActionEpoch,
+            initialDecision: initialDecisionGeneration,
+            createRetry: createRetryEpoch,
+            preparedAlignment: preparedAlignmentGeneration,
+            seek: seekState.generation,
+            pgsSelection: pgsOverlaySelectionGeneration,
+            pgsItem: pgsOverlayItemGeneration,
+            item: player.currentItem.map(ObjectIdentifier.init)
+        )
+    }
+
+    /// Whether the work `captured` was taken for still belongs to anyone,
+    /// judged on `fence`'s own scope set and nothing else. Every migrated
+    /// fence goes through here rather than calling `stillCurrent` with a
+    /// literal set, so the set lives in one table (`AttemptFence.scopes`) that
+    /// a test and the census can both hold still.
+    ///
+    /// A refusal is the one moment the controller knows *which* epoch moved
+    /// under a suspended continuation, so it is logged there as the plan's
+    /// `attempt_stale` client-log event (§4) instead of returning silently:
+    /// a late recovery that quietly did nothing is otherwise indistinguishable
+    /// in a device log from one that was never scheduled.
+    func attemptStillCurrent(_ captured: Attempt, fence: AttemptFence) -> Bool {
+        let now = snapshotAttempt()
+        if captured.stillCurrent(now, scopes: fence.scopes) { return true }
+        let detail = Self.attemptStaleDetail(fence: fence, captured: captured, now: now)
+        lastAttemptStaleDetail = detail
+        reportAttemptStale(detail: detail)
+        return false
+    }
+
+    /// The `detail` of an `attempt_stale` event: which fence refused, which of
+    /// its scopes moved (in `Attempt.Scope` declaration order, so the value is
+    /// bounded by the nine scope names), and whether the attached item was
+    /// replaced as well. The item is reported, never compared: it is not a
+    /// scope.
+    static func attemptStaleDetail(fence: AttemptFence, captured: Attempt, now: Attempt) -> String {
+        let scope = captured.staleScopes(now, scopes: fence.scopes)
+            .map(\.rawValue)
+            .joined(separator: ",")
+        let item = captured.hasSameItem(as: now) ? "same" : "replaced"
+        return "fence=\(fence.rawValue) scope=\(scope) item=\(item)"
+    }
+
+    private func reportAttemptStale(detail: String) {
+        #if os(iOS)
+        if offlineId != nil { return }
+        #endif
+        postClientLog(AppleAttemptStaleLog(
+            message: "a suspended continuation was refused because an epoch it depends on moved",
+            method: clientLogMethod,
+            title: title,
+            fileId: fileId,
+            detail: detail
+        ))
+    }
+
     private func restartInitialDecision(lifecycle: Int) {
         guard isCurrentLifecycle(lifecycle), decision == nil else { return }
         loadingTask?.cancel()
@@ -5416,8 +5510,7 @@ final class PlayerController: ObservableObject {
         // spend — so an ask placed after it would let a server `hold`
         // permanently retire the one same-delivery reopen this client had,
         // which is the exact failure a hold exists to avoid.
-        let generation = openGeneration
-        let actionEpoch = viewerActionEpoch
+        let stallAttempt = snapshotAttempt()
         let deferralDeadline = shouldConsultControl
             ? ProcessInfo.processInfo.systemUptime
                 + Double(max(0, Self.controlStallDeferralDeadlineMs - event.durationMs)) / 1_000
@@ -5429,8 +5522,7 @@ final class PlayerController: ObservableObject {
             verdict = nil
         }
         // Everything the caller checked may have changed across that await.
-        guard openGeneration == generation,
-              viewerActionEpoch == actionEpoch,
+        guard attemptStillCurrent(stallAttempt, fence: .stallRecovery),
               started,
               stallRecoveryStillEligible
         else { return }
@@ -6856,16 +6948,19 @@ final class PlayerController: ObservableObject {
                     // cancels this monitor, so awaiting it here would cancel
                     // the recovery halfway through its own open.
                     self.currentMs = targetMs
-                    let recoveryGeneration = self.openGeneration
-                    let recoveryActionEpoch = self.viewerActionEpoch
+                    // The three epochs this recovery depends on are named by
+                    // `.seekPresentationDeadline`. Its seek scope is this
+                    // monitor's own `generation`: the loop guard above already
+                    // required `seekState.generation == generation` and
+                    // nothing has suspended since, so `recovery.seek` is that
+                    // same value.
+                    let recovery = self.snapshotAttempt()
                     Task { [weak self] in
                         guard let self,
-                              self.openGeneration == recoveryGeneration,
-                              self.viewerActionEpoch == recoveryActionEpoch,
+                              self.attemptStillCurrent(recovery, fence: .seekPresentationDeadline),
                               self.wantsPlayback, !self.isPlaybackBlocked, !self.finished,
                               !(self.seekPresentationBackgrounded && hasVideo),
-                              self.seekState.pendingMs == targetMs,
-                              self.seekState.generation == generation
+                              self.seekState.pendingMs == targetMs
                         else { return }
                         await self.retrySameDeliveryAfterStall(
                             PlaybackStallEvent(
@@ -6947,11 +7042,17 @@ final class PlayerController: ObservableObject {
                     hasVideoSource: self.decision?.source?.videoCodec != nil,
                     playing: isActuallyPlaying
                 ) {
-                    let actionEpoch = self.viewerActionEpoch
+                    // `started` and `lifecycleGeneration == lifecycle` both
+                    // hold here — the observer's own opening guard is
+                    // `isCurrentLifecycle(lifecycle)` and there has been no
+                    // suspension since — so the lifecycle scope below compares
+                    // against the same generation the old conjunction did.
+                    let attempt = self.snapshotAttempt()
                     Task { @MainActor [weak self] in
-                        guard let self, self.isCurrentLifecycle(lifecycle),
-                              self.player.currentItem === item, !self.isChangingStream,
-                              self.viewerActionEpoch == actionEpoch else { return }
+                        guard let self, self.started,
+                              self.attemptStillCurrent(attempt, fence: .blackFrameDecodeFailure),
+                              self.player.currentItem === item,
+                              !self.isChangingStream else { return }
                         await self.handleBlackFrameDecodeFailure(at: observedPosition)
                     }
                 }
@@ -7211,10 +7312,9 @@ final class PlayerController: ObservableObject {
         // govern the compatibility fallback below it, which changes the
         // recipe. A `hold` or a `retry_resource` governs nothing at all: on a
         // dead item they would leave a player with no path forward.
-        let generation = openGeneration
-        let actionEpoch = viewerActionEpoch
+        let failureAttempt = snapshotAttempt()
         _ = await controlVerdictForItemFailure(item)
-        guard openGeneration == generation, viewerActionEpoch == actionEpoch,
+        guard attemptStillCurrent(failureAttempt, fence: .itemFailureLadder),
               player.currentItem === item,
               !isChangingStream else { return }
         var reportedFailure = false
