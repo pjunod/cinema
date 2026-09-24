@@ -11,6 +11,7 @@ import importlib.machinery
 import importlib.util
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -83,6 +84,34 @@ APPLE = textwrap.dedent(
     """
 )
 
+# The status lines that quote the version and both build counters, in the
+# shape the real documents carry them (validation/apple_build.py and
+# validation/doc_versions.py pin those shapes on the real tree).
+DOCUMENTS = {
+    release_cut.APPLE_README: (
+        "# plurx for Apple\n\n"
+        "> Status: **v0.3.0**, build `180` in [`project.yml`](project.yml) — working\n"
+        "> regression suite.\n"
+    ),
+    release_cut.APPLE_PARITY: (
+        "# Parity\n\n> Status (2026-09-15): source is v0.3.0, Apple build 180. Timer-only\n"
+    ),
+    release_cut.ANDROID_README: (
+        "# plurx for Android\n\n> Status: **v0.3.0**, build `120` — native viewer parity\n"
+    ),
+    release_cut.STATUS_PAGE: (
+        "<div>web · Android versionCode 119 source · Apple build 180 source, not yet uploaded</div>\n"
+        "<li>upload Apple build 180 (release notes: x) to TestFlight</li>\n"
+        "<li>Install Apple build 180 and Android versionCode 119 on the physical devices.</li>\n"
+    ),
+}
+
+
+def git(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=root, check=True, text=True, stdout=subprocess.PIPE
+    ).stdout.strip()
+
 
 class ReleaseCutCase(unittest.TestCase):
     def tree(self, changelog: str = CHANGELOG) -> Path:
@@ -95,6 +124,9 @@ class ReleaseCutCase(unittest.TestCase):
         (root / "Cargo.toml").write_text(CARGO, encoding="utf-8")
         (root / release_cut.ANDROID).write_text(ANDROID, encoding="utf-8")
         (root / release_cut.APPLE).write_text(APPLE, encoding="utf-8")
+        for path, contents in DOCUMENTS.items():
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_text(contents, encoding="utf-8")
         for args in (
             ["init", "-q"],
             ["config", "user.name", "Release Test"],
@@ -135,6 +167,16 @@ class ReleaseCutCase(unittest.TestCase):
         apple = (root / release_cut.APPLE).read_text(encoding="utf-8")
         self.assertIn('MARKETING_VERSION: "0.3.1"', apple)
         self.assertIn('CURRENT_PROJECT_VERSION: "181"', apple)
+        # Every status document's quote of the version and both counters.
+        read = lambda path: (root / path).read_text(encoding="utf-8")  # noqa: E731
+        self.assertIn("> Status: **v0.3.1**, build `181` in", read(release_cut.APPLE_README))
+        self.assertIn("source is v0.3.1, Apple build 181. Timer-only", read(release_cut.APPLE_PARITY))
+        self.assertIn("> Status: **v0.3.1**, build `121` — native", read(release_cut.ANDROID_README))
+        status = read(release_cut.STATUS_PAGE)
+        self.assertIn("Android versionCode 121 source · Apple build 181 source", status)
+        self.assertIn("upload Apple build 181 (release notes", status)
+        self.assertIn("Install Apple build 181 and Android versionCode 121 on", status)
+        self.assertNotRegex(status, r"\b(180|119)\b")
         # It never tags; tagging is the scheduled run's, from a green gate.
         tags = subprocess.run(
             ["git", "tag", "-l"], cwd=root, text=True, stdout=subprocess.PIPE
@@ -151,6 +193,64 @@ class ReleaseCutCase(unittest.TestCase):
         after = read_versions(lambda path: (root / path).read_text(encoding="utf-8"))
         self.assertEqual(after.workspace, "0.4.0")
         self.assertEqual(validate_versions(after, baseline=before), ())
+
+    def test_the_cut_real_tree_passes_the_build_claim_sweeps(self):
+        """PR #485 review finding 2: the cut left the repository red.
+
+        `make operations-check` pins every status document's build claim to
+        the manifests (`test_mobile_build_claims`, `test_apple_build_claims`),
+        and a cut that advanced the counters without them failed both. This
+        runs the cut on a copy of this repository's own release files and
+        then those same sweeps on the result.
+        """
+
+        from validation.apple_build import NOTES_DIR, check_repository
+        from validation.doc_versions import validate_documented_builds
+        from validation.mobile_versions import read_versions, validate_versions
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        for path in (
+            "CHANGELOG.md", "Cargo.toml", release_cut.ANDROID, release_cut.APPLE,
+            *DOCUMENTS,
+        ):
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(ROOT / path, root / path)
+        shutil.copytree(ROOT / NOTES_DIR, root / NOTES_DIR)
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        if release_cut._unreleased_is_empty(changelog):
+            (root / "CHANGELOG.md").write_text(
+                changelog.replace("## [Unreleased]\n", "## [Unreleased]\n\n- An entry.\n", 1),
+                encoding="utf-8",
+            )
+        git(root, "init", "-q")
+        read = lambda path: (root / path).read_text(encoding="utf-8")  # noqa: E731
+        self.assertEqual(validate_documented_builds(read), (), "the copy starts green")
+        self.assertEqual(check_repository(root), (), "the copy starts green")
+        before = read_versions(read)
+
+        result = self.run_cut(root, "--date", "2026-09-28")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        after = read_versions(read)
+        self.assertEqual(after.apple_build, before.apple_build + 1)
+        self.assertEqual(validate_documented_builds(read), ())
+        self.assertEqual(check_repository(root), ())
+        self.assertEqual(validate_versions(after, baseline=before), ())
+
+    def test_a_reworded_claim_refuses_the_cut_before_anything_is_written(self):
+        root = self.tree()
+        readme = root / release_cut.ANDROID_README
+        readme.write_text(
+            DOCUMENTS[release_cut.ANDROID_README].replace("build `120`", "versionCode 120"),
+            encoding="utf-8",
+        )
+        result = self.run_cut(root)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"{release_cut.ANDROID_README}: expected exactly one", result.stderr)
+        self.assertEqual((root / "Cargo.toml").read_text(encoding="utf-8"), CARGO)
+        self.assertEqual((root / "CHANGELOG.md").read_text(encoding="utf-8"), CHANGELOG)
 
     def test_an_empty_unreleased_section_is_refused_and_nothing_is_written(self):
         empty = CHANGELOG.replace(
@@ -180,8 +280,12 @@ class ReleaseCutCase(unittest.TestCase):
             out = self.run_cut(root, "--pending").stdout
             return dict(line.split("=", 1) for line in out.splitlines())
 
-        # v0.3.0 has a dated section and no tag in this fixture.
-        self.assertEqual(pending()["pending"], "true")
+        # v0.3.0 is dated and untagged in this fixture, but the one commit
+        # that dated it also carries `[Unreleased]` entries, so it is not a
+        # release commit and nothing is named for tagging.
+        refused = self.run_cut(root, "--pending")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("[Unreleased] section is not empty", refused.stderr)
         subprocess.run(["git", "tag", "-a", "v0.3.0", "-m", "v0.3.0"], cwd=root, check=True)
         self.assertEqual(pending()["pending"], "false")
         self.assertEqual(pending()["tagged"], "true")
@@ -192,6 +296,101 @@ class ReleaseCutCase(unittest.TestCase):
         self.assertEqual(state["pending"], "true")
         self.assertEqual(state["tag"], "v0.3.1")
         self.assertEqual(state["dated"], "true")
+        self.assertEqual(state["sha"], git(root, "rev-parse", "HEAD"))
+
+    def pending_at(self, root: Path) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+        result = self.run_cut(root, "--pending")
+        return result, dict(line.split("=", 1) for line in result.stdout.splitlines())
+
+    def released(self) -> tuple[Path, str, str]:
+        """v0.3.0 tagged, then a release pull request for v0.3.1 landed on main."""
+
+        root = self.tree()
+        git(root, "tag", "-a", "v0.3.0", "-m", "v0.3.0")
+        main = git(root, "rev-parse", "--abbrev-ref", "HEAD")
+        git(root, "checkout", "-q", "-b", "release/v0.3.1")
+        self.assertEqual(self.run_cut(root, "--date", "2026-09-28").returncode, 0)
+        cut = self.commit(root, "release: v0.3.1")
+        git(root, "checkout", "-q", main)
+        git(root, "merge", "-q", "--no-ff", "-m", "Merge pull request 'release: v0.3.1'", cut)
+        return root, cut, git(root, "rev-parse", "HEAD")
+
+    def commit(self, root: Path, subject: str) -> str:
+        git(root, "add", "-A")
+        git(root, "commit", "-qm", subject)
+        return git(root, "rev-parse", "HEAD")
+
+    def test_pending_names_the_release_commit_never_main_s_tip(self):
+        """PR #485 review finding 1, the reviewer's own reproduction.
+
+        After the release lands, `main` keeps the version and the dated
+        section, so the Monday run used to tag whatever tip it found --
+        including a fix the changelog files under `[Unreleased]`. The tag has
+        to go on the release's landing commit, whatever is on top of it.
+        """
+
+        root, cut, landing = self.released()
+        self.assertEqual(self.pending_at(root)[1]["sha"], landing)
+
+        changelog = root / "CHANGELOG.md"
+        changelog.write_text(
+            changelog.read_text(encoding="utf-8").replace(
+                "## [Unreleased]\n", "## [Unreleased]\n\n### Fixed\n\n- A later fix.\n", 1
+            ),
+            encoding="utf-8",
+        )
+        later_fix = self.commit(root, "fix(app): a later fix")
+        (root / "notes.txt").write_text("undocumented\n", encoding="utf-8")
+        tip = self.commit(root, "chore: a change with no changelog entry")
+
+        result, state = self.pending_at(root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["pending"], "true")
+        self.assertEqual(state["head"], tip)
+        self.assertEqual(state["sha"], landing, "the tag target is not the release commit")
+        self.assertNotIn(state["sha"], (tip, later_fix))
+
+        # The tag job re-asks from the release commit it checked out, and must
+        # get that same commit back.
+        git(root, "checkout", "-q", "--detach", landing)
+        self.assertEqual(self.pending_at(root)[1]["sha"], landing)
+
+        # Before it lands, on the release branch, the release is the cut itself.
+        git(root, "checkout", "-q", cut)
+        self.assertEqual(self.pending_at(root)[1]["sha"], cut)
+
+    def test_a_dated_section_no_release_commit_explains_is_refused(self):
+        """A heading that arrived without its release is not tagged anywhere."""
+
+        root = self.tree()
+        git(root, "tag", "-a", "v0.3.0", "-m", "v0.3.0")
+        rolled = release_cut.roll_changelog(CHANGELOG, "0.3.1", "2026-09-28")
+        (root / "CHANGELOG.md").write_text(rolled, encoding="utf-8")
+        self.commit(root, "docs: date the changelog by hand")
+        (root / "Cargo.toml").write_text(
+            release_cut.set_workspace_version(CARGO, "0.3.1"), encoding="utf-8"
+        )
+        self.commit(root, "chore: move the version later")
+
+        result, state = self.pending_at(root)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(state, {})
+        self.assertIn("does not declare 0.3.1", result.stderr)
+
+    def test_a_section_edited_after_the_release_commit_is_refused(self):
+        root, _, landing = self.released()
+        changelog = root / "CHANGELOG.md"
+        changelog.write_text(
+            changelog.read_text(encoding="utf-8").replace(
+                "Something a server operator will notice.", "Something else entirely."
+            ),
+            encoding="utf-8",
+        )
+        self.commit(root, "docs: reword the release")
+        result, _ = self.pending_at(root)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(landing[:12], result.stderr)
+        self.assertIn("section differs", result.stderr)
 
 
 class WeeklyTagWorkflowCase(unittest.TestCase):
@@ -219,6 +418,30 @@ class WeeklyTagWorkflowCase(unittest.TestCase):
             "        if: steps.release.outputs.pending == 'true'\n        run: make release-check",
             self.check,
         )
+
+    def test_the_gate_runs_on_the_release_commit_not_the_tip(self):
+        """The commit gated is the commit tagged: the release commit.
+
+        `--pending`'s `sha` is the release commit (see
+        `test_pending_names_the_release_commit_never_main_s_tip`); the gate has
+        to check it out before `make release-check`, or it tests the tip and
+        tags a commit it never ran.
+        """
+
+        checkout = self.check.index(
+            "      - name: Check out the release commit\n"
+            "        if: steps.release.outputs.pending == 'true'\n"
+            "        env:\n"
+            "          RELEASE_SHA: ${{ steps.release.outputs.sha }}\n"
+            '        run: git checkout -q --detach "$RELEASE_SHA"\n'
+        )
+        self.assertLess(checkout, self.check.index("run: make release-check"))
+        self.assertIn("sha: ${{ steps.release.outputs.sha }}", self.check)
+        # A refusal from `--pending` fails the step instead of vanishing into a pipe.
+        find = self.check.split("id: release\n", 1)[1].split("      - name:", 1)[0]
+        self.assertNotIn("| tee", find)
+        self.assertIn('scripts/release-cut --pending > "$found"', find)
+        self.assertIn('grep -qx "sha=$TESTED_SHA"', self.tag)
 
     def test_the_tag_goes_on_the_commit_the_gate_passed_and_is_annotated(self):
         self.assertIn("ref: ${{ needs.release-check.outputs.sha }}", self.tag)

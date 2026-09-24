@@ -12,13 +12,19 @@ wrong at 1 a.m.:
 3. set the one workspace version in Cargo.toml, keep both native apps'
    marketing versions equal to it and advance both native build counters
    (validation/mobile_versions.py requires all of that of any branch that
-   moves the workspace version), then let Cargo relock both lockfiles.
+   moves the workspace version), rewrite every status document that quotes
+   the version or a build counter (the Apple ones through
+   validation/apple_build.py's generator), then let Cargo relock both
+   lockfiles.
 
 It never tags. Under the weekly cadence (docs/RELEASING.md "The weekly
 release tag") the tag is cut by the scheduled release-readiness run, and only
-after that run is green on the merged release commit. `--pending` is the
-question that run asks first: is the version on this commit untagged and
-dated in the changelog?
+after that run is green on the release commit. `--pending` is the question
+that run asks first: is the version on this commit untagged and dated in the
+changelog, and if so, which commit is the release? The answer is the commit
+that brought the dated section onto `main`'s first-parent line -- the release
+pull request's landing commit -- never the tip of `main` that happens to
+carry it on a Monday.
 """
 
 from __future__ import annotations
@@ -32,11 +38,41 @@ import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
+# validation/apple_build.py owns the Apple build surfaces; the cut reuses it.
+sys.path.insert(0, str(ROOT))
 ANDROID = "clients/android/app/build.gradle.kts"
 APPLE = "clients/apple/project.yml"
 SPIKE_MANIFEST = "spikes/hiqlite-m0/Cargo.toml"
 SEMVER = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
 UNRELEASED = "## [Unreleased]"
+APPLE_README = "clients/apple/README.md"
+APPLE_PARITY = "docs/clients/APPLE-CLIENT-PARITY.md"
+ANDROID_README = "clients/android/README.md"
+STATUS_PAGE = "docs/STATUS.html"
+
+# Every place a status document quotes the current workspace version or the
+# Android build counter, beside the Apple build surfaces that
+# validation/apple_build.py generates. Group 1 is the quoted value, and each
+# pattern must match exactly once, so a reworded line fails the cut instead
+# of being skipped. `{version}` is the version the line quotes now.
+VERSION_CLAIMS = (
+    (APPLE_README, r"^> Status: \*\*v({version})\*\*, build `", "Apple README status version"),
+    (
+        APPLE_PARITY,
+        r"^> Status \(\d{{4}}-\d{{2}}-\d{{2}}\): source is v({version}), Apple build ",
+        "Apple parity status version",
+    ),
+    (ANDROID_README, r"^> Status: \*\*v({version})\*\*, build `", "Android README status version"),
+)
+ANDROID_BUILD_CLAIMS = (
+    (ANDROID_README, r"^> Status: \*\*v[^*\n]+\*\*, build `(\d+)`", "Android README status build"),
+    (STATUS_PAGE, r"· Android versionCode (\d+) source ·", "STATUS.html viewers tile"),
+    (
+        STATUS_PAGE,
+        r"Install Apple build \d+ and Android versionCode (\d+) on the physical devices",
+        "STATUS.html physical install item",
+    ),
+)
 
 
 class CutError(ValueError):
@@ -136,29 +172,168 @@ def set_mobile_versions(android: str, apple: str, version: str) -> tuple[str, st
     return android, apple
 
 
+def _replace_one(text: str, pattern: str, value: str, where: str, label: str) -> str:
+    found = list(re.finditer(pattern, text, re.MULTILINE))
+    if len(found) != 1:
+        raise CutError(
+            f"{where}: expected exactly one {label}, found {len(found)}; the line was "
+            "reworded by hand -- restore it or update scripts/release-cut deliberately"
+        )
+    match = found[0]
+    return text[: match.start(1)] + value + text[match.end(1) :]
+
+
+def set_build_claims(
+    read, previous: str, version: str, apple_build: int, android_build: int
+) -> dict[str, str]:
+    """Every status document's quote of the version and both build counters.
+
+    `read` serves the tree as the cut leaves it (Cargo.toml and both native
+    manifests already moved). Returns the documents whose contents change. The
+    Apple build surfaces come from validation/apple_build.py's own generator,
+    so the cut and `make apple-build-bump` can never disagree about them.
+    """
+
+    from validation.apple_build import AppleBuildError, render
+
+    documents: dict[str, str] = {}
+
+    def current(path: str) -> str:
+        return documents[path] if path in documents else read(path)
+
+    for path, pattern, label in VERSION_CLAIMS:
+        documents[path] = _replace_one(
+            current(path), pattern.format(version=re.escape(previous)), version, path, label
+        )
+    for path, pattern, label in ANDROID_BUILD_CLAIMS:
+        documents[path] = _replace_one(current(path), pattern, str(android_build), path, label)
+    try:
+        documents.update(render(current, apple_build))
+    except AppleBuildError as exc:
+        raise CutError(str(exc)) from exc
+    return {path: text for path, text in documents.items() if text != read(path)}
+
+
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ("git", *args), cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
 
 
+def _dated_heading(version: str) -> str:
+    return rf"(?m)^## \[{re.escape(version)}\] — \d{{4}}-\d{{2}}-\d{{2}}$"
+
+
+def _section(changelog: str, version: str) -> str | None:
+    start = re.search(_dated_heading(version), changelog)
+    if start is None:
+        return None
+    following = re.search(r"(?m)^## \[", changelog[start.end() :])
+    return changelog[start.start() : start.end() + following.start() if following else None]
+
+
+def _unreleased_is_empty(changelog: str) -> bool:
+    start = changelog.find(UNRELEASED + "\n")
+    if start < 0:
+        return False
+    start += len(UNRELEASED) + 1
+    following = re.search(r"(?m)^## \[", changelog[start:])
+    body = changelog[start : start + following.start() if following else None]
+    return not any(
+        line.strip() and not line.lstrip().startswith("#") for line in body.splitlines()
+    )
+
+
+def release_commit(root: Path, version: str) -> str:
+    """The commit that is release `version`: the one that dated its section.
+
+    Every commit that reaches `main` after a release still carries the same
+    version and the same dated section, so "HEAD is untagged and dated" says
+    only that a release is waiting, not which commit it is. The release is the
+    commit on HEAD's first-parent line that brought the `## [X.Y.Z] — date`
+    heading in: on `main`, the landing commit of the release pull request
+    (v0.2.8 and v0.3.0 were tagged on exactly those); on the release branch
+    before it lands, the `scripts/release-cut` commit itself. It must also be
+    the tree the changelog describes -- that version in Cargo.toml, nothing
+    under `[Unreleased]`, and the same section text HEAD carries -- or it is
+    refused rather than tagged.
+    """
+
+    heading = f"## [{version}] — "
+    found = _git(
+        root, "log", "--first-parent", "--diff-merges=first-parent", "--no-patch",
+        "--format=%H", "-S", heading, "HEAD", "--", "CHANGELOG.md",
+    )
+    if found.returncode != 0:
+        raise CutError(f"cannot read CHANGELOG.md history: {found.stderr.strip()}")
+
+    def show(revision: str, path: str) -> str | None:
+        shown = _git(root, "show", f"{revision}:{path}")
+        return shown.stdout if shown.returncode == 0 else None
+
+    def dated_in(revision: str) -> bool:
+        changelog = show(revision, "CHANGELOG.md")
+        return changelog is not None and re.search(_dated_heading(version), changelog) is not None
+
+    sha = next(
+        (
+            candidate
+            for candidate in found.stdout.split()
+            if dated_in(candidate) and not dated_in(f"{candidate}^1")
+        ),
+        None,
+    )
+    if sha is None:
+        raise CutError(
+            f"no commit on HEAD's first-parent line brought in a dated '## [{version}]' heading"
+        )
+
+    changelog = show(sha, "CHANGELOG.md") or ""
+    problems = []
+    if workspace_version(show(sha, "Cargo.toml") or "") != version:
+        problems.append(f"its Cargo.toml does not declare {version}")
+    if _section(changelog, version) != _section(
+        (root / "CHANGELOG.md").read_text(encoding="utf-8"), version
+    ):
+        problems.append(
+            f"HEAD's '## [{version}]' section differs from it, so a tag there would "
+            "not be the release the changelog describes"
+        )
+    if not _unreleased_is_empty(changelog):
+        problems.append(
+            "its [Unreleased] section is not empty, so it carries changes the "
+            f"'## [{version}]' section does not list"
+        )
+    if problems:
+        raise CutError(
+            f"commit {sha[:12]} dated '## [{version}]' but is not a release commit: "
+            + "; ".join(problems)
+            + ". Land a release as the pull request scripts/release-cut prepares."
+        )
+    return sha
+
+
 def pending(root: Path) -> dict[str, str]:
-    """What the scheduled run needs to decide whether this commit is a release."""
+    """Whether a release is waiting to be tagged, and which commit it is.
+
+    `sha` is the release commit (see `release_commit`), not HEAD: the weekly
+    run gates and tags that commit, whatever has merged on top of it since.
+    """
 
     version = workspace_version((root / "Cargo.toml").read_text(encoding="utf-8"))
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    dated = bool(
-        re.search(rf"(?m)^## \[{re.escape(version)}\] — \d{{4}}-\d{{2}}-\d{{2}}$", changelog)
-    )
+    dated = bool(re.search(_dated_heading(version), changelog))
     tagged = _git(root, "rev-parse", "-q", "--verify", f"refs/tags/v{version}").returncode == 0
-    sha = _git(root, "rev-parse", "HEAD").stdout.strip()
+    head = _git(root, "rev-parse", "HEAD").stdout.strip()
+    is_pending = dated and not tagged
     return {
         "version": version,
         "tag": f"v{version}",
-        "sha": sha,
+        "sha": release_commit(root, version) if is_pending else head,
+        "head": head,
         "dated": "true" if dated else "false",
         "tagged": "true" if tagged else "false",
-        "pending": "true" if dated and not tagged else "false",
+        "pending": "true" if is_pending else "false",
     }
 
 
@@ -182,12 +357,18 @@ def cut(root: Path, version: str, date: str) -> list[str]:
         (root / APPLE).read_text(encoding="utf-8"),
         version,
     )
+    moved = {"CHANGELOG.md": changelog, "Cargo.toml": cargo, ANDROID: android, APPLE: apple}
+    claims = set_build_claims(
+        lambda path: moved[path] if path in moved else (root / path).read_text(encoding="utf-8"),
+        current,
+        version,
+        int(re.search(r'CURRENT_PROJECT_VERSION:\s*"(\d+)"', apple).group(1)),
+        int(re.search(r"(?m)^\s*versionCode\s*=\s*(\d+)\s*$", android).group(1)),
+    )
     # Every refusal above happens before any file is written.
-    (root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
-    cargo_path.write_text(cargo, encoding="utf-8")
-    (root / ANDROID).write_text(android, encoding="utf-8")
-    (root / APPLE).write_text(apple, encoding="utf-8")
-    return ["CHANGELOG.md", "Cargo.toml", ANDROID, APPLE]
+    for path, contents in {**moved, **claims}.items():
+        (root / path).write_text(contents, encoding="utf-8")
+    return [*moved, *sorted(claims)]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -252,10 +433,11 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "\nNext, per docs/RELEASING.md:\n"
         f"  1. commit these as `release: v{version}` on a branch and open a pull request;\n"
-        "  2. merge it once its fast lane is green;\n"
+        "  2. merge it once its fast lane is green; the commit that lands it on main\n"
+        "     is the release commit;\n"
         "  3. the next scheduled release-readiness run (Mondays 06:00 UTC) runs\n"
-        "     `make release-check` on the merged commit and, only if it is green,\n"
-        f"     pushes the annotated tag v{version}. Tagging by hand stays possible:\n"
+        "     `make release-check` on that release commit and, only if it is green,\n"
+        f"     pushes the annotated tag v{version} onto it. Tagging by hand stays possible:\n"
         f"     make release-check && git tag -a v{version} -m 'v{version}' && git push origin v{version}"
     )
     return 0
