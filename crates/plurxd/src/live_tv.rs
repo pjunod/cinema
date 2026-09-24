@@ -1672,9 +1672,11 @@ impl LiveTvRegistry {
             if transport.is_closing() {
                 return ViewerAdmission::WaitFor(Arc::clone(transport));
             }
+            // Stale or failed source facts do not stop a join: the joiner
+            // re-probes the live edge before it plans (§2.4 D1, D5), so the
+            // facts one start saw never decide every later viewer.
             let shareable = transport.same_tuner(seat.device_id, seat.address)
-                && transport.owner_serving_generation == seat.serving_generation
-                && !transport.source_stale();
+                && transport.owner_serving_generation == seat.serving_generation;
             if !shareable {
                 // Never a second transport for one key. One nothing wants is
                 // about to retire, so wait for it; one still in use is not
@@ -5942,16 +5944,19 @@ async fn run_live_session_inner(
 
     // The tuner GET, its prefix and its probe belong to the shared transport
     // this session was admitted to (plan L-03 §3.1): an opener waits for its
-    // own transport's probe, a joiner for the probe of a tune already running,
-    // which is this tune's own evidence rather than a cache. A device refusal
-    // (`tuner_unavailable`) reaches the viewers waiting here as the
+    // own transport's probe of the prefix it will be fed. A joiner gets the
+    // running transport's facts only while they are fresh; failed, stale or
+    // old facts are re-probed from the live edge first
+    // (`DvrTransport::source_for_viewer`). Either way the plan is checked
+    // against the input this viewer's FFmpeg actually opens, below. A device
+    // refusal (`tuner_unavailable`) reaches the viewers waiting here as the
     // transport's error.
     let transport = session.transport().ok_or_else(|| {
         LiveTvError::StreamFailed("the live-TV session has no tuner connection".into())
     })?;
     let startup_deadline = session.started + STARTUP_TIMEOUT;
     let source = transport
-        .wait_for_source(&session.cancel, startup_deadline)
+        .source_for_viewer(&session.cancel, startup_deadline)
         .await?;
     let observed = LiveTvSourceFormat {
         video_width: source.width,
@@ -6049,6 +6054,7 @@ async fn run_live_session_inner(
         spawn_live_ffmpeg(&owner.system, &transcode_plan, &session.directory)?;
     let stdin = child.stdin.take();
     let source_format_changed = Arc::new(AtomicBool::new(false));
+    let input_format = Arc::new(StdMutex::new(None));
     let stderr = child.stderr.take().map(|stderr| {
         tokio::spawn(capture_live_stderr(
             stderr,
@@ -6057,6 +6063,7 @@ async fn run_live_session_inner(
             Arc::clone(&session.source_format),
             Arc::clone(&session.source_format_expires_at),
             Arc::clone(&source_format_changed),
+            Arc::clone(&input_format),
         ))
     });
     let Some(stdin) = stdin else {
@@ -6104,6 +6111,7 @@ async fn run_live_session_inner(
         .source_format
         .as_ref()
         .map_or(0, |format| format.observed_at);
+    let mut input_checked = false;
     let observe = async {
         loop {
             tick.tick().await;
@@ -6117,12 +6125,35 @@ async fn run_live_session_inner(
                     "live-TV FFmpeg exited with {status}"
                 )));
             }
-            if pump.is_finished() {
+            // An eviction ends this session on this tick, under its own
+            // reason. The pump may still be blocked writing to an FFmpeg that
+            // stopped reading, for up to `TUNER_READ_TIMEOUT`; waiting for it
+            // would keep that FFmpeg and its encode permit, and report the
+            // stall instead of the eviction (plan L-03 §3.2).
+            if pump.is_finished() || consumer.evicted().is_some() {
                 break Err(viewer_stream_error(&pump_failure, &consumer, &transport));
             }
+            if !input_checked {
+                let input = input_format
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if let Some(input) = input {
+                    input_checked = true;
+                    if input_contradicts_plan(&source, &input) {
+                        // The facts this viewer planned from do not describe
+                        // the bytes it was fed: the transport's facts are
+                        // stale, and the next viewer re-probes (§2.4 D5).
+                        transport.mark_source_stale();
+                        break Err(LiveTvError::SourceFormatChanged(
+                            "the broadcast changed format since this channel's tuner was last observed; start the channel again so a fresh delivery route can be selected".into(),
+                        ));
+                    }
+                }
+            }
             if source_format_changed.load(Ordering::Acquire) {
-                // The transport's facts no longer describe the mux: no new
-                // viewer may plan from them (§2.4 D5).
+                // The transport's facts no longer describe the mux: the next
+                // viewer re-probes before it plans (§2.4 D5).
                 transport.mark_source_stale();
                 break Err(LiveTvError::SourceFormatChanged(
                     "the broadcast changed format; start the channel again so a fresh delivery route can be selected".into(),
@@ -7017,6 +7048,7 @@ async fn capture_live_stderr(
     source_format: Arc<StdMutex<Option<LiveTvSourceFormat>>>,
     source_format_expires_at: Arc<AtomicI64>,
     source_format_changed: Arc<AtomicBool>,
+    input_format: Arc<StdMutex<Option<LiveTvSourceFormat>>>,
 ) {
     // Drain forever without exposing device metadata. Retain only FFmpeg's
     // bounded initial input description and stop parsing at Stream mapping;
@@ -7068,6 +7100,9 @@ async fn capture_live_stderr(
                             .saturating_add(SOURCE_FORMAT_TTL.as_secs() as i64),
                         Ordering::Release,
                     );
+                    *input_format
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(format.clone());
                     *source_format
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(format);
@@ -7113,6 +7148,9 @@ async fn capture_live_stderr(
                     .saturating_add(SOURCE_FORMAT_TTL.as_secs() as i64),
                 Ordering::Release,
             );
+            *input_format
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(format.clone());
             *source_format
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(format);
@@ -7167,13 +7205,29 @@ async fn pump_viewer_feed(
     }
 }
 
-/// Why a viewer's feed ended, most specific first: its own write failure, an
-/// eviction the transport chose, then how the transport itself ended.
+/// Why a viewer's feed ended, most specific first: an eviction the transport
+/// chose, then this viewer's own write failure, then how the transport itself
+/// ended. The eviction comes first because it is the cause: a pump blocked on
+/// an FFmpeg that stopped reading fails "input stalled" only as a consequence
+/// of the backlog the transport already evicted it for.
 fn viewer_stream_error(
     pump_failure: &StdMutex<Option<LiveTvError>>,
     consumer: &dvr::ViewerConsumer,
     transport: &dvr::DvrTransport,
 ) -> LiveTvError {
+    match consumer.evicted() {
+        Some("backlog") => {
+            return LiveTvError::StreamFailed(
+                "the live-TV producer stopped consuming tuner bytes".into(),
+            );
+        }
+        Some(_) => {
+            return LiveTvError::OwnerUnavailable(
+                crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
+            );
+        }
+        None => {}
+    }
     if let Some(error) = pump_failure
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -7181,17 +7235,27 @@ fn viewer_stream_error(
     {
         return error;
     }
-    match consumer.evicted() {
-        Some("backlog") => {
-            LiveTvError::StreamFailed("the live-TV producer stopped consuming tuner bytes".into())
-        }
-        Some(_) => {
-            LiveTvError::OwnerUnavailable(crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned())
-        }
-        None => transport.terminal_error().unwrap_or_else(|| {
-            LiveTvError::StreamFailed("the tuner stream ended unexpectedly".into())
-        }),
+    transport
+        .terminal_error()
+        .unwrap_or_else(|| LiveTvError::StreamFailed("the tuner stream ended unexpectedly".into()))
+}
+
+/// Whether the input a viewer's FFmpeg opened contradicts the facts its plan
+/// was made from (plan L-03 §2.4 D5). A joiner plans from its transport's
+/// probe but is fed the live edge, so this is the check that the two agree.
+///
+/// Only facts the plan is sized from, and only where both sides state them:
+/// frame size (output height, scaling and encode admission) and audio channel
+/// count. Scan is left out: FFmpeg's banner omits field order where FFprobe
+/// reports `unknown`, and the session maps `unknown` to progressive, so
+/// comparing it would refuse starts whose plan is right.
+fn input_contradicts_plan(planned: &LiveSourceFacts, input: &LiveTvSourceFormat) -> bool {
+    fn differs<T: PartialEq>(planned: Option<T>, input: Option<T>) -> bool {
+        matches!((planned, input), (Some(planned), Some(input)) if planned != input)
     }
+    differs(planned.width, input.video_width)
+        || differs(planned.height, input.video_height)
+        || differs(planned.audio_channels, input.audio_channels)
 }
 
 async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, LiveTvError> {
@@ -9861,6 +9925,415 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
         tuner.await.expect("fake tuner");
     }
 
+    /// A loopback HDHomeRun for start-path tests. It answers discovery and
+    /// the lineup, and streams every tuner GET 16 KiB a millisecond until the
+    /// client goes away, counting the GETs. With `lineup_gate` above one it
+    /// holds lineup answers until that many are waiting (or a second has
+    /// passed), so concurrent starts reach admission together.
+    struct FixtureTuner {
+        gets: Arc<AtomicUsize>,
+        server: tokio::task::JoinHandle<()>,
+        /// The node's 1 Hz settings observer, when a manager is attached.
+        observer: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl Drop for FixtureTuner {
+        fn drop(&mut self) {
+            self.server.abort();
+            if let Some(observer) = &self.observer {
+                observer.abort();
+            }
+        }
+    }
+
+    async fn fixture_tuner(lineup_gate: usize) -> (reqwest::Client, FixtureTuner) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fixture tuner");
+        let address = listener.local_addr().expect("fixture tuner address");
+        // Test-only transport injection, as in the producer test above: the
+        // real pinned-address discovery, lineup and tuner GET, through a
+        // loopback proxy.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .proxy(reqwest::Proxy::all(format!("http://{address}")).expect("fixture proxy"))
+            .build()
+            .expect("fixture client");
+        let gets = Arc::new(AtomicUsize::new(0));
+        let lineups = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(tokio::sync::Notify::new());
+        let server = {
+            let gets = Arc::clone(&gets);
+            tokio::spawn(async move {
+                while let Ok((mut stream, _)) = listener.accept().await {
+                    let gets = Arc::clone(&gets);
+                    let lineups = Arc::clone(&lineups);
+                    let released = Arc::clone(&released);
+                    tokio::spawn(async move {
+                        let mut request = Vec::new();
+                        let mut buffer = [0_u8; 2048];
+                        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            match stream.read(&mut buffer).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(read) => request.extend_from_slice(&buffer[..read]),
+                            }
+                        }
+                        let line = String::from_utf8_lossy(&request)
+                            .lines()
+                            .next()
+                            .unwrap_or_default()
+                            .to_owned();
+                        let document = if line.contains("/discover.json") {
+                            Some(
+                                r#"{"FriendlyName":"Fixture","ModelNumber":"HDFX-4K","FirmwareVersion":"fixture","DeviceID":"10ABCDEF","TunerCount":4}"#,
+                            )
+                        } else if line.contains("/lineup.json") {
+                            let release = released.notified();
+                            tokio::pin!(release);
+                            release.as_mut().enable();
+                            if lineups.fetch_add(1, Ordering::SeqCst) + 1 >= lineup_gate {
+                                released.notify_waiters();
+                            } else {
+                                let _ = tokio::time::timeout(Duration::from_secs(1), release).await;
+                            }
+                            Some(
+                                r#"[{"GuideNumber":"7.1","GuideName":"Test","URL":"http://ignored.local:5004/auto/v7.1"}]"#,
+                            )
+                        } else {
+                            None
+                        };
+                        if let Some(document) = document {
+                            let _ = stream
+                                .write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{document}", document.len()).as_bytes())
+                                .await;
+                            return;
+                        }
+                        if !line.contains("/auto/v") {
+                            let _ = stream
+                                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                                .await;
+                            return;
+                        }
+                        gets.fetch_add(1, Ordering::SeqCst);
+                        if stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nTransfer-Encoding: chunked\r\n\r\n")
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let chunk = vec![0x47_u8; 16 * 1024];
+                        let frame = [
+                            format!("{:x}\r\n", chunk.len()).into_bytes(),
+                            chunk,
+                            b"\r\n".to_vec(),
+                        ]
+                        .concat();
+                        while stream.write_all(&frame).await.is_ok() {
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                    });
+                }
+            })
+        };
+        (
+            client,
+            FixtureTuner {
+                gets,
+                server,
+                observer: None,
+            },
+        )
+    }
+
+    /// A manager wired to a fixture tuner, a scripted FFmpeg (`ffmpeg` is the
+    /// script's body) and an FFprobe that prints `<root>/probe.json`, fails
+    /// while it is absent, and first sleeps a second while `<root>/probe.slow`
+    /// exists.
+    #[cfg(unix)]
+    async fn start_path_fixture(
+        root: &Path,
+        ffmpeg: &str,
+        lineup_gate: usize,
+    ) -> (Arc<LiveTvManager>, FixtureTuner) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let ffmpeg_path = root.join("fake-ffmpeg");
+        std::fs::write(&ffmpeg_path, format!("#!/bin/sh\n{ffmpeg}\n")).expect("fake FFmpeg");
+        std::fs::set_permissions(&ffmpeg_path, std::fs::Permissions::from_mode(0o755))
+            .expect("executable fake FFmpeg");
+        let ffprobe_path = root.join("fake-ffprobe");
+        std::fs::write(
+            &ffprobe_path,
+            format!(
+                "#!/bin/sh\n[ -f '{slow}' ] && /bin/sleep 1\n[ -f '{answer}' ] || exit 1\nexec /bin/cat '{answer}'\n",
+                slow = root.join("probe.slow").display(),
+                answer = root.join("probe.json").display(),
+            ),
+        )
+        .expect("fake FFprobe");
+        std::fs::set_permissions(&ffprobe_path, std::fs::Permissions::from_mode(0o755))
+            .expect("executable fake FFprobe");
+        let system = SystemInfo {
+            ffmpeg: ffmpeg_path.to_string_lossy().into_owned(),
+            ffprobe: ffprobe_path.to_string_lossy().into_owned(),
+            ..SystemInfo::default()
+        };
+        let mut manager = test_manager_with_system(root, system);
+        seed_test_config(&manager).await;
+        let (client, mut tuner) = fixture_tuner(lineup_gate).await;
+        Arc::get_mut(&mut manager)
+            .expect("unique test manager")
+            .client = Ok(client);
+        // Every session's per-second fence validates against the node's
+        // 1 Hz settings observation; run that loop as production does, so a
+        // session in these tests ends for its own reason and not the fence's.
+        let observed = Arc::downgrade(&manager);
+        tuner.observer = Some(tokio::spawn(async move {
+            while let Some(manager) = observed.upgrade() {
+                manager.observe_fence().await;
+                drop(manager);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }));
+        (manager, tuner)
+    }
+
+    const PROBED_480: &str = r#"{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width":720,"height":480,"field_order":"tt"},{"codec_type":"audio","codec_name":"ac3","channels":2}]}"#;
+
+    fn fixture_request(user_id: i64) -> LiveTvStartRequest {
+        let mut request = test_session(PathBuf::from("/unused"), 1).request.clone();
+        request.user_id = user_id;
+        request
+    }
+
+    fn spawn_start(
+        manager: &Arc<LiveTvManager>,
+        request: LiveTvStartRequest,
+    ) -> tokio::task::JoinHandle<Result<LiveTvProvisional, LiveTvError>> {
+        let manager = Arc::clone(manager);
+        tokio::spawn(async move { manager.start_local(request).await })
+    }
+
+    /// Wait until `count` sessions are registered and each has its transport.
+    async fn admitted_transports(
+        manager: &LiveTvManager,
+        count: usize,
+    ) -> Vec<Arc<dvr::DvrTransport>> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let transports = {
+                let registry = manager.registry.lock().expect("registry");
+                registry
+                    .sessions
+                    .values()
+                    .filter_map(|session| session.transport())
+                    .collect::<Vec<_>>()
+            };
+            if transports.len() == count {
+                return transports;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{count} admitted starts expected, saw {}",
+                transports.len()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_concurrent_starts_on_one_channel_open_one_transport_with_one_get() {
+        // Review of #482, finding 4: D2 on the production start path. Two
+        // starts for one channel reach admission together (the fixture holds
+        // both lineup answers until both are asked). Deciding in one lock hold
+        // and inserting in another lets both decide "open": the second insert
+        // replaces the first, whose worker still holds a tuner GET that
+        // nothing counts or can close.
+        let root = crate::test_tempdir().expect("root");
+        let (manager, tuner) = start_path_fixture(root.path(), "exec /bin/cat >/dev/null", 2).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+
+        let first = spawn_start(&manager, fixture_request(1));
+        let second = spawn_start(&manager, fixture_request(2));
+        let transports = admitted_transports(&manager, 2).await;
+        assert!(
+            Arc::ptr_eq(&transports[0], &transports[1]),
+            "one start opened the transport and the other joined it"
+        );
+        assert_eq!(manager.registry.lock().expect("registry").held(), 1);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(tuner.gets.load(Ordering::SeqCst), 1, "one tuner GET");
+
+        manager.shutdown().await.expect("shutdown");
+        let _ = first.await;
+        let _ = second.await;
+        assert_eq!(tuner.gets.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_probe_ends_a_viewers_only_transport_and_the_next_start_probes_again() {
+        // Review of #482, finding 1, the transport no recording holds: D1 as
+        // designed. Its probe failing ends it with the probe's error, so the
+        // viewer who joined while it was probing fails promptly with that
+        // error instead of waiting out its start deadline for a re-probe the
+        // unattached transport would never take, and the next start opens a
+        // fresh GET and probes again.
+        let root = crate::test_tempdir().expect("root");
+        let (manager, tuner) = start_path_fixture(root.path(), "exec /bin/cat >/dev/null", 2).await;
+        std::fs::write(root.path().join("probe.slow"), b"").expect("slow probe");
+
+        let started = tokio::time::Instant::now();
+        let first = spawn_start(&manager, fixture_request(1));
+        let second = spawn_start(&manager, fixture_request(2));
+        let transports = admitted_transports(&manager, 2).await;
+        assert!(Arc::ptr_eq(&transports[0], &transports[1]));
+        for start in [first, second] {
+            let result = tokio::time::timeout(Duration::from_secs(8), start)
+                .await
+                .expect("both starts answer with the probe's failure")
+                .expect("start task");
+            assert!(
+                matches!(result, Err(LiveTvError::InvalidResponse(_))),
+                "{result:?}"
+            );
+        }
+        assert!(started.elapsed() < STARTUP_TIMEOUT);
+        let closed = tokio::time::Instant::now() + Duration::from_secs(3);
+        while manager.registry.lock().expect("registry").held() != 0 {
+            assert!(
+                tokio::time::Instant::now() < closed,
+                "the failed transport closes"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        std::fs::remove_file(root.path().join("probe.slow")).expect("fast probe");
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+        let third = spawn_start(&manager, fixture_request(3));
+        let planned = tokio::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let delivery = {
+                let registry = manager.registry.lock().expect("registry");
+                registry
+                    .sessions
+                    .values()
+                    .next()
+                    .and_then(|session| session.delivery())
+            };
+            if delivery.is_some() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < planned,
+                "the next start plans"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            tuner.gets.load(Ordering::SeqCst),
+            2,
+            "a fresh GET, probed again"
+        );
+        manager.shutdown().await.expect("shutdown");
+        let _ = third.await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_viewer_whose_input_contradicts_its_plan_ends_and_marks_the_facts_stale() {
+        // Review of #482, finding 2. The plan (height, deinterlace, encode
+        // admission) was made from 480-line facts; the input FFmpeg opened
+        // is 1080 lines. That is the joiner who planned from a recording's
+        // opening probe after the broadcast switched. The viewer ends with
+        // `source_format_changed` and the transport's facts are stale, so the
+        // retry re-probes.
+        let root = crate::test_tempdir().expect("root");
+        let ffmpeg = r#"printf 'Input #0, mpegts, from pipe:0:\n  Stream #0:0[0x31]: Video: mpeg2video (Main), yuv420p(tv, top first), 1920x1080 [SAR 1:1 DAR 16:9], 29.97 fps\n  Stream #0:1[0x34]: Audio: ac3, 48000 Hz, stereo, fltp, 192 kb/s\nStream mapping:\n' >&2
+exec /bin/cat >/dev/null"#;
+        let (manager, _tuner) = start_path_fixture(root.path(), ffmpeg, 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+
+        let start = spawn_start(&manager, fixture_request(1));
+        let transport = admitted_transports(&manager, 1).await.remove(0);
+        let result = tokio::time::timeout(Duration::from_secs(8), start)
+            .await
+            .expect("the start answers once the input is seen")
+            .expect("start task");
+        assert!(
+            matches!(result, Err(LiveTvError::SourceFormatChanged(_))),
+            "{result:?}"
+        );
+        assert!(transport.source_stale());
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[test]
+    fn only_a_stated_difference_in_size_or_channels_contradicts_a_plan() {
+        let planned = LiveSourceFacts {
+            width: Some(720),
+            height: Some(480),
+            audio_channels: Some(2),
+            field_order: Some("tt".into()),
+            ..LiveSourceFacts::default()
+        };
+        let input = |width, height, channels, scan: Option<&str>| LiveTvSourceFormat {
+            video_width: width,
+            video_height: height,
+            scan: scan.map(str::to_owned),
+            audio_channels: channels,
+            audio_layout: None,
+            observed_at: 0,
+        };
+        assert!(!input_contradicts_plan(
+            &planned,
+            &input(Some(720), Some(480), Some(2), Some("interlaced"))
+        ));
+        assert!(!input_contradicts_plan(
+            &planned,
+            &input(None, None, None, Some("progressive"))
+        ));
+        assert!(input_contradicts_plan(
+            &planned,
+            &input(Some(1920), Some(1080), Some(2), None)
+        ));
+        assert!(input_contradicts_plan(
+            &planned,
+            &input(Some(720), Some(480), Some(6), None)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_evicted_viewer_ends_on_the_next_tick_with_the_eviction_reason() {
+        // Review of #482, finding 5 (plan §3.2, §5.1). This FFmpeg never
+        // reads its stdin: the pump blocks on its write and the viewer's
+        // queue fills, so the transport evicts it. The session must end on
+        // its next tick saying it stopped consuming — not `TUNER_READ_TIMEOUT`
+        // later with "FFmpeg input stalled", holding its FFmpeg and encode
+        // permit meanwhile.
+        let root = crate::test_tempdir().expect("root");
+        let (manager, _tuner) = start_path_fixture(root.path(), "exec /bin/sleep 60", 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+
+        let started = tokio::time::Instant::now();
+        let start = spawn_start(&manager, fixture_request(1));
+        let result = tokio::time::timeout(Duration::from_secs(10), start)
+            .await
+            .expect("the evicted start answers well before the write timeout")
+            .expect("start task");
+        match result {
+            Err(LiveTvError::StreamFailed(message)) => {
+                assert!(message.contains("stopped consuming"), "{message}");
+            }
+            other => panic!("expected the eviction, got {other:?}"),
+        }
+        assert!(started.elapsed() < TUNER_READ_TIMEOUT / 2);
+        manager.shutdown().await.expect("shutdown");
+    }
+
     #[test]
     fn live_filter_deinterlaces_interlaced_frames_only() {
         let filter = live_video_filter(
@@ -10101,6 +10574,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
             Arc::new(StdMutex::new(None)),
             Arc::new(AtomicI64::new(0)),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(StdMutex::new(None)),
         ));
         let mut stdin = child.stdin.take().expect("stdin");
         stdin
@@ -10164,6 +10638,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
                             Arc::new(StdMutex::new(None)),
                             Arc::new(AtomicI64::new(0)),
                             changed,
+                            Arc::new(StdMutex::new(None)),
                         )
                     );
                 })
@@ -10229,6 +10704,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
                         Arc::new(StdMutex::new(None)),
                         Arc::new(AtomicI64::new(0)),
                         Arc::new(AtomicBool::new(false)),
+                        Arc::new(StdMutex::new(None)),
                     )
                 );
             })
@@ -10258,6 +10734,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
                 Arc::new(StdMutex::new(None)),
                 Arc::new(AtomicI64::new(0)),
                 Arc::new(AtomicBool::new(false)),
+                Arc::new(StdMutex::new(None)),
             ));
             writer
                 .write_all(&vec![b'x'; 32 * 1024])
@@ -10288,6 +10765,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
             Arc::new(StdMutex::new(None)),
             Arc::new(AtomicI64::new(0)),
             Arc::clone(&changed),
+            Arc::new(StdMutex::new(None)),
         ));
         writer
             .write_all(

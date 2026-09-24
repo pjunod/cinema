@@ -227,6 +227,7 @@ async fn atsc_audio_failures_retain_a_sanitized_cause_across_stderr_chunks() {
             Arc::new(StdMutex::new(None)),
             Arc::new(AtomicI64::new(0)),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(std::sync::Mutex::new(None)),
         );
         let write = async {
             writer

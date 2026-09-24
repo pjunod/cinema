@@ -947,7 +947,12 @@ pattern = "ServingAuthority"
 # `ServingAuthority::always_ready()` to `pump_tuner_fanout`. The shared
 # transport projects the same existing authority the DVR transport already
 # did (its per-chunk `is_current` check); no new authority is created.
-expected_occurrences = 32
+# 32 -> 34 (measured) with the L-03 review round: two test-only
+# `ServingAuthority::always_ready()` in `live_tv::dvr::tests`, for the
+# re-probe case and the full-rate prefix case, each passed to
+# `pump_tuner_fanout` exactly as the M1 fan-out cases do. No production
+# authority is added or projected differently.
+expected_occurrences = 34
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -1978,7 +1983,19 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # or ends with its test. Production is unchanged in count: the transport
 # worker and its close hand-off moved from `attach_sink` into
 # `spawn_transport_worker`, which viewer starts now share.
-expected_occurrences = 580
+# 580 -> 587 (measured) with the L-03 review round, all test-only; production
+# is unchanged in count (the fan-out's re-probe is a future polled inside the
+# fan-out task, deliberately not a spawned task, so cancelling and joining the
+# worker still ends everything the transport owns). In `live_tv::tests`: the
+# start-path fixture tuner's accept loop and its per-connection handler (both
+# end when the test's runtime or the client does; the accept loop is aborted
+# on drop), the fixture's 1 Hz settings-observer loop standing in for the
+# node's (aborted on drop, and it ends when the manager is gone), and
+# `spawn_start` running `start_local` as an HTTP handler would (each joined).
+# In `live_tv::dvr::tests`: a fan-out worker and a viewer-feed reader (both
+# joined), and one `std::thread::spawn` racing an attach against retirement
+# (joined each round). No timer, no process, no producer.
+expected_occurrences = 587
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2664,7 +2681,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +1. Each bounds one owned wait; none creates a producer. Tests +8: the
 # endless-tuner fixture's pacing `sleep` and the shared-transport cases'
 # settling sleeps and join timeouts.
-expected_occurrences = 889
+# 889 -> 900 (measured) with the L-03 review round. Production net 0: the
+# viewer's start-deadline `sleep_until` moved with the wait into
+# `DvrTransport::source_for_viewer`, which now also waits for a re-probe
+# under the same bound; the fan-out's re-probe adds no timer (its sample is
+# bounded by `SOURCE_PREFIX_TIME` read off the chunks it already receives,
+# and the probe keeps `probe_live_source`'s own `SOURCE_PROBE_TIME`). Tests
+# +11: the fixture tuner's 1 ms pacing `sleep` and its one-second lineup-gate
+# `timeout`, the fixture's 1 Hz observer `sleep`, three 10 ms polling sleeps
+# and one 500 ms settling sleep in the start-path cases, three `timeout`s
+# bounding a start's answer, and the busy-tuner fixture's pacing `sleep` in
+# `live_tv::dvr::tests`. Each bounds one test wait.
+expected_occurrences = 900
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3327,7 +3355,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 379
+# 379 -> 381 (measured) with the L-03 review round: two test-only
+# `std::sync::Barrier::wait` calls in `live_tv::dvr::tests`
+# (`retirement_is_atomic_against_a_consumer_attaching` lines its two threads
+# up each round). The pattern matches the method name; neither is a process.
+expected_occurrences = 381
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
