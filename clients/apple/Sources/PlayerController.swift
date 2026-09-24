@@ -2124,8 +2124,9 @@ final class PlayerController: ObservableObject {
     /// about it, and whether an offered one is a replay. `lazy` because it
     /// holds this controller as its host.
     private(set) lazy var preparedReplacement = PreparedReplacementCoordinator(host: self)
-    private var endObserver: NSObjectProtocol?
-    private var itemStatusObservation: NSKeyValueObservation?
+    private var itemObserver: AVPlayerItemObserver?
+    private var itemEventTask: Task<Void, Never>?
+    private var lastItemFailureDetail: (item: AVPlayerItem, detail: PlayerItemFailure.Detail)?
     private var statusTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?
     private let audioSessionObserver = PlaybackAudioSessionObserver()
@@ -2834,9 +2835,9 @@ final class PlayerController: ObservableObject {
         Self.configureBuffering(item, growingHLS: false)
         installSeekVideoOutput(on: item)
         item.externalMetadata = [titleMetadata(title)]
-        observeEnd(of: item)
-        observeStatus(of: item)
+        retireItemObserver()
         player.replaceCurrentItem(with: item)
+        installItemObserver(for: item)
         // The attached media generation changed: every fault about the
         // generation this replaces stops being about anything and is dropped.
         present(.attach(generation))
@@ -4149,11 +4150,11 @@ final class PlayerController: ObservableObject {
         seekVideoOutput = nil
         viewerActionEpoch &+= 1
         pendingControlSequence = nil
-        if let endObserver {
-            NotificationCenter.default.removeObserver(endObserver)
-            self.endObserver = nil
-        }
-        itemStatusObservation = nil
+        itemObserver?.cancel()
+        itemObserver = nil
+        itemEventTask?.cancel()
+        itemEventTask = nil
+        lastItemFailureDetail = nil
         statusTask?.cancel()
         statusTask = nil
         recoveryTask?.cancel()
@@ -4819,8 +4820,7 @@ final class PlayerController: ObservableObject {
         // player chrome and does not need item-level external metadata.
         item.externalMetadata = [titleMetadata(title)]
         #endif
-        observeEnd(of: item)
-        observeStatus(of: item)
+        retireItemObserver()
         pgsOverlayItemGeneration &+= 1
         pgsOverlayWindowTask?.cancel()
         pgsOverlayLoadingRange = nil
@@ -4828,6 +4828,7 @@ final class PlayerController: ObservableObject {
         pgsOverlayWindow = nil
         stallObservation.reset()
         player.replaceCurrentItem(with: item)
+        installItemObserver(for: item)
         // The attached media generation changed: every fault about the
         // generation this replaces stops being about anything and is dropped.
         present(.attach(generation))
@@ -7169,74 +7170,76 @@ final class PlayerController: ObservableObject {
         finished = true
     }
 
-    private func observeEnd(of item: AVPlayerItem) {
-        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
-        endObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
-            object: item,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self,
-                      self.started,
-                      !self.isChangingStream,
-                      self.player.currentItem === item
-                else { return }
-                let endedAt = self.realPositionMs()
-                let itemDurationSeconds = item.duration.seconds
-                let itemDurationMs = itemDurationSeconds.isFinite && itemDurationSeconds > 0
-                    ? Int(itemDurationSeconds * 1000)
-                    : nil
-                let isGrowingPlaylist = self.sessionId != nil && !self.isVOD
-                switch self.prepareObservedEndAction(
-                    knownDurationMs: self.knownDurationMs,
-                    itemDurationMs: itemDurationMs,
-                    isGrowingPlaylist: isGrowingPlaylist,
-                    endedAt: endedAt
-                ) {
-                case .reopen:
-                    // The viewer did not pause — the playlist merely announced
-                    // its current end — and `wantsPlayback` still says so, so
-                    // this continuation keeps playing. The repeated-position
-                    // guard alone cannot stop a loop whose reopens land a few
-                    // seconds apart each time (observed: nine sessions in
-                    // sixteen seconds); the shared rolling budget can.
-                    guard self.recoveryReopenBudget.admit() else {
-                        let expectedDurationMs = self.knownDurationMs > 0
-                            ? self.knownDurationMs
-                            : itemDurationMs
-                        self.stopAfterRepeatedEarlyEnd(
-                            at: endedAt,
-                            expectedDurationMs: expectedDurationMs,
-                            isGrowingPlaylist: isGrowingPlaylist
-                        )
-                        return
-                    }
-                    await self.reopen(at: endedAt)
-                    return
-                case .stop:
-                    let expectedDurationMs = self.knownDurationMs > 0
-                        ? self.knownDurationMs
-                        : itemDurationMs
-                    self.stopAfterRepeatedEarlyEnd(
-                        at: endedAt,
-                        expectedDurationMs: expectedDurationMs,
-                        isGrowingPlaylist: isGrowingPlaylist
-                    )
-                    return
-                case .finish(let durationMs):
-                    self.finishAfterObservedEnd(at: durationMs)
+    private func retireItemObserver() {
+        itemObserver?.cancel()
+        itemObserver = nil
+        itemEventTask?.cancel()
+        itemEventTask = nil
+        lastItemFailureDetail = nil
+    }
+
+    private func installItemObserver(for item: AVPlayerItem) {
+        let observer = AVPlayerItemObserver(item: item, player: player)
+        itemObserver = observer
+        itemEventTask = Task { @MainActor [weak self, weak observer] in
+            guard let observer else { return }
+            for await event in observer.events {
+                guard let self, self.itemObserver === observer,
+                      self.player.currentItem === item else { return }
+                switch event {
+                case .status(.failed):
+                    await self.handleItemFailure(item)
+                case .failedToPlayToEnd(let error):
+                    await self.handleItemFailure(item, fatalError: error)
+                case .playedToEnd:
+                    await self.handleObservedEnd(item)
+                case .playbackStalled:
+                    // The existing recovery evidence poll owns the stall
+                    // policy; this notification is never a terminal rung.
+                    break
+                case .newErrorLogEntry, .timeControl, .interruption, .routeLost, .status:
+                    break
                 }
             }
         }
     }
 
-    private func observeStatus(of item: AVPlayerItem) {
-        itemStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
-            guard item.status == .failed else { return }
-            Task { @MainActor in
-                await self?.handleItemFailure(item)
+    private func handleObservedEnd(_ item: AVPlayerItem) async {
+        guard started, !isChangingStream, player.currentItem === item else { return }
+        let endedAt = realPositionMs()
+        let itemDurationSeconds = item.duration.seconds
+        let itemDurationMs = itemDurationSeconds.isFinite && itemDurationSeconds > 0
+            ? Int(itemDurationSeconds * 1000)
+            : nil
+        let isGrowingPlaylist = sessionId != nil && !isVOD
+        switch prepareObservedEndAction(
+            knownDurationMs: knownDurationMs,
+            itemDurationMs: itemDurationMs,
+            isGrowingPlaylist: isGrowingPlaylist,
+            endedAt: endedAt
+        ) {
+        case .reopen:
+            // A growing playlist may announce its present end before playback
+            // is finished. Keep the same rolling reopen budget as before.
+            guard recoveryReopenBudget.admit() else {
+                let expectedDurationMs = knownDurationMs > 0 ? knownDurationMs : itemDurationMs
+                stopAfterRepeatedEarlyEnd(
+                    at: endedAt,
+                    expectedDurationMs: expectedDurationMs,
+                    isGrowingPlaylist: isGrowingPlaylist
+                )
+                return
             }
+            await reopen(at: endedAt)
+        case .stop:
+            let expectedDurationMs = knownDurationMs > 0 ? knownDurationMs : itemDurationMs
+            stopAfterRepeatedEarlyEnd(
+                at: endedAt,
+                expectedDurationMs: expectedDurationMs,
+                isGrowingPlaylist: isGrowingPlaylist
+            )
+        case .finish(let durationMs):
+            finishAfterObservedEnd(at: durationMs)
         }
     }
 
@@ -7249,22 +7252,29 @@ final class PlayerController: ObservableObject {
     /// transcode ladder, or stopping playback outright, mid-seek. `open()`
     /// re-checks the successor's own status once the change lands, so a
     /// genuinely failed replacement is still handled.
-    private func handleItemFailure(_ item: AVPlayerItem) async {
+    private func handleItemFailure(_ item: AVPlayerItem, fatalError: NSError? = nil) async {
         guard player.currentItem === item, !isChangingStream else { return }
-        let event = item.errorLog()?.events.last
+        let itemError = item.error as NSError?
+        let detail = PlayerItemFailure.classify(
+            fatal: fatalError,
+            item: itemError,
+            log: item.errorLog()?.events.map(PlayerItemFailure.LogEntry.init) ?? [],
+            failedURI: Self.failedResourceURI(item: item, error: fatalError ?? itemError)
+        )
+        lastItemFailureDetail = detail.map { (item, $0) }
         let isCompatibilityFailure = Self.isCompatibilityPlaybackFailure(
-            error: item.error as NSError?,
-            eventDomain: event?.errorDomain,
-            eventStatus: event?.errorStatusCode,
-            eventComment: event?.errorComment
+            error: detail?.error,
+            eventDomain: detail?.eventDomain,
+            eventStatus: detail?.eventStatus,
+            eventComment: detail?.eventComment
         )
         // Only a transport failure can be answered by another node; see
         // `isTransportPlaybackFailure`. `!isCompatibilityFailure` is not the
         // same question and would walk the whole list for a terminal 404.
         let isTransportFailure = Self.isTransportPlaybackFailure(
-            error: item.error as NSError?,
-            eventDomain: event?.errorDomain,
-            eventStatus: event?.errorStatusCode
+            error: detail?.error,
+            eventDomain: detail?.eventDomain,
+            eventStatus: detail?.eventStatus
         )
         if let attempt = resumeAttempt {
             guard attempt.publicationCompleted else {
@@ -7385,14 +7395,14 @@ final class PlayerController: ObservableObject {
         // claims a sentence it cannot have.
         raiseOwnerFault(
             source: Self.mediaFailureSurfaceSource(
-                statusCode: event?.errorStatusCode,
+                statusCode: detail?.eventStatus,
                 context: surfaceContext
             ),
             title: currentMs > 0
                 ? Self.playbackStoppedFailureTitle
                 : Self.playbackStartFailureTitle,
             detail: verdict
-                ?? item.error?.localizedDescription
+                ?? detail?.error?.localizedDescription
                 ?? PlaybackPreparationError.failed.localizedDescription,
             positionMs: realPositionMs()
         )
@@ -7434,14 +7444,14 @@ final class PlayerController: ObservableObject {
         #if os(iOS)
         item.externalMetadata = [titleMetadata(title)]
         #endif
-        observeEnd(of: item)
-        observeStatus(of: item)
+        retireItemObserver()
         pgsOverlayItemGeneration &+= 1
         pgsOverlayWindowTask?.cancel()
         pgsOverlayLoadingRange = nil
         pgsOverlayWindowFailures = 0
         pgsOverlayWindow = nil
         player.replaceCurrentItem(with: item)
+        installItemObserver(for: item)
         if resumeAttempt?.repairAdmitted == true {
             bindResumeRepairSuccessor(item, generation: generation)
         }
@@ -7513,6 +7523,16 @@ final class PlayerController: ObservableObject {
         return path
     }
 
+    private static func failedResourceURI(item: AVPlayerItem, error: NSError?) -> String? {
+        if let uri = error?.userInfo[NSURLErrorFailingURLStringErrorKey] as? String {
+            return uri
+        }
+        if let url = error?.userInfo[NSURLErrorFailingURLErrorKey] as? URL {
+            return url.absoluteString
+        }
+        return (item.asset as? AVURLAsset)?.url.absoluteString
+    }
+
     private func reportPlaybackFailure(
         _ item: AVPlayerItem,
         step: PlaybackCompatibilityLadderStep
@@ -7520,8 +7540,16 @@ final class PlayerController: ObservableObject {
         #if os(iOS)
         if offlineId != nil { return }
         #endif
-        let failure = item.error as NSError?
-        let event = item.errorLog()?.events.last
+        let itemError = item.error as NSError?
+        let detail = lastItemFailureDetail?.item === item
+            ? lastItemFailureDetail?.detail
+            : PlayerItemFailure.classify(
+                fatal: nil,
+                item: itemError,
+                log: item.errorLog()?.events.map(PlayerItemFailure.LogEntry.init) ?? [],
+                failedURI: Self.failedResourceURI(item: item, error: itemError)
+            )
+        let failure = detail?.error
         let payload = ApplePlaybackFailureLog(
             message: failure?.localizedDescription
                 ?? PlaybackPreparationError.failed.localizedDescription,
@@ -7532,9 +7560,9 @@ final class PlayerController: ObservableObject {
             vcodec: decision?.source?.videoCodec,
             detail: Self.playbackFailureDetail(
                 error: failure,
-                eventDomain: event?.errorDomain,
-                eventStatus: event?.errorStatusCode,
-                eventComment: event?.errorComment,
+                eventDomain: detail?.eventDomain,
+                eventStatus: detail?.eventStatus,
+                eventComment: detail?.eventComment,
                 ladderStep: step
             )
         )
@@ -9630,8 +9658,7 @@ extension PlayerController: PreparedSuccessorHost {
         #if os(iOS)
         item.externalMetadata = [titleMetadata(title)]
         #endif
-        observeEnd(of: item)
-        observeStatus(of: item)
+        retireItemObserver()
         pgsOverlayItemGeneration &+= 1
         pgsOverlayWindowTask?.cancel()
         pgsOverlayLoadingRange = nil
@@ -9643,6 +9670,7 @@ extension PlayerController: PreparedSuccessorHost {
         // window has an endpoint at the commit rather than at the nearest poll.
         sampleThePreparedSwitch()
         player.replaceCurrentItem(with: item)
+        installItemObserver(for: item)
         preparedSwitch.note(commitAtMs: PlaybackControlSession.monotonicMs())
         // The successor is a full session in every respect but its pointer, so
         // everything keyed on "which session am I playing" moves with it.

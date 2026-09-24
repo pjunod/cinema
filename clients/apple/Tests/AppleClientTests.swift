@@ -455,8 +455,7 @@ private struct DetailNavigationTestHost<Content: View>: View {
 final class AppleClientTests: XCTestCase {
     func testClusterMediaFailoverUsesEachValidatedNodeWithoutMovingAccountOrigin() {
         let session = Session()
-        session.origin = "http://primary.local:32400"
-        session.token = "bearer"
+        session.setCredentials(origin: "http://primary.local:32400", token: "bearer")
         session.configureNodeOrigins(
             [
                 "http://primary.local:32400",
@@ -466,7 +465,7 @@ final class AppleClientTests: XCTestCase {
                 "http://node-b.local:32400",
                 "https://node-c.local:443",
             ],
-            primary: session.origin
+            primary: session.credentials.origin
         )
 
         XCTAssertEqual(
@@ -478,7 +477,7 @@ final class AppleClientTests: XCTestCase {
             "token=bearer"
         )
         XCTAssertNil(session.nextMediaFailoverURL("/api/v1/hls/cap/index.m3u8", authenticated: false))
-        XCTAssertEqual(session.origin, "http://primary.local:32400")
+        XCTAssertEqual(session.credentials.origin, "http://primary.local:32400")
     }
 
     /// A candidate becomes a request authority the moment it is used, and a
@@ -509,8 +508,8 @@ final class AppleClientTests: XCTestCase {
     /// request, so neither may produce a candidate.
     func testOnlyAServerRelativePathIsRebound() {
         let session = Session()
-        session.origin = "http://primary.local:32400"
-        session.configureNodeOrigins(["http://node-b.local:32400"], primary: session.origin)
+        session.setCredentials(origin: "http://primary.local:32400", token: nil)
+        session.configureNodeOrigins(["http://node-b.local:32400"], primary: session.credentials.origin)
 
         XCTAssertNil(session.nextMediaFailoverURL("//evil.example/x", authenticated: false))
         XCTAssertNil(session.nextMediaFailoverURL("http://evil.example/x", authenticated: false))
@@ -526,11 +525,10 @@ final class AppleClientTests: XCTestCase {
     /// downgraded candidate would put it on the wire in cleartext.
     func testAnHTTPSSessionRefusesToFailOverToACleartextNode() {
         let session = Session()
-        session.origin = "https://primary.local"
-        session.token = "bearer"
+        session.setCredentials(origin: "https://primary.local", token: "bearer")
         session.configureNodeOrigins(
             ["http://node-b.local:32400", "https://node-c.local"],
-            primary: session.origin
+            primary: session.credentials.origin
         )
 
         XCTAssertEqual(
@@ -545,10 +543,10 @@ final class AppleClientTests: XCTestCase {
     /// in the same process, and the next one has no node left to try.
     func testAFreshStreamStartsAtTheHeadOfTheNodeList() {
         let session = Session()
-        session.origin = "http://primary.local:32400"
+        session.setCredentials(origin: "http://primary.local:32400", token: nil)
         session.configureNodeOrigins(
             ["http://node-b.local:32400", "http://node-c.local:32400"],
-            primary: session.origin
+            primary: session.credentials.origin
         )
 
         XCTAssertEqual(
