@@ -181,9 +181,9 @@ fn hevc_promotion_failure(
 ///
 /// The whole point of the native copy path, for accounting purposes, is that
 /// Rust holds the complete slice before it writes it. That makes an exact
-/// grant possible here and only here: FFmpeg's own `-f hls` output has no
-/// such boundary, and a measurement taken afterwards can only discover an
-/// overrun, never prevent one.
+/// grant possible here. FFmpeg's own `-f hls` output gets the same boundary
+/// from `crate::scratch_put`, which receives its uploads and spends these
+/// grants piece by piece.
 ///
 /// `authorize` is called with the exact length of the next temporary file,
 /// before it is created. A refusal is backpressure on this writer — not on
@@ -215,7 +215,7 @@ impl WriteGrants {
         }
     }
 
-    fn authorize(&self, bytes: usize) -> Option<crate::scratch_ledger::ScratchWrite> {
+    pub(crate) fn authorize(&self, bytes: usize) -> Option<crate::scratch_ledger::ScratchWrite> {
         self.ledger.authorize_write(
             self.key,
             i64::try_from(bytes).unwrap_or(i64::MAX),
@@ -228,8 +228,14 @@ impl WriteGrants {
     /// parked waiting for a grant that can never be issued is a stall, and a
     /// stall holds the whole conservative producer charge for as long as it
     /// lasts.
-    fn fenced(&self) -> bool {
+    pub(crate) fn fenced(&self) -> bool {
         self.ledger.writers_fenced(self.key)
+    }
+
+    /// Register one writer against this allocation before it can make a
+    /// byte. `None` means retirement already fenced it.
+    pub(crate) fn register_writer(&self) -> Option<crate::scratch_ledger::ScratchWriter> {
+        self.ledger.register_writer(self.key)
     }
 }
 

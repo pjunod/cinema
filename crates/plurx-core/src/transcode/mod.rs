@@ -1749,8 +1749,13 @@ fn hls_args_inner(
             &SEGMENT_SECONDS.to_string(),
             "-hls_playlist_type",
             "event",
-            "-hls_flags",
-            "independent_segments+temp_file",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    args.extend(hls_write_args(out_dir, &["independent_segments"]));
+    args.extend(
+        [
             "-hls_segment_type",
             "mpegts",
             "-hls_segment_filename",
@@ -1762,6 +1767,40 @@ fn hls_args_inner(
         .map(|s| s.to_string()),
     );
     args.push(format!("{out_dir}/index.m3u8"));
+    args
+}
+
+/// Whether an HLS output base is an upload endpoint rather than a directory.
+///
+/// A rolling session hands FFmpeg `http://127.0.0.1:<port>/<token>/<lane>`
+/// so every object its muxer writes passes the daemon's scratch grant before
+/// it reaches the disk (`plurxd::scratch_put`).
+pub fn hls_output_is_upload(out_dir: &str) -> bool {
+    out_dir.starts_with("http://")
+}
+
+/// The muxer's write-mode options for one output base.
+///
+/// A directory keeps `temp_file`, so a reader sees an object either absent
+/// or complete. An upload endpoint gets `-method PUT` instead, and no
+/// `temp_file`: FFmpeg cannot rename over HTTP and warns that it will not,
+/// and the receiver renames each object into place itself. The other flags
+/// are the same either way, so the objects FFmpeg produces are too.
+fn hls_write_args(out_dir: &str, flags: &[&str]) -> Vec<String> {
+    let mut args = Vec::new();
+    if hls_output_is_upload(out_dir) {
+        if !flags.is_empty() {
+            args.push("-hls_flags".to_owned());
+            args.push(flags.join("+"));
+        }
+        args.push("-method".to_owned());
+        args.push("PUT".to_owned());
+    } else {
+        let mut flags = flags.to_vec();
+        flags.push("temp_file");
+        args.push("-hls_flags".to_owned());
+        args.push(flags.join("+"));
+    }
     args
 }
 
@@ -2356,8 +2395,13 @@ pub fn hls_copy_args_with_sequence(
             &COPY_SEGMENT_SECONDS.to_string(),
             "-hls_playlist_type",
             "event",
-            "-hls_flags",
-            "temp_file",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    args.extend(hls_write_args(out_dir, &[]));
+    args.extend(
+        [
             "-hls_segment_type",
             "fmp4",
             "-hls_fmp4_init_filename",
@@ -4985,5 +5029,29 @@ mod index_pipe_tests {
             return false;
         }
         (0..=haystack.len() - needle.len()).any(|i| &haystack[i..i + needle.len()] == needle)
+    }
+}
+
+#[cfg(test)]
+mod upload_output_tests {
+    use super::*;
+
+    /// A directory keeps FFmpeg's own rename; an upload endpoint swaps it
+    /// for `-method PUT` and changes no other muxer flag, which is what
+    /// keeps the objects byte-identical between the two.
+    #[test]
+    fn scratch_charge_upload_output_swaps_temp_file_for_put_and_nothing_else() {
+        assert_eq!(
+            hls_write_args("/tmp/s", &["independent_segments"]),
+            ["-hls_flags", "independent_segments+temp_file"]
+        );
+        assert_eq!(hls_write_args("/tmp/s", &[]), ["-hls_flags", "temp_file"]);
+        let upload = "http://127.0.0.1:40001/0123456789abcdef0123456789abcdef/0";
+        assert!(hls_output_is_upload(upload));
+        assert_eq!(
+            hls_write_args(upload, &["independent_segments"]),
+            ["-hls_flags", "independent_segments", "-method", "PUT"]
+        );
+        assert_eq!(hls_write_args(upload, &[]), ["-method", "PUT"]);
     }
 }
