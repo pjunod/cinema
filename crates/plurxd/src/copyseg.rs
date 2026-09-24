@@ -350,13 +350,11 @@ impl SessionDir {
             return Ok(Some(authorized));
         }
         // Only a session that has never published can wait forever for
-        // nothing, so only that one gets a deadline.
-        let deadline = self
-            .started
-            .then(|| std::time::Instant::now() + GRANT_WAIT_BUDGET);
+        // nothing, so only that one gets a deadline. Measured in polls, so
+        // the bound is the same on a paused test clock as on a real one.
         let mut waited = std::time::Duration::ZERO;
         loop {
-            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            if !self.started && waited >= GRANT_WAIT_BUDGET {
                 // Prefixed with the daemon's existing insufficient-capacity
                 // marker, the one `publication_cycle` keys on, so this reads
                 // as what it is rather than as a producer fault. The typed
@@ -2306,5 +2304,56 @@ mod tests {
         assert_eq!(CutReason::ByteCeiling.label(), "byte-ceiling");
         assert_eq!(CutReason::TimeCeiling.label(), "time-ceiling");
         assert_eq!(CutReason::EndOfStream.label(), "eof");
+    }
+}
+
+#[cfg(test)]
+mod grant_wait_tests {
+    use super::*;
+    use std::sync::atomic::AtomicI64;
+    use std::sync::Arc;
+
+    fn starved(dir: PathBuf, started: bool) -> (SessionDir, crate::scratch_ledger::ScratchPermit) {
+        let ledger = crate::scratch_ledger::ScratchLedger::new();
+        let permit = ledger.reserve(1_000, 1_000).expect("admission");
+        let grants = WriteGrants::new(
+            Arc::clone(&ledger),
+            permit.key(),
+            Arc::new(AtomicI64::new(1_000)),
+            0,
+        );
+        let mut session = SessionDir::new(dir, 0, 16, Some(grants));
+        session.started = started;
+        (session, permit)
+    }
+
+    /// The bounded wait exists for a session with no playlist, which nobody
+    /// can ever drain. It was applied the other way round: a session that
+    /// had published was failed after 120 s of an ordinary hold, and one that
+    /// never could publish waited forever.
+    #[tokio::test(start_paused = true)]
+    async fn scratch_charge_grant_wait_gives_up_only_before_first_publication() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (never, _never_permit) = starved(root.path().to_path_buf(), false);
+        let Err(error) = never.authorize_write("seg00000.m4s", 5_000).await else {
+            panic!("a session that cannot publish stops waiting");
+        };
+        assert!(
+            error
+                .to_string()
+                .starts_with("rolling_insufficient_capacity:"),
+            "{error}"
+        );
+
+        let (published, _published_permit) = starved(root.path().to_path_buf(), true);
+        let waiting = tokio::time::timeout(
+            GRANT_WAIT_BUDGET * 3,
+            published.authorize_write("seg00001.m4s", 5_000),
+        )
+        .await;
+        assert!(
+            waiting.is_err(),
+            "a published session waits out a hold for as long as it lives"
+        );
     }
 }
