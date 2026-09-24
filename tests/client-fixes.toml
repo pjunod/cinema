@@ -2487,3 +2487,17 @@ source = "clients/apple/Sources/LiveTv.swift"
 source_anchor = "maxChannels: $0 == \"aac\" ? aacChannels : 8"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testLiveEnvelopeClaimsTheRouteChannelsForAac"
+
+[[fixes]]
+# f68095d9: opening playback info in any mode but Mini removes the transport
+# block, but the panel's height reserve was keyed on `controlsVisible`, which
+# stays true — so on Android TV it kept subtracting the transport's last
+# measured height from a panel that had the whole frame, leaving a sliver of
+# body under the header. The source anchor is the shared predicate the reserve
+# now reads; the test pins that every non-Mini info mode reports no transport.
+id = "android.playback-info-reserves-only-a-composed-transport"
+commits = ["f68095d9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "playbackTransportOnScreen(isInPip, controlsVisible, panel, statsMode, blockingFault != null),"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTransportReserveTest.kt"
+test_anchor = "infoPanelInAnyModeButMiniHidesTheTransport"
