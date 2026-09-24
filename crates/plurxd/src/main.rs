@@ -23,6 +23,7 @@ mod media_pool;
 mod media_sessions;
 mod meter;
 mod offline;
+mod panics;
 mod pgs_overlay;
 mod pipeprobe;
 mod playback_control;
@@ -36,6 +37,7 @@ mod producer_spawn;
 mod progress;
 mod progressive;
 mod reader_formats;
+mod redact;
 mod renditiondir;
 mod schedule;
 mod scratch_ledger;
@@ -87,6 +89,7 @@ use plurx_core::metadata::{self, AniListClient, TmdbClient};
 use plurx_core::store::SqliteStore;
 use plurx_core::store::{keys, Store};
 use serde::Deserialize;
+use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
 
 use crate::job_lease::acquire_cluster_job;
@@ -1457,6 +1460,9 @@ async fn reset_password(
 
 async fn run(config: Config) -> anyhow::Result<()> {
     let logs = init_logging();
+    // After the subscriber and before the first task: a panic reported before
+    // there is anywhere to report it to reaches only stderr.
+    panics::install_panic_hook();
     report_open_file_limit(plurx_core::process::rlimit::raise_open_file_limit());
     // Signal streams must exist before store activation, system probing, or
     // any listener can make this process externally reachable. Installing them
@@ -1710,20 +1716,103 @@ fn report_open_file_limit(
 /// voter remains visible to service supervisors before an admin can sign in.
 /// The EnvFilter remains global, so `PLURX_LOG` governs every sink.
 fn init_logging() -> logbuf::LogBuffers {
-    use tracing::Level;
-    use tracing_subscriber::filter::filter_fn;
-    use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::Layer;
 
     let logs = logbuf::LogBuffers::default();
+    logging_subscriber(
+        &logs,
+        EnvFilter::try_from_env("PLURX_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
+        LogFormat::from_env(),
+        std::io::stdout().is_terminal(),
+        std::io::stdout,
+    )
+    .try_init()
+    .ok();
+    logs
+}
+
+/// How the console sink is formatted.
+///
+/// `PLURX_LOG_FORMAT=json|text`, default text. An environment variable rather
+/// than a replicated setting, beside `PLURX_LOG`, because it describes how
+/// *this process's* stdout is consumed: a node whose journald is scraped by a
+/// log pipeline needs JSON and its neighbour may not.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LogFormat {
+    Text,
+    Json,
+}
+
+impl LogFormat {
+    fn from_env() -> Self {
+        Self::parse(std::env::var("PLURX_LOG_FORMAT").ok().as_deref())
+    }
+
+    /// Anything that is not `json` is text, including an unset variable and a
+    /// misspelling. A log format is not worth refusing a boot over.
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some(value) if value.trim().eq_ignore_ascii_case("json") => Self::Json,
+            _ => Self::Text,
+        }
+    }
+}
+
+/// The subscriber `init_logging` installs, built separately so its format and
+/// its ANSI decision can be exercised against a captured writer rather than
+/// against the process's real stdout.
+///
+/// The filter is a parameter rather than read from `PLURX_LOG` in here: a test
+/// that has to reach into the environment to decide whether its own subscriber
+/// will emit anything is a test that fails when a neighbouring test sets the
+/// same variable, which is exactly what happened.
+///
+/// `with_ansi` is set explicitly because `tracing-subscriber` does not check
+/// for a terminal: `fmt_layer.rs` turns ANSI on whenever the `ansi` feature is
+/// compiled in and `NO_COLOR` is unset, with no TTY detection anywhere, so a
+/// systemd unit or a container gets escape bytes in its journal unless the
+/// operator knows to set `NO_COLOR`. Under `json` it is forced off regardless,
+/// because an escape sequence inside a JSON string field is not a colour, it
+/// is a parse hazard.
+fn logging_subscriber<W>(
+    logs: &logbuf::LogBuffers,
+    filter: EnvFilter,
+    format: LogFormat,
+    ansi: bool,
+    writer: W,
+) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+{
+    use tracing_subscriber::filter::filter_fn;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Layer;
+
+    // Boxed, and built separately per arm. `fmt::Layer` carries the subscriber
+    // type it will be layered onto, so one shared builder reused by both arms
+    // would tie the text and JSON layers to the same position in the stack and
+    // neither would compile.
+    let console: Box<dyn Layer<_> + Send + Sync> = match format {
+        LogFormat::Text => Box::new(
+            tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .with_ansi(ansi)
+                .with_filter(filter_fn(console_target)),
+        ),
+        LogFormat::Json => Box::new(
+            tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .json()
+                // Never, whatever the terminal says: an escape sequence inside
+                // a JSON string field is not a colour, it is a parse hazard.
+                .with_ansi(false)
+                .with_filter(filter_fn(console_target)),
+        ),
+    };
+
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_env("PLURX_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(
-            tracing_subscriber::fmt::layer().with_filter(filter_fn(|metadata| {
-                !logbuf::is_cluster_target(metadata.target()) || *metadata.level() <= Level::WARN
-            })),
-        )
+        .with(filter)
+        .with(console)
         .with(
             logbuf::BufferLayer(Arc::clone(&logs.general)).with_filter(filter_fn(|metadata| {
                 !logbuf::is_cluster_target(metadata.target())
@@ -1734,9 +1823,13 @@ fn init_logging() -> logbuf::LogBuffers {
                 logbuf::is_cluster_target(metadata.target())
             })),
         )
-        .try_init()
-        .ok();
-    logs
+}
+
+/// Cluster INFO/DEBUG detail belongs on Settings -> Cluster and is kept off
+/// stdout; WARN and ERROR still reach it so a broken voter stays visible to a
+/// service supervisor before an admin can sign in.
+fn console_target(metadata: &tracing::Metadata<'_>) -> bool {
+    !logbuf::is_cluster_target(metadata.target()) || *metadata.level() <= tracing::Level::WARN
 }
 
 /// The one line that says what is running and where its data is.
@@ -5549,6 +5642,103 @@ mod startup_tests {
         // from would silently produce no identity at all.
         let loopback = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
         assert_eq!(seen.ip(), loopback);
+    }
+
+    /// `PLURX_LOG_FORMAT` decides only the console sink's shape, and anything
+    /// that is not `json` is text — including a misspelling, which must not
+    /// refuse a boot.
+    #[test]
+    fn the_log_format_variable_is_json_or_text_and_never_an_error() {
+        assert_eq!(LogFormat::parse(Some("json")), LogFormat::Json);
+        assert_eq!(LogFormat::parse(Some("JSON")), LogFormat::Json);
+        assert_eq!(LogFormat::parse(Some(" json ")), LogFormat::Json);
+        assert_eq!(LogFormat::parse(Some("text")), LogFormat::Text);
+        assert_eq!(LogFormat::parse(Some("jsonl")), LogFormat::Text);
+        assert_eq!(LogFormat::parse(None), LogFormat::Text);
+    }
+
+    fn captured_console(format: LogFormat, ansi: bool) -> String {
+        let logs = logbuf::LogBuffers::default();
+        let captured = logbuf::testwriter::CapturedWriter::new();
+        let subscriber = logging_subscriber(
+            &logs,
+            EnvFilter::new("trace"),
+            format,
+            ansi,
+            captured.clone(),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(detail = "value", "console line");
+        });
+        captured.text()
+    }
+
+    #[test]
+    fn json_format_emits_lines_a_parser_can_read() {
+        let text = captured_console(LogFormat::Json, false);
+        let lines = text.lines().filter(|line| !line.is_empty()).count();
+        assert_eq!(lines, 1, "{text}");
+        for line in text.lines().filter(|line| !line.is_empty()) {
+            let parsed: serde_json::Value =
+                serde_json::from_str(line).unwrap_or_else(|error| panic!("{error}: {line}"));
+            assert_eq!(parsed["level"], "WARN");
+            assert_eq!(parsed["fields"]["message"], "console line");
+            assert_eq!(parsed["fields"]["detail"], "value");
+        }
+    }
+
+    /// `tracing-subscriber` turns ANSI on whenever the `ansi` feature is
+    /// compiled and `NO_COLOR` is unset, with no TTY detection anywhere, so a
+    /// systemd unit or a container gets escape bytes in its journal unless
+    /// something sets the flag. This is that something.
+    #[test]
+    fn ansi_is_off_when_stdout_is_not_a_terminal_and_never_on_in_json() {
+        const ESCAPE: &str = "\u{1b}[";
+        assert!(
+            !captured_console(LogFormat::Text, false).contains(ESCAPE),
+            "escape bytes reached a non-terminal sink"
+        );
+        // The flag is load-bearing rather than decorative: with it on, the very
+        // same line does carry escapes.
+        assert!(
+            captured_console(LogFormat::Text, true).contains(ESCAPE),
+            "the ansi flag decided nothing"
+        );
+        // JSON forces it off whatever the terminal says, because an escape
+        // sequence inside a JSON string field is a parse hazard, not a colour.
+        assert!(!captured_console(LogFormat::Json, true).contains(ESCAPE));
+    }
+
+    #[test]
+    fn cluster_detail_stays_off_the_console_unless_it_is_a_warning() {
+        // The console rule that predates the format switch, pinned so neither
+        // format can quietly change which events reach stdout: cluster INFO
+        // belongs on Settings -> Cluster, cluster WARN still reaches a service
+        // supervisor, and everything else is unaffected.
+        for format in [LogFormat::Text, LogFormat::Json] {
+            let logs = logbuf::LogBuffers::default();
+            let captured = logbuf::testwriter::CapturedWriter::new();
+            let subscriber = logging_subscriber(
+                &logs,
+                EnvFilter::new("trace"),
+                format,
+                false,
+                captured.clone(),
+            );
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::info!(target: "plurx::cluster", "cluster detail");
+                tracing::warn!(target: "plurx::cluster", "cluster trouble");
+                tracing::info!(target: "plurxd::http", "ordinary detail");
+            });
+            let console = captured.text();
+            assert!(!console.contains("cluster detail"), "{format:?}: {console}");
+            assert!(console.contains("cluster trouble"), "{format:?}: {console}");
+            assert!(console.contains("ordinary detail"), "{format:?}: {console}");
+            // The ring the product shows keeps the cluster detail the console
+            // dropped, and keeps the two surfaces apart.
+            assert_eq!(logs.cluster.tail("trace", 8).len(), 2);
+            assert_eq!(logs.general.tail("trace", 8).len(), 1);
+        }
     }
 
     /// The daemon installs exactly one subscriber, and losing that race is not

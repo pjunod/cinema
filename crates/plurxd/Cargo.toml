@@ -30,6 +30,10 @@ tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 toml = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
+# The response-body wrapper that times delivery implements `http_body::Body`
+# directly so it can delegate `size_hint`; the crate is already in the tree
+# under hyper and axum, so this names it rather than adding a build.
+http-body = { workspace = true }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = [
     "server-auto",

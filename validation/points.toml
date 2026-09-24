@@ -612,7 +612,7 @@ title = "Native server API and runtime"
 contract = "The single server binary exposes stable native endpoints, coordinates background work safely, carries authenticated cluster media control without widening household credentials, and publishes a permanent Dolby Vision replacement only after exact media verification and a final source-identity fence."
 paths = [
   "crates/plurxd/Cargo.toml",
-  "crates/plurxd/src/{cachekeep,logbuf,main,schedule,state,storeprobe,telemetry}.rs",
+  "crates/plurxd/src/{cachekeep,logbuf,main,panics,redact,schedule,state,storeprobe,telemetry}.rs",
   "crates/plurxd/src/dv_disk.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/reader_formats.rs",
