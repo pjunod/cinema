@@ -52,12 +52,12 @@ fn atsc_aac_conversion_bounds_unknown_and_immersive_channels() {
     // encode negotiate the real layout from the first decoded frame; it is
     // no longer collapsed to stereo before a frame was seen.
     for (channels, limit, expected, layouts) in [
-        (Some(12), 32, 6, "5.1(side)|5.1|stereo|mono"),
+        (Some(12), 32, 6, "5.1|stereo|mono"),
         (Some(12), 2, 2, "stereo|mono"),
-        (Some(6), 6, 6, "5.1(side)|5.1|stereo|mono"),
+        (Some(6), 6, 6, "5.1|stereo|mono"),
         (Some(1), 2, 1, "mono"),
-        (Some(0), 6, 6, "5.1(side)|5.1|stereo|mono"),
-        (None, 6, 6, "5.1(side)|5.1|stereo|mono"),
+        (Some(0), 6, 6, "5.1|stereo|mono"),
+        (None, 6, 6, "5.1|stereo|mono"),
         (Some(0), 1, 1, "mono"),
         (Some(2), 6, 2, "stereo|mono"),
     ] {
@@ -705,6 +705,14 @@ fn atsc_encoded_channel_layouts_follow_the_ceiling() {
     assert_eq!(encoded_channel_layouts(1), "mono");
     assert_eq!(encoded_channel_layouts(2), "stereo|mono");
     assert_eq!(encoded_channel_layouts(5), "stereo|mono");
-    assert_eq!(encoded_channel_layouts(6), "5.1(side)|5.1|stereo|mono");
-    assert_eq!(encoded_channel_layouts(8), "5.1(side)|5.1|stereo|mono");
+    assert_eq!(encoded_channel_layouts(6), "5.1|stereo|mono");
+    assert_eq!(encoded_channel_layouts(8), "5.1|stereo|mono");
+    // A layout without an ADTS channel configuration would be signalled as
+    // configuration 0 plus a PCE, which browsers cannot start.
+    for ceiling in 1..=8 {
+        assert!(
+            !encoded_channel_layouts(ceiling).contains("(side)"),
+            "{ceiling}"
+        );
+    }
 }

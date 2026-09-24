@@ -496,7 +496,37 @@ function metadataPanel(settings,readiness){
 // calendar seam; both are the opposite direction of the Metadata providers,
 // which is why they no longer share a page with them.
 function integrationsPanel(settings,trakt){
-  return `${setHead("Integrations","Other services plurx talks to.")}${traktCardHtml(trakt)}${monarrCardHtml()}`;
+  return `${setHead("Integrations","Other services plurx talks to.")}${traktCardHtml(trakt)}${monarrCardHtml()}<div class="card">${cardHead("OpenSubtitles","Find and download missing movie and episode subtitles.")}<div style="padding:16px"><button class="sm" onclick="openSubtitleProvider(this)">Configure OpenSubtitles</button><div id="subtitle-provider-form"></div></div></div>`;
+}
+
+async function openSubtitleProvider(button){
+  const panel=document.getElementById("subtitle-provider-form");
+  button.disabled=true;
+  try{
+    const settings=await api("/subtitle-provider");
+    if(!panel.isConnected)return;
+    panel.innerHTML=`<p>${settings.configured?"OpenSubtitles is configured. Leave secrets blank to keep them.":"Add an OpenSubtitles API key to enable subtitle downloads."} <a href="https://www.opensubtitles.com/consumers" target="_blank" rel="noopener">Create an API key</a>.</p>
+      <label for="os-key">API key</label><input id="os-key" type="password" autocomplete="off">
+      <label for="os-user">Account username (optional)</label><input id="os-user" autocomplete="off" value="${esc(settings.username||"")}">
+      <label for="os-password">Account password (optional)</label><input id="os-password" type="password" autocomplete="new-password">
+      <label><input id="os-auto" type="checkbox"${settings.automatic?" checked":""}> Automatically download missing subtitles when the file matches</label>
+      <label for="os-languages">Automatic languages (up to three codes, separated by commas)</label><input id="os-languages" value="${esc((settings.languages||["en"]).join(", "))}" placeholder="en, fr">
+      <p class="muted">Downloads use the provider’s allowance. An account can provide a higher allowance.</p>
+      <button class="sm" onclick="saveSubtitleProvider(false)">Save</button>
+      <button class="ghost sm" onclick="saveSubtitleProvider(true)">Disable and clear credentials</button><div id="os-status" role="status"></div>`;
+  }catch(e){if(panel.isConnected)panel.textContent=e.message||"Could not load OpenSubtitles settings.";}
+  finally{button.disabled=false;}
+}
+
+async function saveSubtitleProvider(clear){
+  const status=document.getElementById("os-status");
+  const key=document.getElementById("os-key"),password=document.getElementById("os-password");
+  const body=clear?{api_key:"",username:"",password:"",automatic:false}:{username:document.getElementById("os-user").value.trim(),automatic:document.getElementById("os-auto").checked,languages:document.getElementById("os-languages").value.split(",").map(v=>v.trim()).filter(Boolean)};
+  if(!clear&&key.value.trim())body.api_key=key.value.trim();
+  if(!clear&&password.value)body.password=password.value;
+  status.textContent="Saving…";
+  try{await api("/subtitle-provider",{method:"PUT",body});key.value="";password.value="";status.textContent=clear?"OpenSubtitles disabled.":"Saved.";}
+  catch(e){status.textContent=e.message||"Could not save OpenSubtitles settings.";}
 }
 function presetOpts(pairs, cur, label){
   cur=(cur==null?"":String(cur));

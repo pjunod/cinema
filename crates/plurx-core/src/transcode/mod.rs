@@ -2425,6 +2425,7 @@ mod tests {
 
     fn file(hdr: Option<&str>) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: "/media/movie.mkv".into(),
@@ -4435,6 +4436,7 @@ mod index_pipe_tests {
 
     fn hevc_dv() -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: "/library/film.mkv".into(),

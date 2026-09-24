@@ -533,6 +533,15 @@ An older client never reads the field; a newer one treats an absent field as
 
 ## Subtitles — three independent delivery questions
 
+Downloaded OpenSubtitles captions join the same selectable list after the
+embedded ordinals. The catalog retains normalized WebVTT, provider identity,
+language and accessibility flags against the file's size and modification
+time. Subtitle delivery reads these captions locally from the replicated
+catalog; a cold or evicted extraction cache never needs another provider
+download. The existing WebVTT, HLS and text-burn paths consume the acquired
+track with absolute media cue times. Replacing the source invalidates the
+association; rescanning the unchanged source preserves it.
+
 Every subtitle in `/decision` carries `text` and `native` plus an optional
 `overlay` capability. They are not interchangeable claims. A client that reads
 one for another either offers a track the server will refuse, hides a route it

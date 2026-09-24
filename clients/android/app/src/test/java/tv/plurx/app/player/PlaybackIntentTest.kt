@@ -70,6 +70,20 @@ class PlaybackIntentTest {
     }
 
     @Test
+    fun remuxPrerollSettlesOnlyAfterRenderedVideoCrossesTheTarget() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val pending = intent.beginSeek(3_413_400, 1_000_000)
+
+        assertFalse(intent.presentedVideoProgress(3_413_500, pending.sequence))
+        assertTrue(intent.markExecuted(pending.sequence))
+        assertFalse(intent.presentedVideoFrame(3_413_118, pending.sequence))
+        assertFalse(intent.presentedVideoProgress(3_413_300, pending.sequence))
+        assertFalse(intent.presentedVideoProgress(3_413_500, pending.sequence + 1))
+        assertTrue(intent.presentedVideoProgress(3_413_500, pending.sequence))
+        assertNull(intent.pendingSeek)
+    }
+
+    @Test
     fun capturedFrameGenerationCannotSettleItsExecutedSuccessor() {
         val intent = PlaybackIntent("99999999-9999-4999-8999-999999999999", PlaybackQuality.Auto)
         val predecessor = intent.beginSeek(20_000, 10_000)

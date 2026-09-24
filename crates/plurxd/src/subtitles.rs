@@ -901,6 +901,9 @@ pub enum SidecarState {
 /// Probe the cache for one track. See [`SidecarState`] for why this starts
 /// nothing.
 pub async fn sidecar_state(dir: &Path, file: &MediaFile, index: i64) -> SidecarState {
+    if file.downloaded_subtitle(index).is_some() {
+        return SidecarState::Ready;
+    }
     let cached = vtt_path(dir, file, index);
     if matches!(read_vtt_path(&cached, MAX_SIDECAR_BYTES).await, Ok(Some(_))) {
         return SidecarState::Ready;
@@ -977,6 +980,9 @@ pub async fn read_cached_vtt(
     file: &MediaFile,
     index: i64,
 ) -> Result<Option<Vec<u8>>, String> {
+    if let Some(track) = file.downloaded_subtitle(index) {
+        return Ok(Some(track.vtt.as_bytes().to_vec()));
+    }
     read_vtt_path(&vtt_path(dir, file, index), MAX_SIDECAR_BYTES).await
 }
 
@@ -1145,6 +1151,11 @@ async fn ensure_burn_source_with(
     let source = Arc::new(
         crate::fragment_index_cluster::open_source_fence(file, expected_object_version).await?,
     );
+    if file.downloaded_subtitle(index).is_some() {
+        return ensure_vtt_file(dir, file, index)
+            .await
+            .map(BurnSource::File);
+    }
     let version = hex::encode(Sha256::digest(source.object_version().as_bytes()));
     let cached = dir.join(format!("f{}-s{index}-{version}-burn-v2.mks", file.id));
     // A sidecar already published for this exact object is served before any
@@ -1870,6 +1881,13 @@ async fn extract_vtt_window(
     anchor_seconds: i64,
     window_seconds: i64,
 ) -> Result<(), String> {
+    if let Some(track) = file.downloaded_subtitle(index) {
+        // The consumer slices absolute cue times to its segment. Keeping the
+        // complete small track here also preserves cues spanning a window.
+        return tokio::fs::write(tmp, &track.vtt)
+            .await
+            .map_err(|e| e.to_string());
+    }
     let end = anchor_seconds
         .saturating_add(bounded_window_seconds(window_seconds))
         .saturating_add(WINDOW_SLACK_SECONDS);
@@ -2184,6 +2202,11 @@ pub(crate) fn peak_window_flights_for_test(session: &str) -> usize {
 }
 
 async fn extract_vtt(tmp: &Path, file: &MediaFile, index: i64) -> Result<(), String> {
+    if let Some(track) = file.downloaded_subtitle(index) {
+        return tokio::fs::write(tmp, &track.vtt)
+            .await
+            .map_err(|e| e.to_string());
+    }
     let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
     #[cfg(unix)]
     let input = PathBuf::from("/dev/fd/3");
@@ -2653,8 +2676,68 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn downloaded_captions_rebuild_cache_without_embedded_streams_or_provider() {
+        let dir = crate::test_tempdir().expect("downloaded caption fixture");
+        let mut file = media_file(dir.path().join("not-an-embedded-subtitle.mkv"));
+        let vtt="WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nFirst\n\n00:02:00.000 --> 00:02:05.000\nLater\n";
+        file.subtitle_streams = vec![plurx_core::domain::SubtitleStream {
+            index: 0,
+            codec: "webvtt".into(),
+            ..Default::default()
+        }];
+        file.downloaded_subtitles = vec![plurx_core::domain::DownloadedSubtitle {
+            source_size: file.size,
+            source_mtime: file.mtime,
+            provider_file_id: 1,
+            language: "en".into(),
+            title: "Example".into(),
+            hearing_impaired: false,
+            forced: false,
+            vtt: vtt.into(),
+        }];
+        assert_eq!(
+            read_cached_vtt(dir.path(), &file, 0)
+                .await
+                .expect("downloaded caption fixture")
+                .expect("downloaded caption fixture"),
+            vtt.as_bytes()
+        );
+        assert!(matches!(
+            sidecar_state(dir.path(), &file, 0).await,
+            SidecarState::Ready
+        ));
+        assert_eq!(
+            ensure_vtt_bytes(dir.path(), &file, 0)
+                .await
+                .expect("downloaded caption fixture"),
+            vtt.as_bytes()
+        );
+        tokio::fs::remove_file(vtt_path(dir.path(), &file, 0))
+            .await
+            .expect("downloaded caption fixture");
+        assert_eq!(
+            ensure_vtt_bytes(dir.path(), &file, 0)
+                .await
+                .expect("downloaded caption fixture"),
+            vtt.as_bytes()
+        );
+        let window = dir.path().join("window.vtt");
+        extract_vtt_window(&window, &file, 0, 200, 200)
+            .await
+            .expect("downloaded caption fixture");
+        assert_eq!(
+            tokio::fs::read(window)
+                .await
+                .expect("downloaded caption fixture"),
+            vtt.as_bytes(),
+            "absolute cues are never shifted to a later seek window"
+        );
+    }
+
     fn media_file(path: PathBuf) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 77,
             item_id: 1,
             path,
@@ -3426,6 +3509,7 @@ mod stored_source_tests {
     fn file_at(id: i64, path: PathBuf) -> MediaFile {
         let metadata = std::fs::metadata(&path).expect("source metadata");
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id,
             item_id: 1,
             size: metadata.len() as i64,

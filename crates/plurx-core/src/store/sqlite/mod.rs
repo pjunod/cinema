@@ -1138,6 +1138,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // this as v64; the field-order and luminance columns reached main first,
     // so the validation column appends after them.
     crate::store::fragindex::FRAGMENT_INDEXES_VALIDATION_COLUMN,
+    super::downloaded_subtitles::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1234,13 +1235,14 @@ const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container,
      (probe_json IS NOT NULL), \
      dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, \
      video_codec_tag, field_order, \
-     max_cll, max_fall, mastering_max_luminance, luminance_source";
+     max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles";
 
 fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
     let path: String = row.get(2)?;
     let audio_json: String = row.get(14)?;
     let subs_json: String = row.get(15)?;
-    Ok(MediaFile {
+    MediaFile {
+        downloaded_subtitles: Vec::new(),
         id: row.get(0)?,
         item_id: row.get(1)?,
         path: path.into(),
@@ -1276,7 +1278,9 @@ fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
         max_fall: row.get(28)?,
         mastering_max_luminance: row.get(29)?,
         luminance_source: row.get(30)?,
-    })
+    }
+    .with_downloaded_subtitles(&row.get::<_, String>(31)?)
+    .map_err(|e| conversion_err(31, format!("downloaded_subtitles: {e}")))
 }
 
 const USER_COLS: &str = "id, username, password_hash, is_admin, created_at";
@@ -2558,9 +2562,10 @@ mod tests {
         // main first. 65 -> 66 for v66, `FRAGMENT_INDEXES_VALIDATION_COLUMN`:
         // the node-local publication proof C-05 drafted as v64, appended after
         // both of those for the same reason they reached main first. No
-        // earlier entry moved; the list stays append-only.
+        // earlier entry moved; the list stays append-only. v67 adds durable
+        // downloaded captions to files.
         assert_eq!(
-            version, 66,
+            version, 67,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

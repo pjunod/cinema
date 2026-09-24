@@ -3618,6 +3618,7 @@ mod tests {
 
     fn hevc_file(hdr: Option<&str>) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 42,
             item_id: 1,
             path: "/movies/hevc.mp4".into(),
@@ -4477,6 +4478,7 @@ mod tests {
         use plurx_core::domain::AudioStream;
 
         let mut file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 5698,
             item_id: 1,
             path: "/movies/Michael (2026).mkv".into(),
@@ -5951,6 +5953,7 @@ mod tests {
             }
         }
         let mut file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: "/media/anime.mkv".into(),
@@ -6116,6 +6119,7 @@ mod tests {
     #[test]
     fn the_subtitle_route_names_how_the_cues_are_produced() {
         let file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: "/media/routes.mkv".into(),
