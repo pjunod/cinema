@@ -432,18 +432,16 @@ impl MediaStore for SqliteStore {
             // have can never match a row whose id is also NULL. TMDB wins ties
             // because it is what plurx stores for everything it enriched; the
             // IMDb arm is the fallback for items adopted from an NFO.
-            Ok(find_by(
-                conn,
-                &format!(
-                    "SELECT {ITEM_COLS} FROM items
-                     WHERE kind = ?1
-                       AND ((?2 IS NOT NULL AND tmdb_id = ?2)
-                         OR (?3 IS NOT NULL AND imdb_id = ?3 COLLATE NOCASE))
-                     ORDER BY (?2 IS NOT NULL AND tmdb_id = ?2) DESC, id
-                     LIMIT 1"
-                ),
-                params![kind, tmdb_id, imdb_id],
-            )?)
+            let sql = format!(
+                "SELECT {ITEM_COLS} FROM items
+                 WHERE kind = ?1
+                   AND ((?2 IS NOT NULL AND tmdb_id = ?2)
+                     OR (?3 IS NOT NULL AND imdb_id = ?3 COLLATE NOCASE))
+                 ORDER BY (?2 IS NOT NULL AND tmdb_id = ?2) DESC, id
+                 LIMIT 1"
+            );
+            super::trace_statement("item_by_external_id", &sql);
+            Ok(find_by(conn, &sql, params![kind, tmdb_id, imdb_id])?)
         })
         .await
     }
@@ -876,19 +874,20 @@ impl MediaStore for SqliteStore {
                 GENRE_COUNT.replace("?2", "?"),
                 GENRE_PAGE.replace("?4", "?")
             );
-            let total: i64 = conn.query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM items WHERE library_id = ?1 AND \
-                     {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_COUNT}"
-                ),
-                params![library_id, genre],
-                |row| row.get(0),
-            )?;
-            let mut stmt = conn.prepare(&format!(
+            let count_sql = format!(
+                "SELECT COUNT(*) FROM items WHERE library_id = ?1 AND \
+                 {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_COUNT}"
+            );
+            super::trace_statement("list_top_items_in_genre.count", &count_sql);
+            let total: i64 =
+                conn.query_row(&count_sql, params![library_id, genre], |row| row.get(0))?;
+            let page_sql = format!(
                 "SELECT {ITEM_COLS} FROM items
                  WHERE library_id = ?1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_PAGE}
                  ORDER BY {order} LIMIT ?3 OFFSET ?2"
-            ))?;
+            );
+            super::trace_statement("list_top_items_in_genre.page", &page_sql);
+            let mut stmt = conn.prepare(&page_sql)?;
             let items = stmt
                 .query_map(params![library_id, offset, limit, genre], |row| {
                     item_from_row(row, 0)
@@ -905,7 +904,7 @@ impl MediaStore for SqliteStore {
     ) -> Result<Vec<HomePreviewPage>, StoreError> {
         let limit_per_library = limit_per_library.clamp(1, 24);
         self.with_read(move |conn| {
-            let mut stmt = conn.prepare(&format!(
+            let sql = format!(
                 "WITH ranked AS (
                      SELECT id, library_id,
                             COUNT(*) OVER (PARTITION BY library_id) AS library_total,
@@ -925,7 +924,9 @@ impl MediaStore for SqliteStore {
                    JOIN items i ON i.id = selected.id
                   ORDER BY selected.library_id, selected.preview_rank",
                 item_cols("i")
-            ))?;
+            );
+            super::trace_statement("home_preview_pages", &sql);
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
                 .query_map([limit_per_library], |row| {
                     Ok((item_from_row(row, 0)?, row.get::<_, i64>(ITEM_COL_COUNT)?))
@@ -962,7 +963,7 @@ impl MediaStore for SqliteStore {
             // Photos are excluded on purpose: a 2,000-photo import would
             // otherwise flood the home screen, and its videos and folders
             // still surface it.
-            let mut stmt = conn.prepare(&format!(
+            let sql = format!(
                 "WITH ranked AS (
                      SELECT {i},
                             show.title AS rail_show_title,
@@ -992,7 +993,9 @@ impl MediaStore for SqliteStore {
                  LIMIT ?2",
                 i = item_cols("i"),
                 r = item_cols("r")
-            ))?;
+            );
+            super::trace_statement("recently_added", &sql);
+            let mut stmt = conn.prepare(&sql)?;
             let items = stmt
                 .query_map(params![library_id, limit], |row| {
                     Ok(RecentItem {
@@ -1012,7 +1015,7 @@ impl MediaStore for SqliteStore {
             return Ok(Vec::new());
         };
         self.with_conn(move |conn| {
-            let mut stmt = conn.prepare(&format!(
+            let sql = format!(
                 "WITH hits AS MATERIALIZED (SELECT rowid,rank AS score FROM items_fts WHERE items_fts MATCH ?1 AND rowid NOT IN (SELECT rowid FROM classification_fts) UNION ALL SELECT rowid,rank AS score FROM classification_fts WHERE classification_fts MATCH ?1) SELECT {i}, show.title, season.poster_path
                  FROM (SELECT rowid,min(score) AS score FROM hits GROUP BY rowid) f
                  JOIN items i ON i.id = f.rowid
@@ -1022,7 +1025,9 @@ impl MediaStore for SqliteStore {
                  WHERE i.kind IN ('movie','show','episode','folder','video','photo','book','audiobook')
                  ORDER BY f.score, i.id LIMIT ?2",
                 i = item_cols("i")
-            ))?;
+            );
+            super::trace_statement("search_items", &sql);
+            let mut stmt = conn.prepare(&sql)?;
             let items = stmt
                 .query_map(params![match_expr, limit], |row| {
                     Ok(RecentItem {
@@ -2143,10 +2148,12 @@ impl MediaStore for SqliteStore {
             // and a 1080p rip of the same movie). Order by resolution, then
             // bitrate, so clients default to the highest quality; SQLite
             // sorts NULLs last under DESC.
-            let mut stmt = conn.prepare(&format!(
+            let sql = format!(
                 "SELECT {FILE_COLS} FROM files WHERE item_id = ?1
                  ORDER BY height DESC, bitrate DESC, path"
-            ))?;
+            );
+            super::trace_statement("files_for_item", &sql);
+            let mut stmt = conn.prepare(&sql)?;
             let files = stmt
                 .query_map(params![item_id], file_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2239,7 +2246,7 @@ impl MediaStore for SqliteStore {
             // NULL heights sort last via COALESCE rather than being filtered
             // out — an unprobed file is still a file, and dropping it here
             // would make `files`/`bytes` understate what is on the volume.
-            let mut stmt = conn.prepare(&format!(
+            let sql = format!(
                 "WITH ranked AS (
                      SELECT item_id,
                             COUNT(*)  OVER (PARTITION BY item_id) AS n_files,
@@ -2258,7 +2265,9 @@ impl MediaStore for SqliteStore {
                  SELECT item_id, n_files, total_bytes, container, video_codec,
                         height, hdr, hdr_format, audio_streams
                  FROM ranked WHERE pick = 1"
-            ))?;
+            );
+            super::trace_statement("item_media_facts", &sql);
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
                 .query_map([], |row| {
                     let audio_json: String = row.get(8)?;

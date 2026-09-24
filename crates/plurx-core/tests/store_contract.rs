@@ -30632,3 +30632,69 @@ async fn fragment_index_builders_held_by_names_the_builder_on_every_backend() {
     })
     .await;
 }
+
+/// The calls K-05's query-plan protocol measures, shared with the
+/// `query_plans` example so both backends are planned for the same requests.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "../examples/query_plans/calls.rs"]
+mod k05_query_plan_calls;
+
+/// K-05 M0 (plan section 3.4 step 5): capture the replicated statements the
+/// measured calls execute, and the state machine's schema as a bootstrapped
+/// three-voter cluster created it, for `query_plans build-hiqlite`/`measure`.
+/// A measurement tool, not a contract, so it is ignored by default:
+///
+/// `K05_HIQLITE_CAPTURE=hiqlite.json cargo test -p plurx-core --features
+/// cluster-read-cost-validation,hiqlite-contract-tests --test store_contract
+/// -- --ignored k05_capture_hiqlite_statements`
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+#[ignore = "K-05 measurement capture: writes the file named by K05_HIQLITE_CAPTURE"]
+async fn k05_capture_hiqlite_statements() {
+    let out = std::env::var_os("K05_HIQLITE_CAPTURE").expect("set K05_HIQLITE_CAPTURE");
+    let capture = k05_query_plan_calls::StatementCapture::default();
+    tracing::subscriber::set_global_default(capture.clone()).expect("capture subscriber");
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let statements = k05_query_plan_calls::drive(&store, "hiqlite", &capture).await;
+    assert!(!statements.is_empty(), "no replicated statement events");
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect schema client");
+    let schema = client
+        .query_raw(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master \
+             WHERE sql IS NOT NULL ORDER BY rowid",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read state-machine schema")
+        .into_iter()
+        .map(|mut row| {
+            serde_json::json!({
+                "kind": row.get::<String>("type"),
+                "name": row.get::<String>("name"),
+                "table": row.get::<String>("tbl_name"),
+                "sql": row.get::<String>("sql"),
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        out,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "backend": "hiqlite",
+            "schema": schema,
+            "statements": statements,
+        }))
+        .expect("encode capture"),
+    )
+    .expect("write capture");
+}

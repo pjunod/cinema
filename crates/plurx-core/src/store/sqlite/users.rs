@@ -286,9 +286,7 @@ impl UserStore for SqliteStore {
         self.with_conn(move |conn| {
             // The expiry policy is read in the same statement as the token, so
             // a request is judged against one snapshot of both.
-            let found = conn
-                .query_row(
-                    "SELECT u.id, u.username, u.password_hash, u.is_admin, u.created_at,
+            const SQL: &str = "SELECT u.id, u.username, u.password_hash, u.is_admin, u.created_at,
                             t.last_seen_at,
                             (SELECT value FROM settings WHERE key = ?2),
                             (SELECT value FROM settings WHERE key = ?3),
@@ -296,7 +294,11 @@ impl UserStore for SqliteStore {
                             unixepoch()
                      FROM users u
                      JOIN tokens t ON t.user_id = u.id
-                     WHERE t.token_hash = ?1",
+                     WHERE t.token_hash = ?1";
+            super::trace_statement("authenticate_token", SQL);
+            let found = conn
+                .query_row(
+                    SQL,
                     params![
                         token_hash,
                         keys::AUTH_TOKEN_EXPIRY_ENABLED,

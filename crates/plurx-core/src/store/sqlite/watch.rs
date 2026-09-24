@@ -82,12 +82,13 @@ impl WatchStore for SqliteStore {
             // the query parameter-count bounded regardless of list length.
             let ids_json = serde_json::to_string(&item_ids)
                 .map_err(|e| StoreError::Database(e.to_string()))?;
-            let mut stmt = conn.prepare(
+            const SQL: &str =
                 "SELECT w.item_id, w.position_ms, w.duration_ms, w.watched, w.updated_at
                  FROM watch_state w
                  JOIN json_each(?2) j ON j.value = w.item_id
-                 WHERE w.user_id = ?1",
-            )?;
+                 WHERE w.user_id = ?1";
+            super::trace_statement("watch_map", SQL);
+            let mut stmt = conn.prepare(SQL)?;
             let rows = stmt
                 .query_map(params![user_id, ids_json], |row| {
                     Ok((row.get::<_, i64>(0)?, watch_from_row(row, 1)?))
@@ -405,7 +406,7 @@ impl WatchStore for SqliteStore {
             // terminates — and a (root, id) pair is unique per root, so two
             // containers on the same page never contaminate each other's
             // count.
-            let mut stmt = conn.prepare(&format!(
+            let sql = format!(
                 "WITH RECURSIVE tree(root, id) AS (
                      SELECT id, id FROM items WHERE id IN ({list})
                      UNION
@@ -417,7 +418,9 @@ impl WatchStore for SqliteStore {
                  LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
                  WHERE i.kind IN ({PLAYABLE_KINDS})
                  GROUP BY t.root"
-            ))?;
+            );
+            super::trace_statement("watch_rollups", &sql);
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
                 .query_map(params![user_id], |row| {
                     Ok((
@@ -450,7 +453,7 @@ impl WatchStore for SqliteStore {
         self.with_conn(move |conn| {
             // In-progress = has a position, not finished. Episodes carry their
             // show's title so a card can read "Severance · S1E3".
-            let mut stmt = conn.prepare(&format!(
+            let sql = format!(
                 "SELECT {i}, show.title,
                         w.position_ms, w.duration_ms, w.watched, w.updated_at,
                         season.poster_path
@@ -463,7 +466,9 @@ impl WatchStore for SqliteStore {
                    AND i.kind IN ('movie','episode','video','audiobook')
                  ORDER BY w.updated_at DESC LIMIT ?2",
                 i = item_cols("i")
-            ))?;
+            );
+            super::trace_statement("continue_watching", &sql);
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
                 .query_map(params![user_id, limit], |row| {
                     Ok(InProgressItem {
@@ -486,6 +491,7 @@ impl WatchStore for SqliteStore {
             // progress, strictly after the last watched episode of that show.
             // One row per show (bare columns alongside MIN() pick that row).
             let sql = super::super::sql_source::next_up(&item_cols("e")).sqlite();
+            super::trace_statement("next_up", &sql);
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
                 .query_map(params![user_id, limit], |row| {

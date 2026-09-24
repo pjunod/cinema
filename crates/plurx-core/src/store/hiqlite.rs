@@ -4130,6 +4130,7 @@ impl UserStore for HiqliteAuthStore {
                  FROM users u JOIN tokens t ON t.user_id = u.id \
                  WHERE t.token_hash = $4";
         validate_sql(sql)?;
+        trace_statement("authenticate_token", sql);
         let mut rows = self
             .client()
             .query_consistent_map::<TokenUserRow, _>(
@@ -4373,6 +4374,14 @@ impl Clock for SystemClock {
 
 pub(super) fn validate_sql(sql: &str) -> Result<(), StoreError> {
     validate_sql_with_refusal_counter(sql, &STORE_VALIDATION_REFUSALS)
+}
+
+/// The replicated twin of `sqlite::trace_statement`: the SQL a hot read is
+/// about to send, at TRACE under `plurx_core::store::hiqlite`, so K-05's
+/// query-plan protocol can take each plan on the statement as executed on
+/// this backend too (section 3.4 step 5).
+pub(super) fn trace_statement(statement: &'static str, sql: &str) {
+    tracing::trace!(target: "plurx_core::store::hiqlite", statement, sql, "hiqlite statement");
 }
 
 fn validate_sql_with_refusal_counter(sql: &str, refusals: &AtomicU64) -> Result<(), StoreError> {

@@ -1322,6 +1322,18 @@ struct ReadPool {
 /// enough to be nothing on any box this runs on.
 const READ_CONNS: usize = 2;
 
+/// The SQL a hot read is about to run, interpolations resolved.
+///
+/// K-05 section 3.4 takes every query plan on the statement *as executed*,
+/// not on a hand copy of the source text that can drift from it: with
+/// `RUST_LOG=plurx_core::store::sqlite=trace` each instrumented method logs
+/// its statement name and SQL here, and the `query_plans` example reads the
+/// events back to run `EXPLAIN QUERY PLAN` on exactly those strings. The
+/// macro evaluates nothing unless TRACE is enabled for this target.
+pub(crate) fn trace_statement(statement: &'static str, sql: &str) {
+    tracing::trace!(target: "plurx_core::store::sqlite", statement, sql, "sqlite statement");
+}
+
 impl SqliteStore {
     /// Open (creating if necessary) the database at `path` and migrate it.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
