@@ -919,7 +919,13 @@ async fn owner_start_within(
             // Only the owner knows what is holding its tuners, so only the
             // owner can name them. A relayed refusal keeps the code and loses
             // the detail, which is the honest thing for an ingress to say.
-            .map_err(|error| capacity_error(error, state.live_tv.transport_holders()));
+            .map_err(|error| {
+                capacity_error(
+                    error,
+                    state.live_tv.transport_holders(),
+                    state.live_tv.watchable_channels(),
+                )
+            });
     }
     let (node_id, base) = owner_peer(state, &config.owner_node_id).await?;
     let (path, body) = if request.playback.is_some() {
@@ -1899,20 +1905,30 @@ pub(crate) fn api_error_from(error: LiveTvError, decided: Decided) -> ApiError {
 /// The holders are added to the refusal the ordinary path already built rather
 /// than replacing it, so `retry` and `owner_decided` are still there for a
 /// client that reads those and not this.
+///
+/// `watchable` rides beside them (plan L-03 §3.4): channels someone is
+/// already watching or recording that would take one more viewer, which cost
+/// no tuner to join. Same row shape; an owner-local refusal only, like the
+/// holders, because the signed relay shape does not change.
 pub(crate) fn capacity_error(
     error: LiveTvError,
     holders: Vec<crate::live_tv::dvr::DvrHolder>,
+    watchable: Vec<crate::live_tv::dvr::DvrHolder>,
 ) -> ApiError {
     let mut refusal = api_error(error);
-    if holders.is_empty() {
+    if holders.is_empty() && watchable.is_empty() {
         return refusal;
     }
     if let ApiError::TypedDetail { code, detail, .. } = &mut refusal {
         if *code == "tuner_capacity" {
-            detail.insert(
-                "holders".to_owned(),
-                serde_json::to_value(&holders).unwrap_or(serde_json::Value::Null),
-            );
+            for (field, rows) in [("holders", holders), ("watchable", watchable)] {
+                if !rows.is_empty() {
+                    detail.insert(
+                        field.to_owned(),
+                        serde_json::to_value(&rows).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+            }
         }
     }
     refusal
@@ -1942,6 +1958,43 @@ mod tests {
             .await
             .expect("body");
         serde_json::from_slice(&bytes).expect("json")
+    }
+
+    #[tokio::test]
+    async fn a_capacity_refusal_names_the_channels_a_viewer_could_join_instead() {
+        let row = |channel: &str| crate::live_tv::dvr::DvrHolder {
+            channel_id: channel.to_owned(),
+            guide_number: channel.to_owned(),
+            channel_name: "Fixture".to_owned(),
+            sinks: Vec::new(),
+        };
+        let body = body_of(capacity_error(
+            LiveTvError::Capacity("all 2 tuners plurx Live TV may use are in use".into()),
+            Vec::new(),
+            vec![row("2.1"), row("4.1")],
+        ))
+        .await;
+        let watchable = body["detail"]["watchable"]
+            .as_array()
+            .or_else(|| body["watchable"].as_array())
+            .unwrap_or_else(|| panic!("no watchable rows: {body}"));
+        assert_eq!(watchable.len(), 2, "{body}");
+        assert_eq!(watchable[0]["guide_number"], "2.1");
+        assert!(
+            body.get("holders").is_none() && body["detail"].get("holders").is_none(),
+            "no recording holds a tuner, so there is nothing to offer to stop: {body}"
+        );
+
+        let other = body_of(capacity_error(
+            LiveTvError::TunerUnavailable("the device refused".into()),
+            Vec::new(),
+            vec![row("2.1")],
+        ))
+        .await;
+        assert!(
+            !other.to_string().contains("watchable"),
+            "only a capacity refusal offers another channel: {other}"
+        );
     }
 
     #[test]

@@ -44,7 +44,11 @@ class KnownRedContractTest(unittest.TestCase):
         # S-08 adds two more of the same shape: the deinterlace argv fixture
         # matrix and the descriptor-bound idet pass, each of which needs the
         # shipped ffmpeg or ffprobe named in its own ignore reason.
-        self.assertEqual(len(ignored), 15)
+        # L-03 M3 adds two operator-run caption audits: the per-node hardware
+        # audit and the broadcast-capture summary, each driven by
+        # scripts/live-tv-caption-audit with the hardware or capture its
+        # ignore reason names.
+        self.assertEqual(len(ignored), 17)
         self.assertTrue(all(item.reason for item in ignored))
         self.assertTrue(all(item.path in item.identity for item in ignored))
         self.assertTrue(all(item.cargo_name in item.identity for item in ignored))
