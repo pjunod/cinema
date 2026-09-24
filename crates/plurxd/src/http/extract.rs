@@ -10,6 +10,7 @@ use axum::http::request::Parts;
 use plurx_core::auth;
 use plurx_core::domain::ApiKey;
 use plurx_core::domain::User;
+use plurx_core::store::TokenAuthentication;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -708,9 +709,13 @@ impl FromRequestParts<AppState> for AuthUser {
         let token = token_from_parts(parts).ok_or(ApiError::Unauthorized)?;
         let hash = auth::hash_token(&token);
         let ticket = state.cache_only_admin_proofs.authentication_ticket();
-        let user = match state.store.user_for_token(&hash).await? {
-            Some(user) => user,
-            None => {
+        let user = match state.store.authenticate_token(&hash).await? {
+            TokenAuthentication::Authenticated(user) => user,
+            TokenAuthentication::Expired { idle_days } => {
+                state.cache_only_admin_proofs.invalidate_digest(&hash);
+                return Err(session_expired(idle_days));
+            }
+            TokenAuthentication::Unknown => {
                 state.cache_only_admin_proofs.invalidate_digest(&hash);
                 return Err(ApiError::Unauthorized);
             }
@@ -720,6 +725,23 @@ impl FromRequestParts<AppState> for AuthUser {
             .record_authenticated(ticket, hash, &user);
         Ok(AuthUser(user))
     }
+}
+
+/// Stable code every client matches to land on its sign-in screen with the
+/// reason, rather than a generic "your session ended".
+pub(crate) const SESSION_EXPIRED_CODE: &str = "session_expired";
+
+/// The 401 for a login token that sat unused for the whole idle window. The
+/// status stays 401 so every client that predates the code still signs out;
+/// the code and `idle_days` let a current client say why.
+pub(crate) fn session_expired(idle_days: i64) -> ApiError {
+    let unit = if idle_days == 1 { "day" } else { "days" };
+    ApiError::typed_detail(
+        axum::http::StatusCode::UNAUTHORIZED,
+        SESSION_EXPIRED_CODE,
+        format!("Signed out after {idle_days} {unit} of inactivity. Sign in again to continue."),
+        serde_json::json!({ "idle_days": idle_days }),
+    )
 }
 
 impl FromRequestParts<AppState> for RawToken {
@@ -1196,7 +1218,9 @@ mod tests {
             extractor
                 .find("authentication_ticket()")
                 .expect("auth ticket")
-                < extractor.find("user_for_token(&hash)").expect("Store auth")
+                < extractor
+                    .find("authenticate_token(&hash)")
+                    .expect("Store auth")
         );
         assert!(extractor.contains("record_authenticated(ticket, hash, &user)"));
 

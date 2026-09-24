@@ -17,6 +17,28 @@ final class Session: @unchecked Sendable {
     private var mediaFailoverOrigins: [String] = []
     private var mediaFailoverIndex = 0
 
+    private let noticeLock = NSLock()
+    private var sessionExpiryNotice: String?
+
+    /// Remember the server's sentence for a sign-in it refused as idle-expired
+    /// (`session_expired`). The 401 itself stays `.http(401)` so every status
+    /// matcher keeps signing the viewer out; this only carries the reason to
+    /// the login screen that sign-out lands on.
+    func noteSessionExpiry(_ message: String) {
+        noticeLock.lock()
+        sessionExpiryNotice = message
+        noticeLock.unlock()
+    }
+
+    /// The pending reason, once. Nil when the last refusal was not an expiry.
+    func takeSessionExpiryNotice() -> String? {
+        noticeLock.lock()
+        defer { noticeLock.unlock() }
+        let notice = sessionExpiryNotice
+        sessionExpiryNotice = nil
+        return notice
+    }
+
     /// Install the server-advertised alternatives for this exact instance.
     ///
     /// Every candidate is validated again here because it becomes a request
