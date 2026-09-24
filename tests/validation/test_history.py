@@ -901,6 +901,88 @@ class CorrectiveBoundaryCase(RepositoryFixture):
         self.assertEqual(report.errors, ())
         self.assertEqual(report.covered_by_trailer, (fix,))
 
+    def test_an_anchored_commit_that_is_not_corrective_needs_no_landing_line(self):
+        """Both carriers call the same commits corrective.
+
+        A `tests/client-fixes.toml` row pulls its commit into the audit
+        whatever the subject says, so past the boundary a `refactor(` commit
+        with an anchor row reached the landing-line demand. The pull request
+        field check asks `CORRECTIVE_RE` alone and let that pull request merge
+        with no field, so the landing audit then turned every later
+        `make history-check` red (`d49a079b`, anchored at
+        `tests/client-fixes.toml`, is that shape on `main`). The anchor row
+        stays its evidence; a `fix(` commit with an anchor row still needs
+        its line.
+        """
+
+        from validation.regression_field import corrective_subjects
+
+        root, catalog, coverage = self.repository()
+        (root / "clients").mkdir()
+        (root / "clients/app.swift").write_text("func a() {}\n", encoding="utf-8")
+        (root / "tests/client.swift").write_text("func testA() {}\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
+        boundary = self.commit(root, "docs: draw the boundary")
+        base = self.branch(root)
+
+        def land(subject: str, number: int) -> str:
+            subprocess.run(["git", "checkout", "-q", "-b", f"topic{number}"], cwd=root, check=True)
+            (root / "clients/app.swift").write_text(
+                f"func a() {{}}\nfunc keptWire{number}() {{}}\n", encoding="utf-8"
+            )
+            (root / "tests/client.swift").write_text(
+                f"func testA() {{}}\nfunc testKeptWire{number}() {{}}\n", encoding="utf-8"
+            )
+            sha = self.commit(root, subject)
+            (root / "tests/client-fixes.toml").write_text(
+                textwrap.dedent(
+                    f"""
+                    version = 1
+
+                    [[fixes]]
+                    id = "client.kept-wire-{number}"
+                    commits = ["{sha[:8]}"]
+                    source = "clients/app.swift"
+                    source_anchor = "keptWire{number}"
+                    test = "tests/client.swift"
+                    test_anchor = "testKeptWire{number}"
+                    """
+                ),
+                encoding="utf-8",
+            )
+            self.commit(root, "docs(client): anchor the kept wire")
+            # What the fast lane's pre-merge check asks of this range.
+            pre_merge = corrective_subjects(root, base, "HEAD")
+            subprocess.run(["git", "checkout", "-q", base], cwd=root, check=True)
+            self.merge(
+                root, f"topic{number}",
+                f"Merge pull request '{subject}' (#{number}) from topic{number} into main",
+            )
+            return sha, pre_merge
+
+        refactor, pre_merge = land("refactor(client): delete the minter, keep the wire", 7)
+        self.assertEqual(pre_merge, (), "the pull request check calls it corrective")
+        report = audit_history(
+            root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
+        )
+        self.assertEqual(report.errors, ())
+        self.assertEqual(report.anchored_count, 1)
+        self.assertNotIn(refactor, report.pending)
+
+        # Control: the same shape as a `fix(` still needs its landing line,
+        # and the pull request check agrees that it is corrective.
+        subprocess.run(["git", "reset", "-q", "--hard", "HEAD^"], cwd=root, check=True)
+        fix, pre_merge = land("fix(client): keep the wire", 8)
+        self.assertEqual(pre_merge, ("fix(client): keep the wire",))
+        report = audit_history(
+            root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
+        )
+        self.assertTrue(
+            any(fix[:8] in error and "no Regression-Test: line" in error for error in report.errors),
+            report.errors,
+        )
+
     def test_a_fix_that_reached_main_outside_a_landing_commit_is_an_error(self):
         """A direct push has no landing commit to carry its line.
 

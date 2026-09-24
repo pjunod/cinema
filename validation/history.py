@@ -996,6 +996,13 @@ def audit_history(
                     f"corrective client commit {issue.sha[:8]} needs a "
                     f"tests/client-fixes.toml anchor row: {issue.subject}"
                 )
+            if not is_corrective(issue.subject, issue.sha, post_boundary):
+                # Here only because a `tests/client-fixes.toml` row names it.
+                # The pull request field check asks `CORRECTIVE_RE` alone, so
+                # demanding a landing line of this commit would pass it before
+                # the merge and turn every later `make history-check` red after
+                # it. Its anchor row, checked above, is its evidence.
+                continue
             if issue.sha in landing.covers:
                 trailer_covered.add(issue.sha)
             elif issue.sha in landing.introduced:
