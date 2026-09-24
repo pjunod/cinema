@@ -15,11 +15,13 @@ and never reaches a shipped artifact (§5).
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
 fields, so an audit claiming to read licenses "from Cargo.lock" has not done
-the work. 501 source-bearing crates in the root workspace · license fields
+the work. 495 source-bearing crates in the root workspace · license fields
 verified 2026-09-17; the graph itself re-checked against `Cargo.lock`
 on 2026-09-22, when the vendored Hiqlite `backup` feature stopped
 enabling S3 and fourteen crates reached only through it left the
-resolution.
+resolution, and on 2026-09-24, when `ring` became the only rustls provider
+and the six crates reached only through `aws-lc-rs` (`aws-lc-rs`,
+`aws-lc-sys`, `cmake`, `dunce`, `fs_extra`, `jobserver`) left it.
 
 ---
 
@@ -186,7 +188,7 @@ Crates under `Unicode-3.0` (18) and `CDLA-Permissive-2.0` (2, the webpki root
 stores) are permissive with attribution requirements, satisfied by this file.
 
 Two limits worth stating rather than hiding. This table reproduces each
-crate's declared SPDX expression only: `aws-lc-sys`, `onig_sys` and `lz4-sys`
+crate's declared SPDX expression only: `onig_sys` and `lz4-sys`
 statically link bundled C whose own upstream notices are not carried here.
 And the repo has three lockfiles — `fuzz/Cargo.lock` and
 `spikes/hiqlite-m0/Cargo.lock` resolve 37 packages the root lock does not
@@ -223,8 +225,6 @@ distribution, but they are not covered by the table above.
 | `async-trait` | 0.1.91 | MIT OR Apache-2.0 |
 | `atomic-waker` | 1.1.2 | Apache-2.0 OR MIT |
 | `autocfg` | 1.5.1 | Apache-2.0 OR MIT |
-| `aws-lc-rs` | 1.17.3 | ISC AND (Apache-2.0 OR ISC) |
-| `aws-lc-sys` | 0.43.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) |
 | `axum` | 0.8.9 | MIT |
 | `axum-core` | 0.5.6 | MIT |
 | `axum-server` | 0.8.0 | MIT |
@@ -270,7 +270,6 @@ distribution, but they are not covered by the table above.
 | `clap_builder` | 4.6.2 | MIT OR Apache-2.0 |
 | `clap_derive` | 4.6.1 | MIT OR Apache-2.0 |
 | `clap_lex` | 1.1.0 | MIT OR Apache-2.0 |
-| `cmake` | 0.1.58 | MIT OR Apache-2.0 |
 | `colorchoice` | 1.0.5 | MIT OR Apache-2.0 |
 | `combine` | 4.6.7 | MIT |
 | `compact_str` | 0.9.1 | MIT |
@@ -313,7 +312,6 @@ distribution, but they are not covered by the table above.
 | `displaydoc` | 0.2.7 | MIT OR Apache-2.0 |
 | `dolby_vision` | 3.4.0 | MIT |
 | `dotenvy` | 0.15.7 | MIT |
-| `dunce` | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 |
 | `dyn-clone` | 1.0.20 | MIT OR Apache-2.0 |
 | `dyn-stack` | 0.13.2 | MIT |
 | `dyn-stack-macros` | 0.1.3 | MIT |
@@ -341,7 +339,6 @@ distribution, but they are not covered by the table above.
 | `fraction` | 0.16.0 | MIT OR Apache-2.0 |
 | `fs-err` | 3.3.1 | MIT OR Apache-2.0 |
 | `fs4` | 1.1.0 | MIT OR Apache-2.0 |
-| `fs_extra` | 1.3.0 | MIT |
 | `funty` | 2.0.0 | MIT |
 | `futures` | 0.3.33 | MIT OR Apache-2.0 |
 | `futures-channel` | 0.3.33 | MIT OR Apache-2.0 |
@@ -407,7 +404,6 @@ distribution, but they are not covered by the table above.
 | `jni-macros` | 0.22.4 | MIT OR Apache-2.0 |
 | `jni-sys` | 0.4.1 | MIT OR Apache-2.0 |
 | `jni-sys-macros` | 0.4.1 | MIT OR Apache-2.0 |
-| `jobserver` | 0.1.35 | MIT OR Apache-2.0 |
 | `js-sys` | 0.3.103 | MIT OR Apache-2.0 |
 | `jsonschema` | 0.50.1 | MIT |
 | `jsonschema-regex` | 0.50.1 | MIT |

@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LEDGERS = (
-    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 19),
+    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 20),
     (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 3),
 )
 
@@ -142,6 +142,44 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
         self.assertNotIn(
             '("s3-simple", "0.8.0")', (ROOT / "scripts/vendor-audit-lock").read_text()
         )
+
+
+class RingOnlyProviderGraphCase(unittest.TestCase):
+    """K-08 section 3.6 option A: the workspace compiles one rustls provider.
+
+    The behavioural half lives in crates/plurx-core/tests/rustls_single_provider.rs,
+    which only runs where Rust tests run. This half reads the lockfile and the
+    fork manifest, so the graph cannot regain aws-lc through a lane that never
+    compiles plurx-core's test binaries.
+    """
+
+    AWS_LC = {"aws-lc-rs", "aws-lc-sys"}
+
+    def test_the_workspace_lock_resolves_no_aws_lc(self):
+        names = {package["name"] for package in lock_packages(ROOT / "Cargo.lock")}
+        self.assertFalse(
+            names & self.AWS_LC,
+            "a dependency re-enabled a second rustls provider; run "
+            "`cargo tree -e features -i aws-lc-rs` to find the edge",
+        )
+
+    def test_the_fork_names_no_aws_lc_route(self):
+        dependencies = tomllib.loads(
+            (ROOT / "vendor/hiqlite/Cargo.toml").read_text(encoding="utf-8")
+        )["dependencies"]
+        self.assertEqual(dependencies["axum-server"]["features"], ["tls-rustls-no-provider"])
+        rustls = dependencies["rustls"]
+        self.assertIs(rustls["default-features"], False)
+        self.assertIn("ring", rustls["features"])
+        self.assertNotIn("prefer-post-quantum", rustls["features"])
+        tokio_rustls = dependencies["tokio-rustls"]
+        self.assertIs(tokio_rustls["default-features"], False)
+        self.assertIn("ring", tokio_rustls["features"])
+        for spec in (rustls, tokio_rustls):
+            self.assertFalse(
+                {"aws-lc-rs", "aws_lc_rs", "fips"} & set(spec["features"]),
+                "the fork asks for aws-lc directly",
+            )
 
 
 class ForkBackupGraphPolicyCase(unittest.TestCase):
