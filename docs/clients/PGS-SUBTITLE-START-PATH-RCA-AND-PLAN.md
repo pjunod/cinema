@@ -534,6 +534,10 @@ SDR burn-in. HDR playback was kept unchanged.” The two-device HDR proof bar
 below has not been met. The overlay gate is on for qualification and is not
 release-qualified. The streaming normalizer change is a candidate repair;
 code tests and an SDR cue are not substitutes for the HDR hardware retest.
+After those failed trials, current-main Apple build `181` was installed and
+confirmed on the six reachable physical Apple devices, and current-main
+Android versionCode `121` was installed and confirmed on the TCL tablet. The
+newer client versions have not yet passed the HDR PGS retest.
 
 The plan's M4/M5 acceptance asks for an "executed compatibility matrix" and a
 "complete physical validation matrix". Those are ceremony for this feature. A
