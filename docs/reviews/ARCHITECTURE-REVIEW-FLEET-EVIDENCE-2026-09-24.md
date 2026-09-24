@@ -1,0 +1,126 @@
+# Architecture review fleet evidence — what the 2026-09-24 rollout proves
+
+**Status:** evidence-only snapshot · **Source:** [architecture-review workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) at `f600d2823` · **Observed:** 2026-09-24
+
+This record separates the four-node deployment and short, read-only observations from the longer fleet and physical-device acceptance owed by the plans. It was assembled in a fresh Forgejo clone and copied deployment playbook. No plan owner or landed milestone claim changed. No client was installed, no active playback was started, and no disruptive drill was run.
+
+## 1. Deployment — four inventory nodes run `f600d2823`
+
+The current `noirr` Ansible group contains `nynuc`, `m6`, `nuc4`, and `nuc3`. The names `media1` and `lab*` in older plan prompts are not extra hosts in that inventory; map each plan's role to the present fleet before running its prompt. A read of `origin/main` at 23:39 UTC still returned `f600d28230222005441cfc62301c306785c852ce`.
+
+The copied playbook ran with `sync=false`, `only=plurx`, and `--limit nuc4,nuc3`; it did not synchronize or deploy the operator's other application checkouts. `nynuc` and `m6` already ran the target. The first `nuc3` attempt built the exact image under Rust 1.97.1 but failed at Compose recreation while another on-node deploy was running. After that process ended, one `build=false` retry passed container health, `/readyz`, and the playbook's durable-store activation log check and wrote `.ansible-deployed-ref`. The failed first attempt is part of the record; the retry is the verified result.
+
+| Node | Previous running build and image, where changed | Final image SHA-256 | Final binary, health, `/readyz` |
+|---|---|---|---|
+| `nynuc` | Already `f600d2823` | `81fb79d4ba8ade261f1b12abd32074f1bd82a97a13634784d8c334dbce653ac9` | `v0.3.0-3881-gf600d2823` · healthy · 200 |
+| `m6` | Already `f600d2823` | `7b2a58db14b0af7db2b796bc2a23f6459b32107ab27f816b3f8dd28c2a72e325` | `v0.3.0-3881-gf600d2823` · healthy · 200 |
+| `nuc4` | `v0.3.0-3803-g936157b4b` · `c30011e3c8e41b1dfe18dfc0ba0160b27a1be54f298db5c7c58d09e578114d34` | `19025f0e38565d3e7ac2de19e318d17fa1dba2186e0e70159423a31bfb5818f5` | `v0.3.0-3881-gf600d2823` · healthy · 200 |
+| `nuc3` | `v0.3.0-3853-gb1de09647` · `c4534110c68baea0b6de20ef73d863ea490f7c32eae1cd502242f1c5387f8d00` | `2b3e98bd34b2f0824d669221b37c9f5df04c53a04eed7497f7e599502899d6ad` | `v0.3.0-3881-gf600d2823` · healthy · 200 |
+
+All four had Docker restart count zero at 23:36:14–16 UTC. Both `plurxd` and `plurx-discovery` were healthy on `nuc3`. Its `/api/v1/server` returns 503 with `learner_route_ineligible` because it is a non-voting learner; `/readyz` is 200. A second bounded 30-second log window at 23:38:06–07 UTC had zero `ERROR` lines on every node. That is a short post-deploy observation, not a soak or unit-test result.
+
+## 2. Read-only measurements — useful baselines, not acceptance
+
+All reads used the running `f600d2823` image and local `/metrics`. They establish that the instrumentation is present and provide a dated starting point. Counters reset on restart, so a zero near deploy says nothing about a week of use.
+
+| Workboard row | 2026-09-24 observation | Why acceptance remains open |
+|---|---|---|
+| `C-08` | Five scrapes per node at 23:36:14–16 UTC were 325,838–326,692 bytes and 0.000978–0.002168 s; `x-request-id` appeared on all four; recent Docker logs had zero ANSI lines. A malformed ID on `nynuc` was replaced by a fresh 32-character hex ID and `passwd` appeared in zero following log lines. The RED counter exposed 315 series. | The plan asks for an hour of normal use, JSON-mode restart, browsing, and media-body flow. Its literal label grep matched 82 ordinary metric names containing `session` on each node; excluding that broad word yielded zero matches for UUID-like route values, `token`, `/mnt/`, or `file_id=` on `nynuc`. Do not report the literal grep as empty. |
+| `K-02` | At 23:36:14–16 UTC, all four `plurx_raft_state_machine_bytes` families were present and `plurx_raft_apply_lag_entries` was 0 on each node. | The 24-hour every-voter B/E/S/W series and approved follower restart/catch-up observation are still owed. |
+| `S-04` | Font attestation spawn and stat counts were zero on every node. | No text-burn session ran; cold/warm and per-segment measurements remain. |
+| `S-11` | Software encoder available on all four; QSV on `nynuc`, `nuc4`, `nuc3`; VAAPI on all four; NVENC and VideoToolbox on none. Accepted-session and tone-map counters were zero after recent restarts. | Seven gap-free, reset-aware days on every node remain. |
+| `K-06` | `timedatectl show -p NTPSynchronized` reported `yes` on all four at 23:31:28–29 UTC. | `chronyc` is absent on `nuc3` and no `plurx_cluster_clock_` metric exists in this build. NTP status is not the plan's offset and uncertainty measurement. |
+| `C-05` | `plurx_index_validation_backfill_total` was zero for `validated`, `refused`, and `gone` on all four at 23:38:57–58 UTC. | A counter snapshot does not establish backfill convergence on an active library. |
+| `P-02` | `/proc/1/limits` in `plurxd` showed 524288 soft and hard open-file limits on every node at 23:38:37–38 UTC; no EMFILE appeared in the preceding five minutes. | Busy-evening sample and a week without EMFILE remain. |
+| `D-03` | Physical inventory showed connected Apple TV 4K, iPhones and iPad, plus Pixel 11 Pro XL, Motorola razr ultra 2025, TCL 9445X, Google TV Streamer and Pixel 10 Pro Fold through `adb`. | Required Xiaomi 25019PNF3C was absent. The current control environment lacked `PLURX_DEVELOPMENT_TEAM` and all four Android release-signing inputs, and the `plurx-agent` mobile role still names `app-debug.apk`. No release APK or client was installed. |
+
+Three client-side updates were reported by the coordinating session on
+2026-09-24. They are branch work and trace evidence, not merged fleet or device
+acceptance:
+
+| Row | Current observation | Remaining |
+|---|---|---|
+| `A-02` | Commit `f30ef466b` implements the §5.5 `Session` credential lock. `make apple-build` passed on iOS and tvOS. | `make apple-test` has not run for this commit; other A-02 milestones and device evidence remain. |
+| `W-02` | Commit `2a6fbc855` repairs playback-lab readiness, allowing a Chrome shaped-network trace to reach playback. | The §5.4–5.5 splits, type baseline, browser checks and physical input observations remain. |
+| `A-04` | The Chrome `8mbps-to-1.5mbps` D3 trace failed recovery acceptance: one automatic restart/downshift from 720p to 360p, 21.113 s to the first downshift, a 4.2665 s maximum video gap, three transition waits, four hitches and zero seconds of downshift runway. The shaper measured 7,999.4 kb/s before and 1,500 kb/s after the cliff. The raw and normalized controller artifacts were produced under `/private/tmp/plurx-a04-d3-evidence-2026-09-24/` on the observing host. | Safari WebDriver failed to establish a session; Firefox, Apple, Android, the two-cliff profile and HDR pass remain. D3 is incomplete and the failed Chrome run is not an acceptance pass. |
+
+The Chrome raw report (`web-chrome-after-readiness.json`) has SHA-256
+`8e01fdc99ec54f2d0a2a9a8be86dc0fe77afade3d3727b1cd09b1361a7f3a7cf`;
+the normalized report has SHA-256
+`7ce160648a2f9e450fd260ec82abb246af695eac22eaf678768aa8ffa38eee49`.
+These artifacts are local to the observing host and are not part of this
+documentation commit.
+
+The Raft size-gauge values at 23:36 UTC, in bytes, are kept here so later readings have a comparison point:
+
+| Node | db | wal | snapshots | logs |
+|---|---:|---:|---:|---:|
+| `nynuc` | 170659840 | 4939912 | 165400613 | 33554489 |
+| `m6` | 165871616 | 14621912 | 165404709 | 16777273 |
+| `nuc4` | 169033728 | 12018072 | 165404709 | 16777273 |
+| `nuc3` | 165597184 | 2624472 | 165404709 | 16777273 |
+
+The deployment and metric observations used these read-only checks on each node:
+
+```bash
+# Confirm the running binary and readiness, not just the checkout.
+git -C /opt/noirr/plurx rev-parse HEAD
+docker exec plurxd plurxd --version
+docker inspect --format '{{.Image}} {{.State.Health.Status}} {{.RestartCount}}' plurxd
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:32400/readyz
+
+# Read one metrics snapshot and the open-file limit.
+curl -fsS http://127.0.0.1:32400/metrics
+docker exec plurxd grep 'Max open files' /proc/1/limits
+```
+
+## 3. Remaining fleet and device evidence — one row per workboard plan
+
+`No acceptance run` means the plan's named evidence is still owed. `Preliminary snapshot` refers only to §2; it does not change a plan's `merged` or `blocked` status. Long-duration collection, physical playback, NAS failure injection, follower restarts, and log-mode restarts were not performed in this pass.
+
+| Row | 2026-09-24 result | Still owed |
+|---|---|---|
+| `S-01` | No acceptance run | M4 deployed-image §5.4 fleet check. |
+| `S-02` | No acceptance run | One-week media1 prerequisite; post-deploy §6 telemetry and packet rate. |
+| `S-03` | No acceptance run | Controlled M0 before-counts, then M4 fleet traces after deployed hold/release. |
+| `S-04` | Preliminary snapshot in §2; acceptance open | Real text-burn session; cold/warm and per-segment attestation measurements. |
+| `S-05` | No acceptance run | Deployed text-burn/remux environment, first/second TTFF, unexpected progress-key journal. |
+| `S-06` | No acceptance run | Reserved n2 read-write M3/M4 rate-control captures. |
+| `S-07` | No acceptance run | lab4 10/50/90 captures/histograms/Harbor Lights stills; media1 pipeline verdict; Apple TV/Chrome playback. |
+| `S-08` | No acceptance run | media1 QSV/VAAPI idet, signalstats and wall-time qualification. |
+| `S-09` | No acceptance run | Per-layout audio matrices; Apple TV/AVR/AirPods, Android and browser passes. |
+| `S-10` | No acceptance run | SPS per family and cadence, named-device SDR CODECS, transcode/copy/remux/index peaks, Apple panel comparison. |
+| `S-11` | Preliminary snapshot in §2; acceptance open | Seven gap-free reset-aware days on all four nodes; recent zero session counts are not absence evidence. |
+| `S-12` | No acceptance run | ffmpeg 6/8 boxes, per-family quality/init/restart and client playback; Paul's option decision. |
+| `S-13` | No acceptance run | media1 static-binary cold/warm decode-gate timing; lab2 deliberate ffprobe-change log/counter. |
+| `S-14` | No acceptance run | Post-merge decomposition qualification; no fleet-specific measurement is named in board. |
+| `K-01` | No acceptance run | Qualified image smoke and lab1-lab4/NAS loss/restore drills with measured RPO/RTO. |
+| `K-02` | Preliminary snapshot in §2; acceptance open | 24-hour every-voter B/E/S/W series and an approved follower restart/catch-up rate. |
+| `K-04` | No acceptance run | lab1-lab3 per-route bounded-read readout. |
+| `K-06` | Preliminary snapshot in §2; acceptance open | Runtime measurement release, one-hour idle/loaded clock upper bounds; `chronyc` absent on nuc3. |
+| `K-07` | No acceptance run | First ten post-merge lane-cost receipts. |
+| `K-08` | No acceptance run | M0 timings, provider assertion/three-voter proof, corpus equivalence, conditional M5 and upstream links. |
+| `C-01` | No acceptance run | Lab soak, HAR/waterfall and device reader. |
+| `C-02` | No acceptance run | NAS timing and provider-drop acceptance. |
+| `C-03` | No acceptance run | lab1 image concurrency/CPU/503, Chrome cold/warm bytes, Apple/Android TV browse. |
+| `C-04` | No acceptance run | Three-node logout fence/failure injection, trusted proxy, real-client revocation recovery. |
+| `C-05` | Preliminary snapshot in §2; acceptance open | Backfill-convergence receipt over time on an active library; M2/M3 follow only after it. |
+| `C-06` | No acceptance run | Slow-sidecar real playback and three restart timings. |
+| `C-07` | No acceptance run | Seven gap-free days from each node plus four concurrent ingress playbacks/seeks. |
+| `C-08` | Preliminary snapshot in §2; acceptance open | One-hour normal-use scrape series; literal label regex has metric-name false positives; JSON mode restart, browser RED sanity and media-body flow remain. |
+| `L-01` | No acceptance run | media1 336-hour guide vs 2 MiB clip; mixed NAS/local sink interruption and metrics. |
+| `L-02` | No acceptance run | Three §6.3 fleet prompts: settings failover budget, peer resolution, and start/cleanup observations; M3/M4 implementation also pending. |
+| `L-03` | No acceptance run | Shared-transport physical pass, M3 caption prompts A-C; M2 client device pass and M4 post-advertising caption pass after service capture and per-build probe. #482 already merged. |
+| `W-01` | No acceptance run | Progressive-remux browser/device matrix, post-deploy event rate and journal. |
+| `W-02` | Readiness repair; no §5.4–5.5 acceptance | Browser, lock-screen, headset and LG/Fire TV input evidence; 5.4/5.5 also await 5.1-5.3 type baseline and Playwright. |
+| `A-01` | No acceptance run | Apple TV HDMI mode matrix; iPhone interruption/route matrix. |
+| `A-02` | §5.5 branch build passed; tests unrun | Controller device evidence per plan §6 after remaining 5.1-5.6. |
+| `A-03` | No acceptance run | Deployed `sort_title` curl; Apple/Android paging/filter traces after 5.2-5.5. |
+| `A-04` | Chrome D3 trace failed; D3 incomplete | D3 shaped-network baseline: Safari/Firefox, Apple TV/iPhone, four Android types, two cliff profiles, six metrics and HDR second pass. |
+| `A-05` | Blocked by A-04 D3 | Platform's shaped trace on an unmerged milestone build before Auto controller merges. |
+| `D-01` | No acceptance run | Three-TV ADB memory/display baseline and physical HDMI pass. |
+| `D-02` | No acceptance run | §5.6 Android lifecycle/player device acceptance after M1-M5/M7-M9. |
+| `D-03` | Preliminary snapshot in §2; acceptance open | Lenovo trace; signed release build/install, release-role switch, device M9/M10. Current control env lacks four Android signing inputs; copied role still builds debug; required Xiaomi absent. |
+| `P-02` | Preliminary snapshot in §2; acceptance open | Busy-evening sample and one week without EMFILE. |
+
+`P-03` explicitly names no fleet or device evidence. The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the status authority; this page is a dated observation and owed-work inventory.
