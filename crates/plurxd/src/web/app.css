@@ -146,6 +146,16 @@
   }
   .poster{background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;cursor:pointer;transition:transform .12s,border-color .12s;position:relative}
   .poster:hover{transform:translateY(-3px);border-color:var(--accent)}
+  /* One answer for every layout. Catalog and theater each used to carry their
+     own copy of this because the rule above animates unconditionally and they
+     could not edit it; the rule they were opting out of is right here, so the
+     opt-out belongs here too and the per-layout copies are gone. Both
+     properties, because `transition:none` alone still leaves the hover
+     `transform` — it just arrives instantly. */
+  @media (prefers-reduced-motion: reduce){
+    .poster{transition:none}
+    .poster:hover{transform:none}
+  }
   /* The artwork gets its own positioning box so the corner badges anchor to the
      picture, not to the card (whose height varies with the caption). */
   .poster .artbox{position:relative;display:block}
@@ -2170,14 +2180,6 @@
     [data-layout=catalog] .px-side{transition:width .16s ease-out, flex-basis .16s ease-out}
     [data-layout=catalog] .px-seeall{transition:color .12s ease-out}
   }
-  /* The shipped .poster rule animates transform unconditionally; catalog cannot
-     edit it, so it opts out here for anyone who asked for less motion. The
-     hover state stays legible because the border tint above does not move. */
-  @media (prefers-reduced-motion: reduce){
-    [data-layout=catalog] .poster{transition:none}
-    [data-layout=catalog] .poster:hover{transform:none}
-  }
-
   /* ============================ forced colours =============================
      In forced-colors mode the UA replaces author colours wholesale, which
      silently erases anything that carried meaning as a tint: the selected
@@ -3072,14 +3074,6 @@
   [data-layout=theater] .th-chips select{transition:border-color .13s ease-out}
   [data-layout=theater] .poster:focus-visible{transition:transform .14s ease-out}
 }
-/* The shipped .poster rule animates `transform` unconditionally and theater
-   cannot edit it, so it opts out here for anyone who asked for less motion.
-   The hover state stays legible because the ring above does not move. */
-@media (prefers-reduced-motion: reduce){
-  [data-layout=theater] .poster{transition:none}
-  [data-layout=theater] .poster:hover{transform:none}
-}
-
 /* ============================ forced colours ==============================
    In forced-colors mode the UA replaces author colours wholesale, which
    silently erases everything in this layout that carried meaning as a tint:

@@ -695,7 +695,11 @@ function artHtml(it, cls){
   // A photo whose thumbnail hasn't been generated yet still has itself to
   // show — the endpoint falls back to the original.
   const src=it.poster||it.backdrop||(it.kind==='photo'?`/api/v1/items/${it.id}/photo?size=thumb`:null);
-  if(src) return `<img class="art ${cls||''}" loading="lazy" src="${esc(tok(src))}" alt="">`;
+  // `decoding="async"` keeps a grid of posters off the main thread's critical
+  // path: the browser may decode each image whenever it likes instead of
+  // blocking the paint that reveals the card. It is advisory and understood
+  // everywhere `loading="lazy"` is, so there is nothing to feature-detect.
+  if(src) return `<img class="art ${cls||''}" loading="lazy" decoding="async" src="${esc(tok(src))}" alt="">`;
   if(it.kind==='season' && it.season_number!=null)
     return `<div class="art ph season ${cls||''}"><div class="snum">${it.season_number}</div><div class="sl">Season</div></div>`;
   if(it.kind==='audiobook') return `<div class="art ph ${cls||''}" aria-label="Audiobook">♫</div>`;

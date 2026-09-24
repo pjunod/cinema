@@ -377,6 +377,19 @@ function replayEnded(){
   });
   return true;
 }
+// What the viewer wants, which is exactly what `togglePlay` flips: the pending
+// open's intent while one is current, else the player's. An ended element
+// reads as not playing, because `togglePlay` answers it with a replay. Never
+// the element's `paused` alone — a pending open and every reattach (a
+// transcode seek's reopen, a quality or audio switch, stall recovery) leave
+// the element paused until `applyPlaybackTransportIntent` plays it again.
+function playerWantsPlayback(v){
+  const pending=typeof play==='function'&&play.pendingIntent;
+  if(pending&&PLAY_OPEN_GATE.current(pending.attempt)) return !!pending.wantsPlayback;
+  if(!v||v.ended) return false;
+  if(PLAYER&&typeof PLAYER.wantsPlayback==="boolean") return PLAYER.wantsPlayback;
+  return !v.paused;
+}
 function togglePlay(){
   const v=document.getElementById("video"); if(!v) return;
   if(PLAYER&&PLAYER.libraryChannel&&v.paused
@@ -398,6 +411,15 @@ function togglePlay(){
     applyPlaybackTransportIntent(v,PLAYER);
   }
   if(PLAYER)playerActivity();
+  // The pause EDGE beats (F-web-12), so the server hears where the viewer
+  // stopped now rather than on the next five-second sample. It is prompt, not
+  // load-bearing: `reportProgress` drops a paused beat only when its position
+  // equals the last ACCEPTED one, and that one was taken while the film was
+  // playing, so the first paused sample differs and would post the stop
+  // position within five seconds without this. This is the viewer's own pause
+  // and nothing else: a teardown's internal pause is followed by
+  // `closePlayer`'s final report, which owns that moment.
+  if(PLAYER&&PLAYER.fileId!=null&&PLAYER.wantsPlayback===false) reportProgress(PLAYER.fileId);
   notifyPlaybackControl();
 }
 // Pointer nudges coalesce after a short quiet. Keyboard arrows use physical

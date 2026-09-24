@@ -313,28 +313,43 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
   const render = function renderPlaybackSurface() {};
   const tick = new Function(
     "renderPlaybackSurface", "playbackWaitLiveDetail", "playbackProgressTick",
+    // The same half-second tick carries the MediaSession position (F-web-13);
+    // the plan forbids a second timer for it, so it has to be visible here.
+    "updatePlayerMediaSession",
     `${shippedSource("playbackSamplingTick")}\nreturn playbackSamplingTick;`,
   )(
     render,
     () => { order.push("sample"); return "1.5 s client loaded · 1 server HTTP wait"; },
     () => { order.push(`paint:${render.waitDetail}`); },
+    (v, p) => { order.push(["mediasession", v, p]); },
   );
-  tick({}, {});
-  assert.deepEqual(order, ["sample", "paint:1.5 s client loaded · 1 server HTTP wait"]);
+  const sampled = {}, sampledPlayer = {};
+  tick(sampled, sampledPlayer);
+  assert.deepEqual(order, ["sample", "paint:1.5 s client loaded · 1 server HTTP wait",
+    ["mediasession", sampled, sampledPlayer]],
+    "the sampling tick no longer carries the OS transport's position");
   // Both places that arm the half-second tick use it: a cold attach and a
   // prepared handoff's adoption of the successor element.
   const intervals = [];
+  let installedMediaSession = 0;
   const arm = new Function(
     "setInterval", "clearInterval", "playbackSamplingTick", "PlaybackPolicy",
+    // Arming the timers is also where the attached stream claims the OS
+    // transport, so a re-arm after a stall recovery re-installs it.
+    "installPlayerMediaSession",
     `${shippedSource("armPlaybackSampling")}\nreturn armPlaybackSampling;`,
   )(
     (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
     () => {},
     (v, p) => order.push(["sampled", v, p]),
     { AUTO_DEFAULTS: { sampleMs: 1000 } },
+    () => { installedMediaSession += 1; },
   );
   const v = { id: "v" }, p = { id: "p" };
   arm(v, p);
+  assert.equal(installedMediaSession, 1, "arming the sampling timers did not claim the OS transport");
+  arm(v, p);
+  assert.equal(installedMediaSession, 2, "a re-arm left the OS transport pointing at the old stream");
   const half = intervals.find((entry) => entry.ms === 500);
   assert.ok(half, "armPlaybackSampling no longer arms a 500 ms tick");
   half.fn();
@@ -4871,6 +4886,7 @@ function carryHarness(player) {
     removeAttribute() {},
     load() {},
   });
+  const cleared = { count: 0 };
   const build = new Function(
     "document",
     "PLAYER",
@@ -4888,6 +4904,9 @@ function carryHarness(player) {
     "PLAY_OPEN_GATE",
     "cancelPendingSeek",
     "cancelHlsStartup",
+    // Closing hands the OS media keys back (F-web-13); the counter this
+    // harness keeps is what proves the call is still there.
+    "clearPlayerMediaSession",
     [
       shippedBinding("let", "PREPLAY"),
       shippedSource("prePlaySelection"),
@@ -4909,7 +4928,7 @@ function carryHarness(player) {
         " rememberPlaybackSelection, closePlayer};",
     ].join("\n"),
   );
-  return build(
+  const harness = build(
     { getElementById: stubEl },
     player,
     () => {},
@@ -4928,7 +4947,10 @@ function carryHarness(player) {
     { invalidate() {} },
     () => { player._seekPending = null; player._seekPreview = null; },
     () => {},
+    () => { cleared.count += 1; },
   );
+  harness.mediaSessionCleared = () => cleared.count;
+  return harness;
 }
 
 test("closing the player ends its track choice instead of arming the next play", () => {
@@ -4938,6 +4960,8 @@ test("closing the player ends its track choice instead of arming the next play",
   // carry a quality change depends on.
   assert.deepEqual(h.playbackSelection(player, 42), { audio: 1, subtitle: null });
   h.closePlayer();
+  assert.equal(h.mediaSessionCleared(), 1,
+    "closing left the OS media keys installed for a player that is gone");
   // loadItem() empties the pickers on the way back to the detail screen, so
   // "Default" is what the viewer now sees on both of them.
   h.clearPrePlay();
