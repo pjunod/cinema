@@ -1446,6 +1446,7 @@ mod tests {
 
     fn media_file_with_tracks() -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: PathBuf::from("/media/movie.mkv"),

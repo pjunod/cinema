@@ -1728,6 +1728,7 @@ mod tests {
 
     fn file(container: &str, vcodec: &str, acodec: &str) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: "/x".into(),

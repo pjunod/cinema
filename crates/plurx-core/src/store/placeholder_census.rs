@@ -128,6 +128,10 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
 /// these, such a statement resolves to a neutral token, stops looking like a
 /// statement, and is never judged.
 const SHARED_CONSTANT_SOURCES: &[(&str, &str)] = &[
+    (
+        "downloaded_subtitles.rs",
+        include_str!("downloaded_subtitles.rs"),
+    ),
     ("dv_conversion.rs", include_str!("dv_conversion.rs")),
     ("fragindex.rs", include_str!("fragindex.rs")),
     (

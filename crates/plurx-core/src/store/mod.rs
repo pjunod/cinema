@@ -17,7 +17,11 @@
 
 pub mod classification;
 pub use classification::ClassificationStore;
+mod downloaded_subtitles;
 mod dv_conversion;
+pub use downloaded_subtitles::{
+    valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
+};
 mod fragindex;
 mod fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
@@ -2943,6 +2947,18 @@ pub trait MediaStore: Send + Sync + 'static {
         probe: &ProbeResult,
     ) -> Result<i64, StoreError>;
     async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError>;
+    /// False means duplicate, full, or a source revision replaced during download.
+    async fn add_downloaded_subtitle(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+    ) -> Result<bool, StoreError>;
+    /// Bounded, ordered catalog walk for optional subtitle acquisition.
+    async fn subtitle_candidate_file_ids(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<i64>, StoreError>;
     /// A census of what the libraries actually hold, in transcoder terms.
     ///
     /// Aggregated in SQL rather than by walking files: a library of a few
@@ -4246,6 +4262,13 @@ pub trait CoordinationStore: Send + Sync + 'static {
 /// transaction as the mutation.
 #[async_trait]
 pub trait FencedPublicationStore: Send + Sync + 'static {
+    async fn add_downloaded_subtitle_fenced(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
     /// Apply exactly the server-generated repair plan while the library scan
     /// lease and the preview preimage are both current.
     async fn apply_identity_repair_fenced(

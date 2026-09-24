@@ -8502,6 +8502,7 @@ mod tests {
         );
 
         let file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: src.clone(),
@@ -8609,6 +8610,7 @@ mod tests {
         );
 
         let file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: src,
