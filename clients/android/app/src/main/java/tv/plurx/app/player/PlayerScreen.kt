@@ -316,7 +316,7 @@ internal fun playerRuntimeLabel(milliseconds: Long): String {
     return if (hours > 0) "${hours}h ${minutes}m" else "${minutes}m"
 }
 
-private enum class PlayerPanel { Tracks, Settings, Info }
+internal enum class PlayerPanel { Tracks, Settings, Info }
 
 internal enum class PlayerControlId {
     SkipBack,
@@ -1429,8 +1429,7 @@ private fun PlayerContent(
             ) { Text(activeMarker.displayLabel, fontWeight = FontWeight.SemiBold) }
         }
 
-        val miniInfo = panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini
-        if (!isInPip && controlsVisible && (panel == null || miniInfo) && blockingFault == null) {
+        if (playbackTransportOnScreen(isInPip, controlsVisible, panel, statsMode, blockingFault != null)) {
             Controls(
                 title = plan.title,
                 subtitle = plan.subtitle,
@@ -1567,7 +1566,10 @@ private fun PlayerContent(
                 controller = controller,
                 positionMs = positionMs,
                 displayHdrTypes = displayHdrTypes,
-                transportReserve = playbackTransportReserve(controlsVisible, transportHeightPx),
+                transportReserve = playbackTransportReserve(
+                    playbackTransportOnScreen(isInPip, controlsVisible, panel, statsMode, blockingFault != null),
+                    transportHeightPx,
+                ),
                 mode = statsMode,
                 onMode = {
                     statsMode = it
@@ -2129,14 +2131,34 @@ private fun PlayerInfo(
 }
 
 /**
+ * Whether the bottom transport block ([Controls]) is composed right now. This
+ * is the one predicate both the composition and the playback-info reserve read,
+ * so they cannot disagree: opening the info panel in any mode but Mini removes
+ * the transport while `controlsVisible` stays true, and a reserve keyed on
+ * `controlsVisible` alone kept subtracting the transport's last measured
+ * height (~300 dp of a 540 dp-tall Android TV frame) from a panel that had the
+ * whole screen to itself — which squashed the info body down to its header.
+ */
+internal fun playbackTransportOnScreen(
+    isInPip: Boolean,
+    controlsVisible: Boolean,
+    panel: PlayerPanel?,
+    statsMode: PlaybackStatsMode,
+    faulted: Boolean,
+): Boolean {
+    val miniInfo = panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini
+    return !isInPip && controlsVisible && (panel == null || miniInfo) && !faulted
+}
+
+/**
  * How much of the bottom of the screen the transport block is occupying right
- * now. Zero when the controls are not composed — the common case, since opening
- * the info panel hides them — the measured height once they have been laid out,
+ * now. Zero when the transport is not composed — the common case, since every
+ * info mode but Mini hides it — the measured height once it has been laid out,
  * and only a floor in the window between the two.
  */
 @Composable
-private fun playbackTransportReserve(controlsVisible: Boolean, measuredPx: Int): Dp = when {
-    !controlsVisible -> 0.dp
+private fun playbackTransportReserve(transportOnScreen: Boolean, measuredPx: Int): Dp = when {
+    !transportOnScreen -> 0.dp
     measuredPx > 0 -> with(LocalDensity.current) { measuredPx.toDp() }
     else -> PlaybackTransportReserveFallback
 }
