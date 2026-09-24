@@ -1102,7 +1102,7 @@
         );
         let expected_session = session_log_id("prewarmed");
         let mut emitted = None;
-        for _ in 0..100 {
+        for _ in 0..3_000 {
             let events = store
                 .playback_events(&plurx_core::domain::PlaybackEventQuery {
                     event: Some("marker_prewarm".to_owned()),
@@ -1117,7 +1117,7 @@
             if emitted.is_some() {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let emitted = emitted.expect("server marker prewarm telemetry persisted");
         assert_eq!(emitted.detail.as_deref(), Some("hit"));

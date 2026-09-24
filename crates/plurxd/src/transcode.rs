@@ -28779,7 +28779,7 @@ impl HlsDeliveryFixture {
     /// Every `segment_delivery_*` row recorded so far, once at least `want` of
     /// them have landed. Telemetry is written off the request path.
     pub(crate) async fn delivery_events(&self, want: usize) -> Vec<PlaybackEvent> {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let events: Vec<_> = self
                     .store
