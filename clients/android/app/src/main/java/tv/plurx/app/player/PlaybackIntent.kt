@@ -217,6 +217,25 @@ class PlaybackIntent(
     }
 
     /**
+     * A remux can render its first frame just before the requested position.
+     * Once that frame has been seen, the controller may prove that later video
+     * output advanced through the target without relaxing the first-frame
+     * landing window for other transports.
+     */
+    @Synchronized
+    fun presentedVideoProgress(positionMs: Long, sequence: Long): Boolean {
+        val pending = pendingSeek ?: return false
+        val frameFloor = pending.frameFloor ?: return false
+        if (sequence != pending.sequence || presentedFrames <= frameFloor ||
+            positionMs < pending.targetMs
+        ) return false
+        pendingSeek = null
+        controlSequenceFloor = null
+        lastAudioPositionMs = null
+        return true
+    }
+
+    /**
      * Audio-only equivalent: land at the target, then prove that the active
      * post-execution clock advances. Media3's `isPlaying` is only a state
      * predicate; a READY player can still freeze at the target.

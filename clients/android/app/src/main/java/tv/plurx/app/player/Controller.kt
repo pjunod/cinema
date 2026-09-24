@@ -963,6 +963,7 @@ class Controller internal constructor(
     /** One actual-output listener carrying the exact mutation it can settle. */
     private var presentationListener: Player.Listener? = null
     private var recipePresentationFrame: Pair<Long, Long>? = null
+    private var firstVideoFrameForSeek: Triple<Long, Long, Int>? = null
 
     /**
      * Registered through [addPlayerListener], not on `player` directly.
@@ -989,14 +990,20 @@ class Controller internal constructor(
         val captured = object : Player.Listener {
             override fun onRenderedFirstFrame() {
                 if (!playbackIntent.isCurrent(sequence)) return
+                val position = realPosition()
+                firstVideoFrameForSeek = Triple(
+                    sequence,
+                    position,
+                    player.videoDecoderCounters?.renderedOutputBufferCount ?: 0,
+                )
                 if (recipeExecution?.sequence == sequence) {
-                    recipePresentationFrame = sequence to realPosition()
+                    recipePresentationFrame = sequence to position
                     completeRecipeExecution()
                     return
                 }
                 val recipe = selectionRecipe ?: return
                 if (!recipeOwnership.canPresent(recipe)) return
-                if (!playbackIntent.presentedVideoFrame(realPosition(), sequence)) return
+                if (!playbackIntent.presentedVideoFrame(position, sequence)) return
                 playbackControl.playerChanged()
                 removePlayerListener(this)
                 if (presentationListener === this) presentationListener = null
@@ -1014,6 +1021,7 @@ class Controller internal constructor(
         if (recipeOwnership.needsMediaReplacement(recipe) || !playbackIntent.isCurrent(sequence)) return
         recipeExecution = RecipeExecution(sequence, recipe, inPlace)
         recipePresentationFrame = null
+        firstVideoFrameForSeek = null
         playbackIntent.markExecuted(
             sequence,
             observedAtMs = monotonicNowMs(),
@@ -2697,6 +2705,7 @@ class Controller internal constructor(
 
     private fun sampleTargetPresentationDeadline() {
         if (!playbackControlBootstrapFence.isActive()) return
+        settleVideoPlaybackIntentIfPresented()
         val now = monotonicNowMs()
         val event = targetPresentationDeadline.sample(
             pending = playbackIntent.pendingSeek,
@@ -2734,6 +2743,26 @@ class Controller internal constructor(
                 surfaceContext(),
                 "Getting back to the requested position.",
             )
+        }
+    }
+
+    private fun settleVideoPlaybackIntentIfPresented() {
+        val pending = playbackIntent.pendingSeek ?: return
+        val first = firstVideoFrameForSeek ?: return
+        // A progressive remux may start at the preceding keyframe. Its first
+        // rendered frame proves the new surface is live; later rendered output
+        // and a clock that has crossed the target prove arrival at the seek.
+        if (!progressiveTransport || first.first != pending.sequence ||
+            first.second !in (pending.targetMs - 2_000L)..pending.targetMs ||
+            !presentationForeground || !player.isPlaying ||
+            textSelectionArmed || audioSelectionArmed ||
+            selectionRecipe?.let(recipeOwnership::canPresent) != true ||
+            (player.videoDecoderCounters?.renderedOutputBufferCount ?: 0) <= first.third
+        ) return
+        if (playbackIntent.presentedVideoProgress(realPosition(), pending.sequence)) {
+            playbackControl.playerChanged()
+            disarmVideoPresentation()
+            firstVideoFrameForSeek = null
         }
     }
 
@@ -4337,10 +4366,9 @@ internal fun serverSubtitleLabel(track: SubTrack): String = listOfNotNull(
     languageName(track.language),
     track.title,
     if (isForcedSubtitle(track)) "Forced" else null,
-    // "Burn-in" is a warning about cost, so it follows the question that
-    // actually decides cost: can the server serve this as a rendition? ASS/SSA
-    // carry text and still burn, which `text` alone would have hidden.
-    if (!track.isNativeHls) "Burn-in" else null,
+    // Bitmap overlays are composited by the client; only a server-rendered
+    // subtitle should carry the burn-in warning.
+    if (track.isPgsOverlay) "Overlay" else if (!track.isNativeHls) "Burn-in" else null,
 ).distinct().joinToString(" · ").ifBlank { "Subtitle" }
 
 internal fun languageName(code: String?): String? {
