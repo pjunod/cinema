@@ -278,9 +278,15 @@ Where each correction lives (`live_tv.rs`, `live_tv/dvr.rs`):
 - **D1** — `run_transport` probes the prefix with `probe_live_source` into
   the transport's own folder and publishes the result on a watch channel
   (`DvrTransport::publish_source`); viewers wait on it
-  (`wait_for_source`, bounded by their own start deadline) and plan from
-  it. A probe failure fails the viewers and nothing else. `source` is set
-  from the same facts, so DVR sidecars now carry them.
+  (`source_for_viewer`, bounded by their own start deadline) and plan from
+  it. `source` keeps the first facts established, so DVR sidecars now carry
+  them. *Changed after review (#482 finding 1):* a failed probe on a
+  transport nothing but viewers wants ends it with the probe's error, as D1
+  specifies, so the next start opens a fresh GET and probes again; a failed
+  probe on a transport a recording holds keeps it, and every later viewer
+  that finds failed, stale or old facts (older than
+  `TRANSPORT_FACTS_MAX_AGE`) has the running fan-out re-probe a sample of
+  the live edge. A failed re-probe fails that viewer only.
 - **D2** — viewer admission (`LiveTvRegistry::viewer_admission`, applied
   in `start_local_inner`) and DVR admission (`attach_sink`) each decide and
   reserve in one registry lock hold: a new transport is inserted with the
@@ -294,13 +300,21 @@ Where each correction lives (`live_tv.rs`, `live_tv/dvr.rs`):
   lock" guarantee without nesting the two locks. The fan-out, the DVR
   tick's `close_finished_transports` and the DVR-disabled path
   (`close_recordings`) all key on "no live consumer and no reserved seat",
-  retired atomically (`try_retire`). `transport_holders` lists recording
-  transports only.
+  retired atomically (`try_retire`, which holds both consumer lists' locks
+  from the check through the seat swap — *changed after review, #482
+  finding 3*; before, an attach and seat release could land between them).
+  `transport_holders` lists recording transports only.
 - **D4** — the order is kept; a start that needs a transport gone waits on
   `closed()`, which fires after the worker (the tuner response's owner) is
   joined.
-- **D5** — a viewer's `source_format_changed` marks its transport stale;
-  a stale transport admits no joiner.
+- **D5** — a viewer's `source_format_changed`, or an input its FFmpeg
+  opened that contradicts the facts it planned from
+  (`input_contradicts_plan`), marks the transport's facts stale. *Changed
+  after review (#482 findings 1 and 2):* a stale transport still admits
+  joiners — they re-probe before they plan — and is not offered as
+  watchable until a re-probe succeeds. As first built, a stale transport
+  refused every viewer until the recording ended, which is the lockout D7
+  was decided to avoid.
 - **D6** — the fan-out keeps `TUNER_READ_TIMEOUT` on its tuner read; the
   per-viewer pump (`pump_viewer_feed`) keeps it on its stdin write.
 - **D8** — `stray_to_evict` only offers a stray that is its transport's
@@ -417,6 +431,19 @@ transport's own probe of this tune, which is strictly better evidence than a
 cache). The joiner's first bytes are the live edge, not the prefix — FFmpeg
 starts on the next PAT/PMT + keyframe, as it does on any zap.
 
+**Corrected after review (PR #482, findings 1 and 2).** "Strictly better
+than a cache" was wrong for a transport a recording holds open for hours:
+its one probe never expires, where the per-channel cache it replaced expires
+after `SOURCE_FORMAT_TTL`, and a failed probe failed every later joiner. As
+built now, a joiner plans from the transport's facts only while they are
+fresh — a successful probe, not marked stale, younger than
+`TRANSPORT_FACTS_MAX_AGE` (60 s). Otherwise the running fan-out collects a
+sample of the live edge (bounded like the prefix) and probes it beside the
+fan-out loop, and the joiner plans from that. And every viewer's plan is
+checked against the input its own FFmpeg opened (`input_contradicts_plan`:
+frame size and audio channel count); a contradiction ends that viewer with
+`source_format_changed` and marks the facts stale, so its retry re-probes.
+
 ### 3.2 Slow-consumer eviction and bounded queues
 
 Every consumer has its own `SinkQueue` (bytes and slots bounded). On
@@ -427,6 +454,15 @@ reason, and cancels nothing else:
 |---|---|---|
 | `Viewer` | its FFmpeg stopped reading stdin (stalled encoder, blocked scratch write) | `evicted = "producer_backlog"`; the session's observe loop ends it with `StreamFailed("the live-TV producer stopped consuming tuner bytes")` on its next tick; the pump exits; the child is killed and reaped by the existing cleanup |
 | `Recording` | disk stalled | the DVR plan's `disk_write_backlog`: the sink ends its attempt; recovery rolls the next |
+
+**Corrected in the review round of PR #482:** the queue bound is measured
+from where the viewer started. The opener, and any viewer attached when the
+fan-out starts, is handed the held prefix — up to `SOURCE_PREFIX_BYTES`,
+about 3 s of a full-rate mux and more than the whole 4 MiB queue — so its
+bound is `VIEWER_QUEUE_BYTES` plus the prefix it was handed. As first built,
+the prefix was offered against 4 MiB alone and would have evicted the opener
+of every full-rate channel on its first chunk; no M1 test fed a prefix
+larger than the queue. The memory bound becomes 16 × (4 MiB + 8 MiB).
 
 The reader never waits on a consumer; the only thing that can stall the
 tuner GET is the tuner. `TUNER_READ_TIMEOUT` stays on the fan-out's tuner
@@ -779,6 +815,17 @@ in use by plurx, live_tv.max_sessions = 2):
    `consumer_evictions_total{kind="viewer",reason="backlog"}` increments
    by 1 (or, if Media3 keeps reading into its buffer, no eviction — report
    which). Report the numbers, not a summary.
+5. (Added after the #482 review.) With the recording from step 2 still
+   running and every viewer on 2.1 stopped, wait at least two minutes, then
+   open 2.1 on one client. Expect it to start (the joiner re-probes the
+   live edge; the owner's log shows no "could not observe its source"
+   line for it) and no second tuner for 2.1 on tuners.html. Report the
+   time from tap to first frame, next to the time for a channel nothing
+   was watching.
+6. (Added after the #482 review.) Open 2.1 as the only viewer on a
+   full-rate HD channel with nothing else on it and watch for 60 s:
+   expect no eviction (`consumer_evictions_total` unchanged). This is the
+   opener's prefix, which the first build of M1 evicted at once.
 ```
 
 ```
@@ -838,7 +885,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 | — | Not started: depends on M1. *Superseded by the M2 row below.* |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 | — | Not started, deliberately: advertising needs the broadcast service ids (open question 5: "the capture gates the advertising") and today's client baseline (§2.4 C5), both device/tuner facts; and §2.4 C6 changes M4's design from a static proven-encoder set to a per-node, per-build caption probe. |
 | 2026-09-24 | coordinating session (on Paul's behalf) | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | §2.4 D7 decision | [PR #482](http://192.168.4.7:3000/noirr/plurx/pulls/482) | **Option (b)**: a viewer joins on channel, device id, device address and current serving generation; the configuration generation is not compared. Taken by the coordinating session on Paul's behalf so M1 could proceed, and recorded under D7 as a decision **Paul can overturn**. |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 | [PR #482](http://192.168.4.7:3000/noirr/plurx/pulls/482) | Landed on the branch, commit `5cc42346a` (with the measured task/timer-shape reviews in `50eba75e8` and the clippy follow-up `d86129da9`). Viewers share the channel's transport; slots count transports; D1–D6 and D8 are built as listed under "As built in M1"; `tuner_capacity` gains `watchable` rows (owner-local refusals only — the signed relay shape is unchanged); `/metrics` gains `plurx_live_tv_transports`, `plurx_live_tv_transport_consumers{kind}` and `plurx_live_tv_consumer_evictions_total{kind,reason}`. The DVR transport keeps its name and module (a rename is churn the plan left optional). Tests: `a_viewer_joins_a_recording_transport_without_a_slot`, `a_second_start_joins_a_transport_whose_opener_has_not_attached_yet`, `a_join_crosses_a_settings_generation_but_not_a_device_or_serving_change`, `a_stalled_viewer_is_evicted_and_its_sibling_continues`, `the_last_detach_closes_the_transport_and_releases_the_tuner`, `a_recording_keeps_the_transport_open_past_the_last_viewer`, `a_drain_closes_a_shared_transport_and_ends_every_viewer`, `a_recording_joining_a_viewer_transport_respects_the_reserve`, `the_recording_tick_leaves_a_transport_only_viewers_hold`, `a_viewer_waiting_on_a_transport_gets_its_probe_or_its_error`, `stray_eviction_only_when_a_new_transport_is_needed`, `capacity_rules_over_transports_do_not_depend_on_who_arrived_first`, `a_capacity_refusal_names_the_channels_a_viewer_could_join_instead`, and the two-node `two_viewers_on_one_channel_open_one_tuner_get` (fixture device `opens == 1` for two viewers, one through the owner and one through the ingress; `plurx_live_tv_transports 1`, two viewer consumers). Mutation check, one build, exit 101: disabling viewer eviction, reverting the DVR tick's closer to "no live sink", dropping the stray filter and turning a join into an open fail `a_stalled_viewer…`, `the_recording_tick_leaves…`, `stray_eviction_only…` and the three join cases; restored before commit. `make live-tv-two-node-check`: 5/5 passed on nuc3 in `unshare -rnm` with a dummy `10.77.0.1/24` interface, the built `plurxd` bind-mounted over the shared target path — 517 s at `5cc42346a` and again 518 s at `d86129da9`. Gates at `d86129da9`: history-check, validation-lint, validation unittests, operations-check, spike-lock-check, fmt, clippy `-D warnings` and `cargo test -p plurxd` (2732 passed, 13 ignored), each exit 0. **Not evidence:** no real HDHomeRun, no device — §6.3's first GPT prompt is owed. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 | [PR #482](http://192.168.4.7:3000/noirr/plurx/pulls/482) | Landed on the branch, commit `5cc42346a` (with the measured task/timer-shape reviews in `50eba75e8` and the clippy follow-up `d86129da9`). Viewers share the channel's transport; slots count transports; D1–D6 and D8 are built as listed under "As built in M1"; `tuner_capacity` gains `watchable` rows (owner-local refusals only — the signed relay shape is unchanged); `/metrics` gains `plurx_live_tv_transports`, `plurx_live_tv_transport_consumers{kind}` and `plurx_live_tv_consumer_evictions_total{kind,reason}`. **Deviation from the plan:** §3.1 renames `DvrTransport` to `LiveTransport` keyed by `(device_id, channel_id)`, and §5.1 moves it to `live_tv/transport.rs`. Neither was done: the transport keeps its name, its module and its `channel_id` key, and a join checks the device with `same_tuner`. *(Corrected after review, #482 finding 6: this row first said the plan left the rename optional, which it does not.)* Tests: `a_viewer_joins_a_recording_transport_without_a_slot`, `a_second_start_joins_a_transport_whose_opener_has_not_attached_yet`, `a_join_crosses_a_settings_generation_but_not_a_device_or_serving_change`, `a_stalled_viewer_is_evicted_and_its_sibling_continues`, `the_last_detach_closes_the_transport_and_releases_the_tuner`, `a_recording_keeps_the_transport_open_past_the_last_viewer`, `a_drain_closes_a_shared_transport_and_ends_every_viewer`, `a_recording_joining_a_viewer_transport_respects_the_reserve`, `the_recording_tick_leaves_a_transport_only_viewers_hold`, `a_viewer_waiting_on_a_transport_gets_its_probe_or_its_error`, `stray_eviction_only_when_a_new_transport_is_needed`, `capacity_rules_over_transports_do_not_depend_on_who_arrived_first`, `a_capacity_refusal_names_the_channels_a_viewer_could_join_instead`, and the two-node `two_viewers_on_one_channel_open_one_tuner_get` (fixture device `opens == 1` for two viewers, one through the owner and one through the ingress; `plurx_live_tv_transports 1`, two viewer consumers). Mutation check, one build, exit 101: disabling viewer eviction, reverting the DVR tick's closer to "no live sink", dropping the stray filter and turning a join into an open fail `a_stalled_viewer…`, `the_recording_tick_leaves…`, `stray_eviction_only…` and the three join cases; restored before commit. `make live-tv-two-node-check`: 5/5 passed on nuc3 in `unshare -rnm` with a dummy `10.77.0.1/24` interface, the built `plurxd` bind-mounted over the shared target path — 517 s at `5cc42346a` and again 518 s at `d86129da9`. Gates at `d86129da9`: history-check, validation-lint, validation unittests, operations-check, spike-lock-check, fmt, clippy `-D warnings` and `cargo test -p plurxd` (2732 passed, 13 ignored), each exit 0. **Not evidence:** no real HDHomeRun, no device — §6.3's first GPT prompt is owed. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 review round ([comment 4272](http://192.168.4.7:3000/noirr/plurx/pulls/482#issuecomment-4272)) | [PR #482](http://192.168.4.7:3000/noirr/plurx/pulls/482) | Commit `b3c0b14b`; `main` had not moved (merge-base = `origin/main` `07fe785d3`), so nothing was merged. **Finding 1:** a transport's facts are now a sequence of probe publications; a viewer that finds them failed, stale or older than `TRANSPORT_FACTS_MAX_AGE` (60 s) has the running fan-out re-probe a sample of the live edge, a failed re-probe fails that viewer only, a stale transport admits joiners again, `watchable` offers only a successful non-stale probe, and a failed opening probe ends a viewers-only transport (D1 as designed). **Finding 2:** every viewer's plan is compared with the input descriptor its FFmpeg parsed (`input_contradicts_plan`); a contradiction marks the facts stale and ends the viewer with `source_format_changed`. **Finding 3:** `try_retire` holds both consumer lists from the check through the seat swap. **Finding 4:** D2 is pinned on `start_local`. **Finding 5:** the observe loop ends an evicted viewer on its next tick under the eviction's reason. **Finding 6:** the rename is recorded above as a deviation. **Found while testing:** the held prefix (about 7 MB at 19.4 Mbit/s) was offered to viewers against the 4 MiB queue bound, evicting the opener of every full-rate channel; a viewer handed the prefix now has its bound measured from where it started (§3.2). Tests: `a_failed_or_stale_probe_is_reprobed_for_the_next_viewer_of_a_recording`, `a_failed_probe_ends_a_viewers_only_transport_and_the_next_start_probes_again`, `a_viewer_whose_input_contradicts_its_plan_ends_and_marks_the_facts_stale`, `only_a_stated_difference_in_size_or_channels_contradicts_a_plan`, `retirement_is_atomic_against_a_consumer_attaching`, `two_concurrent_starts_on_one_channel_open_one_transport_with_one_get`, `an_evicted_viewer_ends_on_the_next_tick_with_the_eviction_reason`, `the_opener_of_a_full_rate_channel_takes_its_whole_prefix`. Mutation check, exit 101 for each: reverting the re-probe, the `watchable` filter, the viewers-only end, the input check, the eviction check, the locked retirement (4 of 20000 rounds retired under a viewer), the prefix allowance, and the reviewer's own D2 mutation each fails its test; each was restored before commit. `make live-tv-two-node-check`: 5/5, 560 s, exit 0, on nuc3 in `unshare -rnm` with the built `plurxd` bind-mounted (checked to contain this change). Gates: see the PR's disposition comment. **Not evidence:** no real HDHomeRun or device; §6.3's shared-transport prompt is still owed, and should now also start a second viewer on a channel more than a minute into a recording (the re-probe path). |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 | — | **Not started in this PR.** M2 is client UI on web, Apple and Android ("Watch 2.1 instead" from the `watchable` rows) plus a new shared start-case fixture, and its acceptance is a device pass; it was left out so M1's server change is reviewed on its own. Clients ignore the new `watchable` field until then (web never reads the refusal detail; Apple decodes with `Codable`, which ignores unknown keys; Android reads named fields). |
 | 2026-09-24 | — | — | needs: broadcast capture | — | `needs:` real-tuner capture of three captioned channels, analysed with `scripts/live-tv-caption-audit analyze` — GPT prompt A below. |
 | 2026-09-24 | — | — | needs: Mac and NVENC audit | — | `needs:` VideoToolbox audit and `-a53cc 1` re-proof on a Mac node's own FFmpeg; NVENC on any node that has it — GPT prompt B below. |
