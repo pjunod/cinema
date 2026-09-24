@@ -1138,7 +1138,16 @@ assert.equal(context.ACT_TIMER, null);
         workflow = read(".github/workflows/rust-audit.yml")
         step = workflow.split("- name: Report base-image pin drift")
         self.assertEqual(len(step), 2, "the drift report step is missing")
-        self.assertIn("continue-on-error: true", step[1].split("- name:")[0])
+        body = step[1].split("- name:")[0]
+        self.assertIn("continue-on-error: true", body)
+        # `continue-on-error` does not make a step run after an earlier one
+        # failed; only a status condition does. Without it the report is
+        # skipped in exactly the weeks the audit it rides on goes red.
+        self.assertRegex(
+            body,
+            r"(?m)^\s+if: \$\{\{ (!cancelled\(\)|always\(\)) \}\}\s*$",
+            "the drift report is skipped whenever an earlier audit step fails",
+        )
         self.assertIn("scripts/image-base-drift Dockerfile", step[1])
         self.assertTrue((ROOT / "scripts/image-base-drift").exists())
 

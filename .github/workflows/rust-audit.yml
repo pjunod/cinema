@@ -99,7 +99,14 @@ jobs:
       # Not a gate, and `continue-on-error` besides: a stale base-image pin is
       # a decision to take, not a reason to fail a dependency audit, and the
       # report needs a registry this runner may not always reach.
+      #
+      # `!cancelled()` because the report must not depend on the audit above
+      # it. `continue-on-error` only stops this step failing the job; without
+      # the condition the step is skipped whenever an earlier step failed, and
+      # the weekly audit does fail, so the drift would print only in the weeks
+      # when nothing else is wrong.
       - name: Report base-image pin drift
+        if: ${{ !cancelled() }}
         continue-on-error: true
         run: |
           scripts/image-base-drift Dockerfile | tee -a "$GITHUB_STEP_SUMMARY"
