@@ -102,6 +102,25 @@ private struct AppleMarkerPlaybackLog: Encodable {
     }
 }
 
+/// `attempt_stale`: a migrated continuation fence refused the work it was
+/// about to do because an epoch it depends on moved while it was suspended.
+/// `detail` is `PlayerController.attemptStaleDetail(fence:captured:now:)`.
+private struct AppleAttemptStaleLog: Encodable {
+    let level = "info"
+    let event = "attempt_stale"
+    let message: String
+    let method: String
+    let title: String
+    let fileId: Int
+    let detail: String
+    let ua = "Apple AVPlayer"
+
+    enum CodingKeys: String, CodingKey {
+        case level, event, message, method, title, detail, ua
+        case fileId = "file_id"
+    }
+}
+
 struct MarkerOfferLedger {
     private var offered: Set<String> = []
 
@@ -2243,6 +2262,10 @@ final class PlayerController: ObservableObject {
         }
     }
     var openGenerationForTesting: Int { openGeneration }
+    /// The `detail` of the last `attempt_stale` event this controller raised,
+    /// or `nil` if no migrated fence has refused a continuation yet. Only
+    /// ever the latest one, so it holds nothing a long session accumulates.
+    private(set) var lastAttemptStaleDetail: String?
     /// Production-linked overlay seams. Only the decision's track list and the
     /// selection publication are supplied; the selection, window load, tick,
     /// seek and failure paths are the production ones.
@@ -4230,6 +4253,52 @@ final class PlayerController: ObservableObject {
         )
     }
 
+    /// Whether the work `captured` was taken for still belongs to anyone,
+    /// judged on `fence`'s own scope set and nothing else. Every migrated
+    /// fence goes through here rather than calling `stillCurrent` with a
+    /// literal set, so the set lives in one table (`AttemptFence.scopes`) that
+    /// a test and the census can both hold still.
+    ///
+    /// A refusal is the one moment the controller knows *which* epoch moved
+    /// under a suspended continuation, so it is logged there as the plan's
+    /// `attempt_stale` client-log event (§4) instead of returning silently:
+    /// a late recovery that quietly did nothing is otherwise indistinguishable
+    /// in a device log from one that was never scheduled.
+    func attemptStillCurrent(_ captured: Attempt, fence: AttemptFence) -> Bool {
+        let now = snapshotAttempt()
+        if captured.stillCurrent(now, scopes: fence.scopes) { return true }
+        let detail = Self.attemptStaleDetail(fence: fence, captured: captured, now: now)
+        lastAttemptStaleDetail = detail
+        reportAttemptStale(detail: detail)
+        return false
+    }
+
+    /// The `detail` of an `attempt_stale` event: which fence refused, which of
+    /// its scopes moved (in `Attempt.Scope` declaration order, so the value is
+    /// bounded by the nine scope names), and whether the attached item was
+    /// replaced as well. The item is reported, never compared: it is not a
+    /// scope.
+    static func attemptStaleDetail(fence: AttemptFence, captured: Attempt, now: Attempt) -> String {
+        let scope = captured.staleScopes(now, scopes: fence.scopes)
+            .map(\.rawValue)
+            .joined(separator: ",")
+        let item = captured.hasSameItem(as: now) ? "same" : "replaced"
+        return "fence=\(fence.rawValue) scope=\(scope) item=\(item)"
+    }
+
+    private func reportAttemptStale(detail: String) {
+        #if os(iOS)
+        if offlineId != nil { return }
+        #endif
+        postClientLog(AppleAttemptStaleLog(
+            message: "a suspended continuation was refused because an epoch it depends on moved",
+            method: clientLogMethod,
+            title: title,
+            fileId: fileId,
+            detail: detail
+        ))
+    }
+
     private func restartInitialDecision(lifecycle: Int) {
         guard isCurrentLifecycle(lifecycle), decision == nil else { return }
         loadingTask?.cancel()
@@ -5443,7 +5512,7 @@ final class PlayerController: ObservableObject {
             verdict = nil
         }
         // Everything the caller checked may have changed across that await.
-        guard stallAttempt.stillCurrent(snapshotAttempt(), scopes: [.open, .viewerAction]),
+        guard attemptStillCurrent(stallAttempt, fence: .stallRecovery),
               started,
               stallRecoveryStillEligible
         else { return }
@@ -6903,18 +6972,16 @@ final class PlayerController: ObservableObject {
                     // cancels this monitor, so awaiting it here would cancel
                     // the recovery halfway through its own open.
                     self.currentMs = targetMs
-                    // The three epochs this recovery depends on, named. The
-                    // seek scope is this monitor's own `generation`: the loop
-                    // guard above already required
-                    // `seekState.generation == generation` and nothing has
-                    // suspended since, so `recovery.seek` is that same value.
+                    // The three epochs this recovery depends on are named by
+                    // `.seekPresentationDeadline`. Its seek scope is this
+                    // monitor's own `generation`: the loop guard above already
+                    // required `seekState.generation == generation` and
+                    // nothing has suspended since, so `recovery.seek` is that
+                    // same value.
                     let recovery = self.snapshotAttempt()
                     Task { [weak self] in
                         guard let self,
-                              recovery.stillCurrent(
-                                  self.snapshotAttempt(),
-                                  scopes: [.open, .viewerAction, .seek]
-                              ),
+                              self.attemptStillCurrent(recovery, fence: .seekPresentationDeadline),
                               self.wantsPlayback, !self.isPlaybackBlocked, !self.finished,
                               !(self.seekPresentationBackgrounded && hasVideo),
                               self.seekState.pendingMs == targetMs
@@ -7007,10 +7074,7 @@ final class PlayerController: ObservableObject {
                     let attempt = self.snapshotAttempt()
                     Task { @MainActor [weak self] in
                         guard let self, self.started,
-                              attempt.stillCurrent(
-                                  self.snapshotAttempt(),
-                                  scopes: [.lifecycle, .viewerAction]
-                              ),
+                              self.attemptStillCurrent(attempt, fence: .blackFrameDecodeFailure),
                               self.player.currentItem === item,
                               !self.isChangingStream else { return }
                         await self.handleBlackFrameDecodeFailure(at: observedPosition)
@@ -7274,7 +7338,7 @@ final class PlayerController: ObservableObject {
         // dead item they would leave a player with no path forward.
         let failureAttempt = snapshotAttempt()
         _ = await controlVerdictForItemFailure(item)
-        guard failureAttempt.stillCurrent(snapshotAttempt(), scopes: [.open, .viewerAction]),
+        guard attemptStillCurrent(failureAttempt, fence: .itemFailureLadder),
               player.currentItem === item,
               !isChangingStream else { return }
         var reportedFailure = false

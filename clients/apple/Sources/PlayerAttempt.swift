@@ -75,8 +75,9 @@ struct Attempt: Equatable, Sendable {
     /// Call sites that care about item identity already hold the item itself
     /// and compare it with `===`, which is stronger: it survives an
     /// `ObjectIdentifier` being reused by a later allocation at the same
-    /// address. What this field is for is saying which item an attempt was
-    /// captured against when a drift is described.
+    /// address. What this field is for is the `attempt_stale` client-log
+    /// event: `PlayerController.attemptStaleDetail(fence:captured:now:)`
+    /// reports through `hasSameItem(as:)` whether the item was replaced too.
     let item: ObjectIdentifier?
 
     /// This attempt's value for one scope.
@@ -109,14 +110,60 @@ struct Attempt: Equatable, Sendable {
     }
 
     /// Which of the named scopes moved, in the declaration order of `Scope` so
-    /// a log line is stable. Used to say *why* a continuation was refused.
+    /// a log line is stable. `PlayerController.attemptStillCurrent(_:fence:)`
+    /// puts it in the `attempt_stale` event it raises when a migrated fence
+    /// refuses a continuation, to say *why* it was refused.
     func staleScopes(_ now: Attempt, scopes: Set<Scope>) -> [Scope] {
         Scope.allCases.filter { scopes.contains($0) && value(of: $0) != now.value(of: $0) }
     }
 
     /// Whether the same item object was attached at both snapshots. Both being
-    /// `nil` counts as the same: no item then, no item now.
+    /// `nil` counts as the same: no item then, no item now. Reported in the
+    /// `attempt_stale` event; never a reason to refuse on its own.
     func hasSameItem(as now: Attempt) -> Bool {
         item == now.item
+    }
+}
+
+/// Every continuation fence that has been migrated to `Attempt`, with the one
+/// scope set it compares.
+///
+/// The set is the whole decision a fence makes — the plan's rule is that it is
+/// copied from the conjunction the fence replaced and never widened — so it is
+/// written down once, here, rather than as a literal at the call site where a
+/// later edit could swap it unnoticed. Three things hold it still:
+///
+/// - `AttemptScopesTests` pins each case's set exactly, and drives a real
+///   `PlayerController` through a viewer Pause and a new title to show every
+///   fence refuses them through `PlayerController.attemptStillCurrent`;
+/// - `validation/attempt-census.toml` `[fences]` records each case's set and
+///   the one function that may use it, and the census fails on a difference
+///   in either direction;
+/// - the raw value is the `fence=` of the `attempt_stale` client-log event.
+///
+/// Adding a case is how the next fence is migrated: the case, its set, its
+/// census row and the call site land together, and the allow-list row for the
+/// conjunction it replaced goes down in the same commit.
+enum AttemptFence: String, CaseIterable, Sendable {
+    /// `beginSeekPresentationMonitor`: the eight-second deadline reopen.
+    case seekPresentationDeadline = "seek_presentation_deadline"
+    /// `makePeriodicPlaybackObservation`: the black-frame decode-failure
+    /// handler. `started` stays beside it as a predicate.
+    case blackFrameDecodeFailure = "black_frame_decode_failure"
+    /// `retrySameDeliveryAfterStall`: the same-delivery reopen after the
+    /// control ask.
+    case stallRecovery = "stall_recovery"
+    /// `handleItemFailure`: the failure ladder after its control ask.
+    case itemFailureLadder = "item_failure_ladder"
+
+    /// The epochs this fence depends on — exactly the fields its old
+    /// conjunction compared.
+    var scopes: Set<Attempt.Scope> {
+        switch self {
+        case .seekPresentationDeadline: return [.open, .viewerAction, .seek]
+        case .blackFrameDecodeFailure: return [.lifecycle, .viewerAction]
+        case .stallRecovery: return [.open, .viewerAction]
+        case .itemFailureLadder: return [.open, .viewerAction]
+        }
     }
 }

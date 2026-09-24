@@ -23,6 +23,16 @@
 # Everything else is a fence waiting for milestone 5.1's successors.
 #
 # Counted by `python3 -m validation.attempt_census`.
+#
+# `[fences]` is the other half: every fence already migrated. Each row is an
+# `AttemptFence` case in `clients/apple/Sources/PlayerAttempt.swift`, the one
+# function in PlayerController.swift that may use it through
+# `attemptStillCurrent(_:fence:)`, and the scopes it compares — copied from the
+# conjunction it replaced, never widened. The audit holds the declared cases,
+# their `scopes` arms and their call sites against this table in both
+# directions, so swapping a fence's set, using a case from a second function,
+# or calling `stillCurrent` around the table each fail. Migrating the next
+# fence adds a row here and lowers its `[allowed]` row in the same commit.
 
 version = 1
 
@@ -71,3 +81,9 @@ version = 1
 "startResumePresentationMonitor::self.viewerActionEpoch == attempt.viewerActionEpoch" = 1
 "startStatusPolling::self.openGeneration == generation" = 1
 "updatePGSOverlaySelection::self.pgsOverlaySelectionGeneration == selectionGeneration" = 3
+
+[fences]
+seekPresentationDeadline = { function = "beginSeekPresentationMonitor", scopes = ["open", "viewerAction", "seek"] }
+blackFrameDecodeFailure = { function = "makePeriodicPlaybackObservation", scopes = ["lifecycle", "viewerAction"] }
+stallRecovery = { function = "retrySameDeliveryAfterStall", scopes = ["open", "viewerAction"] }
+itemFailureLadder = { function = "handleItemFailure", scopes = ["open", "viewerAction"] }

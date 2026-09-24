@@ -18,6 +18,14 @@ the allow-list is therefore the only way to shrink it, and re-introducing a
 hand-written fence anywhere in the file fails the audit rather than passing
 unnoticed.
 
+It also holds the migrated fences still. Each one is an `AttemptFence` case
+whose `scopes` is the set its conjunction compared, and the controller reaches
+it only through `attemptStillCurrent(_:fence:)`. The `[fences]` table records
+every case's scope set and the one function that may use it, and the audit
+compares all three — declared cases, their sets, and their call sites — in both
+directions, so a fence whose set is swapped, a case used from the wrong
+function, and a `stillCurrent` call that bypasses the table each fail.
+
 The audit is deliberately textual. It reads Swift this environment cannot
 compile, so it claims nothing about types — only about which identifiers are
 compared with `==` or `!=`, and in which function.
@@ -58,8 +66,13 @@ _OPERAND = r"[A-Za-z_][A-Za-z0-9_.?]*"
 COMPARISON_RE = re.compile(rf"(?P<lhs>{_OPERAND})\s*(?P<op>==|!=)\s*(?P<rhs>{_OPERAND})")
 FUNC_RE = re.compile(r"\bfunc\s+(?P<name>[A-Za-z_]\w*)")
 SCOPE_CASE_RE = re.compile(r"^\s*case\s+(?P<name>[A-Za-z_]\w*)\s*$", re.MULTILINE)
-STILL_CURRENT_RE = re.compile(r"stillCurrent\((?P<args>[^()]*(?:\([^()]*\)[^()]*)*)\)", re.DOTALL)
-SCOPES_ARG_RE = re.compile(r"scopes:\s*\[(?P<scopes>[^\]]*)\]", re.DOTALL)
+STILL_CURRENT_RE = re.compile(r"\bstillCurrent\(")
+FENCE_CALL_RE = re.compile(r"\battemptStillCurrent\(\s*[^,()]+,\s*fence:\s*\.(?P<fence>[A-Za-z_]\w*)\s*\)")
+FENCE_CASE_RE = re.compile(r'^\s*case\s+(?P<name>[A-Za-z_]\w*)\s*=\s*"(?P<raw>[^"]+)"\s*$', re.MULTILINE)
+FENCE_SCOPES_RE = re.compile(r"case\s+\.(?P<name>[A-Za-z_]\w*)\s*:\s*return\s*\[(?P<scopes>[^\]]*)\]")
+#: The one function allowed to call `stillCurrent` in the controller: the
+#: helper that reads the scope set from `AttemptFence` and logs a refusal.
+FENCE_HELPER = "attemptStillCurrent"
 
 
 @dataclass(frozen=True)
@@ -137,21 +150,64 @@ def code_only(text: str) -> str:
     return "\n".join(strip_comment(line) for line in text.splitlines())
 
 
-def named_scope_sets(text: str) -> tuple[tuple[str, ...], ...]:
-    """The scope list of every `stillCurrent(_:scopes:)` call site.
+def _by_function(text: str, pattern: re.Pattern[str], group: str | None) -> tuple[tuple[str, str], ...]:
+    """Every match of `pattern` in `text`'s code, with its enclosing function.
 
-    Comments are removed first: this file documents the very API it calls, and
-    a doc comment naming `stillCurrent(_:scopes:)` is not a call site.
+    Comments are removed first: these files document the very API they call,
+    and a doc comment naming a call is not a call site.
     """
-    sets: list[tuple[str, ...]] = []
-    for call in STILL_CURRENT_RE.finditer(code_only(text)):
-        arg = SCOPES_ARG_RE.search(call.group("args"))
-        if arg is None:
-            sets.append(())
-            continue
-        names = [piece.strip().lstrip(".") for piece in arg.group("scopes").split(",")]
-        sets.append(tuple(name for name in names if name))
-    return tuple(sets)
+    found: list[tuple[str, str]] = []
+    function = "<file scope>"
+    for raw in text.splitlines():
+        code = strip_comment(raw)
+        match = FUNC_RE.search(code)
+        if match:
+            function = match.group("name")
+        for call in pattern.finditer(code):
+            found.append((function, call.group(group) if group else call.group(0)))
+    return tuple(found)
+
+
+def fence_calls(text: str) -> tuple[tuple[str, str], ...]:
+    """`(enclosing function, AttemptFence case)` for every migrated fence."""
+    return _by_function(text, FENCE_CALL_RE, "fence")
+
+
+def still_current_calls(text: str) -> tuple[str, ...]:
+    """The enclosing function of every direct `stillCurrent(` call."""
+    return tuple(function for function, _ in _by_function(text, STILL_CURRENT_RE, None))
+
+
+def _enum_body(source: str, header: str) -> str:
+    start = source.find(header)
+    if start < 0:
+        return ""
+    end = source.find("\n}", start)
+    return code_only(source[start:end if end > 0 else len(source)])
+
+
+def declared_fences(attempt_source: str) -> dict[str, tuple[str, ...]]:
+    """Each `AttemptFence` case mapped to the scopes its `scopes` returns.
+
+    A case with no `scopes` arm maps to an empty tuple, which the audit
+    reports: Swift would refuse the non-exhaustive switch, but this check does
+    not get to assume a compiler ran.
+    """
+    body = _enum_body(attempt_source, "enum AttemptFence")
+    arms = {
+        match.group("name"): tuple(
+            piece.strip().lstrip(".")
+            for piece in match.group("scopes").split(",")
+            if piece.strip()
+        )
+        for match in FENCE_SCOPES_RE.finditer(body)
+    }
+    return {match.group("name"): arms.get(match.group("name"), ()) for match in FENCE_CASE_RE.finditer(body)}
+
+
+def load_fences(text: str) -> dict[str, dict]:
+    """The `[fences]` table: case name -> {function, scopes}."""
+    return dict(tomllib.loads(text).get("fences", {}))
 
 
 def load_allowlist(text: str) -> dict[str, int]:
@@ -205,20 +261,90 @@ def audit(read) -> tuple[str, ...]:
                 "hand-written fence to take the retired one's place unnoticed."
             )
 
-    for index, named in enumerate(named_scope_sets(source)):
-        if not named:
+    errors.extend(_audit_fences(source, attempt_source, read(ALLOWLIST), scopes))
+    return tuple(errors)
+
+
+def _audit_fences(source: str, attempt_source: str, allowlist: str, scopes: tuple[str, ...]) -> list[str]:
+    """The migrated fences: declared cases, their scope sets and their call
+    sites, each held against the `[fences]` table in both directions."""
+    errors: list[str] = []
+    declared = declared_fences(attempt_source)
+    recorded = {}
+    for name, row in load_fences(allowlist).items():
+        if isinstance(row, dict):
+            recorded[name] = row
+        else:
             errors.append(
-                f"{SOURCE}: the stillCurrent call #{index + 1} names no scopes. A fence that "
-                "depends on none of the nine epochs is not a fence."
+                f"{ALLOWLIST} [fences] `{name}` must be a table with `function` and `scopes`."
+            )
+
+    for name in sorted(set(declared) | set(recorded)):
+        if name not in recorded:
+            errors.append(
+                f"{ATTEMPT_SOURCE} declares AttemptFence.{name}, which {ALLOWLIST} [fences] "
+                "does not record. Add its row with the function that uses it and the scopes "
+                "its conjunction compared."
             )
             continue
-        for name in named:
-            if name not in scopes:
+        if name not in declared:
+            errors.append(
+                f"{ALLOWLIST} [fences] records `{name}`, which AttemptFence does not declare. "
+                "A fence row that outlived its case no longer pins anything."
+            )
+            continue
+        have = declared[name]
+        want = tuple(recorded[name].get("scopes", ()))
+        if not have:
+            errors.append(
+                f"{ATTEMPT_SOURCE}: AttemptFence.{name} names no scopes. A fence that depends "
+                "on none of the nine epochs is not a fence."
+            )
+        for scope in have:
+            if scope not in scopes:
                 errors.append(
-                    f"{SOURCE}: the stillCurrent call #{index + 1} names scope `.{name}`, "
-                    f"which Attempt.Scope does not declare ({list(scopes)})."
+                    f"{ATTEMPT_SOURCE}: AttemptFence.{name} names scope `.{scope}`, which "
+                    f"Attempt.Scope does not declare ({list(scopes)})."
                 )
-    return tuple(errors)
+        if sorted(set(have)) != sorted(set(want)) or len(set(have)) != len(have):
+            errors.append(
+                f"{ATTEMPT_SOURCE}: AttemptFence.{name} compares {sorted(have)}, but "
+                f"{ALLOWLIST} [fences] records {sorted(want)} — the fields its conjunction "
+                "compared. A migration copies the set; it never widens, narrows or swaps it. "
+                "Changing a fence's scopes is a behaviour change and changes both together."
+            )
+
+    expected = Counter((str(row.get("function", "")), name) for name, row in recorded.items())
+    seen = Counter(fence_calls(source))
+    for function, name in sorted(set(expected) | set(seen)):
+        have, want = seen.get((function, name), 0), expected.get((function, name), 0)
+        if have == want:
+            continue
+        if name not in declared:
+            errors.append(
+                f"{SOURCE}: `{function}()` calls attemptStillCurrent with `.{name}`, which "
+                "AttemptFence does not declare."
+            )
+        elif have > want:
+            errors.append(
+                f"{SOURCE}: `{function}()` uses AttemptFence.{name} {have} time(s) and "
+                f"{ALLOWLIST} [fences] allows {want}. Each fence's scope set belongs to the "
+                "one continuation it was copied from; another continuation gets its own case."
+            )
+        else:
+            errors.append(
+                f"{ALLOWLIST} [fences] says `{function}()` uses AttemptFence.{name}, but "
+                f"{SOURCE} has {have} such call(s) there."
+            )
+
+    for function in still_current_calls(source):
+        if function != FENCE_HELPER:
+            errors.append(
+                f"{SOURCE}: `{function}()` calls stillCurrent directly. Name its scope set as "
+                f"an AttemptFence case and call `{FENCE_HELPER}(_:fence:)`, so the set is pinned "
+                "and a refusal is logged."
+            )
+    return errors
 
 
 def repository_read(path: str) -> str:
