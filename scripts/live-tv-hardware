@@ -231,7 +231,11 @@ class Client:
         self.token = token
 
     def api(self, path, method="GET", body=None, timeout=60):
-        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + self.token}
+        headers = {"Authorization": "Bearer " + self.token}
+        if body is not None:
+            # A JSON content type on an empty body is a parse error to the
+            # server's optional-body routes, not an absent body.
+            headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
             self.base + "/api/v1" + path, method=method,
             data=json.dumps(body).encode() if body is not None else None, headers=headers)
@@ -350,10 +354,14 @@ def playback_body(copy_route, request_id=None):
                 "v": 2,
                 "video": [{"codec": "hevc", "profiles": [], "max_height": 2160}],
                 "audio": ["ac3"],
-                "containers": ["fmp4"],
+                "containers": ["fmp4", "mpegts"],
                 "transports": ["hls"],
             },
-            "hls_formats": [{"container": "fmp4", "video": "hevc", "audio": "ac3"}],
+            # Both containers: AC-3 in live fMP4 races the init file, so the
+            # owner carries a copied HEVC/AC-3 pair in MPEG-TS when the player
+            # claims it, and that is the route this mode is meant to prove.
+            "hls_formats": [{"container": "fmp4", "video": "hevc", "audio": "ac3"},
+                            {"container": "mpegts", "video": "hevc", "audio": "ac3"}],
             "video_limits": [{
                 "codec": "hevc",
                 "max_width": 3840,
@@ -847,8 +855,14 @@ def main(argv):
                 "video_profile": video[0].get("profile") if video else None,
                 "video_height": video[0].get("height") if video else None,
                 "video_field_order": video[0].get("field_order") if video else None,
+                "video_sample_aspect_ratio": video[0].get("sample_aspect_ratio") if video else None,
+                "video_display_aspect_ratio": video[0].get("display_aspect_ratio") if video else None,
                 "audio_codec": audio[0].get("codec_name") if audio else None,
                 "audio_channels": audio[0].get("channels") if audio else None,
+                "audio_tracks": [
+                    {"codec": s.get("codec_name"), "channels": s.get("channels"),
+                     "language": (s.get("tags") or {}).get("language")}
+                    for s in audio],
                 "bytes_in_%ds" % 4: source.stat().st_size,
             }
             # Our own probe held a tuner; wait for the device to say it is back
@@ -933,8 +947,15 @@ def main(argv):
             "container": container.get("format_name"),
             "video_codec": video[0].get("codec_name"),
             "video_height": video[0].get("height"),
+            "video_width": video[0].get("width"),
+            # Picture geometry as the segment carries it. An anamorphic SD
+            # broadcast (704x480, SAR 40:33) must still read as 16:9 here.
+            "video_sample_aspect_ratio": video[0].get("sample_aspect_ratio"),
+            "video_display_aspect_ratio": video[0].get("display_aspect_ratio"),
             "audio_codec": audio[0].get("codec_name"),
             "audio_channels": audio[0].get("channels"),
+            "audio_layout": audio[0].get("channel_layout"),
+            "delivery": started.get("delivery"),
         }
         assert len(segments) <= LISTED_SEGMENTS, (
             "the live window published %d segments; at most %d may be listed"
@@ -1113,7 +1134,11 @@ def main(argv):
 
         leftover = 0
         if data_root and data_root.exists():
-            live = [p for p in data_root.rglob("*") if p.is_dir() and "live" in p.name.lower()]
+            # Session scratch is `live-tv-<id>/`. The persisted programme guide
+            # (`cache/runtime/live-tv/guide.json`) also lives under a "live"
+            # directory and is meant to survive a release, so it is not scratch.
+            live = [p for p in data_root.rglob("*")
+                    if p.is_dir() and p.name.lower().startswith("live-tv-")]
             leftover = sum(f.stat().st_size for d in live for f in d.rglob("*") if f.is_file())
         evidence["scratch_bytes_after_release"] = leftover
         assert leftover == 0, "%d bytes of live scratch survived an explicit release" % leftover

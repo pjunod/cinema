@@ -3768,16 +3768,26 @@ struct LiveTvView: View {
         .onChange(of: showingMore) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: showingLayout) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: live.paused) { _, _ in overlayGeneration &+= 1 }
-        .onChange(of: live.playing) { _, playing in
-            if !playing && !live.busy {
-                fullscreen = false
-                temporaryGuide = false
-            }
-        }
+        // Only a session that has actually finished closes the surface, and
+        // it can finish on either edge. `watch()` detaches before it awaits
+        // the new lease, so `playing` goes false mid-tune while `busy` is
+        // true — closing on `playing` alone dismissed the cover, ran
+        // `onDismiss` and released the tuner being granted. A stop ends with
+        // `playing` falling while `busy` stays false; a tune that fails ends
+        // with `busy` falling while `playing` is already false. Observing only
+        // one of the two leaves the other stranded on a black cover.
+        .onChange(of: live.playing) { _, _ in closeSurfaceIfSessionFinished() }
+        .onChange(of: live.busy) { _, _ in closeSurfaceIfSessionFinished() }
         // Outside the remote adapter on purpose: a press that lands on one of
         // the reminder's buttons is the button's, and the routing table never
         // sees it. Back and Menu still leave the cover through the platform.
         .overlay(alignment: .bottomLeading) { reminderOverlay }
+    }
+
+    private func closeSurfaceIfSessionFinished() {
+        guard !live.playing && !live.busy else { return }
+        fullscreen = false
+        temporaryGuide = false
     }
 
     /// Every ten-foot press lands here, already decided by the shared table.

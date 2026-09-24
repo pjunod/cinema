@@ -93,6 +93,25 @@ jobs:
           fetch-depth: 0
       - name: Audit corrective-history evidence
         run: make history-check
+      # docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.1: the pull
+      # request's `Regression-Test:` lines, judged in the tree the merge will
+      # produce. The body and title are payload data on the `pull_request`
+      # event, read from the environment: no API call, no credential, and
+      # nothing interpolated into the script. This checkout is the branch
+      # head, not a merge candidate (the step prints both to keep that
+      # visible), so the module builds the candidate with `git merge-tree`.
+      # Advisory while validation/merge-errata.toml sets no boundary (phase
+      # A); the change that sets the boundary removes `continue-on-error` in
+      # the same diff, and tests/validation/test_regression_field.py refuses
+      # one without the other.
+      - name: Check the pull request's Regression-Test fields
+        continue-on-error: true
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 -m validation.regression_field
       - name: Check validation catalog and static contracts
         run: |
           make validation-lint

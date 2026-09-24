@@ -96,7 +96,7 @@ exactly once, at creation.
 
 | Extractor | Accepts | Rejects with |
 |---|---|---|
-| `AuthUser` | any carrier resolving to a user row | 401 `authentication required` |
+| `AuthUser` | any carrier resolving to a user row | 401 `authentication required`, or 401 `session_expired` for a login token idle past the window (§2.5) |
 | `AdminUser` | `AuthUser` plus `user.is_admin` | 401, or 403 `admin privileges required` |
 | `ScopedKey::require(scope)` | a `plx_` key, not disabled, carrying that exact scope | 401 for the wrong credential *kind*, 403 for a real key missing the scope |
 | `CacheOnlyAdminUser` | a digest with a live admin proof in this process's cache | 401 only |
@@ -180,9 +180,33 @@ tokens do not survive into a span either.
 
 ### 2.5 Revocation and expiry
 
-Login tokens **do not expire**. There is no expiry column and no sweeper;
-`last_seen_at` is an activity signal refreshed at most once a minute. A token
-stops working only when its row is deleted:
+**Idle expiry is a server-wide option, on by default.** "Sign-ins expire"
+(Settings → Users; `auth_token_expiry`, default `true`) signs a device out
+once its login token has gone unused for `auth_token_idle_days` (default
+**90**, 1–3650). It is a sliding window measured from the token's
+`last_seen_at` — the activity timestamp authentication already refreshes at
+most once a minute — so a device in regular use is never signed out and the
+option adds no write of its own. No token's window starts before
+`auth_token_expiry_since`: the moment expiry first took effect (the first start
+of a build with the option) or was last switched back on, so neither an
+upgrade nor turning the option on signs anyone out on the spot. The policy is
+read in the same snapshot as the token on every authentication, so every node
+judges by the committed policy.
+
+An expired token is answered with a typed 401 that clients match to land on
+their sign-in screen with the reason:
+
+```json
+{ "code": "session_expired", "idle_days": 90,
+  "message": "Signed out after 90 days of inactivity. Sign in again to continue." }
+```
+
+Its row is not deleted and its activity is not refreshed (that would revive
+it); it stays in the devices list marked `expired` until revoked. Turning the
+option off makes every login token valid again until revoked — today's
+non-expiring behaviour. API keys (`plx_`) never expire this way.
+
+Otherwise a token stops working only when its row is deleted:
 
 | Trigger | What is deleted |
 |---|---|
@@ -299,13 +323,13 @@ families. No `/api/v1/cluster/*` path matches either.
 | POST | `/api/v1/auth/login` | public | Verifies credentials, mints a token |
 | POST | `/api/v1/auth/logout` | bearer | Deletes this token's digest, cluster-wide |
 | GET | `/api/v1/me` | bearer | The caller's own user record |
-| GET | `/api/v1/me/devices` | bearer | This account's bounded token inventory; eight-hex digest prefixes only |
+| GET | `/api/v1/me/devices` | bearer | This account's bounded token inventory; eight-hex digest prefixes only, plus `expires_at` (null while sign-ins do not expire) and `expired` |
 | DELETE | `/api/v1/me/devices/{prefix}` | bearer | Revokes one other device through the cluster revocation fence; the current device must use logout |
 | GET | `/api/v1/users` | admin | Every user; never any password hash |
 | POST | `/api/v1/users` | admin | Creates a user |
 | PUT | `/api/v1/users/{id}` | admin | Sets password and/or admin flag |
 | DELETE | `/api/v1/users/{id}` | admin | Deletes a user; tokens and watch state cascade |
-| GET | `/api/v1/users/{id}/devices` | admin | One user's bounded token inventory; eight-hex digest prefixes only |
+| GET | `/api/v1/users/{id}/devices` | admin | One user's bounded token inventory; eight-hex digest prefixes only, plus `expires_at` and `expired` |
 | DELETE | `/api/v1/users/{id}/devices/{prefix}` | admin | Revokes one uniquely matched device token through the user-wide cluster fence |
 | GET | `/api/v1/keys` | admin | Lists API keys; never the hash or the secret |
 | POST | `/api/v1/keys` | admin | Creates a key, returning the secret **once** |
@@ -446,6 +470,9 @@ Refusals worth knowing, each a 400 unless noted:
   playback".
 - 409 when enabling `cluster_media_pool_enabled` before every committed voter
   publishes the protocol. Disabling always succeeds.
+- `sign-in expiry must be between 1 and 3650 days` for `auth_token_idle_days`
+  out of range. Switching `auth_token_expiry` from off to on also writes
+  `auth_token_expiry_since` = now in the same commit (§2.5).
 
 Job intervals (`probe_retry_mins`, `artwork_retry_mins`,
 `transcode_cleanup_mins`, `cache_produce_mins`) take 0 to mean off and

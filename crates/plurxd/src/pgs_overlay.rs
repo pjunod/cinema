@@ -17,7 +17,9 @@ use std::time::Duration;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use plurx_core::domain::MediaFile;
-use plurx_pgs::{NormalizedTrack, ParserLimits};
+#[cfg(test)]
+use plurx_pgs::NormalizedTrack;
+use plurx_pgs::{NormalizedComposition, ParserLimits};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -30,6 +32,9 @@ const PREPARE_TIMEOUT: Duration = Duration::from_secs(600);
 const NEGATIVE_TTL: Duration = Duration::from_secs(120);
 const MAX_NEGATIVE_ENTRIES: usize = 128;
 const MAX_TRACK_BYTES: u64 = 256 * 1024 * 1024;
+// The streaming normalizer can produce many cues that reuse a small PNG set.
+// Bound the in-memory snapshots before cloning them into the manifest.
+const MAX_SNAPSHOT_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_CACHE_TRACKS: usize = 128;
 
@@ -551,18 +556,13 @@ async fn prepare_stage_with(
     let generation_for_worker = generation.to_owned();
     let worker_cancellation = cancellation.worker();
     tokio::task::spawn_blocking(move || {
-        let track = plurx_pgs::normalize_sup_cancellable(
+        compile_generation_streamed(
             &sup_for_worker,
-            &ParserLimits::default(),
-            &worker_cancellation,
-        )?;
-        compile_generation(
             &stage_for_worker,
             &file_for_worker,
             index,
             &generation_for_worker,
-            track,
-            Some(&worker_cancellation),
+            &worker_cancellation,
         )
     })
     .await
@@ -694,6 +694,18 @@ struct Snapshot {
 }
 
 impl Snapshot {
+    fn metadata_bytes(&self) -> Result<u64, OverlayError> {
+        self.objects.iter().try_fold(
+            (std::mem::size_of::<Self>()
+                + self.objects.len() * std::mem::size_of::<OverlayObject>()) as u64,
+            |total, object| {
+                total
+                    .checked_add(object.image.len() as u64)
+                    .ok_or_else(|| OverlayError::Limit("snapshot metadata size overflowed".into()))
+            },
+        )
+    }
+
     fn same_composition(&self, other: &Self) -> bool {
         self.canvas_width == other.canvas_width
             && self.canvas_height == other.canvas_height
@@ -701,50 +713,64 @@ impl Snapshot {
     }
 }
 
-fn compile_generation(
-    stage: &Path,
-    file: &MediaFile,
-    index: i64,
-    generation: &str,
-    track: NormalizedTrack,
-    cancelled: Option<&AtomicBool>,
-) -> Result<(), OverlayError> {
-    check_worker_cancelled(cancelled)?;
-    let duration_ms = file
-        .duration_ms
-        .filter(|duration| *duration > 0)
-        .ok_or_else(|| {
-            OverlayError::Unavailable("media duration is required for a PGS manifest".into())
-        })?;
-    let objects_dir = stage.join("objects");
-    std::fs::create_dir(&objects_dir)
-        .map_err(|error| OverlayError::Internal(format!("creating PGS object cache: {error}")))?;
+struct GenerationCompiler<'a> {
+    stage: &'a Path,
+    generation: &'a str,
+    cancelled: Option<&'a AtomicBool>,
+    unique_bytes: u64,
+    snapshot_metadata_bytes: u64,
+    snapshot_metadata_limit: u64,
+    published: HashSet<String>,
+    snapshots: Vec<Snapshot>,
+}
 
-    let mut unique_bytes = 0u64;
-    let mut published = HashSet::new();
-    let mut snapshots: Vec<Snapshot> = Vec::with_capacity(track.compositions.len());
-    for composition in track.compositions {
+impl<'a> GenerationCompiler<'a> {
+    fn new(
+        stage: &'a Path,
+        generation: &'a str,
+        cancelled: Option<&'a AtomicBool>,
+    ) -> Result<Self, OverlayError> {
         check_worker_cancelled(cancelled)?;
+        std::fs::create_dir(stage.join("objects")).map_err(|error| {
+            OverlayError::Internal(format!("creating PGS object cache: {error}"))
+        })?;
+        Ok(Self {
+            stage,
+            generation,
+            cancelled,
+            unique_bytes: 0,
+            snapshot_metadata_bytes: 0,
+            snapshot_metadata_limit: MAX_SNAPSHOT_METADATA_BYTES,
+            published: HashSet::new(),
+            snapshots: Vec::new(),
+        })
+    }
+
+    fn push(&mut self, composition: NormalizedComposition) -> Result<(), OverlayError> {
+        check_worker_cancelled(self.cancelled)?;
         let mut objects = Vec::with_capacity(composition.objects.len());
         for object in composition.objects {
-            check_worker_cancelled(cancelled)?;
+            check_worker_cancelled(self.cancelled)?;
             let png = encode_rgba_png(object.width, object.height, &object.rgba)?;
             let hash = hex::encode(Sha256::digest(&png));
-            if published.insert(hash.clone()) {
-                unique_bytes = unique_bytes
+            if self.published.insert(hash.clone()) {
+                self.unique_bytes = self
+                    .unique_bytes
                     .checked_add(png.len() as u64)
                     .ok_or_else(|| OverlayError::Limit("PNG byte count overflowed".into()))?;
-                if unique_bytes > MAX_TRACK_BYTES {
+                if self.unique_bytes > MAX_TRACK_BYTES {
                     return Err(OverlayError::Limit(format!(
                         "overlay objects exceed the {MAX_TRACK_BYTES} byte track cap"
                     )));
                 }
-                write_durable(&objects_dir.join(format!("{hash}.png")), &png).map_err(|error| {
-                    OverlayError::Internal(format!("writing PGS object: {error}"))
-                })?;
+                write_durable(
+                    &self.stage.join("objects").join(format!("{hash}.png")),
+                    &png,
+                )
+                .map_err(|error| OverlayError::Internal(format!("writing PGS object: {error}")))?;
             }
             objects.push(OverlayObject {
-                image: format!("overlay/{generation}/objects/{hash}.png"),
+                image: format!("overlay/{}/objects/{hash}.png", self.generation),
                 x: object.x,
                 y: object.y,
                 width: object.width,
@@ -757,73 +783,160 @@ fn compile_generation(
             canvas_height: composition.canvas_height,
             objects,
         };
-        if snapshots
+        if self
+            .snapshots
             .last()
             .is_some_and(|previous| previous.start_ms == snapshot.start_ms)
         {
-            let replacement_index = snapshots.len() - 1;
-            snapshots[replacement_index] = snapshot;
+            let replacement_index = self.snapshots.len() - 1;
+            self.snapshot_metadata_bytes -= self.snapshots[replacement_index].metadata_bytes()?;
+            self.snapshot_metadata_bytes = self
+                .snapshot_metadata_bytes
+                .checked_add(snapshot.metadata_bytes()?)
+                .ok_or_else(|| OverlayError::Limit("snapshot metadata size overflowed".into()))?;
+            self.snapshots[replacement_index] = snapshot;
             if replacement_index > 0
-                && snapshots[replacement_index - 1].same_composition(&snapshots[replacement_index])
+                && self.snapshots[replacement_index - 1]
+                    .same_composition(&self.snapshots[replacement_index])
             {
-                snapshots.pop();
+                self.snapshot_metadata_bytes -=
+                    self.snapshots[replacement_index].metadata_bytes()?;
+                self.snapshots.pop();
             }
-            continue;
+            self.check_snapshot_metadata_limit()?;
+            return Ok(());
         }
-        if snapshots
+        if self
+            .snapshots
             .last()
             .is_some_and(|previous| previous.same_composition(&snapshot))
         {
-            continue;
+            return Ok(());
         }
-        snapshots.push(snapshot);
+        self.snapshot_metadata_bytes = self
+            .snapshot_metadata_bytes
+            .checked_add(snapshot.metadata_bytes()?)
+            .ok_or_else(|| OverlayError::Limit("snapshot metadata size overflowed".into()))?;
+        self.check_snapshot_metadata_limit()?;
+        self.snapshots.push(snapshot);
+        Ok(())
     }
 
-    let mut cues = Vec::new();
-    for (position, snapshot) in snapshots.iter().enumerate() {
+    fn check_snapshot_metadata_limit(&self) -> Result<(), OverlayError> {
+        if self.snapshot_metadata_bytes > self.snapshot_metadata_limit {
+            Err(OverlayError::Limit(format!(
+                "PGS cue metadata exceeds the {} byte track cap",
+                self.snapshot_metadata_limit
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn finish(self, file: &MediaFile, index: i64) -> Result<(), OverlayError> {
+        let Self {
+            stage,
+            generation,
+            cancelled,
+            snapshots,
+            ..
+        } = self;
         check_worker_cancelled(cancelled)?;
-        if snapshot.objects.is_empty() || snapshot.start_ms >= duration_ms {
-            continue;
+        let duration_ms = file
+            .duration_ms
+            .filter(|duration| *duration > 0)
+            .ok_or_else(|| {
+                OverlayError::Unavailable("media duration is required for a PGS manifest".into())
+            })?;
+        let mut cues = Vec::new();
+        for (position, snapshot) in snapshots.iter().enumerate() {
+            check_worker_cancelled(cancelled)?;
+            if snapshot.objects.is_empty() || snapshot.start_ms >= duration_ms {
+                continue;
+            }
+            let end_ms = snapshots
+                .get(position + 1)
+                .map(|next| next.start_ms)
+                .unwrap_or(duration_ms)
+                .min(duration_ms);
+            if end_ms <= snapshot.start_ms {
+                continue;
+            }
+            cues.push(OverlayCue {
+                id: format!("c{:08}", cues.len() + 1),
+                start_ms: snapshot.start_ms.max(0),
+                end_ms,
+                canvas_width: snapshot.canvas_width,
+                canvas_height: snapshot.canvas_height,
+                objects: snapshot.objects.clone(),
+            });
         }
-        let end_ms = snapshots
-            .get(position + 1)
-            .map(|next| next.start_ms)
-            .unwrap_or(duration_ms)
-            .min(duration_ms);
-        if end_ms <= snapshot.start_ms {
-            continue;
+        let manifest = OverlayManifest {
+            schema: SCHEMA,
+            generation: generation.to_owned(),
+            file_id: file.id,
+            track_index: index,
+            kind: "pgs".into(),
+            timebase: "source_ms".into(),
+            duration_ms,
+            cues,
+        };
+        let bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| OverlayError::Internal(format!("encoding PGS manifest: {error}")))?;
+        write_durable(&stage.join("manifest.json"), &bytes)
+            .map_err(|error| OverlayError::Internal(format!("writing PGS manifest: {error}")))?;
+        let total_bytes = directory_size_sync(stage, cancelled)?;
+        if total_bytes > MAX_TRACK_BYTES {
+            return Err(OverlayError::Limit(format!(
+                "overlay generation is {total_bytes} bytes, above the {MAX_TRACK_BYTES} byte track cap"
+            )));
         }
-        cues.push(OverlayCue {
-            id: format!("c{:08}", cues.len() + 1),
-            start_ms: snapshot.start_ms.max(0),
-            end_ms,
-            canvas_width: snapshot.canvas_width,
-            canvas_height: snapshot.canvas_height,
-            objects: snapshot.objects.clone(),
-        });
+        validate_generation_sync(stage, file, index, generation, cancelled)
     }
+}
 
-    let manifest = OverlayManifest {
-        schema: SCHEMA,
-        generation: generation.to_owned(),
-        file_id: file.id,
-        track_index: index,
-        kind: "pgs".into(),
-        timebase: "source_ms".into(),
-        duration_ms,
-        cues,
-    };
-    let bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(|error| OverlayError::Internal(format!("encoding PGS manifest: {error}")))?;
-    write_durable(&stage.join("manifest.json"), &bytes)
-        .map_err(|error| OverlayError::Internal(format!("writing PGS manifest: {error}")))?;
-    let total_bytes = directory_size_sync(stage, cancelled)?;
-    if total_bytes > MAX_TRACK_BYTES {
-        return Err(OverlayError::Limit(format!(
-            "overlay generation is {total_bytes} bytes, above the {MAX_TRACK_BYTES} byte track cap"
-        )));
+fn compile_generation_streamed(
+    sup: &Path,
+    stage: &Path,
+    file: &MediaFile,
+    index: i64,
+    generation: &str,
+    cancelled: &AtomicBool,
+) -> Result<(), OverlayError> {
+    let mut compiler = GenerationCompiler::new(stage, generation, Some(cancelled))?;
+    let mut compilation_error = None;
+    let parsed = plurx_pgs::normalize_sup_cancellable_into(
+        sup,
+        &ParserLimits::default(),
+        cancelled,
+        &mut |composition| {
+            compiler.push(composition).map_err(|error| {
+                compilation_error = Some(error);
+                plurx_pgs::AdapterError::Io(std::io::Error::other("PGS object compilation failed"))
+            })
+        },
+    );
+    if let Some(error) = compilation_error {
+        return Err(error);
     }
-    validate_generation_sync(stage, file, index, generation, cancelled)
+    parsed?;
+    compiler.finish(file, index)
+}
+
+#[cfg(test)]
+fn compile_generation(
+    stage: &Path,
+    file: &MediaFile,
+    index: i64,
+    generation: &str,
+    track: NormalizedTrack,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), OverlayError> {
+    let mut compiler = GenerationCompiler::new(stage, generation, cancelled)?;
+    for composition in track.compositions {
+        compiler.push(composition)?;
+    }
+    compiler.finish(file, index)
 }
 
 fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -1170,6 +1283,39 @@ mod tests {
             rgba: vec![255, 255, 255, 255],
             rgba_sha256: "unused-by-publisher".into(),
         }
+    }
+
+    #[test]
+    fn streamed_cue_metadata_is_bounded_even_when_pngs_are_reused() {
+        let dir = crate::test_tempdir().expect("cache");
+        let mut compiler = GenerationCompiler::new(dir.path(), "fixture", None).expect("compiler");
+        let composition = |pts_90khz, x| {
+            let mut object = object();
+            object.x = x;
+            NormalizedComposition {
+                pts_90khz,
+                start_ms: pts_90khz as f64 / 90.0,
+                canvas_width: 1920,
+                canvas_height: 1080,
+                objects: vec![object],
+            }
+        };
+
+        compiler.push(composition(90_000, 10)).expect("first cue");
+        compiler.snapshot_metadata_limit = compiler.snapshot_metadata_bytes + 1;
+        // Replacement at the same timestamp must release its predecessor.
+        compiler
+            .push(composition(90_000, 20))
+            .expect("same-timestamp replacement");
+        assert!(matches!(
+            compiler.push(composition(180_000, 30)),
+            Err(OverlayError::Limit(message)) if message.contains("cue metadata")
+        ));
+        assert_eq!(
+            compiler.published.len(),
+            1,
+            "PNG reuse does not bypass the metadata cap"
+        );
     }
 
     async fn publish_empty_manifest(

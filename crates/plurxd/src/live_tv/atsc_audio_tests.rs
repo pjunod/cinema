@@ -1,7 +1,7 @@
 //! ATSC audio regressions: delivery decisions and decodable live HLS output.
 
 use super::*;
-use crate::live_tv_delivery::resolve_live_delivery;
+use crate::live_tv_delivery::{resolve_live_delivery, LiveSourceAudioTrack};
 
 fn playback(codec: &str, aac_channels: u8) -> LivePlaybackRequest {
     serde_json::from_value(serde_json::json!({
@@ -47,14 +47,19 @@ fn support() -> LiveExecutionSupport {
 
 #[test]
 fn atsc_aac_conversion_bounds_unknown_and_immersive_channels() {
-    for (channels, limit, expected) in [
-        (Some(12), 32, 6),
-        (Some(12), 2, 2),
-        (Some(6), 6, 6),
-        (Some(1), 2, 1),
-        (Some(0), 6, 2),
-        (None, 6, 2),
-        (Some(0), 1, 1),
+    // The ceiling is the player's AAC limit, 5.1, and the source layout when
+    // the probe learned it. An unknown layout keeps the ceiling and lets the
+    // encode negotiate the real layout from the first decoded frame; it is
+    // no longer collapsed to stereo before a frame was seen.
+    for (channels, limit, expected, layouts) in [
+        (Some(12), 32, 6, "5.1(side)|5.1|stereo|mono"),
+        (Some(12), 2, 2, "stereo|mono"),
+        (Some(6), 6, 6, "5.1(side)|5.1|stereo|mono"),
+        (Some(1), 2, 1, "mono"),
+        (Some(0), 6, 6, "5.1(side)|5.1|stereo|mono"),
+        (None, 6, 6, "5.1(side)|5.1|stereo|mono"),
+        (Some(0), 1, 1, "mono"),
+        (Some(2), 6, 2, "stereo|mono"),
     ] {
         let plan = resolve_live_delivery(
             &source("ac4", channels),
@@ -74,9 +79,16 @@ fn atsc_aac_conversion_bounds_unknown_and_immersive_channels() {
         let command =
             live_ffmpeg_command(&system, &plan, Path::new("/fixture/live")).expect("command");
         let args: Vec<_> = command.as_std().get_args().collect();
-        assert!(args
-            .windows(2)
-            .any(|pair| pair[0] == "-ac" && pair[1] == expected.to_string().as_str()));
+        assert!(
+            !args.iter().any(|argument| *argument == "-ac"),
+            "the encode negotiates its layout, it never pins a channel count"
+        );
+        let expected_filter = format!("aformat=channel_layouts={layouts}");
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-af" && pair[1] == expected_filter.as_str()),
+            "{channels:?}/{limit}: {args:?}"
+        );
     }
 }
 
@@ -112,7 +124,14 @@ fn atsc_incomplete_audio_facts_cannot_select_copy() {
         .expect("conversion can wait for decoder facts");
         assert_eq!(plan.audio_action, LiveTrackAction::Encode);
         assert_eq!(plan.video_action, LiveTrackAction::Copy);
-        assert_eq!(plan.output.audio_channels, 2);
+        // A known stereo layout bounds the encode at stereo; an unknown one
+        // leaves the player's ceiling in place for the decoder to fill.
+        let expected = if channels.is_some_and(|value| value > 0) {
+            2
+        } else {
+            6
+        };
+        assert_eq!(plan.output.audio_channels, expected);
     }
 }
 
@@ -398,4 +417,293 @@ async fn atsc_delayed_ac3_produces_decodable_live_fmp4() {
 async fn atsc_supplied_ac3_capture_produces_decodable_live_fmp4() {
     let path = std::env::var_os("PLURX_ATSC3_AC3_CAPTURE").expect("set the supplied capture path");
     verify_ac3_capture(tokio::fs::read(path).await.expect("read capture")).await;
+}
+
+fn track(index: u8, codec: &str, channels: u8, language: Option<&str>) -> LiveSourceAudioTrack {
+    LiveSourceAudioTrack {
+        index,
+        id: None,
+        codec: Some(codec.into()),
+        sample_rate: Some(48000),
+        channels: Some(channels),
+        layout: None,
+        language: language.map(str::to_owned),
+        described: false,
+    }
+}
+
+/// The main audio is never displaced by described video, however much
+/// better its codec or layout looks to the ranking.
+#[test]
+fn atsc_described_audio_never_beats_the_main_track() {
+    let mut source = source("ac4", Some(2));
+    let mut described = track(1, "ac3", 6, Some("eng"));
+    described.described = true;
+    source.audio_tracks = vec![track(0, "ac4", 2, Some("eng")), described];
+    let plan = resolve_live_delivery(
+        &source,
+        Some(&playback("ac3", 6)),
+        &LiveQualityPolicy::default(),
+        &support(),
+    )
+    .expect("route");
+    assert_eq!(plan.audio_track, 0);
+}
+
+/// `und` is no tag, and an untagged first track keeps the choice among
+/// untagged tracks rather than admitting every language.
+#[test]
+fn atsc_untagged_first_track_admits_only_untagged_tracks() {
+    let mut source = source("ac3", Some(2));
+    source.audio_tracks = vec![
+        track(0, "ac3", 2, Some("und")),
+        track(1, "ac3", 6, Some("spa")),
+        track(2, "ac3", 6, None),
+    ];
+    let plan = resolve_live_delivery(
+        &source,
+        Some(&playback("ac3", 6)),
+        &LiveQualityPolicy::default(),
+        &support(),
+    )
+    .expect("route");
+    assert_eq!(plan.audio_track, 2, "{:?}", plan.reasons);
+}
+
+/// On a player that takes HEVC only in fMP4, AC-3 is not a copy (it would be
+/// converted for the init-file race), so a true AAC copy beside it wins.
+#[test]
+fn atsc_fmp4_only_player_prefers_a_true_aac_copy_to_a_converted_ac3() {
+    let mut source = source("ac3", Some(6));
+    source.audio_tracks = vec![track(0, "ac3", 6, None), track(1, "aac", 2, None)];
+    let plan = resolve_live_delivery(
+        &source,
+        Some(&playback("ac3", 6)),
+        &LiveQualityPolicy::default(),
+        &support(),
+    )
+    .expect("route");
+    assert_eq!(plan.audio_track, 1);
+    assert_eq!(plan.audio_action, LiveTrackAction::Copy);
+    assert_eq!(plan.output.audio_codec, "aac");
+}
+
+/// The live open maps the selected track by its PID when the probe saw one,
+/// so a stream the runtime demuxer has not classified cannot shift the
+/// ordinal onto another track.
+#[test]
+fn atsc_selected_track_is_mapped_by_pid() {
+    let mut source = source("ac4", Some(6));
+    let mut simulcast = track(1, "ac3", 6, Some("eng"));
+    simulcast.id = Some(0x33);
+    source.audio_tracks = vec![track(0, "ac4", 6, Some("eng")), simulcast];
+    let mut playback = playback("ac3", 6);
+    playback.hls_formats.push(
+        serde_json::from_value(serde_json::json!(
+            {"container":"mpegts","video":"hevc","audio":"ac3"}
+        ))
+        .expect("format"),
+    );
+    let plan = resolve_live_delivery(
+        &source,
+        Some(&playback),
+        &LiveQualityPolicy::default(),
+        &support(),
+    )
+    .expect("route");
+    let system = SystemInfo {
+        ffmpeg: "ffmpeg".into(),
+        ..SystemInfo::default()
+    };
+    let plan = LiveTvTranscodePlan::new(&system, plan, None, None).expect("plan");
+    let command = live_ffmpeg_command(&system, &plan, Path::new("/fixture/live")).expect("command");
+    let args: Vec<_> = command.as_std().get_args().collect();
+    assert!(
+        args.windows(2)
+            .any(|pair| pair[0] == "-map" && pair[1] == "0:i:0x33"),
+        "{args:?}"
+    );
+}
+
+/// The VPM ATSC 3.0 mux (157.1) carries AC-4 5.1 first and an AC-3 5.1
+/// simulcast beside it. A player that takes AC-3 gets it untouched instead of
+/// an AC-4 decode plus an AAC encode.
+#[test]
+fn atsc_copyable_simulcast_track_beats_the_first_track_needing_conversion() {
+    let mut source = source("ac4", Some(6));
+    source.audio_tracks = vec![
+        track(0, "ac4", 6, Some("eng")),
+        track(1, "ac3", 6, Some("eng")),
+        track(2, "ac3", 1, Some("spa")),
+        track(3, "ac3", 1, Some("eng")),
+    ];
+    let mut playback = playback("ac3", 6);
+    playback.hls_formats.push(
+        serde_json::from_value(serde_json::json!(
+            {"container":"mpegts","video":"hevc","audio":"ac3"}
+        ))
+        .expect("format"),
+    );
+    let plan = resolve_live_delivery(
+        &source,
+        Some(&playback),
+        &LiveQualityPolicy::default(),
+        &support(),
+    )
+    .expect("copy route");
+    assert_eq!(plan.video_action, LiveTrackAction::Copy);
+    assert_eq!(plan.audio_action, LiveTrackAction::Copy);
+    assert_eq!(plan.audio_track, 1);
+    assert_eq!(plan.source.audio_codec.as_deref(), Some("ac3"));
+    assert_eq!(plan.output.audio_codec, "ac3");
+    assert_eq!(plan.output.audio_channels, 6);
+    // fMP4 would race the AC-3 init file; the player claimed MPEG-TS for
+    // this pair, so the copy rides MPEG-TS instead of being converted.
+    assert_eq!(plan.packaging, LivePackaging::Mpegts);
+    assert!(plan
+        .reasons
+        .iter()
+        .any(|reason| reason.code == "container_switched"));
+    let system = SystemInfo {
+        ffmpeg: "ffmpeg".into(),
+        ..SystemInfo::default()
+    };
+    let plan = LiveTvTranscodePlan::new(&system, plan, None, None).expect("plan");
+    let command = live_ffmpeg_command(&system, &plan, Path::new("/fixture/live")).expect("command");
+    let args: Vec<_> = command.as_std().get_args().collect();
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "-map" && pair[1] == "0:a:1"));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "-c:a" && pair[1] == "copy"));
+}
+
+/// The same mux on a player that only takes fMP4 for HEVC (Apple): the AC-3
+/// simulcast is still the better encode source than AC-4, and the fMP4 rule
+/// converts it to AAC at the full 5.1 ceiling.
+#[test]
+fn atsc_fmp4_only_player_converts_the_simulcast_rather_than_decoding_ac4() {
+    let mut source = source("ac4", Some(6));
+    source.audio_tracks = vec![
+        track(0, "ac4", 6, Some("eng")),
+        track(1, "ac3", 6, Some("eng")),
+    ];
+    let plan = resolve_live_delivery(
+        &source,
+        Some(&playback("ac3", 6)),
+        &LiveQualityPolicy::default(),
+        &support(),
+    )
+    .expect("route");
+    assert_eq!(plan.video_action, LiveTrackAction::Copy);
+    assert_eq!(plan.audio_action, LiveTrackAction::Encode);
+    assert_eq!(plan.audio_track, 1);
+    assert_eq!(plan.packaging, LivePackaging::Fmp4);
+    assert_eq!(plan.output.audio_codec, "aac");
+    assert_eq!(plan.output.audio_channels, 6);
+    assert!(plan
+        .reasons
+        .iter()
+        .any(|reason| reason.code == "audio_muxer_incompatible"));
+}
+
+/// Track selection never changes the language: a fuller Spanish track and an
+/// untagged track both lose to the tagged primary-language track.
+#[test]
+fn atsc_track_selection_stays_in_the_primary_language() {
+    let mut source = source("ac4", Some(2));
+    source.audio_tracks = vec![
+        track(0, "ac4", 2, Some("eng")),
+        track(1, "ac3", 6, Some("spa")),
+        track(2, "ac3", 2, None),
+    ];
+    let plan = resolve_live_delivery(
+        &source,
+        Some(&playback("ac3", 6)),
+        &LiveQualityPolicy::default(),
+        &support(),
+    )
+    .expect("route");
+    assert_eq!(plan.audio_track, 0, "{:?}", plan.reasons);
+    assert_eq!(plan.source.audio_codec.as_deref(), Some("ac4"));
+}
+
+/// With nothing copyable, the robust decode wins over AC-4 and a fuller
+/// layout wins among equals; the first track is the tie-break.
+#[test]
+fn atsc_encode_source_prefers_robust_decoders_then_fuller_layouts() {
+    let mut source = source("ac4", Some(6));
+    source.audio_tracks = vec![
+        track(0, "ac4", 6, None),
+        track(1, "mp2", 2, None),
+        track(2, "mp2", 6, None),
+    ];
+    let plan = resolve_live_delivery(
+        &source,
+        Some(&playback("ac3", 6)),
+        &LiveQualityPolicy::default(),
+        &support(),
+    )
+    .expect("route");
+    assert_eq!(plan.audio_action, LiveTrackAction::Encode);
+    assert_eq!(plan.audio_track, 2);
+
+    let mut single = source.clone();
+    single.audio_tracks.clear();
+    let plan = resolve_live_delivery(
+        &single,
+        Some(&playback("ac3", 6)),
+        &LiveQualityPolicy::default(),
+        &support(),
+    )
+    .expect("route");
+    assert_eq!(
+        plan.audio_track, 0,
+        "a probe without a track list keeps the flat facts"
+    );
+    assert_eq!(plan.source.audio_codec.as_deref(), Some("ac4"));
+}
+
+#[test]
+fn atsc_probe_lists_every_audio_track_with_its_language() {
+    let facts = parse_probe_facts(
+        br#"{"streams":[
+        {"codec_type":"video","codec_name":"hevc","width":1920,"height":1080},
+        {"codec_type":"audio","codec_name":"ac4","sample_rate":"46034","channels":6,"channel_layout":"5.1(side)","tags":{"language":"eng"}},
+        {"codec_type":"data","codec_name":"bin_data"},
+        {"codec_type":"audio","codec_name":"ac3","sample_rate":"48000","channels":6,"channel_layout":"5.1(side)","tags":{"language":"eng"}},
+        {"codec_type":"audio","codec_name":"ac3","sample_rate":"48000","channels":1,"channel_layout":"mono","tags":{"language":"spa"}}
+    ]}"#,
+    )
+    .expect("facts");
+    assert_eq!(facts.audio_codec.as_deref(), Some("ac4"));
+    assert_eq!(facts.audio_tracks.len(), 3);
+    assert_eq!(facts.audio_tracks[1].index, 1);
+    assert_eq!(facts.audio_tracks[1].codec.as_deref(), Some("ac3"));
+    assert_eq!(facts.audio_tracks[1].channels, Some(6));
+    assert_eq!(facts.audio_tracks[2].language.as_deref(), Some("spa"));
+    assert_eq!(facts.audio_tracks[1].id, None);
+    let facts = parse_probe_facts(
+        br#"{"streams":[
+        {"codec_type":"video","codec_name":"hevc","width":1920,"height":1080,"id":"0x31"},
+        {"codec_type":"audio","codec_name":"ac3","sample_rate":"48000","channels":6,"id":"0x33","disposition":{"default":1,"visual_impaired":0}},
+        {"codec_type":"audio","codec_name":"ac3","sample_rate":"48000","channels":1,"id":"0x35","disposition":{"visual_impaired":1}}
+    ]}"#,
+    )
+    .expect("facts");
+    assert_eq!(facts.audio_tracks[0].id, Some(0x33));
+    assert!(!facts.audio_tracks[0].described);
+    assert!(facts.audio_tracks[1].described);
+    assert_eq!(facts.audio_tracks[1].map_specifier(), "0:i:0x35");
+}
+
+#[test]
+fn atsc_encoded_channel_layouts_follow_the_ceiling() {
+    use crate::live_tv_delivery::encoded_channel_layouts;
+    assert_eq!(encoded_channel_layouts(1), "mono");
+    assert_eq!(encoded_channel_layouts(2), "stereo|mono");
+    assert_eq!(encoded_channel_layouts(5), "stereo|mono");
+    assert_eq!(encoded_channel_layouts(6), "5.1(side)|5.1|stereo|mono");
+    assert_eq!(encoded_channel_layouts(8), "5.1(side)|5.1|stereo|mono");
 }

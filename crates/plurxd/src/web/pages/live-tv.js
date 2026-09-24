@@ -80,8 +80,25 @@ async function liveTvOrphanHints(){
 async function liveTvRetireOrphanHints(){
   for(const hint of await liveTvOrphanHints()) liveTvRetireHint(hint.id);
 }
+// Channels the browser's audio output reaches, between stereo and 5.1 (the
+// most the server encodes). A fixed 2 is what folded every 5.1 broadcast to
+// stereo; a browser on a multichannel output decodes 5.1 AAC natively.
+function liveTvAacChannelCeiling(destinationChannels){
+  const channels=Number(destinationChannels);
+  return Number.isFinite(channels)?Math.min(6,Math.max(2,Math.floor(channels))):2;
+}
+let LIVE_TV_AUDIO_CONTEXT=null;
+function liveTvOutputChannels(){
+  try{
+    const Ctx=window.AudioContext||window.webkitAudioContext;
+    if(!Ctx) return 2;
+    LIVE_TV_AUDIO_CONTEXT=LIVE_TV_AUDIO_CONTEXT||new Ctx();
+    return LIVE_TV_AUDIO_CONTEXT.destination.maxChannelCount;
+  }catch(e){ return 2; }
+}
 function liveTvPlaybackEnvelope(compatibility=null){
   const caps=currentCapsDocument();
+  const aacChannels=liveTvAacChannelCeiling(liveTvOutputChannels());
   const audio=(caps.audio||[]).filter(codec=>["aac","ac3","eac3"].includes(codec));
   const formats=[{container:"mpegts",video:"h264",audio:"aac"}];
   for(const video of caps.video||[]){
@@ -96,7 +113,7 @@ function liveTvPlaybackEnvelope(compatibility=null){
       max_width:3840,max_height:video.max_height||2160,max_frame_rate:{num:60,den:1},interlaced:false});
   }
   return {v:1,caps,hls_formats:Array.from(unique.values()),video_limits,
-    audio_limits:audio.map(codec=>({codec,max_channels:codec==="aac"?2:8})),
+    audio_limits:audio.map(codec=>({codec,max_channels:codec==="aac"?aacChannels:8})),
     ...(compatibility?{compatibility}:{})};
 }
 const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
@@ -414,7 +431,7 @@ function liveTvStatsTelemetry(){
     source_video:source.exact.slice(1).join(" · ")||null,
     source_resolution_note:source.observedAt?`Tuner source observed ${new Date(source.observedAt*1000).toLocaleString()}`:"Source measurement not reported.",
     stream_format:plan?.output?[plan.output.width>0&&plan.output.height>0?`${plan.output.width}×${plan.output.height}`:null,plan.output.video_codec,plan.output.hdr].filter(Boolean).join(" · "):null,
-    decode_audio:plan?.output?[plan.output.audio_codec,plan.output.audio_channels>0?`${plan.output.audio_channels} channels`:null].filter(Boolean).join(" · "):null,
+    decode_audio:plan?.output?[plan.output.audio_codec,plan.output.audio_channels>0?`${plan.audio_action==="encode"&&!(plan.source?.audio_channels>0)?"up to ":""}${plan.output.audio_channels} channels`:null].filter(Boolean).join(" · "):null,
     subtitles:attached&&v.textTracks?[...v.textTracks].filter(t=>t.mode==="showing").map(t=>t.label||t.language||"Selected").join(" · ")||"Off":"Not reported",
     client_loaded:buffer||"Not reported",live_edge:edge||"Not reported",frames,
     stalls:"Not reported",stalls_note:"This live player does not expose an interruption counter.",

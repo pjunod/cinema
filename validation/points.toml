@@ -1003,6 +1003,7 @@ paths = [
   "scripts/decoder-diagnostic-qualification",
   "scripts/validate-docker-startup-budget",
   "scripts/registry-push",
+  "scripts/release-cut",
   "tests/operations/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "operations-contract", "container-runtime", "resource-bounds"]
