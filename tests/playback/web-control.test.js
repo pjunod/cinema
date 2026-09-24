@@ -1367,15 +1367,15 @@ async function main() {
     assert.deepEqual(h.released,['A']);
   }
   {
-    // F-web-12. A paused remux no longer repeats a position nobody moved, so
-    // the pause EDGE has to carry it — otherwise the server's last known
-    // position sits up to one five-second sample behind where the viewer
-    // actually stopped, for as long as they leave it there.
+    // F-web-12. The pause EDGE reports the stop position at once. It is not
+    // what makes the position correct — the case below shows the first paused
+    // sample would post it within five seconds anyway — so what this pins is
+    // that the report is immediate, and that the repeats after it are dropped.
     const h=fullOpenHarness(),p=fullPlayer();p.method='transcode';h.attach(p);
     h.video.currentTime=100;h.video.paused=false;
     h.togglePlay();
     assert.equal(p.wantsPlayback,false,'the harness did not reach the pause edge');
-    assert.equal(h.posted.length,1,'pausing reported no position at all');
+    assert.equal(h.posted.length,1,'pausing did not report the stop position at once');
     assert.equal(h.posted[0].path,'/items/film-item/progress');
     assert.equal(h.posted[0].body.position_ms,100_000);
     // The sampling beat that follows is the repeat the pause edge just made
@@ -1390,6 +1390,22 @@ async function main() {
     h.video.currentTime=130;h.reportProgress('film');
     assert.equal(h.posted.length,2);
     assert.equal(h.posted[1].body.position_ms,130_000);
+  }
+  {
+    // Why the pause edge is prompt and not load-bearing: the repeat guard
+    // drops a paused beat only at the position of the last ACCEPTED beat, and
+    // that one was taken while playing. So the first paused sample — with no
+    // edge beat at all — still posts where the viewer stopped; only the one
+    // after it is a repeat.
+    const h=fullOpenHarness(),p=fullPlayer();p.method='transcode';h.attach(p);
+    h.video.paused=false;h.video.currentTime=95;h.reportProgress('film');
+    assert.equal(h.posted.length,1);
+    h.video.currentTime=100;h.video.paused=true;p.wantsPlayback=false;
+    h.reportProgress('film');
+    assert.equal(h.posted.length,2,'the first paused sample was dropped as a repeat of a playing beat');
+    assert.equal(h.posted[1].body.position_ms,100_000);
+    h.reportProgress('film');
+    assert.equal(h.posted.length,2,'the paused repeat after it was posted');
   }
   {
     // The OS transport acts on the viewer's INTENT (PR #459 review, finding 1).

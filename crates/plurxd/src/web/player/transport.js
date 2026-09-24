@@ -380,12 +380,14 @@ function togglePlay(){
     applyPlaybackTransportIntent(v,PLAYER);
   }
   if(PLAYER)playerActivity();
-  // The pause EDGE always beats (F-web-12). `reportProgress` now drops a paused
-  // REPEAT, so without one beat here the server's last known position would sit
-  // up to one five-second sample behind where the viewer actually stopped, for
-  // as long as they leave it paused. This is the viewer's own pause and nothing
-  // else: a teardown's internal pause is followed by `closePlayer`'s final
-  // report, which owns that moment.
+  // The pause EDGE beats (F-web-12), so the server hears where the viewer
+  // stopped now rather than on the next five-second sample. It is prompt, not
+  // load-bearing: `reportProgress` drops a paused beat only when its position
+  // equals the last ACCEPTED one, and that one was taken while the film was
+  // playing, so the first paused sample differs and would post the stop
+  // position within five seconds without this. This is the viewer's own pause
+  // and nothing else: a teardown's internal pause is followed by
+  // `closePlayer`'s final report, which owns that moment.
   if(PLAYER&&PLAYER.fileId!=null&&PLAYER.wantsPlayback===false) reportProgress(PLAYER.fileId);
   notifyPlaybackControl();
 }
