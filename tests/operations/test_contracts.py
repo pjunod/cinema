@@ -1233,7 +1233,12 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("generic/platform=iOS", script)
         self.assertIn("generic/platform=tvOS", script)
         self.assertIn("-configuration Release", script)
-        self.assertIn(":app:assembleDebug", script)
+        # Android ships the signed release variant: the debug APK is
+        # `debuggable`, which lets `adb shell run-as` read the bearer.
+        self.assertIn(":app:assembleRelease", script)
+        self.assertIn("apk/release/app-release.apk", script)
+        self.assertNotIn(":app:assembleDebug", script)
+        self.assertNotIn("app-debug.apk", script)
 
         # Neither artifact reaches a device unverified.
         self.assertIn("codesign --verify --deep --strict", script)

@@ -2403,3 +2403,27 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "`.stallReopen` is the bound half of the wire and **nothing in this target"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testTheDeliveryWatchdogIsBoundedByItsFloorAndStopsWithItsOwnMessage()"
+
+[[fixes]]
+# Both Android backup rule files excluded only `offline/`, so the Preferences
+# DataStore holding the account bearer, the origin and the username was copied
+# to Google by Auto Backup and handed to a new handset by device-to-device
+# transfer. The correction excludes the whole `datastore/` directory in both
+# files and — this is the half that is easy to lose — under BOTH sections of
+# `data-extraction-rules`, because excluding `cloud-backup` alone leaves the
+# transfer path open, which is F-android-7's named mistake.
+#
+# No Android toolchain runs in this repository's suites, so the anchored test
+# is an operations case that reads the XML rather than a Gradle unit test: it
+# parses both files, requires a `domain="file"` exclusion of `datastore/` under
+# every declared section, and requires the two files to agree. It also pins
+# that the bearer still lives under a `preferencesDataStore` — moving the token
+# to SharedPreferences or a plain file would leave both exclusions pointing at
+# a directory it no longer occupies while every other assertion still passed.
+# A revert to the one-line `offline/`-only rules fails it.
+id = "android.credential-datastore-excluded-from-backup-and-transfer"
+commits = ["2fec1c693"]
+source = "clients/android/app/src/main/res/xml/data_extraction_rules.xml"
+source_anchor = "<exclude domain=\"file\" path=\"datastore/\" />"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "def test_extraction_rules_exclude_the_store_from_every_transfer(self) -> None:"

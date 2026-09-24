@@ -44,10 +44,15 @@ appear over USB and Wi-Fi at once. The playbook deduplicates those endpoints
 and fails if a required device is absent; a partial push is not a successful
 deploy.
 
-The Android path deploys the signed debug APK to the controller's physical
-test devices; it does not sign or upload a Google Play release. The release
-target has no signing configuration, so store delivery remains the separate §5
-workflow instead of borrowing a development key behind the operator's back.
+The Android path deploys to the controller's physical test devices; it does
+not upload a Google Play release. The `mobile_release` role in `plurx-agent`
+**still builds and installs the debuggable debug APK** until it is switched to
+`:app:assembleRelease` / `app-release.apk` with the four `PLURX_ANDROID_*`
+signing inputs (see the 2026-09-23 note in
+[clients/CLIENT-DEPLOY-PROMPT.md](clients/CLIENT-DEPLOY-PROMPT.md)). The
+in-repository paths — `make android-publish` and `scripts/ship-physical` —
+already ship the release variant (§5.1). Store delivery remains the separate §5
+workflow.
 
 Apple upload uses an App Store Connect API key. Keep the private key out of the
 repo at
@@ -103,7 +108,14 @@ It resolves `origin/main`, pins a detached worktree under
 checkout is neither read for its working state nor left holding build output.
 Apple builds the `plurx-iOS` and `plurx-tvOS` Release targets against
 `generic/platform=iOS` and `generic/platform=tvOS` — a device build, not an
-archive — and Android assembles the same signed debug APK the playbook ships.
+archive — and Android assembles the signed **release** APK
+(`:app:assembleRelease`), never the debuggable debug build. It takes the same
+four signing inputs as `make android-release` (§5.1) and stops before any work
+when one is missing; a relative `PLURX_ANDROID_KEYSTORE` is resolved against the
+directory it was started from. A device still on the pre-release debug build is
+not treated as "already installed" at an equal versionCode, and when Android
+refuses the upgrade across signers the script names the one-time
+`adb uninstall` and what it costs rather than doing it.
 `codesign --verify --deep --strict` and `apksigner verify` both run before any
 device is touched.
 
@@ -372,18 +384,47 @@ Play requirement. The pinned JDK 25 / AGP 9.3.2 / SDK 37.0 image is documented
 in [clients/android/README.md](../clients/android/README.md), and
 `make android-test` proves its JVM suite and lint in that image.
 
-One real blocker remains, not polish: **a release signing config.**
-`build.gradle.kts` defines no `signingConfigs`,
-so `assembleRelease` produces an unsigned or debug-signed artifact that Play
-refuses. Generate an upload key, keep it out of git, and enrol in **Play App
-Signing** so Google holds the distribution key — losing an upload key is
-recoverable, losing a distribution key without Play App Signing means the app
-can never be updated again.
+**The release signing blocker is closed in the repository.**
+`build.gradle.kts` now defines `signingConfigs.release`, and the `release`
+build type selects it. The four values come from the environment —
+`PLURX_ANDROID_KEYSTORE`, `PLURX_ANDROID_KEYSTORE_PASSWORD`,
+`PLURX_ANDROID_KEY_ALIAS`, `PLURX_ANDROID_KEY_PASSWORD` — and any one of them
+missing fails the build naming it (`requiredSigningValue`). There is
+deliberately no fallback to the debug key: Play refuses a debug-signed
+artifact, and once one is installed a properly signed build cannot upgrade it
+in place, so every device would need an uninstall first.
+
+`make android-release` builds it; `make android-publish` serves it at
+`/download/plurx-android.apk`. `make android` still produces the debug APK for
+local use. `PLURX_ANDROID_KEYSTORE` may be relative to the directory `make` runs
+in (the `keytool` line below leaves `plurx-upload.jks` in the cwd); it is
+resolved to an absolute path before Docker bind-mounts it.
+
+The release APK is R8-obfuscated, so `android-publish` also keeps the build's
+`mapping.txt` beside it as `plurx-android-<versionCode>.mapping.txt` in
+`ANDROID_DATA_DIR` (keyed by the versionCode in the build's
+`output-metadata.json`), writes it before replacing the APK, and refuses to
+publish a build that has none. Only `/download/plurx-android.apk` is served;
+the mappings are not. To de-obfuscate a device stack trace, run R8's `retrace`
+against the mapping of the versionCode the device reports.
+
+What remains is operational, not structural: **generate the upload key and put
+it in the fleet vault.** It is streamed to the build host, never committed,
+never passed as a command-line argument.
 
 ```bash
 keytool -genkey -v -keystore plurx-upload.jks \
   -keyalg RSA -keysize 2048 -validity 10000 -alias upload   # store OUTSIDE the repo
 ```
+
+Enrol in **Play App Signing** so Google holds the distribution key — losing an
+upload key is recoverable, losing a distribution key without Play App Signing
+means the app can never be updated again. The key generated here should be the
+one enrolled later, so the sideload fleet and Play share a signing lineage.
+
+Because the fleet's existing installs are debug-signed, the first release
+install on each device needs `adb uninstall tv.plurx.app` first. `make
+android-publish` prints that reminder.
 
 ### 5.2 Build and upload
 
