@@ -14930,6 +14930,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              ALTER TABLE files DROP COLUMN dv_bl_compat_id;
              ALTER TABLE files DROP COLUMN dv_level;
              ALTER TABLE files DROP COLUMN dv_profile;
+             ALTER TABLE files DROP COLUMN downloaded_subtitles;
              ALTER TABLE files DROP COLUMN luminance_source;
              ALTER TABLE files DROP COLUMN mastering_max_luminance;
              ALTER TABLE files DROP COLUMN max_fall;

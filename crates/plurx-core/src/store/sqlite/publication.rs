@@ -30,7 +30,7 @@ impl FencedPublicationStore for SqliteStore {
         let track = track.clone();
         self.with_fenced_conn(lease, replacement, move |conn| {
             Ok(conn.execute(
-                crate::store::downloaded_subtitles::ADD,
+                crate::store::downloaded_subtitles::ADD_DOWNLOADED_SUBTITLE,
                 params![
                     file_id,
                     track.source_size,

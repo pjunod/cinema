@@ -2869,7 +2869,7 @@ impl MediaStore for HiqliteAuthStore {
         let changed = self
             .client()
             .execute(
-                super::downloaded_subtitles::ADD,
+                super::downloaded_subtitles::ADD_DOWNLOADED_SUBTITLE,
                 params!(
                     file_id,
                     track.source_size,

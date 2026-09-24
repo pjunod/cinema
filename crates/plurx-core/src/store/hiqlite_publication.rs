@@ -286,7 +286,8 @@ impl FencedPublicationStore for HiqliteAuthStore {
         replacement: &Lease,
     ) -> Result<bool, StoreError> {
         let raw = super::downloaded_subtitles::encode(track)?;
-        let sql=format!("{} AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$6 AND owner_node_id=$7 AND fence=$8 AND revision=$9 AND expires_at_ms=$10)",super::downloaded_subtitles::ADD);
+        use super::downloaded_subtitles::ADD_DOWNLOADED_SUBTITLE;
+        let sql = format!("{ADD_DOWNLOADED_SUBTITLE} AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$6 AND owner_node_id=$7 AND fence=$8 AND revision=$9 AND expires_at_ms=$10)");
         let counts = self
             .atomic_publication(
                 lease,

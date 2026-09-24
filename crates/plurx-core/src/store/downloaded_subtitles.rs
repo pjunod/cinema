@@ -63,7 +63,7 @@ pub(crate) const CANDIDATES: &str = "SELECT id FROM files WHERE id > $1
 
 // The update is atomic on both backends: duplicate downloads and concurrent
 // additions cannot lose another track. A new source revision starts a new list.
-pub(crate) const ADD: &str = "WITH caption(file_id, source_size, source_mtime, payload, provider_id)
+pub(crate) const ADD_DOWNLOADED_SUBTITLE: &str = "WITH caption(file_id, source_size, source_mtime, payload, provider_id)
     AS (VALUES ($1, $2, $3, $4, $5))
     UPDATE files SET downloaded_subtitles = json_insert(
     CASE WHEN json_extract(downloaded_subtitles, '$[0].source_size') = (SELECT source_size FROM caption)

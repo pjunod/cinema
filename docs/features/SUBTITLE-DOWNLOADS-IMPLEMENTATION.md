@@ -126,3 +126,12 @@ One independent adversarial review found two P2 issues. Both are addressed:
 No second review was requested. Current main was integrated before the final
 local checks. The initial 104-test receipt above predates the added hash test;
 the final subtitle filter contains 105 tests.
+
+The broader pre-promotion checks also passed: 303 core storage unit tests,
+242 validation tests (one skipped), and 500 local operations tests. Three
+unchanged operations fixtures assume Linux (`/bin/true` signing stubs and
+Linux timeout behavior) and were excluded on macOS; the required Linux
+promotion lane runs the full operations suite. The legacy SQLite downgrade
+fixtures now remove the new caption column, the placeholder census resolves
+the complete caption publication statement, and the ownership inventory names
+the new shutdown-owned job, bounded hash worker, HTTP fixtures and timers.

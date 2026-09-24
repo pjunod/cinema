@@ -1805,7 +1805,7 @@ impl MediaStore for SqliteStore {
         let track = track.clone();
         self.with_conn(move |conn| {
             let changed = conn.execute(
-                crate::store::downloaded_subtitles::ADD,
+                crate::store::downloaded_subtitles::ADD_DOWNLOADED_SUBTITLE,
                 params![
                     file_id,
                     track.source_size,
