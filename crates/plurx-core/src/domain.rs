@@ -149,6 +149,20 @@ impl ItemKind {
             _ => None,
         }
     }
+
+    /// Whether an item of this kind carries a `resolution` — the best file
+    /// height, which the grid badges and the `resolution` sort ranks by.
+    ///
+    /// Movies and home videos only. A photo is probed and has a real height,
+    /// but a pixel count on a still is not the playback resolution the badge
+    /// and the sort are about, and no client badges one. The library
+    /// `ORDER BY` (`store::item_sort_order_by`) ranks every other kind at -1,
+    /// the same key a client merging on the DTO reads from an absent
+    /// `resolution`; the two must name the same kinds, and a unit test beside
+    /// the clause holds them together.
+    pub fn carries_resolution(self) -> bool {
+        matches!(self, ItemKind::Movie | ItemKind::Video)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

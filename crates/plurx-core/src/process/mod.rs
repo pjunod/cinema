@@ -1,6 +1,8 @@
-//! Cross-platform control of an owned, unreaped child process.
+//! Cross-platform control of an owned, unreaped child process, and the
+//! daemon's own inherited limits on how many descriptors it may hold.
 
 pub mod bounded;
+pub mod rlimit;
 
 use std::io;
 

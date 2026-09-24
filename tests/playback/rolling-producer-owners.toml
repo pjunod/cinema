@@ -1958,7 +1958,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # takes a statvfs, awaited to completion inside the request. It owns no
 # producer, no process and no timer; it exists so two synchronous filesystem
 # reads do not run on the async runtime.
-expected_occurrences = 574
+# 574 -> 575 (measured) with the #461 review's P1 fix: one test-only
+# `tokio::spawn` in
+# `http::tests::a_fully_delivered_body_counts_complete_over_a_real_connection_whatever_its_framing`,
+# running `axum::serve` on a 127.0.0.1:0 listener so the regression test goes
+# through a real hyper connection, which is the only place the defect exists
+# (`oneshot` always polls a body to its end). The task owns the listener and
+# nothing else; it ends with the test's runtime. No timer, no process, no
+# producer.
+expected_occurrences = 575
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2615,7 +2623,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # bounding the one-frame ffmpeg child (15 s). Both are request-scoped waits
 # that end with the request; neither selects a recipe, publishes anything
 # or starts a rolling producer.
-expected_occurrences = 877
+# 877 -> 878 (measured on the merged tree) with C-08 M1, merged over main's
+# 868 -> 877: one test-only `tokio::time::sleep(100 ms)` inside
+# `streaming_test_handler`, the fixture body that the HTTP observability tests
+# stream three frames out of. It exists so the test can tell response-header
+# latency from body delivery — the response head returns at once and the body
+# takes 300 ms — and it is exactly the distinction F-core-12 asked for, so the
+# wait is the assertion rather than a wait for somebody else's work. It sits
+# inside `mod tests`, it is bounded, and it owns no producer, no process, no
+# child and no recovery decision.
+expected_occurrences = 878
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2797,7 +2814,32 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # `kill_on_drop`, an output cap (2 MiB) and a 15 s timeout. It runs only for
 # the chapter a watch page asked for, two at a time behind a semaphore, and
 # nothing owns it beyond the request's await.
-expected_occurrences = 152
+# 152 -> 154 with P-02 (#457), measured by zeroing this row: two
+# `std::process::Command::new` in `crates/plurx-core/src/process/rlimit.rs`'s
+# `#[cfg(all(test, unix))]` module, both run to completion by `.output()`
+# before the test asserts. One re-execs the test binary as
+# `process::rlimit::tests::child_main`. It lowers only its own soft
+# `RLIMIT_NOFILE` so that the shared test process is untouched, prints one
+# line and exits. The branch added it without this review. The other is
+# `/usr/sbin/sysctl -n kern.maxfilesperproc`, the macOS-only oracle that the
+# review fix compares the clamped raise against, and it is reached only under
+# `cfg!(target_vendor = "apple")`. Neither is a producer, neither outlives
+# its statement, and neither is in a shipped binary.
+# 152 -> 153 (measured) with the #461 review's P2 fix: one test-only
+# `std::process::Command::new(std::env::current_exe())` in
+# `panics::tests::run_in_a_child`, re-running a single named test of this
+# same test binary (`--exact`, one thread) in a child process. Two tests use
+# it because the property they pin is what a panic does to the *process* —
+# one expects the child to abort, which cannot be observed from inside the
+# process that aborts. The child is this binary, runs one test and exits; it
+# is waited to completion by `.output()` before the test continues. No
+# producer, no `ffmpeg`, nothing outlives the test.
+# 155 on the architecture-review wave-3 integration tree, measured by zeroing
+# this row after merging both: main's 152, plus P-02's two test-only children
+# in `plurx-core/src/process/rlimit.rs` and C-08's one in
+# `plurxd/src/panics.rs`, each reviewed above. Disjoint files; the merge
+# itself added no occurrence.
+expected_occurrences = 155
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3074,7 +3116,63 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `subtitle_ride_along::run_ffmpeg`, which spawns, drains and reaps the
 # self-test's child in one await under the 20 s timeout; `kill_on_drop` covers
 # the timeout.
-expected_occurrences = 350
+# 350 -> 352 with P-02 (#457), measured by zeroing this row: the `.output()`
+# on each of the two test-only children in
+# `crates/plurx-core/src/process/rlimit.rs` that are described under
+# `process-command-construction` above (the `child_main` re-exec and the
+# macOS `sysctl` oracle). They are the same two children, counted once in
+# each sentinel, and each is spawned, drained and reaped in one call.
+# +7 with C-07's M0 census (branch base 343 -> 350, merged over main's
+# Fix C / #456 count of 350 and re-measured on the merged tree): seven
+# `.status(` occurrences across six lines, every one of them `axum::response::Response::status()` on an
+# in-process response, and **not one of them launches a child**. This
+# sentinel's pattern counts `.spawn(`, `.output(` and `.status(` together and
+# `Response::status()` is the third spelling; no `Command` is constructed
+# anywhere on this branch and `process-command-construction` is unchanged.
+# Two are production, and both are the census itself: `plex_facade_census`
+# reads the status of the response the façade already produced to pick the
+# outcome cell, and `root_dispatch` does the same on its Plex branch. Neither
+# can change the response; they are reads of HTTP metadata after the fact.
+# The other five are assertions in the census tests -- a 401 on a tokenless
+# façade route, a 200 on `/identity`, a browser root, and the two arms of the
+# Plex root's accepted answers. All in-process; they create no task, timer,
+# process or rolling-producer owner.
+# 359 on the architecture-review wave-3 integration tree, measured by zeroing
+# this row after merging both: main's 350, plus P-02's two test-only
+# `.output()` children and C-07's seven in-process `Response::status()`
+# reads, each reviewed above. The two sets are disjoint files
+# (`plurx-core/src/process/rlimit.rs` against `plurxd/src/http/mod.rs`), so
+# neither review changes; no occurrence was added by the merge itself.
+# 350 -> 357 (measured on the merged tree) with C-08 M1/M2/M3, merged over
+# main's 343 -> 350: seven `.status(` reads, every one of them
+# `axum::response::Response::status()` on an in-process response, and **not one
+# of them launches a child**. This sentinel's pattern counts `.spawn(`,
+# `.output(` and `.status(` together, and `Response::status()` is the third
+# spelling; no `Command` is constructed anywhere on this branch, and
+# `process-command-construction` is unchanged by it.
+# One is production: `http_request_metrics` reads the response's status to pick
+# the counter cell for `plurx_http_requests_total{route_group,method,status}`
+# and to decide whether the request earns a 5xx access line. It is a read of
+# HTTP metadata on a response the inner layers already produced; it starts
+# nothing, owns nothing, and cannot change the response.
+# The other six are assertions in the new observability tests — a 200 on a
+# matched route, a 404 on an unmatched one, a 200 whose body is then abandoned,
+# a 500, a second 200 beside it, and a 503 in the refusal-storm test. Each
+# asserts the wire answer the middleware saw, which is the only way to pin the
+# status classification the counter depends on. All in-process; they create no
+# task, timer, process or rolling-producer owner.
+# 357 -> 358 (measured) with the #461 review's P2 fix: the `.output()` in
+# `panics::tests::run_in_a_child`, the same test-only launch described in
+# `process-command-construction` above — this test binary re-run on one named
+# test, waited to completion before its test continues.
+# 367 on the architecture-review wave-3 integration tree, measured by zeroing
+# this row after merging all three: main's 350, plus P-02's two `.output()`
+# calls, C-07's seven `Response::status()` reads and C-08's seven
+# `Response::status()` reads and one `.output()`, each reviewed above. The
+# C-07 and C-08 reads are different call sites in `plurxd/src/http/mod.rs`
+# (the façade census against the request-metrics middleware and their own
+# tests); the merge itself added no occurrence.
+expected_occurrences = 367
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

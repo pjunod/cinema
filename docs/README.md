@@ -316,6 +316,7 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md](clients/NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md) | The build plan the adaptive-quality design produced: settle the four policy disagreements in the web first, type the reopen cause on the wire only in the change that first sends one, add the Swift and JVM runners of the shared fixture, then one adapter at a time — each one disabled until its own shaped-network trace beats its own baseline. | open |
 | [NATIVE-ADAPTIVE-QUALITY-DESIGN.md](clients/NATIVE-ADAPTIVE-QUALITY-DESIGN.md) | Implementation plan from the 2026-09-20 architecture review: what adaptive quality on the Apple and Android clients would have to be — one shared policy, five named kinds of evidence, and the shaped-network trace that would let it be switched on. | open |
 | [WEB-PLAYER-RECOVERY-AND-LOCAL-SEEK.md](clients/WEB-PLAYER-RECOVERY-AND-LOCAL-SEEK.md) | Implementation plan from the 2026-09-20 architecture review: hls.js worker on, `recoverMediaError` inside the existing attempt fences, a global error reporter with redaction, and local seeking for rolling HLS within the retained published range. | open |
 | [WEB-VOD-SEEK-MISSING-MEDIA-RCA-AND-FIX.md](clients/WEB-VOD-SEEK-MISSING-MEDIA-RCA-AND-FIX.md) | Why an unlanded Safari VOD seek hit the 8 s stall rule before its fragment retry, and the reviewed 20 s local-seek fallback proposal. | open |

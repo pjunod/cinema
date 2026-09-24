@@ -1,0 +1,28 @@
+version = 1
+
+[[coverage]]
+commits = ["7611d398"]
+points = ["server.api"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+plurx_http_bodies_total{outcome} counted every fully delivered fixed-length
+body as `aborted`, which on the playback group is every direct play range
+and HLS segment: hyper's h1 dispatcher drops a Content-Length body unpolled
+once the declared bytes are written, and a stream body is not
+is_end_stream() until polled to None. MeasuredBody now counts yielded data
+bytes against the declared length (header, else exact size hint; zero for
+HEAD/1xx/204/304) and classifies a drop as complete once it is reached.
+
+`http::tests::a_fully_delivered_body_counts_complete_over_a_real_connection_whatever_its_framing`
+serves the metrics layer through a real axum::serve listener and reads over
+a raw HTTP/1.1 socket: four 5-byte stream frames sent chunked and with
+content-length: 20 must be (complete, aborted) = (2, 0), and (3, 0) after a
+HEAD. With delivered_everything() reverted to is_end_stream() alone it reads
+(1, 1), the review's reproduction; with only the HEAD arm of
+declared_body_length reverted it reads (2, 1). Both reverts were run on
+2026-09-24.
+`http::tests::a_fixed_length_body_is_complete_at_its_declared_length_and_aborted_short_of_it`
+drops a body after 5 of 20 declared bytes (aborted) and after 20 of 20
+without polling to None (complete); reverted it reads (0, 2) instead of
+(1, 1). Run `cargo test -p plurxd http::tests::a_f`.
+"""
