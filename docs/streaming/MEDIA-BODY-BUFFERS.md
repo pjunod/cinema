@@ -1,7 +1,8 @@
 # Media body buffers — size the read, then, separately, the acknowledgement
 
-**Status:** M1 implemented and its sole adversarial review dispositioned;
-lab4 acceptance (§5.1, both groups) and M2 pending ·
+**Status:** M1 merged. §5.1 before/after measured 2026-09-24 (§5.1.1):
+throughput and p99 met, both peak-RSS figures grew, Decision 1 is waiting on
+Paul. M2 pending ·
 **Executes:** §2.4, C1, F-core-1, F-stream-8, §5.1 item 3 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @
@@ -331,7 +332,7 @@ kill "$sampler"; wait "$sampler" || true
 # 256 KiB is proportionate; only this group measures the case where the
 # reservation is entirely overhead, scaled by request count. Decision 1
 # (§7) is settled by both, not by group A alone.
-PHOTO=<photo id whose original is a few hundred KiB or less>
+PHOTO=<item id of a photo whose original is a few hundred KiB or less>
 ( while sleep 1; do awk '/VmRSS/{print systime(), $2}' /proc/$PID/status; done ) &
 sampler=$!
 for round in $(seq 20); do
@@ -341,7 +342,7 @@ for round in $(seq 20); do
       "$BASE/api/v1/files/$FILE/direct" &
     pids+=("$!")
     curl -s -o /dev/null -H "Authorization: Bearer $TOKEN" \
-      "$BASE/api/v1/photos/$PHOTO/original" &
+      "$BASE/api/v1/items/$PHOTO/photo" &
     pids+=("$!")
   done
   for curl_pid in "${pids[@]}"; do wait "$curl_pid"; done
@@ -382,6 +383,55 @@ the small-object paths stop sharing the constant.
 
 Acceptance: run the four focused commands in §6, then `make unit`; record the
 four lab4 measurement groups in the PR body.
+
+#### 5.1.1 Measured 2026-09-24
+
+Run on nuc3, not lab4, with three release builds of `main` @ `886fc8bd4`.
+The builds differ only in `MEDIA_BODY_READ_BUFFER`: 4 KiB (which is the
+pre-M1 behaviour at the measured sites), 128 KiB and 256 KiB. There were
+three trials in rotated order, every group ran in a fresh process, media was
+page-cache warm, and client and server shared loopback. nuc4 was not usable
+for this: it already runs an image that contains M1 (`99d4abf8c`), so it has
+no "before" side, and it is a production node whose load nothing here
+controls. The host was a shared build host with a load average of 1 to 9,
+not the idle lab4 this section asks for. Peak RSS is `VmHWM` after a
+`clear_refs` reset, because group A finishes in under a second and the 1 Hz
+sampler never recorded a sample. Method, conditions, the harness, every raw
+number and the HLS diagnostic are in
+[media-body-buffers-m1-measurement-2026-09-24.md](../evidence/media-body-buffers-m1-measurement-2026-09-24.md).
+Ranges are over the three trials:
+
+| Figure | 4 KiB (before) | 128 KiB | 256 KiB (merged) |
+|---|---|---|---|
+| Single-viewer direct play, MB/s (9 runs, median) | 373 | 3341 | 3172 |
+| Group A, 8 large viewers: RSS growth, MiB | 1.0–1.3 | 9.3–10.9 | 14.3–16.1 |
+| Group B, 128 small requests per round: RSS growth, MiB (6 runs, median) | 44.8 | 41.9 | 53.1 |
+| HLS 200 GETs p50 / p95 / p99, ms | 24–25 / 62–65 / 65–72 | 48–50 / 51–58 / 51–60 | 48–50 / 50–57 / 51–58 |
+| Peak threads, group A / group B | 46–47 / 60–69 | 35–40 / 38–43 | 29–35 / 37–38 |
+
+Against the acceptance above:
+
+- All five figures are reported.
+- **p99 did not get worse.** It improved by 7 to 21 ms.
+- **Both peak-RSS figures got worse**, so M1 is **not accepted as the
+  acceptance is written**.
+- Group A grew about 1.8 MiB per concurrent large body at 256 KiB, over the
+  4 KiB build. That is above the ≈1 MiB budget in §2.1. 128 KiB grew about
+  1.1 MiB per body.
+- **Group B's veto is not reached.** Group B memory is mostly per-connection
+  cost, 33 to 59 MiB even at 4 KiB. At matched concurrency, the worst run
+  put 256 KiB about 0.27 MiB per in-flight request above 4 KiB, about half
+  the veto line.
+- **HLS p50 doubled.** Per-segment timing shows a bimodal ~50 ms mode, and
+  the diagnostic records one hypothesis for it, not yet tested: Nagle and
+  delayed ACK, since `plurxd` never sets `TCP_NODELAY`. It is loopback-only
+  evidence and not a §5.1 acceptance figure.
+
+128 KiB matches 256 KiB on throughput and latency within run-to-run spread,
+at about two thirds of the group A growth. **Decision 1 (§7) is Paul's to
+make on these numbers.** The choices are to keep 256 KiB and restate the
+memory acceptance as a budget rather than "not worse", or to drop to
+128 KiB. This record does neither.
 
 ### 5.2 M2 — acknowledgement batching
 
@@ -436,7 +486,10 @@ lab4 with HLS p99 not worse than M1's.
 1. **Use 256 KiB provisionally.** It matches the two pre-existing file-backed
    paths and reduces the default read count by 64×. The concurrent-memory
    measurement still decides whether this PR keeps 256 KiB or reduces it to
-   128 KiB before M1 is accepted.
+   128 KiB before M1 is accepted. *Measured 2026-09-24 (§5.1.1): both
+   sizes give the same throughput and latency. 256 KiB costs about 1.8 MiB
+   per concurrent large body against about 1.1 MiB at 128 KiB. Group B's
+   veto was not reached. Undecided: waiting on Paul.*
 2. **Use 1 MiB/s for the slow-read rate.** At that rate a roughly 20 MiB 4K
    segment already takes 20 seconds to read, close to the 30-second no-progress
    budget. The boundary test makes the intended classification explicit;
@@ -479,3 +532,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | `ed98c6ab` / [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Shared 256 KiB capacity at all six file-backed readers; rate-normalized the slow-read signal. Pinned 1.97.1 check and six focused regressions passed. Needs: lab4 before/after throughput, peak RSS/thread count, HLS p50/p95/p99, and the repaired fast-lane `make unit` evidence. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | pending in [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Needs: M1 candidate deployed on media1 for one week with no `segment_delivery` regression, then the §5.1 lab4 protocol re-run. No acknowledgement-batching code has been written. |
 | 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 review disposition | [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Addressed the sole adversarial review. The 256 KiB read had carried the pump's delivery-proof granularity up with it; `MEDIA_BODY_ACK_GRANULARITY = 4 KiB` now pins the proof where it was (§2.2 item 1, §3.1, Decision 5) and the three delivery-accounting tests that failed at the merged head pass again for that reason. Added `a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units` and `a_large_read_at_the_event_boundary_emits_no_storage_stall_warning`; §5.1 now measures small-object concurrency (group B) as well as large. Still needs: the lab4 groups A and B before/after, and `make unit`. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 §5.1 measurement | evidence PR (this row's commit) | Before/after measured on nuc3 with three release builds of `886fc8bd4`, identical except `MEDIA_BODY_READ_BUFFER` at 4/128/256 KiB, and three rotated trials. nuc4 was only inspected: it already runs M1 (`99d4abf8c`), so it has no before side, and it carries production load. Results (§5.1.1, raw record in `docs/evidence/media-body-buffers-m1-measurement-2026-09-24.md`): single-viewer direct play 373 → 3172 MB/s median; HLS p99 65–72 → 51–58 ms (met) and p50 24–25 → 48–50 ms; group A RSS growth 1.0–1.3 → 14.3–16.1 MiB; group B median 44.8 → 53.1 MiB, with the veto not reached. Acceptance **not met as written**: both peak-RSS figures grew. Decision 1 (256 or 128 KiB) is waiting on Paul. The §5.1 photo URL is now the real route, `/api/v1/items/{id}/photo`. `make unit`: #454's integration record ran its `cargo test --workspace --exclude plurx-cluster-check` half on the integrated tree (4051 passed, 0 failed). Its `vodencode-restart-check` half is not recorded there. Still owed: Paul's Decision 1, a lab4 re-run only if the quiet-host condition is wanted, and M2's media1 week. |
