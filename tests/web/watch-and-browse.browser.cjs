@@ -109,6 +109,15 @@ const data=id=>id==='10'?{item:show,files:[],children:[season],ancestors:[]}:id=
   await page.evaluate(()=>reportProgress(PLAYER.fileId,false,PLAYER));
   assert.ok(posts.some(p=>p.id==='2'&&p.position_ms>=14000));
   await page.evaluate(()=>playNextEpisode());await page.waitForFunction(()=>WATCH.accepted==='3');
+  // The final save at Close is a zero-position beat until this episode has
+  // played, and a zero beat needs a witness: the current attachment must have
+  // reached a timeline (readyState >= 1) or reportProgress suppresses it, so
+  // the resume point of an unplayable start is never overwritten with 0.
+  // A failed preparation below swaps the element under this player, so the
+  // witness has to be recorded on the player now, by a beat taken while the
+  // element is ready — the same beat the periodic heartbeat would take.
+  await page.waitForFunction(()=>document.getElementById('video').readyState>=1);
+  await page.evaluate(()=>reportProgress(PLAYER.fileId,false,PLAYER));
   failedFile='104';await page.evaluate(()=>watchPlayEpisode('4'));
   assert.equal(await page.evaluate(()=>WATCH.accepted),'3');assert.equal(new URL(page.url()).hash,'#/item/3');
   failedFile=null;

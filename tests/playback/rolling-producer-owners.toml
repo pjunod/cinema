@@ -2692,7 +2692,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and one 500 ms settling sleep in the start-path cases, three `timeout`s
 # bounding a start's answer, and the busy-tuner fixture's pacing `sleep` in
 # `live_tv::dvr::tests`. Each bounds one test wait.
-expected_occurrences = 900
+# +1 for `transcode/tests/chunk_05.rs`'s `placeholder_source`, test-only:
+# the one ffmpeg that encodes the transcode suite's placeholder file (a real
+# 4K HEVC source, so the sessions under test hold a child that reads instead
+# of one that exits before registration). Once per host, `kill_on_drop`,
+# bounded by a 120 s `tokio::time::timeout`, awaited to completion through
+# `output()`. It owns no producer and runs under `#[cfg(test)]` only.
+expected_occurrences = 901
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2906,7 +2912,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # arguments and cleared environment as `live_ffmpeg_command_for_input`).
 # Each is awaited to completion under a 180 s timeout with `kill_on_drop`;
 # none is a producer and none is in a shipped binary.
-expected_occurrences = 160
+# +1 for `transcode/tests/chunk_05.rs`'s `placeholder_source`, test-only:
+# the one ffmpeg that encodes the transcode suite's placeholder file (a real
+# 4K HEVC source, so the sessions under test hold a child that reads instead
+# of one that exits before registration). Once per host, `kill_on_drop`,
+# bounded by a 120 s `tokio::time::timeout`, awaited to completion through
+# `output()`. It owns no producer and runs under `#[cfg(test)]` only.
+expected_occurrences = 161
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3243,7 +3255,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # described under process-command-construction -- `media_command`'s
 # `.output()` and `run_live_graph`'s `.spawn()` -- both test-only and
 # awaited to completion.
-expected_occurrences = 369
+# +1 for `transcode/tests/chunk_05.rs`'s `placeholder_source`, test-only:
+# the one ffmpeg that encodes the transcode suite's placeholder file (a real
+# 4K HEVC source, so the sessions under test hold a child that reads instead
+# of one that exits before registration). Once per host, `kill_on_drop`,
+# bounded by a 120 s `tokio::time::timeout`, awaited to completion through
+# `output()`. It owns no producer and runs under `#[cfg(test)]` only.
+expected_occurrences = 370
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3480,7 +3498,13 @@ pattern = "kill_on_drop\\s*\\("
 # `live_tv::caption_audit_tests`, so an FFmpeg child whose 180 s timeout
 # fires, or whose test panics, is killed rather than left holding a
 # hardware encoder the next audit run needs.
-expected_occurrences = 84
+# +1 for `transcode/tests/chunk_05.rs`'s `placeholder_source`, test-only:
+# the one ffmpeg that encodes the transcode suite's placeholder file (a real
+# 4K HEVC source, so the sessions under test hold a child that reads instead
+# of one that exits before registration). Once per host, `kill_on_drop`,
+# bounded by a 120 s `tokio::time::timeout`, awaited to completion through
+# `output()`. It owns no producer and runs under `#[cfg(test)]` only.
+expected_occurrences = 85
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
