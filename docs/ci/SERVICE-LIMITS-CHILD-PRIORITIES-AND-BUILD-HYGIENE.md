@@ -111,6 +111,14 @@ closure performs only descriptor syscalls" (`:83`). That is the model for
 any new `pre_exec`. `grep -rn "setpriority\|ioprio\|oom_score_adj\|setrlimit"
 crates/` in non-test source: none.
 
+**Corrected 2026-09-24 (review of PR #457).** Two claims above were already
+false when this plan was written. `inherit_file_descriptors` is one of five
+production `pre_exec` registrations (`ffmpeg.rs:131`, `fragindex.rs:1754`,
+`dv_disk.rs:1578` and `:5811`, `decode_facts.rs:2472`), and not every ffmpeg
+reaches `spawn_job_owned`: `plurx-core` spawns its own. §3.2.1 has the
+survey. `setrlimit` now has one production caller, §3.3's
+`process::rlimit`.
+
 ### 2.3 CI ffmpeg
 
 `ci.yml:267` `check` runs on `[…, high-cpu, ffmpeg-6]` and calls
@@ -338,7 +346,8 @@ its `OOMScoreAdjust` companion row in §3.1 is implemented.
 **The wiring §3.2 prescribes does not cover the tree.** §3.2 says to add the
 call "at each `Command::new(ffmpeg_bin())` site" and to have "a test [grep]
 that every `ffmpeg_bin()` command passes through it". A survey of every
-`Command::new(` in `crates/plurxd/src` outside test modules (2026-09-23)
+`Command::new(` in `crates/plurxd/src` outside test modules (2026-09-23; it
+did not look at `plurx-core`, which the correction below does)
 finds fourteen sites that name `ffmpeg_bin()` literally — in `ffmpeg.rs`,
 `subtitles.rs`, `fragindex.rs`, `pgs_overlay.rs` and `pipeprobe.rs` — and
 these, which spawn ffmpeg through a value instead:
@@ -356,14 +365,82 @@ A test keyed on the literal `ffmpeg_bin()` would be green while the producer
 that carries realtime playback spawns unadjusted children. That is a test
 which proves nothing, and this campaign does not land those.
 
-**The seam that does cover the tree is the one the instruction protects.**
-Every child in the tree reaches `plurx_core::process::spawn_job_owned`,
-directly or through `output_job_owned` / `status_job_owned` / `bounded`. One
-`pre_exec` registration there would be complete by construction and provable
-by one test. It would also mean editing the shared, cross-platform,
-audited supervision contract, and applying an OOM preference to every child
-the daemon owns rather than to ffmpeg specifically — a widening the plan did
-not ask for. Both are decisions above an executing session's pay grade.
+**Correction (2026-09-24, review of #457): no seam covers the tree today.**
+The first version of this section said that every child reaches
+`plurx_core::process::spawn_job_owned`, so one `pre_exec` registration there
+"would be complete by construction and provable by one test". That was
+false. Its survey covered only `crates/plurxd/src`, and it missed a spawn
+there too. Re-surveyed on the branch after merging main, across
+`crates/plurx-core/src` and `crates/plurxd/src` (every production
+`Command::new(`, then every production `.spawn()` / `.output()` /
+`.status()` on a command, each traced to the call that starts the child),
+these production children never reach `spawn_job_owned`:
+
+| Site | Child | Started by |
+|---|---|---|
+| `plurx-core` `metadata/local.rs:402` (`generate_thumb_with`, from `:365` and `:812`) | ffmpeg: library-scan thumbnail extraction | `cmd.spawn()` `:419` |
+| `plurx-core` `metadata/book.rs:678` (`extract_attached_picture`, from `:199` and `:610`) | ffmpeg: embedded cover extraction | `.spawn()` `:693` |
+| `plurx-core` `transcode/encoder.rs:781` (`detect_video_decoders`) | ffmpeg: decoder inventory | `.output()` `:783` |
+| `plurx-core` `transcode/encoder.rs:886` (`try_encode`) | ffmpeg: test-encode validation | `.output()` `:891` |
+| `plurx-core` `transcode/encoder.rs:951` (`try_encode_yielding`) | ffmpeg: test-encode validation | `command.spawn()` `:958` |
+| `plurx-core` `transcode/encoder.rs:1184` (`detect_encoders`) | ffmpeg: encoder inventory | `.output()` `:1186` |
+| `plurx-core` `transcode/decoder_inventory.rs:376`, `:451`, `:509` (`advertised_backends`, `probe_clip`, `probe_decode`) | ffmpeg: decoder inventory probes | `.output()` `:379`, `:470`, `:526`, under the file's own timeout `bounded()` (`:483`), not `process::bounded` |
+| `plurx-core` `scan/probe.rs:177` (`probe_reporter_identity`) | `ffprobe -version` | `.spawn()` `:183` |
+| `plurxd` `media_pool.rs:910` (`spawn_library_root_probe`) | `find`: library-root reachability probe | `.spawn()` `:918` |
+| `plurxd` `subtitle_ride_along.rs:1755` (`run_ffmpeg`; arrived with the main merge) | ffmpeg: PGS ride-along self-test | `command.output()` `:1763` under `tokio::time::timeout` |
+| `plurxd` `decode_facts.rs:2314` (`spawn_configured_probe`, from `:3112`, `:3868` and `:4038`) | the held-source decode-fact probes | `command.spawn()` `:2319` inside `spawn_blocking` |
+
+Every other production `Command::new(` in the two crates does reach
+`spawn_job_owned`: directly, through `output_job_owned` /
+`status_job_owned`, through `process::bounded::output`, through `ffmpeg.rs`'s
+`bounded_command_output*` (`:2383`) or `BoundedDiagnosticChild` (`:194`,
+`:214`), or through `dv_disk.rs`'s `run_tool_command_with_timeout`
+(`:5885`). The three builders that return a `Command` (`live_tv.rs:6071`,
+`http/chapter_thumbs.rs:339`, `http/images.rs:855`) are spawned by job-owned
+callers. `plurx-pgs` and `plurx-compat-plex` spawn nothing in production, and
+`plurx-cluster-check` is a separate harness binary, not a daemon child.
+
+The rows above are exactly the background ffmpeg work that child
+priorities exist to push below playback: scan thumbnails, cover extraction,
+encoder and decoder inventory, and test encodes. So **neither option is
+complete as it stands**:
+
+- **(a) a call at each `Command::new(ffmpeg_bin())` site plus a grep test**
+  misses the value-spawned producers in the first table, as above.
+- **(b) one `pre_exec` inside `spawn_job_owned`** misses every row of this
+  table. Its one test would be green while scan thumbnails and encoder
+  probes run at the daemon's priority and `oom_score_adj`, which is the same
+  defect that rules out (a).
+
+Each option therefore carries its own migration list. (b) must first move
+the rows above onto `spawn_job_owned` or an equivalent owned spawn, and needs
+an audit test that fails on any production `.spawn()` / `.output()` /
+`.status()` outside `process/`. The existing
+`process::tests::output_job_owned_call_sites_are_the_audited_set` has that
+shape. (a) needs every literal and value-spawned ffmpeg site in both crates,
+including the `plurx-core` rows. The choice between them remains the
+decision this section flags, together with whether an OOM preference should
+reach non-ffmpeg children such as `find` at all. This PR does not take it.
+
+**`pre_exec` composition is answered.** std's `CommandExt::pre_exec` appends
+each closure, and the child runs every registered closure in registration
+order before `exec` ("multiple closures can be registered and they will be
+called in order of their registration"). tokio's `Command::pre_exec`
+delegates to std. This was checked on nuc3 with rustc 1.97.1: two closures
+on one `Command` printed `first` then `second`. A second registration
+composes with `inherit_file_descriptors` and does not replace it. Two things
+follow for whichever seam is chosen:
+
+- There are five production `pre_exec` registrations, not one (§2.2's
+  correction lists them).
+- Order matters where a caller's closure does not return. In production,
+  `decode_facts.rs:2472` installs seccomp filters and then execs the probe
+  from inside the closure (`execute_held_probe`, `SYS_execveat`, `:2395`).
+  A closure registered after it would never run. That is where a
+  registration inside `spawn_job_owned` would land, because callers
+  configure the command first. A closure registered before it would run
+  ahead of the seccomp filter. That path does not reach `spawn_job_owned`
+  today anyway (the last row above).
 
 **Independently, §3.2's own acceptance is out of reach here.** The `nice` and
 `ioprio` values are explicitly proposals that §3.2's realtime cadence
@@ -378,12 +455,11 @@ every ffmpeg exactly as protected as the daemon, which inverts the intent.
 
 What the next session needs, in order:
 
-1. A decision on the seam — §4.1's spawn unification first, or an accepted
-   `pre_exec` inside `spawn_job_owned` with its audit test.
-2. Whether a second `pre_exec` registration on one `Command` composes with
-   `inherit_file_descriptors` or replaces it. `ffmpeg.rs:84-115` is the only
-   `pre_exec` in the tree today, so the tree does not answer this; establish
-   it with a test before relying on either answer.
+1. A decision on the seam: (a) with its full site list across both crates;
+   (b) with the rows above migrated first and an audit test over every
+   production spawn; or §4.1's spawn unification first.
+2. For (b), where the registration goes relative to a caller's own
+   `pre_exec` (the decode-facts path above), pinned by a test.
 3. §3.2's measurement, on a host running real sessions.
 
 ### 3.3 Raise soft `NOFILE` at startup
@@ -414,6 +490,33 @@ both deliberate:
   and as an independent `getrlimit` reads it back, and it fails loudly rather
   than vacuously on a host whose hard limit is too low to demonstrate
   anything.
+
+**Corrected 2026-09-24 (review of #457): macOS.** As first landed, the raise
+always asked for `rlim_cur = rlim_max`. launchd gives a LaunchAgent such as
+`deploy/com.plurx.plurxd.plist` `256` soft against an **unlimited** hard
+limit, and macOS enforces `kern.maxfilesperproc` whatever the hard limit
+says. The review reasoned from `setrlimit(2)`'s COMPATIBILITY note that
+`rlim_cur = RLIM_INFINITY` is refused with `EINVAL`, leaving the daemon at 256
+with a WARN on every boot and the unit test red. On the lab Mac `mba`
+(macOS 27.0; soft `256`, hard `unlimited`, `kern.maxfilesperproc` `122880`)
+that does **not** reproduce. `setrlimit` accepts the infinite soft limit,
+`getrlimit` reports it back, the kernel still stops the process at 122877
+open descriptors with `EMFILE`, and the unfixed test passes. The defect on
+this macOS is therefore a daemon that logs `soft 256 -> 9223372036854775807`
+for a limit it does not have. On the older versions the man page describes,
+the defect is the one the review names; that was not run.
+
+On either behaviour the target should be the per-process ceiling. The
+raise now clamps it to `kern.maxfilesperproc` on Apple targets, as Go's
+runtime does, and falls back to `OPEN_MAX` (10240) if the sysctl cannot be
+read. The Linux behaviour is unchanged: Linux caps the hard limit at
+`fs.nr_open`, so a Linux hard limit is always an acceptable soft limit. The
+clamp is a pure function (`raised_soft_limit`), pinned on every host by
+`an_unlimited_hard_limit_is_clamped_to_the_platform_ceiling`. The re-exec
+test, now `the_soft_limit_is_raised_as_far_as_the_platform_allows`, compares
+against `min(hard, sysctl -n kern.maxfilesperproc)` on macOS and against the
+hard limit elsewhere. On `mba` it fails when the Apple ceiling is removed
+and passes with it; the disposition comment on #457 has the output.
 
 The `LimitNOFILE` / `ulimits.nofile` row in §3.1 did **not** land with it, and
 deliberately: the observed hard limit is already 524288, so the raise takes
@@ -529,7 +632,12 @@ manifest bytes `--raw` returns. `tests/operations/test_contracts.py`'s
 `test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` pins the
 drift report onto `rust-audit.yml`'s weekly `scheduled` job, where
 `scripts/image-base-drift` prints each pinned digest beside the current
-upstream one under `continue-on-error`. That step has **not** been observed
+upstream one under `continue-on-error` and `if: ${{ !cancelled() }}`. The
+condition was added after review: `continue-on-error` only keeps the step's
+own failure from failing the job and does not make it run after an earlier
+step failed, so without the condition the report was skipped in every week
+the audit it rides on went red. The contract test now asserts it. That step
+has **not** been observed
 running on a CI runner; it is non-gating by construction, but the claim here
 is only that it is wired, not that it has reported.
 
@@ -778,3 +886,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 (digest half) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | Both `Dockerfile` bases pinned to their index digests, read on nuc3 and each verified against the SHA-256 of `imagetools inspect --raw`. `test_dockerfile_base_images_are_pinned_by_digest` fails on the unpinned Dockerfile (`[('rust:1-bookworm', 'build')] != []`) and `test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` fails with the workflow step removed. `scripts/image-base-drift` exits 1 on an unpinned base. The release profile is untouched; the drift step has not been observed on a runner. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — **flagged, not implemented** | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | §3.2.1. §3.2's prescribed wiring (each `Command::new(ffmpeg_bin())` site plus a grep test) does not reach the producers that carry realtime playback, which spawn through a value; the seam that does is `spawn_job_owned`, which the plan's standing instruction says to stop and flag rather than change. §3.2's realtime measurement is also unreachable from here, so the `OOMScoreAdjust` row stays out under §4's guardrail. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4, M7, M8 — not started | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | M4 needs a lab VM playback matrix and a GPU-selection check under the new unit; M7's three PRs are each gated on a measurement; M8's four fuzz targets need the nightly toolchain and generated corpora. None was attempted, and nothing in the branch pretends otherwise. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review of #457 (M2, M3 flag, M6) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | Three findings, all addressed on the branch after merging main. (1) §3.2.1's claim that every child reaches `spawn_job_owned` was false. It has been re-surveyed across `plurx-core` and `plurxd`: eleven production sites spawn without it, including scan thumbnails, cover extraction, the encoder/decoder inventory, `media_pool.rs`'s `find`, the PGS ride-along self-test and the held decode-fact probes. Both M3 options now carry a migration list, and the decision stays open. `pre_exec` composition is answered: std runs every closure in registration order, checked on rustc 1.97.1. §2.2's "only `pre_exec`" claim is corrected to five. (2) The open-file raise now clamps to `kern.maxfilesperproc` on Apple targets. On `mba` (macOS 27.0) the review's `EINVAL` did not reproduce: the old code set and reported an infinite soft limit that the kernel does not enforce. `an_unlimited_hard_limit_is_clamped_to_the_platform_ceiling` fails on Linux without the clamp, and `the_soft_limit_is_raised_as_far_as_the_platform_allows` fails on `mba` without the Apple ceiling (`9223372036854775807` vs `122880`). (3) The drift step is `if: ${{ !cancelled() }}`, and `test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` fails without it. M3 is still not implemented. |
