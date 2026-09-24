@@ -253,4 +253,25 @@ class CapsPolicyTest {
             ),
         )
     }
+
+    @Test fun hdmiPcmChannelsTakeTheWidestSinkAndFallBackToStereo() {
+        assertEquals(2, Caps.hdmiPcmChannels(emptyList<List<Int>>()))
+        assertEquals(2, Caps.hdmiPcmChannels(listOf(listOf(2))))
+        assertEquals(8, Caps.hdmiPcmChannels(listOf(listOf(2, 6), listOf(8))))
+    }
+
+    @Test fun mpeg2IsClaimedOnlyFromAHardwareDecoder() {
+        val software = videoCodecCaps(listOf(
+            VideoDecoderLimit("h264", 1080),
+            VideoDecoderLimit("mpeg2video", 1080, hardwareAccelerated = false),
+        ))
+        assertEquals(listOf("h264"), software.codecs)
+        val hardware = videoCodecCaps(listOf(
+            VideoDecoderLimit("h264", 1080),
+            VideoDecoderLimit("mpeg2video", 1080, hardwareAccelerated = false),
+            VideoDecoderLimit("mpeg2video", 1080, hardwareAccelerated = true),
+        ))
+        assertEquals(listOf("h264", "mpeg2video"), hardware.codecs)
+        assertEquals(1080, hardware.maxHeights["mpeg2video"])
+    }
 }

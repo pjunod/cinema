@@ -208,9 +208,79 @@ pub(crate) struct LiveSourceFacts {
     pub(crate) audio_channels: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) audio_layout: Option<String>,
+    /// Every audio stream the probe observed, in demuxer order. The flat
+    /// `audio_*` fields above describe the track the plan selected (the first
+    /// one until a plan is resolved). Empty when the probe predates this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) audio_tracks: Vec<LiveSourceAudioTrack>,
+}
+
+/// One audio stream of the tuner programme. `index` is its ordinal among the
+/// audio streams, which is what an FFmpeg `0:a:<index>` map addresses.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct LiveSourceAudioTrack {
+    pub(crate) index: u8,
+    /// The container's own stream id (the PID in MPEG-TS), which the live
+    /// open maps by (`0:i:<id>`) so a stream the runtime demuxer has not yet
+    /// classified cannot shift the ordinal onto another track.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sample_rate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) channels: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) layout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) language: Option<String>,
+    /// Described video, hearing-impaired or commentary audio per the
+    /// container's disposition flags: never the main programme audio.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) described: bool,
+}
+
+impl LiveSourceAudioTrack {
+    /// The FFmpeg input stream specifier for this track.
+    pub(crate) fn map_specifier(&self) -> String {
+        match self.id {
+            Some(id) => format!("0:i:{id:#x}"),
+            None => format!("0:a:{}", self.index),
+        }
+    }
 }
 
 impl LiveSourceFacts {
+    /// The audio tracks a plan may choose from: the probed list, or the flat
+    /// fields as a single track when the probe carried no list.
+    fn candidate_audio_tracks(&self) -> Vec<LiveSourceAudioTrack> {
+        if !self.audio_tracks.is_empty() {
+            return self.audio_tracks.clone();
+        }
+        vec![LiveSourceAudioTrack {
+            index: 0,
+            id: None,
+            codec: self.audio_codec.clone(),
+            sample_rate: self.audio_sample_rate,
+            channels: self.audio_channels,
+            layout: self.audio_layout.clone(),
+            language: None,
+            described: false,
+        }]
+    }
+
+    /// The facts with the flat `audio_*` fields describing `track`.
+    fn with_audio_track(&self, track: &LiveSourceAudioTrack) -> Self {
+        Self {
+            audio_codec: track.codec.clone(),
+            audio_sample_rate: track.sample_rate,
+            audio_channels: track.channels,
+            audio_layout: track.layout.clone(),
+            ..self.clone()
+        }
+    }
+
     fn interlaced(&self) -> bool {
         matches!(
             ScanType::from_field_order(self.field_order.as_deref()),
@@ -270,6 +340,9 @@ pub(crate) struct LiveDeliveryPlan {
     pub(crate) output: LiveDeliveryOutput,
     pub(crate) video_action: LiveTrackAction,
     pub(crate) audio_action: LiveTrackAction,
+    /// Ordinal of the selected source audio stream (`0:a:<audio_track>`).
+    #[serde(default)]
+    pub(crate) audio_track: u8,
     pub(crate) packaging: LivePackaging,
     pub(crate) reasons: Vec<LiveDeliveryReason>,
     pub(crate) deinterlace: bool,
@@ -446,14 +519,130 @@ fn device_video_supports(source: &LiveSourceFacts, caps: &DeviceCaps) -> bool {
     })
 }
 
-fn audio_limit_supports(source: &LiveSourceFacts, limit: &LiveAudioLimit) -> bool {
-    source.audio_codec.as_deref().is_some_and(|codec| {
+fn audio_limit_supports(track: &LiveSourceAudioTrack, limit: &LiveAudioLimit) -> bool {
+    track.codec.as_deref().is_some_and(|codec| {
         normalized(&limit.codec) == normalized(codec)
-            && source.audio_sample_rate.is_some_and(|rate| rate > 0)
-            && source
-                .audio_channels
+            && track.sample_rate.is_some_and(|rate| rate > 0)
+            && track
+                .channels
                 .is_some_and(|channels| channels > 0 && channels <= limit.max_channels)
     })
+}
+
+/// Whether the active player claims `track` for copy on the resolved video
+/// route: the codec in its capability document, a channel limit that admits
+/// the track, and an HLS packaging that carries the (video, audio) pair.
+fn audio_track_copy_claimed(
+    track: &LiveSourceAudioTrack,
+    request: &LivePlaybackRequest,
+    caps: &DeviceCaps,
+    preferred_packaging: LivePackaging,
+    video_codec: &str,
+) -> bool {
+    let Some(codec) = track.codec.as_deref() else {
+        return false;
+    };
+    if !caps
+        .audio
+        .iter()
+        .any(|claimed| normalized(claimed) == normalized(codec))
+        || !request
+            .audio_limits
+            .iter()
+            .any(|limit| audio_limit_supports(track, limit))
+    {
+        return false;
+    }
+    match claimed_packaging(request, preferred_packaging, video_codec, codec) {
+        None => false,
+        // AC-3 in live fMP4 is converted (the init-file race), so it only
+        // counts as a copy when MPEG-TS carries the pair — the same condition
+        // the container switch applies.
+        Some(LivePackaging::Fmp4) if normalized(codec) == "ac3" => {
+            claimed_packaging(request, LivePackaging::Mpegts, video_codec, codec)
+                == Some(LivePackaging::Mpegts)
+        }
+        Some(_) => true,
+    }
+}
+
+/// Codecs whose live decode is fragile enough that another track of the same
+/// programme is preferred as an encode source: the AC-4 decoder emits nothing
+/// until a global random-access frame arrives, which a broadcast may withhold
+/// for seconds.
+fn fragile_decode(codec: Option<&str>) -> bool {
+    codec.is_some_and(|codec| normalized(codec) == "ac4")
+}
+
+/// A language tag worth comparing: `und` and empty are the same as no tag.
+fn tagged_language(track: &LiveSourceAudioTrack) -> Option<String> {
+    track
+        .language
+        .as_deref()
+        .map(normalized)
+        .filter(|language| !language.is_empty() && language != "und")
+}
+
+/// Choose the audio track for this delivery. Described, hearing-impaired and
+/// commentary tracks are never preferred to the main audio. Then direct play
+/// first: a track the player takes untouched beats every track that needs
+/// conversion. Among equals, prefer the robust decode, then the fuller
+/// layout, then broadcast order. Only tracks in the programme's primary
+/// language are candidates — the first track's tag, or, when the first track
+/// carries none, only the untagged tracks — so the choice never changes what
+/// language is heard.
+fn select_audio_track(
+    tracks: &[LiveSourceAudioTrack],
+    request: Option<&LivePlaybackRequest>,
+    caps: Option<&DeviceCaps>,
+    preferred_packaging: LivePackaging,
+    video_codec: &str,
+    audio_copy_refused: bool,
+) -> LiveSourceAudioTrack {
+    let primary_language = tracks.first().and_then(tagged_language);
+    let same_language =
+        |track: &LiveSourceAudioTrack| match (&primary_language, tagged_language(track)) {
+            (Some(primary), Some(language)) => *primary == language,
+            (None, None) => true,
+            _ => false,
+        };
+    tracks
+        .iter()
+        .filter(|track| same_language(track))
+        .max_by_key(|track| {
+            let copyable = !audio_copy_refused
+                && request.zip(caps).is_some_and(|(request, caps)| {
+                    audio_track_copy_claimed(track, request, caps, preferred_packaging, video_codec)
+                });
+            (
+                !track.described,
+                copyable,
+                !fragile_decode(track.codec.as_deref()),
+                track.channels.unwrap_or(0),
+                std::cmp::Reverse(track.index),
+            )
+        })
+        .or_else(|| tracks.first())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The channel layouts an encoded track may take under `ceiling` channels, as
+/// an FFmpeg `aformat=channel_layouts=` list. FFmpeg picks the listed layout
+/// closest to the decoded one, so a 7.1.4 broadcast becomes 5.1 while a
+/// stereo one stays stereo — and a layout the probe never learned (an AC-4
+/// track before its first random-access frame) is resolved when the first
+/// frame arrives instead of being forced to stereo up front.
+pub(crate) fn encoded_channel_layouts(ceiling: u8) -> String {
+    let mut layouts = Vec::new();
+    if ceiling >= 6 {
+        layouts.extend(["5.1(side)", "5.1"]);
+    }
+    if ceiling >= 2 {
+        layouts.push("stereo");
+    }
+    layouts.push("mono");
+    layouts.join("|")
 }
 
 fn format_supports(
@@ -501,16 +690,6 @@ pub(crate) fn resolve_live_delivery(
         .video_codec
         .as_deref()
         .ok_or_else(|| "source_probe_incomplete: source video codec is unknown".to_owned())?;
-    let source_audio = source
-        .audio_codec
-        .as_deref()
-        .ok_or_else(|| "source_probe_incomplete: source audio codec is unknown".to_owned())?;
-    // A probe can identify AC-4 before the first random-access frame supplies
-    // its layout. Zero means unknown, not a request for `-ac 0`.
-    let source_channels = source
-        .audio_channels
-        .filter(|channels| *channels > 0)
-        .unwrap_or(2);
 
     let caps = request.map(LivePlaybackRequest::validate).transpose()?;
     let compatibility = request.and_then(|request| request.compatibility.as_ref());
@@ -551,6 +730,45 @@ pub(crate) fn resolve_live_delivery(
                 .iter()
                 .any(|limit| video_limit_supports(source, limit))
     });
+    let video_copy_candidate = video_claimed
+        && copy_height_allowed
+        && !compatibility.is_some_and(|hint| hint.failed_video || hint.failed_container)
+        && (!source.interlaced()
+            || request.is_some_and(|request| {
+                request
+                    .video_limits
+                    .iter()
+                    .any(|limit| video_limit_supports(source, limit) && limit.interlaced)
+            }));
+    // The audio track is chosen against the video route it will ride with:
+    // a copied HEVC picture prefers fMP4, an encode is H.264 in MPEG-TS.
+    let tracks = source.candidate_audio_tracks();
+    let copied_video_codec = normalized(source_video);
+    let track = select_audio_track(
+        &tracks,
+        request,
+        caps.as_ref(),
+        if video_copy_candidate && copied_video_codec == "hevc" {
+            LivePackaging::Fmp4
+        } else {
+            LivePackaging::Mpegts
+        },
+        if video_copy_candidate {
+            copied_video_codec.as_str()
+        } else {
+            "h264"
+        },
+        compatibility.is_some_and(|hint| hint.failed_audio || hint.failed_container),
+    );
+    let source = &source.with_audio_track(&track);
+    let source_audio = source
+        .audio_codec
+        .as_deref()
+        .ok_or_else(|| "source_probe_incomplete: source audio codec is unknown".to_owned())?;
+    // A probe can identify AC-4 before the first random-access frame supplies
+    // its layout. Zero means unknown, not a request for `-ac 0`.
+    let known_channels = source.audio_channels.filter(|channels| *channels > 0);
+    let source_channels = known_channels.unwrap_or(2);
     let audio_claimed = request.is_some_and(|request| {
         caps.as_ref().is_some_and(|caps| {
             caps.audio
@@ -559,7 +777,7 @@ pub(crate) fn resolve_live_delivery(
         }) && request
             .audio_limits
             .iter()
-            .any(|limit| audio_limit_supports(source, limit))
+            .any(|limit| audio_limit_supports(&track, limit))
     });
     let complete_copy_claim = request.is_some_and(|request| {
         request
@@ -712,6 +930,22 @@ pub(crate) fn resolve_live_delivery(
     if packaging == LivePackaging::Fmp4
         && audio_action == LiveTrackAction::Copy
         && audio_codec == "ac3"
+        && request.is_some_and(|request| {
+            claimed_packaging(request, LivePackaging::Mpegts, &video_codec, &audio_codec)
+                == Some(LivePackaging::Mpegts)
+        })
+    {
+        // MPEG-TS has no init file to race, so a player that takes this
+        // video/audio pair in MPEG-TS keeps the compressed audio untouched.
+        packaging = LivePackaging::Mpegts;
+        reasons.push(reason(
+            "container_switched",
+            "AC-3 is carried in MPEG-TS instead of fMP4 so the source audio can be copied.",
+        ));
+    }
+    if packaging == LivePackaging::Fmp4
+        && audio_action == LiveTrackAction::Copy
+        && audio_codec == "ac3"
     {
         if !available.audio_encode {
             return Err(
@@ -772,6 +1006,12 @@ pub(crate) fn resolve_live_delivery(
     let audio_channels = if audio_action == LiveTrackAction::Copy {
         source_channels
     } else {
+        // Native AAC rejects immersive layouts such as AC-4's 7.1.4, so the
+        // ceiling is 5.1, the player's AAC limit, and the source layout when
+        // the probe learned it. An unknown layout keeps the ceiling: the
+        // encode negotiates the real layout from the first decoded frame
+        // (`encoded_channel_layouts`), so this is an upper bound, not a
+        // promise of that many channels.
         request
             .and_then(|request| {
                 request
@@ -782,9 +1022,7 @@ pub(crate) fn resolve_live_delivery(
                     .max()
             })
             .unwrap_or(2)
-            .min(source_channels)
-            // Native AAC rejects immersive layouts such as AC-4's 7.1.4.
-            // Use at most 5.1 while respecting a smaller source/client limit.
+            .min(known_channels.unwrap_or(u8::MAX))
             .min(6)
     };
 
@@ -820,6 +1058,7 @@ pub(crate) fn resolve_live_delivery(
         },
         video_action,
         audio_action,
+        audio_track: track.index,
         packaging,
         reasons,
         deinterlace,

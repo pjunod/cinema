@@ -4,6 +4,46 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Live TV: direct play first, 5.1 stays 5.1
+
+**Branch `fix/live-tv-direct-play`, draft pull request; not merged, nothing
+deployed.** Paul's three reports of 2026-09-24 — Live TV "transcodes no matter
+what", audio is "unnecessarily downmixed to stereo", and every channel shows
+the same aspect ratio — worked against the real lineup on the FLEX 4K
+(59 ATSC 1.0 MPEG-2/AC-3 channels, 10 ATSC 3.0 HEVC/AC-4 channels).
+Record: [docs/streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](docs/streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md).
+
+- **Transcoding:** every client sent `interlaced: false` and no client claimed
+  `mpeg2video`, so all 59 ATSC 1.0 channels were encoded on every client. Android
+  TV now claims its hardware MPEG-2 decoder and interlaced input (television UI
+  mode only), so ATSC 1.0 is copied there; Apple and the web cannot decode MPEG-2
+  in HLS and keep the encode — the one necessary case. On ATSC 3.0 the picture
+  was already copied; the audio was converted from the fragile AC-4 track even
+  though 157.x carries an **AC-3 5.1 simulcast in the same programme**. The
+  owner now probes every audio stream and selects the track the player can copy
+  (`LiveDeliveryPlan.audio_track`), and the AC-3-in-fMP4 rule switches the
+  container to MPEG-TS when the player claims that pair instead of converting.
+- **Stereo:** all three clients claimed `aac: max_channels 2`, and an AC-4 track
+  whose layout the probe had not seen was folded to stereo before a frame
+  existed. The AAC claim is now the sink's real channel count (floored 2, capped
+  5.1) on Apple, Android and the web, and the encode negotiates its layout with
+  `aformat=channel_layouts=` under that ceiling — `-ac` is gone from live
+  commands, so stereo stays stereo, 7.1.4 folds to 5.1, unknown is decided by
+  the first frame.
+- **Aspect ratio: not reproduced on the server.** Real 6.2 captures (704×480,
+  SAR 40:33, 480i) through the exact QSV, VAAPI and x264 producer chains on nynuc
+  all publish SAR 40:33 / DAR 16:9. `scripts/live-tv-hardware` now records the
+  segment's SAR/DAR. Open until the client showing it is named.
+
+Verified: focused Rust tests (53) + clippy `-D warnings` + fmt on nuc3;
+`make apple-test` on mba (1330 cases); Android unit tests in the pinned image
+(745); `tests/web/live-tv.test.js`. Hardware, this branch's `plurxd` against
+the real tuner from nuc3: 6.2 encodes to `704×480 SAR 40:33 DAR 16:9`;
+157.1 with a copy envelope comes back **copy/copy** — HEVC + the AC-3 5.1
+simulcast in MPEG-TS, no decoder running. One adversarial review pass, eight
+findings folded (Android now reads the HDMI sink's PCM channel count, described
+tracks never win, `und` is no language, the track is mapped by PID).
+
 ## P-03: the regression ledger stops growing, and releases get a weekly cadence
 
 **Branch `plan/P-03`, draft pull request; not merged, nothing deployed.**
@@ -303,30 +343,6 @@ ten do-first items all survive on their code facts; §5 now splits the ones
 that were two changes and defers the ones that became design questions.
 §0 of the review lists every disposition. No code changed.
 
-## End-to-end architecture review — ten verified do-first items, ranked
-
-**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-(the verdict) and its
-[appendix](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-APPENDIX.md) (nine area
-reports, ~120 findings with `file:line`).** Nine parallel reviews of `main` @
-`a1414368` covering the streaming pipeline, server core, store/cluster, Live
-TV, the three clients, build/CI/ops, and the month's git history; every P0/P1
-re-verified against the tree before it was written down. The four system-level
-findings: the merge gate has run no Rust test since `3cd127e2` (2026-09-10)
-and nothing is scheduled after; the hot paths run unsized defaults (4 KiB media
-bodies through a blocking-pool hop per chunk, no listener timeouts, encoded-VOD
-respawning ffmpeg every control beat, `fc-list` per segment on text burns,
-1-pass ABR with `-bf 0`, stereo-only audio, no deinterlacer); the cluster pays
-consensus for reads and heartbeats that do not need it and has no backup; and
-four files hold 65k product lines at 50–75 % fix density. One live regression
-is still on `main`: `process_control::output_job_owned` never pipes the child's
-output (`2e3a3bb5`, 2026-09-13), so `dovi_probe_output` always fails — every
-Dolby Vision Profile 5 transcode has been refused since the 09-14 deploy — and
-`probe_media_origin` always falls back. §5 of the review sequences the work:
-twelve small PRs this week, the encoder-defaults set and cluster backup this
-month, the `transcode.rs`/`hls.rs`/`vodserve.rs` decomposition this quarter.
-Nothing in the tree was changed by this PR.
-
 ## Older efforts — where each one now lives
 
 Sections older than those above moved verbatim on 2026-09-24 into the
@@ -334,6 +350,7 @@ status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-20 | End-to-end architecture review — ten verified do-first items, ranked | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-19 | The web app is a tree, and the bytes are the same ones | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |
 | 2026-09-17 | The twenty red tests, and the three live defects three of them were reporting | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-09-17 | A held source is compared on its media facts, not its reporter's schema | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |

@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 struct LiveTvChannel: Codable, Identifiable, Equatable, Sendable {
@@ -251,7 +252,20 @@ struct LiveTvPlaybackEnvelope: Encodable {
     let maxBitrateBps: Int?
     let compatibility: LiveTvCompatibility?
 
+    /// Channels the active audio route can carry, between stereo and 5.1 (the
+    /// most the server encodes). A fixed `2` here is what folded every 5.1
+    /// broadcast into stereo before it reached the receiver.
+    static func aacChannelCeiling(routeChannels: Int) -> Int {
+        min(6, max(2, routeChannels))
+    }
+
     static func current(compatibility: LiveTvCompatibility? = nil) -> Self {
+        current(compatibility: compatibility,
+                aacChannels: aacChannelCeiling(
+                    routeChannels: AVAudioSession.sharedInstance().maximumOutputNumberOfChannels))
+    }
+
+    static func current(compatibility: LiveTvCompatibility?, aacChannels: Int) -> Self {
         let caps = Caps.capsDocument()
         let liveAudio = caps.audio.filter { ["aac", "ac3", "eac3"].contains($0) }
         var formats = [LiveTvHlsFormat(container: "mpegts", video: "h264", audio: "aac")]
@@ -276,7 +290,7 @@ struct LiveTvPlaybackEnvelope: Encodable {
                 return parts.count == 3 ? LiveTvHlsFormat(container: parts[0], video: parts[1], audio: parts[2]) : nil
             },
             videoLimits: limits,
-            audioLimits: liveAudio.map { LiveTvAudioLimit(codec: $0, maxChannels: $0 == "aac" ? 2 : 8) },
+            audioLimits: liveAudio.map { LiveTvAudioLimit(codec: $0, maxChannels: $0 == "aac" ? aacChannels : 8) },
             maxHeight: nil,
             maxBitrateBps: nil,
             compatibility: compatibility
