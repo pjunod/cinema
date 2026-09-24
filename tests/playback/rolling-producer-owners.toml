@@ -2698,7 +2698,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # of one that exits before registration). Once per host, `kill_on_drop`,
 # bounded by a 120 s `tokio::time::timeout`, awaited to completion through
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
-expected_occurrences = 901
+# 901 -> 903 (measured) with C-08 M5: two test-only `tokio::time::sleep`s in
+# `http::tests` -- a 5 ms poll while `a_ttff_beacon_is_labelled_by_the_requesters_client_class`
+# waits for the handler's spawned recorder, and the 1.1 s gap between the two
+# progress beats in `live_progress_beats_credit_watched_seconds_to_the_named_method`,
+# which is the wall time the watched-seconds ledger credits. Neither bounds a
+# producer, a process or a response. The `tokio::time::timeout` in
+# `ArtworkCoordinator::derive_permit` and in `RegisteredWait::wait` were
+# re-bound to a local, not added.
+expected_occurrences = 903
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3261,7 +3269,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # of one that exits before registration). Once per host, `kill_on_drop`,
 # bounded by a 120 s `tokio::time::timeout`, awaited to completion through
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
-expected_occurrences = 370
+# 370 -> 371 (measured) with C-08 M5: one `Response::status()` read in
+# `http::stream::count_direct_play_bytes`, which leaves a non-success direct
+# play response unwrapped. An HTTP status code on the handler's own response;
+# no child process, no producer, nothing to own.
+expected_occurrences = 371
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3377,7 +3389,12 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # `std::sync::Barrier::wait` calls in `live_tv::dvr::tests`
 # (`retirement_is_atomic_against_a_consumer_attaching` lines its two threads
 # up each round). The pattern matches the method name; neither is a process.
-expected_occurrences = 381
+# 381 -> 383 (measured) with C-08 M5: two test-only `RegisteredWait::wait`
+# calls in `waitpool::tests::an_admitted_wait_is_timed_into_the_vod_blocked_get_pool`
+# (one satisfied, one run to its 5 ms deadline). `RegisteredWait` is the
+# in-process blocked-GET pool's oneshot; neither call addresses or reaps an
+# operating-system process.
+expected_occurrences = 383
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
