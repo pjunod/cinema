@@ -32,6 +32,9 @@ const PREPARE_TIMEOUT: Duration = Duration::from_secs(600);
 const NEGATIVE_TTL: Duration = Duration::from_secs(120);
 const MAX_NEGATIVE_ENTRIES: usize = 128;
 const MAX_TRACK_BYTES: u64 = 256 * 1024 * 1024;
+// The streaming normalizer can produce many cues that reuse a small PNG set.
+// Bound the in-memory snapshots before cloning them into the manifest.
+const MAX_SNAPSHOT_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_CACHE_TRACKS: usize = 128;
 
@@ -691,6 +694,18 @@ struct Snapshot {
 }
 
 impl Snapshot {
+    fn metadata_bytes(&self) -> Result<u64, OverlayError> {
+        self.objects.iter().try_fold(
+            (std::mem::size_of::<Self>()
+                + self.objects.len() * std::mem::size_of::<OverlayObject>()) as u64,
+            |total, object| {
+                total
+                    .checked_add(object.image.len() as u64)
+                    .ok_or_else(|| OverlayError::Limit("snapshot metadata size overflowed".into()))
+            },
+        )
+    }
+
     fn same_composition(&self, other: &Self) -> bool {
         self.canvas_width == other.canvas_width
             && self.canvas_height == other.canvas_height
@@ -703,6 +718,8 @@ struct GenerationCompiler<'a> {
     generation: &'a str,
     cancelled: Option<&'a AtomicBool>,
     unique_bytes: u64,
+    snapshot_metadata_bytes: u64,
+    snapshot_metadata_limit: u64,
     published: HashSet<String>,
     snapshots: Vec<Snapshot>,
 }
@@ -722,6 +739,8 @@ impl<'a> GenerationCompiler<'a> {
             generation,
             cancelled,
             unique_bytes: 0,
+            snapshot_metadata_bytes: 0,
+            snapshot_metadata_limit: MAX_SNAPSHOT_METADATA_BYTES,
             published: HashSet::new(),
             snapshots: Vec::new(),
         })
@@ -770,13 +789,21 @@ impl<'a> GenerationCompiler<'a> {
             .is_some_and(|previous| previous.start_ms == snapshot.start_ms)
         {
             let replacement_index = self.snapshots.len() - 1;
+            self.snapshot_metadata_bytes -= self.snapshots[replacement_index].metadata_bytes()?;
+            self.snapshot_metadata_bytes = self
+                .snapshot_metadata_bytes
+                .checked_add(snapshot.metadata_bytes()?)
+                .ok_or_else(|| OverlayError::Limit("snapshot metadata size overflowed".into()))?;
             self.snapshots[replacement_index] = snapshot;
             if replacement_index > 0
                 && self.snapshots[replacement_index - 1]
                     .same_composition(&self.snapshots[replacement_index])
             {
+                self.snapshot_metadata_bytes -=
+                    self.snapshots[replacement_index].metadata_bytes()?;
                 self.snapshots.pop();
             }
+            self.check_snapshot_metadata_limit()?;
             return Ok(());
         }
         if self
@@ -786,8 +813,24 @@ impl<'a> GenerationCompiler<'a> {
         {
             return Ok(());
         }
+        self.snapshot_metadata_bytes = self
+            .snapshot_metadata_bytes
+            .checked_add(snapshot.metadata_bytes()?)
+            .ok_or_else(|| OverlayError::Limit("snapshot metadata size overflowed".into()))?;
+        self.check_snapshot_metadata_limit()?;
         self.snapshots.push(snapshot);
         Ok(())
+    }
+
+    fn check_snapshot_metadata_limit(&self) -> Result<(), OverlayError> {
+        if self.snapshot_metadata_bytes > self.snapshot_metadata_limit {
+            Err(OverlayError::Limit(format!(
+                "PGS cue metadata exceeds the {} byte track cap",
+                self.snapshot_metadata_limit
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     fn finish(self, file: &MediaFile, index: i64) -> Result<(), OverlayError> {
@@ -1240,6 +1283,39 @@ mod tests {
             rgba: vec![255, 255, 255, 255],
             rgba_sha256: "unused-by-publisher".into(),
         }
+    }
+
+    #[test]
+    fn streamed_cue_metadata_is_bounded_even_when_pngs_are_reused() {
+        let dir = crate::test_tempdir().expect("cache");
+        let mut compiler = GenerationCompiler::new(dir.path(), "fixture", None).expect("compiler");
+        let composition = |pts_90khz, x| {
+            let mut object = object();
+            object.x = x;
+            NormalizedComposition {
+                pts_90khz,
+                start_ms: pts_90khz as f64 / 90.0,
+                canvas_width: 1920,
+                canvas_height: 1080,
+                objects: vec![object],
+            }
+        };
+
+        compiler.push(composition(90_000, 10)).expect("first cue");
+        compiler.snapshot_metadata_limit = compiler.snapshot_metadata_bytes + 1;
+        // Replacement at the same timestamp must release its predecessor.
+        compiler
+            .push(composition(90_000, 20))
+            .expect("same-timestamp replacement");
+        assert!(matches!(
+            compiler.push(composition(180_000, 30)),
+            Err(OverlayError::Limit(message)) if message.contains("cue metadata")
+        ));
+        assert_eq!(
+            compiler.published.len(),
+            1,
+            "PNG reuse does not bypass the metadata cap"
+        );
     }
 
     async fn publish_empty_manifest(

@@ -502,21 +502,38 @@ equivalent.
 
 The Google TV Streamer ran Android client `0.3.0` (versionCode `119`) against
 server build `v0.3.0-3649-g99d4abf8c`. *Casino* (file `5226`) is HDR10 with
-English SDH PGS at subtitle index `0`. The client selected that track and the
-server reported remux delivery. Playback time advanced and a forward seek
-reached 15:02, but no cue appeared. On nynuc the overlay preparation ended
-after 584,654 ms with `PGS safety limit exceeded: normalized RGBA output
-exceeds 268435456 bytes`. The client therefore did not reach cue timing,
-placement, or backward-seek acceptance. A protected-video screenshot cannot
+English SDH PGS at subtitle index `0`. Playback time advanced and a forward
+seek reached 15:02, but no cue appeared. On nynuc the overlay preparation
+ended after 584,654 ms with `PGS safety limit exceeded: normalized RGBA
+output exceeds 268435456 bytes`. Cue timing, placement, and backward-seek
+acceptance were therefore not reached. A protected-video screenshot cannot
 establish visible picture or HDR output, so those observations remain open.
 
-The browser check on the same server build passed its narrower contract:
-*Casino* opened with subtitles Off; manually selecting PGS displayed “That
-subtitle requires an SDR burn-in. HDR playback was kept unchanged.” No Apple
-PGS cue or seek was observed. The iPad Pro was locked, and the Apple TV had an
-active viewer during the first attempt. The two-device proof bar below has
-not been met. A parser change that streams one normalized composition at a
-time is being validated separately; it does not count as hardware evidence.
+On the TCL tablet, *Casino* started immediately and playback advanced, but
+the first m6 extraction timed out after 600,001 ms. The tablet's Playback info
+reported `HDR → SDR`, 3840×2160 source to 1920×1080 playback, `Transcode ·
+VA-API · 1080p`, and `PGS overlay · unavailable`. It cannot establish the
+required HDR/direct-or-remux result. After the m6 index pass stored all seven
+PGS tracks for file `5226` (472 MB, one file), a second preparation served a
+stored track and failed after 610 ms on the same aggregate RGBA limit. The
+stored subtitle path is working; the normalizer limit is the remaining failure
+for this title.
+
+On iPhone 17 Pro Max, *Bad Boys: Ride or Die* (file `5208`, Dolby Vision
+Profile 8, forced PGS index `2`) played at 3840×2160 with a remux decision,
+Dolby Vision rendering, and no buffering interruptions. Nynuc's cold PGS
+preparation timed out after 600,002 ms, so no DV PGS cue was validated. A
+separate SDR control, *The Good Son* (file `6641`), prepared its stored PGS
+track in 2,330 ms and visibly drew a centered cue on the iPhone. That proves
+the renderer can draw a real cue; its forward/backward seek behavior remains
+unproven because no post-seek cue was captured.
+
+The browser check passed its narrower contract: *Casino* opened with
+subtitles Off; manually selecting PGS displayed “That subtitle requires an
+SDR burn-in. HDR playback was kept unchanged.” The two-device HDR proof bar
+below has not been met. The overlay gate is on for qualification and is not
+release-qualified. The streaming normalizer change is a candidate repair;
+code tests and an SDR cue are not substitutes for the HDR hardware retest.
 
 The plan's M4/M5 acceptance asks for an "executed compatibility matrix" and a
 "complete physical validation matrix". Those are ceremony for this feature. A
@@ -536,7 +553,8 @@ the local override still works — and the HDR path is where an overlay can fail
 in a way a 4K SDR title will never show, so leaving the grade unspecified is
 how a check passes without testing anything.
 
-The gate stays off until this runs. `overlay_for_caller` removes the reason
+The gate was enabled for the physical check, but §5.5 remains open.
+`overlay_for_caller` removes the reason
 the switch was unsafe to flip — no client **that sends a capabilities
 document** is now offered a track it cannot draw, and none is told a delivery
 needs no burn when for it one does. That qualifier is load-bearing: a caller
