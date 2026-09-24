@@ -3521,6 +3521,7 @@ final class PlayerController: ObservableObject {
         playbackRecoveryMonitor.reset()
         deliveryStarvation.reset()
         interactiveSeekTask?.cancel()
+        let seekAttempt = snapshotAttempt()
         interactiveSeekTask = Task {
             // Coalesce native and replacement seeks alike. Executing every
             // scrub event makes AVPlayer and the server race old destinations.
@@ -3528,15 +3529,15 @@ final class PlayerController: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(100))
             }
             guard !Task.isCancelled,
-                  generation == seekState.generation,
-                  actionEpoch == viewerActionEpoch
+                  seekAttempt.seek == generation,
+                  seekAttempt.viewerAction == actionEpoch,
+                  attemptStillCurrent(seekAttempt, fence: .seekIntent)
             else { return }
             if !intentAlreadyPublished {
                 retainControlSequence(await playbackControl.reportIntent())
             }
             guard !Task.isCancelled,
-                  generation == seekState.generation,
-                  actionEpoch == viewerActionEpoch
+                  attemptStillCurrent(seekAttempt, fence: .seekIntent)
             else { return }
             if recipeRevision.needsReopen {
                 await reopen(at: target)
@@ -3553,7 +3554,7 @@ final class PlayerController: ObservableObject {
             switch route {
             case .native(let itemMs):
                 let item = player.currentItem
-                let itemGeneration = openGeneration
+                let nativeAttempt = snapshotAttempt()
                 _ = await player.seek(
                     to: CMTime(seconds: Double(itemMs) / 1000.0, preferredTimescale: 600),
                     toleranceBefore: .zero,
@@ -3561,18 +3562,14 @@ final class PlayerController: ObservableObject {
                 )
                 // Only the newest seek may publish or escalate; an older
                 // completion arriving after AVPlayer cancelled it must not.
-                guard generation == seekState.generation,
-                      actionEpoch == viewerActionEpoch,
-                      openGeneration == itemGeneration,
+                guard attemptStillCurrent(nativeAttempt, fence: .nativeSeekCompletion),
                       player.currentItem === item
                 else { return }
                 // A seek or Pause may have invalidated an awaited native
                 // subtitle choice. Reconcile that retained choice on the
                 // same item before acknowledging the new destination.
                 if let item { await reconcileNativeMediaSelections(to: item) }
-                guard generation == seekState.generation,
-                      actionEpoch == viewerActionEpoch,
-                      openGeneration == itemGeneration,
+                guard attemptStillCurrent(nativeAttempt, fence: .nativeSeekCompletion),
                       player.currentItem === item
                 else { return }
                 let landed = realPositionMs()

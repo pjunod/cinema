@@ -87,6 +87,10 @@ final class AttemptScopesTests: XCTestCase {
         .stallRecovery: [.open, .viewerAction],
         // `openGeneration == generation`, `viewerActionEpoch == actionEpoch`
         .itemFailureLadder: [.open, .viewerAction],
+        // `generation == seekState.generation`, `actionEpoch == viewerActionEpoch`
+        .seekIntent: [.viewerAction, .seek],
+        // Those two counters plus `openGeneration == itemGeneration`.
+        .nativeSeekCompletion: [.open, .viewerAction, .seek],
     ]
 
     func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid() {
@@ -151,8 +155,13 @@ final class AttemptScopesTests: XCTestCase {
             .blackFrameDecodeFailure: .lifecycle,
             .stallRecovery: .open,
             .itemFailureLadder: .open,
+            .nativeSeekCompletion: .open,
         ]
         for fence in AttemptFence.allCases {
+            // `seekIntent` is intentionally scoped to the seek and the
+            // viewer's action, not to a title or an attachment. Its caller
+            // checks the captured seek argument before the first await.
+            if fence == .seekIntent { continue }
             let controller = PlayerController()
             let model = AppModel()
             start(controller, model: model)

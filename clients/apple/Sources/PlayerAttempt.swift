@@ -155,6 +155,10 @@ enum AttemptFence: String, CaseIterable, Sendable {
     case stallRecovery = "stall_recovery"
     /// `handleItemFailure`: the failure ladder after its control ask.
     case itemFailureLadder = "item_failure_ladder"
+    /// `issueSeek`: coalesced intent and control publication before routing.
+    case seekIntent = "seek_intent"
+    /// `issueSeek`: native seek completion and subtitle reconciliation.
+    case nativeSeekCompletion = "native_seek_completion"
 
     /// The epochs this fence depends on — exactly the fields its old
     /// conjunction compared.
@@ -164,6 +168,8 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .blackFrameDecodeFailure: return [.lifecycle, .viewerAction]
         case .stallRecovery: return [.open, .viewerAction]
         case .itemFailureLadder: return [.open, .viewerAction]
+        case .seekIntent: return [.viewerAction, .seek]
+        case .nativeSeekCompletion: return [.open, .viewerAction, .seek]
         }
     }
 }
