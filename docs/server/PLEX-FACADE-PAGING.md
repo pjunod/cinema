@@ -743,21 +743,71 @@ Two deliberate departures from §3.4:
 
 ### 8.5 How to close this row
 
-Deploy this branch, leave it for a week on the node clients actually connect
-to, then:
+`plurx_plex_requests_total` is an in-process counter. It starts at zero every
+time `plurxd` starts, it lives on one node, and nothing in this repository
+scrapes or persists it. **One read is evidence about one node since that
+node's last restart, and about nothing else.** The rule below is built around
+that. The rule this PR first shipped — leave it a week on "the node clients
+actually connect to", then `curl` once — was not, and the adversarial review
+of PR #462 showed the failure: a Kodi box that browsed on day 2 closes C-07 as
+`abandoned` if the node restarted on day 5, and on this campaign's deploy
+cadence a week-old process is unlikely. nuc4 itself restarted between the
+census read and the review.
 
-```text
-curl -s http://<host>:32400/metrics | grep plurx_plex_requests_total | grep -v ' 0$'
+**Read every node, with its uptime.** A Plex client can be pointed at any
+node's HTTP port (32400 unless `PLURX_HTTP_PORT` moved it), and §8.2 shows
+nobody knows which node clients use, so there is no single node to read.
+
+```sh
+for host in <every plurxd node in the fleet>; do
+  printf '%s %s ' "$host" "$(date -u +%FT%TZ)"
+  curl -s "http://$host:32400/metrics" \
+    | grep -E '^(plurx_uptime_seconds|plurx_plex_requests_total)' \
+    | grep -v '^plurx_plex_requests_total.* 0$' | tr '\n' ' '
+  echo
+done
 ```
 
-- Nothing but zeros → the façade has no caller. Close C-07 as `abandoned: no
-  façade traffic`, keep this plan, and revisit if that ever changes.
+Record every line in the execution log. A read at time *t* of a node reporting
+`plurx_uptime_seconds` *u* covers that node over [*t − u*, *t*], and nothing
+before *t − u*.
+
+**What each outcome means.**
+
+- Any non-zero cell, on any node, in any read, is a caller — whatever the
+  window. The three outcomes below say what kind.
+- Zeros close the row **only with coverage**: for every node, the union of its
+  reads' intervals must cover the same seven consecutive days with no gap. A
+  node that restarts between two reads leaves a gap from the earlier read to
+  the restart — whatever it counted in that stretch is gone. A gap makes the
+  week **inconclusive, not zero**: extend the window until seven gap-free days
+  exist, never close on a partial one. In practice this means reading every
+  node daily and immediately before any deploy or restart of it; a deploy
+  that does not read first opens a gap on every node it touches.
+- A node the census cannot see through is a gap too. `cluster_capacity_gate`
+  is layered outside the whole router and answers 503 before routing, so the
+  census never sees its refusals: every façade request on a node in
+  maintenance or fenced, and on a learner every façade route but `/`,
+  `/identity` and `/library` (the only ones `learner_route_eligible` admits).
+  Only `mutable_media_serving_gate`'s refusals are inside the census and
+  counted. Any stretch a node spent in maintenance, fenced, or as a learner is
+  a gap for that node.
+- With seven gap-free days of zeros on every node → the façade has no caller.
+  Close C-07 as `abandoned: no façade traffic`, keep this plan, and revisit if
+  that ever changes.
 - `outcome="unauthorized"` moving → somebody is trying and cannot get in. That
   is a pairing problem, not a paging one, and it is the more urgent finding.
 - `handler="section_all"` or `handler="children"` moving with `outcome="ok"` →
   a client is browsing. Re-open C-07 at M1 and build the plan as written; the
   §6.3 step 4 Kodi refresh timing is then both possible and required, because
   it is the before-measurement M2 may not claim without.
+
+A persisted or scraped counter would make gaps impossible, and was
+considered. It was not built: it puts a file or store write on the façade's
+request path, or a scrape target on every node, for a measure-only instrument
+whose question a daily read can answer. If the reads prove impractical in
+practice, persisting the 56 cells is the next step — not closing the row on a
+partial window.
 
 ### 8.6 The C9 appendix (M5, M6) was not opened
 
@@ -786,4 +836,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 — the census instrument | [PR #462](http://192.168.4.7:3000/noirr/plurx/pulls/462) | `plurx_plex_requests_total{handler,outcome}` from §3.4, plus a fourth outcome `unauthorized` (§8.4). Measure-only: one layer over the façade sub-router, one call in `root_dispatch`'s Plex branch, no handler touched. Five tests, one of which reads the façade's route registrations out of `router()`'s own source so a new façade route without a label fails the build. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1, M2, M3 | — | **Deliberately not built.** §8.3. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5, M6 (C9 appendix) | — | **Not opened.** Unclaimed and unblocked; reason in §8.6. |
-| | | | | | `needs:` one week of `plurx_plex_requests_total` on the ingress node, then §8.5. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 — review of PR #462 | [PR #462](http://192.168.4.7:3000/noirr/plurx/pulls/462) | Two findings, both fixed. (1) The census counter was a process-wide `static`, so three census tests asserting exact deltas raced every other test sending façade traffic (the reviewer measured 34 failing runs in 400). It is now a `PlexCensus` held on `AppState`, so each router counts only its own requests; `each_router_counts_only_its_own_facade_requests` pins it. (2) §8.5's closing rule read one node once after a week, which a restart or an unread node silently turns into a false "no caller". It now requires every node, with `plurx_uptime_seconds` on every read, seven gap-free days, and treats a restart between reads, maintenance, fencing and learner time as gaps; the layer comment that claimed refused requests are counted now names the refusals it cannot see. Merged main (`99d4abf8c`); `process-capable-launch-method` re-measured on the merged tree. |
+| | | | | | `needs:` seven gap-free days of `plurx_plex_requests_total` read from every node with its uptime, then §8.5. |
