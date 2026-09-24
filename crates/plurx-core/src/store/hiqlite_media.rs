@@ -3813,10 +3813,12 @@ impl WatchStore for HiqliteAuthStore {
             return Ok(Vec::new());
         }
         let ids_json = serde_json::to_string(item_ids).map_err(database_error)?;
+        // One (user_id, item_id) key lookup per requested id; see the
+        // standalone twin for the plan this replaces (K-05 M0).
         const SQL: &str =
             "SELECT w.item_id, w.position_ms, w.duration_ms, w.watched, w.updated_at \
-                 FROM watch_state w JOIN json_each($1) j ON j.value = w.item_id \
-                 WHERE w.user_id = $2";
+                 FROM json_each($1) j \
+                 CROSS JOIN watch_state w ON w.user_id = $2 AND w.item_id = j.value";
         trace_statement("watch_map", SQL);
         Ok(self
             .client()
