@@ -321,6 +321,7 @@ fn measure(database: &Path, capture: &Path) -> Result<()> {
     println!("| Call | Statement | Rows | Cold median | Warm median |");
     println!("|---|---|---:|---:|---:|");
     let mut plans = Vec::new();
+    let mut calls: Vec<(String, usize, Duration, Duration)> = Vec::new();
     for planned in &capture.statements {
         let params = bind_values(&planned.params)?;
         let mut cold = Vec::with_capacity(RUNS);
@@ -337,14 +338,33 @@ fn measure(database: &Path, capture: &Path) -> Result<()> {
         let warm = (0..RUNS)
             .map(|_| run(&conn, &planned.sql, &params).map(|(elapsed, _)| elapsed))
             .collect::<Result<Vec<_>>>()?;
+        let (cold, warm) = (median(cold), median(warm));
         println!(
             "| `{}` | `{}` | {rows} | {:.2} ms | {:.3} ms |",
             planned.label,
             planned.statement,
-            median(cold).as_secs_f64() * 1e3,
-            median(warm).as_secs_f64() * 1e3,
+            cold.as_secs_f64() * 1e3,
+            warm.as_secs_f64() * 1e3,
         );
+        match calls.last_mut() {
+            Some(call) if call.0 == planned.label => {
+                call.1 += 1;
+                call.2 += cold;
+                call.3 += warm;
+            }
+            _ => calls.push((planned.label.clone(), 1, cold, warm)),
+        }
         plans.push((planned, plan(&conn, &planned.sql, &params)?));
+    }
+    println!("\nPer call (sums of the statement medians above):\n");
+    println!("| Call | Statements | Cold | Warm |");
+    println!("|---|---:|---:|---:|");
+    for (label, statements, cold, warm) in &calls {
+        println!(
+            "| `{label}` | {statements} | {:.2} ms | {:.3} ms |",
+            cold.as_secs_f64() * 1e3,
+            warm.as_secs_f64() * 1e3
+        );
     }
     println!();
     for (planned, lines) in plans {

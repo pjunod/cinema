@@ -113,7 +113,10 @@ fn show_ids() -> Vec<i64> {
 /// The SQLite statements number `?N` explicitly; the replicated statements
 /// introduce `$N` in first-appearance order, so the two lists differ where
 /// the SQL does.
-fn bind(backend: &str, label: &str, statement: &str) -> Vec<Value> {
+///
+/// `pass` counts earlier executions of the same statement in the same call:
+/// `recently_added` widens its window and runs once per pass.
+fn bind(backend: &str, label: &str, statement: &str, pass: u32) -> Vec<Value> {
     let hiqlite = backend == "hiqlite";
     let library = |label: &str| -> (i64, i64, Value) {
         match label {
@@ -144,9 +147,10 @@ fn bind(backend: &str, label: &str, statement: &str) -> Vec<Value> {
             } else {
                 Value::Null
             };
-            // The first pass of the widening window: eight rows a card, so
-            // the zero-based offset of the window's last row (K-05 M4).
-            vec![library, json!(RAIL * 8 - 1), json!(RAIL)]
+            // The widening window: eight rows a card on the first pass,
+            // doubled on each later one, bound as the zero-based offset of
+            // the window's last row (K-05 M4).
+            vec![library, json!(RAIL * 8 * (1_i64 << pass) - 1), json!(RAIL)]
         }
         "search_items" => vec![
             json!(plurx_core::metadata::classification::fts_query(SEARCH).expect("tokens")),
@@ -184,8 +188,11 @@ fn bind(backend: &str, label: &str, statement: &str) -> Vec<Value> {
 pub async fn drive(store: &dyn Store, backend: &str, capture: &StatementCapture) -> Vec<Planned> {
     let mut planned = Vec::new();
     let mut take = |label: &str| {
+        let mut passes = std::collections::HashMap::<String, u32>::new();
         for (statement, sql) in capture.drain() {
-            let params = bind(backend, label, &statement);
+            let pass = passes.entry(statement.clone()).or_default();
+            let params = bind(backend, label, &statement, *pass);
+            *pass += 1;
             planned.push(Planned {
                 label: label.to_owned(),
                 statement,

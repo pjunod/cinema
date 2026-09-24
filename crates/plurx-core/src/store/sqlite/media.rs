@@ -967,11 +967,13 @@ impl MediaStore for SqliteStore {
             let sql =
                 super::super::sql_source::recently_added(&item_cols("i"), &item_cols("r"), true)
                     .sqlite();
-            super::trace_statement("recently_added", &sql);
             let mut stmt = conn.prepare(&sql)?;
             let mut window_offset =
                 super::super::sql_source::recently_added_first_window_offset(limit);
             loop {
+                // Once per pass: the query-plan protocol times every pass
+                // the read actually ran.
+                super::trace_statement("recently_added", &sql);
                 let mut cut = false;
                 let items = stmt
                     .query_map(params![library_id, window_offset, limit], |row| {

@@ -1078,9 +1078,10 @@ impl HiqliteAuthStore {
             super::sql_source::recently_added(&item_cols("i"), &item_cols("r"), exclude_recordings)
                 .hiqlite();
         validate_sql(&sql)?;
-        trace_statement("recently_added", &sql);
         let mut window_offset = super::sql_source::recently_added_first_window_offset(limit);
         loop {
+            // Once per pass, as on the standalone store.
+            trace_statement("recently_added", &sql);
             let rows = if local {
                 self.client()
                     .query_map::<RecentWindowRow, _>(
