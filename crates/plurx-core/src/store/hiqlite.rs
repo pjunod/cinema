@@ -105,7 +105,9 @@ const FIELD_ORDER_SCHEMA_VERSION: i64 = 43;
 // S-07 drafted the luminance columns as v43; S-08's field-order column reached
 // main first, so the luminance step appends after it.
 const LUMINANCE_SCHEMA_VERSION: i64 = 44;
-pub const AUTH_SCHEMA_VERSION: i64 = LUMINANCE_SCHEMA_VERSION;
+const DOWNLOADED_SUBTITLES_SCHEMA_VERSION: i64 = 45;
+const DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE: i64 = LUMINANCE_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = DOWNLOADED_SUBTITLES_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -2617,6 +2619,21 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(LUMINANCE_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(
+                    DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let attempt = self.client().txn(vec![
+                        (super::downloaded_subtitles::SCHEMA.to_owned(), params!()),
+                        ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                            params!(DOWNLOADED_SUBTITLES_SCHEMA_VERSION, now, DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE)),
+                    ]).await;
+                    self.settle_migration_attempt(
+                        DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -4547,7 +4564,8 @@ fn schema_migration_action(
         | VIDEO_CODEC_TAG_SCHEMA_VERSION
         | CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE
         | FIELD_ORDER_SCHEMA_MIGRATION_SOURCE
-        | LUMINANCE_SCHEMA_MIGRATION_SOURCE => {
+        | LUMINANCE_SCHEMA_MIGRATION_SOURCE
+        | DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6541,9 +6559,9 @@ mod tests {
             "v43 must advance exactly one step to the luminance schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 39,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 40,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v44 step"
+            "this implementation contains every additive v5→v45 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

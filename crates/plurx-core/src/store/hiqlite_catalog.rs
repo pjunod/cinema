@@ -101,7 +101,8 @@ CREATE TABLE IF NOT EXISTS files (
     max_cll          INTEGER,
     max_fall         INTEGER,
     mastering_max_luminance INTEGER,
-    luminance_source TEXT CHECK (luminance_source IN ('stream','frame','none'))
+    luminance_source TEXT CHECK (luminance_source IN ('stream','frame','none')),
+    downloaded_subtitles TEXT NOT NULL DEFAULT '[]'
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_files_item ON files(item_id);
 

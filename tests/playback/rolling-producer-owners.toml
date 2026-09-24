@@ -1995,6 +1995,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # In `live_tv::dvr::tests`: a fan-out worker and a viewer-feed reader (both
 # joined), and one `std::thread::spawn` racing an attach against retirement
 # (joined each round). No timer, no process, no producer.
+# Subtitle acquisition adds four: one shutdown-owned background loop, one
+# bounded held-file hashing worker, and two test-only HTTP fixture servers.
+# The hash worker holds its file until it exits; timeout discards its result
+# and it cannot publish captions. Fixture servers are aborted after use.
 # 587 -> 591 (measured) with L-02 M3/M4. Production, three: one
 # `tokio::task::spawn_blocking` in `LiveTvManager::touch_incarnation`, a
 # write of one small JSON file every 30 s while anything is live, awaited by
@@ -2009,7 +2013,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # tick. Test-only, one: the `#[cfg(test)]` `tokio::spawn(pending())` that
 # stands in for such a hung scan, aborted by the same path. No timer, no
 # process, no producer.
-expected_occurrences = 591
+# Merged with main's subtitle acquisition: the value is the whole merged
+# tree re-measured after the merge, the sum of both contributions.
+expected_occurrences = 595
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2712,6 +2718,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # of one that exits before registration). Once per host, `kill_on_drop`,
 # bounded by a 120 s `tokio::time::timeout`, awaited to completion through
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
+# Subtitle acquisition adds four: the 60-second background cadence, its
+# 120-second work budget, and five-second bounds on opening and hashing one
+# media file. Shutdown and lease loss cancel the async acquisition page.
 # 901 -> 913 (measured) with L-02 M3/M4: three new in production, one
 # replaced, nine in tests. The scratch-sweep loop's `tokio::time::sleep(ORPHAN_RETRY)` replaces its
 # `sleep(SCRATCH_SWEEP_INTERVAL)` (the hourly sweep now runs when due inside
@@ -2729,7 +2738,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # the warm, disagreeing and byte-exact starts, the hung-scan test's start and
 # its poll for the session's end, and the orphan retry loop). Each bounds one
 # test wait. None owns a producer.
-expected_occurrences = 913
+# Merged with main's subtitle acquisition: the value is the whole merged
+# tree re-measured after the merge, the sum of both contributions.
+expected_occurrences = 917
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3298,7 +3309,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # of one that exits before registration). Once per host, `kill_on_drop`,
 # bounded by a 120 s `tokio::time::timeout`, awaited to completion through
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
-expected_occurrences = 370
+# Subtitle acquisition adds two reqwest Response::status() reads for
+# HTTP status and redirect handling. Neither launches a process.
+expected_occurrences = 372
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
