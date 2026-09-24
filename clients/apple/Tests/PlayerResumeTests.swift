@@ -318,7 +318,7 @@ final class PlayerResumeTests: XCTestCase {
         }
         let ownership = try XCTUnwrap(controller.resumeOwnershipForTesting)
         XCTAssertEqual(ownership.expiresAt, 25, "repair inherits the root deadline")
-        // Further samples past the deadline admit nothing new: the same
+        // Further samples past the admission admit nothing new: the same
         // attempt, still admitted once.
         try await Task.sleep(for: .milliseconds(20))
         XCTAssertEqual(controller.resumeOwnershipForTesting?.id, ownership.id)
