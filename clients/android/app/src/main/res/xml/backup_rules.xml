@@ -1,4 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android Auto Backup rules for API <= 30. `data_extraction_rules.xml` is the
+  API >= 31 equivalent and MUST carry the same exclusions under every section;
+  tests/operations/test_android_credential_exposure.py fails when they drift.
+
+  `datastore/` holds the Preferences DataStore named "plurx"
+  (data/SettingsStore.kt), whose keys include the account bearer token, the
+  server origin and the username. Backing it up would copy an account
+  credential to Google; restoring it would install one on a device that never
+  logged in. The whole directory is excluded, not one file: origin and username
+  are pairing state that must not be restored without the token that pairs with
+  it. A restored phone signs in again — that is the intended cost.
+-->
 <full-backup-content>
     <exclude domain="file" path="offline/" />
+    <exclude domain="file" path="datastore/" />
 </full-backup-content>

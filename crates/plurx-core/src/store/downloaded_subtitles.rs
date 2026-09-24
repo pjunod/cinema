@@ -57,7 +57,7 @@ fn timestamp(value: &str) -> Option<u64> {
 }
 
 pub(crate) const CANDIDATES: &str = "SELECT id FROM files WHERE id > $1
-    AND video_codec IS NOT NULL
+    AND video_codec IS NOT NULL AND probe_json IS NOT NULL
     AND item_id IN (SELECT id FROM items WHERE kind IN ('movie','episode'))
     ORDER BY id LIMIT $2";
 
@@ -70,6 +70,7 @@ pub(crate) const ADD: &str = "WITH caption(file_id, source_size, source_mtime, p
           AND json_extract(downloaded_subtitles, '$[0].source_mtime') = (SELECT source_mtime FROM caption)
          THEN downloaded_subtitles ELSE '[]' END, '$[#]', json((SELECT payload FROM caption)))
     WHERE id = (SELECT file_id FROM caption)
+      AND probe_json IS NOT NULL
       AND size = (SELECT source_size FROM caption) AND mtime = (SELECT source_mtime FROM caption)
       AND (json_extract(downloaded_subtitles, '$[0].source_size') IS NOT (SELECT source_size FROM caption)
         OR json_extract(downloaded_subtitles, '$[0].source_mtime') IS NOT (SELECT source_mtime FROM caption)

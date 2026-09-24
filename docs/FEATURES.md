@@ -558,13 +558,28 @@ recordings library.
   live playlist. Six segments is the whole window: the scratch a live session
   can occupy is bounded by construction rather than by a reaper racing an
   encoder, and the segments behind the window are deleted as it moves.
+- **Direct play first, on both tracks.** The owner probes every audio stream
+  of the programme and picks the one the active player can copy — on an
+  ATSC 3.0 channel that carries an AC-3 5.1 simulcast beside its AC-4 track,
+  the AC-3 is copied and the AC-4 decoder is never started. Failing a copy, a
+  robust decode beats a fragile one and a fuller layout beats a thinner one,
+  always within the programme's primary language. Android TV claims its
+  hardware MPEG-2 decoder and interlaced input, so ATSC 1.0 is copied there;
+  Apple and browsers cannot decode MPEG-2 in HLS, so their picture is encoded
+  while their audio stays AC-3 where they claim it. See
+  [direct play and surround](streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md).
 - **Live audio must fit the encoder and muxer.** AAC conversion keeps at most
-  six channels (5.1), bounded further by the source and client. Unknown or zero
-  source channels use stereo, or mono when the client requires it. Audio copy
-  requires a positive observed sample rate and channel count and gets a
-  2 MiB / 2 s FFmpeg probe; conversion retains the 512 KiB / 1 s probe.
-  AC-3 in live fMP4 is converted to AAC because late audio can otherwise leave
-  unreadable initialization metadata, while compatible video stays copied.
+  six channels (5.1), bounded further by the source layout when the probe saw
+  it and by the client's claim — which is the sink's real channel count, not a
+  fixed stereo. The encode negotiates its layout under that ceiling
+  (`aformat=channel_layouts=`) rather than pinning `-ac`, so a stereo broadcast
+  stays stereo, 7.1.4 folds to 5.1, and a layout the probe never saw is
+  decided by the first decoded frame. Audio copy requires a positive observed
+  sample rate and channel count and gets a 2 MiB / 2 s FFmpeg probe;
+  conversion retains the 512 KiB / 1 s probe. AC-3 in live fMP4 is carried in
+  MPEG-TS instead when the player claims that pair, and converted to AAC only
+  when it does not, because late audio can otherwise leave unreadable
+  initialization metadata; compatible video stays copied either way.
   See [the ATSC audio investigation](streaming/ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md)
   for the capture evidence and the separate AC-4 random-access limitation.
 - **The session is a capability, not an account.** Starting a channel returns

@@ -1454,6 +1454,8 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.
 	@node tests/web/cluster-recovery-session.test.js
+	# An idle-expired sign-in lands on the login page saying why.
+	@node tests/web/session-expiry.test.js
 	# The validation runner already has this as `web-membership`, but this is
 	# the target a web change reaches for, and the Cluster panel is a web
 	# surface like any other here. Two seconds.
@@ -1749,7 +1751,7 @@ android-instrumentation-run: ## Install and run instrumented tests (set PLURX_AN
 android-instrumentation: android-instrumentation-build android-instrumentation-run ## Run UI tests on an explicitly selected disposable device
 
 .PHONY: android
-android: android-image ## Build the Android debug APK in Docker (no host JDK/SDK)
+android: android-image ## Build the Android debug APK for local use (NOT what ships)
 	docker run --rm \
 	  --platform $(ANDROID_PLATFORM) \
 	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
@@ -1761,11 +1763,74 @@ android: android-image ## Build the Android debug APK in Docker (no host JDK/SDK
 .PHONY: apk
 apk: android ## Build the Android debug APK (alias for android)
 
+# The variant that reaches devices. `release` clears `debuggable`, which is
+# what `adb shell run-as` follows: while the fleet ran the debug APK, any host
+# the device trusted could read the account bearer straight out of
+# `files/datastore/plurx.preferences_pb`.
+#
+# The keystore stays wherever the vault put it on the host — never in the
+# repository, never in the image — and is bind-mounted read-only for the one
+# build. `PLURX_ANDROID_KEYSTORE` names the host path here and the mount point
+# inside the container; the three secrets ride `-e NAME`, which forwards the
+# caller's value and passes nothing when the caller has none. Gradle then
+# fails naming whichever is missing (`requiredSigningValue` in
+# clients/android/app/build.gradle.kts), so an unsigned or debug-signed
+# "release" is not a reachable outcome.
+#
+# The keystore path is resolved to an absolute one before `docker run -v`
+# sees it. Docker reads a source that is not absolute as a *volume name*: the
+# `plurx-upload.jks` that PUBLISHING.md's `keytool` line leaves in the cwd
+# would become an empty named volume, mounted as a directory at
+# /signing/upload.jks, and the build would fail on a keystore that exists.
+.PHONY: android-release
+android-release: android-image ## Build the SIGNED Android release APK (needs PLURX_ANDROID_KEYSTORE etc.)
+	@test -n "$${PLURX_ANDROID_KEYSTORE:-}" || { echo "set PLURX_ANDROID_KEYSTORE to the upload keystore's path on this host (streamed from the vault, not stored in the repo)"; exit 1; }
+	@test -f "$${PLURX_ANDROID_KEYSTORE}" || { echo "PLURX_ANDROID_KEYSTORE=$${PLURX_ANDROID_KEYSTORE} is not a file"; exit 1; }
+	keystore="$$(cd "$$(dirname "$${PLURX_ANDROID_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_KEYSTORE}")" && \
+	docker run --rm \
+	  --platform $(ANDROID_PLATFORM) \
+	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
+	  -e GRADLE_USER_HOME=/workspace/clients/android/.gradle-docker \
+	  -e PLURX_ANDROID_KEYSTORE_PASSWORD -e PLURX_ANDROID_KEY_ALIAS \
+	  -e PLURX_ANDROID_KEY_PASSWORD \
+	  -e PLURX_ANDROID_KEYSTORE=/signing/upload.jks \
+	  -v "$$keystore":/signing/upload.jks:ro \
+	  -v "$(CURDIR)":/workspace -w /workspace/clients/android \
+	  $(ANDROID_IMAGE) ./gradlew --no-daemon :app:assembleRelease
+	@echo "→ clients/android/app/build/outputs/apk/release/app-release.apk"
+
+# Publishing keeps the R8 mapping of every build it serves (plan
+# ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD §3.5, F-android-12): the
+# release APK is obfuscated, so a device stack trace means nothing without the
+# `mapping.txt` of the exact build that produced it, and the next Gradle run
+# overwrites that file. It is kept beside the APK as
+# `plurx-android-<versionCode>.mapping.txt`, the versionCode read from the
+# build's own output-metadata.json rather than from build.gradle.kts. The
+# mapping is written before the APK is replaced, so a served APK always has
+# one; a republish of the same versionCode with a different mapping moves the
+# earlier one aside instead of overwriting it. Only
+# /download/plurx-android.apk is served, so the mappings stay private.
+ANDROID_OUTPUTS ?= clients/android/app/build/outputs
+
 .PHONY: android-publish
-android-publish: android ## Build the APK + serve it from the web UI (ANDROID_DATA_DIR=/path/to/data)
+android-publish: android-release ## Build the signed APK + serve it from the web UI (ANDROID_DATA_DIR=/path/to/data)
 	@test -n "$(ANDROID_DATA_DIR)" || { echo "set ANDROID_DATA_DIR to the server's data_dir, e.g. make android-publish ANDROID_DATA_DIR=~/.local/share/plurx"; exit 1; }
-	cp clients/android/app/build/outputs/apk/debug/app-debug.apk "$(ANDROID_DATA_DIR)/plurx-android.apk"
+	@metadata="$(ANDROID_OUTPUTS)/apk/release/output-metadata.json"; \
+	  mapping="$(ANDROID_OUTPUTS)/mapping/release/mapping.txt"; \
+	  code="$$(sed -n 's/.*"versionCode": *\([0-9][0-9]*\).*/\1/p' "$$metadata" | head -1)"; \
+	  test -n "$$code" || { echo "no versionCode in $$metadata; nothing published"; exit 1; }; \
+	  test -s "$$mapping" || { echo "no R8 mapping at $$mapping; nothing published (a release APK without its mapping cannot be de-obfuscated)"; exit 1; }; \
+	  kept="$(ANDROID_DATA_DIR)/plurx-android-$$code.mapping.txt"; \
+	  if [ -e "$$kept" ] && ! cmp -s "$$mapping" "$$kept"; then \
+	    aside="$$kept.$$(date +%Y%m%dT%H%M%S)"; \
+	    mv "$$kept" "$$aside" && echo "versionCode $$code was published before with a different build; its mapping is kept as $$aside"; \
+	  fi; \
+	  cp "$$mapping" "$$kept.tmp" && mv "$$kept.tmp" "$$kept" && \
+	  cp "$(ANDROID_OUTPUTS)/apk/release/app-release.apk" "$(ANDROID_DATA_DIR)/plurx-android.apk" && \
+	  echo "R8 mapping for versionCode $$code -> $$kept"
 	@echo "Published -> $(ANDROID_DATA_DIR)/plurx-android.apk (served at /download/plurx-android.apk, no restart needed)"
+	@echo "NOTE: the signing key changed with the debug->release switch; the first"
+	@echo "      install on each device needs an 'adb uninstall tv.plurx.app' first."
 
 .PHONY: clean
 clean: ## Remove build artifacts and coverage output

@@ -10,12 +10,12 @@ use hiqlite::Row;
 use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore, TimedClient};
 use super::{
     directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
-    normalized_directory, ArtworkInventoryItem, ArtworkRepairFence, IdentityRepairBlocker,
-    IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot, IdentityRepairWatch,
-    MediaStore, MissingFieldOrder, MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus,
-    SeriesHintOutcome, WatchStore, IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX,
-    IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN,
-    IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
+    item_sort_order_by, normalized_directory, ArtworkInventoryItem, ArtworkRepairFence,
+    IdentityRepairBlocker, IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot,
+    IdentityRepairWatch, MediaStore, MissingFieldOrder, MissingVideoCodecTag, ReconcileOutcome,
+    RootFingerprintStatus, SeriesHintOutcome, WatchStore, IDENTITY_REPAIR_EPISODES_MAX,
+    IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX,
+    IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
 };
 use crate::domain::DolbyVisionFacts;
 use crate::domain::{
@@ -953,15 +953,7 @@ impl HiqliteAuthStore {
         limit: i64,
         genre: Option<&str>,
     ) -> Result<ItemPage, StoreError> {
-        let order = match sort {
-            ItemSort::Title => "sort_title ASC",
-            ItemSort::Added => "added_at DESC, id DESC",
-            ItemSort::Year => "year IS NULL, year DESC, sort_title ASC",
-            ItemSort::Resolution => {
-                "COALESCE((SELECT MAX(f.height) FROM files f WHERE f.item_id = items.id), -1) DESC, sort_title ASC"
-            }
-            ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC",
-        };
+        let order = item_sort_order_by(sort);
         const GENRE: &str = "($2 IS NULL OR EXISTS (SELECT 1 FROM json_each(items.genres) \
              WHERE value = $2 COLLATE NOCASE))";
         let count = self
@@ -2053,15 +2045,7 @@ impl MediaStore for HiqliteAuthStore {
         limit: i64,
         genre: Option<&str>,
     ) -> Result<ItemPage, StoreError> {
-        let order = match sort {
-            ItemSort::Title => "sort_title ASC",
-            ItemSort::Added => "added_at DESC, id DESC",
-            ItemSort::Year => "year IS NULL, year DESC, sort_title ASC",
-            ItemSort::Resolution => {
-                "COALESCE((SELECT MAX(f.height) FROM files f WHERE f.item_id = items.id), -1) DESC, sort_title ASC"
-            }
-            ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC",
-        };
+        let order = item_sort_order_by(sort);
         const GENRE: &str = "($2 IS NULL OR EXISTS (SELECT 1 FROM json_each(items.genres) \
              WHERE value = $2 COLLATE NOCASE))";
         let count = self

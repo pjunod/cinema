@@ -1,12 +1,13 @@
 # PGS subtitles on the start path — why a 79.5 GB read blocks playback, and the three fixes
 
-**Status:** every fix planned here has merged; **nothing here is deployed** ·
+**Status:** the fixes below are deployed through `99d4abf8c` on the four server
+nodes; §5.5 physical acceptance **failed** on Android and remains open ·
 §3 #437 · §4 #445 · §5: B1 and most of B5 in #447, B2 built and deliberately
 reverted, B3 and B4 in #453 · §6 (Fix C, the subtitle ride-along on the index
 pass) in #456 (the store's readers), #466 (the producer; first merged as #460,
 which the forge did not keep — see `STATUS.md`) and #463 (attribution) · the
-overlay gate `subtitles.pgs_overlay` is still **off** pending §5.5's
-two-device check · reviewed — see
+overlay gate `subtitles.pgs_overlay` was enabled for the 2026-09-24 check;
+it is not qualified for release · reviewed — see
 [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
 **Reviewer:** Fable, adversarial · **Written:** 2026-09-22, revised 2026-09-23 ·
 **Reported by:** Paul, 2026-09-21 ~18:50 ET, Android on the TCL tablet
@@ -497,6 +498,47 @@ equivalent.
 
 ### 5.5 The proof bar — deliberately not a matrix
 
+#### 2026-09-24 physical check: failed, acceptance open
+
+The Google TV Streamer ran Android client `0.3.0` (versionCode `119`) against
+server build `v0.3.0-3649-g99d4abf8c`. *Casino* (file `5226`) is HDR10 with
+English SDH PGS at subtitle index `0`. Playback time advanced and a forward
+seek reached 15:02, but no cue appeared. On nynuc the overlay preparation
+ended after 584,654 ms with `PGS safety limit exceeded: normalized RGBA
+output exceeds 268435456 bytes`. Cue timing, placement, and backward-seek
+acceptance were therefore not reached. A protected-video screenshot cannot
+establish visible picture or HDR output, so those observations remain open.
+
+On the TCL tablet, *Casino* started immediately and playback advanced, but
+the first m6 extraction timed out after 600,001 ms. The tablet's Playback info
+reported `HDR → SDR`, 3840×2160 source to 1920×1080 playback, `Transcode ·
+VA-API · 1080p`, and `PGS overlay · unavailable`. It cannot establish the
+required HDR/direct-or-remux result. After the m6 index pass stored all seven
+PGS tracks for file `5226` (472 MB, one file), a second preparation served a
+stored track and failed after 610 ms on the same aggregate RGBA limit. The
+stored subtitle path is working; the normalizer limit is the remaining failure
+for this title.
+
+On iPhone 17 Pro Max, *Bad Boys: Ride or Die* (file `5208`, Dolby Vision
+Profile 8, forced PGS index `2`) played at 3840×2160 with a remux decision,
+Dolby Vision rendering, and no buffering interruptions. Nynuc's cold PGS
+preparation timed out after 600,002 ms, so no DV PGS cue was validated. A
+separate SDR control, *The Good Son* (file `6641`), prepared its stored PGS
+track in 2,330 ms and visibly drew a centered cue on the iPhone. That proves
+the renderer can draw a real cue; its forward/backward seek behavior remains
+unproven because no post-seek cue was captured.
+
+The browser check passed its narrower contract: *Casino* opened with
+subtitles Off; manually selecting PGS displayed “That subtitle requires an
+SDR burn-in. HDR playback was kept unchanged.” The two-device HDR proof bar
+below has not been met. The overlay gate is on for qualification and is not
+release-qualified. The streaming normalizer change is a candidate repair;
+code tests and an SDR cue are not substitutes for the HDR hardware retest.
+After those failed trials, current-main Apple build `181` was installed and
+confirmed on the six reachable physical Apple devices, and current-main
+Android versionCode `121` was installed and confirmed on the TCL tablet. The
+newer client versions have not yet passed the HDR PGS retest.
+
 The plan's M4/M5 acceptance asks for an "executed compatibility matrix" and a
 "complete physical validation matrix". Those are ceremony for this feature. A
 bitmap overlay can be wrong in exactly three ways a screen reveals: a cue lands
@@ -515,7 +557,8 @@ the local override still works — and the HDR path is where an overlay can fail
 in a way a 4K SDR title will never show, so leaving the grade unspecified is
 how a check passes without testing anything.
 
-The gate stays off until this runs. `overlay_for_caller` removes the reason
+The gate was enabled for the physical check, but §5.5 remains open.
+`overlay_for_caller` removes the reason
 the switch was unsafe to flip — no client **that sends a capabilities
 document** is now offered a track it cannot draw, and none is told a delivery
 needs no burn when for it one does. That qualifier is load-bearing: a caller

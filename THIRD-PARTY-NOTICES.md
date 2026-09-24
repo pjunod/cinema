@@ -615,6 +615,7 @@ distribution, but they are not covered by the table above.
 | `tracing-core` | 0.1.36 | MIT |
 | `tracing-futures` | 0.2.5 | MIT |
 | `tracing-log` | 0.2.0 | MIT |
+| `tracing-serde` | 0.2.0 | MIT |
 | `tracing-subscriber` | 0.3.23 | MIT |
 | `try-lock` | 0.2.5 | MIT |
 | `typed-path` | 0.12.3 | MIT OR Apache-2.0 |

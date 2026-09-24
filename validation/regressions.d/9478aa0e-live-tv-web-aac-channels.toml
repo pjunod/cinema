@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9478aa0e"]
+points = ["live-tv.integration"]
+checks = ["web-static"]
+reason = "The web Live TV envelope claimed aac: max_channels 2 unconditionally, which folded every converted 5.1 broadcast to stereo. The claim now follows the AudioContext destination's channel count, floored at stereo and capped at 5.1; tests/web/live-tv.test.js pins the ceiling function and that the shipped envelope reads it rather than the literal 2, which is what a revert restores."

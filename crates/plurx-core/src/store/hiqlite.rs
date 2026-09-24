@@ -27,8 +27,8 @@ use super::telemetry::NodeLocalTelemetry;
 use super::{
     bounded_device_label, keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence,
     CacheAdminMutationClaim, DeleteTokenByPrefixOutcome, MetricsStore, NetworkPriorStore,
-    PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore, TokenSummary, UserStore,
-    MAX_DEVICE_LABEL_BYTES, TOKEN_SUMMARY_MAX,
+    PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore, TokenAuthentication,
+    TokenSummary, UserStore, MAX_DEVICE_LABEL_BYTES, TOKEN_SUMMARY_MAX,
 };
 use crate::domain::{
     ApiKey, NetworkPrior, NetworkPriorObservation, OfflinePackageStats, PlaybackEvent,
@@ -4112,23 +4112,52 @@ impl UserStore for HiqliteAuthStore {
             > 0)
     }
 
-    async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError> {
+    async fn authenticate_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<TokenAuthentication, StoreError> {
+        // The expiry policy rides the same consistent read as the token row:
+        // no extra round trip per request, and every voter judges a token
+        // against the committed policy rather than a node-local cache.
+        // Replicated statements introduce `$n` in order of first appearance,
+        // and the three setting keys appear in the projection before the
+        // token predicate, so the digest is `$4`.
         let sql = "SELECT u.id, u.username, u.password_hash, u.is_admin, u.created_at, \
-                          t.last_seen_at \
+                          t.last_seen_at, \
+                          (SELECT value FROM settings WHERE key = $1) AS expiry_enabled, \
+                          (SELECT value FROM settings WHERE key = $2) AS expiry_idle_days, \
+                          (SELECT value FROM settings WHERE key = $3) AS expiry_since \
                  FROM users u JOIN tokens t ON t.user_id = u.id \
-                 WHERE t.token_hash = $1";
+                 WHERE t.token_hash = $4";
         validate_sql(sql)?;
         let mut rows = self
             .client()
-            .query_consistent_map::<TokenUserRow, _>(sql, params!(token_hash))
+            .query_consistent_map::<TokenUserRow, _>(
+                sql,
+                params!(
+                    keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                    keys::AUTH_TOKEN_IDLE_DAYS,
+                    keys::AUTH_TOKEN_EXPIRY_SINCE,
+                    token_hash
+                ),
+            )
             .await?;
-        let row = rows.pop();
-        if let Some(row) = row.as_ref() {
-            let now = self.now()?;
-            self.refresh_token_activity_if_due(token_hash, row.last_seen_at, now)
-                .await?;
+        let Some(row) = rows.pop() else {
+            return Ok(TokenAuthentication::Unknown);
+        };
+        let now = self.now()?;
+        if let Some(policy) = row
+            .expiry
+            .filter(|policy| policy.is_expired(row.last_seen_at, now))
+        {
+            // No activity refresh: touching an expired token would revive it.
+            return Ok(TokenAuthentication::Expired {
+                idle_days: policy.idle_days,
+            });
         }
-        Ok(row.map(Into::into))
+        self.refresh_token_activity_if_due(token_hash, row.last_seen_at, now)
+            .await?;
+        Ok(TokenAuthentication::Authenticated(row.user.into()))
     }
 
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError> {
@@ -4772,6 +4801,7 @@ struct UserRow {
 struct TokenUserRow {
     user: UserRow,
     last_seen_at: i64,
+    expiry: Option<crate::auth::TokenIdlePolicy>,
 }
 
 struct TokenSummaryRow {
@@ -4806,16 +4836,18 @@ impl From<TokenSummaryRow> for TokenSummary {
 impl From<&mut Row<'_>> for TokenUserRow {
     fn from(row: &mut Row<'_>) -> Self {
         let last_seen_at = row.get("last_seen_at");
+        let enabled: Option<String> = row.get("expiry_enabled");
+        let idle_days: Option<String> = row.get("expiry_idle_days");
+        let since: Option<String> = row.get("expiry_since");
         Self {
             user: UserRow::from(&mut *row),
             last_seen_at,
+            expiry: crate::auth::TokenIdlePolicy::from_settings(
+                enabled.as_deref(),
+                idle_days.as_deref(),
+                since.as_deref(),
+            ),
         }
-    }
-}
-
-impl From<TokenUserRow> for User {
-    fn from(row: TokenUserRow) -> Self {
-        row.user.into()
     }
 }
 

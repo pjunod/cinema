@@ -251,6 +251,26 @@ validation fan-out, builds once on an X64 runner, verifies the immutable
 registry copy, and only then moves the fleet tag. It publishes
 `sha-<12hex>` for rollback and `main` for the newest qualified merge.
 Versioned releases own `latest`; fleet merges never overwrite that alias.
+**No run currently reaches that job:** `ci.yml` runs on `v*` tags and manual
+dispatch only, and the job's condition is a push to `main`, so no new
+`sha-` image has had an automatic producer since `3cd127e2` (2026-09-10)
+([LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
+correction 1, re-verified 2026-09-24; the fix belongs to
+[RUST-TEST-EXECUTION-POLICY.md](ci/RUST-TEST-EXECUTION-POLICY.md) §3.1(b)).
+
+**Two identities, two questions.** The `sha-<12hex>` image is the deploy and
+rollback identity: it is what `deploy/.env`'s `PLURX_IMAGE` names and what a
+voter runs. A `v` release tag ([RELEASING.md](RELEASING.md), cut weekly) is
+the communication identity: it names the `CHANGELOG.md` section. To go from a
+node to its changelog:
+
+```bash
+curl -fsS http://127.0.0.1:32400/api/v1/server | jq '{version, build}'
+# build "v0.3.1"             -> CHANGELOG.md "## [0.3.1]"
+# build "v0.3.1-12-gabc1234" -> "## [0.3.1]" plus `git log v0.3.1..abc1234`
+```
+
+`plurx_build_info{version,build}` is the same pair for every node at once.
 Every external workflow action is resolved to a reviewed 40-character commit,
 and checkout drops its injected repository credential immediately after the
 fetch. Version comments preserve the human update trail without restoring a
@@ -2974,6 +2994,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_MDNS_ADVERTISE` | — | `true` | Run Bonjour inside the server process; Compose sets this to `false` because its host-network companion advertises instead |
 | `PLURX_DISCOVERY_SERVER_URL` | — | `http://127.0.0.1:32400` | Server URL read by `plurxd advertise`; normally only the Compose companion uses it |
 | `PLURX_LOG` | — | `info` | Log filter (`tracing` EnvFilter syntax, e.g. `plurxd=debug`) |
+| `PLURX_LOG_FORMAT` | — | `text` | Console log shape: `text` or `json`. Anything else is `text`. A property of how *this process's* stdout is consumed, not a cluster setting — a node whose journal is scraped by a log pipeline wants `json` and its neighbour may not. Under `json` the ANSI colouring is off whatever the terminal is, because an escape sequence inside a JSON string field is a parse hazard, not a colour |
 | `PLURX_CLUSTER_ACTIVATION_FAILPOINT` | — | — | Test-only activation exit: `after-quiescence` · `after-incoming` · `after-marker` · `after-rename`; each exits `86` |
 | `PLURX_HLS_FORCED_AUTOSELECT` | — | off | **Experiment.** Puts `AUTOSELECT=YES` on forced subtitle renditions. Set `1` to enable |
 | `PLURX_PGS_OVERLAY` | — | off | **Retired as a gate.** The switch is now Settings → Developer → *Serve PGS subtitles as an overlay* (`subtitles.pgs_overlay`). This variable seeds that setting once, on a node that has never been told either way, and does nothing afterwards. Still keep it off until native-client and physical HDR/DV acceptance is complete |
@@ -4878,6 +4899,38 @@ they never label a session, file, user, network, or path.
 The compact Prometheus alert shape is: membership sample valid · leader known ·
 heartbeat quorum available · apply lag zero. `/readyz` remains the final active
 serving check because the metrics are deliberately passive and cached.
+
+### HTTP requests, bodies and panics
+
+Bounded by construction: the route label is the same nine-value
+`route_group` classification the Store attribution uses, never a URI, an id, a
+session, a title or a path. Nothing here names content.
+
+| Metric | How to read it |
+|---|---|
+| `plurx_http_requests_total{route_group,method,status}` | Every request's outcome, counted outside the cluster capacity gate — so a learner, fenced or maintenance 503 is counted, which is the point. `status` is the class (`2xx`…`5xx`, `other`), not a code: a node that has turned every request into `5xx` or every request into a `503` shows up here and nowhere else. |
+| `plurx_http_route_seconds{route_group,role}` | **Response-header** latency: it stops when the handler returns its response, before a byte of the body is read. This is the number to alert on for JSON pages, and the number a two-hour direct play would otherwise ruin. |
+| `plurx_http_body_seconds{route_group}` | **Body delivery** time, from the handler's response to the body's last frame or its drop. A different scale from the line above — seconds to hours rather than milliseconds — which is why it is a separate family rather than more buckets. It is per **response body**, so a direct play answered as ten range requests is ten observations, not one viewing. |
+| `plurx_http_bodies_total{route_group,outcome="complete\|aborted"}` | How bodies ended. `complete` is a body that handed the connection everything it promised: it reached its end, or — for a response with a `Content-Length`, which is every direct play range and HLS segment — it yielded the declared number of bytes (hyper stops polling a fixed-length body once those are written, so "reached its end" alone would miss every one of them). `aborted` is a body let go of short of that, or one that ended in an error. `complete` means handed to the connection, not acknowledged by the client. A HEAD, 204 or 304 response promises no body and counts `complete`. **`aborted` is not an error rate**: on a media route a consumer that leaves mid-body — a seek, a player that drops a segment it no longer needs — is ordinary. But a body delivered in full is `complete` whatever its framing, so `aborted` counts real departures only. Read it against `complete` on the *same* route group, and read a change in the ratio rather than its level. |
+| `plurx_panics_total{subsystem}` | Panics the process hook saw, by a fixed allowlist of module names with `other` for everything else, including dependencies. Any movement at all is worth the daemon log: the matching line is at ERROR on target `plurxd::panic` with the panic's location and a redacted message. The counter reports a panic; it does not repair whatever the panicking task left behind. |
+
+Every 5xx also writes one `WARN` line on target `plurxd::http` carrying the
+route group, the status, the latency, the redacted target and the request id.
+Successful requests are deliberately **not** logged: the in-memory ring behind
+Settings → System → Logs is bounded, and one line per HLS segment per viewer
+would evict everything else in it inside a minute. The counters carry the
+volume; the ring carries the exceptions.
+
+### Request ids
+
+Every response carries `x-request-id`. An inbound one is adopted when it is at
+most 64 characters of `[A-Za-z0-9_-]`, and otherwise replaced by a minted uuid
+— replaced rather than refused, because a correlation aid must never be able to
+fail a request. **A discarded value is never logged, echoed or stored**: a
+client that puts a bearer token in that header does not get it written into the
+journal. The id is on the `http_request` span, so every log line inside a
+request carries it, and it is deliberately not a metric label.
+
 
 ### Reading the index queue's verdict
 

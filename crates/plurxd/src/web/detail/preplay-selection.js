@@ -155,7 +155,7 @@ async function downloadSubtitle(fileId,providerId,language,button){
     }
     toast("Subtitle downloaded and selected for your next playback.");
   }catch(e){
-    if(button.isConnected){button.disabled=false;button.textContent="Retry download";const note=document.createElement("div");note.className="err";note.textContent=e.message||"Subtitle download failed.";button.after(note);}
+    if(button.isConnected){button.disabled=false;button.textContent="Retry download";const note=document.createElement("div");note.textContent=e.message||"Subtitle download failed.";button.after(note);}
   }
 }
 // Does THIS player have to burn the chosen subtitle into the picture?

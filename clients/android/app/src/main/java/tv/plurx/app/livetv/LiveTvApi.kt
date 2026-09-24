@@ -220,19 +220,28 @@ data class LiveTvResumeAnswer(val outcome: String, val session: LiveTvStarted? =
     val compatibility: LiveTvCompatibility? = null,
 ) {
     companion object {
-        fun from(caps: DeviceCaps, compatibility: LiveTvCompatibility? = null): LiveTvPlaybackEnvelope {
+        fun from(
+            caps: DeviceCaps,
+            compatibility: LiveTvCompatibility? = null,
+            sink: tv.plurx.app.data.LiveSinkFacts = tv.plurx.app.data.LiveSinkFacts(),
+        ): LiveTvPlaybackEnvelope {
             val liveAudio = caps.audio.filter { it in setOf("aac", "ac3", "eac3") }
             val formats = buildList {
                 add(LiveTvHlsFormat("mpegts", "h264", "aac"))
                 caps.video.forEach { video ->
-                    val container = if (video.codec == "hevc") "fmp4" else "mpegts"
-                    liveAudio.forEach { audio -> add(LiveTvHlsFormat(container, video.codec, audio)) }
+                    // Media3's TS extractor reads HEVC as readily as fMP4 does,
+                    // and MPEG-TS has no init file for late AC-3 to race, so a
+                    // copied HEVC picture with copied AC-3 rides MPEG-TS.
+                    val containers = if (video.codec == "hevc") listOf("fmp4", "mpegts") else listOf("mpegts")
+                    containers.forEach { container ->
+                        liveAudio.forEach { audio -> add(LiveTvHlsFormat(container, video.codec, audio)) }
+                    }
                 }
             }.distinct()
             val limits = caps.video.flatMap { video ->
                 (video.profiles.map { it.lowercase() }.map { it as String? }.ifEmpty { listOf(null) }).map { profile ->
                     LiveTvVideoLimit(video.codec, profile, 3840, video.max_height ?: 2160,
-                        LiveTvRational(60, 1), false)
+                        LiveTvRational(60, 1), sink.deinterlaces)
                 }
             }
             return LiveTvPlaybackEnvelope(
@@ -240,7 +249,7 @@ data class LiveTvResumeAnswer(val outcome: String, val session: LiveTvStarted? =
                 caps = caps,
                 hls_formats = formats,
                 video_limits = limits,
-                audio_limits = liveAudio.map { LiveTvAudioLimit(it, if (it == "aac") 2 else 8) },
+                audio_limits = liveAudio.map { LiveTvAudioLimit(it, if (it == "aac") sink.aacChannels else 8) },
                 compatibility = compatibility,
             )
         }
@@ -577,7 +586,11 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
             val compatibility = nextCompatibility
             nextCompatibility = null
             Net.json.encodeToJsonElement(
-                LiveTvPlaybackEnvelope.from(Caps.snapshot(current).document, compatibility)
+                LiveTvPlaybackEnvelope.from(
+                    Caps.snapshot(current).document,
+                    compatibility,
+                    Caps.liveSinkFacts(current),
+                )
             )
         }
         val body = buildJsonObject {

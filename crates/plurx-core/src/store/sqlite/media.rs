@@ -17,12 +17,12 @@ use crate::error::StoreError;
 use crate::mediafacts::{FactsRow, MediaFacts};
 use crate::store::{
     directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
-    normalized_directory, ArtworkInventoryItem, ArtworkRepairFence, IdentityRepairBlocker,
-    IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot, IdentityRepairWatch,
-    MediaStore, MissingFieldOrder, MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus,
-    SeriesHintOutcome, IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX,
-    IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN,
-    IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
+    item_sort_order_by, normalized_directory, ArtworkInventoryItem, ArtworkRepairFence,
+    IdentityRepairBlocker, IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot,
+    IdentityRepairWatch, MediaStore, MissingFieldOrder, MissingVideoCodecTag, ReconcileOutcome,
+    RootFingerprintStatus, SeriesHintOutcome, IDENTITY_REPAIR_EPISODES_MAX,
+    IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX,
+    IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
 };
 
 pub(super) fn identity_repair_snapshot(
@@ -853,16 +853,7 @@ impl MediaStore for SqliteStore {
     ) -> Result<ItemPage, StoreError> {
         let genre = genre.map(str::to_owned);
         self.with_conn(move |conn| {
-            let order = match sort {
-                ItemSort::Title => "sort_title ASC",
-                ItemSort::Added => "added_at DESC, id DESC",
-                ItemSort::Year => "year IS NULL, year DESC, sort_title ASC",
-                // Best (max) file height per item, highest first; no-height items last.
-                ItemSort::Resolution => {
-                    "COALESCE((SELECT MAX(f.height) FROM files f WHERE f.item_id = items.id), -1) DESC, sort_title ASC"
-                }
-                ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC",
-            };
+            let order = item_sort_order_by(sort);
             // Genres are a JSON array (migration v13), so membership is a
             // `json_each` scan rather than an index probe. Written as
             // "no filter asked, OR the array contains it" in ONE clause so

@@ -641,6 +641,13 @@ pub struct AppState {
     /// so a hostile request cannot turn authentication pressure into Raft
     /// writes or a replicated account lockout.
     pub(crate) login_throttle: crate::http::LoginThrottle,
+    /// Argon2 admission (workers and queue). Per state, like the throttle:
+    /// one per process in production, one per router in tests (see
+    /// `http::PasswordCapacity`).
+    pub(crate) password_capacity: crate::http::PasswordCapacity,
+    /// C-07's façade census. Per state rather than process-global so each
+    /// router counts only its own requests (see `http::PlexCensus`).
+    pub(crate) plex_census: Arc<crate::http::PlexCensus>,
     /// Node-local network boundary for security-sensitive forwarding headers.
     pub(crate) trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
@@ -667,6 +674,11 @@ pub struct AppState {
     pub(crate) media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
     /// Always-compiled HDHomeRun configuration, readiness, and lineup owner.
     pub(crate) live_tv: Arc<crate::live_tv::LiveTvManager>,
+    /// One HTTP client for every Live TV ingress-to-owner exchange, plus a
+    /// five-second memory of the owner's address. Signing, expected-node
+    /// binding and response verification stay per request inside the
+    /// transport; nothing about a credential is held here.
+    pub(crate) live_tv_peers: Arc<crate::http::live_tv::LiveTvPeers>,
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
@@ -996,6 +1008,7 @@ impl AppState {
         );
         let cache_only_admin_proofs =
             crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
+        let live_tv_peers = crate::http::live_tv::LiveTvPeers::new(membership.clone());
         let live_tv = crate::live_tv::LiveTvManager::new(
             Arc::clone(&store),
             Arc::clone(&system),
@@ -1009,6 +1022,8 @@ impl AppState {
             store,
             cache_only_admin_proofs,
             login_throttle: Default::default(),
+            password_capacity: Default::default(),
+            plex_census: Default::default(),
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
             replication,
@@ -1022,6 +1037,7 @@ impl AppState {
             media_pool,
             media_sessions,
             live_tv,
+            live_tv_peers,
             server_name,
             node_id,
             cluster_advertisement,

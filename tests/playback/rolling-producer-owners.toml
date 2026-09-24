@@ -941,7 +941,18 @@ pattern = "ServingAuthority"
 # bytes. They project the always-ready authority every other fixture uses; the
 # one test that proves lost authority cancels the sinks builds a real
 # `ServingFence` instead. No production serving lease is added.
-expected_occurrences = 27
+# 27 -> 32 (measured) with L-03 M1: five test-only references in
+# `live_tv::dvr::tests` -- the shared-transport manager fixture's
+# always-ready authority and four fan-out cases that pass
+# `ServingAuthority::always_ready()` to `pump_tuner_fanout`. The shared
+# transport projects the same existing authority the DVR transport already
+# did (its per-chunk `is_current` check); no new authority is created.
+# 32 -> 34 (measured) with the L-03 review round: two test-only
+# `ServingAuthority::always_ready()` in `live_tv::dvr::tests`, for the
+# re-probe case and the full-rate prefix case, each passed to
+# `pump_tuner_fanout` exactly as the M1 fan-out cases do. No production
+# authority is added or projected differently.
+expected_occurrences = 34
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -1953,7 +1964,38 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # reads, one counter increment, then it returns. At most eight run at once (an
 # atomic in-flight count); past that the miss is counted `absent` inline. No
 # timer, no process, no producer, and no request waits on it.
-expected_occurrences = 573
+# +1 for `http/developer.rs`'s chapter-thumbnail readiness card: one
+# `tokio::task::spawn_blocking` that walks the small thumbnail cache and
+# takes a statvfs, awaited to completion inside the request. It owns no
+# producer, no process and no timer; it exists so two synchronous filesystem
+# reads do not run on the async runtime.
+# 574 -> 575 (measured) with the #461 review's P1 fix: one test-only
+# `tokio::spawn` in
+# `http::tests::a_fully_delivered_body_counts_complete_over_a_real_connection_whatever_its_framing`,
+# running `axum::serve` on a 127.0.0.1:0 listener so the regression test goes
+# through a real hyper connection, which is the only place the defect exists
+# (`oneshot` always polls a body to its end). The task owns the listener and
+# nothing else; it ends with the test's runtime. No timer, no process, no
+# producer.
+# 575 -> 580 (measured) with L-03 M1: five test-only `tokio::spawn`s in
+# `live_tv::dvr::tests` -- a viewer-feed drain, three fan-out readers run
+# as a transport's worker would be, and one source waiter. Each is joined
+# or ends with its test. Production is unchanged in count: the transport
+# worker and its close hand-off moved from `attach_sink` into
+# `spawn_transport_worker`, which viewer starts now share.
+# 580 -> 587 (measured) with the L-03 review round, all test-only; production
+# is unchanged in count (the fan-out's re-probe is a future polled inside the
+# fan-out task, deliberately not a spawned task, so cancelling and joining the
+# worker still ends everything the transport owns). In `live_tv::tests`: the
+# start-path fixture tuner's accept loop and its per-connection handler (both
+# end when the test's runtime or the client does; the accept loop is aborted
+# on drop), the fixture's 1 Hz settings-observer loop standing in for the
+# node's (aborted on drop, and it ends when the manager is gone), and
+# `spawn_start` running `start_local` as an HTTP handler would (each joined).
+# In `live_tv::dvr::tests`: a fan-out worker and a viewer-feed reader (both
+# joined), and one `std::thread::spawn` racing an attach against retirement
+# (joined each round). No timer, no process, no producer.
+expected_occurrences = 587
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2038,7 +2080,13 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # test returns, and it owns no producer, process, child, timer or lease. The
 # sentinel still sees it, which is the point: the one thing this module may not
 # do is start a rolling owner nobody joins.
-expected_occurrences = 47
+# 47 -> 48 (measured) with L-03 M3: one test-only `command.spawn()` in
+# `live_tv::caption_audit_tests::run_live_graph`, which runs the production
+# live FFmpeg argv on a generated caption fixture. The child is
+# `kill_on_drop`, its stdin is written and closed in the same `join!` that
+# awaits `wait_with_output` under a 180 s timeout, so it cannot outlive the
+# test. No producer, no session, nothing registered.
+expected_occurrences = 48
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2605,7 +2653,52 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # test's own calls to `work_cluster_fragment_index_queue` while the queued
 # request resolves, is claimed and builds (at most 40 rounds). It owns no
 # producer and outlives nothing: the test awaits each round.
-expected_occurrences = 875
+# +2 for `http/chapter_thumbs.rs`: `tokio::time::timeout` bounding the wait
+# for one of the two extraction permits (10 s), and `tokio::time::timeout`
+# bounding the one-frame ffmpeg child (15 s). Both are request-scoped waits
+# that end with the request; neither selects a recipe, publishes anything
+# or starts a rolling producer.
+# 877 -> 878 (measured on the merged tree) with C-08 M1, merged over main's
+# 868 -> 877: one test-only `tokio::time::sleep(100 ms)` inside
+# `streaming_test_handler`, the fixture body that the HTTP observability tests
+# stream three frames out of. It exists so the test can tell response-header
+# latency from body delivery — the response head returns at once and the body
+# takes 300 ms — and it is exactly the distinction F-core-12 asked for, so the
+# wait is the assertion rather than a wait for somebody else's work. It sits
+# inside `mod tests`, it is bounded, and it owns no producer, no process, no
+# child and no recovery decision.
+# 878 -> 880 (measured) with L-03 M3: two test-only `tokio::time::timeout`
+# calls in `live_tv::caption_audit_tests` (`media_command` and
+# `run_live_graph`), each bounding one awaited FFmpeg/ffprobe child to
+# 180 s. Neither is a timer anything else observes.
+# 880 -> 889 (measured) with L-03 M1. Production +1: the viewer pump
+# (`pump_viewer_feed`) keeps one `TUNER_READ_TIMEOUT` stdin write in place
+# of `pump_tuner_stream`'s three (its tuner read moved to the shared
+# fan-out, which already had one), -2; the transport's wait for its first
+# consumer polls with a 250 ms `sleep`, +1; a viewer's wait for its
+# transport's probe is bounded by `sleep_until` its start deadline, +1; a
+# start that waits for a closing transport bounds it with `timeout_at`,
+# +1. Each bounds one owned wait; none creates a producer. Tests +8: the
+# endless-tuner fixture's pacing `sleep` and the shared-transport cases'
+# settling sleeps and join timeouts.
+# 889 -> 900 (measured) with the L-03 review round. Production net 0: the
+# viewer's start-deadline `sleep_until` moved with the wait into
+# `DvrTransport::source_for_viewer`, which now also waits for a re-probe
+# under the same bound; the fan-out's re-probe adds no timer (its sample is
+# bounded by `SOURCE_PREFIX_TIME` read off the chunks it already receives,
+# and the probe keeps `probe_live_source`'s own `SOURCE_PROBE_TIME`). Tests
+# +11: the fixture tuner's 1 ms pacing `sleep` and its one-second lineup-gate
+# `timeout`, the fixture's 1 Hz observer `sleep`, three 10 ms polling sleeps
+# and one 500 ms settling sleep in the start-path cases, three `timeout`s
+# bounding a start's answer, and the busy-tuner fixture's pacing `sleep` in
+# `live_tv::dvr::tests`. Each bounds one test wait.
+# +1 for `transcode/tests/chunk_05.rs`'s `placeholder_source`, test-only:
+# the one ffmpeg that encodes the transcode suite's placeholder file (a real
+# 4K HEVC source, so the sessions under test hold a child that reads instead
+# of one that exits before registration). Once per host, `kill_on_drop`,
+# bounded by a 120 s `tokio::time::timeout`, awaited to completion through
+# `output()`. It owns no producer and runs under `#[cfg(test)]` only.
+expected_occurrences = 901
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2781,7 +2874,51 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # `subtitle_ride_along::testing::run_ffmpeg_to_completion`, a
 # `std::process::Command` run to completion through `testfixtures::run`
 # before its test proceeds.
-expected_occurrences = 151
+# +1 for `http/chapter_thumbs.rs`: the one-frame chapter thumbnail child,
+# built by `extract_command` and spawned through
+# `BoundedDiagnosticChild::spawn_piped_output`, so it inherits
+# `kill_on_drop`, an output cap (2 MiB) and a 15 s timeout. It runs only for
+# the chapter a watch page asked for, two at a time behind a semaphore, and
+# nothing owns it beyond the request's await.
+# 152 -> 154 with P-02 (#457), measured by zeroing this row: two
+# `std::process::Command::new` in `crates/plurx-core/src/process/rlimit.rs`'s
+# `#[cfg(all(test, unix))]` module, both run to completion by `.output()`
+# before the test asserts. One re-execs the test binary as
+# `process::rlimit::tests::child_main`. It lowers only its own soft
+# `RLIMIT_NOFILE` so that the shared test process is untouched, prints one
+# line and exits. The branch added it without this review. The other is
+# `/usr/sbin/sysctl -n kern.maxfilesperproc`, the macOS-only oracle that the
+# review fix compares the clamped raise against, and it is reached only under
+# `cfg!(target_vendor = "apple")`. Neither is a producer, neither outlives
+# its statement, and neither is in a shipped binary.
+# 152 -> 153 (measured) with the #461 review's P2 fix: one test-only
+# `std::process::Command::new(std::env::current_exe())` in
+# `panics::tests::run_in_a_child`, re-running a single named test of this
+# same test binary (`--exact`, one thread) in a child process. Two tests use
+# it because the property they pin is what a panic does to the *process* —
+# one expects the child to abort, which cannot be observed from inside the
+# process that aborts. The child is this binary, runs one test and exits; it
+# is waited to completion by `.output()` before the test continues. No
+# producer, no `ffmpeg`, nothing outlives the test.
+# 155 on the architecture-review wave-3 integration tree, measured by zeroing
+# this row after merging both: main's 152, plus P-02's two test-only children
+# in `plurx-core/src/process/rlimit.rs` and C-08's one in
+# `plurxd/src/panics.rs`, each reviewed above. Disjoint files; the merge
+# itself added no occurrence.
+# 155 -> 160 (measured) with L-03 M3: five test-only commands in
+# `live_tv::caption_audit_tests` -- the fixture's MPEG-2 generation and
+# mux, the ffprobe that exports `cc_data`, the H.264 copy-route source,
+# and the production live argv rebuilt in `run_live_graph` (same program,
+# arguments and cleared environment as `live_ffmpeg_command_for_input`).
+# Each is awaited to completion under a 180 s timeout with `kill_on_drop`;
+# none is a producer and none is in a shipped binary.
+# +1 for `transcode/tests/chunk_05.rs`'s `placeholder_source`, test-only:
+# the one ffmpeg that encodes the transcode suite's placeholder file (a real
+# 4K HEVC source, so the sessions under test hold a child that reads instead
+# of one that exits before registration). Once per host, `kill_on_drop`,
+# bounded by a 120 s `tokio::time::timeout`, awaited to completion through
+# `output()`. It owns no producer and runs under `#[cfg(test)]` only.
+expected_occurrences = 161
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3058,7 +3195,73 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `subtitle_ride_along::run_ffmpeg`, which spawns, drains and reaps the
 # self-test's child in one await under the 20 s timeout; `kill_on_drop` covers
 # the timeout.
-expected_occurrences = 350
+# 350 -> 352 with P-02 (#457), measured by zeroing this row: the `.output()`
+# on each of the two test-only children in
+# `crates/plurx-core/src/process/rlimit.rs` that are described under
+# `process-command-construction` above (the `child_main` re-exec and the
+# macOS `sysctl` oracle). They are the same two children, counted once in
+# each sentinel, and each is spawned, drained and reaped in one call.
+# +7 with C-07's M0 census (branch base 343 -> 350, merged over main's
+# Fix C / #456 count of 350 and re-measured on the merged tree): seven
+# `.status(` occurrences across six lines, every one of them `axum::response::Response::status()` on an
+# in-process response, and **not one of them launches a child**. This
+# sentinel's pattern counts `.spawn(`, `.output(` and `.status(` together and
+# `Response::status()` is the third spelling; no `Command` is constructed
+# anywhere on this branch and `process-command-construction` is unchanged.
+# Two are production, and both are the census itself: `plex_facade_census`
+# reads the status of the response the façade already produced to pick the
+# outcome cell, and `root_dispatch` does the same on its Plex branch. Neither
+# can change the response; they are reads of HTTP metadata after the fact.
+# The other five are assertions in the census tests -- a 401 on a tokenless
+# façade route, a 200 on `/identity`, a browser root, and the two arms of the
+# Plex root's accepted answers. All in-process; they create no task, timer,
+# process or rolling-producer owner.
+# 359 on the architecture-review wave-3 integration tree, measured by zeroing
+# this row after merging both: main's 350, plus P-02's two test-only
+# `.output()` children and C-07's seven in-process `Response::status()`
+# reads, each reviewed above. The two sets are disjoint files
+# (`plurx-core/src/process/rlimit.rs` against `plurxd/src/http/mod.rs`), so
+# neither review changes; no occurrence was added by the merge itself.
+# 350 -> 357 (measured on the merged tree) with C-08 M1/M2/M3, merged over
+# main's 343 -> 350: seven `.status(` reads, every one of them
+# `axum::response::Response::status()` on an in-process response, and **not one
+# of them launches a child**. This sentinel's pattern counts `.spawn(`,
+# `.output(` and `.status(` together, and `Response::status()` is the third
+# spelling; no `Command` is constructed anywhere on this branch, and
+# `process-command-construction` is unchanged by it.
+# One is production: `http_request_metrics` reads the response's status to pick
+# the counter cell for `plurx_http_requests_total{route_group,method,status}`
+# and to decide whether the request earns a 5xx access line. It is a read of
+# HTTP metadata on a response the inner layers already produced; it starts
+# nothing, owns nothing, and cannot change the response.
+# The other six are assertions in the new observability tests — a 200 on a
+# matched route, a 404 on an unmatched one, a 200 whose body is then abandoned,
+# a 500, a second 200 beside it, and a 503 in the refusal-storm test. Each
+# asserts the wire answer the middleware saw, which is the only way to pin the
+# status classification the counter depends on. All in-process; they create no
+# task, timer, process or rolling-producer owner.
+# 357 -> 358 (measured) with the #461 review's P2 fix: the `.output()` in
+# `panics::tests::run_in_a_child`, the same test-only launch described in
+# `process-command-construction` above — this test binary re-run on one named
+# test, waited to completion before its test continues.
+# 367 on the architecture-review wave-3 integration tree, measured by zeroing
+# this row after merging all three: main's 350, plus P-02's two `.output()`
+# calls, C-07's seven `Response::status()` reads and C-08's seven
+# `Response::status()` reads and one `.output()`, each reviewed above. The
+# C-07 and C-08 reads are different call sites in `plurxd/src/http/mod.rs`
+# (the façade census against the request-metrics middleware and their own
+# tests); the merge itself added no occurrence.
+# 367 -> 369 (measured) with L-03 M3: the two launches of the commands
+# described under process-command-construction -- `media_command`'s
+# `.output()` and `run_live_graph`'s `.spawn()` -- both test-only and
+# awaited to completion.
+# +1 for `transcode/tests/chunk_05.rs`'s `placeholder_source`, test-only:
+# the one ffmpeg that encodes the transcode suite's placeholder file (a real
+# 4K HEVC source, so the sessions under test hold a child that reads instead
+# of one that exits before registration). Once per host, `kill_on_drop`,
+# bounded by a 120 s `tokio::time::timeout`, awaited to completion through
+# `output()`. It owns no producer and runs under `#[cfg(test)]` only.
+expected_occurrences = 370
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3170,7 +3373,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # The count above each contribution below is stated against that branch's
 # own base. This row's value is the whole merged tree re-measured after the
 # promotion merge, so it is the sum, not either branch's number.
-expected_occurrences = 379
+# 379 -> 381 (measured) with the L-03 review round: two test-only
+# `std::sync::Barrier::wait` calls in `live_tv::dvr::tests`
+# (`retirement_is_atomic_against_a_consumer_attaching` lines its two threads
+# up each round). The pattern matches the method name; neither is a process.
+expected_occurrences = 381
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -3287,7 +3494,17 @@ pattern = "kill_on_drop\\s*\\("
 # self-test's shutdown drops is killed with it. The index pass's own child,
 # which now also carries the ride-along's tee, was already `kill_on_drop` and
 # is unchanged.
-expected_occurrences = 82
+# 82 -> 84 (measured) with L-03 M3: `media_command` and `run_live_graph` in
+# `live_tv::caption_audit_tests`, so an FFmpeg child whose 180 s timeout
+# fires, or whose test panics, is killed rather than left holding a
+# hardware encoder the next audit run needs.
+# +1 for `transcode/tests/chunk_05.rs`'s `placeholder_source`, test-only:
+# the one ffmpeg that encodes the transcode suite's placeholder file (a real
+# 4K HEVC source, so the sessions under test hold a child that reads instead
+# of one that exits before registration). Once per host, `kill_on_drop`,
+# bounded by a 120 s `tokio::time::timeout`, awaited to completion through
+# `output()`. It owns no producer and runs under `#[cfg(test)]` only.
+expected_occurrences = 85
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

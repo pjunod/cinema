@@ -308,6 +308,11 @@ pub(crate) async fn search_request(
         .get_file(id)
         .await?
         .ok_or(ApiError::NotFound("file"))?;
+    if !file.probed {
+        return Err(ApiError::Conflict(
+            "Wait for this media file to finish scanning before downloading subtitles".into(),
+        ));
+    }
     let item = state
         .store
         .get_item(file.item_id)
@@ -360,26 +365,39 @@ async fn movie_hash(file: &MediaFile) -> Option<String> {
     if size < 128 * 1024 {
         return None;
     }
+    let mtime = file.mtime;
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        tokio::task::spawn_blocking(move || {
-            use std::io::{Read, Seek, SeekFrom};
-            let mut handle = source.handle.try_clone().ok()?;
-            let mut sum = size;
-            let mut block = [0u8; 65536];
-            for offset in [0, size - 65536] {
-                handle.seek(SeekFrom::Start(offset)).ok()?;
-                handle.read_exact(&mut block).ok()?;
-                for word in block.chunks_exact(8) {
-                    sum = sum.wrapping_add(u64::from_le_bytes(word.try_into().ok()?));
-                }
-            }
-            Some(format!("{sum:016x}"))
-        }),
+        tokio::task::spawn_blocking(move || hash_held_source(source.handle, size, mtime)),
     )
     .await
     .ok()?
     .ok()?
+}
+
+fn hash_held_source(mut handle: std::fs::File, size: u64, mtime: i64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let before = handle.metadata().ok()?;
+    let stamp = crate::fragment_index_cluster::source_stamp(&before);
+    if !before.is_file() || size < 128 * 1024 || stamp.size != size || stamp.mtime != mtime {
+        return None;
+    }
+    let mut sum = size;
+    let mut block = [0u8; 65536];
+    for offset in [0, size - 65536] {
+        handle.seek(SeekFrom::Start(offset)).ok()?;
+        handle.read_exact(&mut block).ok()?;
+        for word in block.chunks_exact(8) {
+            sum = sum.wrapping_add(u64::from_le_bytes(word.try_into().ok()?));
+        }
+    }
+    let after = handle.metadata().ok()?;
+    if crate::fragment_index_cluster::source_stamp(&after) != stamp
+        || after.modified().ok()? != before.modified().ok()?
+    {
+        return None;
+    }
+    Some(format!("{sum:016x}"))
 }
 
 #[derive(Deserialize)]
@@ -496,6 +514,29 @@ async fn save_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtitle_hash_rejects_a_replacement_before_catalog_rescan() {
+        let source = tempfile::tempfile().expect("source");
+        source.set_len(128 * 1024).expect("size");
+        let stamp =
+            crate::fragment_index_cluster::source_stamp(&source.metadata().expect("metadata"));
+        assert_eq!(
+            hash_held_source(source.try_clone().expect("clone"), stamp.size, stamp.mtime),
+            Some("0000000000020000".into())
+        );
+        source.set_len(stamp.size + 1).expect("replace size");
+        assert!(
+            hash_held_source(source.try_clone().expect("clone"), stamp.size, stamp.mtime).is_none()
+        );
+        source.set_len(stamp.size).expect("restore size");
+        source
+            .set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs((stamp.mtime + 5) as u64),
+            )
+            .expect("replace mtime");
+        assert!(hash_held_source(source, stamp.size, stamp.mtime).is_none());
+    }
 
     #[test]
     fn automatic_acquisition_requires_complete_untranslated_file_matches() {

@@ -1,0 +1,30 @@
+version = 1
+
+[[coverage]]
+commits = ["20700f81"]
+points = ["server.api"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+The panic hook claimed a thread-local guard stopped a panic inside the
+reporting path from recursing. std never re-enters a hook: a nested panic is
+MustAbort::PanicInHook and aborts the process, so the guard could never fire
+and the real protection is a reporting path that cannot panic. The guard is
+gone, report_panic documents why each step is panic-free, and the counter
+and label are reached with get().
+
+`panics::tests::a_panic_inside_the_reporting_path_aborts_the_process` re-runs
+itself in a child that installs the real hook behind a log writer that
+panics and panics once under catch_unwind; it asserts the child dies of
+SIGABRT with std's "while processing panic" message and never prints its
+survival marker. It pins std's behaviour, which is what makes panic-freedom
+necessary; it passes with or without the old guard, because the guard was
+inert.
+`panics::tests::hostile_payloads_are_reported_without_a_second_panic` runs
+the real hook in a child over a payload whose Debug and Display panic, a
+u32, an empty String and a 2001-character multi-byte String, and asserts
+two "non-string panic payload" lines, the long payload cut at exactly 512
+characters, and exactly four counts. Replacing redact_bounded's
+chars().take(limit) with byte slicing makes the child abort (exit 134,
+"thread panicked while processing panic. aborting."), run on 2026-09-24.
+Run `cargo test -p plurxd panics::`.
+"""

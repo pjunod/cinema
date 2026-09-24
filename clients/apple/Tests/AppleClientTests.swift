@@ -2334,12 +2334,16 @@ final class AppleClientTests: XCTestCase {
 
     /// A reach expansion the merge created and neither side had on its own:
     /// `main`'s server-truth delivery watchdog funnels into
-    /// `retrySameDeliveryAfterStall`, the exact arm this branch bound to the
-    /// ladder. So a wedge that AVPlayer never reported is bounded by the same
-    /// floor and stops with its own message. It reopens unticketed, though: a
-    /// session whose published bytes were simply never fetched has nothing
-    /// wrong with the rung it was already serving.
-    func testTheDeliveryWatchdogAlsoStepsTheLadderDownAndStopsAtItsFloor() {
+    /// `retrySameDeliveryAfterStall`. So a wedge that AVPlayer never reported
+    /// is bounded by the same floor and stops with its own message.
+    ///
+    /// What intent that reopen carries is no longer asserted here, because
+    /// there is no longer a client function that decides it: A-04 deleted the
+    /// `stallReopenIntent` minter. `retrySameDeliveryAfterStall` reopens with
+    /// `intent: .sameDeliveryRepair`, which keeps the recovery budgets and
+    /// carries no server ticket, so nothing this arm produces is
+    /// `.stallReopen`. The wire it used to mint onto is untouched.
+    func testTheDeliveryWatchdogIsBoundedByItsFloorAndStopsWithItsOwnMessage() {
         var storm = RecoveryReopenBudget()
 
         // With floor budget left, a watchdog-detected starvation reopens, and
@@ -2355,17 +2359,6 @@ final class AppleClientTests: XCTestCase {
             ),
             .reopen
         )
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: "session-a",
-                isVOD: false,
-                requestId: "request-1",
-                wedge: true
-            ),
-            .normal,
-            "the watchdog arm comes back on the rung it was already serving"
-        )
-
         // At the floor it stops with the delivery-specific message rather than
         // the generic buffering one, so the failure screen still names what
         // actually went wrong.
@@ -2395,40 +2388,6 @@ final class AppleClientTests: XCTestCase {
                 now: 202
             ),
             .reopen
-        )
-    }
-
-    /// The legacy typed helper remains narrowly scoped for interoperability;
-    /// timer-only presentation recovery no longer calls it.
-    func testLegacyBoundRecoveryOnlyNamesAGrowingServerSession() {
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: "session-a",
-                isVOD: false,
-                requestId: "request-1",
-                wedge: false
-            ),
-            stallIntent()
-        )
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: "session-a",
-                isVOD: true,
-                requestId: "request-1",
-                wedge: false
-            ),
-            .normal,
-            "a completed cache entry has no ladder answer to give"
-        )
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: nil,
-                isVOD: false,
-                requestId: "request-1",
-                wedge: false
-            ),
-            .normal,
-            "direct play holds no session at all"
         )
     }
 
@@ -4573,6 +4532,40 @@ final class AppleClientTests: XCTestCase {
         XCTAssertThrowsError(try PlurxAPI.check(forbidden, data: body)) { error in
             XCTAssertTrue(AppModel.isSessionExpired(error))
         }
+    }
+
+    func testAnIdleExpiredSignInStillSignsOutAndKeepsItsReasonForTheLoginScreen() throws {
+        _ = Session.shared.takeSessionExpiryNotice()
+        let url = try XCTUnwrap(URL(string: "http://server.local/api/v1/me"))
+        let response = try XCTUnwrap(
+            HTTPURLResponse(url: url, statusCode: 401, httpVersion: "HTTP/1.1", headerFields: nil)
+        )
+        let expired = Data(
+            #"{"code":"session_expired","message":"Signed out after 90 days of inactivity. Sign in again to continue.","idle_days":90}"#.utf8
+        )
+        XCTAssertThrowsError(try PlurxAPI.check(response, data: expired)) { error in
+            XCTAssertTrue(AppModel.isSessionExpired(error), "an expired sign-in is still a sign-out")
+            guard let api = error as? APIError, case .http(401) = api else {
+                XCTFail("a 401 must stay status-shaped")
+                return
+            }
+        }
+        XCTAssertEqual(
+            Session.shared.takeSessionExpiryNotice(),
+            "Signed out after 90 days of inactivity. Sign in again to continue."
+        )
+        XCTAssertNil(Session.shared.takeSessionExpiryNotice(), "the reason is taken once")
+
+        // Any other 401 carries no reason, and neither does a 403.
+        let other = Data(#"{"code":"token_expired","message":"Sign in again."}"#.utf8)
+        XCTAssertThrowsError(try PlurxAPI.check(response, data: other))
+        XCTAssertNil(Session.shared.takeSessionExpiryNotice())
+        let forbidden = try XCTUnwrap(
+            HTTPURLResponse(url: url, statusCode: 403, httpVersion: "HTTP/1.1", headerFields: nil)
+        )
+        XCTAssertThrowsError(try PlurxAPI.check(forbidden, data: expired))
+        XCTAssertNil(Session.shared.takeSessionExpiryNotice())
+        XCTAssertNil(PlurxAPI.sessionExpiryMessage(status: 401, data: nil))
     }
 
     func testRefusalBodiesAreKeptWithoutDisturbingTheMatchersThatPredateThem() throws {
@@ -8747,6 +8740,12 @@ final class AppleClientTests: XCTestCase {
     /// The detail page had no dynamic-range badge at all, while Android and the
     /// web both did. It is source-only and stays that way: there is no session
     /// on a detail page to report a downgrade against.
+    ///
+    /// Since a767f5fe5 (docs/clients/CALM-LIBRARY-PAGES.md, "The item header
+    /// describes the selected file") resolution, video codec, dynamic range
+    /// and container are the header's coloured badges for every video file:
+    /// an SDR file is labelled SDR rather than left blank, and the container
+    /// closes the row.
     func testDetailBadgesCarryTheSourceDynamicRangeAfterTheCodec() throws {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -8763,25 +8762,37 @@ final class AppleClientTests: XCTestCase {
         let badges = DetailView.itemMetadataBadges(
             item, file: file, durationMs: file.durationMs, includeSeries: false
         )
-        XCTAssertEqual(badges.map(\.kind), [.year, .runtime, .resolution, .video, .dynamicRange])
-        let range = try XCTUnwrap(badges.last)
+        XCTAssertEqual(
+            badges.map(\.kind),
+            [.year, .runtime, .resolution, .video, .dynamicRange, .container]
+        )
+        let range = try XCTUnwrap(badges.first { $0.kind == .dynamicRange })
         XCTAssertEqual(range.symbol, "sparkles")
         XCTAssertEqual(range.mark, "DV P8")
         XCTAssertEqual(
             range.accessibilityLabel,
             "Dolby Vision · Profile 8 (HDR10-compatible)"
         )
+        let container = try XCTUnwrap(badges.last)
+        XCTAssertEqual(container.kind, .container)
+        XCTAssertEqual(container.mark, "MKV")
 
-        // An SDR file gains nothing, exactly as before.
+        // An SDR file is labelled SDR — never with the source HDR badge's
+        // symbol or mark — and still closes on its container.
         let sdr = try decoder.decode(MediaFile.self, from: Data(#"""
         {"id":12,"duration_ms":8520000,"container":"mp4","video_codec":"h264","height":1080}
         """#.utf8))
-        XCTAssertEqual(
-            DetailView.itemMetadataBadges(
-                item, file: sdr, durationMs: sdr.durationMs, includeSeries: false
-            ).map(\.kind),
-            [.year, .runtime, .resolution, .video]
+        let sdrBadges = DetailView.itemMetadataBadges(
+            item, file: sdr, durationMs: sdr.durationMs, includeSeries: false
         )
+        XCTAssertEqual(
+            sdrBadges.map(\.kind),
+            [.year, .runtime, .resolution, .video, .dynamicRange, .container]
+        )
+        let sdrRange = try XCTUnwrap(sdrBadges.first { $0.kind == .dynamicRange })
+        XCTAssertEqual(sdrRange.mark, "SDR")
+        XCTAssertEqual(sdrRange.symbol, "sun.max")
+        XCTAssertEqual(sdrBadges.last?.mark, "MP4")
     }
 
     func testSeasonEpisodeSummaryKeepsResolutionAndRichHDRCompact() throws {

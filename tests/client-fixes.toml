@@ -2355,3 +2355,149 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "/// Interruption state, deliberately NOT `@Published`."
 test = "tests/operations/test_playback_surface_fence.py"
 test_anchor = "def test_the_player_controllers_published_surface_inventory_is_pinned(self):"
+
+[[fixes]]
+# `onPlayerError` gated the node failover on the error CODE alone, and 2004 is
+# raised for any non-2xx, so a 404 on an ended session, a 401, a 409 and a 416
+# each cost a full player prepare on every ingress before the viewer saw the
+# same error. The comment on 2004 claimed a 4xx was "filtered at the call
+# site"; nothing filtered anything, which is the drift review row D3 named.
+#
+# The correction is a predicate that reads the status the exception carried,
+# with the transport allowlist still asked FIRST so the status rules can only
+# ever narrow the set, never widen it. The anchored source line is the
+# `else -> false` fall-through, because the mutation that matters is flipping
+# it to `true`: that restores the old walk-every-node behaviour while the
+# function still looks gated, and a reviewer skimming the diff would not catch
+# it. No Android toolchain runs in this repository's suites, so the anchored
+# test is the Node policy test that reads the Kotlin back and pins all four
+# branches AND their order; the Kotlin cases beside it in PlaybackPolicyTest.kt
+# have not been executed anywhere.
+id = "android.node-failover-is-gated-on-the-response-code"
+commits = ["da2409ba8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackPolicy.kt"
+source_anchor = "internal fun nodeFailoverEligible(errorCode: Int, responseCode: Int?): Boolean = when {"
+test = "tests/playback/web-policy.test.js"
+test_anchor = "the Android failover predicate reads the status and defaults to refusing"
+
+[[fixes]]
+# A-04's D5, and the one row in this ledger whose subject is a deletion. The
+# repository owner decided on 2026-09-23 to revive the stall-reopen wire and
+# delete the Apple helper that minted onto it, so this commit removes both
+# `stallReopenIntent` overloads. Neither had a production call site, so there
+# is no behaviour to assert the absence of and no new test could be written:
+# the evidence is that the symbol is gone from `clients/apple/` entirely and
+# that the wire it minted onto is not.
+#
+# The source anchor is the corrected `PlayerOpenIntent` doc comment, which is
+# exactly what a revival would have to delete: it states that nothing in the
+# target constructs `.stallReopen` and says why the case, the ticket,
+# `applyOpenIntent`'s binding and `unboundStallRetry` were kept anyway. The
+# test anchor is the delivery-watchdog floor test the same commit corrected —
+# one of its assertions was the minter's fourth call site, and its name and
+# doc comment now state what it actually proves rather than a ladder step it
+# no longer asserts.
+id = "apple.stall-ticket-minter-deleted-wire-retained"
+commits = ["d49a079b8"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "`.stallReopen` is the bound half of the wire and **nothing in this target"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testTheDeliveryWatchdogIsBoundedByItsFloorAndStopsWithItsOwnMessage()"
+
+[[fixes]]
+# Both Android backup rule files excluded only `offline/`, so the Preferences
+# DataStore holding the account bearer, the origin and the username was copied
+# to Google by Auto Backup and handed to a new handset by device-to-device
+# transfer. The correction excludes the whole `datastore/` directory in both
+# files and — this is the half that is easy to lose — under BOTH sections of
+# `data-extraction-rules`, because excluding `cloud-backup` alone leaves the
+# transfer path open, which is F-android-7's named mistake.
+#
+# No Android toolchain runs in this repository's suites, so the anchored test
+# is an operations case that reads the XML rather than a Gradle unit test: it
+# parses both files, requires a `domain="file"` exclusion of `datastore/` under
+# every declared section, and requires the two files to agree. It also pins
+# that the bearer still lives under a `preferencesDataStore` — moving the token
+# to SharedPreferences or a plain file would leave both exclusions pointing at
+# a directory it no longer occupies while every other assertion still passed.
+# A revert to the one-line `offline/`-only rules fails it.
+id = "android.credential-datastore-excluded-from-backup-and-transfer"
+commits = ["2fec1c693"]
+source = "clients/android/app/src/main/res/xml/data_extraction_rules.xml"
+source_anchor = "<exclude domain=\"file\" path=\"datastore/\" />"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "def test_extraction_rules_exclude_the_store_from_every_transfer(self) -> None:"
+
+[[fixes]]
+# b1709dbcc added the `system_interruption` source row, the contract's first
+# per-source `retired_by` override (`system_resumed`) and the `system_paused`
+# fixture event, and ported the web and Apple presenters only. The Android
+# presenter runs the same fixture, so four PlaybackSurfaceReducerTest cases
+# failed on main from then on: the source table was a row short and every
+# case replay stopped at the first `system_paused` it could not translate.
+# The correction transcribes the row with its override, reads a fault's
+# retirement rules through the source row before the class everywhere, and
+# gives the reducer SystemPaused. The source anchor is the override itself —
+# drop it and the fixture case's 32 s tick retires the hold by timer; the test
+# anchor is the direct case that a system resume leaves a server
+# `control_hold` and its own timer alone.
+id = "android.surface-system-interruption-source"
+commits = ["d258d8fbc"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurface.kt"
+source_anchor = "retiredBy = setOf(SurfaceRetirement.SystemResumed),"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackSurfaceReducerTest.kt"
+test_anchor = "fun aSystemResumeRetiresOnlyTheSystemHold()"
+
+[[fixes]]
+# 861c6e24f moved the live fullscreen cover's close from the `busy` edge to
+# the `playing` edge, so a tune that failed (`busy` falling while `playing`
+# was already false) left the viewer on a black cover with no tuner. Both
+# edges now route through one predicate that refuses while a tune is in
+# flight. The source anchor is the `busy` observer a revert would delete; the
+# test pins the predicate and both observers.
+id = "apple.live-tv-fullscreen-closes-on-either-finishing-edge"
+commits = ["f5ea82623"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".onChange(of: live.busy) { _, _ in closeSurfaceIfSessionFinished() }"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "a failed tune ends on the busy edge"
+
+[[fixes]]
+# e2b31cdb: every Live TV envelope sent interlaced: false and never named
+# mpeg2video, so all 59 ATSC 1.0 channels were encoded on television SoCs that
+# decode and deinterlace MPEG-2 in hardware; the AAC claim was a fixed stereo.
+# The source anchor is the television-mode interlaced claim a revert deletes;
+# the test pins it together with the sink channel claim and both HEVC
+# containers.
+id = "android.live-tv-envelope-claims-the-sink"
+commits = ["e2b31cdb"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvApi.kt"
+source_anchor = "LiveTvRational(60, 1), sink.deinterlaces)"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
+test_anchor = "liveEnvelopeCarriesTheSinkFactsAndBothHevcContainers"
+
+[[fixes]]
+# 323edd83: the Apple Live TV envelope claimed aac: max_channels 2, which
+# folded every converted 5.1 broadcast to stereo before it reached the
+# receiver. The source anchor is the route-derived claim; the test pins the
+# ceiling and the envelope reading it.
+id = "apple.live-tv-envelope-claims-the-route-channels"
+commits = ["323edd83"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "maxChannels: $0 == \"aac\" ? aacChannels : 8"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLiveEnvelopeClaimsTheRouteChannelsForAac"
+
+[[fixes]]
+# f68095d9: opening playback info in any mode but Mini removes the transport
+# block, but the panel's height reserve was keyed on `controlsVisible`, which
+# stays true — so on Android TV it kept subtracting the transport's last
+# measured height from a panel that had the whole frame, leaving a sliver of
+# body under the header. The source anchor is the shared predicate the reserve
+# now reads; the test pins that every non-Mini info mode reports no transport.
+id = "android.playback-info-reserves-only-a-composed-transport"
+commits = ["f68095d9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "playbackTransportOnScreen(isInPip, controlsVisible, panel, statsMode, blockingFault != null),"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTransportReserveTest.kt"
+test_anchor = "infoPanelInAnyModeButMiniHidesTheTransport"

@@ -114,7 +114,7 @@ pub async fn setup(
         return Err(ApiError::BadRequest("username required".into()));
     }
     super::auth::validate_new_password(&req.password)?;
-    let hash = super::auth::hash_password_bounded(req.password).await?;
+    let hash = super::auth::hash_password_bounded(&state.password_capacity, req.password).await?;
     let user = state
         .store
         .create_user(req.username.trim(), &hash, true)
@@ -1737,6 +1737,10 @@ pub struct SettingsDto {
     /// store kept instead of the whole source. On by default; off makes both
     /// ignore the store entirely.
     pub subtitle_stored_sources: bool,
+    /// Make a chapter thumbnail the first time a watch page asks for one.
+    /// On by default; off answers the thumbnail route 404 and runs no
+    /// ffmpeg. The Developer tab's readiness rows are advisory.
+    pub chapter_thumbnails: bool,
     /// What the subtitle-source store occupies on this node and what its
     /// producer is doing: the footprint its last sweep measured, its cap, the
     /// ride-alongs running now and the verdicts since this process started.
@@ -1818,6 +1822,14 @@ pub struct SettingsDto {
     /// (see migration v13), and an upgrade that started that on its own is
     /// the failure v9 documents.
     pub genre_backfill: bool,
+    /// "Sign-ins expire" (Settings → Users). On by default: a device that
+    /// goes unused for `auth_token_idle_days` is signed out; one in regular
+    /// use never is. Off keeps login tokens valid until revoked.
+    pub auth_token_expiry: bool,
+    pub auth_token_idle_days: i64,
+    /// When expiry last took effect (Unix seconds). No device's idle window
+    /// starts earlier. `None` until the server has started the clock.
+    pub auth_token_expiry_since: Option<i64>,
     /// What the last backfill pass did, or `None` if none has run since boot.
     /// Reported here rather than in the per-library scan status because the
     /// backfill walks item ids, not libraries — and because this page is
@@ -2133,6 +2145,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
             true,
         ),
+        chapter_thumbnails: plurx_core::store::stored_switch(
+            setting(keys::CHAPTER_THUMBNAILS).as_deref(),
+            true,
+        ),
         subtitle_store: subtitle_store_diagnostics(
             state,
             plurx_core::store::stored_switch(
@@ -2171,6 +2187,15 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .unwrap_or(14)
             .clamp(1, 365),
         genre_backfill,
+        auth_token_expiry: plurx_core::store::stored_switch(
+            setting(keys::AUTH_TOKEN_EXPIRY_ENABLED).as_deref(),
+            true,
+        ),
+        auth_token_idle_days: plurx_core::auth::token_idle_days(
+            setting(keys::AUTH_TOKEN_IDLE_DAYS).as_deref(),
+        ),
+        auth_token_expiry_since: setting(keys::AUTH_TOKEN_EXPIRY_SINCE)
+            .and_then(|value| value.trim().parse().ok()),
         genre_backfill_last: state.jobs.last_genre_backfill().await,
     })
 }
@@ -2372,6 +2397,7 @@ pub struct UpdateSettings {
     pub subtitle_window_secs: Option<i64>,
     pub subtitle_not_ready_503: Option<bool>,
     pub subtitle_stored_sources: Option<bool>,
+    pub chapter_thumbnails: Option<bool>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -2434,6 +2460,11 @@ pub struct UpdateSettings {
     pub dv_disk_convert_parallel: Option<i64>,
     /// Arm or disarm the one-off genre backfill.
     pub genre_backfill: Option<bool>,
+    /// "Sign-ins expire". Switching it on (from off) restarts the idle clock
+    /// at that moment, so enabling it never signs a device out on the spot.
+    pub auth_token_expiry: Option<bool>,
+    /// The idle window in whole days, 1..=3650.
+    pub auth_token_idle_days: Option<i64>,
 }
 
 struct PreparedLiveTvUpdate {
@@ -2527,6 +2558,7 @@ impl UpdateSettings {
             || self.subtitle_window_secs.is_some()
             || self.subtitle_not_ready_503.is_some()
             || self.subtitle_stored_sources.is_some()
+            || self.chapter_thumbnails.is_some()
             || self.live_tv_deinterlace_output.is_some()
             || self.default_audio_lang.is_some()
             || self.default_sub_lang.is_some()
@@ -2561,6 +2593,8 @@ impl UpdateSettings {
             || self.dv_disk_keep_original.is_some()
             || self.dv_disk_convert_parallel.is_some()
             || self.genre_backfill.is_some()
+            || self.auth_token_expiry.is_some()
+            || self.auth_token_idle_days.is_some()
             // The DVR settings are their own transaction boundary for the same
             // reason the Live TV tuple is: mixing them would let one commit
             // while the other's CAS reports 409.
@@ -2597,6 +2631,17 @@ pub async fn update_settings(
     // write, so a later bad field cannot leave an earlier policy change in
     // force despite returning 400/409. This matters especially for destructive
     // policies such as `dv_disk_keep_original = false`.
+    if let Some(days) = req.auth_token_idle_days {
+        if !(plurx_core::auth::TOKEN_IDLE_DAYS_MIN..=plurx_core::auth::TOKEN_IDLE_DAYS_MAX)
+            .contains(&days)
+        {
+            return Err(ApiError::BadRequest(format!(
+                "sign-in expiry must be between {} and {} days",
+                plurx_core::auth::TOKEN_IDLE_DAYS_MIN,
+                plurx_core::auth::TOKEN_IDLE_DAYS_MAX
+            )));
+        }
+    }
     let live_tv_requested = req.live_tv_enabled.is_some()
         || req.live_tv_device_ipv4.is_some()
         || req.live_tv_owner_node_id.is_some()
@@ -3308,6 +3353,12 @@ pub async fn update_settings(
             .put_setting(keys::SUBTITLE_STORED_SOURCES, if on { "1" } else { "0" })
             .await?;
     }
+    if let Some(on) = req.chapter_thumbnails {
+        state
+            .store
+            .put_setting(keys::CHAPTER_THUMBNAILS, if on { "1" } else { "0" })
+            .await?;
+    }
     if let Some(name) = server_name {
         state.store.put_setting(keys::SERVER_NAME, name).await?;
     }
@@ -3734,6 +3785,41 @@ pub async fn update_settings(
             .store
             .put_setting(keys::JOB_SCAN_ON_STARTUP, if on { "1" } else { "0" })
             .await?;
+    }
+    if req.auth_token_expiry.is_some() || req.auth_token_idle_days.is_some() {
+        let mut values: Vec<(&str, String)> = Vec::new();
+        if let Some(days) = req.auth_token_idle_days {
+            values.push((keys::AUTH_TOKEN_IDLE_DAYS, days.to_string()));
+        }
+        if let Some(on) = req.auth_token_expiry {
+            // Off -> on restarts the clock in the same write that flips the
+            // switch: every device's idle window then starts now, so turning
+            // expiry on signs nobody out on the spot. On -> on leaves it.
+            let settings = state.store.settings_snapshot().await?;
+            let was_on = plurx_core::store::stored_switch(
+                settings
+                    .get(keys::AUTH_TOKEN_EXPIRY_ENABLED)
+                    .map(String::as_str),
+                true,
+            );
+            let clock_started = settings.contains_key(keys::AUTH_TOKEN_EXPIRY_SINCE);
+            if on && (!was_on || !clock_started) {
+                values.push((
+                    keys::AUTH_TOKEN_EXPIRY_SINCE,
+                    super::users::unix_now().to_string(),
+                ));
+            }
+            values.push((
+                keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                if on { "1" } else { "0" }.to_owned(),
+            ));
+            tracing::info!(on, "sign-in expiry");
+        }
+        let borrowed = values
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        state.store.put_settings(&borrowed).await?;
     }
     if let Some(on) = req.genre_backfill {
         // Arming rewinds the cursor. A pass that finished left it at 0 and
@@ -4786,7 +4872,9 @@ pub(crate) struct MetricsState {
     passive_membership: plurx_core::cluster::membership::PassiveMembershipMetrics,
     blocked_gets: Arc<crate::waitpool::BlockedGetMetrics>,
     live_tv: Arc<crate::live_tv::LiveTvMetrics>,
+    live_tv_peers: Arc<crate::http::live_tv::LiveTvPeerMetrics>,
     backup: Arc<crate::backup::BackupMetrics>,
+    plex_census: Arc<super::PlexCensus>,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -4805,7 +4893,9 @@ impl FromRef<AppState> for MetricsState {
             // this node is actually serving from.
             blocked_gets: state.transcode.blocked_get_metrics_handle(),
             live_tv: state.live_tv.metrics_handle(),
+            live_tv_peers: state.live_tv_peers.metrics_handle(),
             backup: state.backup.metrics(),
+            plex_census: Arc::clone(&state.plex_census),
         }
     }
 }
@@ -5209,7 +5299,7 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
         plurx_core::store::prometheus_store_operations(),
         crate::store_result::prometheus(),
@@ -5225,11 +5315,14 @@ pub(crate) async fn metrics(
         super::prometheus_handler_deadlines(),
         crate::ffmpeg::engine_attestation_prometheus(),
         super::prometheus_http_store_attribution(),
+        state.plex_census.prometheus(),
+        super::prometheus_http_request_metrics(),
+        crate::panics::prometheus_panics(),
         crate::state::fragment_index_validation_prometheus(),
         crate::subtitle_source::prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
-    let live_tv_metrics = state.live_tv.prometheus();
+    let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();
     let backup_metrics = state.backup.prometheus();
     let codec_qualification_metrics = state.transcode.codec_qualification_prometheus();
 

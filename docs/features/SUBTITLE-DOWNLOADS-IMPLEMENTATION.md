@@ -56,10 +56,13 @@ wait for this job.
 
 ## 4. Integration and acceptance
 
-Develop on `effort/subtitle-downloads` under the repository's
-[development pipeline](../DEVELOPMENT_PIPELINE.md). The implementation is on `codex/subtitle-downloads`, based on that effort.
-The areas below form one integrated review candidate because storage, playback
-and API changes share the media-file contract. Promotion remains gated.
+The feature is one integrated change on `codex/subtitle-downloads` and targets
+`main` through the ordinary affected-surface lane in the repository's
+[development pipeline](../DEVELOPMENT_PIPELINE.md). The initially created
+local effort scaffold received no task merges; storage, playback and API
+changes share one media-file contract and are reviewed together. The single
+adversarial review, current-candidate gate and qualification receipt are
+required before merge.
 
 | Area | Result | Acceptance |
 |---|---|---|
@@ -105,3 +108,21 @@ account download still needs a smoke test. Native device playback was not
 smoke-tested; acquired tracks use the existing WebVTT delivery contract.
 Automatic matching requires the worker to read the media file for its hash.
 No release qualification, merge or deployment has been performed.
+
+## 6. Adversarial review before promotion
+
+One independent adversarial review found two P2 issues. Both are addressed:
+
+- Source hashing now compares the held file's size and modification time to
+  the catalog before reading and checks its identity and nanosecond modification
+  time again after both blocks. `subtitle_hash_rejects_a_replacement_before_catalog_rescan`
+  covers both size and modification-time replacements.
+- Search refuses files that have not completed a probe. Both SQLite and
+  replicated acquisition updates also require `probe_json IS NOT NULL` in the
+  atomic publication statement. The downloaded-subtitle store contract verifies
+  refusal before the first probe, then preserves embedded ordinal zero while
+  appending the acquired caption after it.
+
+No second review was requested. Current main was integrated before the final
+local checks. The initial 104-test receipt above predates the added hash test;
+the final subtitle filter contains 105 tests.

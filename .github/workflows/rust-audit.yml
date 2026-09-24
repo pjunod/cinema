@@ -91,3 +91,22 @@ jobs:
           working-directory: target/rust-audit
       - name: Audit the complete scheduled inventory
         run: cargo audit --file target/rust-audit/Cargo.lock
+      # The Dockerfile's base images are pinned by digest, which stops Debian
+      # from changing the shipped userland without a diff and equally stops
+      # anyone from noticing that it has. Report the drift on the one job that
+      # already runs weekly and already exists to say "upstream moved".
+      #
+      # Not a gate, and `continue-on-error` besides: a stale base-image pin is
+      # a decision to take, not a reason to fail a dependency audit, and the
+      # report needs a registry this runner may not always reach.
+      #
+      # `!cancelled()` because the report must not depend on the audit above
+      # it. `continue-on-error` only stops this step failing the job; without
+      # the condition the step is skipped whenever an earlier step failed, and
+      # the weekly audit does fail, so the drift would print only in the weeks
+      # when nothing else is wrong.
+      - name: Report base-image pin drift
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          scripts/image-base-drift Dockerfile | tee -a "$GITHUB_STEP_SUMMARY"

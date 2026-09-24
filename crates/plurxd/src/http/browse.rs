@@ -212,7 +212,7 @@ pub async fn list_items(
     let badged: Vec<i64> = page
         .items
         .iter()
-        .filter(|i| matches!(i.kind, ItemKind::Movie | ItemKind::Video))
+        .filter(|i| i.kind.carries_resolution())
         .map(|i| i.id)
         .collect();
     let heights = state.catalogue.item_max_heights(&badged).await?;
@@ -556,7 +556,7 @@ pub async fn home_previews(
     let item_ids: Vec<i64> = all_items.iter().map(|item| item.id).collect();
     let badged: Vec<i64> = all_items
         .iter()
-        .filter(|item| matches!(item.kind, ItemKind::Movie | ItemKind::Video))
+        .filter(|item| item.kind.carries_resolution())
         .map(|item| item.id)
         .collect();
     let folder_ids: Vec<i64> = all_items
@@ -676,7 +676,7 @@ pub async fn hubs(
         .iter()
         .chain(next_up.iter())
         .chain(recently_added.iter())
-        .filter(|d| matches!(d.kind, ItemKind::Movie | ItemKind::Video))
+        .filter(|d| d.kind.carries_resolution())
         .map(|d| d.id)
         .collect();
     if !badged.is_empty() {
@@ -686,7 +686,7 @@ pub async fn hubs(
             .chain(next_up.iter_mut())
             .chain(recently_added.iter_mut())
         {
-            if matches!(d.kind, ItemKind::Movie | ItemKind::Video) {
+            if d.kind.carries_resolution() {
                 d.resolution = heights.get(&d.id).copied();
             }
         }

@@ -172,6 +172,17 @@ pub struct TokenSummary {
     pub last_seen_at: i64,
 }
 
+/// What a login-token lookup found. `Expired` is distinct from `Unknown` so
+/// the HTTP layer can tell a client "you were signed out after N idle days"
+/// instead of a bare 401; an expired token's activity is never refreshed, so
+/// presenting it cannot slide it back to life.
+#[derive(Clone, Debug)]
+pub enum TokenAuthentication {
+    Authenticated(User),
+    Expired { idle_days: i64 },
+    Unknown,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeleteTokenByPrefixOutcome {
     Deleted,
@@ -1650,6 +1661,18 @@ pub mod keys {
     /// Human-visible name of the logical server. Configuration supplies only
     /// the first value; thereafter this replicated key is authoritative.
     pub const SERVER_NAME: &str = "server.name";
+    /// "Sign-ins expire": whether a login token that goes unused for
+    /// `AUTH_TOKEN_IDLE_DAYS` stops authenticating. Absent is ON — the
+    /// product default — and `0` restores non-expiring tokens.
+    pub const AUTH_TOKEN_EXPIRY_ENABLED: &str = "auth.token_expiry_enabled";
+    /// The sliding idle window in whole days (1..=3650). Absent is 90.
+    pub const AUTH_TOKEN_IDLE_DAYS: &str = "auth.token_idle_days";
+    /// Unix seconds at which expiry last took effect: seeded once at startup
+    /// and rewritten whenever an administrator switches expiry back on. No
+    /// token's idle clock starts before it, so turning expiry on — including
+    /// the default taking effect on upgrade — never signs anyone out at once.
+    /// Absent means the clock has not started and nothing can expire.
+    pub const AUTH_TOKEN_EXPIRY_SINCE: &str = "auth.token_expiry_since";
     /// TMDB API key (set by the admin; empty/absent disables the agent).
     pub const TMDB_API_KEY: &str = "tmdb.api_key";
     /// OMDb API key — powers review-site ratings (Rotten Tomatoes / Metacritic /
@@ -1835,6 +1858,9 @@ pub mod keys {
     /// so a wrong artifact a producer published is taken out of service with
     /// one switch and no redeploy.
     pub const SUBTITLE_STORED_SOURCES: &str = "subtitles.stored_sources";
+    /// Make a chapter thumbnail on request and keep it in the runtime
+    /// cache. On by default; off answers the route 404 and extracts nothing.
+    pub const CHAPTER_THUMBNAILS: &str = "playback.chapter_thumbnails";
     /// VOD availability kill switch. Absent/on accepts immutable VOD session
     /// creation; `0` refuses it. It never selects the removed live HLS path.
     pub const VOD_PRESENTATION: &str = "playback.vod_presentation";
@@ -2170,8 +2196,21 @@ pub trait UserStore: Send + Sync + 'static {
         device: Option<&str>,
         expected_password_hash: &str,
     ) -> Result<bool, StoreError>;
-    /// Resolve a token hash to its user (touching `last_seen_at`).
-    async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError>;
+    /// Resolve a token hash under the server's sign-in expiry policy, read in
+    /// the same snapshot as the token row. A live token's coalesced
+    /// `last_seen_at` is refreshed exactly as before; an expired one is
+    /// reported and left untouched.
+    async fn authenticate_token(&self, token_hash: &str)
+        -> Result<TokenAuthentication, StoreError>;
+    /// Resolve a token hash to its user (touching `last_seen_at`). An expired
+    /// token resolves to nobody, so every caller that predates expiry — the
+    /// Plex facade, recovery reads — honours the policy without knowing it.
+    async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError> {
+        Ok(match self.authenticate_token(token_hash).await? {
+            TokenAuthentication::Authenticated(user) => Some(user),
+            TokenAuthentication::Expired { .. } | TokenAuthentication::Unknown => None,
+        })
+    }
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError>;
     /// Delete a login token only while the exact clustered cache-revocation
     /// exclusion claim is still live. Standalone SQLite passes no claim.
@@ -3093,6 +3132,49 @@ pub trait MediaStore: Send + Sync + 'static {
 pub(crate) const TOP_LEVEL_ITEM_PREDICATE: &str =
     "(kind IN ('movie','show','book','audiobook') OR \
      (kind IN ('folder','video','photo') AND parent_id IS NULL))";
+
+/// The `ORDER BY` for a library grid page, for every backend and every sort.
+///
+/// **Every clause ends in `id`, and that is the point.** `sort_title` is not
+/// unique — "Harbor Lights" the 1947 film and "Harbor Lights" the 1971 film
+/// reduce to the same key — and neither are `year`, a resolution or a capture
+/// date. Without a unique final key SQLite is free to return equal rows in
+/// any order it likes, and it does not have to pick the same one twice. A
+/// client paging by `offset` then asks for rows 0..199 and rows 200..399 of
+/// two different orderings, so an item on the seam is shown twice and its
+/// neighbour is never shown at all. That is invisible on a small library and
+/// certain on a large one, and it is why a client cannot be asked to merge
+/// several of these pages into one grid until the order is total.
+///
+/// `Added` already ended in `id DESC` and keeps it: giving it `id ASC` for
+/// symmetry would reorder equal-`added_at` rows that viewers see today, for
+/// nothing. The four that gain `id ASC` had no tie-break at all.
+///
+/// One function rather than one per backend because the SQLite and Hiqlite
+/// media stores each spelled this out, three copies in total, and a merge
+/// order that differs between backends is a bug no single-backend test can
+/// see. Native clients merge library cursors against this exact order, so it
+/// is also pinned from the outside by `tests/contracts/library-sort-cases.json`.
+pub(crate) fn item_sort_order_by(sort: ItemSort) -> &'static str {
+    match sort {
+        ItemSort::Title => "sort_title ASC, id ASC",
+        ItemSort::Added => "added_at DESC, id DESC",
+        ItemSort::Year => "year IS NULL, year DESC, sort_title ASC, id ASC",
+        // Best (max) file height per item, highest first; no-height items
+        // last. Only the kinds that carry a `resolution` on the DTO
+        // (`ItemKind::carries_resolution`) are ranked by height: a root photo
+        // has a real file height but no `resolution`, and ranking it by one
+        // would hand a merging client a cursor that is not sorted under the
+        // key it was given.
+        ItemSort::Resolution => {
+            "CASE WHEN kind IN ('movie','video') \
+             THEN COALESCE((SELECT MAX(f.height) FROM files f WHERE f.item_id = items.id), -1) \
+             ELSE -1 END DESC, \
+             sort_title ASC, id ASC"
+        }
+        ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC, id ASC",
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootFingerprintStatus {
@@ -5631,5 +5713,124 @@ mod producer_recovery_schema_tests {
                 .contains(&format!("<= {MAX_DECODE_RESTRICTION_BYTES}")),
             "the ledger's CHECK must name MAX_DECODE_RESTRICTION_BYTES exactly"
         );
+    }
+}
+
+#[cfg(test)]
+mod item_sort_order_tests {
+    use super::item_sort_order_by;
+    use crate::domain::ItemSort;
+
+    /// Every library sort ends in a unique key.
+    ///
+    /// This is a text assertion on the clause, and it is deliberately not the
+    /// fixture replay in `tests/store_contract.rs`. With movies alone that
+    /// replay did not detect the tie-break's removal: SQLite returned the tied
+    /// rows in rowid order, which is the order the fixture expects. It now
+    /// does — the fixture's photo/movie pair ties on every visible key, and
+    /// the grid query reads through `idx_items_library_kind`, which yields
+    /// them in kind order — but that is still an observation of today's query
+    /// plan. What SQLite does with tied rows is not promised by anything; it
+    /// can change with the plan, the schema, an added index or the backend,
+    /// and when it changes the symptom is a client paging by `offset` that
+    /// reads two adjacent pages of two different orderings: an item on the
+    /// seam shown twice and its neighbour never shown at all. A property
+    /// nothing guarantees cannot be pinned by observing that it currently
+    /// holds; it has to be pinned by requiring the clause that makes it true.
+    ///
+    /// `Added` ends in `id DESC` and the other four in `id ASC`. `Added` is
+    /// not made symmetric on purpose: it already had a tie-break, and flipping
+    /// it would reorder equal-`added_at` rows that viewers see today for
+    /// nothing.
+    #[test]
+    fn every_sort_ends_in_a_unique_key() {
+        for sort in [
+            ItemSort::Title,
+            ItemSort::Added,
+            ItemSort::Year,
+            ItemSort::Resolution,
+            ItemSort::Recorded,
+        ] {
+            let clause = item_sort_order_by(sort);
+            let last = clause
+                .rsplit(',')
+                .next()
+                .expect("a non-empty ORDER BY")
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                last.first().copied(),
+                Some("id"),
+                "{sort:?} ends in {clause:?}, which has no unique final key"
+            );
+            assert!(
+                matches!(last.get(1).copied(), Some("ASC") | Some("DESC")),
+                "{sort:?} ends in {clause:?}, whose final key has no explicit direction"
+            );
+        }
+        assert!(item_sort_order_by(ItemSort::Added).ends_with("id DESC"));
+    }
+
+    /// The `resolution` sort ranks by height exactly the kinds whose DTO
+    /// carries a `resolution`, and every other kind at -1.
+    ///
+    /// The clause and `ItemKind::carries_resolution` are two spellings of one
+    /// rule — SQL cannot call the Rust predicate — so this reads the kind list
+    /// out of the clause and compares it with the predicate for every kind. A
+    /// kind added to one and not the other is a row the server ranks by a key
+    /// the client never receives.
+    #[test]
+    fn resolution_ranks_exactly_the_kinds_that_carry_one() {
+        use crate::domain::ItemKind;
+
+        let clause = item_sort_order_by(ItemSort::Resolution);
+        let list = clause
+            .strip_prefix("CASE WHEN kind IN (")
+            .and_then(|rest| rest.split_once(')'))
+            .map(|(list, _)| list)
+            .unwrap_or_else(|| panic!("{clause:?} does not rank by kind first"));
+        let ranked: std::collections::BTreeSet<&str> = list
+            .split(',')
+            .map(|kind| kind.trim().trim_matches('\''))
+            .collect();
+        for kind in [
+            ItemKind::Movie,
+            ItemKind::Show,
+            ItemKind::Season,
+            ItemKind::Episode,
+            ItemKind::Book,
+            ItemKind::Audiobook,
+            ItemKind::Folder,
+            ItemKind::Video,
+            ItemKind::Photo,
+        ] {
+            assert_eq!(
+                ranked.contains(kind.as_str()),
+                kind.carries_resolution(),
+                "{kind:?}: the resolution sort and the DTO disagree about whether it has a resolution"
+            );
+        }
+        assert!(clause.contains("ELSE -1 END DESC"), "{clause:?}");
+    }
+
+    /// The clause is one function, and every backend's page and count use it.
+    ///
+    /// Three copies of this `match` is how the SQLite and Hiqlite stores would
+    /// drift apart, and a merge order that differs between backends is a
+    /// defect no single-backend test can see — `for_each_backend` runs the
+    /// Hiqlite voters only under `hiqlite-contract-tests`, so on an ordinary
+    /// run the fixture replay never compares them at all.
+    #[test]
+    fn the_stores_do_not_carry_their_own_copies_of_the_order() {
+        for source in [
+            include_str!("sqlite/media.rs"),
+            include_str!("hiqlite_media.rs"),
+        ] {
+            assert!(
+                !source.contains("ItemSort::Title =>"),
+                "a media store spells the library ORDER BY itself again"
+            );
+            assert!(source.contains("item_sort_order_by(sort)"));
+        }
     }
 }

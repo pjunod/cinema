@@ -612,13 +612,16 @@ title = "Native server API and runtime"
 contract = "The single server binary exposes stable native endpoints, coordinates background work safely, carries authenticated cluster media control without widening household credentials, and publishes a permanent Dolby Vision replacement only after exact media verification and a final source-identity fence."
 paths = [
   "crates/plurxd/Cargo.toml",
-  "crates/plurxd/src/{cachekeep,logbuf,main,schedule,state,storeprobe,telemetry}.rs",
+  "crates/plurxd/src/{cachekeep,logbuf,main,panics,redact,schedule,state,storeprobe,telemetry}.rs",
   "crates/plurxd/src/dv_disk.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/reader_formats.rs",
   "crates/plurxd/src/http/{analysis,developer,dto,error,extract,mod,network,publication,reading,system}.rs",
   "crates/plurxd/src/http/scan_identity.rs",
   "crates/plurxd/src/http/dv_disk.rs",
+  # On-request chapter thumbnails: one bounded ffmpeg per chapter, node-local
+  # cache, counted for the Developer card. Runtime work with no producer.
+  "crates/plurxd/src/http/chapter_thumbs.rs",
   "crates/plurxd/src/http/{cluster,internal_media_sessions,peer_transport}.rs",
   "plurx.example.toml",
 ]
@@ -631,6 +634,10 @@ title = "Shared native API wire contract"
 contract = "The server, Apple clients, and Android clients decode the same representative JSON without field-name or type drift."
 paths = [
   "tests/contracts/native-api.json",
+  # The library grid's ORDER BY, pinned from outside the server. The Rust
+  # store replays it; the Apple and Android merges must reproduce it from
+  # per-library cursors, so a change here is a change to all three at once.
+  "tests/contracts/library-sort-cases.json",
   "crates/plurxd/src/http/{dto,mod}.rs",
   "clients/apple/Sources/{PlurxAPI,Models}.swift",
   "clients/android/app/src/main/java/tv/plurx/app/data/**",
@@ -780,6 +787,7 @@ paths = [
   "crates/plurxd/src/live_tv/guide.rs",
   "crates/plurxd/src/live_tv/videotoolbox_tests.rs",
   "crates/plurxd/src/live_tv/atsc_audio_tests.rs",
+  "crates/plurxd/src/live_tv/caption_audit_tests.rs",
   "crates/plurxd/src/http/live_tv.rs",
   "crates/plurxd/src/http/internal_live_tv.rs",
   "crates/plurxd/src/web/live-tv.js",
@@ -788,6 +796,7 @@ paths = [
   "scripts/live-tv-endless",
   "crates/plurxd/tests/live_tv_two_node.rs",
   "scripts/live-tv-hardware",
+  "scripts/live-tv-caption-audit",
   "docs/features/HDHOMERUN-LIVE-TV-*.md",
   "docs/features/LIVE-TV-GUIDE-AND-UI-PLAN.md",
   "docs/features/LIVE-TV-NATIVE-LAYOUTS-*.md",
@@ -971,7 +980,7 @@ depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichm
 [[points]]
 id = "operations.packaging"
 title = "Build, deploy, and release artifacts"
-contract = "Every supported installation path builds the same stamped server and keeps its runtime configuration explicit."
+contract = "Every supported installation path builds the same stamped server and keeps its runtime configuration explicit, from base images pinned by digest rather than by a moving tag, with pin drift reported on a schedule and gating nothing."
 paths = [
   ".dockerignore",
   ".github/actions/**",
@@ -986,6 +995,7 @@ paths = [
   "scripts/ci-execution-mode",
   "scripts/ci-cargo-cache-prepare",
   "scripts/ci-cargo-cache-refresh",
+  "scripts/image-base-drift",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
   "scripts/ci-require-disk",
@@ -998,6 +1008,7 @@ paths = [
   "scripts/decoder-diagnostic-qualification",
   "scripts/validate-docker-startup-budget",
   "scripts/registry-push",
+  "scripts/release-cut",
   "tests/operations/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "operations-contract", "container-runtime", "resource-bounds"]

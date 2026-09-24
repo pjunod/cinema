@@ -76,7 +76,7 @@ function settingsPanel(tab,d){
   if(tab==="livetv")       return liveTvPanel(d.settings,d.developerReadiness);
   if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis);
   if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions,d.developerReadiness);
-  if(tab==="users")        return usersPanel(d.users);
+  if(tab==="users")        return usersPanel(d.users,d.settings);
   if(tab==="system")       return systemPanel(d.sys,d.playbackEvents);
   if(tab==="cluster")      return clusterPanel(d);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
