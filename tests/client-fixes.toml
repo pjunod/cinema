@@ -2501,3 +2501,14 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
 source_anchor = "playbackTransportOnScreen(isInPip, controlsVisible, panel, statsMode, blockingFault != null),"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTransportReserveTest.kt"
 test_anchor = "infoPanelInAnyModeButMiniHidesTheTransport"
+
+[[fixes]]
+# A remux can render its first video frame 282 ms before the requested seek
+# position. The original 250 ms first-frame window timed out even as playback
+# continued. Later rendered video must cross the target for the same seek.
+id = "android.remux-seek-settles-after-rendered-progress"
+commits = ["27ce627b8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "fun presentedVideoProgress(positionMs: Long, sequence: Long): Boolean"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "remuxPrerollSettlesOnlyAfterRenderedVideoCrossesTheTarget"
