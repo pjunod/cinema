@@ -7956,6 +7956,9 @@ pub(crate) fn unix_seconds() -> i64 {
 mod atsc_audio_tests;
 
 #[cfg(test)]
+mod caption_audit_tests;
+
+#[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
