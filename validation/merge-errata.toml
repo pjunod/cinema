@@ -18,9 +18,17 @@
 # this audit merges is therefore the boundary, and setting it is a one-line
 # PR made once that commit exists.
 #
+# Starting phase B is one change of two lines: set `enforce_after` here, and
+# remove `continue-on-error: true` from the fast lane's "Check the pull
+# request's Regression-Test fields" step. tests/validation/
+# test_regression_field.py refuses either without the other.
+#
 # `[[errata]]` rows are permanent. A landing commit cannot be amended, so a
-# trailer that reaches `main` wrong stays wrong; a row here is the only way to
-# record that and move on. Expect this list to stay empty. If it does not, the
+# `Regression-Test:` line that reaches `main` wrong (or missing) stays that
+# way; a row naming that landing commit is the only way to record it and move
+# on. A row may also name a corrective commit past the boundary that reached
+# `main` without a landing commit at all. A row that names no commit past the
+# boundary is an error. Expect this list to stay empty. If it does not, the
 # pre-merge check in `validation/regression_field.py` is not doing its job and
 # that, not the typo, is the thing to fix.
 

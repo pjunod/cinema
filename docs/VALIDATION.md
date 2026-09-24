@@ -931,31 +931,52 @@ be renamed to follow (the file name must begin with its first mapped commit),
 and the repository has paid for that in commits that change nothing else:
 1,081 of 5,399 non-merge commits at `fad591a4` touch
 `validation/regressions.d/`, and 925 fragments now hold 8,069 lines. So past a
-**boundary commit**, a corrective change records its regression as a trailer
-on the commit that lands it instead:
+**boundary commit**, a corrective change records its regression on the pull
+request instead, one line per test:
 
 ```text
 Regression-Test: crates/plurxd/src/transcode.rs::the_producer_releases_on_late_arrival
 ```
 
 A repository-relative path and a test name — never a SHA, so a rebase cannot
-invalidate it. `main` is never force-pushed, so a landing commit and its tree
-are immutable, and the audit resolves the path and the name **in that
-commit's own tree**, not in today's worktree. Before merge, the same line in
-the pull request description is checked against the merge candidate by
-`python3 -m validation.regression_field`, which runs in the fast lane's
-`preflight` job. That pre-merge check is what makes a typo fixable: once the
-commit lands it cannot be amended, and the only remaining remedy is a
-permanent row in [`validation/merge-errata.toml`](../validation/merge-errata.toml).
+invalidate it. The line has two carriers and one resolver
+(`validation.history.resolve_regression_test`):
+
+- **Before merge**, the pull request description carries it and the fast
+  lane's `preflight` runs `python3 -m validation.regression_field`. The lane
+  checks out the branch head, not a merge candidate, so the module builds the
+  merge candidate's tree with `git merge-tree --write-tree` and judges the
+  line there: the path must be a file in that tree and the name a test in it
+  (`validation/test_markers.py`). A pull request whose title or any commit is
+  `fix(`/`perf(` and that carries no line fails.
+- **At merge**, the landing commit's message carries the same lines —
+  whoever merges pastes the output of
+  `python3 -m validation.regression_field --body-file <description> --landing-lines`
+  into it. `make history-check` resolves each line **in that landing
+  commit's own tree**; `main` is never force-pushed, so that tree never
+  changes under it. The landing commit may be a Forgejo merge
+  (`Merge pull request '<title>' (#N) …`), a squash (`<title> (#N)`), or an
+  integration branch's `Merge plan/X (#N) at <sha>`.
+
+The pre-merge check is what makes a typo fixable: once a landing commit
+exists it cannot be amended, and the only remaining remedy is a permanent row
+in [`validation/merge-errata.toml`](../validation/merge-errata.toml).
 
 The boundary lives in that same file as `enforce_after`, and it decides,
-**per commit**, which corrective rule applies:
+**per commit**, which rule applies:
 
 | | at or before the boundary | past the boundary |
 |---|---|---|
 | Corrective when | the legacy `ISSUE_RE` matches — `fix`, correction verbs, body words | `^(fix\|perf)(\(…\))?[:!]` matches |
-| Evidence is | a `validation/regressions.d/` fragment, a client-fix anchor, or a direct test change | a `Regression-Test:` trailer on the landing commit |
-| New fragments | already written; nothing is ever deleted | refused, naming the trailer that replaces them |
+| Evidence is | a `validation/regressions.d/` fragment, a client-fix anchor, or a direct test change | resolving `Regression-Test:` lines on the landing commit that brings it in (a client-fix anchor is still required for `clients/`) |
+| On a branch, before it lands | judged as always | reported as awaiting its landing; the pull request's field check owns it |
+| New fragments | already written; nothing is ever deleted | refused — a fragment may not name any commit past the boundary |
+
+A corrective commit past the boundary that reached `main` without passing
+through a landing commit (a direct push) is an error once a later landing
+commit has it as an ancestor; an errata row naming that commit is the only
+way past it, exactly as for a landing commit whose line is wrong. An errata
+row that names no commit past the boundary is itself an error.
 
 Nothing is retired. The 925 existing fragments keep auditing the commits they
 were written for, because nothing else ever will, and the directory simply
@@ -976,9 +997,10 @@ forward: a behavior fix mislabelled `chore(` or `refactor(` is not audited,
 and AGENTS.md's subject-prefix rule is what answers that.
 
 While `enforce_after` is unset, none of this is in force — every commit is
-judged by the legacy rule, fragments are still accepted, and the merge-trailer
-audit reports nothing.
-
+judged by the legacy rule, fragments are still accepted, the merge audit
+reports nothing, and the fast lane's field step is advisory. Setting the
+boundary and removing that step's `continue-on-error` are one change;
+`tests/validation/test_regression_field.py` refuses either without the other.
 
 ```bash
 make history-check

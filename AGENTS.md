@@ -70,7 +70,12 @@ test failures, or denied lints.
   fragment past it".
 - Name the regression in the pull request description, one per line:
   `Regression-Test: <path>::<test name>`. The fast lane checks it against the
-  merge candidate, and the landing commit carries the same line as a trailer.
+  tree the merge will produce. Whoever merges puts the same lines in the
+  landing commit's message — `python3 -m validation.regression_field
+  --body-file <description> --landing-lines` prints them — because once
+  `validation/merge-errata.toml` sets its boundary, `make history-check`
+  reads them from the landing commit, and a corrective landing without them
+  turns every later pull request red until an errata row records it.
 
 - A focused `plurx-core` regression that covers replicated storage must use
   `make unit-core` or pass `--features hiqlite-store`. Bare

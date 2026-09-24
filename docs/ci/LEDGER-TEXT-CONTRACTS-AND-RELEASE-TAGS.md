@@ -1,6 +1,6 @@
 # Regression ledger, text contracts and release tags — what the process buys, and what it costs
 
-**Status:** ready for review · **Executes:** §4.4 / §4.5 / F-hist-8 / F-hist-9 /
+**Status:** in execution — M1-M4, M6 and M7's buildable half on `plan/P-03` ([PR #485](http://192.168.4.7:3000/noirr/plurx/pulls/485), draft, 2026-09-24); M5 refused by its own protocol · **Executes:** §4.4 / §4.5 / F-hist-8 / F-hist-9 /
 F-build-9 / F-build-15 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -31,7 +31,8 @@ the lane rather than removing them.
 
 ---
 
-**Correction to the review:** five, one of which changes a milestone.
+**Correction to the review:** five, one of which changes a milestone. Three
+more were found while executing it; they follow the five.
 
 1. **`publish_main` cannot fire on any trigger `ci.yml` declares.**
    `ci.yml:6-9` is `push: tags: ["v*"]` plus `workflow_dispatch`, and
@@ -74,6 +75,37 @@ the lane rather than removing them.
    `Cargo.toml:21` is `0.3.0`. Cosmetic, but it is the procedure someone
    follows at 1 a.m.; M7 fixes it in passing.
 
+
+**Found while executing (2026-09-24):**
+
+6. **The fast lane does not check out the merge candidate.** §2.3 and §3.1
+   say the `pull_request` checkout is the merge candidate. On this Forgejo it
+   is the branch head: the preflight of
+   [run 2797](http://192.168.4.7:3000/noirr/plurx/actions/runs/2797) (task
+   11298, PR #480) runs `git checkout --progress --force
+   refs/remotes/pull/480/head` and lands on `117213a20`, the PR's head. So
+   `validation/regression_field.py` builds the candidate itself with
+   `git merge-tree --write-tree <base> <head>` and judges the field there,
+   falling back to the head (and saying so) only when the merge conflicts.
+   This is M2's re-verification, done from a real run's log rather than from
+   a run of this branch.
+7. **M5's pre-authorised replacement cannot see the invariant it replaces.**
+   `/var/lib/apt/lists` is emptied by the Dockerfile's own
+   `rm -rf /var/lib/apt/lists/*`, not by `apt-get clean`; and the
+   `debian:bookworm-slim` base ships `/etc/apt/apt.conf.d/docker-clean`,
+   whose `DPkg::Post-Invoke` deletes every downloaded `.deb` after each
+   install. Built both ways (`--target runtime-assets`, 2026-09-24), the stage
+   with and without the second `apt-get clean` has 0 apt-list entries, 0
+   cached `.deb`s and the identical size, 853,963,414 bytes. The replacement
+   passes on the revert, so §3.3 step 2 cannot be satisfied and the text
+   assertion stays (M5 row).
+8. **§3.1's two carriers need one rule for "corrective", and it is the
+   commit's.** §3.1 step 4 asks whether the pull request's *commits* contain
+   a corrective one; the landing audit as first written judged only the
+   landing commit's *title*. Past the boundary a corrective commit is now
+   evidenced by the landing commit that brings it in, whatever that PR is
+   titled — which is what makes the phase table's "the only evidence for the
+   post-boundary range" true. It also sets the real volume (§7.5).
 ---
 
 ## 1. Objective
@@ -138,21 +170,22 @@ moved, which is why the commands are here rather than the numbers alone.
 
 The two M1 additions:
 
-- **`make history-check` wall clock: 92.5 s** (`/usr/bin/time -p make
-  history-check` on the author host, a 2,192-corrective-commit walk; the
-  audit reads every corrective commit's `diff-tree` and `show`, so the cost
-  is linear in history length and is paid on every pull request). The
-  equivalent number **on the `general` runner is not measured** — it needs a
-  Forgejo run of this branch's `preflight`, which cannot exist before the
-  pull request opens. Recorded as owed, not estimated.
-- **Corrective landing commits: 77 in the last 30 days, 18.0 per week**
-  (379 landing commits in that window, judged by §3.2's rule against the pull
-  request title each one carries). That lands between §7.5's two thresholds:
-  above "under ten, the trailer costs nothing" and well below "over fifty,
-  the pre-merge check's failure mode matters more than this plan assumes", so
-  step 4 of §3.1 is implemented as specified rather than started advisory —
-  but the check as a whole is advisory in the lane for M2, so its first
-  failures cost nothing either way.
+- **`make history-check` wall clock on the `general` runner: 44.4 s**, in
+  the preflight of [run 2797](http://192.168.4.7:3000/noirr/plurx/actions/runs/2797)
+  (task 11298, 2026-09-24: checkout done 07:01:12.24, `history ok` printed
+  07:01:56.61, a 2,212-corrective-commit walk). On nuc3, `/usr/bin/time -p
+  make history-check` at this branch's merge of `main` read 85.7 s; the first
+  pass read 92.5 s on its author host. The audit reads every corrective
+  commit's `diff-tree` and `show`, so the cost is linear in history length
+  and paid on every pull request, inside a five-minute preflight.
+- **Corrective landing commits in the 30 days to 2026-09-24: 77 by pull
+  request title, 211 by what they bring in** (398 landing-shaped commits,
+  286 of them on `main`'s first-parent line; the rest are
+  `Merge plan/X (#N) at <sha>` integration merges). 77 is 18 a week, between
+  §7.5's thresholds. 211 — landings whose title is corrective **or** that
+  bring in at least one `fix(`/`perf(` commit, which is the set correction 8
+  makes carry a line — is **49 a week, at §7.5's "over fifty" line**. See
+  §7.5.
 
 **A fifth correction to §3.2's arithmetic, found while implementing it.** The
 narrow rule is not a subset of `ISSUE_RE`. At `fad591a4`, `ISSUE_RE` matches
@@ -215,10 +248,10 @@ demanded it is satisfied by it.
 | CI, deploy and shipping contracts | `make operations-check` → `tests/operations` |
 | Shared player input contract | two Node tests |
 
-That job is the merge-time hook this plan needs: the `pull_request` event
-checks out the **merge candidate**, not the branch head, so a check running
-there is already looking at the merged tree. M2 re-verifies that on a real run
-before anything depends on it.
+That job is the merge-time hook this plan needs — but, per correction 6, the
+`pull_request` event on this Forgejo checks out the **branch head**, not a
+merge candidate. The field check therefore builds the candidate tree itself
+(`git merge-tree --write-tree`) rather than trusting the checkout.
 
 ### 2.4 The text-contract surface
 
@@ -612,10 +645,12 @@ ledger keeps growing.
    (§7.4).
 2. **Release cadence (Paul), review §7.7 — ANSWERED 2026-09-23: weekly tags
    from a green scheduled run**, option (a) of §3.5, not a tag per fleet
-   deploy. Recorded on the work board's P-03 row. M7 is not implemented here
-   and the reason is not the decision: `publish_main` still has no trigger
-   that can fire it (correction 1), which belongs to
-   [RUST-TEST-EXECUTION-POLICY.md](RUST-TEST-EXECUTION-POLICY.md) M2, and
+   deploy. Recorded on the work board's P-03 row. M7's buildable half is
+   implemented against it (`scripts/release-cut`, the Monday schedule and a
+   tag job that only a green scheduled run of a pending release reaches).
+   The first tag still waits: `publish_main` has no trigger that can fire it
+   (correction 1, re-verified 2026-09-24), which belongs to
+   [RUST-TEST-EXECUTION-POLICY.md](RUST-TEST-EXECUTION-POLICY.md), and
    `v0.3.0` stands until that is fixed.
 
 3. **Whether a Rust path may be named in the field before the fast lane runs
@@ -631,16 +666,28 @@ ledger keeps growing.
    and an earlier one would demand trailers on landing commits made before
    the trailer existed and which nobody can amend.
    `validation/merge-errata.toml` therefore ships with `enforce_after`
-   commented out, which is phase A and changes nothing; setting it is a
-   one-line pull request made once that commit exists, and it is the only
-   step that starts phase B. Every mechanism the boundary drives — the rule
-   selection, the fragment freeze, the trailer requirement — is implemented
-   and tested on both sides of a fixture boundary.
+   commented out, which is phase A and changes nothing (proved on eight
+   `main` commits, M4 row). Starting phase B is one small pull request made
+   once that commit exists, and it changes two lines that
+   `tests/validation/test_regression_field.py` refuses to see apart: it sets
+   `enforce_after` to that landing commit and removes `continue-on-error`
+   from the fast lane's field step. From then on every pull request whose
+   commits or title are corrective must carry a `Regression-Test:` line, and
+   whoever merges it must put that line in the landing commit's message
+   (`python3 -m validation.regression_field --body-file <body> --landing-lines`
+   prints exactly the lines to paste). A landing commit that misses it turns
+   the next pull request's `make history-check` red until a
+   `validation/merge-errata.toml` row records it.
 5. **How many landing commits per week actually carry a corrective change —
-   ANSWERED by M1: 18.0 per week** (77 corrective landing commits in the 30
-   days to `fad591a4`, from 379 landings). Between the two thresholds this
-   question sets, so step 4 of §3.1 is implemented as written; the whole
-   check is `continue-on-error: true` in the lane for M2 regardless.
+   measured, and the answer sits on the line this question draws.** By pull
+   request title, 18 a week. By what a landing brings in — the rule §3.1 step
+   4 and correction 8 use — **49 a week**, one short of "over fifty". Most of
+   that volume is the integration waves: a plan branch full of `fix(`
+   commits merged as `Merge plan/X (#N) at <sha>`. The pre-merge check is
+   advisory until the boundary is set, so nothing blocks yet; **whether phase
+   B starts with that volume, or with a narrower "title only" rule that §3.1
+   step 4 would then also have to adopt, is a question for Paul before the
+   boundary pull request**, not a choice this branch made.
 
 
 ---
@@ -655,11 +702,10 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 | this PR | §2.1's second table, re-measured at `fad591a4`: 5,399 non-merge commits, 925 fragments, 8,069 fragment lines, `STATUS.md` 2,889 lines. `make history-check` 92.5 s on the author host; **the `general` runner timing is owed** — it needs a Forgejo run of this branch, which cannot precede the PR. 77 corrective landing commits in 30 days, 18.0/week. Found and recorded §3.2's fifth correction: the narrow rule is **not** a subset of `ISSUE_RE` (22 `perf(<scope>):` subjects match it and not `ISSUE_RE`). |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 | this PR | `validation/regression_field.py` with §3.1's four conditions, wired into `main-fast-lane.yml`'s `preflight` with `continue-on-error: true`, printing the checked-out `HEAD` and its parents so the merge-candidate claim is checkable on a real run. The marker set is `validation/test_markers.py`, imported by both audits so they cannot drift. The executed-suite set is **derived** from the lane's own step list and the Makefile (`tests/playback/*.test.js`, `tests/web/player-dom.test.js`, `tests/operations`, `tests/validation`), so a Rust path is accepted with a printed warning that will stop on its own when the lane runs Rust. Ten tests in `tests/validation/test_regression_field.py`. **The merge-candidate re-verification of §5.2 is not done**: no run of this branch's `preflight` exists yet, so the two printed revisions have not been read. Owed after the first lane run. |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 | this PR | `audit_merge_regressions` in `validation/history.py`: landing commits collected in both shapes, `Regression-Test:` trailers read with git's own trailer parser, each resolved against **the landing commit's own tree** (`git show <landing>:<path>`), and a `merges` array in `target/validation/history.json`. `validation/merge-errata.toml` ships with `enforce_after` commented out and the errata list empty. The fixture-repository test that proves the exact-tree binding deletes the named test after the merge and asserts the trailer still resolves. |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 | this PR | **Machinery built and tested; the boundary is deliberately unset, so nothing is in force on `main` yet.** `CORRECTIVE_RE` is exactly §3.2's `^(fix\|perf)(\([^)]*\))?[:!]`. **Deviation from §3.2, with evidence:** the rule is chosen **per commit at the boundary** (`is_corrective`) rather than replacing `ISSUE_RE` outright, because the two rules are not nested — 22 `perf(<scope>):` commits match the narrow rule and not `ISSUE_RE`, so a wholesale swap would make 22 unamendable landed commits newly corrective and newly unevidenced while §3.1's phase table forbids writing them a fragment. §3.1's phase table already says the pre-boundary range keeps its fragments "forever", and this is what makes that true. The consequence is that M4's acceptance line "a corrective-commit count within 5 of 938" is **not** met and cannot be: the count stays at the legacy rule's value for the pre-boundary range by design. The freeze (`load_coverage`'s fragments refused past the boundary) and the trailer requirement are errors, not reports, the moment `enforce_after` is set. Six revert proofs are in the PR body. |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 | not implemented | §3.3's protocol requires two `scripts/prove-fix` transcripts showing the text assertion and its replacement failing on the same revert, and the replacement is an assertion inside a **built container image** (`scripts/container-smoke` on `/var/lib/apt/lists`). No image build was available to this session, so the demonstration §3.3 step 2 requires could not be produced. Deleting the text assertion without it is exactly what the protocol forbids. |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | not implemented | Deliberately deferred rather than attempted: moving ~40 `STATUS.md` sections verbatim into per-subject documents, extending `STATUS_PAGES` and adding two operations assertions is a large mechanical diff that collides with every other open plan branch editing `STATUS.md`, and §3.4's own failure mode is a move that outruns the guard. It is independent of M1–M4 and loses nothing by landing separately. |
-| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M7 | blocked | The cadence decision is answered (weekly, §7.2), but both options in §3.5 assume correction 1 is fixed first and it is not: `publish_main` still has no trigger that can fire it, which belongs to [RUST-TEST-EXECUTION-POLICY.md](RUST-TEST-EXECUTION-POLICY.md) M2. Cutting a tag from this session would also need `make release-check` green on a merged commit and a two-platform image that nothing currently publishes. No tag was cut and no release prose was changed. |
-
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 | [#485](http://192.168.4.7:3000/noirr/plurx/pulls/485) (draft) | **Done.** §2.1's second table re-measured every number at `fad591a4` (first pass, 2026-09-23). The two additions: `make history-check` takes **44.4 s on the `general` runner** ([run 2797](http://192.168.4.7:3000/noirr/plurx/actions/runs/2797), task 11298) and 85.7 s on nuc3; **77 landings in 30 days are corrective by title, 211 by what they bring in** (49 a week — §7.5). The first pass also found that the narrow rule is not a subset of `ISSUE_RE` (22 `perf(<scope>):` subjects), which shaped M4. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 | [#485](http://192.168.4.7:3000/noirr/plurx/pulls/485) (draft) | **Done, advisory.** `validation/regression_field.py` in the fast lane's `preflight` with `continue-on-error: true`. §5.2's re-verification came back negative and is correction 6: the lane checks out the branch head, so the module builds the merge candidate with `git merge-tree --write-tree` and judges the field there. One resolver serves both carriers (`history.resolve_regression_test`) and reads a git tree, refusing absolute and `..` paths; a pull request is corrective by its title or any of its commits; `--landing-lines` prints the checked lines for the merge message. Acceptance by test: a real `<path>::<name>` exits 0, a misspelt name exits 1 naming the file searched, an absent path exits 1. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 | [#485](http://192.168.4.7:3000/noirr/plurx/pulls/485) (draft) | **Done, reporting.** `audit_merge_regressions`: landing commits past the boundary in three shapes (Forgejo merge, squash, and the `Merge plan/X (#N) at <sha>` integration merge `main` actually carries), `Regression-Test:` lines read from the whole landing message with the same parser as the PR body, each resolved in **that commit's own tree**; `merges` in `target/validation/history.json`; `validation/merge-errata.toml` empty and append-only. `jq '.merges \| length'` is 0 on this branch (no boundary) and 27 with a boundary at `d74ac817a` on real `main`. The fixture test deletes the named test after landing and the line still resolves. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 | [#485](http://192.168.4.7:3000/noirr/plurx/pulls/485) (draft) | **Built and proved; not in force (§7.4).** Rule chosen per commit at the boundary (`ISSUE_RE` at or before it, `^(fix\|perf)(\(…\))?[:!]` past it) — a recorded deviation, because a wholesale swap would make 22 unamendable `perf(` commits newly unevidenced; so §5.4's "count within 5 of 938" is not met by design. This pass repaired the first pass's phase B, which demanded a `regressions.d` mapping for every runtime fix past the client-fix boundary while refusing every new fragment — every runtime fix would have been unlandable. Past the boundary a corrective commit is now covered by the resolving lines of the landing commit that brings it in; one still on a branch is reported as awaiting its landing; one that reached `main` outside any landing is an error an erratum can excuse; the freeze refuses any post-boundary commit in any fragment. **Real history:** phase A is identical to `main`'s own checker (exit code, every error, every commit's coverage class) at eight `main` commits from `30d422727` to `fff9e94da`; a synthetic `fix(plurxd)` with no evidence and a deleted fragment fail under both; with the boundary at `fff9e94da` the result equals phase A, a synthetic fix awaits its landing, lands red without a line or with a misspelt one, green with a resolving one, and a new fragment for it is refused; with the boundary at `d74ac817a` the audit reports 36 errors on real `main` (23 corrective commits that landed without a line, the one corrective landing title, six fragments written past it). 32 production hunks each fail their pinning test when reverted (PR body). |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 | [#485](http://192.168.4.7:3000/noirr/plurx/pulls/485) (draft) | **Not done — refused by §3.3's own protocol** (correction 7). The pre-authorised replacement (`/var/lib/apt/lists` empty in the image) passes with the second `apt-get clean` removed: both `runtime-assets` builds have 0 list entries, 0 cached `.deb`s and the identical size, because the lists are removed by `rm -rf /var/lib/apt/lists/*` and the base image's `docker-clean` hook deletes each `.deb` after install. No final-image check can observe a build-time peak, so `test_contracts.py`'s `count("&& apt-get clean") == 2` stays. Next candidate needs its own PR. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [#485](http://192.168.4.7:3000/noirr/plurx/pulls/485) (draft) | **Done, with one deviation.** `STATUS.md` 2,890 → 382 lines: the eight newest sections stay (the ten newest alone are now 407 lines, so §3.4's ten and M6's 400-line bound cannot both hold; the bound wins), a new P-03 section, and 46 index rows. The 46 older sections moved verbatim into `docs/{ci,clients,cluster,features,playback-control,streaming}/STATUS-HISTORY.md` under headings dated by the commit that first recorded each; only relative link targets were re-based (checked mechanically). `STATUS_PAGES` gains all six; `tests/operations/test_status_page_shape.py` asserts the length and that every index-linked document is guarded. Each document is indexed with a `**Status:**` header. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M7 | [#485](http://192.168.4.7:3000/noirr/plurx/pulls/485) (draft) | **Buildable half done; the first tag is blocked, and no tag was cut.** `scripts/release-cut` (refuses an empty `[Unreleased]`, an existing tag or section; dates the changelog and its links; sets the workspace version, both native marketing versions and both build counters; relocks `Cargo.lock` and the spike lock — dry-run on this tree leaves `make spike-lock-check` and `cargo metadata --locked` green), `release-readiness.yml` on `0 6 * * 1` with a `tag` job that only a green scheduled run of a pending release reaches, `test_contracts.py`'s readiness assertion inverted, `RELEASING.md` on `0.3.x`, OPERATIONS.md's node → changelog procedure. **Blocked:** `publish_main` still cannot fire (`ci.yml` is `push: tags: [v*]` + dispatch; the job needs a push to `main`; unchanged since `3cd127e2`), so per §6 no release PR should merge before RUST-TEST-EXECUTION-POLICY §3.1(b) lands. **Owed by an operator:** a `RELEASE_TAG_TOKEN` repository secret (a run-token tag push starts no workflow). The fleet acceptance is §6's GPT prompt, after the first tag. |
