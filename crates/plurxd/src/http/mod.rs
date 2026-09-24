@@ -9,6 +9,7 @@ mod analysis;
 mod auth;
 pub(crate) use auth::LoginThrottle;
 mod browse;
+mod chapter_thumbs;
 mod cluster;
 pub(crate) mod cluster_operations;
 pub mod comingsoon;
@@ -309,7 +310,8 @@ fn http_route_group(path: &str) -> usize {
         | "/library/metadata/{key}"
         | "/library/metadata/{key}/children"
         | "/library/metadata/{key}/{kind}"
-        | "/api/v1/images/{filename}" => 3,
+        | "/api/v1/images/{filename}"
+        | "/api/v1/files/{id}/chapters/{index}/thumb" => 3,
 
         // Search only; maintenance of the search index is a settings action.
         "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
@@ -649,6 +651,10 @@ pub fn router(state: AppState) -> Router {
         // Browse
         .route("/items/{id}", get(browse::item_detail).patch(items::edit))
         .route("/files/{id}/dv-conversion", get(dv_disk::file_status))
+        .route(
+            "/files/{id}/chapters/{index}/thumb",
+            get(chapter_thumbs::serve),
+        )
         .route("/dv-conversions", get(dv_disk::status))
         .route("/analysis/summary", get(analysis::summary))
         .route("/analysis/jobs", get(analysis::jobs))
@@ -7035,6 +7041,7 @@ mod tests {
                 "pgs_overlay",
                 "subtitle_stored_sources",
                 "subtitle_not_ready_503",
+                "chapter_thumbnails",
                 "dolby_vision_convert",
                 "source_probe_comparison"
             ],
@@ -7124,6 +7131,13 @@ mod tests {
             green,
             vec![
                 "authoritative_store",
+                // The chapter-thumbnail rows read this process: the runtime
+                // cache has room on any host that can run the suite, and the
+                // counters row is a statement of what ran (nothing yet). The
+                // ffmpeg row is absent here because the fixture never probed
+                // a build.
+                "chapter_thumbs_cache_space",
+                "chapter_thumbs_work",
                 "durable_queue",
                 "rolling_contract_built",
                 "runtime",
