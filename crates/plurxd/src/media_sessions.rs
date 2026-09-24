@@ -65,7 +65,7 @@ pub(crate) const MAX_ADMITTED_MEDIA_BODY_LIFETIME: Duration = Duration::from_sec
 /// Tokio's file reader performs one blocking-pool hop per read and caps an
 /// individual read at 2 MiB. Every file-backed media body shares it: direct
 /// play and ranges (`serve_file_range`), both HLS pumps, offline transfers
-/// and the internal media relay.
+/// and the internal fragment-index blob endpoint.
 ///
 /// 128 KiB, not 256 KiB, on measurement (docs/streaming/MEDIA-BODY-BUFFERS.md
 /// Decision 1, §5.1.1). The two sizes were indistinguishable on direct-play

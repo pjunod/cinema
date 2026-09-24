@@ -2778,9 +2778,19 @@ impl HttpAcceptor for tokio::net::TcpListener {
 /// often a body ends that way depends on write timing, which the media read
 /// size changes: measured on loopback, the 128 KiB and 256 KiB reads put most
 /// HLS segment fetches into a ~50 ms mode that the 4 KiB read only reached in
-/// its tail (docs/streaming/MEDIA-BODY-BUFFERS.md §5.1.1, Decision 6). hyper
-/// already coalesces a response's head and body writes itself, so disabling
-/// Nagle does not turn one response into many small packets.
+/// its tail (docs/streaming/MEDIA-BODY-BUFFERS.md §5.1.1, Decision 6).
+///
+/// The cost is more, smaller packets on HLS bodies. The HLS pump hands the
+/// body one `MEDIA_BODY_ACK_GRANULARITY` (4 KiB) piece and waits for it to be
+/// taken before splitting the next, so hyper usually finds the body pending
+/// and flushes after each piece: an HLS body leaves as a run of roughly 4 KiB
+/// writes. With Nagle on, the kernel merged those writes' sub-segment tails;
+/// with it off, each write is sent at once. On a 1500-byte-MTU link a 4 KiB
+/// write is two full segments and a 1200-byte tail, about 6% more packets
+/// (and ACKs) than full segments would need. Direct play and ranges are not
+/// affected: they hand hyper whole `MEDIA_BODY_READ_BUFFER` reads. The
+/// post-deploy check (§6) watches packet rate; batching the pump's
+/// acknowledgements (M2) is what would coalesce these writes.
 ///
 /// Failing to set the option is not a reason to refuse the connection; it is
 /// only slower.
