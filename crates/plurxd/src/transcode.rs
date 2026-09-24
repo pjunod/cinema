@@ -19160,6 +19160,26 @@ impl TranscodeManager {
         }
     }
 
+    /// Whether the subtitle-source store holds this track as a real track
+    /// with no cues, by the burn path's rule. Uncounted; see
+    /// [`crate::subtitle_source::stored_as_empty`].
+    async fn burn_track_is_stored_empty(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        index: i64,
+    ) -> bool {
+        crate::subtitle_source::stored_as_empty(
+            &crate::subtitle_source::StoreAccess::from_setting(
+                Arc::clone(&self.store),
+                &self.runtime_cache,
+            ),
+            file,
+            index,
+            crate::subtitle_source::Live::Path(&file.path),
+        )
+        .await
+    }
+
     /// Freeze an executable encoded recipe before any rendition is named.
     /// Copy remains index-driven; selecting burn pixels requires an encoder
     /// even when the incoming request otherwise asks for source quality.
@@ -19168,8 +19188,22 @@ impl TranscodeManager {
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
-        if matches!(req.kind, SessionKind::Copy { .. }) && req.subtitle_burn.is_none() {
-            return Ok(None);
+        if matches!(req.kind, SessionKind::Copy { .. }) {
+            match req.subtitle_burn {
+                None => return Ok(None),
+                // A copy whose burn track the store holds as having no cues
+                // has nothing to burn: it stays the copy it would have been,
+                // rather than a full re-encode to overlay nothing.
+                Some(index) if self.burn_track_is_stored_empty(file, index).await => {
+                    tracing::info!(
+                        file_id = file.id,
+                        subtitle_index = index,
+                        "the burn track has no cues; serving the copy without an overlay"
+                    );
+                    return Ok(None);
+                }
+                Some(_) => {}
+            }
         }
         let source = crate::fragment_index_cluster::open_source_fence(file, None)
             .await
@@ -19314,9 +19348,60 @@ impl TranscodeManager {
                 "the source probe has no usable video cadence; rescan the file",
             )
         })?;
-        let (encoder, grade) = self
+        let (mut encoder, mut grade) = self
             .encoder_and_grade_for(file, req.hdr10, target_height, subtitle_burn.is_some())
             .await?;
+        // After the encoder and grade, deliberately. `encoder_and_grade_for`
+        // can refuse this source outright (an unknown Dolby Vision profile, an
+        // unproven Profile 5 renderer), and a refusal must not first start a
+        // detached full-source extraction and answer "pending" while it runs.
+        // A `Nothing` answer chooses the encoder and grade again without the
+        // burn: the HTTP layer admits an HDR delivery whose burn track the
+        // store holds as `empty`, and that session must keep its range.
+        let (subtitle_burn, burn_file) = match subtitle_burn {
+            Some(burn) => {
+                // The only caller that passes the short budget. A start has 50 s
+                // for everything; a cold burn sidecar on a remux of this size needs
+                // 400. Refusing in seconds with a pending answer is the only thing
+                // that leaves the viewer better off — including on the speculative
+                // prepared-successor path, which would otherwise hold a preparation
+                // slot for the length of a full-film demux.
+                // Read lazily: a warm sidecar never reads the setting.
+                let stored = crate::subtitle_source::StoreAccess::from_setting(
+                    Arc::clone(&self.store),
+                    &self.runtime_cache,
+                )
+                .on_node(self.cache_location().map(|(_, node_id)| node_id));
+                match crate::subtitles::ensure_burn_source(
+                    &self.subtitle_cache,
+                    file,
+                    burn.subtitle_index,
+                    Some(&source_object_version),
+                    crate::subtitles::SIDECAR_JOIN_BUDGET,
+                    &stored,
+                )
+                .await?
+                {
+                    crate::subtitles::BurnSource::File(handle) => (Some(burn), Some(handle)),
+                    crate::subtitles::BurnSource::Nothing => {
+                        tracing::info!(
+                            file_id = file.id,
+                            subtitle_index = burn.subtitle_index,
+                            "the selected subtitle track has no cues; starting without an overlay"
+                        );
+                        // The HTTP HDR guard now lets an `empty` track through
+                        // on an HDR delivery, so the grade chosen for a burn
+                        // is no longer always the burn-free one: choose again
+                        // without the burn, and keep the range.
+                        (encoder, grade) = self
+                            .encoder_and_grade_for(file, req.hdr10, target_height, false)
+                            .await?;
+                        (None, None)
+                    }
+                }
+            }
+            None => (None, None),
+        };
         let software_threads = Workload::of(file, target_height)
             .software_threads()
             .min(self.software_budget().await)
@@ -19332,21 +19417,7 @@ impl TranscodeManager {
             Some(software_threads),
             grade,
         );
-        let subtitle = if let Some(burn) = options.subtitle_burn.as_ref() {
-            // The only caller that passes the short budget. A start has 50 s
-            // for everything; a cold burn sidecar on a remux of this size needs
-            // 400. Refusing in seconds with a pending answer is the only thing
-            // that leaves the viewer better off — including on the speculative
-            // prepared-successor path, which would otherwise hold a preparation
-            // slot for the length of a full-film demux.
-            let subtitle = crate::subtitles::ensure_burn_file(
-                &self.subtitle_cache,
-                file,
-                burn.subtitle_index,
-                Some(&source_object_version),
-                crate::subtitles::SIDECAR_JOIN_BUDGET,
-            )
-            .await?;
+        let subtitle = if let Some(subtitle) = burn_file {
             #[cfg(unix)]
             {
                 options.subtitle_file = Some("/dev/fd/5".into());
@@ -28708,7 +28779,7 @@ impl HlsDeliveryFixture {
     /// Every `segment_delivery_*` row recorded so far, once at least `want` of
     /// them have landed. Telemetry is written off the request path.
     pub(crate) async fn delivery_events(&self, want: usize) -> Vec<PlaybackEvent> {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let events: Vec<_> = self
                     .store

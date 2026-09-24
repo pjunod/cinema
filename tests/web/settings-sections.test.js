@@ -371,9 +371,14 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
+      shippedSource("subtitleStoredSourcesCard"),
+      shippedSource("chapterThumbnailsCard"),
       shippedSource("seekScratchReservationsCard"),
       shippedSource("liveTvGuideCard"), shippedSource("liveTvDeinterlaceCard"),
-      shippedConst("DEV_READINESS_LABEL"),
+      // `clusterBackupCard`'s extracted source runs to the next function and
+      // so already carries `DEV_READINESS_LABEL`; composing both declares it
+      // twice.
+      shippedSource("clusterBackupCard"),
       shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
       shippedSource("devReadinessEvidence"), shippedSource("devReq"),
       shippedSource("devStaticReq"), shippedSource("clusterTransportRecoveryCard"),
@@ -384,7 +389,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       shippedSource("searchSettingsCard"), shippedSource("windowsServerCard"),
       shippedSource("maintenancePanel"), shippedSource("presetOpts"),
       "const SERVER=null, RETRY_EVERY=[], ART_EVERY=[], CLEAN_EVERY=[];",
-      "const langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'';",
+      "const langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',subtitleStorePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'';",
       // `directedChangeDeveloperRows` reads the live player and returns ""
       // when there is none, which is exactly the state a settings page is in.
       shippedSource("directedChangeDeveloperRows"),
@@ -441,8 +446,22 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503"])
+  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503", "subsrc", "chthumb"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
+  // Absent from the settings document is on: chapter thumbnails default on.
+  assert.match(html, /TOG:chthumb\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(html, /FOOT:saveChapterThumbnails/);
+  assert.match(
+    panels.developerPanel({ ...settings, chapter_thumbnails: false }, readiness),
+    /TOG:chthumb\|[^|]*\|[^|]*\|checked=false/,
+  );
+  // Absent from the settings document is on: the store's switch defaults on.
+  assert.match(html, /TOG:subsrc\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(html, /FOOT:saveSubtitleStoredSources/);
+  assert.match(
+    panels.developerPanel({ ...settings, subtitle_stored_sources: false }, readiness),
+    /TOG:subsrc\|[^|]*\|[^|]*\|checked=false/,
+  );
   assert.doesNotMatch(html, /HDHomeRun Live TV|CARDHEAD:Programme guide/);
   for (const route of ["livetv", "playback", "cluster"])
     assert.ok(html.includes(`href="#/settings/${route}"`), `${route} has a destination link`);
@@ -910,9 +929,96 @@ test("Automatic recovery is directly enabled and coverage remains advisory", () 
   assert.match(legacy, /checked=true/);
 });
 
+// Fix C PR 3: the subtitle-source store's footprint and its producer's work,
+// on the card where background work says what it costs and where it stops.
+test("Maintenance shows the stored subtitle tracks: size, what is riding now, and where to turn it off", () => {
+  const render = new Function(
+    "esc",
+    `const setCard=(html,o)=>"CARD["+o.id+"]"+html;
+     const cardHead=(t,d,s)=>"HEAD:"+t+"|"+s+"|";
+     const fmtBytes=(n)=>n?n+" B":"";
+     const fmtDur=(ms)=>ms?Math.round(ms/60000)+"m":"";
+     ${shippedSource("subtitleStorePanel")}
+     return subtitleStorePanel;`,
+  )(esc);
+  const html = render({
+    subtitle_stored_sources: true,
+    vod_index_mins: 15,
+    subtitle_store: {
+      footprint: { bytes: 18866, directories: 3, measured_at_ms: 1 },
+      footprint_age_ms: 5 * 60000,
+      cap_bytes: 34359738368,
+      riding: [
+        { file_id: 5208, item_id: 77, title: "Bad <Boys>", tracks: 2, bytes_written: 4096, started_at_ms: 1, running_ms: 3 * 60000 },
+        { file_id: 5209, item_id: 0, title: "", tracks: 1, bytes_written: 0, started_at_ms: 1, running_ms: 0 },
+      ],
+      tracks_attempted: 5, kept: 3, empty: 1, malformed: 1, transient: 0,
+      bytes_written: 9000, manifests_published: 2, files_not_riding: 1, discarded_switch_off: 2,
+      gate: { open: true, reason: null },
+    },
+  });
+  assert.match(html, /CARD\[subsrcstore\]/);
+  assert.match(html, /HEAD:Stored subtitle tracks\|<span class="pill ok">18866 B · 3 files<\/span>/, "an open gate: the size in a good pill");
+  assert.match(html, /On this node the store holds <b>18866 B · 3 files<\/b> \(measured 5m ago\)/, "the size, on this node, and when it was measured");
+  assert.match(html, /<b><a href="#\/item\/77">Bad &lt;Boys&gt;<\/a><\/b>: keeping 2 PGS tracks, 4096 B written so far · running 3m/,
+    "a running ride by its escaped, linked title and how long it has run");
+  assert.match(html, /<b>File 5209<\/b>: keeping 1 PGS track, 0 B written so far · running just now/, "an untitled ride falls back to its file");
+  assert.match(html, /5 tracks attempted — 3 kept, 1 with no cues, 1 malformed, 0 to retry/);
+  assert.match(html, /1 file indexed without it after a riding pass failed/);
+  assert.match(html, /2 riding passes finished after it was turned off and kept nothing/);
+  assert.match(html, /href="#\/settings\/developer\/enable-subtitle-sources"/, "the link lands on the switch");
+  assert.match(html, /a pass already running finishes its index but publishes none of the tracks it kept/, "what off does, exactly");
+  assert.doesNotMatch(html, /setwarn/);
+
+  // Switch on, gate closed: the card says so and why, instead of a green pill
+  // over "nothing is riding".
+  const blocked = render({
+    subtitle_stored_sources: true,
+    subtitle_store: { riding: [], gate: { open: false, reason: "the startup self-test failed: ffprobe <7.1> and ffmpeg 8.0 differ" } },
+  });
+  assert.match(blocked, /HEAD:Stored subtitle tracks\|<span class="pill bad">not keeping tracks<\/span>/);
+  assert.match(blocked, /class="setwarn">⚠ <b>The index pass on this node keeps no PGS tracks:<\/b> the startup self-test failed: ffprobe &lt;7\.1&gt; and ffmpeg 8\.0 differ\./);
+
+  const idle = render({ subtitle_stored_sources: false, vod_index_mins: 15, subtitle_store: { riding: [], gate: { open: false, reason: "subtitles.stored_sources is off" } } });
+  assert.match(idle, /HEAD:Stored subtitle tracks\|<span class="pill">off<\/span>/);
+  assert.doesNotMatch(idle, /setwarn/, "off is a choice, not a fault");
+  assert.match(idle, /No index pass on this node is keeping PGS tracks right now/);
+  assert.match(idle, /not measured yet: the next background analysis pass's sweep measures it/);
+  const paused = render({ subtitle_stored_sources: true, vod_index_mins: 0, subtitle_store: { riding: [] } });
+  assert.match(paused, /not measured: background analysis is paused/, "true even when the sweep never runs");
+});
+
+test("a section route may name the element it lands on", () => {
+  const r = new Function(
+    "location", "history", "document",
+    `${shippedConst("SET_GROUPS")}${shippedConst("SET_TABS")}
+     ${shippedSource("settingsRouteTab")}
+     ${shippedSource("settingsRouteAnchor")}
+     ${shippedSource("revealSettingsAnchor")}
+     return {settingsRouteTab,settingsRouteAnchor,revealSettingsAnchor};`,
+  );
+  const location = { hash: "#/settings/developer/enable-subtitle-sources" };
+  const replaced = [];
+  const history = { replaceState: (_s, _t, url) => { replaced.push(url); location.hash = url; } };
+  let scrolled = 0;
+  const document = { getElementById: (id) => (id === "enable-subtitle-sources" ? { scrollIntoView: () => { scrolled += 1; } } : null) };
+  const api = r(location, history, document);
+  assert.equal(api.settingsRouteTab(location.hash), "developer", "the section still routes");
+  assert.equal(api.settingsRouteAnchor(location.hash), "enable-subtitle-sources");
+  assert.equal(api.settingsRouteAnchor("#/settings/developer"), null);
+  assert.equal(api.settingsRouteTab("#/settings/nothere/enable-subtitle-sources"), null);
+  api.revealSettingsAnchor("developer");
+  assert.equal(scrolled, 1, "scrolled to the named card");
+  assert.deepEqual(replaced, ["#/settings/developer"], "the address drops the anchor");
+  api.revealSettingsAnchor("developer");
+  assert.equal(scrolled, 1, "once: a repaint does not scroll the reader back");
+  assert.match(shippedSource("renderSettings"), /settingsPanel\(tab,d\)\}<\/div><\/div>`;\s*revealSettingsAnchor\(tab\);/);
+  assert.match(shippedSource("subtitleStoredSourcesCard") + shippedSource("developerPanel"), /id="enable-subtitle-sources"/, "the anchor exists on Developer");
+});
+
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {
   const panel = shippedSource("maintenancePanel");
-  for (const card of ["precachePanel", "dvDiskPanel", "telemetryPanel"]) assert.match(panel, new RegExp(`${card}\\(`));
+  for (const card of ["precachePanel", "subtitleStorePanel", "dvDiskPanel", "telemetryPanel"]) assert.match(panel, new RegExp(`${card}\\(`));
   for (const id of ["job-probe", "job-art", "job-clean", "job-boot"]) assert.match(panel, new RegExp(`"${id}"`));
   const libraries = shippedSource("librariesPanel");
   for (const gone of ["maintenancePanel", "dvDiskPanel", "precachePanel", "telemetry"])

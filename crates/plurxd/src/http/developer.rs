@@ -158,6 +158,14 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         false,
     );
+    // Absent is on: keeping and reading PGS tracks is the point of the store.
+    // One switch stops the producer and both consumers.
+    let stored_sources_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::SUBTITLE_STORED_SOURCES)
+            .map(String::as_str),
+        true,
+    );
 
     // Absent is on, unlike every other switch here, because a Profile 7 title
     // reaching a Dolby Vision client as HDR10 is what the conversion exists to
@@ -212,12 +220,14 @@ pub(crate) async fn readiness(
             content_analysis_repair(&state, content_analysis_on).await,
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
+            subtitle_stored_sources(stored_sources_on, &state.runtime_cache_dir),
             subtitle_not_ready_503(plurx_core::store::stored_switch(
                 settings
                     .get(plurx_core::store::keys::SUBTITLE_NOT_READY_503)
                     .map(String::as_str),
                 false,
             )),
+            chapter_thumbnails(&state).await,
             dolby_vision_convert(convert_on),
             source_probe_comparison().await,
         ],
@@ -674,6 +684,135 @@ fn pgs_overlay(enabled: bool) -> DeveloperEnableItem {
                            the right moment is judged on a screen. The daemon never receives that \
                            receipt, and a green unit suite is not it."
                     .to_owned(),
+            },
+        ],
+    }
+}
+
+/// Stored PGS tracks: kept by the fragment-index pass, read in place of a
+/// whole-source extraction.
+///
+/// `docs/clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md` §6. One switch for
+/// both halves: off stops the index pass keeping tracks and makes the overlay
+/// and the burn path ignore what is stored, so a wrong artifact is out of
+/// service without a redeploy. The producer also needs the startup self-test
+/// to have passed and a local cache filesystem; the rows below say whether it
+/// has them. Advisory: no row turns the switch on or off.
+fn subtitle_stored_sources(enabled: bool, runtime_cache: &std::path::Path) -> DeveloperEnableItem {
+    use crate::subtitle_ride_along::{self as ride_along, SelfTest};
+
+    let (hits, empty, misses) = crate::subtitle_source::lookup_snapshot();
+    let (attempted, [kept, no_cues, malformed, transient], written, published) =
+        ride_along::snapshot();
+    let (self_test_status, self_test_evidence) = match ride_along::self_test_state() {
+        SelfTest::Passed {
+            elapsed_ms,
+            version,
+        } => (
+            RequirementStatus::Met,
+            format!(
+                "Passed in {elapsed_ms} ms: ffprobe and ffmpeg are the same build ({version}); \
+                 the tee left the index output byte-identical, kept the intact track, recognised \
+                 the corrupted track's stderr failure, and the framecrc byte arithmetic alone \
+                 judged the corrupted track malformed."
+            ),
+        ),
+        SelfTest::Failed { reason } => (
+            RequirementStatus::Unmet,
+            format!("Failed, so the index pass keeps no PGS tracks on this process: {reason}"),
+        ),
+        SelfTest::Running => (
+            RequirementStatus::Unobservable,
+            "Running now; the index pass keeps no PGS tracks until it passes.".to_owned(),
+        ),
+        SelfTest::NotRun => (
+            RequirementStatus::Unobservable,
+            "Has not run in this process; the index pass keeps no PGS tracks until it passes."
+                .to_owned(),
+        ),
+    };
+    let store_root = crate::subtitle_source::store_root(runtime_cache);
+    let checked = if store_root.is_dir() {
+        store_root
+    } else {
+        runtime_cache.to_owned()
+    };
+    let (filesystem_status, filesystem_evidence) = match ride_along::local_filesystem(&checked) {
+        Ok(kind) => (
+            RequirementStatus::Met,
+            format!("{} is on a local filesystem ({kind}).", checked.display()),
+        ),
+        Err(reason) => (
+            RequirementStatus::Unmet,
+            format!(
+                "{}: {reason}. The index pass keeps no PGS tracks here: a blocked stage \
+                 write would stall the demuxer the index shares.",
+                checked.display()
+            ),
+        ),
+    };
+    let (space_status, space_evidence) = match ride_along::free_space(&checked) {
+        Ok(evidence) => (
+            RequirementStatus::Met,
+            format!("{}: {evidence}.", checked.display()),
+        ),
+        Err(reason) => (
+            RequirementStatus::Unmet,
+            format!(
+                "{}: {reason}. The index pass keeps no PGS tracks until there is room: stage \
+                 writes share the disk with the index blob the pass is about to publish.",
+                checked.display()
+            ),
+        ),
+    };
+    let failed = ride_along::failed_ride_count();
+    DeveloperEnableItem {
+        id: "subtitle_stored_sources",
+        title: "Keep PGS tracks during indexing and read them instead of the source",
+        enabled: Some(enabled),
+        setting: Some("subtitle_stored_sources"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "stored_source_producer",
+                title: "Something fills the store",
+                // A statement about this build, read from this build.
+                status: RequirementStatus::Met,
+                evidence: format!(
+                    "The fragment-index pass keeps every PGS track it reads. Since this process \
+                     started: {attempted} track(s) attempted — {kept} kept, {no_cues} with no \
+                     cues, {malformed} malformed, {transient} transient — {written} byte(s) \
+                     written to stages, {published} manifest(s) published; {failed} file(s) \
+                     whose riding pass did not build its index are indexed without the \
+                     ride-along until the next restart. Process-local."
+                ),
+            },
+            DeveloperRequirement {
+                id: "stored_source_self_test",
+                title: "The startup self-test passed",
+                status: self_test_status,
+                evidence: self_test_evidence,
+            },
+            DeveloperRequirement {
+                id: "stored_source_local_cache",
+                title: "The cache is on a local filesystem",
+                status: filesystem_status,
+                evidence: filesystem_evidence,
+            },
+            DeveloperRequirement {
+                id: "stored_source_free_space",
+                title: "The cache has room for the stage",
+                status: space_status,
+                evidence: space_evidence,
+            },
+            DeveloperRequirement {
+                id: "stored_source_lookups",
+                title: "Lookups are answered from the store",
+                status: RequirementStatus::Unobservable,
+                evidence: format!(
+                    "Since this process started: {hits} lookup(s) served a stored track, {empty} \
+                     answered that the track has no cues, and {misses} fell through to \
+                     extraction. Process-local; a restart returns them to zero."
+                ),
             },
         ],
     }
@@ -1161,6 +1300,128 @@ fn prepared_quality_handoff(enabled: bool) -> DeveloperEnableItem {
         enabled: Some(enabled),
         setting: Some("prepared_quality_handoff"),
         requirements,
+    }
+}
+
+// Chapter thumbnails.
+//
+// The watch view's chapter rail shows a frame per chapter, made on request by
+// one ffmpeg seek and kept under the runtime cache. The switch is the enable
+// path; the rows say what an extraction needs and what this process has done
+// so far, and never turn the switch.
+async fn chapter_thumbnails(state: &AppState) -> DeveloperEnableItem {
+    use crate::http::chapter_thumbs;
+    use crate::subtitle_ride_along as ride_along;
+
+    let enabled = chapter_thumbs::enabled(state).await;
+    let counts = chapter_thumbs::snapshot();
+    let root = chapter_thumbs::cache_root(&state.runtime_cache_dir);
+    let checked = if root.is_dir() {
+        root.clone()
+    } else {
+        state.runtime_cache_dir.clone()
+    };
+    // Two directory walks and a statvfs, off the async runtime.
+    let runtime_cache = state.runtime_cache_dir.clone();
+    let checked_for_space = checked.clone();
+    let ((files, bytes), space) = tokio::task::spawn_blocking(move || {
+        (
+            chapter_thumbs::cache_footprint(&runtime_cache),
+            ride_along::free_space(&checked_for_space),
+        )
+    })
+    .await
+    .unwrap_or_else(|_| ((0, 0), Err("the readiness walk panicked".to_owned())));
+    let (ffmpeg_status, ffmpeg_evidence) = match state.system.ffmpeg_version.as_deref() {
+        Some(version) if !version.trim().is_empty() => (
+            RequirementStatus::Met,
+            format!(
+                "{} answered `-version` at startup: {}.",
+                state.system.ffmpeg,
+                version.trim()
+            ),
+        ),
+        _ => (
+            RequirementStatus::Unmet,
+            format!(
+                "{} did not answer `-version` at startup, so every extraction will fail \
+                 and the rail shows numbered tiles.",
+                state.system.ffmpeg
+            ),
+        ),
+    };
+    let (space_status, space_evidence) = match space {
+        Ok(evidence) => (
+            RequirementStatus::Met,
+            format!("{}: {evidence}.", checked.display()),
+        ),
+        Err(reason) => (
+            RequirementStatus::Unmet,
+            format!(
+                "{}: {reason}. A thumbnail is tens of kilobytes, but a cache with no room \
+                 fails every write.",
+                checked.display()
+            ),
+        ),
+    };
+    DeveloperEnableItem {
+        id: "chapter_thumbnails",
+        title: "Make chapter thumbnails for the watch view",
+        enabled: Some(enabled),
+        setting: Some("chapter_thumbnails"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "chapter_thumbs_ffmpeg",
+                title: "ffmpeg can decode a frame",
+                status: ffmpeg_status,
+                evidence: ffmpeg_evidence,
+            },
+            DeveloperRequirement {
+                id: "chapter_thumbs_cache_space",
+                title: "The runtime cache has room",
+                status: space_status,
+                evidence: space_evidence,
+            },
+            DeveloperRequirement {
+                id: "chapter_thumbs_work",
+                title: "What this process has extracted",
+                // Counters read from this process, so always answerable.
+                status: RequirementStatus::Met,
+                evidence: format!(
+                    "Since this process started: {} thumbnail(s) made, {} served from the \
+                     cache, {} extraction(s) failed, {} running now, {} request(s) refused \
+                     while the switch was off. Each extraction is one ffmpeg seek and one \
+                     decoded frame, CPU only, bounded to {} at a time and {} seconds each; \
+                     nothing runs unless a watch page asks for that chapter, and a failed \
+                     chapter is not retried for an hour. On disk: {files} thumbnail(s), {} \
+                     under {}.",
+                    counts.generated,
+                    counts.served_cached,
+                    counts.failed,
+                    counts.in_flight,
+                    counts.refused_off,
+                    chapter_thumbs::EXTRACT_CONCURRENCY,
+                    chapter_thumbs::EXTRACT_TIMEOUT.as_secs(),
+                    human_bytes(bytes),
+                    root.display()
+                ),
+            },
+        ],
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 

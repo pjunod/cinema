@@ -914,7 +914,8 @@ class Controller internal constructor(
             newPosition: Player.PositionInfo,
             reason: Int,
         ) {
-            pgsOverlay.reconcile()
+            // A discontinuity is the viewer's move: it ends a failure backoff.
+            pgsOverlay.reconcile(seeked = true)
         }
 
         override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {

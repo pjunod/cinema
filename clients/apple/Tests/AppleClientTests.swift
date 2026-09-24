@@ -10777,6 +10777,370 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
+    // MARK: - PGS overlay: the shared seek, tick and manifest-response fixture
+    //
+    // tests/playback/pgs-overlay-cases.json is the same file the Android JVM
+    // suite reads (PGSOverlayTest), so the two clients cannot drift apart on
+    // when a seek refreshes, which cue is due, or which answers stop a poll.
+
+    private func pgsOverlayCasesData() throws -> Data {
+        let fixtureURL = try XCTUnwrap(
+            Bundle(for: AppleClientTests.self).url(
+                forResource: "pgs-overlay-cases",
+                withExtension: "json"
+            )
+        )
+        return try Data(contentsOf: fixtureURL)
+    }
+
+    private func pgsOverlayCasesFixture() throws -> PGSOverlayCasesFixture {
+        let data = try pgsOverlayCasesData()
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(PGSOverlayCasesFixture.self, from: data)
+    }
+
+    private func pgsOverlayRange(_ bounds: [Int]?) -> Range<Int>? {
+        guard let bounds else { return nil }
+        return bounds[0]..<bounds[1]
+    }
+
+    /// The seek rows as Apple's seek applies them: `pgsOverlaySeeked(to:)`
+    /// asks `shouldRefresh` with the published and in-flight ranges and no
+    /// failure backoff, and keeps a window that already serves the position.
+    /// `clear_now` is Android's alone: Apple's cues are timed layers on an
+    /// `AVSynchronizedLayer` and cannot outlive their interval. The cue due is
+    /// checked twice: in source time against the manifest, and in item time
+    /// through `itemInterval`, the interval the renderer schedules, with a
+    /// non-zero item base so a source/item mix-up cannot cancel out.
+    func testPGSOverlaySeekCasesFromSharedFixture() throws {
+        let fixture = try pgsOverlayCasesFixture()
+        let cues = fixture.manifest.cues.map {
+            pgsOverlayCue(id: $0.id, startMs: $0.startMs, endMs: $0.endMs)
+        }
+        let itemBaseMs = 5_000
+        XCTAssertGreaterThanOrEqual(fixture.seekCases.count, 6)
+        for seek in fixture.seekCases {
+            let loaded = pgsOverlayRange(seek.loadedWindow)
+            let loading = pgsOverlayRange(seek.loadingWindow)
+            let refresh = PGSOverlayPolicy.shouldRefresh(
+                sourceTimeMs: seek.toMs,
+                loadedRange: loaded,
+                loadingRange: loading
+            )
+            XCTAssertEqual(refresh, seek.expect.refresh, seek.name)
+            let serving: Range<Int>?
+            if refresh {
+                serving = PGSOverlayPolicy.windowRange(
+                    at: seek.toMs,
+                    durationMs: fixture.manifest.durationMs
+                )
+            } else if let loaded,
+                      !PGSOverlayPolicy.shouldRefresh(sourceTimeMs: seek.toMs, loadedRange: loaded) {
+                serving = loaded
+            } else {
+                serving = loading
+            }
+            XCTAssertEqual(serving, pgsOverlayRange(seek.expect.window), seek.name)
+
+            let dueInSourceTime = cues.first { $0.startMs <= seek.toMs && seek.toMs < $0.endMs }
+            XCTAssertEqual(dueInSourceTime?.id, seek.expect.activeCue, "\(seek.name) in source time")
+            let itemTimeMs = PGSOverlayPolicy.itemTimeMs(sourceTimeMs: seek.toMs, baseMs: itemBaseMs)
+            XCTAssertEqual(itemTimeMs, seek.toMs - itemBaseMs)
+            let dueInItemTime = cues.first {
+                PGSOverlayPolicy.itemInterval(cue: $0, baseMs: itemBaseMs)?.contains(itemTimeMs) == true
+            }
+            XCTAssertEqual(dueInItemTime?.id, seek.expect.activeCue, "\(seek.name) in item time")
+        }
+    }
+
+    /// The tick rows: a load that covers the position is never replaced, and
+    /// a failed window is retried after 5 s and 30 s and then left for a seek.
+    func testPGSOverlayTickCasesFromSharedFixture() throws {
+        let fixture = try pgsOverlayCasesFixture()
+        XCTAssertGreaterThanOrEqual(fixture.tickCases.count, 8)
+        for tick in fixture.tickCases {
+            XCTAssertEqual(
+                PGSOverlayPolicy.shouldRefresh(
+                    sourceTimeMs: tick.positionMs,
+                    loadedRange: pgsOverlayRange(tick.loadedWindow),
+                    loadingRange: pgsOverlayRange(tick.loadingWindow),
+                    windowFailures: tick.windowFailures,
+                    msSinceFailure: tick.msSinceFailure
+                ),
+                tick.expect.refresh,
+                tick.name
+            )
+        }
+    }
+
+    // MARK: - PGS overlay: the controller's own tick, seek and failure paths
+    //
+    // These drive PlayerController through the calls production makes: the
+    // periodic observer's `pgsOverlayPeriodicTick(currentMs:)`, `issueSeek`'s
+    // `pgsOverlaySeeked(to:)`, and a reselection. Only the bytes (a fetcher)
+    // and the backoff clock are supplied.
+
+    @MainActor
+    private final class PGSOverlayFakeFetch {
+        struct Pending {
+            let path: String
+            let continuation: CheckedContinuation<Data, Error>
+        }
+
+        let manifest: PGSOverlayManifest
+        private(set) var requests: [String] = []
+        private var pending: [Pending] = []
+
+        init(manifest: PGSOverlayManifest) { self.manifest = manifest }
+
+        var fetcher: PGSOverlayFetcher {
+            PGSOverlayFetcher(
+                manifest: { [unowned self] _, _ in .ready(self.manifest) },
+                object: { [unowned self] _, _, _, path in
+                    try await withCheckedThrowingContinuation { continuation in
+                        self.requests.append(path)
+                        self.pending.append(Pending(path: path, continuation: continuation))
+                    }
+                }
+            )
+        }
+
+        var pendingCount: Int { pending.count }
+
+        func succeedAll() {
+            let data = PGSOverlayFakeFetch.png()
+            let all = pending
+            pending = []
+            all.forEach { $0.continuation.resume(returning: data) }
+        }
+
+        func failAll() {
+            let all = pending
+            pending = []
+            all.forEach { $0.continuation.resume(throwing: URLError(.networkConnectionLost)) }
+        }
+
+        static func png() -> Data {
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            return UIGraphicsImageRenderer(
+                size: CGSize(width: 1, height: 1),
+                format: format
+            ).pngData { context in
+                UIColor.white.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+            }
+        }
+    }
+
+    private func pgsOverlayControllerManifest() -> PGSOverlayManifest {
+        let generation = String(repeating: "a", count: 64)
+        func cue(_ id: String, _ start: Int, _ end: Int, _ letter: Character) -> PGSOverlayCue {
+            PGSOverlayCue(
+                id: id,
+                startMs: start,
+                endMs: end,
+                canvasWidth: 1_920,
+                canvasHeight: 1_080,
+                objects: [PGSOverlayObject(
+                    image: "overlay/\(generation)/objects/\(String(repeating: letter, count: 64)).png",
+                    x: 0, y: 0, width: 1, height: 1
+                )]
+            )
+        }
+        return PGSOverlayManifest(
+            schema: 1,
+            generation: generation,
+            fileId: 0,
+            trackIndex: 3,
+            kind: "pgs",
+            timebase: "source_ms",
+            durationMs: 600_000,
+            cues: [cue("c2", 100_000, 104_000, "b"), cue("c6", 300_000, 302_000, "e")]
+        )
+    }
+
+    private let pgsOverlayTracks = [SubtitleTrack(
+        index: 3, codec: "hdmv_pgs_subtitle", language: "eng", title: nil,
+        default: false, forced: false, text: false, overlay: "pgs-v1"
+    )]
+
+    /// Lets the controller's main-actor tasks run until `condition` holds.
+    @MainActor
+    private func pgsOverlaySettle(
+        _ what: String,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        until condition: () -> Bool
+    ) async {
+        for _ in 0..<2_000 {
+            if condition() { return }
+            await Task.yield()
+        }
+        XCTFail("never settled: \(what)", file: file, line: line)
+    }
+
+    @MainActor
+    private func pgsOverlayController(
+        _ fake: PGSOverlayFakeFetch,
+        clock: @escaping () -> Int = { 0 }
+    ) -> PlayerController {
+        let controller = PlayerController()
+        controller.pgsOverlayFetcherForTesting = fake.fetcher
+        controller.pgsOverlayClockMs = clock
+        return controller
+    }
+
+    /// The periodic tick while the window for an out-of-window seek is still
+    /// loading. Before B3 the tick saw a position outside the *published*
+    /// window and cancelled and restarted that load every second.
+    @MainActor
+    func testPGSOverlayTickDoesNotCancelCoveringLoad() async {
+        let fake = PGSOverlayFakeFetch(manifest: pgsOverlayControllerManifest())
+        let controller = pgsOverlayController(fake)
+        controller.selectPGSOverlayForTesting(3, tracks: pgsOverlayTracks, atMs: 101_000)
+        await pgsOverlaySettle("first window requested") { fake.pendingCount == 1 }
+        fake.succeedAll()
+        await pgsOverlaySettle("first window published") { controller.pgsOverlayWindow != nil }
+        XCTAssertEqual(controller.pgsOverlayWindow?.sourceRange, 96_000..<191_000)
+
+        // In-window seek: the published window already serves it.
+        controller.pgsOverlaySeeked(to: 120_000)
+        XCTAssertNil(controller.pgsOverlayLoadingRangeForTesting)
+        XCTAssertEqual(fake.requests.count, 1)
+
+        controller.pgsOverlaySeeked(to: 301_000)
+        await pgsOverlaySettle("second window requested") { fake.pendingCount == 1 }
+        XCTAssertEqual(fake.requests.count, 2)
+        for second in 301...305 {
+            controller.pgsOverlayPeriodicTick(currentMs: second * 1_000)
+            await Task.yield()
+        }
+        XCTAssertEqual(fake.requests.count, 2, "a tick replaced the load that covers it")
+        fake.succeedAll()
+        await pgsOverlaySettle("second window published") {
+            controller.pgsOverlayWindow?.sourceRange == 296_000..<391_000
+        }
+        XCTAssertNil(controller.pgsOverlayLoadingRangeForTesting)
+    }
+
+    /// Review finding: a load that finished after the viewer had moved to
+    /// another track returned early and left its range behind, so reselecting
+    /// the first track was a refresh the stale range said was covered, and
+    /// nothing loaded.
+    @MainActor
+    func testPGSOverlayReselectionAfterAnAbandonedLoadLoadsAgain() async {
+        let fake = PGSOverlayFakeFetch(manifest: pgsOverlayControllerManifest())
+        let controller = pgsOverlayController(fake)
+        controller.selectPGSOverlayForTesting(3, tracks: pgsOverlayTracks, atMs: 101_000)
+        await pgsOverlaySettle("window requested") { fake.pendingCount == 1 }
+
+        controller.publishSelectedSubtitleForTesting(5)
+        fake.succeedAll()
+        await pgsOverlaySettle("abandoned load returned its range") {
+            controller.pgsOverlayLoadingRangeForTesting == nil
+        }
+        XCTAssertNil(controller.pgsOverlayWindow)
+
+        controller.selectPGSOverlayForTesting(3, tracks: pgsOverlayTracks, atMs: 101_000)
+        await pgsOverlaySettle("reselected window published") {
+            controller.pgsOverlayWindow?.sourceRange == 96_000..<191_000
+        }
+    }
+
+    /// One failed window: one notice, no refetch on the next ticks, silent
+    /// retries after 5 s and 30 s, nothing after that until a seek, and the
+    /// seek recovers.
+    @MainActor
+    func testPGSOverlayFailedWindowIsSaidOnceAndRetriedOnABoundedBackoff() async {
+        var now = 0
+        let fake = PGSOverlayFakeFetch(manifest: pgsOverlayControllerManifest())
+        let controller = pgsOverlayController(fake, clock: { now })
+        controller.selectPGSOverlayForTesting(3, tracks: pgsOverlayTracks, atMs: 101_000)
+        await pgsOverlaySettle("window requested") { fake.pendingCount == 1 }
+        fake.failAll()
+        await pgsOverlaySettle("failure noticed") { controller.pgsOverlayNoticeCount == 1 }
+
+        // Every tick is at a position whose window still holds c2, so a
+        // refresh here always needs c2's image; only the clock moves.
+        func tick(atClockMs clockMs: Int) async {
+            now = clockMs
+            controller.pgsOverlayPeriodicTick(currentMs: 101_500)
+            for _ in 0..<20 { await Task.yield() }
+        }
+
+        await tick(atClockMs: 1_000)
+        await tick(atClockMs: 2_000)
+        XCTAssertEqual(fake.requests.count, 1, "a tick inside the backoff refetched")
+
+        await tick(atClockMs: 5_000)
+        await pgsOverlaySettle("first retry") { fake.pendingCount == 1 }
+        XCTAssertEqual(fake.requests.count, 2)
+        fake.failAll()
+        await pgsOverlaySettle("first retry failed") {
+            controller.pgsOverlayLoadingRangeForTesting == nil
+        }
+        await tick(atClockMs: 19_000)
+        XCTAssertEqual(fake.requests.count, 2)
+        await tick(atClockMs: 36_000)
+        await pgsOverlaySettle("second retry") { fake.pendingCount == 1 }
+        fake.failAll()
+        await pgsOverlaySettle("second retry failed") {
+            controller.pgsOverlayLoadingRangeForTesting == nil
+        }
+        await tick(atClockMs: 700_000)
+        XCTAssertEqual(fake.requests.count, 3, "retried past the bounded backoff")
+        XCTAssertEqual(controller.pgsOverlayNoticeCount, 1, "a retry said it again")
+
+        controller.pgsOverlaySeeked(to: 101_500)
+        await pgsOverlaySettle("seek reloads") { fake.pendingCount == 1 }
+        fake.succeedAll()
+        await pgsOverlaySettle("seek recovered") { controller.pgsOverlayWindow != nil }
+        XCTAssertEqual(controller.pgsOverlayNoticeCount, 1)
+    }
+
+    func testPGSOverlayManifestResponsesFromSharedFixture() throws {
+        let fixture = try pgsOverlayCasesFixture()
+        // The bodies go to the reader byte for byte as the server would send
+        // them, so they are taken from the raw file, not from a decoded copy.
+        let raw = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: pgsOverlayCasesData()) as? [String: Any]
+        )
+        let bodies = try XCTUnwrap(raw["manifest_responses"] as? [[String: Any]])
+            .map { $0["body"] as Any }
+        XCTAssertEqual(bodies.count, fixture.manifestResponses.count)
+        XCTAssertGreaterThanOrEqual(fixture.manifestResponses.count, 6)
+        for (answer, rawBody) in zip(fixture.manifestResponses, bodies) {
+            var headers = ["Content-Type": "application/json"]
+            if let retryAfter = answer.retryAfter { headers["Retry-After"] = retryAfter }
+            let http = try XCTUnwrap(HTTPURLResponse(
+                url: try XCTUnwrap(URL(string: "http://plurx.test/api/v1/files/42/subs/3/overlay.json")),
+                statusCode: answer.status,
+                httpVersion: "HTTP/1.1",
+                headerFields: headers
+            ))
+            let body = try JSONSerialization.data(withJSONObject: rawBody)
+            do {
+                switch try PlurxAPI.pgsOverlayManifestFetch(http, data: body) {
+                case .ready(let manifest):
+                    XCTAssertEqual(answer.expect.disposition, "ready", answer.name)
+                    XCTAssertNoThrow(try manifest.validated(fileId: 42, trackIndex: 3), answer.name)
+                case .preparing(let retryAfterMs):
+                    XCTAssertEqual(answer.expect.disposition, "preparing", answer.name)
+                    XCTAssertEqual(retryAfterMs, answer.expect.retryAfterMs, answer.name)
+                }
+            } catch {
+                XCTAssertEqual(answer.expect.disposition, "terminal", answer.name)
+                let notice = PGSOverlayPolicy.failureNotice(error)
+                if let expected = answer.expect.notice {
+                    XCTAssertEqual(notice, expected, answer.name)
+                }
+                XCTAssertTrue(notice.hasSuffix("Video playback was kept unchanged."), answer.name)
+            }
+        }
+    }
+
     private func pgsOverlayManifest(cues: [PGSOverlayCue]) -> PGSOverlayManifest {
         PGSOverlayManifest(
             schema: 1,
@@ -10948,7 +11312,7 @@ final class AppleClientTests: XCTestCase {
 
     func testPGSOverlayUsesSourceTimeWithANonZeroItemBase() {
         XCTAssertEqual(
-            [503, 202, 200].map(PGSOverlayPolicy.manifestDisposition),
+            [503, 202, 200].map { PGSOverlayPolicy.manifestDisposition($0) },
             [.preparing, .preparing, .ready]
         )
         XCTAssertEqual(PGSOverlayPolicy.retryAfterMs("2"), 2_000)
@@ -11684,4 +12048,63 @@ private extension PreferredLanguageStatus {
     /// state to be added without anyone deciding how it should read.
     static let allFive: [PreferredLanguageStatus] =
         [.selected, .available, .missing, .unknown, .noTracks]
+}
+
+// MARK: - tests/playback/pgs-overlay-cases.json
+
+private struct PGSOverlayCasesFixture: Decodable {
+    struct Manifest: Decodable {
+        struct Cue: Decodable {
+            let id: String
+            let startMs: Int
+            let endMs: Int
+        }
+        let durationMs: Int
+        let cues: [Cue]
+    }
+
+    struct SeekCase: Decodable {
+        struct Expect: Decodable {
+            let refresh: Bool
+            let clearNow: Bool
+            let activeCue: String?
+            let window: [Int]?
+        }
+        let name: String
+        let loadedWindow: [Int]?
+        let loadingWindow: [Int]?
+        let shownCue: String?
+        let toMs: Int
+        let expect: Expect
+    }
+
+    struct TickCase: Decodable {
+        struct Expect: Decodable {
+            let refresh: Bool
+        }
+        let name: String
+        let positionMs: Int
+        let loadedWindow: [Int]?
+        let loadingWindow: [Int]?
+        let windowFailures: Int
+        let msSinceFailure: Int
+        let expect: Expect
+    }
+
+    struct ManifestResponse: Decodable {
+        struct Expect: Decodable {
+            let disposition: String
+            let retryAfterMs: Int?
+            let notice: String?
+        }
+        let name: String
+        let status: Int
+        let retryAfter: String?
+        let expect: Expect
+    }
+
+    let manifest: Manifest
+    let seekCases: [SeekCase]
+    let tickCases: [TickCase]
+    let manifestResponses: [ManifestResponse]
 }

@@ -798,6 +798,53 @@ fn windows_object_version(file: &std::fs::File) -> Result<String, String> {
     ))
 }
 
+/// A source's identity as the subtitle-source store keys it: size and mtime
+/// for every consumer, and `(dev, ino)` for the burn path.
+///
+/// Deliberately not [`SourceFence::object_version`], which also carries ctime.
+/// A hardlink or `chmod` from an importer moves ctime without touching a
+/// byte, and a store keyed on it would miss on that file for good while
+/// nothing ever re-rode the pass that fills it. `(dev, ino)` is what rejects a
+/// file replaced in place with a new inode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SourceStamp {
+    pub(crate) size: u64,
+    /// Whole seconds, as the scanner records `files.mtime`.
+    pub(crate) mtime: i64,
+    #[serde(default)]
+    pub(crate) dev: Option<u64>,
+    #[serde(default)]
+    pub(crate) ino: Option<u64>,
+}
+
+#[cfg(unix)]
+pub(crate) fn source_stamp(metadata: &std::fs::Metadata) -> SourceStamp {
+    use std::os::unix::fs::MetadataExt;
+    SourceStamp {
+        size: metadata.size(),
+        mtime: metadata.mtime(),
+        dev: Some(metadata.dev()),
+        ino: Some(metadata.ino()),
+    }
+}
+
+/// The Windows port has no `(dev, ino)` in `std::fs::Metadata`, so the store
+/// falls back to size + mtime there, the overlay's rule.
+#[cfg(not(unix))]
+pub(crate) fn source_stamp(metadata: &std::fs::Metadata) -> SourceStamp {
+    SourceStamp {
+        size: metadata.len(),
+        mtime: metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+            .unwrap_or(0),
+        dev: None,
+        ino: None,
+    }
+}
+
 pub(crate) fn pipeline_digest(
     file: &MediaFile,
     engine_sha256: &str,
