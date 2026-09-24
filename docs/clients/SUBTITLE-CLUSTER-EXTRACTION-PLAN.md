@@ -656,4 +656,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01LUY4Gc3ZFwF8xzj6Eg9Dy1 | Plan | — | Written from `936157b4b` and the 2026-09-24 fleet read in §2.3. Awaiting adversarial review; nothing built. |
+| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01LUY4Gc3ZFwF8xzj6Eg9Dy1 | Plan | [#497](http://192.168.4.7:3000/noirr/plurx/pulls/497) | Written from `936157b4b` and the 2026-09-24 fleet read in §2.3. Awaiting adversarial review; nothing built. |
