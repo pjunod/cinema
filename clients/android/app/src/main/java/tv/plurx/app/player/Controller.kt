@@ -37,7 +37,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewModelScope
-import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
@@ -49,12 +48,8 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
-import androidx.media3.datasource.okhttp.OkHttpDataSource
-import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.session.MediaSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -4068,7 +4063,7 @@ class BuiltPlayer internal constructor(
 
 @UnstableApi
 fun buildPlayer(context: Context, vm: AppViewModel): BuiltPlayer =
-    buildPipeline(context, vm, tunneling = isTelevision(context))
+    buildPipeline(context, vm, PlayerRole.Finite)
 
 /**
  * The second pipeline a prepared replacement primes.
@@ -4093,7 +4088,7 @@ fun buildPlayer(context: Context, vm: AppViewModel): BuiltPlayer =
  */
 @UnstableApi
 fun buildSuccessorPlayer(context: Context, vm: AppViewModel): BuiltPlayer {
-    val built = buildPipeline(context, vm, tunneling = isTelevision(context))
+    val built = buildPipeline(context, vm, PlayerRole.Successor)
     // Never audible and never visible before the switch. Silence is set here
     // rather than relied on from the composition not rendering it: a prepared
     // successor that is merely off-screen is still an audio stream.
@@ -4104,49 +4099,13 @@ fun buildSuccessorPlayer(context: Context, vm: AppViewModel): BuiltPlayer {
 }
 
 @UnstableApi
-private fun buildPipeline(context: Context, vm: AppViewModel, tunneling: Boolean): BuiltPlayer {
-    val selector = DefaultTrackSelector(context).apply {
-        parameters = buildUponParameters()
-            .setPreferredAudioLanguage(vm.audioLang)
-            // Tunneled playback hands decode and A/V sync to the TV SoC's own
-            // pipeline, which is what 4K HDR on a Shield or a Chromecast is
-            // built around. Requested only on television devices: on a phone it
-            // buys nothing and some handset decoders refuse the mode outright.
-            // Media3 falls back to normal playback when the device says no.
-            .setTunnelingEnabled(tunneling)
-            // Text selection is the server's policy, carried by [Controller] —
-            // not the selector's: a preferred language here re-enables the
-            // "merely the same language" tail that policy deletes, and the
-            // server's own renditions are deliberately DEFAULT=NO/AUTOSELECT=NO
-            // so the client must say which.
-            .setPreferredTextLanguage(null)
-            .setSelectUndeterminedTextLanguage(false)
-            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-            .build()
-    }
+private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole): BuiltPlayer {
     val progressiveMediaOrigin = ProgressiveMediaOrigin()
-    val dataSource: OkHttpDataSource.Factory = Net.dataSourceFactory()
-        .setTransferListener(progressiveMediaOrigin)
-    val renderers = DefaultRenderersFactory(context)
-        // A flaky hardware decoder degrades to software instead of erroring
-        // into the compatibility rescue and costing the viewer a restart.
-        .setEnableDecoderFallback(true)
-    val player = ExoPlayer.Builder(context)
-        .setLoadControl(playbackLoadControl(context))
-        .setTrackSelector(selector)
-        .setRenderersFactory(renderers)
-        .setMediaSourceFactory(DefaultMediaSourceFactory(dataSource))
-        // Duck and pause for other apps rather than talking over them, and
-        // stop when the headphones come out.
-        .setAudioAttributes(
-            AudioAttributes.Builder()
-                .setUsage(C.USAGE_MEDIA)
-                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                .build(),
-            /* handleAudioFocus = */ true,
-        )
-        .setHandleAudioBecomingNoisy(true)
-        .build()
+    val player = PlurxPlayerBuilder(context, role).build(
+        dataSource = Net.dataSourceFactory(),
+        audioLanguage = vm.audioLang,
+        transferListener = progressiveMediaOrigin,
+    )
     return BuiltPlayer(player, progressiveMediaOrigin)
 }
 

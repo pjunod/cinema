@@ -24,7 +24,6 @@ import androidx.media3.exoplayer.offline.DownloadManager
 import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.offline.DownloadService
 import androidx.media3.exoplayer.scheduler.Requirements
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -56,7 +55,8 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
-import tv.plurx.app.player.playbackLoadControl
+import tv.plurx.app.player.PlayerRole
+import tv.plurx.app.player.PlurxPlayerBuilder
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 private typealias DownloadManagerAction<T> = DownloadManager.() -> T
@@ -388,10 +388,7 @@ object OfflineDownloads {
         val cacheOnly = CacheDataSource.Factory()
             .setCache(cache)
             .setUpstreamDataSourceFactory(PlaceholderDataSource.FACTORY)
-        return ExoPlayer.Builder(context)
-            .setLoadControl(playbackLoadControl(context))
-            .setMediaSourceFactory(DefaultMediaSourceFactory(cacheOnly))
-            .build()
+        return PlurxPlayerBuilder(context, PlayerRole.Offline).build(dataSource = cacheOnly)
     }
 
     suspend fun completedDownloadRequest(id: String): DownloadRequest? = withManager {
