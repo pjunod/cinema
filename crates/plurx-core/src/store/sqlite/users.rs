@@ -59,6 +59,7 @@ impl TokenActivityGate {
         })
     }
 
+    #[cfg(any(test, feature = "fixtures"))]
     fn forget(&self, token_hash: &str) {
         self.reservations
             .lock()

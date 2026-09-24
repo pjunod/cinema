@@ -2611,20 +2611,20 @@ mod tests {
             .collect()
     }
 
+    /// (id, library, kind, parent, added_at, season, episode)
+    type RecentSeedRow = (
+        i64,
+        i64,
+        &'static str,
+        Option<i64>,
+        i64,
+        Option<i64>,
+        Option<i64>,
+    );
+
     /// Seed libraries 1 Movies, 2 Shows, 3 Home and 4 Recordings, then run
     /// `insert` (id, library, kind, parent, added_at, season, episode) rows.
-    async fn seed_recent(
-        store: &SqliteStore,
-        rows: Vec<(
-            i64,
-            i64,
-            &'static str,
-            Option<i64>,
-            i64,
-            Option<i64>,
-            Option<i64>,
-        )>,
-    ) {
+    async fn seed_recent(store: &SqliteStore, rows: Vec<RecentSeedRow>) {
         store
             .with_conn(move |conn| {
                 conn.execute_batch(
@@ -2706,7 +2706,7 @@ mod tests {
             let store = SqliteStore::open_in_memory().expect("open");
             let mut rows = Vec::new();
             let mut id = 1;
-            let mut stamp = |next: &mut dyn FnMut(u64) -> i64| 1_000 + next(12);
+            let stamp = |next: &mut dyn FnMut(u64) -> i64| 1_000 + next(12);
             for _ in 0..(5 + next(20)) {
                 rows.push((id, 1, "movie", None, stamp(&mut next), None, None));
                 id += 1;
