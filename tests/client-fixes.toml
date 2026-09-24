@@ -2427,3 +2427,37 @@ source = "clients/android/app/src/main/res/xml/data_extraction_rules.xml"
 source_anchor = "<exclude domain=\"file\" path=\"datastore/\" />"
 test = "tests/operations/test_android_credential_exposure.py"
 test_anchor = "def test_extraction_rules_exclude_the_store_from_every_transfer(self) -> None:"
+
+[[fixes]]
+# b1709dbcc added the `system_interruption` source row, the contract's first
+# per-source `retired_by` override (`system_resumed`) and the `system_paused`
+# fixture event, and ported the web and Apple presenters only. The Android
+# presenter runs the same fixture, so four PlaybackSurfaceReducerTest cases
+# failed on main from then on: the source table was a row short and every
+# case replay stopped at the first `system_paused` it could not translate.
+# The correction transcribes the row with its override, reads a fault's
+# retirement rules through the source row before the class everywhere, and
+# gives the reducer SystemPaused. The source anchor is the override itself —
+# drop it and the fixture case's 32 s tick retires the hold by timer; the test
+# anchor is the direct case that a system resume leaves a server
+# `control_hold` and its own timer alone.
+id = "android.surface-system-interruption-source"
+commits = ["d258d8fbc"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurface.kt"
+source_anchor = "retiredBy = setOf(SurfaceRetirement.SystemResumed),"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackSurfaceReducerTest.kt"
+test_anchor = "fun aSystemResumeRetiresOnlyTheSystemHold()"
+
+[[fixes]]
+# 861c6e24f moved the live fullscreen cover's close from the `busy` edge to
+# the `playing` edge, so a tune that failed (`busy` falling while `playing`
+# was already false) left the viewer on a black cover with no tuner. Both
+# edges now route through one predicate that refuses while a tune is in
+# flight. The source anchor is the `busy` observer a revert would delete; the
+# test pins the predicate and both observers.
+id = "apple.live-tv-fullscreen-closes-on-either-finishing-edge"
+commits = ["f5ea82623"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".onChange(of: live.busy) { _, _ in closeSurfaceIfSessionFinished() }"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "a failed tune ends on the busy edge"
