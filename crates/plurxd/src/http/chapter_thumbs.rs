@@ -11,7 +11,11 @@
 //! the Developer tab can say how many ran, how many failed and how many are
 //! running now. The `chapter_thumbnails` switch there stops new extractions;
 //! nothing here outlives the request that started it by more than the
-//! extraction timeout.
+//! extraction timeout. A failed extraction leaves a marker so the next page
+//! view of a broken file does not run ffmpeg again for an hour. The cache has
+//! no cap: it holds one small JPEG per chapter ever viewed on this node, and
+//! removing the `chapter-thumbs` directory under the runtime cache reclaims
+//! it.
 
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,12 +39,18 @@ const SEEK_OFFSET_MS: i64 = 2_000;
 /// Two extractions at a time on a node. A watch page asks for every chapter of
 /// the title at once; the rest queue for a permit rather than fanning out one
 /// ffmpeg per chapter.
-const EXTRACT_CONCURRENCY: usize = 2;
-/// How long a request waits for a permit before it is told to come back.
-const PERMIT_WAIT: Duration = Duration::from_secs(20);
+pub(crate) const EXTRACT_CONCURRENCY: usize = 2;
+/// How long a request waits for a permit before it is told to come back. The
+/// page loads thumbnails two at a time and retries a refusal once, so a
+/// viewer rarely sees this; it bounds what several viewers can pile up.
+const PERMIT_WAIT: Duration = Duration::from_secs(10);
 /// One seek plus one decoded frame. A remux on a slow disk still finishes in a
 /// few seconds; anything longer is a stuck child and is killed.
-const EXTRACT_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const EXTRACT_TIMEOUT: Duration = Duration::from_secs(15);
+/// A chapter whose extraction failed is not retried on every page view: the
+/// failure is remembered beside the thumbnails for this long, and the route
+/// answers 404 from the marker without spawning ffmpeg again.
+const FAILURE_TTL: Duration = Duration::from_secs(60 * 60);
 /// A 320-px JPEG is tens of kilobytes. Bound the pipe so a misbehaving encoder
 /// cannot fill the cache.
 const MAX_THUMB_BYTES: u64 = 2 * 1024 * 1024;
@@ -96,6 +106,13 @@ pub(crate) fn cache_footprint(runtime_cache: &FsPath) -> (u64, u64) {
             continue;
         };
         for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Temporaries (`.<n>.jpg.<uuid>.tmp`) and failure markers are not
+            // thumbnails.
+            if name.starts_with('.') || !name.ends_with(".jpg") {
+                continue;
+            }
             if let Ok(metadata) = entry.metadata() {
                 if metadata.is_file() {
                     files += 1;
@@ -156,7 +173,12 @@ pub async fn serve(
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(',').any(|tag| tag.trim() == etag))
+        .is_some_and(|value| {
+            value.split(',').any(|tag| {
+                let tag = tag.trim();
+                tag == "*" || tag == etag || tag.strip_prefix("W/") == Some(&etag)
+            })
+        })
     {
         return Ok(not_modified(&etag));
     }
@@ -166,6 +188,10 @@ pub async fn serve(
     if let Ok(bytes) = tokio::fs::read(&path).await {
         SERVED_CACHED.fetch_add(1, Ordering::Relaxed);
         return Ok(jpeg_response(bytes, &etag));
+    }
+    let marker = dir.join(format!("{index}.fail"));
+    if recent_failure(&marker).await {
+        return Err(ApiError::NotFound("chapter thumbnail could not be made"));
     }
 
     let permit = tokio::time::timeout(PERMIT_WAIT, EXTRACT_PERMITS.acquire())
@@ -177,13 +203,14 @@ pub async fn serve(
         })?
         .map_err(|_| ApiError::ServiceUnavailable("extraction is shut down".to_owned()))?;
     // A request that queued behind the one that made this thumbnail finds it
-    // on disk now and never spawns a second extraction for the same chapter.
+    // on disk now. Two requests for one chapter that hold the two permits at
+    // once both extract; the rename is atomic and the second simply replaces
+    // an identical file.
     if let Ok(bytes) = tokio::fs::read(&path).await {
         drop(permit);
         SERVED_CACHED.fetch_add(1, Ordering::Relaxed);
         return Ok(jpeg_response(bytes, &etag));
     }
-    IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
     let result = extract(
         &crate::ffmpeg::ffmpeg_bin(),
         &file.path,
@@ -193,7 +220,6 @@ pub async fn serve(
         &state.runtime_cache_dir,
     )
     .await;
-    IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
     drop(permit);
     match result {
         Ok(bytes) => {
@@ -209,8 +235,43 @@ pub async fn serve(
                 reason,
                 "chapter thumbnail extraction failed"
             );
+            let _ = tokio::fs::write(&marker, reason.as_bytes()).await;
             Err(ApiError::NotFound("chapter thumbnail could not be made"))
         }
+    }
+}
+
+async fn recent_failure(marker: &FsPath) -> bool {
+    match tokio::fs::metadata(marker).await {
+        Ok(metadata) => metadata
+            .modified()
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age < FAILURE_TTL),
+        Err(_) => false,
+    }
+}
+
+/// Counts an extraction as running for exactly as long as its future lives,
+/// and removes the temporary output if that future is dropped mid-way — a
+/// viewer navigating away cancels the image load, hyper drops the handler at
+/// its await, and without this the counter would read "running" forever and
+/// the half-written temporary would sit beside the thumbnails.
+struct InFlight {
+    temporary: PathBuf,
+}
+
+impl InFlight {
+    fn begin(temporary: PathBuf) -> Self {
+        IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+        Self { temporary }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+        let _ = std::fs::remove_file(&self.temporary);
     }
 }
 
@@ -233,7 +294,10 @@ async fn extract(
             .unwrap_or("thumb"),
         uuid::Uuid::new_v4().simple()
     ));
+    let in_flight = InFlight::begin(temporary.clone());
     let mut command = extract_command(ffmpeg_bin, source, seek_ms, runtime_cache);
+    // `kill_on_drop` on the child means a cancelled request also ends its
+    // ffmpeg, so the two-at-a-time bound holds across cancellations.
     let child = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(&mut command)
         .map_err(|error| error.to_string())?;
     let generated = tokio::time::timeout(
@@ -266,6 +330,8 @@ async fn extract(
     tokio::fs::rename(&temporary, target)
         .await
         .map_err(|error| error.to_string())?;
+    // The temporary is now the thumbnail; the guard must not remove it.
+    drop(in_flight);
     Ok(bytes)
 }
 
@@ -284,8 +350,10 @@ fn extract_command(
     command.arg("-i");
     command.arg(source);
     command.args([
+        // `V` skips attached pictures — a cover stored as a video stream would
+        // otherwise be the "first video stream" of the file.
         "-map",
-        "0:v:0",
+        "0:V:0",
         "-an",
         "-sn",
         "-frames:v",
@@ -371,7 +439,7 @@ mod tests {
         assert!(ss < input, "the seek must precede the input: {argv:?}");
         assert_eq!(argv[ss + 1], "568.250");
         assert!(argv.windows(2).any(|w| w == ["-frames:v", "1"]), "{argv:?}");
-        assert!(argv.windows(2).any(|w| w == ["-map", "0:v:0"]), "{argv:?}");
+        assert!(argv.windows(2).any(|w| w == ["-map", "0:V:0"]), "{argv:?}");
         let vf = argv.iter().position(|arg| arg == "-vf").expect("-vf");
         assert!(argv[vf + 1].contains("min(320,iw)"), "{argv:?}");
         assert_eq!(argv.last().map(String::as_str), Some("pipe:1"));
@@ -406,6 +474,8 @@ mod tests {
         std::fs::write(title.join("0.jpg"), b"abcd").expect("write");
         std::fs::write(title.join("1.jpg"), b"ab").expect("write");
         std::fs::create_dir_all(title.join("not-a-thumb")).expect("dir");
+        std::fs::write(title.join("2.fail"), b"seek failed").expect("write");
+        std::fs::write(title.join(".3.jpg.abc.tmp"), b"partial").expect("write");
         assert_eq!(cache_footprint(tmp.path()), (2, 6));
     }
 }

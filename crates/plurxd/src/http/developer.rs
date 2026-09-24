@@ -227,8 +227,8 @@ pub(crate) async fn readiness(
                     .map(String::as_str),
                 false,
             )),
-            dolby_vision_convert(convert_on),
             chapter_thumbnails(&state).await,
+            dolby_vision_convert(convert_on),
             source_probe_comparison().await,
         ],
     }))
@@ -1303,16 +1303,6 @@ fn prepared_quality_handoff(enabled: bool) -> DeveloperEnableItem {
     }
 }
 
-/// Refusing a subtitle segment whose sidecar has failed, instead of serving a
-/// syntactically valid empty track.
-///
-/// Every row is an engine observation, and not one of them is consulted by
-/// the settings write. The honest answer for all three is `Unobservable`
-/// today, and saying so is the point: the measurement is *"does this engine
-/// keep playing video through a subtitle 503"*, which is a fact about
-/// AVPlayer, Media3 and hls.js running on real devices, not a fact a server
-/// process can read off itself. An operator who has run the physical
-/// verification may turn this on over three grey rows.
 // Chapter thumbnails.
 //
 // The watch view's chapter rail shows a frame per chapter, made on request by
@@ -1331,7 +1321,17 @@ async fn chapter_thumbnails(state: &AppState) -> DeveloperEnableItem {
     } else {
         state.runtime_cache_dir.clone()
     };
-    let (files, bytes) = chapter_thumbs::cache_footprint(&state.runtime_cache_dir);
+    // Two directory walks and a statvfs, off the async runtime.
+    let runtime_cache = state.runtime_cache_dir.clone();
+    let checked_for_space = checked.clone();
+    let ((files, bytes), space) = tokio::task::spawn_blocking(move || {
+        (
+            chapter_thumbs::cache_footprint(&runtime_cache),
+            ride_along::free_space(&checked_for_space),
+        )
+    })
+    .await
+    .unwrap_or_else(|_| ((0, 0), Err("the readiness walk panicked".to_owned())));
     let (ffmpeg_status, ffmpeg_evidence) = match state.system.ffmpeg_version.as_deref() {
         Some(version) if !version.trim().is_empty() => (
             RequirementStatus::Met,
@@ -1350,7 +1350,7 @@ async fn chapter_thumbnails(state: &AppState) -> DeveloperEnableItem {
             ),
         ),
     };
-    let (space_status, space_evidence) = match ride_along::free_space(&checked) {
+    let (space_status, space_evidence) = match space {
         Ok(evidence) => (
             RequirementStatus::Met,
             format!("{}: {evidence}.", checked.display()),
@@ -1391,15 +1391,17 @@ async fn chapter_thumbnails(state: &AppState) -> DeveloperEnableItem {
                     "Since this process started: {} thumbnail(s) made, {} served from the \
                      cache, {} extraction(s) failed, {} running now, {} request(s) refused \
                      while the switch was off. Each extraction is one ffmpeg seek and one \
-                     decoded frame, CPU only, bounded to {} at a time and 15 seconds each; \
-                     nothing runs unless a watch page asks for that chapter. On disk: {files} \
-                     thumbnail(s), {} under {}.",
+                     decoded frame, CPU only, bounded to {} at a time and {} seconds each; \
+                     nothing runs unless a watch page asks for that chapter, and a failed \
+                     chapter is not retried for an hour. On disk: {files} thumbnail(s), {} \
+                     under {}.",
                     counts.generated,
                     counts.served_cached,
                     counts.failed,
                     counts.in_flight,
                     counts.refused_off,
-                    2,
+                    chapter_thumbs::EXTRACT_CONCURRENCY,
+                    chapter_thumbs::EXTRACT_TIMEOUT.as_secs(),
                     human_bytes(bytes),
                     root.display()
                 ),
@@ -1423,6 +1425,16 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Refusing a subtitle segment whose sidecar has failed, instead of serving a
+/// syntactically valid empty track.
+///
+/// Every row is an engine observation, and not one of them is consulted by
+/// the settings write. The honest answer for all three is `Unobservable`
+/// today, and saying so is the point: the measurement is *"does this engine
+/// keep playing video through a subtitle 503"*, which is a fact about
+/// AVPlayer, Media3 and hls.js running on real devices, not a fact a server
+/// process can read off itself. An operator who has run the physical
+/// verification may turn this on over three grey rows.
 fn subtitle_not_ready_503(enabled: bool) -> DeveloperEnableItem {
     let engine = |id: &'static str, title: &'static str, detail: String| DeveloperRequirement {
         id,

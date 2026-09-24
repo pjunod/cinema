@@ -7131,6 +7131,13 @@ mod tests {
             green,
             vec![
                 "authoritative_store",
+                // The chapter-thumbnail rows read this process: the runtime
+                // cache has room on any host that can run the suite, and the
+                // counters row is a statement of what ran (nothing yet). The
+                // ffmpeg row is absent here because the fixture never probed
+                // a build.
+                "chapter_thumbs_cache_space",
+                "chapter_thumbs_work",
                 "durable_queue",
                 "rolling_contract_built",
                 "runtime",
