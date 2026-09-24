@@ -85,9 +85,14 @@ pub async fn manifest(
     AxPath((id, index)): AxPath<(i64, i64)>,
 ) -> Result<Response, ApiError> {
     let file = file_and_track(&state, id, index).await?;
-    match pgs_overlay::prepare(&state.subs_dir, &file, index)
-        .await
-        .map_err(map_overlay_error)?
+    match pgs_overlay::prepare(
+        &state.subs_dir,
+        &file,
+        index,
+        state.subtitle_source_access(),
+    )
+    .await
+    .map_err(map_overlay_error)?
     {
         // A 202 is not a serving. The client polls this every second while a
         // cold prepare runs, so counting here would record sixty servings and
@@ -205,7 +210,7 @@ async fn reprepare(
     generation_dir: &Path,
 ) -> Result<(), ApiError> {
     pgs_overlay::invalidate_generation(generation_dir).await;
-    pgs_overlay::prepare(&state.subs_dir, file, index)
+    pgs_overlay::prepare(&state.subs_dir, file, index, state.subtitle_source_access())
         .await
         .map_err(map_overlay_error)?;
     Ok(())

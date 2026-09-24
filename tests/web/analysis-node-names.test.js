@@ -335,6 +335,32 @@ test("the workspace and the Now playing table share one naming helper", () => {
   assert.match(shippedSource("activityNodeCell"), /nodeLabel\(names,nodeId\)/);
 });
 
+// Fix C PR 3: an index pass that is also keeping the file's PGS tracks says
+// so on its live progress row, with what it has written and where that work
+// is turned off.
+test("a live index row names the PGS tracks its pass is also keeping", () => {
+  const live = new Function(
+    "return (function(){" +
+      ["esc", "fmtBytes", "fmtDur", "nodeLabel", "analysisNodeCell", "analysisRideAlong", "analysisLiveProgress"]
+        .map(shippedSource)
+        .join("\n") +
+      "\nreturn analysisLiveProgress;})()",
+  )();
+  const base = {
+    file_id: 5208, item_id: 7, title: "Bad Boys", component: "fragment_index",
+    stage: "fragment_index", bytes_read: 1000, total_bytes: 2000,
+    media_ms_examined: 1000, total_media_ms: 2000, fragments_indexed: 12,
+    elapsed_ms: 1000, throughput_bps: 1000, node_id: OWNER,
+  };
+  const riding = live({ progress: [{ ...base, pgs_tracks: 2, pgs_bytes_written: 18866 }] }, {});
+  assert.match(riding, /Also keeping 2 PGS tracks · 19 KB written · <a href="#\/settings\/developer\/enable-subtitle-sources"[^>]*>stored subtitle tracks setting<\/a>/,
+    "the link lands on the switch itself");
+  const plain = live({ progress: [{ ...base, pgs_tracks: 0, pgs_bytes_written: 0 }] }, {});
+  assert.doesNotMatch(plain, /PGS/, "a pass that is not riding says nothing about it");
+  const older = live({ progress: [base] }, {});
+  assert.doesNotMatch(older, /PGS/, "a peer that predates the fields says nothing either");
+});
+
 main().catch((error) => {
   failures += 1;
   process.stdout.write(`FAIL the suite itself threw\n${error && error.stack}\n`);
