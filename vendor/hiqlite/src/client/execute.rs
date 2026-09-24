@@ -6,6 +6,22 @@ use crate::{Client, Error, Params, Response};
 use std::borrow::Cow;
 use tokio::sync::oneshot;
 
+/// A committed write's result together with the Raft log index of the entry
+/// that carried it.
+///
+/// Plurx patch. `log_index` is `Some` when this node was the leader that
+/// committed the entry, or when the leader serving this client's stream
+/// negotiated the `x-hiqlite-write-ack` stream header. It is `None`
+/// when the write was answered by a leader (or proxy) that predates the
+/// negotiation: the write still committed, but its position in the log is not
+/// known here, and a caller that fences reads on it must treat that as "not
+/// provable" rather than as zero.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WriteAck<T> {
+    pub result: T,
+    pub log_index: Option<u64>,
+}
+
 impl Client {
     /// Execute any modifying / non-read-only query on the database.
     /// Returns the affected rows on success.
@@ -33,17 +49,42 @@ impl Client {
             .await
     }
 
+    /// [`Client::execute`], also reporting the Raft log index of the committed
+    /// entry when this node can know it. See [`WriteAck`].
+    pub async fn execute_acked<S>(&self, sql: S, params: Params) -> Result<WriteAck<usize>, Error>
+    where
+        S: Into<Cow<'static, str>>,
+    {
+        self.rate_limit_db().await?;
+
+        let sql = Query {
+            sql: sql.into(),
+            params,
+        };
+
+        let (result, log_index) = self
+            .retry_db_after_leader_change(|| self.execute_ack_req(sql.clone()))
+            .await?;
+        Ok(WriteAck { result, log_index })
+    }
+
     #[inline(always)]
     async fn execute_req(&self, sql: Query) -> Result<usize, Error> {
+        self.execute_ack_req(sql).await.map(|(result, _)| result)
+    }
+
+    #[inline(always)]
+    async fn execute_ack_req(&self, sql: Query) -> Result<(usize, Option<u64>), Error> {
         if let Some(state) = self.is_leader_db_with_state().await {
             let res = state
                 .raft_db
                 .raft
                 .client_write(QueryWrite::Execute(sql))
                 .await?;
+            let log_index = res.log_id.index;
             let resp: Response = res.data;
             match resp {
-                Response::Execute(res) => res.result,
+                Response::Execute(res) => res.result.map(|rows| (rows, Some(log_index))),
                 _ => unreachable!(),
             }
         } else {
@@ -61,7 +102,10 @@ impl Client {
                 .await
                 .map_err(|_| Error::Connect("client stream manager stopped".into()))??;
             match res {
-                ApiStreamResponsePayload::Execute(res) => res,
+                ApiStreamResponsePayload::Execute(res) => res.map(|rows| (rows, None)),
+                ApiStreamResponsePayload::ExecuteAcked(res) => {
+                    res.map(|(rows, log_index)| (rows, Some(log_index)))
+                }
                 _ => unreachable!(),
             }
         }
@@ -88,6 +132,33 @@ impl Client {
             res.push(row.map(|mut row| T::from(&mut row)))
         }
         Ok(res)
+    }
+
+    /// [`Client::execute_returning_map`], also reporting the Raft log index of
+    /// the committed entry when this node can know it. See [`WriteAck`].
+    pub async fn execute_returning_map_acked<S, T>(
+        &self,
+        sql: S,
+        params: Params,
+    ) -> Result<WriteAck<Vec<Result<T, Error>>>, Error>
+    where
+        S: Into<Cow<'static, str>>,
+        T: for<'a, 'r> From<&'a mut crate::Row<'r>> + Send + 'static,
+    {
+        self.rate_limit_db().await?;
+
+        let sql = Query {
+            sql: sql.into(),
+            params,
+        };
+        let (rows, log_index) = self
+            .retry_db_after_leader_change(|| self.execute_returning_ack_req(sql.clone()))
+            .await?;
+        let mut result: Vec<Result<T, Error>> = Vec::with_capacity(rows.len());
+        for row in rows {
+            result.push(row.map(|row| T::from(&mut crate::Row::Owned(row))));
+        }
+        Ok(WriteAck { result, log_index })
     }
 
     /// Execute a query on the database that includes a `RETURNING` statement.
@@ -173,15 +244,26 @@ impl Client {
         &self,
         sql: Query,
     ) -> Result<Vec<Result<RowOwned, Error>>, Error> {
+        self.execute_returning_ack_req(sql)
+            .await
+            .map(|(rows, _)| rows)
+    }
+
+    #[inline]
+    async fn execute_returning_ack_req(
+        &self,
+        sql: Query,
+    ) -> Result<(Vec<Result<RowOwned, Error>>, Option<u64>), Error> {
         if let Some(state) = self.is_leader_db_with_state().await {
             let res = state
                 .raft_db
                 .raft
                 .client_write(QueryWrite::ExecuteReturning(sql))
                 .await?;
+            let log_index = res.log_id.index;
             let resp: Response = res.data;
             match resp {
-                Response::ExecuteReturning(res) => res.result,
+                Response::ExecuteReturning(res) => res.result.map(|rows| (rows, Some(log_index))),
                 _ => unreachable!(),
             }
         } else {
@@ -199,7 +281,10 @@ impl Client {
                 .await
                 .map_err(|_| Error::Connect("client stream manager stopped".into()))??;
             match res {
-                ApiStreamResponsePayload::ExecuteReturning(res) => res,
+                ApiStreamResponsePayload::ExecuteReturning(res) => res.map(|rows| (rows, None)),
+                ApiStreamResponsePayload::ExecuteReturningAcked(res) => {
+                    res.map(|(rows, log_index)| (rows, Some(log_index)))
+                }
                 _ => unreachable!(),
             }
         }

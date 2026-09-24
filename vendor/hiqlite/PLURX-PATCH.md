@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries nineteen compatibility patches for clustered
+Apache-2.0. Plurx carries twenty compatibility patches for clustered
 deployments:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
@@ -29,6 +29,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 17 | Gate `cryptr/s3` behind Hiqlite `s3` | generic bug | pending M6 | Upstream release no longer enables S3 dependencies when backup and S3 are off. |
 | 18 | Scope the vendored `s3-simple` override to this manifest | dependency-only | — | Upstream cryptr accepts `s3-simple` 0.9 or newer, which already carries these dependency-only corrections. |
 | 19 | Install the `ring` rustls provider for the HTTP clients | generic bug | pending M6 | Upstream release installs or declares a rustls crypto provider for its `rustls-no-provider` Reqwest clients. |
+| 20 | Report the committed Raft log index of a write (`WriteAck`) | plurx policy | — | Never; Plurx's watch-state read-your-write fence (K-04 M2) requires this negotiated response shape. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -195,8 +196,28 @@ made-up URL and prevents the fork from being declared fully tracked.
   ours, which is how the accidental inheritance went unnoticed.
   `crates/plurx-core/tests/hiqlite_tls_provider.rs` builds a real client in a
   binary of its own and fails if the install goes away.
+- `Client::execute_acked` and `Client::execute_returning_map_acked` return a
+  `WriteAck` carrying the Raft log index of the committed entry beside the
+  usual result: from `ClientWriteResponse::log_id` on the leader, and through
+  the API stream on every other node. The stream half is negotiated per
+  connection so no request encoding changes: the client adds
+  `x-hiqlite-write-ack: raft-log-index-v1` to its WebSocket upgrade request,
+  and only a leader that saw that header answers `Execute` and
+  `ExecuteReturning` with the new `ExecuteAcked` and `ExecuteReturningAcked`
+  response variants, appended after every deployed ordinal. An older leader
+  ignores the header and keeps sending the original variants, which the new
+  client still accepts and reports as an unknown index (`None`); an older
+  client never sends the header and so never receives a variant it cannot
+  decode; a proxy decodes and re-issues requests through its own client, so
+  its callers see `None`. The plain `execute` and `execute_returning*` methods
+  keep their signatures and discard the index.
+  `network::api::tests::write_ack_variants_are_appended_after_every_deployed_response_ordinal`
+  pins the ordinals, `write_ack_log_index_is_sent_only_on_a_negotiated_connection`
+  pins the negotiation, and Plurx's
+  `watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_write`
+  store contract drives a real streamed write end to end.
 
-Remove this vendor when an upstream Hiqlite release contains all nineteen
+Remove this vendor when an upstream Hiqlite release contains all twenty
 patches and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
 and the snapshot RPC error-boundary plus queue-saturated reset tests above keep
