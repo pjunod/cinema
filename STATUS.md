@@ -35,6 +35,12 @@ Record: [docs/streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](docs/streaming/LIVE
   all publish SAR 40:33 / DAR 16:9. `scripts/live-tv-hardware` now records the
   segment's SAR/DAR. Open until the client showing it is named.
 
+**Deployment finding (same day):** the layout list led with `5.1(side)`, which
+the AAC encoder signals as ADTS configuration 0 plus a PCE; browsers read that
+as an audio track with no channels and never start, so Safari and Chrome sat
+black on 157.1. Fixed: the list is `5.1|stereo|mono`, the harness asserts a
+positive header channel count and gains `--surround`.
+
 Verified: focused Rust tests (53) + clippy `-D warnings` + fmt on nuc3;
 `make apple-test` on mba (1330 cases); Android unit tests in the pinned image
 (745); `tests/web/live-tv.test.js`. Hardware, this branch's `plurxd` against
