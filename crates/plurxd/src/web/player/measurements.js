@@ -249,6 +249,15 @@ function beginWait(v){
   const p=PLAYER;
   if(!p||!p.started||v.seeking||v.paused) return;
   if(!playbackOwnsAttachedMedia(p)) return;
+  // `seeked` can fire before a sparse VOD target is fetched. The local
+  // seek's bounded fallback owns that gap, including `waiting` events after
+  // the element has cleared its seeking flag.
+  const pending=p.controlSeek;
+  if(pending?.localVodSeekFallbackPending&&pending.executed
+     &&!playbackSeekBufferCovers(v,p,pending.targetMs)){
+    if(p.waitAt!=null) endWait(false);
+    return;
+  }
   if(p.waitAt) return;                       // already hungry; not a second one
   p.waitAt=performance.now();
   p.waitStartedRunway=bufferRunway(v);
@@ -362,6 +371,12 @@ async function persistentWait(v,p,began,generation,actionGeneration){
      (p.controlIntentGeneration||0)!==actionGeneration ||
      p.wantsPlayback===false || (p.wantsPlayback==null&&v.paused) ||
      (v.seeking&&!p.controlSeek?.executed&&!p.progressWatch?.fired)) return;
+  const pending=p.controlSeek;
+  if(pending?.localVodSeekFallbackPending&&pending.executed
+     &&!playbackSeekBufferCovers(v,p,pending.targetMs)){
+    endWait(false);
+    return;
+  }
   p.waitTimer=null;
   const ms=Math.round(performance.now()-began);
   const startedRunway=p.waitStartedRunway;
@@ -414,6 +429,12 @@ async function persistentWait(v,p,began,generation,actionGeneration){
      (p.controlIntentGeneration||0)!==actionGeneration ||
      p.wantsPlayback===false || (p.wantsPlayback==null&&v.paused) ||
      (v.seeking&&!p.controlSeek?.executed&&!p.progressWatch?.fired)) return;
+  const currentPending=p.controlSeek;
+  if(currentPending?.localVodSeekFallbackPending&&currentPending.executed
+     &&!playbackSeekBufferCovers(v,p,currentPending.targetMs)){
+    endWait(false);
+    return;
+  }
   // The ask itself consumes frozen-picture time. Re-read the absolute age
   // after it settles so a slow control response cannot extend the deadline.
   const controlElapsedMs=Math.round(performance.now()-began);
@@ -682,4 +703,3 @@ function artHtml(it, cls){
   const label=(it.title||"?").split(/\s+/).slice(0,2).map(w=>w[0]||"").join("").toUpperCase()||"?";
   return `<div class="art ph ${cls||''}">${esc(label)}</div>`;
 }
-
