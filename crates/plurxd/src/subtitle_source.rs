@@ -1394,6 +1394,7 @@ mod tests {
 
     fn media_file(id: i64, path: PathBuf, size: i64, mtime: i64) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id,
             item_id: 1,
             path,

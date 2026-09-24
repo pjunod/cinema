@@ -1319,6 +1319,7 @@ mod tests {
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_diagnostic_json;
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_retry_deadline_ms;
                  ALTER TABLE analysis_requests DROP COLUMN video_identity;
+                 ALTER TABLE files DROP COLUMN downloaded_subtitles;
                  ALTER TABLE files DROP COLUMN luminance_source;
                  ALTER TABLE files DROP COLUMN mastering_max_luminance;
                  ALTER TABLE files DROP COLUMN max_fall;
@@ -1420,7 +1421,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 22] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 23] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1463,6 +1464,7 @@ mod tests {
             // survives its wind-back, while the v14 fixture drops the whole
             // table and takes the column with it.
             "ADD COLUMN validated_revision",
+            "ADD COLUMN downloaded_subtitles",
         ];
 
         assert!(

@@ -563,6 +563,10 @@ pub struct MediaFile {
     pub bitrate: Option<i64>,
     pub audio_streams: Vec<AudioStream>,
     pub subtitle_streams: Vec<SubtitleStream>,
+    /// Durable acquired captions, appended after the embedded stream ordinals.
+    /// Caption bodies are not part of public media metadata.
+    #[serde(skip)]
+    pub downloaded_subtitles: Vec<DownloadedSubtitle>,
     pub scanned_at: i64,
     /// Manual A/V sync correction, milliseconds; positive delays audio.
     /// Applied server-side at stream time (forces remux for direct-play
@@ -574,6 +578,54 @@ pub struct MediaFile {
     /// permissions keeps its size and mtime when the permissions are fixed, so
     /// nothing else would ever mark it as worth looking at again.
     pub probed: bool,
+}
+
+/// A provider subtitle belongs to one exact catalog source revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadedSubtitle {
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub provider_file_id: i64,
+    pub language: String,
+    pub title: String,
+    pub hearing_impaired: bool,
+    pub forced: bool,
+    pub vtt: String,
+}
+
+impl MediaFile {
+    /// Called once by storage decoders. Embedded ordinals remain unchanged.
+    pub(crate) fn with_downloaded_subtitles(
+        mut self,
+        raw: &str,
+    ) -> Result<Self, serde_json::Error> {
+        let tracks: Vec<DownloadedSubtitle> = serde_json::from_str(raw)?;
+        self.downloaded_subtitles = tracks
+            .into_iter()
+            .filter(|track| track.source_size == self.size && track.source_mtime == self.mtime)
+            .collect();
+        for track in &self.downloaded_subtitles {
+            self.subtitle_streams.push(SubtitleStream {
+                index: self.subtitle_streams.len() as i64,
+                codec: "webvtt".into(),
+                language: Some(track.language.clone()),
+                title: Some(track.title.clone()),
+                default: false,
+                forced: track.forced,
+                hearing_impaired: track.hearing_impaired,
+            });
+        }
+        Ok(self)
+    }
+
+    pub fn downloaded_subtitle(&self, index: i64) -> Option<&DownloadedSubtitle> {
+        let index = usize::try_from(index).ok()?;
+        let embedded = self
+            .subtitle_streams
+            .len()
+            .checked_sub(self.downloaded_subtitles.len())?;
+        self.downloaded_subtitles.get(index.checked_sub(embedded)?)
+    }
 }
 
 /// Everything the prober learned about one file.
