@@ -1831,6 +1831,9 @@ pub mod keys {
     /// so a wrong artifact a producer published is taken out of service with
     /// one switch and no redeploy.
     pub const SUBTITLE_STORED_SOURCES: &str = "subtitles.stored_sources";
+    /// Make a chapter thumbnail on request and keep it in the runtime
+    /// cache. On by default; off answers the route 404 and extracts nothing.
+    pub const CHAPTER_THUMBNAILS: &str = "playback.chapter_thumbnails";
     /// VOD availability kill switch. Absent/on accepts immutable VOD session
     /// creation; `0` refuses it. It never selects the removed live HLS path.
     pub const VOD_PRESENTATION: &str = "playback.vod_presentation";
