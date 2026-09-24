@@ -261,10 +261,14 @@ function seekScratchReservationsCard(){
       <h3 class="devcheck-group">More than three streams at once</h3>
       ${devStaticReq("Copy and remux output","enforced write boundary",
         "Every object the native copy writer publishes &mdash; the initialization segment, each media segment, each playlist rewrite &mdash; is authorized before it exists, so these sessions start with a startup allowance and grow under a real bound instead of reserving the whole per-session ceiling up front.","ok")}
-      ${devStaticReq("Transcoded output","conservative, by design",
-        "FFmpeg writes its own HLS output, and this build has no way to authorize those writes before they land &mdash; a measurement taken afterwards can only discover an overrun. Transcoded sessions therefore still reserve the whole per-session ceiling. This is the known limit of the repair, not an oversight.","warn")}
-      ${devStaticReq("Windows","conservative, unproved",
-        "The port's process suspension is implemented, but no native runtime receipt exists for growth enforcement, so Windows keeps the conservative reservation.","")}
+      ${devStaticReq("Transcoded output","enforced write boundary",
+        "FFmpeg's HLS muxer uploads every object to a loopback endpoint in this server (<code>-method PUT</code>) instead of writing the file itself. Each piece is authorized against the scratch budget before it is written, so a transcode starts with a startup allowance and grows. A refusal stops reading the upload and marks the stream starved, and the flow controller suspends FFmpeg until the budget frees.","ok")}
+      ${devStaticReq("Legacy copy writer and retries","enforced write boundary",
+        "A copy the segmenter cannot cut, a cluster takeover, and the legacy retry a segmenter session keeps in reserve all use FFmpeg's muxer too. They upload through the same endpoint, each attempt on its own lane, so a replaced attempt can never overwrite its successor's objects.","ok")}
+      ${devStaticReq("FFmpeg can write HLS over HTTP","met in the published image",
+        "The endpoint needs the engine's <code>http</code> output protocol, which both engines in the published image include. A custom build without network protocols fails every transcode and every copy that uses FFmpeg's muxer, with &ldquo;Protocol not found&rdquo; in the server log. Nothing checks this ahead of time.","ok")}
+      ${devStaticReq("Windows","same boundary, not yet run natively",
+        "The endpoint is loopback TCP and ordinary file writes, with nothing platform-specific in it. It is built for Windows, but no native runtime receipt exists yet.","")}
       <p class="devcheck-note">Advisory only. Capacity, authorization and retention rules are unchanged by anything on this card; the global scratch ceiling is still the one on <a href="#/settings/playback">Playback</a>.</p>
       </div></details>`);
 }

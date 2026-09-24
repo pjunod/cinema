@@ -42,6 +42,7 @@ mod redact;
 mod renditiondir;
 mod schedule;
 mod scratch_ledger;
+mod scratch_put;
 mod serving_fence;
 mod shared_cache;
 mod state;
