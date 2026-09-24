@@ -234,6 +234,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             settings.clearToken()
                             _phase.value = Phase.NeedLogin
                         }
+                        is SavedSessionValidation.Expired -> {
+                            // Same sign-out, but the login screen says why:
+                            // "Signed out after 90 days of inactivity."
+                            Session.token = null
+                            settings.clearToken()
+                            _authError.value = validation.message
+                            _phase.value = Phase.NeedLogin
+                        }
                         SavedSessionValidation.ServerUnavailable -> {
                             // Google TV often launches before networking has fully resumed.
                             // Keep the saved credentials and the Home request already in
@@ -362,9 +370,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (e: Exception) {
-                _home.value = _home.value.copy(loading = false, error = e.message ?: "Failed to load")
+                val expired = (e as? HttpException)?.let(::sessionExpiry)
+                if (expired != null) {
+                    endExpiredSession(expired.message)
+                } else {
+                    _home.value = _home.value.copy(loading = false, error = e.message ?: "Failed to load")
+                }
             }
         }
+    }
+
+    /**
+     * The server signed this device out for sitting unused past its idle
+     * window. Land on the login screen with its sentence rather than leave a
+     * "HTTP 401" on Home; the saved token is dead, so it goes with it.
+     */
+    private fun endExpiredSession(message: String) {
+        if (Session.token == null) return
+        settings.clearToken()
+        Session.token = null
+        currentUser = null
+        currentUserId = null
+        _home.value = HomeState()
+        _authError.value = message
+        _phase.value = Phase.NeedLogin
     }
 
     fun logout() = logout(removeDownloads = false)
@@ -937,6 +966,10 @@ private data class RecoveredServer(val origin: String, val info: Server)
 internal sealed interface SavedSessionValidation<out T> {
     data class Authenticated<T>(val user: T) : SavedSessionValidation<T>
     data object InvalidToken : SavedSessionValidation<Nothing>
+    /** The server signed this device out for sitting unused past its idle
+     *  window (`session_expired`); [message] is its sentence for the login
+     *  screen. */
+    data class Expired(val message: String) : SavedSessionValidation<Nothing>
     data object ServerUnavailable : SavedSessionValidation<Nothing>
 }
 
@@ -976,7 +1009,7 @@ internal suspend fun <T> validateSavedSession(
             throw cancelled
         } catch (error: HttpException) {
             if (error.code() == 401 || error.code() == 403) {
-                return SavedSessionValidation.InvalidToken
+                return sessionExpiry(error) ?: SavedSessionValidation.InvalidToken
             }
         } catch (_: Exception) {
             // Connection, timeout, and decoding failures do not invalidate a token.
@@ -987,6 +1020,25 @@ internal suspend fun <T> validateSavedSession(
         retryDelayMs *= 2
     }
     return SavedSessionValidation.ServerUnavailable
+}
+
+/** The server's stable code for a sign-in that sat unused past its idle window. */
+internal const val SESSION_EXPIRED_CODE = "session_expired"
+
+/**
+ * A 401 that explains itself as an idle expiry, or `null` for every other
+ * refusal (which stays an ordinary [SavedSessionValidation.InvalidToken]).
+ * Reading the body can fail; that is an ordinary sign-out too.
+ */
+internal fun sessionExpiry(error: HttpException): SavedSessionValidation.Expired? {
+    if (error.code() != 401) return null
+    val body = runCatching { error.response()?.errorBody()?.string() }.getOrNull()
+    val refusal = parseRefusal(error.code(), body) ?: return null
+    return if (refusal.code == SESSION_EXPIRED_CODE) {
+        SavedSessionValidation.Expired(refusal.message)
+    } else {
+        null
+    }
 }
 
 /** Normalize the manual server field to the same origin contract as Apple. */
