@@ -394,6 +394,22 @@ impl From<&mut Row<'_>> for RecentItemRow {
     }
 }
 
+/// A `recently_added` row with the window flag `sql_source::recently_added`
+/// appends to each card.
+struct RecentWindowRow {
+    recent: RecentItemRow,
+    cut: bool,
+}
+
+impl From<&mut Row<'_>> for RecentWindowRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            recent: RecentItemRow::from(&mut *row),
+            cut: row.get::<i64>("rail_window_cut") != 0,
+        }
+    }
+}
+
 impl TryFrom<RecentItemRow> for RecentItem {
     type Error = StoreError;
 
@@ -1042,35 +1058,53 @@ impl HiqliteAuthStore {
         library_id: Option<i64>,
         limit: i64,
     ) -> Result<Vec<RecentItem>, StoreError> {
-        let sql = format!(
-            "WITH ranked AS ( \
-                 SELECT {i}, show.title AS rail_show_title, \
-                        season.poster_path AS rail_season_poster, \
-                        ROW_NUMBER() OVER (PARTITION BY CASE \
-                            WHEN i.kind = 'episode' AND show.id IS NOT NULL \
-                            THEN 'show:' || show.id ELSE 'item:' || i.id END \
-                            ORDER BY i.added_at DESC, COALESCE(season.season_number, -1) DESC, \
-                            COALESCE(i.episode_number, -1) DESC, i.id DESC) AS rail_rank \
-                 FROM items i \
-                 LEFT JOIN items season ON season.id = i.parent_id AND i.kind = 'episode' \
-                 LEFT JOIN items show ON show.id = season.parent_id \
-                 WHERE i.kind IN ('movie','episode','video','folder','book','audiobook') \
-                   AND ($1 IS NULL OR i.library_id = $1) \
-                   AND ($1 IS NOT NULL OR NOT EXISTS (SELECT 1 FROM libraries l WHERE l.id = i.library_id AND l.kind = 'recordings')) \
-             ) \
-             SELECT {r}, r.rail_show_title, r.rail_season_poster \
-             FROM ranked r WHERE r.rail_rank = 1 \
-             ORDER BY r.added_at DESC, r.id DESC LIMIT $2",
-            i = item_cols("i"),
-            r = item_cols("r")
-        );
+        self.recently_added_window(library_id, limit, true, true)
+            .await
+    }
+
+    /// `recently_added` from a widening window of the newest rows (K-05
+    /// section 3.5; `sql_source::recently_added` states why it is exact).
+    /// Each pass is complete for the state it read, so the passes need no
+    /// shared snapshot. `exclude_recordings` and `local` keep each caller's
+    /// existing predicate and read path.
+    async fn recently_added_window(
+        &self,
+        library_id: Option<i64>,
+        limit: i64,
+        exclude_recordings: bool,
+        local: bool,
+    ) -> Result<Vec<RecentItem>, StoreError> {
+        let sql =
+            super::sql_source::recently_added(&item_cols("i"), &item_cols("r"), exclude_recordings)
+                .hiqlite();
+        validate_sql(&sql)?;
         trace_statement("recently_added", &sql);
-        recent_items(
-            self.client()
-                .query_map::<RecentItemRow, _>(sql, params!(library_id, limit))
-                .await
-                .map_err(database_error)?,
-        )
+        let mut window_offset = super::sql_source::recently_added_first_window_offset(limit);
+        loop {
+            let rows = if local {
+                self.client()
+                    .query_map::<RecentWindowRow, _>(
+                        sql.clone(),
+                        params!(library_id, window_offset, limit),
+                    )
+                    .await
+            } else {
+                self.client()
+                    .query_consistent_map::<RecentWindowRow, _>(
+                        sql.clone(),
+                        params!(library_id, window_offset, limit),
+                    )
+                    .await
+            }
+            .map_err(database_error)?;
+            let cut = rows.first().is_some_and(|row| row.cut);
+            let cards = i64::try_from(rows.len()).unwrap_or(i64::MAX);
+            let items = recent_items(rows.into_iter().map(|row| row.recent).collect())?;
+            if !cut || cards >= limit {
+                return Ok(items);
+            }
+            window_offset = super::sql_source::recently_added_wider_window_offset(window_offset);
+        }
     }
 
     pub(super) async fn local_get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {
@@ -2138,34 +2172,11 @@ impl MediaStore for HiqliteAuthStore {
         library_id: Option<i64>,
         limit: i64,
     ) -> Result<Vec<RecentItem>, StoreError> {
-        let sql = format!(
-            "WITH ranked AS ( \
-                 SELECT {i}, show.title AS rail_show_title, \
-                        season.poster_path AS rail_season_poster, \
-                        ROW_NUMBER() OVER (PARTITION BY CASE \
-                            WHEN i.kind = 'episode' AND show.id IS NOT NULL \
-                            THEN 'show:' || show.id ELSE 'item:' || i.id END \
-                            ORDER BY i.added_at DESC, COALESCE(season.season_number, -1) DESC, \
-                            COALESCE(i.episode_number, -1) DESC, i.id DESC) AS rail_rank \
-                 FROM items i \
-                 LEFT JOIN items season ON season.id = i.parent_id AND i.kind = 'episode' \
-                 LEFT JOIN items show ON show.id = season.parent_id \
-                 WHERE i.kind IN ('movie','episode','video','folder','book','audiobook') \
-                   AND ($1 IS NULL OR i.library_id = $1) \
-             ) \
-             SELECT {r}, r.rail_show_title, r.rail_season_poster \
-             FROM ranked r WHERE r.rail_rank = 1 \
-             ORDER BY r.added_at DESC, r.id DESC LIMIT $2",
-            i = item_cols("i"),
-            r = item_cols("r")
-        );
-        trace_statement("recently_added", &sql);
-        recent_items(
-            self.client()
-                .query_consistent_map::<RecentItemRow, _>(sql, params!(library_id, limit))
-                .await
-                .map_err(database_error)?,
-        )
+        // The Authority read has never excluded Recordings from the
+        // catalogue-wide rail, unlike the local read and the standalone
+        // store; K-05 keeps that predicate as it found it.
+        self.recently_added_window(library_id, limit, false, false)
+            .await
     }
 
     async fn search_items(&self, query: &str, limit: i64) -> Result<Vec<RecentItem>, StoreError> {
