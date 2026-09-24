@@ -193,9 +193,61 @@ MOVES: list[tuple[str, str, str, int]] = [
     ("crates/plurxd/src/transcode.rs", "retention", "transcode/rolling/retention.rs", 6),
     ("crates/plurxd/src/transcode.rs", "ladder", "transcode/ladder.rs", 7),
     ("crates/plurxd/src/transcode.rs", "test-support", "transcode/test_support.rs", 3),
+    ("crates/plurxd/src/http/hls.rs", "hls-session-guard", "hls/session_guard.rs", 13),
+    ("crates/plurxd/src/http/hls.rs", "hls-create", "hls/create.rs", 33),
+    ("crates/plurxd/src/http/hls.rs", "hls-relay", "hls/relay.rs", 2),
+    ("crates/plurxd/src/http/hls.rs", "hls-release", "hls/release.rs", 7),
+    ("crates/plurxd/src/http/hls.rs", "hls-control", "hls/control.rs", 45),
+    ("crates/plurxd/src/http/hls.rs", "hls-preparation", "hls/preparation.rs", 47),
+    ("crates/plurxd/src/http/hls.rs", "hls-status", "hls/status.rs", 3),
+    ("crates/plurxd/src/http/hls.rs", "hls-response", "hls/response.rs", 35),
+    ("crates/plurxd/src/http/hls.rs", "hls-playlist", "hls/playlist.rs", 5),
+    ("crates/plurxd/src/http/hls.rs", "hls-subtitle-playlist", "hls/subtitle_playlist.rs", 9),
+    ("crates/plurxd/src/http/hls.rs", "hls-context", "hls/context.rs", 9),
+    ("crates/plurxd/src/http/hls.rs", "hls-subtitle-names", "hls/subtitle_names.rs", 4),
+    ("crates/plurxd/src/http/hls.rs", "hls-playlist-text", "hls/playlist_text.rs", 8),
+    ("crates/plurxd/src/http/hls.rs", "hls-segment", "hls/segment.rs", 15),
+    ("crates/plurxd/src/vodserve.rs", "vod-discovery", "vod/discovery.rs", 7),
+    ("crates/plurxd/src/vodserve.rs", "vod-reader", "vod/reader.rs", 29),
+    ("crates/plurxd/src/vodserve.rs", "vod-marker-prewarm", "vod/marker_prewarm.rs", 68),
+    ("crates/plurxd/src/vodserve.rs", "vod-session", "vod/session.rs", 107),
+    ("crates/plurxd/src/vodserve.rs", "vod-shared", "vod/shared.rs", 13),
+    ("crates/plurxd/src/vodserve.rs", "vod-driver", "vod/driver.rs", 6),
+    ("crates/plurxd/src/vodserve.rs", "vod-marker-dispatch", "vod/marker_dispatch.rs", 4),
+    ("crates/plurxd/src/vodserve.rs", "vod-generation", "vod/generation.rs", 19),
+    ("crates/plurxd/src/vodserve.rs", "vod-plan", "vod/plan.rs", 15),
+    ("crates/plurxd/src/vodserve.rs", "vod-init", "vod/init.rs", 7),
 ]
 
 CHILD_HEADER = "use super::*;\n\n"
+
+# A parent's own `pub(super)` names *its* parent. Moved one level down, the
+# same reach must be spelled out: `http/hls.rs`'s `pub(super)` (visible in
+# `http`) becomes `pub(in crate::http)` in a child, and one inside hls.rs's
+# inline `pub mod plan_derivation` (visible in `hls`) becomes
+# `pub(in crate::http::hls)`. Reconstruction maps each back after removing
+# the added `pub(super) `; the base parents contain no `pub(in ` at all.
+RESTATED: dict[str, tuple[str, ...]] = {
+    "crates/plurxd/src/http/hls.rs": ("pub(in crate::http) ", "pub(in crate::http::hls) "),
+}
+
+
+# Paths the parent wrote relative to *its* parent, which a child one level
+# down must write with one more `super::` (hls.rs's `super::stream::`
+# names `http::stream`). The base parents contain no `super::super::`.
+RELOCATED: dict[str, tuple[str, str]] = {
+    "crates/plurxd/src/http/hls.rs": ("super::super::", "super::"),
+}
+
+
+def unsplit_visibility(parent: str, text: str) -> tuple[str, int]:
+    added = text.count("pub(super) ")
+    text = text.replace("pub(super) ", "")
+    for spelling in RESTATED.get(parent, ()):
+        text = text.replace(spelling, "pub(super) ")
+    if parent in RELOCATED:
+        text = text.replace(*RELOCATED[parent])
+    return text, added
 
 # (parent, marker, impl header line, [chunk children], pub(super) additions):
 # one `impl` block cut into contiguous chunks. Each chunk child is the
@@ -221,6 +273,20 @@ IMPL_SPLITS: list[tuple[str, str, str, list[str], int]] = [
         ],
         76,
     ),
+    (
+        "crates/plurxd/src/vodserve.rs",
+        "vod-serve",
+        'impl VodServe {\n',
+        [
+            "vod/serve/construct.rs",
+            "vod/serve/create.rs",
+            "vod/serve/delivery.rs",
+            "vod/serve/end.rs",
+            "vod/serve/control.rs",
+            "vod/serve/serve.rs",
+        ],
+        11,
+    ),
 ]
 
 
@@ -235,9 +301,9 @@ def impl_split_reconstruction(
         prefix = CHILD_HEADER + header
         if not text.startswith(prefix) or not text.endswith("\n}\n"):
             raise SystemExit(f"{chunk_path}: lost its exact impl-chunk wrapper")
-        body = text[len(prefix) : -len("}\n")]
-        added += body.count("pub(super) ")
-        bodies.append(body.replace("pub(super) ", ""))
+        body, count = unsplit_visibility(parent, text[len(prefix) : -len("}\n")])
+        added += count
+        bodies.append(body)
     if added != expected:
         raise SystemExit(f"{marker}: pub(super) additions expected {expected}, got {added}")
     rebuilt = header + "\n".join(bodies) + "}\n"
@@ -266,12 +332,11 @@ def moves_reconstructions() -> tuple[dict[str, str], list[str]]:
         if not child.startswith(CHILD_HEADER):
             raise SystemExit(f"{child_path}: lost its exact structural header")
         child = child[len(CHILD_HEADER) :]
-        added = child.count("pub(super) ")
+        child, added = unsplit_visibility(parent, child)
         if added != expected:
             raise SystemExit(
                 f"{child_path}: pub(super) additions expected {expected}, got {added}"
             )
-        child = child.replace("pub(super) ", "")
         parents[parent] = replace_marker(text, marker, child)
         report.append(
             f"{child_path}: {child.count(chr(10))} lines, {added} pub(super) additions"

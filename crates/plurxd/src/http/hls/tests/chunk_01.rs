@@ -175,7 +175,23 @@
         // moved out of `hls.rs` into this directory, the file *is* the
         // production half and the split has nothing to find — it returned
         // `None` and this `expect` panicked. Read the file whole instead.
-        let source = include_str!("../../hls.rs");
+        let source = concat!(
+            include_str!("../../hls.rs"),
+            include_str!("../session_guard.rs"),
+            include_str!("../create.rs"),
+            include_str!("../relay.rs"),
+            include_str!("../release.rs"),
+            include_str!("../control.rs"),
+            include_str!("../preparation.rs"),
+            include_str!("../status.rs"),
+            include_str!("../response.rs"),
+            include_str!("../playlist.rs"),
+            include_str!("../subtitle_playlist.rs"),
+            include_str!("../context.rs"),
+            include_str!("../subtitle_names.rs"),
+            include_str!("../playlist_text.rs"),
+            include_str!("../segment.rs"),
+        );
         assert_eq!(
             source
                 .matches("recovery_epoch_for(activation_predecessor.as_ref())")
@@ -225,7 +241,23 @@
     /// the reserved deadline it must never be given, fails here.
     #[test]
     fn the_confirmation_reserves_recovery_budget_inside_the_owner_lease() {
-        let source = include_str!("../../hls.rs");
+        let source = concat!(
+            include_str!("../../hls.rs"),
+            include_str!("../session_guard.rs"),
+            include_str!("../create.rs"),
+            include_str!("../relay.rs"),
+            include_str!("../release.rs"),
+            include_str!("../control.rs"),
+            include_str!("../preparation.rs"),
+            include_str!("../status.rs"),
+            include_str!("../response.rs"),
+            include_str!("../playlist.rs"),
+            include_str!("../subtitle_playlist.rs"),
+            include_str!("../context.rs"),
+            include_str!("../subtitle_names.rs"),
+            include_str!("../playlist_text.rs"),
+            include_str!("../segment.rs"),
+        );
         let reservation = source
             .split_once("    let confirmation_deadline = activation_confirmation_deadline(")
             .expect("the confirmation must be awaited on its own reserved deadline")
