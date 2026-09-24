@@ -121,6 +121,7 @@ import java.util.Locale
 import kotlin.math.roundToInt
 import tv.plurx.app.BuildConfig
 import tv.plurx.app.data.AudioTrack
+import tv.plurx.app.data.AudioOutputRoute
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.Decision
 import tv.plurx.app.data.DeviceCaps
@@ -171,6 +172,7 @@ private data class Plan(
     /** Both protocol spellings from the route probe that produced the plan. */
     val legacyCaps: Map<String, String>,
     val decisionCaps: DeviceCaps,
+    override val audioOutputRoute: AudioOutputRoute?,
     /**
      * `delivery.audio` — the audio index this plan already carries. Executed as
      * given rather than re-derived: it is what the server actually applied to
@@ -260,6 +262,7 @@ private suspend fun loadPlan(
             deliveredDolbyVisionProfile = decision.delivered_dolby_vision_profile,
             legacyCaps = playbackDecision.capabilities.legacyQuery,
             decisionCaps = playbackDecision.capabilities.document,
+            audioOutputRoute = playbackDecision.capabilities.audioOutputRoute,
             deliveryAudio = decision.delivery?.audio,
             markers = decision.markers,
             reasons = decision.reasons,
@@ -759,6 +762,7 @@ private fun PlayerContent(
             initialAudioOffsetMs = audioOffsetMs,
             retainedAudio = retainedAudio,
             retainedSubtitle = retainedSubtitle,
+            replan = onReload,
         )
     }
     // The one surface, projected from the player by the presenter.

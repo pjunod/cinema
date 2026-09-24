@@ -50,6 +50,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.session.MediaSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -65,6 +66,7 @@ import tv.plurx.app.data.HlsStart
 import tv.plurx.app.data.CreateSessionReq
 import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.AudioTrack
+import tv.plurx.app.data.AudioOutputRoute
 import tv.plurx.app.data.SubTrack
 import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.Net
@@ -129,6 +131,7 @@ class Controller internal constructor(
     initialAudioOffsetMs: Long = 0,
     retainedAudio: Long? = null,
     retainedSubtitle: SubtitleChoice? = null,
+    private val replan: (Long, String, PlaybackQuality) -> Unit,
 ) {
     /**
      * The authoritative player — the one on the surface, with the volume up.
@@ -268,6 +271,9 @@ class Controller internal constructor(
     /** One final H.264 compatibility transcode; failure after that is terminal. */
     private var compatibilityTranscodeUsed = false
 
+    /** One route refresh per attached item, separate from the transcode budget. */
+    private var sinkRetryUsed = false
+
     /** A direct DV decoder failure first gets the same video in normalized MP4. */
     private var forceCompatibilityRemux = false
 
@@ -372,6 +378,7 @@ class Controller internal constructor(
         transport: PlaybackMediaTransport = recipe.recipe.desiredTransport,
     ) {
         recipeOwnership.attach(recipe, transport)
+        sinkRetryUsed = false
         selectionRecipe = recipe
         textSelectionArmed = true
         audioSelectionArmed = true
@@ -687,6 +694,98 @@ class Controller internal constructor(
         onFailure = { message -> raiseDegradedNotice(message) },
     )
 
+    /** Audio output faults use their own bounded branch beside the existing ladder. */
+    private fun handleAudioSinkFailure(error: PlaybackException, refusal: MediaRefusal?): Boolean {
+        val failure = audioSinkFailure(error.errorCode)
+        if (failure == AudioSinkFailure.None) return false
+        val currentRoute = Caps.audioOutputRoute(context)
+        val action = audioSinkAction(
+            failure = failure,
+            // A failed route query is unknown, not evidence of disconnection.
+            outputDevicePresent = currentRoute?.present ?: true,
+            routeChangedSinceSnapshot = currentRoute != null && plan.audioOutputRoute != null &&
+                currentRoute != plan.audioOutputRoute,
+            sinkRetryUsed = sinkRetryUsed,
+            // Reopening an existing transcode with the same recipe is not a rescue.
+            transcodeRescueAlreadyUsed = compatibilityTranscodeUsed || deliveryMode == "transcode",
+        )
+        playbackTelemetry.report(
+            event = "playback_audio_sink_failure",
+            level = "error",
+            message = error.errorCodeName,
+            code = error.errorCode,
+            detail = audioSinkDiagnostic(error, failure, action, currentRoute),
+        )
+        when (action) {
+            AudioSinkRecovery.ReSnapshotAndRetry -> {
+                sinkRetryUsed = true
+                // PlayerScreen's ordinary reload asks for a fresh Caps.snapshot
+                // and /decision before attaching its replacement controller.
+                replan(realPosition(), "audio-route", playbackIntent.desiredQuality)
+                raiseRecoveryStep(refusal, "Checking the changed audio output.")
+            }
+            AudioSinkRecovery.TranscodeRescue -> retryAsCompatibilityTranscode(refusal)
+            AudioSinkRecovery.FailDisconnected ->
+                stopAndRaisePlaybackFailure(null, "Audio output disconnected.")
+            AudioSinkRecovery.Fail ->
+                stopAndRaisePlaybackFailure(refusal, "Audio playback stopped (${error.errorCodeName}).")
+        }
+        return true
+    }
+
+    private fun audioSinkDiagnostic(
+        error: PlaybackException,
+        failure: AudioSinkFailure,
+        action: AudioSinkRecovery,
+        route: AudioOutputRoute?,
+    ): String {
+        val causes = generateSequence(error.cause) { it.cause }.take(4).toList()
+        val initialization = causes.filterIsInstance<AudioSink.InitializationException>().firstOrNull()
+        val write = causes.filterIsInstance<AudioSink.WriteException>().firstOrNull()
+        val format = initialization?.format ?: write?.format ?: player.audioFormat
+        val mime = format?.sampleMimeType
+        val passthrough = mime in setOf(
+            "audio/ac3", "audio/eac3", "audio/eac3-joc", "audio/vnd.dts", "audio/vnd.dts.hd",
+            "audio/true-hd",
+        )
+        val outputs = route?.devices?.sortedWith(compareBy({ it.type }, { it.id }))
+            ?.take(8)?.joinToString(",") { "${it.type}:${it.id}" } ?: "unknown"
+        val cause = causes.firstOrNull()
+        return buildString {
+            append("failure=").append(failure)
+            append(" action=").append(action)
+            append(" route=").append(outputs)
+            append(" route_changed=").append(route != null && plan.audioOutputRoute != null &&
+                route != plan.audioOutputRoute)
+            append(" format=").append(mime ?: "unknown")
+            append(" encoding=").append(format?.pcmEncoding ?: -1)
+            append(" channels=").append(format?.channelCount ?: -1)
+            append(" sample_rate=").append(format?.sampleRate ?: -1)
+            append(" passthrough=").append(passthrough)
+            initialization?.let {
+                append(" audio_track_state=").append(it.audioTrackState)
+                append(" recoverable=").append(it.isRecoverable)
+            }
+            write?.let {
+                append(" sink_error_code=").append(it.errorCode)
+                append(" recoverable=").append(it.isRecoverable)
+            }
+            append(" cause=").append(cause?.javaClass?.simpleName?.take(80) ?: "none")
+            cause?.message?.let { message ->
+                append(" message=").append(message.replace('\n', ' ').replace('\r', ' ').take(200))
+            }
+        }
+    }
+
+    private fun retryAsCompatibilityTranscode(refusal: MediaRefusal?) {
+        val position = realPosition()
+        compatibilityTranscodeUsed = true
+        forceCompatibilityTranscode = true
+        subtitleDelivery = routeSubtitle(trackFor(selectedSubtitle), subtitleDelivery).delivery
+        restartAt(position, "fallback")
+        raiseRecoveryStep(refusal, "Switching to a compatible stream.")
+    }
+
     private val listener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
             if (!playbackControlBootstrapFence.isActive()) return
@@ -752,6 +851,7 @@ class Controller internal constructor(
                 raiseRecoveryStep(refusal, "Reloading this stream.")
                 return
             }
+            if (handleAudioSinkFailure(error, refusal)) return
             val action = playbackErrorAction(
                 deliveryMode = deliveryMode,
                 preservesDolbyVision = plan.preserveDolbyVision,
@@ -844,18 +944,7 @@ class Controller internal constructor(
                     raiseRecoveryStep(refusal, "Switching to a compatible copy.")
                 }
                 PlaybackErrorAction.RetryAsCompatibilityTranscode -> {
-                    // Read the position before the mode moves: which timeline
-                    // the player is on depends on the delivery about to change.
-                    val position = realPosition()
-                    compatibilityTranscodeUsed = true
-                    forceCompatibilityTranscode = true
-                    // `planMode` is a transcode now, and that can move the
-                    // selection's route with it: an embedded track on a
-                    // directly-played file has to become a rendition.
-                    subtitleDelivery =
-                        routeSubtitle(trackFor(selectedSubtitle), subtitleDelivery).delivery
-                    restartAt(position, "fallback")
-                    raiseRecoveryStep(refusal, "Switching to a compatible stream.")
+                    retryAsCompatibilityTranscode(refusal)
                 }
                 PlaybackErrorAction.Fail -> stopAndRaisePlaybackFailure(
                     refusal = refusal,
@@ -4023,6 +4112,8 @@ interface PlanLike {
     val requiresHls: Boolean get() = false
     val durationMs: Long
     val videoCodec: String?
+    /** Active media output captured by the route probe that produced this decision. */
+    val audioOutputRoute: AudioOutputRoute? get() = null
     val requestedQuality: PlaybackQuality
     val audio: List<AudioTrack>
     val subtitles: List<SubTrack>

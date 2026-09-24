@@ -4,6 +4,8 @@ package tv.plurx.app.data
 
 import android.content.Context
 import android.hardware.display.DisplayManager
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.os.Build
@@ -20,7 +22,13 @@ import tv.plurx.app.BuildConfig
 internal data class CapabilitySnapshot(
     val legacyQuery: Map<String, String>,
     val document: DeviceCaps,
+    val audioOutputRoute: AudioOutputRoute?,
 )
+
+data class AudioOutputDevice(val id: Int, val type: Int)
+data class AudioOutputRoute(val devices: Set<AudioOutputDevice>) {
+    val present: Boolean get() = devices.isNotEmpty()
+}
 
 /**
  * Runtime playback capabilities for this device, sent to `/decision` so the
@@ -129,6 +137,7 @@ object Caps {
         )
         return CapabilitySnapshot(
             legacyQuery = result,
+            audioOutputRoute = audioOutputRoute(context),
             document = capsDocument(
                 video = video,
                 audio = audio,
@@ -141,6 +150,25 @@ object Caps {
                 ),
             ),
         )
+    }
+
+    /** The active media route on API 33+, with the available outputs as the older fallback. */
+    internal fun audioOutputRoute(context: Context): AudioOutputRoute? = try {
+        val manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val devices: List<AudioDeviceInfo> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            manager.getAudioDevicesForAttributes(
+                android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MOVIE)
+                    .build(),
+            )
+        } else {
+            manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
+        }
+        AudioOutputRoute(devices.mapTo(mutableSetOf()) { AudioOutputDevice(it.id, it.type) })
+    } catch (_: Exception) {
+        // A failed route query is unknown, not proof that the output vanished.
+        null
     }
 
     /**
