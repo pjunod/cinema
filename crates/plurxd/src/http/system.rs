@@ -4804,6 +4804,7 @@ pub(crate) struct MetricsState {
     live_tv: Arc<crate::live_tv::LiveTvMetrics>,
     live_tv_peers: Arc<crate::http::live_tv::LiveTvPeerMetrics>,
     backup: Arc<crate::backup::BackupMetrics>,
+    plex_census: Arc<super::PlexCensus>,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -4824,6 +4825,7 @@ impl FromRef<AppState> for MetricsState {
             live_tv: state.live_tv.metrics_handle(),
             live_tv_peers: state.live_tv_peers.metrics_handle(),
             backup: state.backup.metrics(),
+            plex_census: Arc::clone(&state.plex_census),
         }
     }
 }
@@ -5227,7 +5229,7 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
         plurx_core::store::prometheus_store_operations(),
         crate::store_result::prometheus(),
@@ -5243,6 +5245,7 @@ pub(crate) async fn metrics(
         super::prometheus_handler_deadlines(),
         crate::ffmpeg::engine_attestation_prometheus(),
         super::prometheus_http_store_attribution(),
+        state.plex_census.prometheus(),
         crate::state::fragment_index_validation_prometheus(),
         crate::subtitle_source::prometheus(),
     );

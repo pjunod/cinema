@@ -3091,7 +3091,28 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `process-command-construction` above (the `child_main` re-exec and the
 # macOS `sysctl` oracle). They are the same two children, counted once in
 # each sentinel, and each is spawned, drained and reaped in one call.
-expected_occurrences = 352
+# +7 with C-07's M0 census (branch base 343 -> 350, merged over main's
+# Fix C / #456 count of 350 and re-measured on the merged tree): seven
+# `.status(` occurrences across six lines, every one of them `axum::response::Response::status()` on an
+# in-process response, and **not one of them launches a child**. This
+# sentinel's pattern counts `.spawn(`, `.output(` and `.status(` together and
+# `Response::status()` is the third spelling; no `Command` is constructed
+# anywhere on this branch and `process-command-construction` is unchanged.
+# Two are production, and both are the census itself: `plex_facade_census`
+# reads the status of the response the façade already produced to pick the
+# outcome cell, and `root_dispatch` does the same on its Plex branch. Neither
+# can change the response; they are reads of HTTP metadata after the fact.
+# The other five are assertions in the census tests -- a 401 on a tokenless
+# façade route, a 200 on `/identity`, a browser root, and the two arms of the
+# Plex root's accepted answers. All in-process; they create no task, timer,
+# process or rolling-producer owner.
+# 359 on the architecture-review wave-3 integration tree, measured by zeroing
+# this row after merging both: main's 350, plus P-02's two test-only
+# `.output()` children and C-07's seven in-process `Response::status()`
+# reads, each reviewed above. The two sets are disjoint files
+# (`plurx-core/src/process/rlimit.rs` against `plurxd/src/http/mod.rs`), so
+# neither review changes; no occurrence was added by the merge itself.
+expected_occurrences = 359
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
