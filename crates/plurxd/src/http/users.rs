@@ -164,7 +164,7 @@ pub async fn create(
             "a user named `{username}` already exists"
         )));
     }
-    let hash = super::auth::hash_password_bounded(req.password).await?;
+    let hash = super::auth::hash_password_bounded(&state.password_capacity, req.password).await?;
     let user = state
         .store
         .create_user(username, &hash, req.is_admin)
@@ -196,7 +196,10 @@ pub async fn update(
     let password_hash = match req.password.as_deref() {
         Some(password) => {
             super::auth::validate_new_password(password)?;
-            Some(super::auth::hash_password_bounded(password.to_owned()).await?)
+            Some(
+                super::auth::hash_password_bounded(&state.password_capacity, password.to_owned())
+                    .await?,
+            )
         }
         None => None,
     };
