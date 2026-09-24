@@ -3,7 +3,7 @@
 **Status:** ready for review · **Executes:** L4 / F-ltv-4 (design) and the
 closed-captions half of Q9 / L7 / F-ltv-8 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-· **Written:** 2026-09-20 · **Against:** `main` @ `88a3957a`
+· **Written:** 2026-09-20 · **Against:** `main` @ `88a3957a` · **Re-verified:** 2026-09-24 @ `886fc8bd` (§2.4)
 
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
 
@@ -130,6 +130,164 @@ anywhere on the live path; the VOD master emits `CLOSED-CAPTIONS=NONE`
 (`http/hls.rs:12472`). Status: "captions lack end-to-end proof"
 ([HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md) row 184).
 
+### 2.4 Re-verification at `886fc8bd` (L-03 design milestone, 2026-09-24)
+
+Every premise in §2 and §3 was re-read against `main` @ `886fc8bd` (after
+L-01's owned DVR writers and L-02's fence observer landed). Line numbers
+below are at that commit; the ones in §2/§3 above are the plan's original
+`88a3957a` numbers. **Verdict: the capacity and ownership design stands, but
+eight of its premises are false or incomplete (D1–D8), and one of them (D7)
+contradicts a guardrail in §4, so M1 cannot be built until it is decided.**
+
+| Premise (plan §) | Code at `886fc8bd` | Verdict |
+|---|---|---|
+| default 2, range `1..=4`, capped by `tuner_count.min(4)` (preamble) | `live_tv.rs:301-303` (`unwrap_or(2)`), `:340`, `:3270-3275` | holds |
+| sessions keyed by `LiveTvRequestKey`; only reuse is a replay (§2.1) | `live_tv.rs:1290-1295`, `request_session` `:1648-1684`, second check under the lock `:3530` | holds |
+| every other start spawns `run_live_session` → own tuner GET → own FFmpeg → own pump (§2.1) | spawn `:3579-3582`; `open_tuner_stream` call `:5597-5605`; `collect_live_prefix` `:5606`; `probe_live_source` `:5607`; `spawn_live_ffmpeg` `:5700-5701`; `pump_tuner_stream` `:5725-5730` | holds |
+| pump writes under `TUNER_READ_TIMEOUT` (30 s) and fails "FFmpeg input stalled" (§2.1) | const `:106`; writes `:6771-6772`, `:6803-6804` | holds |
+| start capacity shape (§2.1) | `:3533-3559`, one registry lock hold from the tombstone check to the insert `:3560-3561` | holds |
+| `held() = live_sessions() + transports.len()` (§2.1) | `:1505-1507`; `live_sessions()` **excludes cancelled sessions** `:1498-1503` | holds; the exclusion matters to D4 and D8 |
+| `transports: HashMap<channel_id, Arc<DvrTransport>>` (§2.1) | `:1470`; inserted under `row.channel_id` `dvr.rs:1727-1729` | holds |
+| `occupancy_admits` = `sessions + transports < max && transports < max - reserve` (§2.1) | `:1531-1535`, `may_open_transport` `:1518-1525` | holds |
+| 503 → `tuner_unavailable`, 404 → `channel_not_found` (§2.1) | `:6024-6031`; codes `:962-965` | holds |
+| the ingress dresses `tuner_capacity` with `transport_holders()` (§2.1) | `http/live_tv.rs:922`, `:1899-1916`; `transport_holders` `dvr.rs:566-590` lists **every** transport with its live sinks | holds; see D3 for viewer-only transports |
+| `DvrTransport` fields, `live_sinks`, `open_until` (§2.2) | `dvr.rs:74-89`, `:92-100`, `:104-110` (`i64::MIN` when no live sink) | holds |
+| sinks join when `may_share_transport` (§2.2) | `schedule.rs:178-180`, applied `dvr.rs:1649-1653` | holds |
+| **the transport collects the prefix and probes it once (`source`), "exactly as `run_transport` does today"** (§2.2, §3.1) | `run_transport` `dvr.rs:2233-2251` collects the prefix and **never probes it**; `DvrTransport.source` is written nowhere in production — its only writers are the constructor's `None` (`:1725`) and a test (`:3192`) | **false — D1** |
+| per-chunk serving-fence check in the fan-out (§2.2) | `dvr.rs:2294-2301` | holds |
+| `close_transport` cancels, closes sinks, joins the worker under `SESSION_DRAIN_TIMEOUT` (§2.2, §3.3) | `dvr.rs:1916-1961`: cancel → settle sinks → **remove from the registry** → join (5 s). Returns early, leaving the entry, while a sink is settling (`:1937-1939`); removal `:1944-1951`, join `:1959` | incomplete — D4 |
+| after the DVR plan's M2 each sink has an owned writer and a bounded queue; the fan-out only `try_send`s (§2.2, M1 dependency) | `SinkQueue` `dvr.rs:138-142`, `DVR_SINK_QUEUE_BYTES` `:68`, `start_sink_writer` `:351-370`, `try_send` `:2333` | holds — L-01 M2 is on `main`, so M1's dependency is met |
+| "inserted in `registry.transports` before its worker is spawned, as the DVR does" (§3.3) | the insert (`dvr.rs:1727-1735`) does precede the spawn (`:1741-1766`), but the **capacity decision (`:1639-1664`) and the insert are two lock holds with an awaited folder creation and `O_EXCL` open between them** (`:1666-1684`) | **false as a model for viewers — D2** |
+| a consumer attaches under the registry lock, only once its resources exist (§3.3, `dvr.rs:1438-1446`) | the sink is published after its file is open (`:1704-1715`) but **pushed into `transport.sinks` without the registry lock and without checking the transport is still running** | incomplete — D3 |
+| a transport closes when it has no consumer and `open_until` has passed (§3.3) | two closers key on *sinks*: the fan-out returns when `live_sinks()` is empty (`dvr.rs:2302-2305`) and every DVR tick closes any transport with no live sink (`close_finished_transports`, `:1898-1914`) | **must change — D3** |
+| `drain_before` closes transports with `generation <` the barrier, then sessions (§3.3) | `live_tv.rs:3864-3900` | holds |
+| shutdown = `close_all_transports` then `cancel_and_wait` (§3.3) | `:3902-3913` | holds |
+| `TUNER_READ_TIMEOUT` "moves entirely to the pump" (§3.2) | the fan-out needs it on the tuner *read* (`dvr.rs:2274`) or a silent tuner is never noticed | wording — D6 |
+| a join requires `(generation, device_id, channel_id)` equality; a different generation → `settings_conflict` (§3.4, §3.5, §4) | `generation` is `live_tv.config_generation`, which **every** Live TV settings save bumps (`http/system.rs:2676-2679`, `:2792`), and a save only drains on a disable or owner transition (`:2702-2727`, `:3295-3300`). A live session ends on the next fence after a save (`validate_start_config` `live_tv.rs:5417-5421`); **a DVR transport does not** — nothing but a drain, disable, owner change or shutdown closes it (`dvr.rs:807-819`, `live_tv.rs:3868-3886`) | **contradiction — D7 (flagged)** |
+| stray eviction fires only when a new transport is needed, "cancel it (its transport closes if it was alone) → retry once" (§3.4) | `stray_to_evict` `:1609-1640` picks any idle/retired session of the user; admission proceeds in the same lock hold because `live_sessions()` stops counting a cancelled session at once (`:1498-1503`, `:3547-3551`) | incomplete — D8 |
+| `activate_local` returns a media playlist; no `CLOSED-CAPTIONS` on the live path; VOD master says `NONE` (§2.3) | `live_tv.rs:3668`; `http/hls.rs:12636` | holds |
+| `-map 0:v:0 -map 0:a:0 -sn -dn`; `-a53cc 0` for VideoToolbox only (§2.3) | `live_tv.rs:6434`, `live_caption_args` `:6622-6631`, diagnostic `:6633-6636` | holds |
+| the audit runs "`live_ffmpeg_command_for_input(.., GraphProbe)`'s real argv against the fixture" (§3.7) | `GraphProbe` replaces the input with `lavfi` `testsrc2` + `sine` (`:6418-6431`) and never reads stdin | **impossible as worded — C1** |
+| audit hosts `media1`, `maca`, `macb` (§3.7, §5.3, §6.3) | the media inventory now names `nynuc`, `m6`, `nuc4`, `nuc3`; `nuc3`'s production `plurxd` validates QSV and VA-API (its boot log), jellyfin-ffmpeg 8.1.2 | stale names — the prompts below find the owner instead of naming it |
+
+#### Design corrections for M1
+
+- **D1 — the transport has to probe.** Viewers plan from `LiveSourceFacts`,
+  and no transport has ever had any. M1 moves `probe_live_source` into the
+  transport worker (after `collect_live_prefix`, before the fan-out starts),
+  publishes `source` before the first byte reaches any consumer, and a
+  viewer's start waits on that publication (bounded by its own
+  `STARTUP_TIMEOUT`) before resolving its plan. A probe failure ends the
+  transport with the probe's error, which every waiting viewer reports.
+  Side effect, recorded here rather than fixed: DVR sidecars have never
+  carried source facts, because `transport_source_facts` (`dvr.rs:2183-2203`)
+  reads the always-`None` field; M1 fixes that as a consequence.
+- **D2 — admission and insertion in one lock hold.** Today a viewer start
+  that interleaves with a DVR attach between `dvr.rs:1664` and `:1727` can
+  hold one tuner more than `max_sessions` (the device then answers 503 to
+  whoever opens last). With viewers creating transports it becomes a
+  correctness bug: two starts on one channel both see "no transport", and the
+  second `HashMap::insert` replaces the first — whose worker still holds a
+  tuner GET and is now neither counted nor reachable by `close_transport`
+  (which looks transports up by key). M1 inserts the transport, in an
+  `opening` state that joins may attach to, in the **same** lock hold as the
+  capacity decision; any later failure removes it only if it is still the
+  same `Arc` (`Arc::ptr_eq`, as `close_transport` already does at
+  `:1944-1951`). The DVR attach path takes the same shape; its `O_EXCL`
+  open moves after the reservation and a failed open releases it.
+- **D3 — attach and close are consumer-aware and locked.** A consumer is
+  pushed only under the registry lock and only when
+  `!transport.cancel.is_cancelled()` and the transport is still the map's
+  entry for its key; otherwise the start treats it as absent. The fan-out's
+  "no live sink → return" and `close_finished_transports`'s "no live sink →
+  close" both become "no live consumer" — as written today, the next DVR tick
+  would close every viewer-only transport within 15 s. `transport_holders`
+  lists only transports with at least one live `Recording` consumer
+  (a viewer-only transport is not a recording the client can offer to stop);
+  the watchable rows of §3.4 are a separate list.
+- **D4 — the slot is freed before the tuner is.** `close_transport` removes
+  the entry before joining the worker, and `live_sessions()` drops a
+  cancelled session before its pump has exited. Both mean a start admitted in
+  that window (≤ `SESSION_DRAIN_TIMEOUT`) can open while the device still
+  counts the old GET and get `tuner_unavailable`. That is today's behaviour
+  and sharing does not worsen it; §3.3's "joining it is what releases the
+  tuner" stays true, but the slot count is not the device's count during a
+  close. M1 keeps the order (removing after the join would refuse starts for
+  up to 5 s on every channel change) and documents the window.
+- **D5 — a source change invalidates the transport's facts.** Each viewer's
+  stderr watcher (`live_tv.rs:5703-5713`, observed `:5761-5765`) ends only
+  that viewer with `source_format_changed`. The transport's `source` then
+  describes a mux that is gone, and a later joiner would plan from it.
+  M1: the first `source_format_changed` from any viewer on a transport marks
+  the transport's facts stale; a stale transport admits no joiner (the start
+  waits for the transport to close and opens a new one, or is refused
+  `tuner_capacity` if the old one still has other consumers).
+- **D6 — timeouts.** The fan-out keeps `TUNER_READ_TIMEOUT` on the tuner
+  read; only the *write* timeout moves to the per-viewer pump (stdin) and the
+  DVR writer (disk). §3.2's sentence is corrected accordingly.
+- **D7 — the generation join rule would lock viewers out of a recorded
+  channel after any settings save. Flagged; not decided here.** A recording
+  transport opened at generation 3 keeps running after an unrelated save
+  (say, output height) bumps the generation to 4. Under §3.4 a viewer start
+  at generation 4 for that channel is refused `settings_conflict`, and
+  "never a second transport for one key" forbids opening its own — for the
+  rest of the recording, and "reload channels" (the message) cannot help.
+  The plan's own guardrail (§4, "A join never crosses a generation") is what
+  produces this, so it is not this session's to relax. Two options for the
+  decision: **(a)** keep the guardrail and allow exactly one extra transport
+  for a key whose existing transport is on an older generation (the old one
+  still drains by generation; costs a tuner in exactly this case);
+  **(b)** narrow the join key to what the bytes depend on — `device_id`,
+  `channel_id`, the device address the transport opened, and a current
+  serving generation — since the transport carries raw tuner bytes and every
+  other generation-scoped setting (heights, deinterlace, guide) is applied by
+  the joiner's own FFmpeg and plan. The recommendation is (b): a drain still
+  closes old-generation transports, and a changed device address or owner
+  still refuses the join. Needs Paul's call before M1.
+- **D8 — stray eviction must free a transport, and must be waited for.**
+  With sharing, cancelling a stray that shares its transport frees nothing,
+  so `stray_to_evict` gains a filter: only a stray that is its transport's
+  last live consumer (and whose transport has no `Recording` consumer)
+  qualifies. And because slots become `transports.len()`, which drops at
+  `close_transport`'s removal rather than at cancel, "retry once" is a
+  bounded wait: the start releases the lock, awaits that transport's close
+  (≤ `SESSION_DRAIN_TIMEOUT`), then re-runs admission once.
+
+#### Captions: what the code and fixtures establish, before any audit run
+
+- **C1 — the audit uses the tuner argv.** `GraphProbe` cannot see a fixture.
+  The audit builds `live_ffmpeg_command_for_input(.., Tuner)` from the
+  production planner's plan for the production probe of the fixture, and
+  feeds the fixture on stdin exactly as `pump_tuner_stream` feeds the tuner.
+- **C2 — the fixture is generated, not committed.** The repository keeps no
+  binary media fixtures (every existing live-TV media test synthesises its
+  input, e.g. `videotoolbox_tests.rs:36-128`, `atsc_audio_tests.rs`), so the
+  10 s 1080i MPEG-2 fixture is built at test time by
+  `live_tv/caption_audit_tests.rs` (`captioned_fixture`), with its ground
+  truth in code. `PLURX_CAPTION_FIXTURE_OUT=<path>` writes a copy for use
+  outside the tests.
+- **C3 — the existing VideoToolbox fixture proves survival, not captions.**
+  `videotoolbox_tests.rs:64-83` injects a single CEA-608 control pair
+  (`0x94 0x20`, resume caption loading) with no text, and runs only with
+  `-a53cc 0`; it shows the encode survives A/53 input, nothing about
+  carrying it.
+- **C4 — `-hwaccel none` on every route** (`live_tv.rs:6404`): decode is
+  software everywhere, so A/53 always reaches the filter chain as frame side
+  data; whether it leaves depends only on the filters and the encoder, which
+  is exactly what the per-graph audit varies.
+- **C5 — "no advertisement" is not "no caption track" on today's clients.**
+  The live path hands every client a media playlist, and each client's own
+  default decides what it does with in-band 608: web builds hls.js with no
+  caption options (`web/pages/live-tv-controls.js:97`) and Safari plays the
+  playlist natively (`:103-104`); Android builds a default
+  `ExoPlayer` with `DefaultMediaSourceFactory` (`livetv/LiveTvPlayer.kt:221-224`);
+  Apple uses a plain `AVPlayer()` with automatic media selection
+  (`LiveTvView.swift:55`). None of the three live players has a caption
+  control or a caption test. Whether any of them already surfaces a CC track
+  today — and whether a VideoToolbox session then shows an empty one — is a
+  device fact, and it is the baseline M4 changes; the §6.3 caption prompt
+  records it before M4 is built.
+
 ## 3. Change
 
 ### 3.1 `LiveTransport` — the DVR transport, generalised
@@ -175,7 +333,8 @@ moment it attached. Per chunk: serving-fence check, then `try_send` per
 live consumer, no awaits on any consumer.
 
 Prefix and probe: the transport collects the prefix and probes it once
-(`source`), exactly as `run_transport` does today, so every consumer's
+(`source`) — **corrected (§2.4 D1): `run_transport` collects the prefix but
+has never probed it, and M1 adds the probe** — so every consumer's
 sidecar and plan see the same facts. A viewer that attaches later gets the
 transport's `source` for its plan without probing (the L6 warm-start
 verification applies to a *new* transport; a joiner is verified by the
@@ -195,9 +354,10 @@ reason, and cancels nothing else:
 | `Recording` | disk stalled | the DVR plan's `disk_write_backlog`: the sink ends its attempt; recovery rolls the next |
 
 The reader never waits on a consumer; the only thing that can stall the
-tuner GET is the tuner. `TUNER_READ_TIMEOUT` moves entirely to the pump
-(per viewer, writing to its own stdin) and the DVR writer (per sink); the
-fan-out has no write timeout because it has no writes.
+tuner GET is the tuner. `TUNER_READ_TIMEOUT` stays on the fan-out's tuner
+*read* and its *write* use moves to the pump (per viewer, writing to its own
+stdin) and the DVR writer (per sink); the fan-out has no write timeout
+because it has no writes (§2.4 D6).
 
 Metric: `plurx_live_tv_consumer_evictions_total{kind,reason}` with `kind ∈
 {viewer, recording}`, `reason ∈ {backlog, fenced}` — four series.
@@ -206,8 +366,9 @@ Metric: `plurx_live_tv_consumer_evictions_total{kind,reason}` with `kind ∈
 
 - A transport is created by the first consumer that needs one, under the
   registry lock, after capacity admits it (§3.4); it is inserted in
-  `registry.transports` before its worker is spawned, as the DVR does
-  (`dvr.rs:1449-1491`).
+  `registry.transports` before its worker is spawned. **Corrected (§2.4
+  D2):** the DVR decides capacity and inserts in two separate lock holds;
+  M1 reserves the entry in the same lock hold as the capacity decision.
 - A consumer attaches under the registry lock and only after its own
   resources exist (the viewer's scratch directory and FFmpeg stdin; the
   sink's `O_EXCL` file) — the DVR's "publish the sink only once its file is
@@ -319,11 +480,14 @@ first two have a recorded result per graph.
    `libcaption`-style tooling, or captured from a broadcast and trimmed —
    whichever the builder can reproduce; the generator command is committed
    beside the fixture). Its ground truth is the caption text per second.
+   **As built (§2.4 C2):** generated at test time by
+   `live_tv/caption_audit_tests.rs`, not committed as a binary.
 2. **Audit per graph.** For each `Encoder` the fleet enables (x264, QSV on
    `media1`, VAAPI where present, VideoToolbox on `maca`/`macb`, NVENC if
    any node has it) and for the copy route: run
    `live_ffmpeg_command_for_input(.., GraphProbe)`'s real argv against the
-   fixture, then `ffprobe -show_frames -select_streams v` on the output and
+   fixture (**as built, §2.4 C1:** the `Tuner` argv with the fixture on
+   stdin — `GraphProbe` never reads its input), then `ffprobe -show_frames -select_streams v` on the output and
    count frames whose side data lists `Closed Captions`; then extract with
    `ffmpeg -f lavfi -i "movie=out.ts[out+subcc]" -map 0:1 out.srt` and
    diff against the ground truth. Record per graph: preserved / dropped /
