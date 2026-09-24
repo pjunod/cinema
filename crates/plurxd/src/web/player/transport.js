@@ -241,9 +241,22 @@ function playbackProgressTick(v,p){
   if(moved){
     watch.clock=clock; watch.frames=frames; watch.at=now;
     p.presentationAdvancedAt=now;
+    // The progress watch has already established clock advancement and,
+    // where available, a newly presented frame. Keep that proof on this
+    // intent even if the stricter control-settlement path is still waiting
+    // for `seeking` to clear or has no usable frame sequence.
+    if(p.controlSeek===pending&&pending?.localVodSeek){
+      const positionMs=Math.round(((p.offset||0)+clock)*1000);
+      const playedMs=Math.max(0,Number(pending.playedSampleMs)||0);
+      if(positionMs>=pending.targetMs-250
+         &&positionMs<=pending.targetMs+playedMs+250){
+        pending.localVodPresented=true;
+        pending.localVodSeekCleanup?.();
+      }
+    }
     if(pending) settlePlaybackControlSeek(v,p,clock,frames);
     completeHlsStartup(p);
-    if(!p.controlSeek){
+    if(!p.controlSeek||(p.controlSeek===pending&&pending?.localVodPresented)){
       watch.fired=false;
       if(p.waitAt!=null){
         endWait(true);
@@ -254,12 +267,30 @@ function playbackProgressTick(v,p){
   }
   // Exclude time spent paused or backgrounded. A new active watch starts a
   // fresh observation window, while an active replacement cannot reset it.
+  if(p.controlSeek===pending&&pending?.localVodSeek&&pending.executed
+     &&pending.localVodSeekFallbackPending){
+    if(!playbackSeekBufferCovers(v,p,pending.targetMs)){
+      watch.vodTargetCoveredAt=null;
+      if(p.waitAt!=null) endWait(false);
+      return;
+    }
+    // Buffer coverage is the first point at which failure to present can be
+    // a decoder stall. Do not charge the preceding fragment wait to it.
+    if(watch.vodTargetCoveredAt==null){
+      watch.vodTargetCoveredAt=now;
+      watch.at=now;
+      return;
+    }
+  }
   const age=now-watch.at;
   const landingAge=pending?.executed
     ? now-Math.max(pending.executedAt??now,watch.startedAt) : 0;
-  if(watch.fired||p.waitAt!=null||Math.max(age,landingAge)<PERSISTENT_STALL_MS) return;
+  const pendingLandingAge=pending?.localVodPresented ? 0
+    : pending?.localVodSeek&&watch.vodTargetCoveredAt!=null
+      ? now-Math.max(watch.vodTargetCoveredAt,watch.startedAt) : landingAge;
+  if(watch.fired||p.waitAt!=null||Math.max(age,pendingLandingAge)<PERSISTENT_STALL_MS) return;
   watch.fired=true;
-  p.waitAt=now-Math.max(age,landingAge);
+  p.waitAt=now-Math.max(age,pendingLandingAge);
   p.waitStartedRunway=bufferRunway(v);
   p.waitReported=false;
   persistentWait(v,p,p.waitAt,p._seekToken||0,p.controlIntentGeneration||0).catch(()=>{});
@@ -875,14 +906,24 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   });
   if(route.route==='local'){
     const attachment=me.mediaAttachment, atMs=route.atMs;
+    const vod=route.basis==='vod';
     let settled=false, timer=null;
     const current=()=>PLAYER===me&&me.mediaAttachment===attachment&&me.controlSeek===seekIntent;
     const cleanup=()=>{
       if(timer!=null) clearTimeout(timer);
+      if(vod) seekIntent.localVodSeekFallbackPending=false;
       try{v.removeEventListener('seeked',onSeeked);}catch(e){}
     };
     const onSeeked=()=>{ if(!current()) return; settled=true; cleanup(); };
-    try{v.addEventListener('seeked',onSeeked,{once:true});}catch(e){}
+    // A `waiting` event may have armed an old 8 s timer during the 100 ms
+    // scrub coalescing above. The committed seek replaces that observation.
+    endWait(false);
+    if(!vod) try{v.addEventListener('seeked',onSeeked,{once:true});}catch(e){}
+    if(vod){
+      seekIntent.localVodSeek=true;
+      seekIntent.localVodSeekFallbackPending=true;
+      seekIntent.localVodSeekCleanup=cleanup;
+    }
     try{ v.currentTime=Math.max(0,atMs/1000-(me.offset||0)); }catch(e){}
     markPlaybackControlSeekExecuted(me,targetSec);
     clientLog({level:'info',event:'seek_local',
@@ -890,9 +931,10 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       message:'seek stayed on the attached media'});
     armStall(targetSec,PlaybackPolicy.HLS_STARTUP.seek_deadline_ms);
     playerActivity();
-    if(route.basis==='direct'||route.basis==='vod') { cleanup(); return; }
+    if(route.basis==='direct') { cleanup(); return; }
+    if(vod&&seekIntent.localVodPresented) { cleanup(); return; }
     timer=setTimeout(()=>{
-      if(settled||!current()) { cleanup(); return; }
+      if(settled||!current()||vod&&seekIntent.localVodPresented) { cleanup(); return; }
       if(playbackSeekBufferCovers(v,me,atMs)) { cleanup(); return; }
       cleanup();
       clientLog({level:'warn',event:'seek_local_fallback',
@@ -901,7 +943,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       Promise.resolve(seekTo(
         targetSec,true,autoHeightOverride,viewerInitiated,recoveryEpisode
       )).catch(()=>{});
-    },PlaybackPolicy.SEEK_LOCAL_SETTLE_MS);
+    },vod?PlaybackPolicy.HLS_STARTUP.seek_deadline_ms:PlaybackPolicy.SEEK_LOCAL_SETTLE_MS);
     return;
   }
   // A retry must reconnect, not repeat the local seek that ordinary direct and
