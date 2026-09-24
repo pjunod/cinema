@@ -168,7 +168,11 @@ function fullOpenHarness() {
     shippedSource("requestQualityChange"),
     shippedSource("fallBackDirectedChange"),
     shippedSource("settleDirectedChange"),
-    shippedSource("resetMediaSource"), shippedSource("play"), shippedSource("setQuality"),
+    shippedSource("resetMediaSource"),
+    ...["beginPlayAttempt","capturePlayInputs","decideForPlay","preparePlayOutgoing",
+      "buildPlayer","presentPlayerChrome","choosePlayRoute","attachPlayRoute",
+      "finishPlayAttach","play"].map(shippedSource),
+    shippedSource("setQuality"),
     shippedSource("playbackSeekBufferedRangesMs"),
     shippedSource("playbackSeekPublishedRangeMs"),
     shippedSource("playbackSeekBufferCovers"),
@@ -2066,10 +2070,11 @@ async function main() {
   // question instead: nothing at all may be awaited before the reason is taken.
   const firstAwait=playSource.indexOf("await ");
   assert.notEqual(firstAwait,-1,"play no longer awaits anything");
-  assert.ok(playSource.indexOf("takePlaybackAttemptReason()")<firstAwait,
-    "play captures its one-shot reason before its first await");
-  assert.match(playSource,/PLAY_OPEN_GATE\.current\(openAttempt\)/);
-  assert.match(playSource,/PLAY_OPEN_GATE\.acceptResource\(openAttempt/);
+  assert.ok(playSource.indexOf("capturePlayInputs(")<firstAwait,
+    "play captures its one-shot inputs before its first await");
+  assert.match(shippedSource("capturePlayInputs"),/takePlaybackAttemptReason\(\)/);
+  assert.match(shippedSource("beginPlayAttempt"),/PLAY_OPEN_GATE\.current\(openAttempt\)/);
+  assert.match(shippedSource("attachPlayRoute"),/PLAY_OPEN_GATE\.acceptResource\(openAttempt/);
   assert.match(shippedSource("startCopyHls"),/PLAY_OPEN_GATE\.acceptResource/);
 
   // The action vocabulary. Declaring `hold` is what permits the server to send

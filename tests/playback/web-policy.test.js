@@ -926,10 +926,10 @@ asyncTest("a temporary live recovery presentation remains playable", async () =>
 });
 
 test("an initial VOD refusal stays visible instead of closing the player", () => {
-  const play = shippedSource("play");
-  assert.match(play, /showSessionOpenFailure\(error,surfaceContext\)/);
+  const beginPlayAttempt = shippedSource("beginPlayAttempt");
+  assert.match(beginPlayAttempt, /showSessionOpenFailure\(error,surfaceContext\)/);
   assert.doesNotMatch(
-    play,
+    shippedSource("attachPlayRoute"),
     /openSession[\s\S]{0,500}return closePlayer\(\)/,
     "a typed VOD refusal must remain on the playback surface",
   );
