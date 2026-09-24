@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-24 23:18 UTC · **Base:** `f600d2823`
+**Status:** open · **Updated:** 2026-09-24 23:32 UTC · **Base:** `f600d2823`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -10,14 +10,14 @@ the acceptance evidence named by its plan.
 
 | Lane | Current state | Next action | Evidence |
 |---|---|---|---|
-| D-02 · Android lifecycle | Reconnaissance; M6 is on main | Finish M1-M5 and M7-M9 from the plan | Plan execution log and workboard row |
+| D-02 · Android lifecycle | M7 builder in progress in a separate clone; M6 is on main | Finish M7, then M1-M5 and M8-M9 | Plan execution log and workboard row |
 | D-03 · Android credentials and release | Reconnaissance; M2, M7 and M8 repo half are on main | Finish capability, release and device milestones | Plan execution log and workboard row |
-| A-02 · Apple controller | Reconnaissance; 5.1 is partial on main | Finish 5.1-5.6 | Plan execution log and workboard row |
+| A-02 · Apple controller | Seek-fence commit `da5c6050a` on [draft PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506); iOS/tvOS compile green | Continue 5.2-5.6; run review and fast lane when ready | Plan execution log and workboard row |
 | A-03 · Native library paging | Reconnaissance; 5.1 is on main | Finish 5.2-5.5 | Plan execution log and workboard row |
-| W-02 · Web player decomposition | Reconnaissance; 5.4-5.5 are unstarted | Establish 5.1-5.3 prerequisites, then split `attachHls` and `play()` | Plan execution log and workboard row |
+| W-02 · Web player decomposition | 5.4-5.5 unstarted; current main's browser play fails before first frame with `WATCH_CLOSE_PROMISE` undefined | Diagnose the runtime failure, then split `attachHls` and `play()` after the type baseline | Plan execution log and workboard row |
 | L-03 · Shared Live TV transport | Reconnaissance; #482 is on main | Finish M2 and M4 | Plan execution log and workboard row |
-| A-04 · Adaptive quality traces | Reconnaissance; D3 is unmeasured | Take the shaped-network traces | Plan execution log and workboard row |
-| Main deployment and fleet evidence | Reconnaissance | Inventory targets, deploy current main, collect each owed observation | Evidence-only docs PR and workboard rows |
+| A-04 · Adaptive quality traces | Chrome 8→1.5 Mb/s run failed before first frame on current main; Safari WebDriver timed out; Firefox absent | Repair the Chrome runtime failure, then repeat and complete the two-profile matrix | Raw reports under `/private/tmp/plurx-a04-d3-evidence-2026-09-24/` |
+| Main deployment and fleet evidence | `nynuc`, `m6`, `nuc4` on `f600d2823`; `nuc3` image build in progress | Verify `nuc3`, then collect bounded and long-window observations | Evidence-only docs PR and workboard rows |
 
 ## Current impediments
 
