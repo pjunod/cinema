@@ -6241,13 +6241,14 @@ test("the final manifest-send gate rejects pause, stale ownership, deadline and 
   assert.equal(decide({ dispatches: 16 }), "exhaust");
 });
 
-// Drained last, in registration order, after every synchronous case has run.
 // ---- D-02 M6: node failover is gated on the response code -------------------
 //
-// `nodeFailoverEligible` is Kotlin, and no Android toolchain runs on this
-// machine, so these are source assertions: weaker than running the predicate,
-// but each is the line a refactor would quietly drop, and the call-site cases
-// are true mutation killers — delete the gate and they fail here.
+// `nodeFailoverEligible` is Kotlin. `LadderVerdictTest` (PlaybackPolicyTest.kt)
+// executes the predicate under `make android-test`; this file runs where no
+// Android toolchain may exist, so these are source assertions: weaker than
+// running the predicate, but each is the line a refactor would quietly drop,
+// and the call-site cases are the only pin on the gate in `onPlayerError`,
+// which no JVM test reaches — delete the gate and they fail here.
 const ANDROID_CONTROLLER = fs.readFileSync(
   path.join(__dirname, "../../clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
   "utf8",
@@ -6336,6 +6337,7 @@ test("the Android policy module stays free of ExoPlayer and Android", () => {
   );
 });
 
+// Drained last, in registration order, after every synchronous case has run.
 (async () => {
   for (const [name, run] of ASYNC_TESTS) {
     try {
