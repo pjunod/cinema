@@ -2712,8 +2712,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # of one that exits before registration). Once per host, `kill_on_drop`,
 # bounded by a 120 s `tokio::time::timeout`, awaited to completion through
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
-# 901 -> 912 (measured) with L-02 M3/M4: three new in production, one
-# replaced, eight in tests. The scratch-sweep loop's `tokio::time::sleep(ORPHAN_RETRY)` replaces its
+# 901 -> 913 (measured) with L-02 M3/M4: three new in production, one
+# replaced, nine in tests. The scratch-sweep loop's `tokio::time::sleep(ORPHAN_RETRY)` replaces its
 # `sleep(SCRATCH_SWEEP_INTERVAL)` (the hourly sweep now runs when due inside
 # the five-second loop), so that one is a replacement, and the loop still
 # ends on the background shutdown token; `drain_orphans`'
@@ -2724,11 +2724,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `tokio::time::timeout(SESSION_DRAIN_TIMEOUT, child.wait())`, which reaps
 # the FFmpeg a disagreeing warm plan started before the start restarts cold
 # (an unconfirmed exit hands the child to the session's cleanup exactly as
-# the tick loop's own end does). Test-only, eight: the start-path tests'
+# the tick loop's own end does). Test-only, nine: the start-path tests'
 # bounded waits in `live_tv::tests` (`watch_once_cold`, `publishable_session`,
-# the warm, disagreeing, byte-exact and hung-scan starts, and the orphan
-# retry loop). Each bounds one test wait. None owns a producer.
-expected_occurrences = 912
+# the warm, disagreeing and byte-exact starts, the hung-scan test's start and
+# its poll for the session's end, and the orphan retry loop). Each bounds one
+# test wait. None owns a producer.
+expected_occurrences = 913
 
 [[module_structures]]
 id = "bare-time-constructor"

@@ -11402,30 +11402,54 @@ exec /bin/cat > {sink}"#,
     /// Plan L-02 §5.4: a scratch scan that never returns — a `stat` on a
     /// stalled mount — is polled on later ticks rather than replaced, so
     /// exactly one is ever in flight, and the tick keeps running the timers
-    /// that end the session. Awaited inline, as it used to be, the hung scan
-    /// would have stopped the tick itself and the start would never answer.
+    /// that end the session. A published session has no start waiter to time
+    /// it out: awaited inline, as it used to be, the hung scan stopped the
+    /// tick itself, and with it the producer-progress timer that is the only
+    /// thing that ends a session whose producer has stopped.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_hung_inventory_does_not_stack_and_the_start_budget_still_ends_the_session() {
+    async fn a_hung_inventory_does_not_stack_and_the_progress_timer_still_ends_the_session() {
         let root = crate::test_tempdir().expect("root");
         let (manager, _tuner) =
             start_path_fixture(root.path(), &publishing_ffmpeg(root.path(), false), 1).await;
         std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
-        manager.hang_scratch_scans.store(true, Ordering::Release);
-        let result = tokio::time::timeout(
-            STARTUP_FEEDING_TIMEOUT + Duration::from_secs(15),
+        let provisional = tokio::time::timeout(
+            Duration::from_secs(10),
             manager.start_local(fixture_request(1)),
         )
         .await
-        .expect("the start ends on its own timers although its scan never returns");
+        .expect("start deadline")
+        .expect("published start");
+        let session = manager
+            .session(&provisional.capability)
+            .expect("registered session");
+        let before = manager.scratch_scans_started.load(Ordering::Acquire);
+        manager.hang_scratch_scans.store(true, Ordering::Release);
+
+        let deadline =
+            tokio::time::Instant::now() + PRODUCER_PROGRESS_TIMEOUT + Duration::from_secs(10);
+        while manager
+            .registry
+            .lock()
+            .expect("registry")
+            .sessions
+            .contains_key(&provisional.capability)
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a hung scan must not stop the session's own timers"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let terminal = session.state.lock().expect("state").terminal_error.clone();
         assert!(
-            matches!(result, Err(LiveTvError::StartupTimeout(_))),
-            "{result:?}"
+            matches!(&terminal, Some(LiveTvError::StreamFailed(message)) if message.contains("stopped advancing")),
+            "{terminal:?}"
         );
         assert_eq!(
-            manager.scratch_scans_started.load(Ordering::Acquire),
+            manager.scratch_scans_started.load(Ordering::Acquire) - before,
             1,
-            "one scan in flight for the whole start, never a second"
+            "one scan in flight from the moment the filesystem hung, never a second"
         );
     }
 
