@@ -696,7 +696,11 @@
         let logs = Arc::new(crate::logbuf::LogBuffer::new(8192));
         let subscriber =
             tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&logs)));
-        let guard = tracing::subscriber::set_default(subscriber);
+        // Through the crate helper rather than `set_default` directly: the
+        // argv callsite is one every copy test reaches, and a test on another
+        // thread reaching it first while this thread is the only registered
+        // dispatcher caches it as never-interesting — see the helper.
+        let guard = crate::test_tracing_default(subscriber);
         let started = mgr
             .start_copy(
                 file_id,

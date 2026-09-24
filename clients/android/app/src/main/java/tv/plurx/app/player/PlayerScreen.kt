@@ -89,6 +89,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
@@ -316,7 +317,7 @@ internal fun playerRuntimeLabel(milliseconds: Long): String {
     return if (hours > 0) "${hours}h ${minutes}m" else "${minutes}m"
 }
 
-private enum class PlayerPanel { Tracks, Settings, Info }
+internal enum class PlayerPanel { Tracks, Settings, Info }
 
 internal enum class PlayerControlId {
     SkipBack,
@@ -1429,8 +1430,7 @@ private fun PlayerContent(
             ) { Text(activeMarker.displayLabel, fontWeight = FontWeight.SemiBold) }
         }
 
-        val miniInfo = panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini
-        if (!isInPip && controlsVisible && (panel == null || miniInfo) && blockingFault == null) {
+        if (playbackTransportOnScreen(isInPip, controlsVisible, panel, statsMode, blockingFault != null)) {
             Controls(
                 title = plan.title,
                 subtitle = plan.subtitle,
@@ -1567,7 +1567,11 @@ private fun PlayerContent(
                 controller = controller,
                 positionMs = positionMs,
                 displayHdrTypes = displayHdrTypes,
-                transportReserve = playbackTransportReserve(controlsVisible, transportHeightPx),
+                transportReserve = playbackTransportReserve(
+                    playbackTransportOnScreen(isInPip, controlsVisible, panel, statsMode, blockingFault != null),
+                    transportHeightPx,
+                    LocalDensity.current,
+                ),
                 mode = statsMode,
                 onMode = {
                     statsMode = it
@@ -2129,15 +2133,34 @@ private fun PlayerInfo(
 }
 
 /**
+ * Whether the bottom transport block ([Controls]) is composed right now. This
+ * is the one predicate both the composition and the playback-info reserve read,
+ * so they cannot disagree: opening the info panel in any mode but Mini removes
+ * the transport while `controlsVisible` stays true, and a reserve keyed on
+ * `controlsVisible` alone kept subtracting the transport's last measured
+ * height (~300 dp of a 540 dp-tall Android TV frame) from a panel that had the
+ * whole screen to itself — which squashed the info body down to its header.
+ */
+internal fun playbackTransportOnScreen(
+    isInPip: Boolean,
+    controlsVisible: Boolean,
+    panel: PlayerPanel?,
+    statsMode: PlaybackStatsMode,
+    faulted: Boolean,
+): Boolean {
+    val miniInfo = panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini
+    return !isInPip && controlsVisible && (panel == null || miniInfo) && !faulted
+}
+
+/**
  * How much of the bottom of the screen the transport block is occupying right
- * now. Zero when the controls are not composed — the common case, since opening
- * the info panel hides them — the measured height once they have been laid out,
+ * now. Zero when the transport is not composed — the common case, since every
+ * info mode but Mini hides it — the measured height once it has been laid out,
  * and only a floor in the window between the two.
  */
-@Composable
-private fun playbackTransportReserve(controlsVisible: Boolean, measuredPx: Int): Dp = when {
-    !controlsVisible -> 0.dp
-    measuredPx > 0 -> with(LocalDensity.current) { measuredPx.toDp() }
+internal fun playbackTransportReserve(transportOnScreen: Boolean, measuredPx: Int, density: Density): Dp = when {
+    !transportOnScreen -> 0.dp
+    measuredPx > 0 -> with(density) { measuredPx.toDp() }
     else -> PlaybackTransportReserveFallback
 }
 
@@ -2254,7 +2277,7 @@ private val PlaybackOverlayInset = 12.dp
  * with chips, a context line and a three-line overview it is closer to 318.dp,
  * which is exactly why this is a fallback and not the reserve.
  */
-private val PlaybackTransportReserveFallback = 192.dp
+internal val PlaybackTransportReserveFallback = 192.dp
 private val PlaybackPanelMinHeight = 180.dp
 /**
  * A source value is a run of separator-joined facts, sometimes with a clause
