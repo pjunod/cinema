@@ -385,7 +385,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * window. Land on the login screen with its sentence rather than leave a
      * "HTTP 401" on Home; the saved token is dead, so it goes with it.
      */
-    private fun endExpiredSession(message: String) {
+    private suspend fun endExpiredSession(message: String) {
         if (Session.token == null) return
         settings.clearToken()
         Session.token = null
