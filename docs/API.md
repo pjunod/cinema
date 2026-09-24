@@ -611,6 +611,13 @@ grid can merge on the key the server sorted by instead of re-deriving it in
 its own language. **Compare it as UTF-8 bytes** — that is SQLite's BINARY
 collation — and not with a locale-aware or case-insensitive compare, which
 disagrees with the server on accented and non-Latin titles.
+
+`resolution` is carried by movies and home videos only, and the `resolution`
+sort ranks every other kind at -1 — the value a merging client reads from an
+absent `resolution`. That includes a root-level photo in a Home library, which
+is probed and has a real file height: it sorts with the rows that have no
+resolution, not by its pixel count, so the key each row carries is the key the
+server sorted it by.
 `tests/contracts/library-sort-cases.json` pins this order for the server and
 for every client that merges.
 

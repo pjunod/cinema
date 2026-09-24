@@ -3108,9 +3108,16 @@ pub(crate) fn item_sort_order_by(sort: ItemSort) -> &'static str {
         ItemSort::Title => "sort_title ASC, id ASC",
         ItemSort::Added => "added_at DESC, id DESC",
         ItemSort::Year => "year IS NULL, year DESC, sort_title ASC, id ASC",
-        // Best (max) file height per item, highest first; no-height items last.
+        // Best (max) file height per item, highest first; no-height items
+        // last. Only the kinds that carry a `resolution` on the DTO
+        // (`ItemKind::carries_resolution`) are ranked by height: a root photo
+        // has a real file height but no `resolution`, and ranking it by one
+        // would hand a merging client a cursor that is not sorted under the
+        // key it was given.
         ItemSort::Resolution => {
-            "COALESCE((SELECT MAX(f.height) FROM files f WHERE f.item_id = items.id), -1) DESC, \
+            "CASE WHEN kind IN ('movie','video') \
+             THEN COALESCE((SELECT MAX(f.height) FROM files f WHERE f.item_id = items.id), -1) \
+             ELSE -1 END DESC, \
              sort_title ASC, id ASC"
         }
         ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC, id ASC",
@@ -5658,18 +5665,19 @@ mod item_sort_order_tests {
     /// Every library sort ends in a unique key.
     ///
     /// This is a text assertion on the clause, and it is deliberately not the
-    /// fixture replay in `tests/store_contract.rs`, because **that replay does
-    /// not detect the tie-break's removal.** Run it against
-    /// `sort_title ASC` with no `id` and it still passes: SQLite happens to
-    /// return the tied rows of this table in rowid order, which is the order
-    /// the fixture expects. That it *happens* to is the entire problem — it is
-    /// not promised by anything, it can change with the query plan, the
-    /// schema, an added index or the backend, and when it changes the symptom
-    /// is a client paging by `offset` that reads two adjacent pages of two
-    /// different orderings: an item on the seam shown twice and its neighbour
-    /// never shown at all. A property nothing guarantees cannot be pinned by
-    /// observing that it currently holds; it has to be pinned by requiring the
-    /// clause that makes it true.
+    /// fixture replay in `tests/store_contract.rs`. With movies alone that
+    /// replay did not detect the tie-break's removal: SQLite returned the tied
+    /// rows in rowid order, which is the order the fixture expects. It now
+    /// does — the fixture's photo/movie pair ties on every visible key, and
+    /// the grid query reads through `idx_items_library_kind`, which yields
+    /// them in kind order — but that is still an observation of today's query
+    /// plan. What SQLite does with tied rows is not promised by anything; it
+    /// can change with the plan, the schema, an added index or the backend,
+    /// and when it changes the symptom is a client paging by `offset` that
+    /// reads two adjacent pages of two different orderings: an item on the
+    /// seam shown twice and its neighbour never shown at all. A property
+    /// nothing guarantees cannot be pinned by observing that it currently
+    /// holds; it has to be pinned by requiring the clause that makes it true.
     ///
     /// `Added` ends in `id DESC` and the other four in `id ASC`. `Added` is
     /// not made symmetric on purpose: it already had a tie-break, and flipping
@@ -5702,6 +5710,48 @@ mod item_sort_order_tests {
             );
         }
         assert!(item_sort_order_by(ItemSort::Added).ends_with("id DESC"));
+    }
+
+    /// The `resolution` sort ranks by height exactly the kinds whose DTO
+    /// carries a `resolution`, and every other kind at -1.
+    ///
+    /// The clause and `ItemKind::carries_resolution` are two spellings of one
+    /// rule — SQL cannot call the Rust predicate — so this reads the kind list
+    /// out of the clause and compares it with the predicate for every kind. A
+    /// kind added to one and not the other is a row the server ranks by a key
+    /// the client never receives.
+    #[test]
+    fn resolution_ranks_exactly_the_kinds_that_carry_one() {
+        use crate::domain::ItemKind;
+
+        let clause = item_sort_order_by(ItemSort::Resolution);
+        let list = clause
+            .strip_prefix("CASE WHEN kind IN (")
+            .and_then(|rest| rest.split_once(')'))
+            .map(|(list, _)| list)
+            .unwrap_or_else(|| panic!("{clause:?} does not rank by kind first"));
+        let ranked: std::collections::BTreeSet<&str> = list
+            .split(',')
+            .map(|kind| kind.trim().trim_matches('\''))
+            .collect();
+        for kind in [
+            ItemKind::Movie,
+            ItemKind::Show,
+            ItemKind::Season,
+            ItemKind::Episode,
+            ItemKind::Book,
+            ItemKind::Audiobook,
+            ItemKind::Folder,
+            ItemKind::Video,
+            ItemKind::Photo,
+        ] {
+            assert_eq!(
+                ranked.contains(kind.as_str()),
+                kind.carries_resolution(),
+                "{kind:?}: the resolution sort and the DTO disagree about whether it has a resolution"
+            );
+        }
+        assert!(clause.contains("ELSE -1 END DESC"), "{clause:?}");
     }
 
     /// The clause is one function, and every backend's page and count use it.

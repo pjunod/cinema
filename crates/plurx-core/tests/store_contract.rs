@@ -29897,6 +29897,13 @@ struct LibrarySortItem {
     year: Option<i32>,
     recorded_at: Option<String>,
     resolution: Option<i64>,
+    /// Absent means `movie`. Every item is inserted at the library root.
+    #[serde(default)]
+    kind: Option<String>,
+    /// The probed height of the item's file when it is not also the merge
+    /// key — a root photo has one and carries no `resolution`.
+    #[serde(default)]
+    file_height: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -29913,19 +29920,26 @@ struct LibrarySortFixture {
 /// that NULL years and NULL capture dates go last, that an item with no file
 /// reads as -1 and sorts after every probed one, that `sort_title` is the
 /// stored `sort_title_for` output rather than anything the DTO recomputes, and
-/// that walking the pages at seven rows — advancing by rows returned, the way
-/// a client does — yields the same sequence as one request for all thirty.
-/// That last part is separate on purpose: a single-request order can be total
-/// while the paged one is not, and the paged one is the only order a native
-/// client that pages on demand ever sees.
+/// that the `resolution` a row carries is the key the SQL ranked it by. That
+/// last one is why the fixture has root photos: a photo is probed and has a
+/// real file height, but no photo carries a `resolution`, so the SQL must rank
+/// it at -1 too — rank it by height and a client merging on the key it was
+/// given sees a cursor that is not sorted under its own comparator.
 ///
-/// **What it does not pin, said plainly: the `, id` tie-break.** Remove `id
-/// ASC` from `item_sort_order_by` and this test still passes, because SQLite
-/// returns the tied rows of this table in rowid order and rowid order is what
-/// the fixture expects. It is not promised to, and `store::item_sort_order_by`
-/// carries the unit test that fails when the clause loses its unique final
-/// key. Leaving that job to this replay would have been a test that agreed
-/// with the change without depending on it.
+/// The paged walk checks the client's walk, not the order: advancing `offset`
+/// by the rows returned and stopping on a short or empty page yields the same
+/// sequence as one request. With one `ORDER BY` for both, paged and whole can
+/// only disagree through ties, and the guard against ties is not this test —
+/// it is `store::item_sort_order_tests::every_sort_ends_in_a_unique_key`,
+/// which requires every clause to end in `id` rather than observing what
+/// SQLite happens to do with tied rows today.
+///
+/// Items 32 (a photo) and 33 (a movie) tie on every visible key of four of
+/// the sorts, and the photo was inserted first. Today the grid query reads
+/// through `idx_items_library_kind`, which yields the movie first, so dropping
+/// the `id` tie-break does fail this replay — but that is a fact about
+/// today's query plan, not a promise, which is why the unit test above stays
+/// the guard.
 ///
 /// The same fixture is what the Apple and Android `LibraryMerge` must
 /// reproduce from k per-library cursors, so an `ORDER BY` edit that this test
@@ -29957,10 +29971,18 @@ async fn library_sort_fixture_matches_order() {
             // sequence rather than on the ordering it is about.
             let mut ids: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
             for item in &fixture.items {
+                let kind = item
+                    .kind
+                    .as_deref()
+                    .map(|kind| {
+                        ItemKind::parse(kind)
+                            .unwrap_or_else(|| panic!("fixture kind {kind:?} is not an item kind"))
+                    })
+                    .unwrap_or(ItemKind::Movie);
                 let id = store
                     .insert_item(&NewItem {
                         library_id: library.id,
-                        kind: ItemKind::Movie,
+                        kind,
                         parent_id: None,
                         title: item.title.clone(),
                         year: item.year,
@@ -29984,11 +30006,16 @@ async fn library_sort_fixture_matches_order() {
                     item.title
                 );
 
-                if let Some(height) = item.resolution {
+                if let Some(height) = item.file_height.or(item.resolution) {
+                    let extension = if kind == ItemKind::Photo {
+                        "jpg"
+                    } else {
+                        "mkv"
+                    };
                     store
                         .upsert_file(
                             id,
-                            &format!("/contract/sort/{}.mkv", item.index),
+                            &format!("/contract/sort/{}.{extension}", item.index),
                             1_000 + item.index,
                             item.index,
                             &ProbeResult {
@@ -29999,6 +30026,22 @@ async fn library_sort_fixture_matches_order() {
                         .await
                         .unwrap_or_else(|error| panic!("{backend}: file for {id}: {error}"));
                 }
+                // The fixture's `resolution` is the key a client merges on, so
+                // it has to be what the DTO carries: the best file height for
+                // a kind that carries one, and nothing for any other kind.
+                let heights = store
+                    .item_max_heights(&[id])
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: heights for {id}: {error}"));
+                let carried = kind
+                    .carries_resolution()
+                    .then(|| heights.get(&id).copied())
+                    .flatten();
+                assert_eq!(
+                    carried, item.resolution,
+                    "{backend}: the resolution {:?} carries",
+                    item.title
+                );
                 if let Some(recorded_at) = item.recorded_at.clone() {
                     store
                         .apply_metadata(

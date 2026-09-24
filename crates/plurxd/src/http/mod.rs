@@ -12265,6 +12265,118 @@ mod tests {
         }
     }
 
+    /// The `resolution` sort's order is reproducible from the rows it returns.
+    ///
+    /// A native client merging several libraries' cursors compares rows on
+    /// `(resolution ?? -1) DESC, sort_title ASC, id ASC` — the key the row
+    /// carries, not the one the SQL computed. A root photo in a Home library
+    /// is probed and has a real file height but no `resolution` on its DTO, so
+    /// the server has to rank it where an absent `resolution` puts it; ranked
+    /// by its 3024-px height it would lead a cursor the client reads as
+    /// unsorted, and the merge would have to drain every other cursor to
+    /// place it.
+    #[tokio::test]
+    async fn library_resolution_sort_is_ordered_by_the_resolution_each_row_carries() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let lib = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Home".into(),
+                kind: LibraryKind::Home,
+                paths: vec![std::path::PathBuf::from("/home-media")],
+                anime: false,
+            })
+            .await
+            .expect("lib");
+        let mut ids = std::collections::HashMap::new();
+        for (title, kind, height) in [
+            ("Pier at Dusk", ItemKind::Photo, Some(3024)),
+            ("Beach Day", ItemKind::Video, Some(720)),
+            ("Birthday", ItemKind::Video, Some(2160)),
+            ("Zebra Crossing", ItemKind::Video, None),
+        ] {
+            let id = state
+                .store
+                .insert_item(&NewItem {
+                    library_id: lib.id,
+                    kind,
+                    parent_id: None,
+                    title: title.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            if let Some(height) = height {
+                state
+                    .store
+                    .upsert_file(
+                        id,
+                        &format!("/home-media/{title}"),
+                        1_000,
+                        1,
+                        &ProbeResult {
+                            height: Some(height),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("file");
+            }
+            ids.insert(title, id);
+        }
+
+        let (status, body) = call(
+            &app,
+            get(
+                &format!("/api/v1/libraries/{}/items?sort=resolution", lib.id),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows = body["items"].as_array().expect("items");
+        let photo = rows
+            .iter()
+            .find(|row| row["id"] == ids["Pier at Dusk"])
+            .expect("the photo is on the page");
+        assert!(
+            photo.get("resolution").is_none_or(Value::is_null),
+            "a photo carries no resolution: {photo}"
+        );
+
+        // The client's comparator, applied to what the client received.
+        let key = |row: &Value| {
+            (
+                std::cmp::Reverse(row["resolution"].as_i64().unwrap_or(-1)),
+                row["sort_title"].as_str().expect("sort_title").to_owned(),
+                row["id"].as_i64().expect("id"),
+            )
+        };
+        let returned: Vec<_> = rows.iter().map(key).collect();
+        let mut reordered = returned.clone();
+        reordered.sort();
+        assert_eq!(
+            returned, reordered,
+            "the server's order is not the order of the keys it sent"
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["id"].as_i64().expect("id"))
+                .collect::<Vec<_>>(),
+            vec![
+                ids["Birthday"],
+                ids["Beach Day"],
+                ids["Pier at Dusk"],
+                ids["Zebra Crossing"],
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn seeded_read_surface() {
         let (app, state) = test_state();

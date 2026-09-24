@@ -1,5 +1,5 @@
 {
-  "note": "The server's library ORDER BY, pinned from outside it. Rust replays these items through list_top_items_in_genre on every backend; the Apple and Android LibraryMerge must reproduce the same order from k shuffled per-library cursors. `index` is the insertion order, so a store that assigns ids 1..N assigns them in this order; a test maps index -> assigned id rather than assuming that. `sort_title` is what plurx_core::domain::sort_title_for produces and what the DTO now carries. Compare it as UTF-8 bytes: SQLite's BINARY collation, not a locale compare. `resolution` null means the item has no file, which the SQL reads as -1 and sorts last.",
+  "note": "The server's library ORDER BY, pinned from outside it. Rust replays these items through list_top_items_in_genre on every backend; the Apple and Android LibraryMerge must reproduce the same order from k shuffled per-library cursors. `index` is the insertion order, so a store that assigns ids 1..N assigns them in this order; a test maps index -> assigned id rather than assuming that. `sort_title` is what plurx_core::domain::sort_title_for produces and what the DTO now carries. Compare it as UTF-8 bytes: SQLite's BINARY collation, not a locale compare. `kind` is the item kind, inserted at the library root (absent means movie). `resolution` is the merge key exactly as the DTO carries it: the best probed file height for a kind that carries a resolution (movie, video -- plurx_core::domain::ItemKind::carries_resolution), and null otherwise. Null is read as -1 and sorts after every item that has one. `file_height` is the probed height of the item's one file when that differs from the key: a root photo has a real height and still carries no resolution, so it sorts with the -1 rows. Items 32 (a photo) and 33 (a movie) tie on every visible key of the title, year, resolution and recorded sorts; only the id tie-break orders them, and it puts the photo first because it was inserted first.",
   "page_size": 7,
   "items": [
     {
@@ -241,6 +241,34 @@
       "year": 2007,
       "recorded_at": "2007-07-07",
       "resolution": null
+    },
+    {
+      "index": 31,
+      "kind": "photo",
+      "title": "Pier at Dusk",
+      "sort_title": "pier at dusk",
+      "year": null,
+      "recorded_at": "2022-08-14T19:02:11",
+      "resolution": null,
+      "file_height": 3024
+    },
+    {
+      "index": 32,
+      "kind": "photo",
+      "title": "Tide Pool",
+      "sort_title": "tide pool",
+      "year": null,
+      "recorded_at": null,
+      "resolution": null,
+      "file_height": 4032
+    },
+    {
+      "index": 33,
+      "title": "The Tide Pool",
+      "sort_title": "tide pool",
+      "year": null,
+      "recorded_at": null,
+      "resolution": null
     }
   ],
   "expected_order": {
@@ -260,9 +288,12 @@
       30,
       8,
       9,
+      31,
       4,
       5,
       13,
+      32,
+      33,
       23,
       24,
       25,
@@ -277,6 +308,9 @@
       22
     ],
     "added": [
+      33,
+      32,
+      31,
       30,
       29,
       28,
@@ -336,7 +370,10 @@
       15,
       3,
       7,
+      31,
       13,
+      32,
+      33,
       23,
       19
     ],
@@ -365,8 +402,11 @@
       7,
       29,
       30,
+      31,
       5,
       13,
+      32,
+      33,
       23,
       11,
       19,
@@ -374,6 +414,7 @@
     ],
     "recorded": [
       10,
+      31,
       8,
       4,
       5,
@@ -398,6 +439,8 @@
       6,
       9,
       13,
+      32,
+      33,
       23,
       11,
       18,
