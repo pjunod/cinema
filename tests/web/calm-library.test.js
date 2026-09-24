@@ -87,7 +87,7 @@ function libraryHarness(pages, state) {
     return node;
   };
   ["main", "libbody", "libpager", "librail", "libcount"].forEach(makeNode);
-  const run = new Function(
+  const api = new Function(
     "assert", "document", "state", "pages", "nodes",
     [
       "let LIB_LOAD=0,LIB_PAGE_AT=0,LIB_VIEW=null,PHOTO_SET=null;",
@@ -97,7 +97,8 @@ function libraryHarness(pages, state) {
       "function layoutChrome(){} function setOrigin(){} function restoreScroll(){}",
       "function libraryBrowseTools(){return '';}",
       "async function libsCached(){return [{id:1}];}",
-      "function matchWatch(){return true;}",
+      // Only "unwatched" is modelled: enough to hide some cards and show them again.
+      "function matchWatch(it,f){return f==='unwatched'?!it.watched:true;}",
       "function libPageCount(n){return LIB_PER==='all'?1:Math.max(1,Math.ceil(n/LIB_PER));}",
       "function pagerHtml(){return '';} function alphaRailHtml(){return '';}",
       "function tagAlpha(){} function exactWireId(i){return i.id;}",
@@ -115,13 +116,19 @@ function libraryHarness(pages, state) {
       // keyword in front of it; put it back or the body's `await` is an
       // identifier.
       `async ${declaration("libraryView")}`,
-      "return libraryView;",
+      // The shipped pager, and the three narrowing globals, so a case can do
+      // what the viewer does after the load: page, filter, scope, find.
+      declaration("libGoPage"),
+      "return {libraryView, libGoPage, redraw(){LIB_VIEW.draw(LIB_VIEW.done);},"
+        + "narrow(n){if('find' in n)LIB_FIND=n.find;if('filter' in n)LIB_FILTER=n.filter;if('scope' in n)LIB_SCOPE=n.scope;}};",
     ].join("\n"),
-  )(assert, { getElementById: (id) => nodes[id] || null }, state, pages, nodes);
-  return { run, nodes };
+  )(assert, { getElementById: (id) => nodes[id] || null, querySelector: () => null }, state, pages, nodes);
+  return { run: api.libraryView, api, nodes };
 }
-const batchA = [{ id: "a1" }, { id: "a2" }];
-const batchB = [{ id: "b1" }, { id: "b2" }, { id: "b3" }];
+// Titles, libraries and watched state exist so the find, scope and filter
+// cases below can hide batch A and show it again.
+const batchA = [{ id: "a1", title: "a1", library_id: 1, watched: true }, { id: "a2", title: "a2", library_id: 1, watched: true }];
+const batchB = [{ id: "b1", title: "b1", library_id: 2 }, { id: "b2", title: "b2", library_id: 2 }, { id: "b3", title: "b3", library_id: 2 }];
 
 (async () => {
   // A single library, unfiltered, one page: the second batch extends the grid
@@ -158,12 +165,39 @@ const batchB = [{ id: "b1" }, { id: "b2" }, { id: "b3" }];
     assert.deepEqual(cards.map((c) => c.id), ["b3", "b2", "b1", "a2", "a1"], "the category did not re-sort the merged set");
     assert.notEqual(cards[0], first, "a category view appended instead of rebuilding");
   }
-  // A paged view's window moves as the list grows, so it rebuilds too.
+  // A paged view's window moves as the list grows and as the viewer pages, so
+  // it rebuilds too. Two cards a page over five items: page 2 is as long as
+  // page 1, which is exactly the draw an append would claim (`page.length >=
+  // painted`) and then leave page 1's cards on screen under page 2's pager.
   {
-    const { run, nodes } = libraryHarness([batchA, batchB], { per: 3 });
+    const { run, api, nodes } = libraryHarness([batchA, batchB], { per: 2 });
     const view = { title: "Films", href: "#/lib/1", libIds: [1], sort: "title", resort: null };
     await run(view);
-    assert.equal(nodes.libbody.grid.children.length, 3, "the page slice was not applied");
+    assert.deepEqual(nodes.libbody.grid.children.map((c) => c.id), ["a1", "a2"], "the page slice was not applied");
+    api.libGoPage(1);
+    assert.deepEqual(nodes.libbody.grid.children.map((c) => c.id), ["b1", "b2"],
+      "paging after the load kept page 1's cards: a paged view appended instead of rebuilding");
+    api.libGoPage(2);
+    assert.deepEqual(nodes.libbody.grid.children.map((c) => c.id), ["b3"]);
+  }
+  // Filter, scope and find change WHICH cards are visible, not how many
+  // arrived. Narrow after the load, then clear: the grid must be the whole
+  // list again, in order and once each. An append would have kept the narrowed
+  // cards and added the tail of the full list after them.
+  for (const [what, narrow, clear] of [
+    ["find", { find: "b" }, { find: "" }],
+    ["filter", { filter: "unwatched" }, { filter: "all" }],
+    ["scope", { scope: "2" }, { scope: "" }],
+  ]) {
+    const { run, api, nodes } = libraryHarness([batchA, batchB], {});
+    const view = { title: "Films", href: "#/lib/1", libIds: [1, 2], sort: "title", resort: null };
+    await run(view);
+    assert.deepEqual(nodes.libbody.grid.children.map((c) => c.id), ["a1", "a2", "b1", "b2", "b3"]);
+    api.narrow(narrow); api.redraw();
+    assert.deepEqual(nodes.libbody.grid.children.map((c) => c.id), ["b1", "b2", "b3"], `${what} did not narrow the grid`);
+    api.narrow(clear); api.redraw();
+    assert.deepEqual(nodes.libbody.grid.children.map((c) => c.id), ["a1", "a2", "b1", "b2", "b3"],
+      `clearing the ${what} appended to the narrowed grid instead of rebuilding it`);
   }
   console.log("Library batches extend the grid they own and rebuild the one they do not.");
 
