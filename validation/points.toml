@@ -975,7 +975,7 @@ depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichm
 [[points]]
 id = "operations.packaging"
 title = "Build, deploy, and release artifacts"
-contract = "Every supported installation path builds the same stamped server and keeps its runtime configuration explicit."
+contract = "Every supported installation path builds the same stamped server and keeps its runtime configuration explicit, from base images pinned by digest rather than by a moving tag, with pin drift reported on a schedule and gating nothing."
 paths = [
   ".dockerignore",
   ".github/actions/**",
@@ -990,6 +990,7 @@ paths = [
   "scripts/ci-execution-mode",
   "scripts/ci-cargo-cache-prepare",
   "scripts/ci-cargo-cache-refresh",
+  "scripts/image-base-drift",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
   "scripts/ci-require-disk",

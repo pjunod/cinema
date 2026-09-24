@@ -1457,6 +1457,7 @@ async fn reset_password(
 
 async fn run(config: Config) -> anyhow::Result<()> {
     let logs = init_logging();
+    report_open_file_limit(plurx_core::process::rlimit::raise_open_file_limit());
     // Signal streams must exist before store activation, system probing, or
     // any listener can make this process externally reachable. Installing them
     // is only half of it: nothing polls that future until `serve` first polls
@@ -1671,6 +1672,36 @@ async fn boot(
 /// must not do to check that discovery is best-effort.
 type MdnsAdvertiser =
     fn(&str, &str, &str, Option<&str>, SocketAddr, &str) -> anyhow::Result<mdns_sd::ServiceDaemon>;
+
+/// Widen the inherited open-file limit and say what it now is.
+///
+/// `#[tokio::main]` builds the runtime before any of `main`'s body runs, so
+/// there is no "before the runtime starts" to run this in. What matters is
+/// that the limit is consulted when a descriptor is opened, and this runs
+/// before the store, the system probe and every listener open theirs.
+///
+/// A limit that cannot be raised is reported and is not fatal: the daemon
+/// served on the inherited soft limit before this call existed, and refusing
+/// to boot over a resource limit would be a worse failure than the
+/// exhaustion it guards against.
+fn report_open_file_limit(
+    outcome: std::io::Result<Option<plurx_core::process::rlimit::OpenFileLimit>>,
+) {
+    match outcome {
+        Ok(Some(limit)) => tracing::info!(
+            "open files: soft {} -> {} (hard {})",
+            limit.soft_before,
+            limit.soft_after,
+            limit.hard
+        ),
+        // A platform without POSIX resource limits, which is the Windows
+        // service. There is no number to report.
+        Ok(None) => {}
+        Err(error) => tracing::warn!(
+            "raising the soft open-file limit failed ({error}); continuing on the inherited limit"
+        ),
+    }
+}
 
 /// Console logging plus separate bounded rings for general and cluster events.
 ///
@@ -6273,6 +6304,51 @@ mod startup_tests {
             tracing_subscriber::registry().with(logbuf::BufferLayer(Arc::clone(&logs)));
         tracing::subscriber::with_default(subscriber, body);
         logs
+    }
+
+    /// Both numbers, or the line cannot answer the question it exists for.
+    ///
+    /// After an `EMFILE` the only thing worth knowing is which limit the
+    /// daemon was actually running under, and "soft 1024" without the hard
+    /// limit beside it does not say whether raising the unit's `LimitNOFILE`
+    /// would have helped. Synthetic values: the raise itself is process-wide
+    /// and is proved in `plurx_core::process::rlimit`.
+    #[test]
+    fn the_open_file_limit_is_logged_with_both_values() {
+        let logs = captured(|| {
+            report_open_file_limit(Ok(Some(plurx_core::process::rlimit::OpenFileLimit {
+                soft_before: 256,
+                soft_after: 524_288,
+                hard: 524_288,
+            })));
+        });
+        let messages = logs
+            .tail("info", 8)
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            vec!["open files: soft 256 -> 524288 (hard 524288)".to_owned()]
+        );
+    }
+
+    /// A resource limit is not a reason to refuse to serve.
+    #[test]
+    fn an_open_file_limit_that_cannot_be_raised_is_only_a_warning() {
+        let logs = captured(|| {
+            report_open_file_limit(Err(std::io::Error::other("refused")));
+        });
+        let entries = logs.tail("trace", 8);
+        let [entry] = &entries[..] else {
+            panic!("expected exactly one event, got {}", entries.len());
+        };
+        assert_eq!(entry.level, "WARN");
+        assert!(
+            entry.message.contains("continuing on the inherited limit"),
+            "unexpected message: {}",
+            entry.message
+        );
     }
 
     /// The async counterpart: capture on this thread until the guard drops.

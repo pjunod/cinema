@@ -2797,7 +2797,18 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # `kill_on_drop`, an output cap (2 MiB) and a 15 s timeout. It runs only for
 # the chapter a watch page asked for, two at a time behind a semaphore, and
 # nothing owns it beyond the request's await.
-expected_occurrences = 152
+# 152 -> 154 with P-02 (#457), measured by zeroing this row: two
+# `std::process::Command::new` in `crates/plurx-core/src/process/rlimit.rs`'s
+# `#[cfg(all(test, unix))]` module, both run to completion by `.output()`
+# before the test asserts. One re-execs the test binary as
+# `process::rlimit::tests::child_main`. It lowers only its own soft
+# `RLIMIT_NOFILE` so that the shared test process is untouched, prints one
+# line and exits. The branch added it without this review. The other is
+# `/usr/sbin/sysctl -n kern.maxfilesperproc`, the macOS-only oracle that the
+# review fix compares the clamped raise against, and it is reached only under
+# `cfg!(target_vendor = "apple")`. Neither is a producer, neither outlives
+# its statement, and neither is in a shipped binary.
+expected_occurrences = 154
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3074,7 +3085,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `subtitle_ride_along::run_ffmpeg`, which spawns, drains and reaps the
 # self-test's child in one await under the 20 s timeout; `kill_on_drop` covers
 # the timeout.
-expected_occurrences = 350
+# 350 -> 352 with P-02 (#457), measured by zeroing this row: the `.output()`
+# on each of the two test-only children in
+# `crates/plurx-core/src/process/rlimit.rs` that are described under
+# `process-command-construction` above (the `child_main` re-exec and the
+# macOS `sysctl` oracle). They are the same two children, counted once in
+# each sentinel, and each is spawned, drained and reaped in one call.
+expected_occurrences = 352
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
