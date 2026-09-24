@@ -51,6 +51,9 @@ const SERVICE1_OFFSET: usize = 3;
 /// emits one frame per field moves a cue by up to a field.
 const CUE_TOLERANCE_SECONDS: f64 = 0.1;
 
+/// (display frame, text) for each caption a fixture stream carries.
+type FrameCues = Vec<(usize, &'static str)>;
+
 #[derive(Clone, Debug, PartialEq)]
 struct CaptionCue {
     at: f64,
@@ -84,7 +87,7 @@ struct CaptionTrack {
 
 fn odd_parity(byte: u8) -> u8 {
     let byte = byte & 0x7f;
-    if byte.count_ones() % 2 == 0 {
+    if byte.count_ones().is_multiple_of(2) {
         byte | 0x80
     } else {
         byte
@@ -94,7 +97,7 @@ fn odd_parity(byte: u8) -> u8 {
 /// One CC1 byte pair per displayed frame. Each caption is the pop-on shape a
 /// broadcaster sends — RCL, ENM, PAC row 15, text, EOC — with every control
 /// code doubled, as 608 requires; the cue is shown at its first EOC.
-fn cc1_pairs() -> (Vec<[u8; 2]>, Vec<(usize, &'static str)>) {
+fn cc1_pairs() -> (Vec<[u8; 2]>, FrameCues) {
     let mut pairs = vec![[0x80, 0x80]; FIXTURE_FRAMES];
     let mut cues = Vec::new();
     for (start, text) in FIXTURE_CAPTIONS {
@@ -124,7 +127,7 @@ fn cc1_pairs() -> (Vec<[u8; 2]>, Vec<(usize, &'static str)>) {
 
 /// One DTVCC packet per caption, carrying one service-1 block: clear every
 /// window, define window 0 visible, the text, ETX.
-fn service1_packets() -> (BTreeMap<usize, Vec<u8>>, Vec<(usize, &'static str)>) {
+fn service1_packets() -> (BTreeMap<usize, Vec<u8>>, FrameCues) {
     let mut packets = BTreeMap::new();
     let mut cues = Vec::new();
     for (sequence, (start, text)) in FIXTURE_CAPTIONS.into_iter().enumerate() {
