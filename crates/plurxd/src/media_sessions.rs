@@ -63,12 +63,21 @@ pub(crate) const MAX_ADMITTED_MEDIA_BODY_LIFETIME: Duration = Duration::from_sec
 /// Bytes requested from storage per read while streaming a media body.
 ///
 /// Tokio's file reader performs one blocking-pool hop per read and caps an
-/// individual read at 2 MiB. This matches the existing fragment-index and
-/// offline transfer paths while keeping the per-body resident bound finite.
+/// individual read at 2 MiB. Every file-backed media body shares it: direct
+/// play and ranges (`serve_file_range`), both HLS pumps, offline transfers
+/// and the internal media relay.
+///
+/// 128 KiB, not 256 KiB, on measurement (docs/streaming/MEDIA-BODY-BUFFERS.md
+/// Decision 1, §5.1.1). The two sizes were indistinguishable on direct-play
+/// throughput and HLS latency, and both cut storage reads 32-64x against the
+/// 4 KiB default, but `ReaderStream::with_capacity` reserves the buffer
+/// eagerly and tokio sizes its blocking read to match, so the size is paid by
+/// every open body whatever it carries: 256 KiB cost about 1.8 MiB per
+/// concurrent large body over 4 KiB, 128 KiB about 1.1 MiB.
 ///
 /// This is a storage-efficiency number only. It is deliberately *not* the
 /// unit the HLS pump proves delivery in; see `MEDIA_BODY_ACK_GRANULARITY`.
-pub(crate) const MEDIA_BODY_READ_BUFFER: usize = 256 * 1024;
+pub(crate) const MEDIA_BODY_READ_BUFFER: usize = 128 * 1024;
 /// Bytes of a media body proved delivered per downstream acknowledgement.
 ///
 /// The HLS pump counts bytes, renews the playback lease and completes an

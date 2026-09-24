@@ -631,12 +631,44 @@
     /// -- renews the lease and moves the fetched-segment frontier. So the
     /// chunk size is the resolution of that whole proof: the most a response
     /// can over-credit, and the largest object a single body poll can make
-    /// look complete. Raising the storage read to 256 KiB without splitting it
-    /// here would raise that resolution 64x and let `init.mp4`, subtitle
+    /// look complete. Raising the storage read to 128 KiB without splitting it
+    /// here would raise that resolution 32x and let `init.mp4`, subtitle
     /// segments and audio-only renditions -- every media object at or below
     /// the read size -- commit on one poll from a client that then walked
     /// away. This pins the two numbers apart: the object below is one storage
     /// read and many acknowledgements.
+    /// Decision 1 of docs/streaming/MEDIA-BODY-BUFFERS.md, taken on the §5.1.1
+    /// measurement: the shared media read is 128 KiB, and the delivery-proof
+    /// unit stays 4 KiB beside it rather than following it.
+    ///
+    /// The read size is a memory/throughput trade-off, so it is pinned by
+    /// value: moving it (back to 256 KiB, or anywhere else) is a new decision
+    /// that must go through the measurement again, not a drive-by edit. The
+    /// acknowledgement unit is pinned independently, so re-coupling the two by
+    /// defining one from the other fails here even where the sizes happen to
+    /// agree, and re-coupling them inside the pumps fails
+    /// `a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units`.
+    #[test]
+    fn the_shared_media_read_is_128_kib_and_the_delivery_proof_stays_4_kib() {
+        assert_eq!(
+            MEDIA_BODY_READ_BUFFER,
+            128 * 1024,
+            "the shared media read size is Decision 1's 128 KiB; changing it \
+             needs the §5.1 measurement re-run, not just this assertion"
+        );
+        assert_eq!(
+            MEDIA_BODY_ACK_GRANULARITY,
+            4 * 1024,
+            "the delivery-proof unit is 4 KiB whatever the read size is"
+        );
+        assert_eq!(
+            MEDIA_BODY_READ_BUFFER / MEDIA_BODY_ACK_GRANULARITY,
+            32,
+            "one storage read is split into 32 acknowledgements; if this ratio \
+             is 1 the read size has become the proof granularity again"
+        );
+    }
+
     #[tokio::test]
     async fn a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units() {
         use futures_util::StreamExt;
