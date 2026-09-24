@@ -2243,6 +2243,17 @@ final class PlayerController: ObservableObject {
         }
     }
     var openGenerationForTesting: Int { openGeneration }
+    /// Production-linked overlay seams. Only the decision's track list and the
+    /// selection publication are supplied; the selection, window load, tick,
+    /// seek and failure paths are the production ones.
+    func selectPGSOverlayForTesting(_ index: Int?, tracks: [SubtitleTrack], atMs position: Int) {
+        currentMs = position
+        selectedSubtitle = index
+        updatePGSOverlaySelection(index, tracks: tracks)
+    }
+    /// The viewer's pick is published before the overlay hears of it.
+    func publishSelectedSubtitleForTesting(_ index: Int?) { selectedSubtitle = index }
+    var pgsOverlayLoadingRangeForTesting: Range<Int>? { pgsOverlayLoadingRange }
     /// Every explicit viewer command invalidates recovery work that crossed an
     /// await. Session generation alone cannot see pause/resume or native seek.
     private var viewerActionEpoch = 0
@@ -2354,6 +2365,25 @@ final class PlayerController: ObservableObject {
     private var pgsOverlayManifest: PGSOverlayManifest?
     private var pgsOverlayPrepareTask: Task<Void, Never>?
     private var pgsOverlayWindowTask: Task<Void, Never>?
+    /// The source range the in-flight window load covers, so a periodic tick
+    /// cannot cancel the very load that will cover its position.
+    private var pgsOverlayLoadingRange: Range<Int>?
+    /// Which window load is current; an older load's outcome is not news.
+    private var pgsOverlayLoadGeneration = 0
+    /// Consecutive failed window loads in this failure episode. The first
+    /// raises the notice; ticks then retry silently on
+    /// `PGSOverlayPolicy.windowRetryDelaysMs` and stop when those are spent.
+    /// A success, a seek, a reselection or a new item ends the episode.
+    private var pgsOverlayWindowFailures = 0
+    private var pgsOverlayLastFailureMs = 0
+    /// Monotonic milliseconds for the failure backoff. XCTest replaces it.
+    var pgsOverlayClockMs: @MainActor () -> Int = {
+        Int(ProcessInfo.processInfo.systemUptime * 1_000)
+    }
+    /// Overlay fetches. Nil reads through the model, as production does.
+    var pgsOverlayFetcherForTesting: PGSOverlayFetcher?
+    /// Overlay failure notices this controller raised.
+    private(set) var pgsOverlayNoticeCount = 0
     private var pgsOverlaySelectionGeneration = 0
     private var pgsOverlayItemGeneration = 0
     private var pgsOverlayRevision = 0
@@ -3454,7 +3484,7 @@ final class PlayerController: ObservableObject {
         // made tvOS look as though the progress command had not worked.
         currentMs = target
         ttffMeasurement.rebasePosition(at: target)
-        refreshPGSOverlayWindow(at: target, force: true)
+        pgsOverlaySeeked(to: target)
         playbackRecoveryMonitor.reset()
         deliveryStarvation.reset()
         interactiveSeekTask?.cancel()
@@ -4692,6 +4722,8 @@ final class PlayerController: ObservableObject {
         observeStatus(of: item)
         pgsOverlayItemGeneration &+= 1
         pgsOverlayWindowTask?.cancel()
+        pgsOverlayLoadingRange = nil
+        pgsOverlayWindowFailures = 0
         pgsOverlayWindow = nil
         stallObservation.reset()
         player.replaceCurrentItem(with: item)
@@ -4711,7 +4743,7 @@ final class PlayerController: ObservableObject {
         if seekAfterAttach == nil {
             ttffMeasurement.rebasePosition(at: realPositionMs())
         }
-        refreshPGSOverlayWindow(at: startMs, force: true)
+        refreshPGSOverlayWindow(at: startMs, reason: .force)
         // Start loading/playing immediately. Previously a resume point gated
         // this call behind item readiness and could leave tvOS permanently
         // presenting a stopped transport. That regression is why a paused
@@ -4871,13 +4903,15 @@ final class PlayerController: ObservableObject {
         return false
     }
 
-    private func updatePGSOverlaySelection(_ index: Int?) {
-        guard let index, Self.subtitleUsesOverlay(index, in: subtitles) else {
+    private func updatePGSOverlaySelection(_ index: Int?, tracks: [SubtitleTrack]? = nil) {
+        guard let index, Self.subtitleUsesOverlay(index, in: tracks ?? subtitles) else {
             clearPGSOverlaySelection()
             return
         }
         guard pgsOverlayTrackIndex != index else {
-            refreshPGSOverlayWindow(at: positionForPlaybackIntent())
+            // A reselection of the same track is a viewer asking again, so it
+            // is allowed past a failure backoff the way a seek is.
+            refreshPGSOverlayWindow(at: positionForPlaybackIntent(), reason: .seek)
             return
         }
 
@@ -4891,7 +4925,7 @@ final class PlayerController: ObservableObject {
         let selectionGeneration = pgsOverlaySelectionGeneration
 
         pgsOverlayPrepareTask = Task { [weak self] in
-            guard let self, let model = self.model else { return }
+            guard let self, let fetcher = self.pgsOverlayFetcher() else { return }
             do {
                 let clock = ContinuousClock()
                 let deadline = clock.now.advanced(
@@ -4903,10 +4937,7 @@ final class PlayerController: ObservableObject {
                           self.pgsOverlayTrackIndex == index,
                           self.selectedSubtitle == index
                     else { return }
-                    switch try await model.pgsOverlayManifest(
-                        fileId: self.fileId,
-                        trackIndex: index
-                    ) {
+                    switch try await fetcher.manifest(self.fileId, index) {
                     case .ready(let rawManifest):
                         let manifest = try rawManifest.validated(
                             fileId: self.fileId,
@@ -4918,7 +4949,7 @@ final class PlayerController: ObservableObject {
                         self.pgsOverlayManifest = manifest
                         self.refreshPGSOverlayWindow(
                             at: self.positionForPlaybackIntent(),
-                            force: true
+                            reason: .force
                         )
                         return
                     case .preparing(let retryAfterMs):
@@ -4930,11 +4961,9 @@ final class PlayerController: ObservableObject {
                 return
             } catch {
                 guard self.pgsOverlaySelectionGeneration == selectionGeneration else { return }
-                self.pgsOverlayStatus = .failed(error.localizedDescription)
+                self.pgsOverlayStatus = .failed(PGSOverlayPolicy.failureDescription(error))
                 self.pgsOverlayWindow = nil
-                self.showPlaybackNotice(
-                    "\(error.localizedDescription) Video playback was kept unchanged."
-                )
+                self.raisePGSOverlayNotice(error)
             }
         }
     }
@@ -4945,6 +4974,8 @@ final class PlayerController: ObservableObject {
         pgsOverlayPrepareTask = nil
         pgsOverlayWindowTask?.cancel()
         pgsOverlayWindowTask = nil
+        pgsOverlayLoadingRange = nil
+        pgsOverlayWindowFailures = 0
         pgsOverlayTrackIndex = nil
         pgsOverlayManifest = nil
         pgsOverlayWindow = nil
@@ -4955,15 +4986,51 @@ final class PlayerController: ObservableObject {
         player.allowsExternalPlayback = true
     }
 
-    private func refreshPGSOverlayWindow(at sourceTimeMs: Int, force: Bool = false) {
+    /// Why a window refresh was asked for. Only `.force` skips the policy.
+    enum PGSOverlayRefreshReason {
+        /// The 1 s periodic observer: never cancels a covering load, and after
+        /// a failure retries only on the bounded backoff.
+        case tick
+        /// A seek or a reselection: the same coverage rule, but a failure
+        /// backoff is the viewer's to override.
+        case seek
+        /// A new item or a newly prepared manifest: always reload.
+        case force
+    }
+
+    /// The periodic observer's overlay step, separated so XCTest drives the
+    /// same call the observer makes.
+    func pgsOverlayPeriodicTick(currentMs: Int) {
+        if let overlayPosition = PGSOverlayPolicy.periodicRefreshPosition(
+            currentMs: currentMs,
+            overlayIsActive: pgsOverlayIsActive
+        ) {
+            refreshPGSOverlayWindow(at: overlayPosition, reason: .tick)
+        }
+    }
+
+    /// `issueSeek`'s overlay step. A seek inside the published window, or
+    /// inside the one already loading, keeps it: the published window's
+    /// layers are timed to the item, so they are already right for the new
+    /// position, and reloading would only blank them for the round trip.
+    func pgsOverlaySeeked(to target: Int) {
+        refreshPGSOverlayWindow(at: target, reason: .seek)
+    }
+
+    private func refreshPGSOverlayWindow(at sourceTimeMs: Int, reason: PGSOverlayRefreshReason) {
         guard let manifest = pgsOverlayManifest,
               let trackIndex = pgsOverlayTrackIndex,
-              selectedSubtitle == trackIndex,
-              force || PGSOverlayPolicy.shouldRefresh(
-                sourceTimeMs: sourceTimeMs,
-                loadedRange: pgsOverlayWindow?.sourceRange
-              )
+              selectedSubtitle == trackIndex
         else { return }
+        if reason == .seek { pgsOverlayWindowFailures = 0 }
+        guard reason == .force || PGSOverlayPolicy.shouldRefresh(
+            sourceTimeMs: sourceTimeMs,
+            loadedRange: pgsOverlayWindow?.sourceRange,
+            loadingRange: pgsOverlayLoadingRange,
+            windowFailures: pgsOverlayWindowFailures,
+            msSinceFailure: pgsOverlayClockMs() - pgsOverlayLastFailureMs
+        ) else { return }
+        if reason == .force { pgsOverlayWindowFailures = 0 }
 
         let sourceRange = PGSOverlayPolicy.windowRange(
             at: sourceTimeMs,
@@ -4977,9 +5044,16 @@ final class PlayerController: ObservableObject {
         let itemBaseMs = baseMs
         let generation = manifest.generation
         pgsOverlayWindowTask?.cancel()
+        pgsOverlayLoadGeneration &+= 1
+        let loadGeneration = pgsOverlayLoadGeneration
+        pgsOverlayLoadingRange = sourceRange
 
         pgsOverlayWindowTask = Task { [weak self] in
-            guard let self, let model = self.model else { return }
+            // Every exit of the current load gives its range back, whichever
+            // guard it leaves by. A range left behind would tell every later
+            // tick and seek that a load which no longer exists covers them.
+            defer { self?.finishPGSOverlayLoad(loadGeneration) }
+            guard let self, let fetcher = self.pgsOverlayFetcher() else { return }
             do {
                 guard PGSOverlayPolicy.windowFitsDecodedBudget(cues) else {
                     throw PGSOverlayError.memoryLimit
@@ -4998,12 +5072,13 @@ final class PlayerController: ObservableObject {
                         if let cached = self.cachedPGSOverlayImage(object.image) {
                             image = cached
                         } else {
-                            let data = try await model.pgsOverlayObject(
-                                fileId: self.fileId,
-                                trackIndex: trackIndex,
-                                generation: generation,
-                                path: object.image
+                            let data = try await fetcher.object(
+                                self.fileId,
+                                trackIndex,
+                                generation,
+                                object.image
                             )
+                            try Task.checkCancellation()
                             guard let decoded = UIImage(data: data)?.cgImage,
                                   decoded.width == object.width,
                                   decoded.height == object.height
@@ -5029,7 +5104,10 @@ final class PlayerController: ObservableObject {
                 guard self.pgsOverlaySelectionGeneration == selectionGeneration,
                       self.pgsOverlayItemGeneration == itemGeneration,
                       self.pgsOverlayTrackIndex == trackIndex,
-                      self.selectedSubtitle == trackIndex
+                      self.selectedSubtitle == trackIndex,
+                      // A superseded load that finished before it saw its
+                      // cancellation must not publish over its successor.
+                      self.pgsOverlayLoadGeneration == loadGeneration
                 else { return }
                 self.pgsOverlayRevision &+= 1
                 self.pgsOverlayWindow = PGSOverlayWindow(
@@ -5039,18 +5117,42 @@ final class PlayerController: ObservableObject {
                     sourceRange: sourceRange,
                     cues: rendered
                 )
+                self.pgsOverlayWindowFailures = 0
                 self.pgsOverlayStatus = .ready
             } catch is CancellationError {
                 return
             } catch {
-                guard self.pgsOverlaySelectionGeneration == selectionGeneration else { return }
-                self.pgsOverlayStatus = .failed(error.localizedDescription)
+                guard self.pgsOverlaySelectionGeneration == selectionGeneration,
+                      self.pgsOverlayLoadGeneration == loadGeneration
+                else { return }
                 self.pgsOverlayWindow = nil
-                self.showPlaybackNotice(
-                    "\(error.localizedDescription) Video playback was kept unchanged."
-                )
+                self.pgsOverlayWindowFailures += 1
+                self.pgsOverlayLastFailureMs = self.pgsOverlayClockMs()
+                self.pgsOverlayStatus = .failed(PGSOverlayPolicy.failureDescription(error))
+                // Said once per failure episode. The backoff retries that
+                // follow are silent; a success or a seek ends the episode.
+                if self.pgsOverlayWindowFailures == 1 {
+                    self.raisePGSOverlayNotice(error)
+                }
             }
         }
+    }
+
+    private func finishPGSOverlayLoad(_ loadGeneration: Int) {
+        if pgsOverlayLoadGeneration == loadGeneration {
+            pgsOverlayLoadingRange = nil
+        }
+    }
+
+    private func raisePGSOverlayNotice(_ error: Error) {
+        pgsOverlayNoticeCount += 1
+        showPlaybackNotice(PGSOverlayPolicy.failureNotice(error))
+    }
+
+    private func pgsOverlayFetcher() -> PGSOverlayFetcher? {
+        if let pgsOverlayFetcherForTesting { return pgsOverlayFetcherForTesting }
+        guard let model else { return nil }
+        return PGSOverlayFetcher(model: model)
     }
 
     private func cachedPGSOverlayImage(_ key: String) -> CGImage? {
@@ -6850,12 +6952,7 @@ final class PlayerController: ObservableObject {
                 // button rather than one tick later.
                 self.autoSkipActiveMarkerIfNeeded()
                 self.playbackControlPlayerChanged()
-                if let overlayPosition = PGSOverlayPolicy.periodicRefreshPosition(
-                    currentMs: self.currentMs,
-                    overlayIsActive: self.pgsOverlayIsActive
-                ) {
-                    self.refreshPGSOverlayWindow(at: overlayPosition)
-                }
+                self.pgsOverlayPeriodicTick(currentMs: self.currentMs)
                 // The last rate the viewer was genuinely playing at, so a
                 // pause at 1.5× is restored as 1.5× and not as the 0 the
                 // transport reports while paused (P2-5).
@@ -7268,6 +7365,8 @@ final class PlayerController: ObservableObject {
         observeStatus(of: item)
         pgsOverlayItemGeneration &+= 1
         pgsOverlayWindowTask?.cancel()
+        pgsOverlayLoadingRange = nil
+        pgsOverlayWindowFailures = 0
         pgsOverlayWindow = nil
         player.replaceCurrentItem(with: item)
         if resumeAttempt?.repairAdmitted == true {
@@ -7280,7 +7379,7 @@ final class PlayerController: ObservableObject {
         // SOURCE time — `resume` is deliberately item-local for a growing
         // session, and passing it would load the window for the wrong part of
         // the film whenever `baseMs` is nonzero.
-        refreshPGSOverlayWindow(at: currentMs, force: true)
+        refreshPGSOverlayWindow(at: currentMs, reason: .force)
         do { try await seekWhenReady(item, ms: resume, owner: seekOwner) }
         catch {
             // The status observer will drive the next node or terminal
@@ -9462,6 +9561,8 @@ extension PlayerController: PreparedSuccessorHost {
         observeStatus(of: item)
         pgsOverlayItemGeneration &+= 1
         pgsOverlayWindowTask?.cancel()
+        pgsOverlayLoadingRange = nil
+        pgsOverlayWindowFailures = 0
         pgsOverlayWindow = nil
         stallObservation.reset()
         // M3. The predecessor's final reading, and then the instant the item
@@ -9502,7 +9603,7 @@ extension PlayerController: PreparedSuccessorHost {
         player.play()
         if !wantsPlayback { player.pause() }
         isPlaying = wantsPlayback
-        refreshPGSOverlayWindow(at: boundaryMs, force: true)
+        refreshPGSOverlayWindow(at: boundaryMs, reason: .force)
         ttffMeasurement.rebasePosition(at: realPositionMs())
         let exposedAtUnixMs = Int(Date().timeIntervalSince1970 * 1_000)
         let firstFrameUnixMs = await awaitPreparedFirstFrame(boundaryMs: boundaryMs)

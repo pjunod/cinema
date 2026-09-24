@@ -1387,9 +1387,9 @@ async fn burn_would_discard_this_session_hdr(
         // nothing honest to say about a file we cannot see.
         return false;
     };
-    if !request.subtitle_burn.is_some_and(|index| index >= 0) {
+    let Some(index) = request.subtitle_burn.filter(|index| *index >= 0) else {
         return false;
-    }
+    };
     let base_grade = state
         .transcode
         .grade_preview(file, hdr10_requested, height, None)
@@ -1397,7 +1397,21 @@ async fn burn_would_discard_this_session_hdr(
     let (method, preserve, _) = session_delivery_shape(&request.kind);
     let base_range =
         plurx_core::playback::delivered_dynamic_range(file, method, preserve, base_grade);
-    plurx_core::playback::burn_would_discard_hdr(base_range, true)
+    if !plurx_core::playback::burn_would_discard_hdr(base_range, true) {
+        return false;
+    }
+    // Asked only on the way to a refusal: a track the store holds as a real
+    // track with no cues has nothing to burn, so the session keeps its range
+    // and starts without an overlay. The lookup order is the store's own —
+    // the switch, the MPEG-TS rule, the manifest on the cache disk, and only
+    // then the source's `fstat`.
+    !crate::subtitle_source::stored_as_empty(
+        &state.subtitle_source_access(),
+        file,
+        index,
+        crate::subtitle_source::Live::Path(&file.path),
+    )
+    .await
 }
 
 /// The dynamic range this session puts on the wire, read off the session it

@@ -3198,6 +3198,17 @@ impl crate::store::FragmentIndexStore for HiqliteAuthStore {
         self.telemetry.forget_fragment_index(file_id).await
     }
 
+    async fn holds_fragment_index_for_source(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+    ) -> Result<bool, StoreError> {
+        self.telemetry
+            .holds_fragment_index_for_source(file_id, source_size, source_mtime)
+            .await
+    }
+
     async fn record_fragment_index_outcome(
         &self,
         file_id: i64,

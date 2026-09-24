@@ -1,0 +1,16 @@
+version = 1
+
+[[coverage]]
+commits = ["7ebc40b7"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+A preparation the runner failed with `OverlayError::Internal` (the cache could
+not be created or synced) is remembered like any other failed preparation but
+answered a codeless 500, so neither client could tell it from a store error.
+The `Internal` row of
+`http::pgs_overlay::tests::a_remembered_preparation_failure_is_a_typed_terminal_answer_not_a_503`
+requires the typed 500 `pgs_overlay_prepare_failed`; putting the arm back to
+`ApiError::Internal(why)` fails it with "a failed preparation must be typed,
+got Internal(..)", which was run on 2026-09-23.
+"""

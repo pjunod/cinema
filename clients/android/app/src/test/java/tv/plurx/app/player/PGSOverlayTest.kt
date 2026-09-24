@@ -1,6 +1,18 @@
 package tv.plurx.app.player
 
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -195,6 +207,150 @@ class PGSOverlayTest {
         )
         assertEquals(PGSOverlayRect(150f, 900f, 1620f, 180f), anamorphic)
     }
+
+    /**
+     * `tests/playback/pgs-overlay-cases.json` is the fixture the Apple suite
+     * reads too. The row that failed before this test existed is the refresh
+     * margin one: a forward seek into the loaded window's last 20 s kept the
+     * pre-seek cue on screen, because the refresh cleared only when the new
+     * position was outside the loaded window. `PGSOverlayControllerTest`
+     * drives the same seek through the controller.
+     */
+    @Test
+    fun seekCasesFromSharedFixture() {
+        val fixture = sharedFixture()
+        val manifest = fixture.getValue("manifest").jsonObject
+        val durationMs = manifest.getValue("duration_ms").jsonPrimitive.long
+        val cues = manifest.getValue("cues").jsonArray.map {
+            val cue = it.jsonObject
+            cue(
+                cue.getValue("id").jsonPrimitive.content,
+                cue.getValue("start_ms").jsonPrimitive.long,
+                cue.getValue("end_ms").jsonPrimitive.long,
+            )
+        }
+        val cases = fixture.getValue("seek_cases").jsonArray
+        assertTrue(cases.size >= 6)
+        cases.forEach { element ->
+            val case = element.jsonObject
+            val name = case.getValue("name").jsonPrimitive.content
+            val expect = case.getValue("expect").jsonObject
+            val plan = PGSOverlayPolicy.seekPlan(
+                positionMs = case.getValue("to_ms").jsonPrimitive.long,
+                loadedWindow = window(case.getValue("loaded_window")),
+                loadingWindow = case["loading_window"]?.let(::window),
+                shownCueId = case.getValue("shown_cue").stringOrNull(),
+                cues = cues,
+                durationMs = durationMs,
+            )
+            assertEquals(name, expect.getValue("refresh").jsonPrimitive.boolean, plan.refresh)
+            assertEquals(name, expect.getValue("clear_now").jsonPrimitive.boolean, plan.clearNow)
+            assertEquals(name, expect.getValue("active_cue").stringOrNull(), plan.activeCueId)
+            assertEquals(name, window(expect.getValue("window")), plan.window)
+        }
+    }
+
+    /**
+     * The refresh rule every non-seek player event and every backoff retry
+     * applies: the same rows Apple's periodic tick is held to.
+     */
+    @Test
+    fun tickCasesFromSharedFixture() {
+        val cases = sharedFixture().getValue("tick_cases").jsonArray
+        assertTrue(cases.size >= 8)
+        cases.forEach { element ->
+            val case = element.jsonObject
+            val name = case.getValue("name").jsonPrimitive.content
+            assertEquals(
+                name,
+                case.getValue("expect").jsonObject.getValue("refresh").jsonPrimitive.boolean,
+                PGSOverlayPolicy.refreshDecision(
+                    positionMs = case.getValue("position_ms").jsonPrimitive.long,
+                    loadedWindow = window(case.getValue("loaded_window")),
+                    loadingWindow = window(case.getValue("loading_window")),
+                    windowFailures = case.getValue("window_failures").jsonPrimitive.int,
+                    msSinceFailure = case.getValue("ms_since_failure").jsonPrimitive.long,
+                ),
+            )
+        }
+    }
+
+    /**
+     * The manifest answers both clients must read the same way, each built as
+     * the `retrofit2.Response` the production fetch receives and read by the
+     * same `readPGSOverlayManifestResponse` it calls. A non-2xx has a null
+     * `body()`; the old reader looked only there and said "empty PGS overlay
+     * response" for every refusal.
+     */
+    @Test
+    fun manifestResponsesFromSharedFixture() {
+        val cases = sharedFixture().getValue("manifest_responses").jsonArray
+        assertTrue(cases.size >= 6)
+        cases.forEach { element ->
+            val case = element.jsonObject
+            val name = case.getValue("name").jsonPrimitive.content
+            val status = case.getValue("status").jsonPrimitive.int
+            val retryAfter = case.getValue("retry_after").stringOrNull()
+            val body = case.getValue("body").toString()
+            val expect = case.getValue("expect").jsonObject
+            val disposition = expect.getValue("disposition").jsonPrimitive.content
+            val expectedRetry = expect["retry_after_ms"]?.jsonPrimitive?.int
+            val expectedNotice = expect["notice"]?.jsonPrimitive?.content
+
+            val raw = okhttp3.Response.Builder()
+                .request(okhttp3.Request.Builder().url("http://plurx.test/api/v1/files/42/subs/3/overlay.json").build())
+                .protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(status)
+                .message("fixture")
+                .header("Content-Type", "application/json")
+                .apply { retryAfter?.let { header("Retry-After", it) } }
+                .build()
+            val responseBody = body.toResponseBody("application/json".toMediaType())
+            val response = if (status in 200..299) {
+                retrofit2.Response.success(responseBody, raw)
+            } else {
+                retrofit2.Response.error(responseBody, raw)
+            }
+
+            val outcome = runCatching { readPGSOverlayManifestResponse(response) }
+            when (val fetch = outcome.getOrNull()) {
+                is PGSOverlayManifestFetch.Ready -> {
+                    assertEquals(name, "ready", disposition)
+                    fetch.manifest.validated(42, 3)
+                }
+                is PGSOverlayManifestFetch.Preparing -> {
+                    assertEquals(name, "preparing", disposition)
+                    assertEquals(name, expectedRetry, fetch.retryAfterMs)
+                }
+                null -> {
+                    assertEquals(name, "terminal", disposition)
+                    val error = outcome.exceptionOrNull()
+                    assertTrue(name, error is IllegalStateException)
+                    val notice = PGSOverlayPolicy.failureNotice(error!!.message!!)
+                    if (expectedNotice != null) {
+                        assertEquals(name, expectedNotice, notice)
+                    }
+                    assertFalse(name, notice.contains("empty"))
+                }
+            }
+        }
+    }
+
+    private fun sharedFixture(): JsonObject {
+        val resource = checkNotNull(javaClass.classLoader?.getResource("pgs-overlay-cases.json")) {
+            "tests/playback/pgs-overlay-cases.json is not on the JVM test classpath"
+        }
+        return Net.json.parseToJsonElement(resource.readText()).jsonObject
+    }
+
+    private fun window(element: JsonElement): PGSOverlayTimeWindow? {
+        if (element is JsonNull) return null
+        val bounds = element as JsonArray
+        return PGSOverlayTimeWindow(bounds[0].jsonPrimitive.long, bounds[1].jsonPrimitive.long)
+    }
+
+    private fun JsonElement.stringOrNull(): String? =
+        if (this is JsonNull) null else jsonPrimitive.content
 
     private fun manifest(cues: List<PGSOverlayCue>) = PGSOverlayManifest(
         schema = 1,
