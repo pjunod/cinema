@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 import runpy
 import tempfile
@@ -468,9 +469,15 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
             3,
             "update the M0 inventory when a shipping HLS builder is added or migrated",
         )
-        live_tv = (ROOT / "crates/plurxd/src/live_tv.rs").read_text(
+        # The shipping region ends where the first test module begins. A
+        # `#[cfg(test)]` field or seam inside a production item is not that
+        # boundary, so split on the module declaration, not on the attribute.
+        live_tv_source = (ROOT / "crates/plurxd/src/live_tv.rs").read_text(
             encoding="utf-8"
-        ).split("#[cfg(test)]", 1)[0]
+        )
+        test_module = re.search(r"^#\[cfg\(test\)\]\nmod \w+", live_tv_source, re.M)
+        self.assertIsNotNone(test_module, "live_tv.rs has no test module to split on")
+        live_tv = live_tv_source[: test_module.start()]
         self.assertEqual(
             live_tv.count("tokio::process::Command::new("),
             2,
