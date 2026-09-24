@@ -6987,7 +6987,8 @@ async fn run_live_session_inner(
                     stderr.abort();
                     let _ = stderr.await;
                 }
-                drop(child_job);
+                // The job goes with this iteration; the encoder admission is
+                // given back now, before the restart asks for its own.
                 drop(admission);
                 if !transport.reserve_seat() {
                     return Err(transport.terminal_error().unwrap_or_else(|| {
@@ -11534,7 +11535,8 @@ exec /bin/cat > {sink}"#,
         };
         assert!(agrees(&base), "a tune that probes the same facts agrees");
 
-        let mutations: [(&str, Box<dyn Fn(&mut LiveSourceFacts)>); 6] = [
+        type Mutation = Box<dyn Fn(&mut LiveSourceFacts)>;
+        let mutations: [(&str, Mutation); 6] = [
             (
                 "video codec",
                 Box::new(|f| f.video_codec = Some("h264".into())),
