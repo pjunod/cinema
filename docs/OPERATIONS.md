@@ -4702,6 +4702,8 @@ curl -s $HOST/metrics | grep plurx_live_tv
 | `plurx_live_tv_starts_total{outcome="created"\|"recovered"\|"failed"}` | a climbing `failed` with a flat `created` is the shape of a device problem |
 | `plurx_live_tv_session_ends_total{reason="terminal"}` | sessions that ended in a terminal state |
 | `plurx_live_tv_relay_bytes_total` | bytes a non-owner served by relaying from the owner |
+| `plurx_live_tv_start_plan_total{source="cold"\|"joined"\|"warm_agreed"\|"warm_disagreed"}` | where each viewer's plan came from. `warm_*` is a channel watched again within its cached facts' life (20 minutes, or the end of the programme): its FFmpeg starts on the tuner's first bytes and nothing is published until this tune's probe agrees. A `warm_disagreed` that is not rare means the facts outlive the broadcast's format |
+| `plurx_live_tv_orphans{kind="process"\|"scratch"}` | ended sessions whose cleanup the owner is still retrying: `process` holds an FFmpeg whose exit is unconfirmed (and its encoder slot), `scratch` only a directory. Both should return to 0; a `process` that stays up is a stuck child worth a look on the box |
 | `plurx_dvr_sink_failures_total{reason="disk_write_failed"\|"disk_write_timeout"\|"disk_write_backlog"}` | capture attempts ended by one sink's disk path; a rising counter does not mean the shared tuner transport failed |
 
 Sessions and starts are **per process**. On a cluster, the owner's numbers are
