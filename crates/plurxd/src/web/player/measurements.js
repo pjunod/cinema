@@ -249,6 +249,12 @@ function beginWait(v){
   const p=PLAYER;
   if(!p||!p.started||v.seeking||v.paused) return;
   if(!playbackOwnsAttachedMedia(p)) return;
+  // `seeked` can fire before a sparse VOD target is fetched. The local
+  // seek's bounded fallback owns that gap, including `waiting` events after
+  // the element has cleared its seeking flag.
+  const pending=p.controlSeek;
+  if(pending?.localVodSeekFallbackPending&&pending.executed
+     &&!playbackSeekBufferCovers(v,p,pending.targetMs)) return;
   if(p.waitAt) return;                       // already hungry; not a second one
   p.waitAt=performance.now();
   p.waitStartedRunway=bufferRunway(v);
