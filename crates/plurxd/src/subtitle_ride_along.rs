@@ -1876,6 +1876,7 @@ pub(crate) fn synthetic_media_file(
     let metadata =
         std::fs::metadata(source).map_err(|error| format!("stat the synthetic source: {error}"))?;
     Ok(plurx_core::domain::MediaFile {
+        downloaded_subtitles: Vec::new(),
         id: 0,
         item_id: 0,
         path: source.to_owned(),

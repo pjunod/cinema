@@ -1995,7 +1995,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # In `live_tv::dvr::tests`: a fan-out worker and a viewer-feed reader (both
 # joined), and one `std::thread::spawn` racing an attach against retirement
 # (joined each round). No timer, no process, no producer.
-expected_occurrences = 587
+# Subtitle acquisition adds four: one shutdown-owned background loop, one
+# bounded held-file hashing worker, and two test-only HTTP fixture servers.
+# The hash worker holds its file until it exits; timeout discards its result
+# and it cannot publish captions. Fixture servers are aborted after use.
+expected_occurrences = 591
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2698,7 +2702,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # of one that exits before registration). Once per host, `kill_on_drop`,
 # bounded by a 120 s `tokio::time::timeout`, awaited to completion through
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
-expected_occurrences = 901
+# Subtitle acquisition adds four: the 60-second background cadence, its
+# 120-second work budget, and five-second bounds on opening and hashing one
+# media file. Shutdown and lease loss cancel the async acquisition page.
+expected_occurrences = 905
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3261,7 +3268,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # of one that exits before registration). Once per host, `kill_on_drop`,
 # bounded by a 120 s `tokio::time::timeout`, awaited to completion through
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
-expected_occurrences = 370
+# Subtitle acquisition adds two reqwest Response::status() reads for
+# HTTP status and redirect handling. Neither launches a process.
+expected_occurrences = 372
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

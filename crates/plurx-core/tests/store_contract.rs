@@ -339,6 +339,8 @@ const LIBRARY_CHANNEL_METHODS: &[&str] = &[
 ];
 const CLASSIFICATION_METHODS: &[&str] = &["classification_page", "write_classification"];
 const MEDIA_METHODS: &[&str] = &[
+    "add_downloaded_subtitle",
+    "subtitle_candidate_file_ids",
     "item_by_external_id",
     "find_movie",
     "find_movies_by_directory",
@@ -635,6 +637,7 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "validation_corrupt_recovery_restriction",
 ];
 const FENCED_PUBLICATION_METHODS: &[&str] = &[
+    "add_downloaded_subtitle_fenced",
     "put_setting_fenced",
     "put_setting_if_absent_fenced",
     "put_setting_if_absent_if_artwork_repair_current_fenced",
@@ -10616,7 +10619,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
     );
 }
 
-/// v44 through v40, newest first, for the downgrade helpers below. Each of
+/// v45 through v40, newest first, for the downgrade helpers below. Each of
 /// these migrations is an `ADD COLUMN` or an unconditional `CREATE`, so
 /// replaying it over a fixture that still carries its result fails; v42 also
 /// rebuilt the active-request index over `video_identity`, which must be back
@@ -10626,6 +10629,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 #[cfg(feature = "hiqlite-contract-tests")]
 fn post_v39_downgrade_statements() -> Vec<(&'static str, hiqlite::Params)> {
     [
+        "ALTER TABLE files DROP COLUMN downloaded_subtitles",
         "ALTER TABLE files DROP COLUMN luminance_source",
         "ALTER TABLE files DROP COLUMN mastering_max_luminance",
         "ALTER TABLE files DROP COLUMN max_fall",
@@ -14929,6 +14933,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              ALTER TABLE files DROP COLUMN dv_bl_compat_id;
              ALTER TABLE files DROP COLUMN dv_level;
              ALTER TABLE files DROP COLUMN dv_profile;
+             ALTER TABLE files DROP COLUMN downloaded_subtitles;
              ALTER TABLE files DROP COLUMN luminance_source;
              ALTER TABLE files DROP COLUMN mastering_max_luminance;
              ALTER TABLE files DROP COLUMN max_fall;
@@ -16722,7 +16727,9 @@ fn contract_inventory_matches_every_store_method() {
     // expiry policy read in the same snapshot as its row. `user_for_token`
     // stays, now a provided method over it so every older caller honours
     // expiry. Named in `USER_METHODS` above; no new trait or supertrait.
-    assert_eq!(declared.len(), 385, "review the Store method count");
+    // 385 -> 388: acquired-caption publication, its fenced form, and the
+    // bounded candidate cursor. The downloaded-subtitle contract covers all three.
+    assert_eq!(declared.len(), 388, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -26790,6 +26797,222 @@ async fn seed_file(store: &Arc<dyn Store>, prefix: &str) -> (i64, i64) {
         .await
         .expect("seed file");
     (user.id, file)
+}
+
+#[tokio::test]
+async fn downloaded_subtitles_survive_rescan_and_reject_stale_or_duplicate_writes() {
+    for_each_backend(|store, backend| async move {
+        let (_, id) = seed_file(&store, "downloaded-subtitle").await;
+        let original = store
+            .get_file(id)
+            .await
+            .expect("subtitle contract fixture")
+            .expect("subtitle contract fixture");
+        let track = plurx_core::domain::DownloadedSubtitle {
+            source_size: original.size,
+            source_mtime: original.mtime,
+            provider_file_id: 123,
+            language: "en".into(),
+            title: "OpenSubtitles · Example".into(),
+            hearing_impaired: true,
+            forced: false,
+            vtt: "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nA missing caption.\n".into(),
+        };
+        assert!(!original.probed, "fixture starts before its first probe");
+        assert!(!store
+            .add_downloaded_subtitle(id, &track)
+            .await
+            .expect("reject unprobed caption"));
+        let embedded = plurx_core::domain::SubtitleStream {
+            index: 0,
+            codec: "subrip".into(),
+            language: Some("en".into()),
+            ..Default::default()
+        };
+        store
+            .upsert_file(
+                original.item_id,
+                original.path.to_str().expect("path"),
+                original.size,
+                original.mtime,
+                &ProbeResult {
+                    raw_json: Some("{}".into()),
+                    video_codec: Some("h264".into()),
+                    subtitle_streams: vec![embedded.clone()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("first successful probe");
+        assert_eq!(
+            store
+                .subtitle_candidate_file_ids(0, 16)
+                .await
+                .expect("caption candidates"),
+            vec![id]
+        );
+        assert!(store
+            .subtitle_candidate_file_ids(id, 16)
+            .await
+            .expect("candidate cursor")
+            .is_empty());
+        let clock = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("subtitle contract fixture")
+            .as_millis() as i64;
+        let lease = acquired(
+            store
+                .acquire_lease("subtitles:contract", "node-a", clock, clock + 90_000)
+                .await
+                .expect("subtitle contract fixture"),
+            backend,
+        );
+        let replacement = publication_successor(&lease);
+        assert!(
+            store
+                .add_downloaded_subtitle_fenced(id, &track, &lease, &replacement)
+                .await
+                .expect("subtitle contract fixture"),
+            "{backend}"
+        );
+        let mut stale_track = track.clone();
+        stale_track.provider_file_id = 999;
+        assert!(
+            store
+                .add_downloaded_subtitle_fenced(id, &stale_track, &lease, &replacement)
+                .await
+                .is_err(),
+            "{backend}: a stale job cannot publish"
+        );
+        assert!(
+            !store
+                .add_downloaded_subtitle(id, &track)
+                .await
+                .expect("subtitle contract fixture"),
+            "{backend}: duplicate"
+        );
+        let loaded = store
+            .get_file(id)
+            .await
+            .expect("subtitle contract fixture")
+            .expect("subtitle contract fixture");
+        assert_eq!(loaded.subtitle_streams.len(), 2, "{backend}");
+        assert_eq!(loaded.subtitle_streams[0].index, 0);
+        assert_eq!(loaded.subtitle_streams[0].codec, "subrip");
+        assert!(loaded.downloaded_subtitle(0).is_none());
+        assert_eq!(
+            loaded
+                .downloaded_subtitle(1)
+                .expect("subtitle contract fixture")
+                .vtt,
+            track.vtt
+        );
+        assert!(serde_json::to_value(&loaded)
+            .expect("subtitle contract fixture")
+            .get("downloaded_subtitles")
+            .is_none());
+        let probe = ProbeResult {
+            raw_json: Some("{}".into()),
+            duration_ms: Some(7_200_000),
+            container: Some("mkv".into()),
+            ..Default::default()
+        };
+        store
+            .upsert_file(
+                original.item_id,
+                original.path.to_str().expect("subtitle contract fixture"),
+                original.size,
+                original.mtime,
+                &probe,
+            )
+            .await
+            .expect("subtitle contract fixture");
+        assert_eq!(
+            store
+                .get_file(id)
+                .await
+                .expect("subtitle contract fixture")
+                .expect("subtitle contract fixture")
+                .downloaded_subtitles
+                .len(),
+            1,
+            "{backend}: rescan preserves captions"
+        );
+        let mut second = track.clone();
+        second.provider_file_id = 124;
+        second.language = "fr".into();
+        let mut third = track.clone();
+        third.provider_file_id = 125;
+        third.language = "de".into();
+        let (a, b) = tokio::join!(
+            store.add_downloaded_subtitle(id, &second),
+            store.add_downloaded_subtitle(id, &third)
+        );
+        assert!(
+            a.expect("subtitle contract fixture") && b.expect("subtitle contract fixture"),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .get_file(id)
+                .await
+                .expect("subtitle contract fixture")
+                .expect("subtitle contract fixture")
+                .downloaded_subtitles
+                .len(),
+            3,
+            "{backend}: concurrent additions preserved"
+        );
+        store
+            .upsert_file(
+                original.item_id,
+                original.path.to_str().expect("subtitle contract fixture"),
+                original.size + 1,
+                original.mtime + 1,
+                &probe,
+            )
+            .await
+            .expect("subtitle contract fixture");
+        let changed = store
+            .get_file(id)
+            .await
+            .expect("subtitle contract fixture")
+            .expect("subtitle contract fixture");
+        assert!(
+            changed.downloaded_subtitles.is_empty(),
+            "{backend}: source revision"
+        );
+        assert!(changed.subtitle_streams.is_empty());
+        assert!(
+            !store
+                .add_downloaded_subtitle(id, &second)
+                .await
+                .expect("subtitle contract fixture"),
+            "{backend}: stale write"
+        );
+        second.source_size += 1;
+        second.source_mtime += 1;
+        assert!(
+            store
+                .add_downloaded_subtitle(id, &second)
+                .await
+                .expect("subtitle contract fixture"),
+            "{backend}: fresh revision replaces stale list"
+        );
+        assert_eq!(
+            store
+                .get_file(id)
+                .await
+                .expect("subtitle contract fixture")
+                .expect("subtitle contract fixture")
+                .downloaded_subtitles
+                .len(),
+            1
+        );
+        second.vtt = "<html>wrong</html>".into();
+        assert!(store.add_downloaded_subtitle(id, &second).await.is_err());
+    })
+    .await;
 }
 
 fn unix_seconds() -> i64 {

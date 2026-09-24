@@ -1734,6 +1734,7 @@
     /// successor a takeover forever, so the fixture carries a readable one.
     fn staged_source_file() -> plurx_core::domain::MediaFile {
         plurx_core::domain::MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 11,
             item_id: 1,
             path: std::path::PathBuf::from("/library/staged.mkv"),
