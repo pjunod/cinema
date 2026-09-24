@@ -45,9 +45,11 @@
     "link": ["bandwidth-limited", "delivery-refused"],
     "encode": ["capacity-shortfall"],
     "decode": [],
-    "hold": ["loader-suspended"],
+    "hold": ["loader-suspended", "control-stall-verdict"],
     "authority": ["authority-refused", "producer-failed"],
-    "unknown": ["unknown", "stale"]
+    "unknown": ["unknown", "stale"],
+    "not_evidence": ["producer-paced"],
+    "hold_split": "Design section 3.2 splits what the server calls a hold in two, and the split is the point. `control-stall-verdict` is a `hold` or `retry_resource` verdict that answered this client's OWN `stalled` ask: it is trouble evidence and suppresses a downward move for as long as the stall deferral lasts. `producer-paced` is the advisory hold `resolve_action` (crates/plurxd/src/playback_control.rs) returns on EVERY control exchange while the producer's ahead window is full, together with `producer_state == \"held\"` (crates/plurxd/src/transcode.rs): that is the ordinary steady state of a paced JIT producer ahead of its viewer, it is not suppression evidence in either direction, and it is exactly the state upward recovery happens in. No platform emits either kind today; the web consumes a hold only inside `persistentWait` (crates/plurxd/src/web/player/measurements.js), after the stall is recorded."
   },
   "ladder": [
     {"height": 1080, "total_kbps": 8160, "peak_kbps": 12160},
@@ -191,18 +193,39 @@
       }
     },
     {
-      "name": "hold: a control verdict in force must stop an upgrade the link would otherwise justify",
-      "section": "3.2 hold, 3.5 a control verdict in force",
+      "name": "hold: a verdict answering this client's own stall suppresses a cliff downswitch",
+      "section": "3.2 hold (stall-scoped), 3.5 a stall-scoped control verdict",
+      "sample": {
+        "activeSupplyStall": true,
+        "runwaySeconds": 0.4,
+        "estimateKbps": 2500,
+        "recentEstimateKbps": 2500,
+        "recentEstimateAtMs": 599000,
+        "lastStallAtMs": 595000,
+        "causeEvidence": {"kind": "control-stall-verdict", "ageMs": 2000}
+      },
+      "expect": {
+        "height": 720,
+        "reason": "control-stall-verdict",
+        "action": "suppressed",
+        "emergency": false,
+        "evidence": {"kind": "control-stall-verdict"}
+      },
+      "web_current": {"height": 480, "reason": "bandwidth cliff", "action": "switch", "emergency": true},
+      "finding": "The server answered this client's own `stalled` ask with `hold` or `retry_resource`, so production is paused or restarting and a fragment fetched now measures the producer, not the link: on a JIT server a transfer that waits on production reads as a cliff. `decideRung` cannot tell, because no platform hands it the verdict. The web holds the verdict only as a local inside `persistentWait` (crates/plurxd/src/web/player/measurements.js), Android only inside `applyStallVerdict` (Controller.kt), and `autoControllerTick` keeps running through the deferral, so a fresh slow transfer during a held stall takes the emergency branch and reopens a rung lower. This is a gap the fixture records, not an observed field defect: nobody has a trace of it. The build plan's M0.1 settles it by adding `control-stall-verdict` to `namedSuppression`, scoped to the stall deferral (20 s on the web, `CONTROL_STALL_DEFER_DEADLINE_MS`). Upgrades need nothing new here: the stall that prompted the ask already set `lastStallAtMs`, and `stallFree` refuses every upgrade for `stallWindowMs`."
+    },
+    {
+      "name": "hold: a routine paced hold is the steady state and never blocks an upgrade",
+      "section": "3.2 hold (not evidence: the advisory ahead-window hold and producer_state held)",
+      "note": "The server returns `hold` on every control exchange while the rolling producer's ahead window is full (`resolve_action` and `HoldReason` in crates/plurxd/src/playback_control.rs; only a client that reports `stalled` has it withheld), and `producer_state` reads `held` whenever the producer is suspended. With a healthy buffer, a fast link and encode headroom, that is a producer paced ahead of its viewer, and it is the state upward recovery is meant to happen in. The web emits no cause kind for it; a native classifier that names it must name it `producer-paced`, outside `namedSuppression`. This case fails if `producer-paced` ever joins `namedSuppression`, which is how M0.1 would freeze Auto if it keyed on any hold.",
       "sample": {
         "estimateKbps": 20000,
         "recentSpeed": 3.0,
         "runwaySeconds": 30,
         "upgradeSinceMs": 540000,
-        "causeEvidence": {"kind": "control-hold", "ageMs": 1000}
+        "causeEvidence": {"kind": "producer-paced", "ageMs": 1000}
       },
-      "expect": {"height": 720, "reason": "hold", "action": "suppressed"},
-      "web_current": {"height": 1080, "reason": "bandwidth recovered"},
-      "finding": "The most valuable disagreement in this file. `autoCauseEvidence` has no control-verdict kind at all, so a hold or retry verdict is invisible to the policy; with a healthy buffer and a fast sample the browser upgrades straight through it. A starved viewer is protected only incidentally, because an empty runway with no fresh cause suppresses for insufficient evidence instead. Design sections 3.2 and 3.5 both require the verdict itself to be the gate. Two things follow for the build plan: `autoCauseEvidence` gains a `control-hold` kind fed by the control verdict already in hand, and `decideRung` adds it to the `namedSuppression` list. Android already has the verdict at the same seam (`Controller.kt`'s `hold`/`retry_resource` arm), which is the one place this is easier off the browser than on it."
+      "expect": {"height": 1080, "reason": "bandwidth recovered"}
     },
     {
       "name": "authority: a refused owner outranks even a fresh cliff",
@@ -450,49 +473,70 @@
   ],
   "controller_gates": [
     {
-      "comment": "Design section 3.5's rows are not `decideRung` inputs: they decide whether the controller runs at all, so they live in `autoControllerTick` (crates/plurxd/src/web/player/stall-diagnosis.js). `web_gate` is the literal substring of that shipped function which implements the row; the runner asserts it is still there, so deleting a gate fails here rather than silently enabling the controller somewhere it must not run. A null `web_gate` means the browser has no such gate and the row carries a finding."
+      "comment": "Design section 3.5's rows are not `decideRung` inputs: they decide whether the controller runs at all, so they live in `autoControllerTick` (crates/plurxd/src/web/player/stall-diagnosis.js). `web_gate` is the literal substring of that shipped function which implements the row, and `web_phase` says which side of the awaited `pollSessionHealth` it must appear on (`before_poll`, `after_poll` or `both`). The runner splits the function at that await and asserts each gate on its side, so deleting a gate fails here even when the same expression survives on the other side of the poll. A null `web_gate` means the browser has no such gate and the row carries a finding. Rows with a gate cover the eight guards design section 8.1 lists; Original and Manual rung share one."
     },
     {
       "viewer_state": "Original",
       "rule": "the controller is off entirely",
       "web_gate": "qualityForce()!=='auto'",
+      "web_phase": "before_poll",
       "why": "`qualityForce` maps `original` and `nomse` to `original`, so the same gate that refuses a manual rung refuses Original. Original is a fidelity promise, not a rung."
     },
     {
       "viewer_state": "Manual rung",
       "rule": "off; an explicit pick is an instruction, not a hint",
       "web_gate": "qualityForce()!=='auto'",
+      "web_phase": "before_poll",
       "why": "`qualityForce` maps any numeric height to `transcode`."
     },
     {
       "viewer_state": "Paused",
       "rule": "off; a paused player's runway is meaningless and its estimate is stale",
       "web_gate": "v.paused",
+      "web_phase": "before_poll",
       "why": "Read straight off the media element in the tick's first gate."
     },
     {
       "viewer_state": "Not yet started",
       "rule": "off until the first frame; there is nothing to measure",
       "web_gate": "!p.started",
+      "web_phase": "before_poll",
       "why": "Startup owns its own recovery ladder; the quality controller must not race it."
     },
     {
       "viewer_state": "A move already in flight",
       "rule": "one automatic move ever, claimed and released",
       "web_gate": "p.abr.switching",
+      "web_phase": "both",
       "why": "Section 3.3's `one automatic move in flight, ever`. The tick re-reads it after the awaited health poll as well, because `maybeDecodeRescue` can claim while the tick waits."
     },
     {
       "viewer_state": "Media this playback does not own",
       "rule": "off; a rung change on media another playback owns is a second session",
       "web_gate": "playbackOwnsAttachedMedia(p)",
+      "web_phase": "both",
       "why": "Checked before the poll and again after it, together with attachment, session and stream identity."
     },
     {
       "viewer_state": "The replicated setting is off",
       "rule": "off; `playback_auto_abr` is the switch that already exists and no new one is added",
       "web_gate": "SERVER.playback_auto_abr",
-      "why": "Design section 3.7 and section 4: no new settings key, and readiness never gates enablement."
+      "web_phase": "before_poll",
+      "why": "Design section 3.7 and section 4: no new settings key. The switch lives in the Playback panel's Streaming card today, not in Developer; the build plan records moving it as a follow-up."
+    },
+    {
+      "viewer_state": "An automatic fallback already claimed",
+      "rule": "off while another automatic move holds the single claim",
+      "web_gate": "p.autoFallbackInFlight",
+      "web_phase": "both",
+      "why": "Section 3.3's single automatic claim (`claimAutoFallback`/`releaseAutoFallback`). A supply or decode rescue that already claimed it owns this playback's one automatic move; the tick refuses before the poll and again after it, because an unawaited `maybeDecodeRescue` can claim while the tick waits."
+    },
+    {
+      "viewer_state": "The playback changed during the health poll",
+      "rule": "abandon the tick if the player, attachment, session or stream changed while it awaited the poll",
+      "web_gate": "PLAYER!==p||p.mediaAttachment!==attachment||p.sessionId!==session||p.streamId!==stream",
+      "web_phase": "after_poll",
+      "why": "The decision is computed from a health sample the tick awaited. If a seek, reopen or title change replaced the playback meanwhile, deciding would move a rung on media this tick never measured."
     },
     {
       "viewer_state": "Background / PiP",
@@ -507,10 +551,10 @@
       "finding": "`decideRung` has no grade input and `autoControllerTick` has no grade gate, so the policy cannot tell a rung that keeps HDR10 from one that drops to SDR. The server decides the grade per rung (`hdr10_rung_fits`, `crates/plurxd/src/transcode.rs`), so the client learns of an unexpected SDR transition only after the switch has landed. Design section 3.5 wants it refused while the cause is `link:` only, and section 5.3 counts unexpected SDR transitions as an acceptance metric, so the ladder the policy is given has to carry each rung's grade. That is a server-shaped change (the ladder gains a grade per rung) and belongs to the build plan, not here."
     },
     {
-      "viewer_state": "A control verdict in force",
-      "rule": "off until the verdict's deadline",
+      "viewer_state": "A stall-scoped control verdict",
+      "rule": "not a tick gate: the tick keeps running, and the verdict reaches decideRung as `control-stall-verdict` evidence that suppresses a downward move for the stall deferral; the routine paced hold is not this row",
       "web_gate": null,
-      "finding": "Same gap as the `control-hold` case above, seen from the tick rather than from the policy: nothing in `autoControllerTick` reads the control verdict. Android is the platform where this is already at hand, in the `hold`/`retry_resource` arm of its verdict handling."
+      "finding": "Same gap as the stall-scoped `hold:` case above, seen from the tick: nothing in `autoControllerTick` reads the verdict, which the web holds only as a local inside `persistentWait` and Android only inside `applyStallVerdict`. It is deliberately not a gate that turns the controller off: the server sends `hold` on every exchange while a paced producer is ahead, so a gate keyed on any hold would freeze Auto in exactly the healthy state upward recovery needs."
     }
   ]
 }

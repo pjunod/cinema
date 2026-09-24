@@ -6272,7 +6272,18 @@ const AUTO_DECISION_KEYS = new Set([
 // otherwise silently stop covering it.
 const VIEWER_STATES_SECTION_3_5 = [
   "Original", "Manual rung", "Paused", "Background / PiP", "HDR fidelity",
-  "A control verdict in force",
+  "A stall-scoped control verdict",
+];
+
+// Design section 8.1's tick guards, in the order `autoControllerTick` applies
+// them. Pinned here rather than read from the fixture for the same reason as
+// the table above: a fixture that dropped a row would otherwise silently stop
+// pinning the guard.
+const TICK_GUARDS_SECTION_8_1 = [
+  "playbackOwnsAttachedMedia(p)", "SERVER.playback_auto_abr",
+  "qualityForce()!=='auto'", "!p.started", "v.paused", "p.abr.switching",
+  "p.autoFallbackInFlight",
+  "PLAYER!==p||p.mediaAttachment!==attachment||p.sessionId!==session||p.streamId!==stream",
 ];
 
 test("the Auto-quality fixture's defaults are the browser's own constants", () => {
@@ -6355,7 +6366,16 @@ test("the Auto-quality fixture drives decideRung, and records every disagreement
 
 test("every controller gate the fixture names is still in the shipped tick", () => {
   const tick = shippedSource("autoControllerTick");
-  let asserted = 0;
+  // Each gate is asserted on its own side of the awaited health poll. A whole-
+  // function substring match let `if(p.autoFallbackInFlight) return;` be
+  // deleted with the suite green, because the post-poll re-check still spells
+  // the same expression.
+  const poll = "await pollSessionHealth(";
+  const at = tick.indexOf(poll);
+  assert.ok(at > 0 && tick.indexOf(poll, at + 1) < 0,
+    "autoControllerTick must await exactly one health poll");
+  const sides = { before_poll: tick.slice(0, at), after_poll: tick.slice(at) };
+  const pinned = new Set();
   for (const row of autoQuality.controller_gates) {
     if (!row.viewer_state) continue;
     if (row.web_gate == null) {
@@ -6365,13 +6385,24 @@ test("every controller gate the fixture names is still in the shipped tick", () 
       );
       continue;
     }
-    assert.ok(
-      tick.includes(row.web_gate),
-      `${row.viewer_state}: autoControllerTick no longer contains ${row.web_gate}`,
-    );
-    asserted += 1;
+    const phases = row.web_phase === "both"
+      ? ["before_poll", "after_poll"]
+      : [row.web_phase];
+    for (const phase of phases) {
+      assert.ok(Object.prototype.hasOwnProperty.call(sides, phase),
+        `${row.viewer_state}: web_phase must be before_poll, after_poll or both`);
+      assert.ok(
+        sides[phase].includes(row.web_gate),
+        `${row.viewer_state}: autoControllerTick no longer contains ${row.web_gate} ${phase.replace("_", " ")}`,
+      );
+    }
+    pinned.add(row.web_gate);
   }
-  assert.ok(asserted >= 6, "the gate list stopped pinning the tick");
+  for (const guard of TICK_GUARDS_SECTION_8_1) {
+    assert.ok(pinned.has(guard), `design section 8.1 guard ${guard} has no fixture row`);
+  }
+  assert.equal(pinned.size, TICK_GUARDS_SECTION_8_1.length,
+    "a fixture gate row names a guard design section 8.1 does not list");
 });
 
 // Drained last, in registration order, after every synchronous case has run.
