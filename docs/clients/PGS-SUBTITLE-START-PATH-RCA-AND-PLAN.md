@@ -550,8 +550,10 @@ The first Pixel 11 run exposed a client seek timeout even with subtitles Off:
 the remux rendered a frame 282 ms before the requested position, outside the
 client's 250 ms first-frame window. Android versionCode 124 waits for later
 rendered video to cross that target before settling a progressive-remux seek.
-The exact installed versionCode 124 package passed both PGS seek directions.
-Six physical Android devices reported versionCode 124 after installation;
+The versionCode 124 package passed both PGS seek directions before the
+subsequent foreground guard review fix. The final package with that guard was
+installed on six physical Android devices, each reporting versionCode 124;
+its Pixel replay is pending device unlock.
 six reachable physical Apple devices reported build 182. These installations
 used local development builds; they are not evidence of store-signed release
 packages.
