@@ -106,7 +106,7 @@ const SETTINGS_MANIFEST={
   livetv:{required:["settings"],secondary:["developerReadiness"]},
   analysis:{required:["settings","analysis"],secondary:[]},
   maintenance:{required:["settings","dvConversions"],secondary:["developerReadiness"]},
-  users:{required:["users"],secondary:[]},
+  users:{required:["settings","users"],secondary:[]},
   system:{required:["sys"],secondary:["playbackEvents"]},
   cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness"]},
   integrations:{required:["settings","trakt"],secondary:[]},
@@ -269,7 +269,7 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
   // Leaving a section drops any minted join token: it is bearer material, and
   // the operator who switched away is done with it whether or not they said so.
   if(SETTINGS_SHOWN_TAB!==tab) forgetJoinToken();
-  SETTINGS_SHOWN_TAB=tab; LIB_DRAWER=null; USER_DRAWER=null;
+  SETTINGS_SHOWN_TAB=tab; LIB_DRAWER=null; USER_DRAWER=null; DEVICE_DRAWER=null;
   try{ localStorage.setItem("plurx_settings_tab",tab); }catch(e){}
   layoutChrome("settings",settingsShell(tab));
   setPagePhase(route,generation,"shell");
