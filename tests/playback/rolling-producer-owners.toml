@@ -2051,7 +2051,13 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # test returns, and it owns no producer, process, child, timer or lease. The
 # sentinel still sees it, which is the point: the one thing this module may not
 # do is start a rolling owner nobody joins.
-expected_occurrences = 47
+# 47 -> 48 (measured) with L-03 M3: one test-only `command.spawn()` in
+# `live_tv::caption_audit_tests::run_live_graph`, which runs the production
+# live FFmpeg argv on a generated caption fixture. The child is
+# `kill_on_drop`, its stdin is written and closed in the same `join!` that
+# awaits `wait_with_output` under a 180 s timeout, so it cannot outlive the
+# test. No producer, no session, nothing registered.
+expected_occurrences = 48
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2632,7 +2638,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # wait is the assertion rather than a wait for somebody else's work. It sits
 # inside `mod tests`, it is bounded, and it owns no producer, no process, no
 # child and no recovery decision.
-expected_occurrences = 878
+# 878 -> 880 (measured) with L-03 M3: two test-only `tokio::time::timeout`
+# calls in `live_tv::caption_audit_tests` (`media_command` and
+# `run_live_graph`), each bounding one awaited FFmpeg/ffprobe child to
+# 180 s. Neither is a timer anything else observes.
+expected_occurrences = 880
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2839,7 +2849,14 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # in `plurx-core/src/process/rlimit.rs` and C-08's one in
 # `plurxd/src/panics.rs`, each reviewed above. Disjoint files; the merge
 # itself added no occurrence.
-expected_occurrences = 155
+# 155 -> 160 (measured) with L-03 M3: five test-only commands in
+# `live_tv::caption_audit_tests` -- the fixture's MPEG-2 generation and
+# mux, the ffprobe that exports `cc_data`, the H.264 copy-route source,
+# and the production live argv rebuilt in `run_live_graph` (same program,
+# arguments and cleared environment as `live_ffmpeg_command_for_input`).
+# Each is awaited to completion under a 180 s timeout with `kill_on_drop`;
+# none is a producer and none is in a shipped binary.
+expected_occurrences = 160
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3172,7 +3189,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # C-07 and C-08 reads are different call sites in `plurxd/src/http/mod.rs`
 # (the façade census against the request-metrics middleware and their own
 # tests); the merge itself added no occurrence.
-expected_occurrences = 367
+# 367 -> 369 (measured) with L-03 M3: the two launches of the commands
+# described under process-command-construction -- `media_command`'s
+# `.output()` and `run_live_graph`'s `.spawn()` -- both test-only and
+# awaited to completion.
+expected_occurrences = 369
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3401,7 +3422,11 @@ pattern = "kill_on_drop\\s*\\("
 # self-test's shutdown drops is killed with it. The index pass's own child,
 # which now also carries the ride-along's tee, was already `kill_on_drop` and
 # is unchanged.
-expected_occurrences = 82
+# 82 -> 84 (measured) with L-03 M3: `media_command` and `run_live_graph` in
+# `live_tv::caption_audit_tests`, so an FFmpeg child whose 180 s timeout
+# fires, or whose test panics, is killed rather than left holding a
+# hardware encoder the next audit run needs.
+expected_occurrences = 84
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
