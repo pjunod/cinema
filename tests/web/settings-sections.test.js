@@ -205,7 +205,7 @@ test("a card's Save wakes on a change and sleeps again once saved", () => {
 test("Playback saves per card, and each card writes only its own fields", () => {
   const writes = {};
   const run = (fn, ids) => new Function(
-    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS", "verifiedDecodeCard", "decodeRecoveryCard",
+    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS", "verifiedDecodeCard", "decodeRecoveryCard", "pgsOverlayCard", "DEVELOPER_READINESS",
     // The newline matters: a shipped function may be followed by a line
     // comment, and `shippedSource` returns everything up to the next
     // declaration. Without it the injected `return` lands inside that comment
@@ -214,7 +214,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   )(
     async (path, opts) => { writes[fn] = { path, body: opts.body }; return {}; },
     { getElementById: (id) => { assert.ok(ids.includes(id), `${fn} reads ${id}`); return { value: "v", checked: true, textContent: "" }; } },
-    (v) => v, () => {}, () => {}, {}, {}, () => "", () => "",
+    (v) => v, () => {}, () => {}, {}, {}, () => "", () => "", () => "", null,
   );
   const defaults = ["pal", "psl", "psm", "perr"];
   // Protocol and quality switching have separate cards. Streaming must not
@@ -230,6 +230,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   // the id has to be listed here for the guard to mean anything.
   const verifiedDecode = ["dhqa", "dhqerr", "vdcard"];
   const automaticRecovery = ["adr", "adrerr", "drcard"];
+  const pgsOverlay = ["pgsoverlay", "pgsoverlayerr", "pgsoverlaycard"];
   return Promise.all([
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
@@ -238,6 +239,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     run("savePreparedQuality", prepared)({ disabled: false }),
     run("saveVerifiedDecode", verifiedDecode)({ disabled: false }),
     run("saveAutomaticDecoderRecovery", automaticRecovery)({ disabled: false }),
+    run("savePgsOverlay", pgsOverlay)({ disabled: false }),
   ]).then(() => {
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
@@ -259,6 +261,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.equal(writes.saveVerifiedDecode.path, "/settings");
     assert.deepEqual(Object.keys(writes.saveAutomaticDecoderRecovery.body).sort(), ["automatic_decoder_recovery"]);
     assert.equal(writes.saveAutomaticDecoderRecovery.path, "/settings");
+    assert.deepEqual(writes.savePgsOverlay.body, { pgs_overlay: true });
+    assert.equal(writes.savePgsOverlay.path, "/settings");
     assert.equal(writes.savePlaybackDefaults.path, "/settings");
     assert.equal(writes.saveStreaming.path, "/settings");
     assert.equal(writes.savePlaybackCompatibility.path, "/settings");
@@ -371,6 +375,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
+      shippedSource("pgsOverlayCard"),
       shippedSource("subtitleStoredSourcesCard"),
       shippedSource("seekScratchReservationsCard"),
       shippedSource("liveTvGuideCard"), shippedSource("liveTvDeinterlaceCard"),
@@ -431,6 +436,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     automatic_decoder_recovery: true,
     vod_live_recovery: true,
     subtitle_not_ready_503: false,
+    pgs_overlay: false,
     live_tv_guide_source: "hdhomerun",
     live_tv_guide_hours: 24,
     dvr_enabled: false,
@@ -445,8 +451,12 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503", "subsrc"])
+  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503", "pgsoverlay", "subsrc"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
+  assert.match(html, /TOG:pgsoverlay\|[^|]*\|[^|]*\|checked=false/);
+  assert.match(html, /FOOT:savePgsOverlay/);
+  assert.match(panels.developerPanel({ ...settings, pgs_overlay: true }, readiness),
+    /TOG:pgsoverlay\|[^|]*\|[^|]*\|checked=true/);
   // Absent from the settings document is on: the store's switch defaults on.
   assert.match(html, /TOG:subsrc\|[^|]*\|[^|]*\|checked=true/);
   assert.match(html, /FOOT:saveSubtitleStoredSources/);

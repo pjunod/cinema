@@ -285,6 +285,7 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-seek-scratch"><h2>Seek scratch accounting</h2><p>Recently shipped accounting and retention changes with unverified native-device behavior.</p></div>${seekScratchReservationsCard()}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}
+      <div class="setsection" id="enable-pgs-overlay"><h2>PGS subtitle overlay</h2><p>Serve bitmap subtitles separately from the video on capable clients.</p></div>${pgsOverlayCard(settings,readiness)}
       <div class="setsection" id="enable-subtitle-sources"><h2>Stored subtitle tracks</h2><p>Keep each PGS track while the file is indexed, and read it instead of the whole source.</p></div>${subtitleStoredSourcesCard(settings,readiness)}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}`;
 }
@@ -321,6 +322,22 @@ function subtitleNotReadyCard(s,readiness){
       </div></details>
       <div class="err" id="sub503err" role="alert"></div>
       ${setCardFoot("saveSubtitleNotReady")}`,{id:"sub503card"});
+}
+function pgsOverlayCard(s,readiness){
+  const enabled=!!s.pgs_overlay;
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Serve PGS subtitles as an overlay","Give capable clients a bitmap subtitle overlay while keeping the video in its original grade.",state)}
+      ${togRow("pgsoverlay",`Serve PGS subtitles as an overlay <span class="pill warn">experimental</span>`,`Applies immediately to new playback requests on every node. Only clients that advertise pgs-v1 receive an overlay.`,enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> Physical playback and seek checks are required before leaving it on. If they fail, turn it off here; no restart is needed.</div>
+      <details class="setdetails" open><summary>Readiness and device qualification</summary><div class="setdetails-body">
+      ${devReq(readiness,"pgs_overlay","clients_render_overlays","A client renders pgs-v1","A served manifest proves a client requested an overlay, not that it drew the cues correctly.")}
+      ${devReq(readiness,"pgs_overlay","overlay_acceptance","Physical-client acceptance","Confirm cue timing, placement and seeking on Android and Apple hardware while video remains HDR or Dolby Vision.")}
+      <p class="devcheck-note">These observations are advisory. The saved switch remains authoritative.</p>
+      </div></details>
+      <div class="err" id="pgsoverlayerr" role="alert"></div>
+      ${setCardFoot("savePgsOverlay")}`,{id:"pgsoverlaycard"});
 }
 // Stored PGS tracks.
 //
