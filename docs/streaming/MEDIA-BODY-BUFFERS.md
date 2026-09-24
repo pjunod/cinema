@@ -3,7 +3,8 @@
 **Status:** M1 merged. §5.1 before/after measured 2026-09-24 (§5.1.1).
 Decision 1 taken on Paul's behalf and his to overturn: the shared read is
 128 KiB, and `TCP_NODELAY` is set on accepted connections, which removed the
-HLS p50 regression (§5.1.2, Decision 6). M2 pending ·
+HLS p50 regression at a packet-count cost on HLS bodies (§5.1.2, Decision 6).
+M2 pending ·
 **Executes:** §2.4, C1, F-core-1, F-stream-8, §5.1 item 3 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @
@@ -467,6 +468,54 @@ there, and every percentile is below the 4 KiB build's p50. Throughput,
 memory and thread counts did not move beyond run-to-run spread. So
 `TCP_NODELAY` is in this PR (Decision 6).
 
+**The packet cost.** Measured after the #487 review. The HLS pump gives
+the body one 4 KiB acknowledgement piece at a time and waits for it to be
+taken before it splits the next. hyper flushes whenever the body is pending,
+so an HLS body leaves as roughly 1,500 writes per ~5 MB segment whatever the
+socket option (the §5.1.1 diagnostic counted 742 to 1,619 at 256 KiB).
+`TCP_NODELAY` does not change the writes. It stops the kernel merging them.
+A further loopback run on nuc3 counted the server socket's `data_segs_out`
+for each segment (`ss -ti` around each GET on one keep-alive connection; 22
+full segments fetched twice; one trial per cell). It used one release build
+of `538e8b601`, run as built and with Nagle left on by an `LD_PRELOAD` shim
+that makes `setsockopt(TCP_NODELAY)` a no-op, at loopback's default MTU and
+at 1500 bytes in a private network namespace:
+
+| Per ~5 MB segment, median (range) | MTU 65536, Nagle on | MTU 65536, `TCP_NODELAY` | MTU 1500, Nagle on | MTU 1500, `TCP_NODELAY` |
+|---|---|---|---|---|
+| Server data packets | 137 (120–154) | 1,190 (1,004–1,373) | 3,693 (3,483–4,259) | 3,700 (3,516–4,249) |
+| Mean bytes per data packet | 36,984 | 4,269 | 1,369 | 1,365 |
+| Client ACK packets | 69 (53–78) | 557 (404–639) | 1,120 (855–1,326) | 1,114 (739–1,306) |
+| Server write syscalls | 1,564 | 1,503 | 1,492 | 1,525 |
+| Fetch ms, median / fetches of 44 at ≥ 40 ms | 49.0 / 40 | 13.2 / 0 | 14.1 / 10 | 11.7 / 0 |
+
+At loopback's 64 KiB MTU, Nagle merged about nine writes into each packet,
+and `TCP_NODELAY` sends about one packet per write: 8.7× the data packets
+and 8× the ACKs. At MTU 1500 the two builds are the same. Both send each
+4 KiB write as three packets (1,448 + 1,448 + 1,200 bytes, 1,365 on
+average), because loopback acknowledges within microseconds and Nagle
+rarely has unacknowledged data to hold a tail behind. The ~50 ms stall still
+happened with Nagle on at MTU 1500, on 10 of 44 fetches. A real client link
+has a round trip of milliseconds, so Nagle would merge some of those tails
+there. The most it could save is the gap between three packets per 4 KiB
+and full segments, about 6% of data packets and their ACKs. So the cost on a
+1500-MTU client link is between nothing and about 6%, and it has not been
+measured on one. §6 watches for it. Direct play and ranges hand hyper whole
+128 KiB reads and are not affected.
+
+Coalescing the HLS writes is not in this PR. hyper 1.10's HTTP/1
+dispatcher flushes each time the body is pending, and it has no setting to
+defer that. The pump offers one 4 KiB piece at a time
+(`LOCAL_MEDIA_BODY_CHANNEL_CAPACITY = 1`), so the body is pending after
+every piece. Fewer, larger writes need the body to offer either more than
+one piece per poll or larger pieces. The first changes the channel
+capacity, which §3.2 rules out for M2. The second raises the
+delivery-proof unit, which Decision 5 rules out. M2's acknowledgement
+batching (§3.2) is where these writes would coalesce. As §3.2 is written,
+though, it acknowledges a whole batch at once, which would also raise the
+proof unit to the batch. M2 has to be reconciled with Decision 5 before it
+is built. That is a follow-up (execution log), not part of this PR.
+
 **The final state against the before side.** One release build of
 `dbcb1168f`, the final code (128 KiB with `TCP_NODELAY`), was compared with
 the 4 KiB build above in a separate run of the full protocol:
@@ -488,11 +537,17 @@ Against the §5.1 acceptance:
 - All five figures are reported.
 - **HLS p99 improved**, from 66–76 ms to 19–20 ms. p50 and p95 improved
   too. The p50 regression §5.1.1 recorded is gone.
-- **Group A peak RSS is still worse than 4 KiB**, by 9.0 to 11.5 MiB for 8
-  bodies. That is 1.0 to 1.3 MiB per concurrent large body, at the ≈1 MiB
-  budget in §2.1. The 256 KiB build was about 1.8 MiB per body. Any read
-  above 4 KiB reserves more per open body, so no size that delivers §1 can
-  meet "not worse" literally. Decision 1 accepts this cost at 128 KiB.
+- **Group A peak RSS is still worse than 4 KiB.** The final build grew 9.0
+  to 11.5 MiB for 8 bodies, against 0.9 to 1.2 MiB at 4 KiB. Taken trial by
+  trial, the difference is 10.3, 9.1 and 8.0 MiB: 8 to 10 MiB, or 1.0 to
+  1.3 MiB per concurrent large body. That is above the §2.1 figure, which
+  is an upper bound of ≈1 MiB per body derived for 256 KiB buffers (four of
+  them). The same derivation at 128 KiB gives ≈512 KiB, so the measured
+  cost is about 2 to 2.6× that model. The 256 KiB build measured about
+  1.8 MiB per body (§5.1.1) against the model's 1 MiB. The per-body model
+  underestimates measured RSS by about 2× at both sizes. Any read above
+  4 KiB reserves more per open body, so no size that delivers §1 can meet
+  "not worse" literally. Decision 1 accepts this cost at 128 KiB.
 - **Group B is worse in the median**, 33.2 → 38.7 MiB. The final build also
   ran at higher peak concurrency here (93–102 connections against 68–89), and
   group B memory follows concurrency (§5.1.1). The veto (about half a
@@ -546,6 +601,15 @@ lab4 with HLS p99 not worse than M1's.
   days before and after the deploy timestamp; also `journalctl -u plurxd |
   grep -c 'stalled on storage'` for both windows. Report both tables." A
   rise in `transport_stall` or in the stall warning is the rollback signal.
+- Packet rate, for Decision 6. `TCP_NODELAY` sends each 4 KiB HLS write as
+  its own packets. On a real 1500-MTU client link that can be up to about
+  6% more packets and ACKs (§5.1.2, the packet cost). GPT prompt: "On
+  media1, before PR <n> is deployed, run `nstat -az TcpOutSegs
+  TcpRetransSegs IpExtOutOctets` twice, one hour apart, during evening
+  viewing. After the deploy, do the same at the same time of day on a day
+  with similar viewing. For each window report segments sent per MB and
+  retransmitted segments per MB." A rise in retransmitted segments per MB,
+  or in `transport_stall` cuts, is the signal to revisit Decision 6.
 - Rollout: one draft PR owns the whole plan; milestones remain separate
   commits and execution-log rows. No setting and no gate: the buffer size is
   a constant with its reason; making it operator-tunable would be a knob
@@ -570,7 +634,9 @@ lab4 with HLS p99 not worse than M1's.
    32× fewer times than a 4 KiB default. `MEDIA_BODY_ACK_GRANULARITY` stays
    4 KiB and stays a separate constant (Decision 5). A test pins the read
    size and the acknowledgement unit separately, so a change to either is a
-   deliberate edit. §5.1.2 has the final-state measurement. To overturn:
+   deliberate edit. It also requires the acknowledgement unit to be defined
+   as a literal, because a value check cannot tell `4 * 1024` from
+   `MEDIA_BODY_READ_BUFFER / 32` while the read is 128 KiB. §5.1.2 has the final-state measurement. To overturn:
    restore `256 * 1024` and that test's expected value. Nothing persists.
 2. **Use 1 MiB/s for the slow-read rate.** At that rate a roughly 20 MiB 4K
    segment already takes 20 seconds to read, close to the 30-second no-progress
@@ -608,8 +674,15 @@ lab4 with HLS p99 not worse than M1's.
    `TCP_NODELAY`, p50/p95/p99 fell from 49–51 / 52–58 / 52–58 ms to
    15–16 / 18 / 19–20 ms, and fetches at 40 ms or more fell from 353 of 600
    to none. Throughput, memory and thread counts were unchanged within
-   spread. hyper already coalesces a response's head and body writes, so
-   the option does not fragment responses. It is set in the `TcpListener`
+   spread. The cost is packets. The HLS pump flushes each body in 4 KiB
+   pieces, one write each, and with `TCP_NODELAY` each write is sent at once
+   instead of merged. On loopback's 64 KiB MTU that was 8.7× the data
+   packets per segment. On loopback at MTU 1500 there was no difference. On
+   a real 1500-MTU client link it is at most about 6% more packets and ACKs,
+   which is not measured (§5.1.2, the packet cost). Direct play and ranges
+   write whole 128 KiB reads and are not affected. §6 watches the packet
+   rate after deploy. Coalescing the HLS writes belongs to M2 and has to
+   keep Decision 5's 4 KiB proof. It is set in the `TcpListener`
    acceptor that feeds `serve_http`, the only production HTTP listener. A
    failure to set it is logged at debug, and the connection is still
    served. `accepted_http_connections_have_nagle_disabled` pins it.
@@ -633,4 +706,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | pending in [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Needs: M1 candidate deployed on media1 for one week with no `segment_delivery` regression, then the §5.1 lab4 protocol re-run. No acknowledgement-batching code has been written. |
 | 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 review disposition | [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Addressed the sole adversarial review. The 256 KiB read had carried the pump's delivery-proof granularity up with it; `MEDIA_BODY_ACK_GRANULARITY = 4 KiB` now pins the proof where it was (§2.2 item 1, §3.1, Decision 5) and the three delivery-accounting tests that failed at the merged head pass again for that reason. Added `a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units` and `a_large_read_at_the_event_boundary_emits_no_storage_stall_warning`; §5.1 now measures small-object concurrency (group B) as well as large. Still needs: the lab4 groups A and B before/after, and `make unit`. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 §5.1 measurement | evidence PR (this row's commit) | Before/after measured on nuc3 with three release builds of `886fc8bd4`, identical except `MEDIA_BODY_READ_BUFFER` at 4/128/256 KiB, and three rotated trials. nuc4 was only inspected: it already runs M1 (`99d4abf8c`), so it has no before side, and it carries production load. Results (§5.1.1, raw record in `docs/evidence/media-body-buffers-m1-measurement-2026-09-24.md`): single-viewer direct play 373 → 3172 MB/s median; HLS p99 65–72 → 51–58 ms (met) and p50 24–25 → 48–50 ms; group A RSS growth 1.0–1.3 → 14.3–16.1 MiB; group B median 44.8 → 53.1 MiB, with the veto not reached. Acceptance **not met as written**: both peak-RSS figures grew. Decision 1 (256 or 128 KiB) is waiting on Paul. The §5.1 photo URL is now the real route, `/api/v1/items/{id}/photo`. `make unit`: #454's integration record ran its `cargo test --workspace --exclude plurx-cluster-check` half on the integrated tree (4051 passed, 0 failed). Its `vodencode-restart-check` half is not recorded there. Still owed: Paul's Decision 1, a lab4 re-run only if the quiet-host condition is wanted, and M2's media1 week. |
-| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Decision 1 + HLS p50 | `7eea547fe`, `dbcb1168f` / [#487](http://192.168.4.7:3000/noirr/plurx/pulls/487) | **Decision 1 taken on Paul's behalf; he can overturn it:** the shared read is now 128 KiB (`7eea547fe`). `MEDIA_BODY_ACK_GRANULARITY` is unchanged at 4 KiB. The new `the_shared_media_read_is_128_kib_and_the_delivery_proof_stays_4_kib` pins both values. The pin fails with the read reverted to 256 KiB (`left: 262144, right: 131072`). Defining the acknowledgement unit from the read stops the test binary compiling. Re-coupling the pump split still fails `a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units` (`left: 65536, right: 4096`). The HLS p50 Nagle hypothesis was tested on nuc3 (§5.1.2): 128 KiB with and without `TCP_NODELAY`, three rotated trials. p50 went from 49–51 to 15–16 ms, with nothing else moving, so `dbcb1168f` sets it on accepted connections. `accepted_http_connections_have_nagle_disabled` pins it and fails with the call removed. Final state against 4 KiB, full §5.1 re-run: direct play 373 → 2747 MB/s median; HLS p50/p95/p99 25–26 / 61–64 / 66–76 → 15 / 18 / 19–20 ms; group A growth 0.9–1.2 → 9.0–11.5 MiB, which is 1.0–1.3 MiB per body, at the §2.1 budget; group B median 33.2 → 38.7 MiB, at higher concurrency, far from the veto. Gates: fmt, clippy `-D warnings`, `cargo test -p plurxd` (2717 passed, 0 failed, 11 ignored), history-check, validation-lint, validation unittests, operations-check, spike-lock-check, all exit 0 (PR body). Still owed: Paul's confirmation or reversal of Decision 1, M2's media1 week, and the §6 post-deploy telemetry for both changes. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Decision 1 + HLS p50 | `7eea547fe`, `dbcb1168f` / [#487](http://192.168.4.7:3000/noirr/plurx/pulls/487) | **Decision 1 taken on Paul's behalf; he can overturn it:** the shared read is now 128 KiB (`7eea547fe`). `MEDIA_BODY_ACK_GRANULARITY` is unchanged at 4 KiB. The new `the_shared_media_read_is_128_kib_and_the_delivery_proof_stays_4_kib` pins both values. The pin fails with the read reverted to 256 KiB (`left: 262144, right: 131072`). Defining the acknowledgement unit *as* the read (`= MEDIA_BODY_READ_BUFFER`) stops the test binary compiling; defining it *from* the read (`MEDIA_BODY_READ_BUFFER / 32`) was not caught until the review row below. Re-coupling the pump split still fails `a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units` (`left: 65536, right: 4096`). The HLS p50 Nagle hypothesis was tested on nuc3 (§5.1.2): 128 KiB with and without `TCP_NODELAY`, three rotated trials. p50 went from 49–51 to 15–16 ms, with nothing else moving, so `dbcb1168f` sets it on accepted connections. `accepted_http_connections_have_nagle_disabled` pins it and fails with the call removed. Final state against 4 KiB, full §5.1 re-run: direct play 373 → 2747 MB/s median; HLS p50/p95/p99 25–26 / 61–64 / 66–76 → 15 / 18 / 19–20 ms; group A growth 0.9–1.2 → 9.0–11.5 MiB, a difference of 8–10 MiB or 1.0–1.3 MiB per body, above the §2.1 upper bound (see the review row below); group B median 33.2 → 38.7 MiB, at higher concurrency, far from the veto. Gates: fmt, clippy `-D warnings`, `cargo test -p plurxd` (2717 passed, 0 failed, 11 ignored), history-check, validation-lint, validation unittests, operations-check, spike-lock-check, all exit 0 (PR body). Still owed: Paul's confirmation or reversal of Decision 1, M2's media1 week, and the §6 post-deploy telemetry for both changes. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Decision 1 review disposition | [#487](http://192.168.4.7:3000/noirr/plurx/pulls/487) | Addressed the single adversarial review ([comment 4265](http://192.168.4.7:3000/noirr/plurx/pulls/487#issuecomment-4265)), three P2 findings. (1) The claim that `TCP_NODELAY` does not turn a response into many small packets was false for HLS: the pump flushes each 4 KiB piece as its own write. The `disable_nagle` doc comment and Decision 6 now state the packet cost. It was measured on loopback (§5.1.2, the packet cost): 8.7× the data packets per segment at MTU 65536, no difference at MTU 1500, and at most about 6% on a real 1500-MTU link (not measured). §6 now watches packet rate. Coalescing the writes is a follow-up: it belongs to M2, and §3.2's M2 must first be reconciled with Decision 5, because acknowledging a whole batch raises the proof unit. (2) The pin's doc had been spliced onto the behavioural test's, and it claimed that defining the acknowledgement unit from the read fails there. With `MEDIA_BODY_READ_BUFFER / 32`, both tests passed. Each test now has its own doc. The pin also requires `MEDIA_BODY_ACK_GRANULARITY` to be defined as a literal, and it fails with `READ / 32`. `media_sessions.rs` now names the internal fragment-index blob endpoint, not "the internal media relay". (3) §5.1.2's group A sentence mixed up growth and difference, and it called a figure above the §2.1 upper bound "at" it. It now gives the per-trial difference (8–10 MiB, 1.0–1.3 MiB per body) and says the per-body model underestimates by about 2×. The same phrase was changed in the row above, the work board and the PR body. Main had not moved (merge-base = `origin/main` = `07fe785d3`). Gates at the review head: `make history-check`, `make validation-lint`, validation unittests (205 OK), `make operations-check` (486 OK), `make spike-lock-check`, `cargo fmt --check` and `cargo clippy --workspace --all-targets -D warnings` all exit 0. `cargo test --locked --no-fail-fast -p plurxd`, run after touching every `.rs` file: 2716 passed, 1 failed, 11 ignored. The failure, `vodserve::tests::every_terminal_cause_answers_gone_and_supersession_spares_the_keeper`, timed out waiting for telemetry to persist (`Elapsed`) at host load about 10. It touches nothing this branch changes, and it passed 3 of 3 re-runs on its own. Still owed: Paul's Decision 1, the §6 telemetry and packet-rate checks after deploy, reconciling M2 with Decision 5, and M2's media1 week. |
