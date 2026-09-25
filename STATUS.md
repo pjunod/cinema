@@ -6,8 +6,9 @@ first.
 
 ## Live TV: direct play first, 5.1 stays 5.1
 
-**Branch `fix/live-tv-direct-play`, draft pull request; not merged, nothing
-deployed.** Paul's three reports of 2026-09-24 — Live TV "transcodes no matter
+**Merged (#492, #501) and deployed to nynuc, m6, nuc4 and nuc3 as
+`v0.3.0-3881-gf600d2823`; #509 (tablet fullscreen) is the client follow-up.**
+Paul's three reports of 2026-09-24 — Live TV "transcodes no matter
 what", audio is "unnecessarily downmixed to stereo", and every channel shows
 the same aspect ratio — worked against the real lineup on the FLEX 4K
 (59 ATSC 1.0 MPEG-2/AC-3 channels, 10 ATSC 3.0 HEVC/AC-4 channels).
@@ -40,6 +41,20 @@ the AAC encoder signals as ADTS configuration 0 plus a PCE; browsers read that
 as an audio track with no channels and never start, so Safari and Chrome sat
 black on 157.1. Fixed: the list is `5.1|stereo|mono`, the harness asserts a
 positive header channel count and gains `--surround`.
+
+**On the fleet:** a Chrome session on 157.1 against the deployed nynuc comes
+back HEVC copied + AAC-LC 48 kHz with `channel_configuration = 6` in the
+init segment's AudioSpecificConfig and `channelcount = 6` in `mp4a` — the
+value that was 0 before #501. GPT's round-1 devices: the Google TV Streamer
+direct-plays (Remux) 6.2, 6.1 and 157.1; the Lenovo TB322FC and TCL 9445X
+tablets showed the fullscreen picture undersized in the top-left corner. That
+is the client: the PlayerView is one View subtree moved between the inline
+and fullscreen boxes with `movableContentOf`, and a moved View keeps its last
+measured size. #509 (Android 125) forces a layout pass through the subtree
+whenever its host box resizes and re-binds the SurfaceView to the player
+after that pass. Still to read on hardware: the tablets after 125, a ~5 s
+freeze on the Google TV Streamer at 38–43 s on 6.2's copy route (round 1,
+once), and the Apple build (182, signing failed on the shipping Mac).
 
 Verified: focused Rust tests (53) + clippy `-D warnings` + fmt on nuc3;
 `make apple-test` on mba (1330 cases); Android unit tests in the pinned image
