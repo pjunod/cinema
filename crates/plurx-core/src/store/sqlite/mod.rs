@@ -2273,7 +2273,8 @@ mod tests {
         holder.await.expect("join").expect("holder");
     }
 
-    /// K-05 M1: every Home and library-page read migrated to the read pool
+    /// K-05 M1: every Home and library-page read on the read pool (the 16
+    /// M1 moved there, plus `home_preview_pages`, which already was)
     /// completes while the writer holds an open write transaction, and none
     /// of them sees that transaction's uncommitted row.
     ///
