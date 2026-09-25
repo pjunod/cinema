@@ -752,6 +752,19 @@ On lab1 and media1, with the build carrying the C-08 M5 PR (plan/C-08-2):
    twice, then paste
      curl -s http://lab1:32400/metrics | grep 'plurx_admission_wait_seconds_count'
    Report the three counts; vod_blocked_get should be non-zero.
+6. Watched time across nodes (the #500 review's case): with the Android
+   device pointed at the cluster address (so its beats are not cookie-pinned),
+   save on EVERY node
+     curl -s http://<node>:32400/metrics | grep plurx_watched_seconds_total
+   play one title for 5 minutes, stop, repeat on every node, and paste all
+   of it. Expected: the deltas summed across nodes come to about 300, not
+   300 × the number of nodes that received beats. Say how many nodes'
+   counters moved.
+7. A long web stall: if a supply stall of 20 s or more happens (or can be
+   provoked, e.g. by throttling the browser to 1 Mb/s on a 4K remux), paste
+   the two `plurx_stalled_seconds_total` readings around it and the
+   `stall` / `stall_end` lines from `GET /api/v1/system/playback-events`.
+   Expected: the kind's seconds rose by the whole stall, not by 8.
 Report exact values. Restart nothing.
 ```
 
@@ -874,10 +887,18 @@ the plan is below, and each item is a deviation from the plan as written.
 **What was re-verified, by function name (lines at `936157b4b`).**
 `PlaybackMetrics` is still the fixed-array house pattern (`telemetry.rs:225`,
 `record` `:259`, `render` `:354`); `plurx_ttff_ms` still had eight buckets
-ending at 30 s (`:17`). Every first-party client still sends a stall's
+ending at 30 s (`:17`). ~~Every first-party client still sends a stall's
 duration in `ms` (web `recordWaitStall` in `web/player/measurements.js`,
 Android `ControllerPlaybackTelemetry.sampleStall`, Apple
-`ApplePlaybackStallLog`), so row 3's numerator needed no client change.
+`ApplePlaybackStallLog`), so row 3's numerator needed no client change.~~
+**Corrected by the #500 review:** every client sends `ms`, but the web sends
+its only report for a long wait from `persistentWait`, at
+`PERSISTENT_STALL_MS` (8 s), with the time elapsed so far, and `endWait`
+then returned without reporting the rest; so every web stall longer than
+8 s reached row 3 as about 8 s. Android and Apple report once, on recovery,
+with the whole length. The web now closes a reported wait with a
+`stall_end` beacon carrying the time after the first report, and the server
+credits it to the same kind without counting a second stall (§7.7.8).
 `/metrics` (`http/system.rs:5290`) and `prometheus_scrape_has_no_store_operation`
 are unchanged, and nothing here touches the `format!` in that handler: every
 new family renders inside `crate::telemetry::prometheus()`. The replacement
@@ -902,12 +923,17 @@ labels the example illustrative.
    progress beat (`http::watch::progress`).** It is the one signal every
    first-party player sends every few seconds while open, playing or paused,
    and each beat reaches exactly one node. `telemetry::WatchLedger` compares
-   a beat with the previous beat for the same viewer and item on the same
-   node and credits the smaller of the position's advance and the wall time
-   between them; a pause, a stall, a rewind, an advance over twice the wall
-   time plus 2 s (a seek), or a gap over 120 s credits nothing. So the sum
-   is never more than wall time per viewer and item per node, and a viewer
-   who moves nodes starts a fresh baseline instead of being counted twice.
+   a beat with the previous beat for the same viewer and item and credits
+   the smaller of the position's advance and the wall time between them; a
+   pause, a stall, a rewind, an advance over twice the wall time plus 2 s (a
+   seek), or a gap over 120 s credits nothing. ~~So the sum is never more
+   than wall time per viewer and item per node, and a viewer who moves nodes
+   starts a fresh baseline instead of being counted twice.~~ **Corrected by
+   the #500 review:** that held for one move, not for beats that alternate
+   between nodes, which the routing contract allows for every non-HLS
+   request and which Android (no cookie jar) does; each node then credited
+   its own 20 s gaps and the cluster sum was N× wall time. "The previous
+   beat" is now cluster-wide (§7.7.9).
    The ledger is per process (`AppState::watch_ledger`) and capped at 4,096
    entries; a viewer arriving at a full ledger is not tracked rather than
    evicting a live one. Offline replays (`recorded_at`) and Plex-compatible
@@ -936,7 +962,13 @@ labels the example illustrative.
    `encode_permit` (the lifetime of an `admission::LiveWait` guard, which
    covers the VOD encoder queue, the rolling start queue and the software
    capacity retry), and `image_materialize` (`ArtworkCoordinator::
-   derive_permit`). One observation per wait, however it ended.
+   derive_permit`). One observation per wait, however it ended. (As first
+   built, `vod_blocked_get` and `image_materialize` recorded after their
+   `await` returned, so a GET aborted mid-wait — the seek-storm tail — and a
+   registration whose recheck found the segment were never recorded; the
+   #500 review found it. Both now time from `telemetry::AdmissionWaitTimer`,
+   a guard created where the wait starts that records when it is dropped,
+   as `LiveWait` always did.)
 5. **Row 2's denominator needed a definition the plan did not give.**
    `plurx_seeks_total{method}` counts seeks that *ended*: `seek_resumed`
    (with `ms`, which also feeds the histogram) plus `seek_abandoned`
@@ -954,6 +986,41 @@ labels the example illustrative.
    `plurx_playback_preparation_decisions_total{outcome="prepare"}`. §3.5's
    "staged ÷ decisions" would have divided by every decision including the
    fallbacks, which never try to stage.
+8. **A web stall is reported in two parts (#500 review, P1).** The web must
+   report a long wait while the picture is frozen — that report is what
+   drives recovery and what an operator reads when the wait never ends — so
+   the first report cannot wait for the end. `persistentWait` remembers what
+   it reported (`waitReportedMs`, and the detail it used); `endWait`, on any
+   ending of a reported wait, sends `stall_end` with `ms` = the wait's whole
+   length minus that, under the same detail. The server's `stall_end` arm
+   adds `ms` to `plurx_stalled_seconds_total{kind}` and leaves
+   `plurx_stalls_total` alone, so the two reports are one stall of the full
+   length and there is nothing to double count: neither side keeps a
+   running total the other can repeat. `stall_end` is a lifecycle event,
+   kept like `stall`, never sampled away. Bounds, written into
+   OPERATIONS.md: a wait handed to a recovery ends at that hand-off (the
+   reload is the `stall_recovery` outcome's `ms`), and a wait still frozen
+   when the tab closes keeps only its first report.
+9. **Watched seconds are credited once cluster-wide (#500 review, P2).** The
+   progress handler already read the viewer's durable progress row before
+   writing (for the watched-crossing check); it now hands that row to the
+   ledger. A node's ledger remembers its last two beats per viewer and item
+   (position, monotonic instant, wall-clock ms). When the row holds neither
+   of those positions and was written no earlier than this node's last beat
+   (to the second `updated_at` is stored in), another node committed a
+   newer beat for this viewer, and this beat credits from the row — its
+   position, and the wall time since its `updated_at` — instead of from the
+   node's own older beat. Otherwise, which is always the case on a single
+   node (its own direct commits and coalesced flushes write positions it
+   saw), the exact monotonic local baseline is used. Chosen over the
+   review's other option (credit only where the delivery lives) because a
+   direct play has no single owning node either, and over a client-sent
+   interval because the native clients cannot be changed in this PR. Known
+   bounds: the cross-node comparison uses the writing node's wall clock, so
+   it assumes NTP-level agreement; two nodes committing one viewer's beats
+   in the same instant can overlap by one beat interval; and a coalesced
+   beat another node has not flushed yet is credited when it lands, not
+   before.
 
 ---
 
@@ -977,3 +1044,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | | | | | | `needs:` the §6.3 fleet observations. Nothing in this branch has been deployed or scraped on a node; the exposition-size, label-hygiene, journald-ANSI-after, JSON-mode and RED-sanity steps are all unrun. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — release-evidence set | [PR #500](http://192.168.4.7:3000/noirr/plurx/pulls/500) (draft) | Rows 1, 2, 3, 5, 6, 7 and 8 built as one PR (premises read at `936157b4b`, merged with `origin/main` at `b1de09647`); **row 4 is not built** (§7.7.3) and its name is reserved. `plurx_ttff_ms` gains `client` (seven closed values from the request's own `User-Agent`) and 60 s / 120 s buckets; `plurx_seek_to_picture_ms{method}` + `plurx_seeks_total{method}` (zero until clients send `seek_resumed` / `seek_abandoned`); `plurx_stalled_seconds_total{kind}` from the stall `ms` all three clients already send; `plurx_watched_seconds_total{method}` from live progress beats (§7.7.2), the web player now naming its method; `plurx_delivered_bytes_total{method}` from the delivery meter and the direct-play body; `plurx_admission_wait_seconds{pool}` on three pools (§7.7.4). The row-5 expression, the row-7 reservation, the per-family reading rows and the §3.6 exit-counter template are in `docs/OPERATIONS.md`, held by `tests/operations/test_release_evidence_metrics.py`. Rust tests, each shown failing with its production hunk reverted on nuc3: `a_ttff_beacon_is_labelled_by_the_requesters_client_class` (handler passes no class → the `client="firefox"` bucket never moves; and again with `record_from` ignoring the class), `ttff_is_labelled_by_client_class_and_has_buckets_above_thirty_seconds` (bucket revert → no `le="60000"`; class revert → `safari` bucket 0 ≠ 1), `release_evidence_families_render_exactly_their_enumerated_labels` (`seek_abandoned` arm removed → `seeks_total{method="unknown"}` 1 ≠ 2), `stalled_and_watched_seconds_move_together_on_a_synthetic_session` (stall-`ms` credit removed), `live_progress_beats_credit_watched_seconds_to_the_named_method` (beat call removed), `a_meter_credits_its_method_in_the_delivered_bytes_family`, `a_live_wait_is_timed_into_the_encode_permit_pool_when_it_ends`, `an_admitted_wait_is_timed_into_the_vod_blocked_get_pool`, `a_derive_permit_wait_is_timed_into_the_image_materialize_pool` (each recording call removed). `watched_time_credits_only_plausible_forward_play_and_never_more_than_wall_time` pins the ledger's rules and `every_client_class_is_in_the_bounded_metric_vocabulary` the label bound; both are new code with nothing to revert to. Web: `a beat names the delivery method it is playing through` (`tests/web/progress-never-presented.test.js`) fails with `method` dropped from the beat. |
 | | | | | | `needs:` the §6.4 M5 fleet observations (families and size, label hygiene, watched seconds against a scripted Chrome session, the two native clients landing under `unknown` with their own `client` class, a non-zero `vod_blocked_get` wait). Nothing in this branch has been deployed or scraped. Client-bound follow-ups, not this plan's code: Apple and Android naming `method` on progress beats, and all three clients emitting `seek_resumed` / `seek_abandoned`. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — #500 review round | [PR #500](http://192.168.4.7:3000/noirr/plurx/pulls/500) (draft) | Merged `origin/main` at `f600d2823` first (one conflict, `tests/playback/rolling-producer-owners.toml`, both sides' reviews kept and the two rows re-measured: 923 and 375), then built and ran `cargo test -p plurxd` on the merge before any change. **The M5 row above overstated three things, now corrected:** row 3's numerator was not complete for the web (every web stall past 8 s counted as about 8 s — §7.7 preamble and §7.7.8); watched seconds were not "never counted twice" for beats alternating between nodes (§7.7.2, §7.7.9); and `vod_blocked_get` / `image_materialize` were not "one observation per wait, however it ended" (§7.7.4). Fix commit `f30eb874` (ledger `validation/regressions.d/f30eb874-release-evidence-review.toml`): the web closes a reported wait with `stall_end` carrying the remainder; the progress handler passes the durable row to the ledger; both pools time from `telemetry::AdmissionWaitTimer`. Each pinned by a test shown failing on nuc3 with its production hunk reverted: `a_stall_reported_while_frozen_is_credited_its_whole_length_once` (8.000 s, not 90.000), web-control "the close carries exactly the time after the first report" (no `stall_end`), `beats_alternating_between_nodes_are_credited_once_cluster_wide` (1,180,000 ≠ 600,000), `a_beat_after_another_nodes_write_credits_only_the_time_since_it` (1,203 ≠ 1,000 with the handler passing no row), `an_abandoned_or_unawaited_wait_is_still_timed_once` and `an_abandoned_derive_permit_wait_is_still_timed` (0 ≠ 1). Test commit `81a2b9ab`: `a_direct_play_get_credits_exactly_its_body_to_delivered_bytes` (real handler; ranged and whole GET add exactly their bodies, HEAD and 416 add nothing — 0 ≠ 10 with the body wrapper removed) and one method assertion per `Meter` construction site (progressive, VOD copy, VOD encoded, live transcode, live copy, cache hit — each `"unknown"` with its site reverted). Not provable by revert, and said so: the wrapper's non-success guard (the 416 body is empty, so removing the guard changes nothing observable) and its GET-only condition (a HEAD body is empty). OPERATIONS.md now warns that `plurx_ttff_ms` queries of the old shape return seven series, and `PLEX-FACADE-PAGING.md` and `TELEMETRY-BACKPRESSURE.md` note the new shape where they quote the old one. Ownership counts re-measured by zeroing each row: 923→924, 375→380, 383→385, all test-only. |
+| | | | | | `needs:` §6.4 steps 6 and 7 as well (the cross-node watched-seconds sum and a long web stall). Still nothing deployed or scraped. |
