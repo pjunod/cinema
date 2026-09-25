@@ -591,7 +591,7 @@ one of these is a door we're keeping shut on purpose:
 
 | Risk | Mitigation |
 |---|---|
-| hiqlite is a small project (bus factor) | Paul Junod owns the maintained fork. Sixteen Hiqlite and three Hiqlite-WAL patches have kinds and tested exit conditions in their `PLURX-PATCH.md` ledgers; the vendor lane compiles them, and `Store` isolates callers. Carrying the fork is the accepted cost; generic repairs remain until their upstream links and releases satisfy the ledger. |
+| hiqlite is a small project (bus factor) | Paul Junod owns the maintained fork. Twenty Hiqlite patches (twelve of them Plurx policy, with no upstream exit) and three Hiqlite-WAL patches have kinds and tested exit conditions in their `PLURX-PATCH.md` ledgers; the vendor lane compiles them, and `Store` isolates callers. Carrying the fork is the accepted cost; generic repairs remain until their upstream links and releases satisfy the ledger. |
 | Deterministic-segment failover has sharp edges (VFR, keyframe drift) | Spiked at the Phase 3 gate; worst case = session restart-at-position, still ahead of everyone |
 | Plex-compat drift / client quirks | Tier 1 targets a small, testable client set; contract tests against recorded Composite/PKC traffic; official API docs exist now |
 | DV/HDR correctness is genuinely hard | Profiles are data; a test-file corpus per DV profile (P5/P8) from day one; HDR10 base-layer + tone-map fallbacks |

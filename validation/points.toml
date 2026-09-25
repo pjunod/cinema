@@ -508,6 +508,7 @@ paths = [
   "crates/plurx-core/src/store/sql_source.rs",
   "crates/plurx-core/src/transcode/{encoder,manifest}.rs",
   "crates/plurx-core/tests/hiqlite_tls_provider.rs",
+  "crates/plurx-core/tests/rustls_single_provider.rs",
   "crates/plurx-core/tests/store_contract.rs",
   "tests/validation/test_store_shard.py",
   "validation/store_shard.py",
