@@ -1,0 +1,34 @@
+version = 1
+
+[[coverage]]
+commits = ["d17cf238"]
+points = ["cluster.page-reads"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = """
+Answers finding 1 of the sole adversarial review of PR #504 (K-04 M2). \
+WatchWriteFences::required_applied_index accepted this process's own write \
+record for a user as the fence when the client sent no X-Plurx-Read-After, so \
+a node that had acknowledged an older write served watch state locally after \
+the user wrote through a peer: the TV writes progress through node B, the phone \
+marks the next episode watched through node A at a later index, and the TV's \
+next Home on B, applied past B's record but short of A's write, was answered \
+from B's replica. The fence now requires the client's floor and lets the local \
+record only raise it. \
+store::watch_fence::tests::a_local_write_record_never_stands_in_for_the_clients_floor \
+(rust-gate) records index 100 for a user and requires no local floor without a \
+header, now and ten seconds later, and 140 when the client echoes 140; with the \
+old match restored it gets Some(100) where it requires None. The three-voter \
+contract watch_fence_a_peers_older_record_does_not_prove_a_write_through_another_node \
+(cluster-store-check, part of cluster-auth) opens two store processes on one \
+cluster, writes progress through B and a watched mark through A, and requires \
+B, at an applied index between the two writes and with no header, to answer \
+watch_map, watch_summary, progress_rails and watch_rollup from Authority (one \
+consistent read, no local one), a client floor below B's own write to be \
+raised to it, and B with A's index echoed and applied to serve locally the \
+Authority answer; with the old match restored it fails at the first read, \
+counting (0 consistent, 1 local) where it requires (1, 0). \
+watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_write now \
+requires Authority on the writing node itself without the header, and fails \
+the same way on revert. Both reverts were run on nuc3 (exit 101) and pass with \
+the fix restored.
+"""
