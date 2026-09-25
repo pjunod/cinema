@@ -12,6 +12,8 @@ LEDGERS = (
     (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 3),
 )
 
+NUMBER_WORDS = {3: "three", 20: "twenty"}
+
 # `quick-xml` 0.39.4 is the release RUSTSEC-2026-0194 and RUSTSEC-2026-0195
 # name. 0.41 is the first constraint that cannot resolve back onto it and the
 # one `vendor/s3-simple` carries; upstream s3-simple 0.9 moved to 0.42.
@@ -105,6 +107,46 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
                     else:
                         self.assertEqual(upstream, "—")
                         self.assertTrue(drop_condition.startswith("Never;"))
+
+    def test_the_removal_condition_can_be_met(self):
+        """A `plurx policy` row's drop condition is `Never`, so a removal
+        sentence that waits for an upstream release to contain every patch can
+        never fire. Where a ledger has policy rows, the removal paragraph must
+        name exactly the rows an upstream release retires and exactly the
+        policy rows that need an owner decision instead, and the intro must
+        state the real patch count.
+        """
+
+        for path, expected in LEDGERS:
+            with self.subTest(ledger=path.parent.name):
+                body = path.read_text(encoding="utf-8")
+                rows = table_rows(body)
+                intro = body.split("**Owner:**", 1)[0]
+                self.assertIn(
+                    f"carries {NUMBER_WORDS[expected]} ",
+                    intro,
+                    "the intro's patch count must match the ledger table",
+                )
+                removal = body.split("\nRemove this vendor", 1)[1].split("\n\n", 1)[0]
+                self.assertNotRegex(
+                    removal,
+                    r"contains\s+all\s+\w+\s+patches",
+                    "an upstream release cannot contain a Plurx policy row",
+                )
+                policy = {int(row[0]) for row in rows if row[2] == "plurx policy"}
+                if not policy:
+                    continue
+                retirable = {int(row[0]) for row in rows} - policy
+                named = [
+                    {int(number) for number in re.findall(r"\d+", listed)}
+                    for listed in re.findall(r"\(rows ([\d, and]+)", removal)
+                ]
+                self.assertEqual(
+                    named,
+                    [retirable, policy],
+                    "the removal paragraph must list the upstream-retirable rows, "
+                    "then the policy rows, exactly as the table classifies them",
+                )
 
     def test_unused_s3_edge_is_gated_and_the_override_is_scoped_to_the_fork(self):
         hiqlite = tomllib.loads((ROOT / "vendor/hiqlite/Cargo.toml").read_text())
