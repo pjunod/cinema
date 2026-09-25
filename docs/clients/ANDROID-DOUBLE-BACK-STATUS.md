@@ -13,7 +13,7 @@ the navigation contract.
 | Item | Value |
 |---|---|
 | Branch | `codex/android-double-back-20260925` |
-| Base | Forgejo `main` at `3ca348a77b769a9a0b72a402a7b6adadc8c966ec` |
+| Base | Forgejo `main` at `60f3803d1d5dc431a919235fab328ae6ea86d394` |
 | Worktree | Separate agent clone at `/private/tmp/plurx-agent-android-double-back-20260925` |
 | Change | Bind Back and Exit callbacks to their originating navigation entry at 16 destinations; preserve Home and intermediate pages after repeated taps. |
 | Lint repair | Opt in to Media3's existing `UnstableApi` usage in `PlaybackService.kt`. |
@@ -23,7 +23,7 @@ the navigation contract.
 
 | Milestone | State | Evidence or next action |
 |---|---|---|
-| Recover candidate on current main | Done | The Android navigation files have no upstream changes since the candidate base; the patch applied cleanly. |
+| Recover candidate on current main | Done | The Android navigation files had no upstream changes since the candidate base; the branch was rebased again after an unrelated streaming PR reached main. |
 | Review scoped implementation | Prepared | Six instrumented regressions use the real navigation controller and Back button. Final adversarial review remains pending. |
 | Validate final tree | Pending | Run the affected fast lane once after review and review fixes, as requested for this delivery. |
 | Physical phone and Android TV | Pending | No physical device result is claimed. |

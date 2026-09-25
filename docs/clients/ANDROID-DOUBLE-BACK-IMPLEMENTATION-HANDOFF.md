@@ -31,7 +31,7 @@ These are local handoff locations, recorded on 2026-09-25:
 |---|---|
 | Preferred working tree | `/private/tmp/plurx-agent-android-double-back-20260925` |
 | Branch | `codex/android-double-back-20260925` |
-| Current main base | `3ca348a77b769a9a0b72a402a7b6adadc8c966ec` |
+| Current main base | `60f3803d1d5dc431a919235fab328ae6ea86d394` |
 | Original checkout | `/Users/pjunod/code/plurx` |
 | Original base | `bafeb08766ce057634f3fab0850cdd9e03507a98`; do not deliver from this base |
 | Commit/push/PR state | See the delivery status; no APK publication is in scope. |

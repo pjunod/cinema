@@ -15,8 +15,8 @@ Live progress: [delivery status](ANDROID-DOUBLE-BACK-STATUS.md).
 The initial investigation used `bafeb08766ce057634f3fab0850cdd9e03507a98`.
 Following Fable's review on 2026-09-25, the candidate was reapplied to
 `38f61dfe6` for the historical validation below. Its selected files were
-then carried to `3ca348a77b769a9a0b72a402a7b6adadc8c966ec` on
-`codex/android-double-back-20260925` in a separate agent clone. Validation
+then carried and rebased to `60f3803d1d5dc431a919235fab328ae6ea86d394`
+on `codex/android-double-back-20260925` in a separate agent clone. Validation
 below describes the older tree until the final gate is recorded. Other workspace
 changes are outside this proposal. No server, Rust, Apple, or web changes
 are required.
