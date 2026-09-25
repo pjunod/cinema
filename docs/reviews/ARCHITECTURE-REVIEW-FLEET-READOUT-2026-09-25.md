@@ -250,3 +250,9 @@ Raw trace, normalized summary and hashed receipt are in `/Users/pjunod/code/plur
 A distinct RSA-3072 release key was generated outside all repositories under `/Users/pjunod/code/plurx-agent/android-signing/`. The directory is mode 0700; the key, credentials file and debug-to-release lineage are mode 0600. Release certificate SHA-256 is `52c046be28f437ca19601b728617c6d4d1c85a13726092e06ac7d66738ff6c37`; lineage SHA-256 is `7b9030ccfa355beeab3ca4d84236e703a45d976a57a28ee49d74f73a6bf37b7c`. Android build-tools 36 generated the lineage from the audited installed debug signer to the new signer with `installed-data` preservation. No passwords or private key bytes are in this readout.
 
 This establishes signing material only. The follow-up code branch has not passed its sole adversarial review or fast lane; no signed release APK or physical data-preserving canary has been verified, and no Android release install was attempted. Preserve the key and lineage securely because later sideload updates require this identity.
+
+## L-03 exact-main source revisit — 16:40–16:41 UTC
+
+On current main `415eb047f3b66afd1bf21bd3ea829766080c0e27`, three sequential duration-bounded direct HDHomeRun MPEG-TS captures checked channels 6.1, 6.2 and 12.2. FFprobe 9.0.1 decoded 338, 336 and 328 video frames respectively; none had `A/53 Closed Captions` frame side data. The capture hashes and byte counts are in `/Users/pjunod/code/plurx-agent/codex-final-main-l03-captures-20260925/receipt.json`, SHA-256 `afc174bd8f4a40c54f5516cbf7c93fa092bc699b50940aaa5056f7d18b2d739c`.
+
+Each tuner request completed; temporary TS samples were removed. No browser or server run followed because no caption-positive source interval was available. This does not change the earlier caption-positive captures or establish whether the merged web selector renders captions when the broadcast carries them. L-03 M4 visual acceptance remains open.
