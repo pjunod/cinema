@@ -381,7 +381,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
-      shippedSource("subtitleStoredSourcesCard"),
+      shippedSource("subtitleStoredSourcesCard"), shippedSource("subtitlePlaybackRangesCard"),
       shippedSource("subtitleClusterSourcesCard"),
       shippedSource("subtitleBackfillCard"),
       shippedSource("chapterThumbnailsCard"),
@@ -1221,7 +1221,7 @@ test("HEVC override saves either choice without consulting advisory readiness", 
     const calls=[];
     const err={textContent:""}, card={outerHTML:""};
     const save = new Function("api","document","cacheSettings","hevcCopyCard","toast",
-      `${shippedSource("saveHevcCopy")} return saveHevcCopy;`)(
+      `${shippedSource("saveHevcCopy")}\nreturn saveHevcCopy;`)(
       async (path, opts) => {calls.push([path,opts.body]);return {hevc_unverified_copy:enabled,hevc_header_trace_available:false};},
       {getElementById:(id)=>id==="hevc-copy-error"?err:id==="hevc-copy-card"?card:{checked:enabled}},
       ()=>{}, s=>`saved:${s.hevc_unverified_copy}`, ()=>{});

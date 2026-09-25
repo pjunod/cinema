@@ -7658,8 +7658,29 @@ impl JobManager {
                 }
                 let identity = crate::fragindex::identity_for(&file, video);
                 match self.store.fragment_index(file_id, &identity).await {
-                    // Already current for this file and this pipeline.
-                    Ok(Some(_)) => continue,
+                    Ok(Some(index)) => {
+                        if !matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+                            continue;
+                        }
+                        // Size/mtime alone miss inode/ctime-only replacement.
+                        // The local pass must refresh such proofs even when
+                        // the cluster request resolver is disabled. A current
+                        // refusal is already analyzed and must not rescan.
+                        match crate::fragment_index_cluster::inspect_source(&file).await {
+                            Ok(object)
+                                if index.promotion.hevc_configuration.as_ref().is_some_and(
+                                    |proof| proof.current_on_node(&object, &node_id),
+                                ) =>
+                            {
+                                continue
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::debug!(file_id, %error, "local HEVC index source unavailable");
+                                break;
+                            }
+                        }
+                    }
                     Ok(None) => {}
                     Err(error) => {
                         // The sidecar is failing reads. Give up on the whole
@@ -13531,6 +13552,124 @@ mod tests {
         assert_eq!(
             row.pgs_tracks, 1,
             "the row names the track it kept: {row:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_hevc_index_refreshes_object_proof_without_cluster_queue() {
+        use plurx_core::store::FragmentIndexStore as _;
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("source.mp4");
+        std::fs::copy(plurx_core::testfixtures::source("closed-gop"), &source)
+            .expect("copy HEVC fixture");
+        let metadata = std::fs::metadata(&source).expect("stat");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "0")
+            .await
+            .expect("local indexing");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "HEVC proof refresh".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.path().to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "HEVC".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let probe = ProbeResult {
+            video_codec: Some("hevc".into()),
+            duration_ms: Some(12000),
+            ..Default::default()
+        };
+        let id = store
+            .upsert_file(
+                item,
+                &source.to_string_lossy(),
+                metadata.len() as i64,
+                metadata
+                    .modified()
+                    .expect("mtime")
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("epoch")
+                    .as_secs() as i64,
+                &probe,
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("read").expect("file");
+        let identity = crate::fragindex::identity_for(
+            &file,
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
+        );
+        let work = crate::test_tempdir().expect("work");
+        let jobs = manager(store.clone(), work.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            work.path().join("transcode"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        jobs.clone().build_fragment_indexes(transcode.clone()).await;
+        let mut index = store
+            .fragment_index(id, &identity)
+            .await
+            .expect("read")
+            .expect("initial index");
+        let object = crate::fragment_index_cluster::inspect_source(&file)
+            .await
+            .expect("object");
+        let proof = index
+            .promotion
+            .hevc_configuration
+            .as_mut()
+            .expect("original proof");
+        assert!(proof.current_on_node(&object, jobs.coordinator.node_id()));
+        // Model a prior object's proof with the same catalog size/mtime.
+        proof.source_object_version = "stale-same-size-and-mtime".into();
+        store
+            .put_fragment_index(id, &index)
+            .await
+            .expect("stale row");
+        jobs.clone().build_fragment_indexes(transcode.clone()).await;
+        let mut rebuilt = store
+            .fragment_index(id, &identity)
+            .await
+            .expect("read")
+            .expect("rebuilt index");
+        assert!(rebuilt
+            .promotion
+            .hevc_configuration
+            .as_ref()
+            .expect("refreshed proof")
+            .current_on_node(&object, jobs.coordinator.node_id()));
+        // A completed refusal on this exact object must remain untouched.
+        rebuilt
+            .promotion
+            .hevc_configuration
+            .as_mut()
+            .expect("proof")
+            .refusal = Some("completed unsupported configuration".into());
+        store
+            .put_fragment_index(id, &rebuilt)
+            .await
+            .expect("refused row");
+        jobs.clone().build_fragment_indexes(transcode.clone()).await;
+        assert_eq!(
+            store.fragment_index(id, &identity).await.expect("read"),
+            Some(rebuilt)
         );
     }
 

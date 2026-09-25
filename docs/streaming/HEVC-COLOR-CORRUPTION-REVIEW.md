@@ -1,13 +1,13 @@
 # HEVC color corruption review — adversarial findings and dispositions
 
-**Status:** complete; amended RCA and proposed design approved ·
+**Status:** final implementation review complete; one finding addressed; CI pending ·
 **Written:** 2026-09-25 · **Reviewer:** independent `header_path_audit` agent
 
 Companion to
 [HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md](HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md).
-This records the independent code audit, the review of the actual proposed
-fix document, and how its objections changed that proposal. It is a design
-review, not approval of an implementation or a deployment receipt.
+This records the original design review and the final batched implementation
+review in §6, including the changes made in response. It is not a deployment
+or physical browser qualification receipt.
 
 ## 1. Review scope and evidence
 
@@ -95,3 +95,26 @@ merge boundary. They are retained as history, not a second final approval.
 
 The final candidate review, disposition and fast-lane receipt will be recorded
 here after the batched PR is ready. No final approval is claimed yet.
+
+## 6. Final batched PR review — PR #535
+
+The independent adversarial agent reviewed candidate `8369dae7d` against
+`8ae8cab1e` without running tests. Verdict: **request changes**, with one P2
+finding and no other must-fix findings.
+
+**F1 — stale local proof never refreshes with cluster indexing disabled.**
+The periodic local pass skipped any index matching catalog size/mtime and
+pipeline, even when ctime/inode or proof revision/node had changed. The
+object-bound queue request could not help while the cluster resolver was off.
+
+**Addressed:** the local pass now skips HEVC only when the proof names the
+current analyzer revision, source object and node. Missing/stale proofs are
+rebuilt through the existing bounded pass. A completed refusal for the current
+object still counts as analyzed, preventing repeat full reads. The new
+`local_hevc_index_refreshes_object_proof_without_cluster_queue` regression
+exercises stale-proof replacement and retention of a completed refusal through
+the real local indexer. The fast-lane validation phase follows this disposition.
+
+The reviewer confirmed that previous trace completion, portable proof,
+full/sampled memo, cached admission and worker fencing findings are addressed,
+and the explicit enable bypasses proof restrictions without readiness gates.

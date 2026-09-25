@@ -44,8 +44,18 @@ impl Proof {
         true
     }
 
+    /// A completed refusal is still a current analysis; do not rescan it
+    /// until source identity or analyzer revision changes.
+    pub fn current_on_node(&self, object: &str, node: &str) -> bool {
+        self.revision == REVISION
+            && !object.is_empty()
+            && !node.is_empty()
+            && self.source_node_id == node
+            && self.source_object_version == object
+    }
+
     pub fn permits_on_node(&self, object: &str, node: &str) -> bool {
-        !node.is_empty() && self.source_node_id == node && self.permits(object)
+        self.current_on_node(object, node) && self.permits(object)
     }
 
     pub fn permits(&self, object_version: &str) -> bool {
