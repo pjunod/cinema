@@ -734,11 +734,16 @@ mandatory null sentinel. The direct WebVTT comparison used
 |---|---|---|
 | E1, zero start | The tee exited 0 with empty stderr and wrote all four selected subtitle streams. Bare and tee index SHA-256 were both `6be1c084a6176e46f476f538f355174d1eb3bf5b385e3f448333c1af951b6f47`. The PGS `.sup` was 2,504 bytes. SRT WebVTT matched direct extraction at SHA-256 prefix `403c5f5a`; ASS WebVTT matched at `23ee845d`. | Pass for this fixture. |
 | E1b, zero start | The double map and Matroska slave succeeded, but the 1,143-byte tee `.mks` (`f48be786a250704b3ad2d7d18f02e8910bea22c15e3a49e5b655644d1d5ebb70`) differed from the 1,143-byte direct burn `.mks` (`4a5961ca2768514c92507b1e5afcbbd3c9680aee476dcaba4fe53ea16b6db7c3`). First byte difference: offset 221. `ffprobe` found two matching ASS packets on each side: PTS 1.500 s and 3.600 s, matching durations, payload hashes and ASS extradata. | **Pass by cue identity** under E1b §6.1. The byte difference remains recorded. |
-| E1/E1b, 7.5 s start; E2–E5 | The first run stopped at the byte mismatch; the continued run is in progress. | In progress. |
+| E1/E1b, 7.5 s start | Tee exited 0; bare and tee index SHA-256 were both `7859d0b45e6500b3371e07d618422749b2b437cfa116d07dc28c091838a92d7c`. SRT and ASS WebVTT were byte-identical to direct extraction. Tee and direct ASS `.mks` bytes differed, but both had the same two packet timestamps, durations, sizes, payload hashes and extradata (first packet PTS 1.480 s). | Pass by §6.1 cue identity. |
+| E2 | ASS WebVTT tee and direct output SHA-256 matched at zero start (`23ee845d0e7523e602d97c8d36caa9973942371b3606cb7f28a3c8bb2d41dae4`) and 7.5 s start (`eda8bc6e0a765acb998a222b1094337fe4ffc69bf510fa861ecbbc0056033b53`), including the same styling loss. | Pass. |
+| E3 | SRT, ASS and `mov_text` each yielded two WebVTT cues and two `framecrc` packets; the ASS `.mks` had two packets. The `mov_text` fixture encoded the two-cue SRT in MP4, then used the production-shaped tee with a VTT, framecrc and null slave. | Pass: 1:1 for these fixtures. |
+| E4 | Five paired runs of a 120 s, 20,222,983-byte synthetic file with 12 SRT, 2 ASS and 3 PGS tracks: bare and ride indexes had the same SHA-256 (prefix `7c2242b2`). Wall time was 0.04–0.05 s for both; user CPU was 0.03 s bare and 0.03–0.04 s riding; peak RSS was 57,916–58,472 KiB bare and 58,900–59,260 KiB riding (about 0.7–1.3 MiB more). | Pass for this synthetic case; the RSS increment is recorded, not called zero. |
+| E5 | A WebVTT slave sent to `/dev/full` failed with `No space left on device`, but ffmpeg exited 0, the index matched baseline, and the other ASS/PGS outputs matched their controls; classify the failed representation `transient`. A corrupt SRT packet also left the index and other tracks intact, with FFmpeg reporting `Invalid UTF-8 in decoded subtitles text` and `Error decoding subtitles`; classify that representation `malformed`. Both its VTT cue count and framecrc count fell from two to one, so equality of those counts alone would **falsely publish an incomplete VTT as kept**. M1 must veto that decoder error and test it by name. | Isolation pass; verdict correction required in M1. |
 
-The experiment used a private temporary directory on nuc3, then removed and
-verified its removal. No product code was written and no fleet deployment was
-made. The §8 audit against implementation base `f600d2823` also found that
+Both experiment runs used private temporary directories on nuc3, then removed
+and verified their removal. Exact generated argv and results were retained
+locally while this record was written. M0 wrote no product code and made no
+fleet deployment. The §8 audit against implementation base `f600d2823` also found that
 `object_version` is host-local metadata, whereas
 `FragmentIndexSourceObservation.source_sha256` is the portable sampled
 digest; §3.10 needs correction before M3.
@@ -878,4 +883,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 |---|---|---|---|---|---|
 | 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01LUY4Gc3ZFwF8xzj6Eg9Dy1 | Plan v1 | [#497](http://192.168.4.7:3000/noirr/plurx/pulls/497) | Written from `936157b4b` and the 2026-09-24 fleet read in §2.5. Reviewed by Codex the same day: request changes, R1–R7. |
 | 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01LUY4Gc3ZFwF8xzj6Eg9Dy1 | Plan v2 | [#497](http://192.168.4.7:3000/noirr/plurx/pulls/497) | All seven findings accepted and re-anchored at `0e2c3fd4` (every cited behaviour re-read in source); the three contracts added (§3.9–§3.11); schema moved to v46 after PR #498 took v45; acceptance split warm/cold; ready for an executing session. Nothing built. |
-| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M0 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | nuc3 E1 passed; E1b was cue-identical but byte-different. Paul directed the session to choose and continue; it chose §6.1's explicit cue-identity allowance. The 7.5 s case and E2–E5 are running. |
+| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M0 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | nuc3 E1 passed; E1b was cue-identical but byte-different. Paul directed the session to choose and continue; it chose §6.1's explicit cue-identity allowance. E1–E5 completed on nuc3; E5 exposed a text-verdict bug to fix in M1. |

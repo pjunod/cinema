@@ -1,6 +1,6 @@
 # Subtitle cluster extraction — implementation status
 
-**Status:** in-progress: M0 continuation and M1 · **Updated:** 2026-09-24 · **Board:** K-09 · **Branch:** `plan/K-09` · **PR:** [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) · **Base:** `f600d2823`
+**Status:** in-progress: M1 · **Updated:** 2026-09-24 · **Board:** K-09 · **Branch:** `plan/K-09` · **PR:** [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) · **Base:** `f600d2823`
 
 The [v2 plan](SUBTITLE-CLUSTER-EXTRACTION-PLAN.md) is the contract. Its
 Execution log holds the evidence for each milestone. This page is the short
@@ -8,7 +8,7 @@ progress view for the one implementation PR.
 
 | Milestone | State | Evidence / next step |
 |---|---|---|
-| M0 · nuc3 experiments E1–E5 | cue identity accepted; continuing | E1 passed. E1b's ASS `.mks` has matching cues and payloads but differs byte for byte from the direct burn sidecar. The 7.5 s case and E2–E5 are running. [Exact evidence](SUBTITLE-CLUSTER-EXTRACTION-PLAN.md#61-results--2026-09-24-m0-stopped-at-e1b). |
+| M0 · nuc3 experiments E1–E5 | complete | E1–E3 passed under the documented E1b cue-identity choice; E4 cost and E5 failure behavior are recorded in [§6.1](SUBTITLE-CLUSTER-EXTRACTION-PLAN.md#61-results--2026-09-24-m0-cue-identity-decision). E5 requires M1 to reject a decode-error truncation even when cue and framecrc counts agree. |
 | M1 · text ride-along and VTT consumer | in progress | Producer and consumer implementation started after accepting §6.1's cue-identity allowance. |
 | M2 · schema v46 and queue lifecycle | pending | SQLite and replicated store contracts. |
 | M3 · publications and hydration | pending | Portable source identity and merge-safe hydration. |
