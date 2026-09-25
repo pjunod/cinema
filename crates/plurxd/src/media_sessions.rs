@@ -4390,19 +4390,41 @@ pub(crate) async fn maintenance_loop(state: AppState) {
     }
 }
 
-/// How stale the takeover loop's cached switches may become (K-03 M3). A
-/// switch flipped on another node is seen within this bound; one flipped on
-/// this node wakes the loop at once through [`takeover_settings_changed`].
+/// How stale the takeover loop's cached "off" may become (K-03 M3). Only
+/// the off state is cached (plan §4): a switch turned on on another node is
+/// seen within this bound, one turned on on this node wakes the loop at once
+/// through [`takeover_settings_changed`], and a switch turned off anywhere is
+/// seen on the next 2 s tick because an "on" answer is never reused.
 const TAKEOVER_SETTINGS_REFRESH: Duration = Duration::from_secs(60);
 /// How long the loop sleeps between looks while either switch is off, which
 /// is the fleet default. Matches the watched drain's idle ceiling.
 const TAKEOVER_IDLE_TICK: Duration = plurx_core::store::watched_drain::IDLE_TICK_MAX;
 
-static TAKEOVER_SETTINGS: LazyLock<tokio::sync::Notify> = LazyLock::new(tokio::sync::Notify::new);
+/// This node's takeover-switch writes: a generation that invalidates any
+/// cached answer taken before the write, and a wake for an idle sleep.
+#[derive(Default)]
+pub(crate) struct TakeoverSettingsSignal {
+    generation: AtomicU64,
+    wake: tokio::sync::Notify,
+}
+
+impl TakeoverSettingsSignal {
+    pub(crate) fn changed(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+}
+
+static TAKEOVER_SETTINGS: LazyLock<Arc<TakeoverSettingsSignal>> =
+    LazyLock::new(|| Arc::new(TakeoverSettingsSignal::default()));
 
 /// The settings route wrote a takeover switch on this node.
 pub(crate) fn takeover_settings_changed() {
-    TAKEOVER_SETTINGS.notify_one();
+    TAKEOVER_SETTINGS.changed();
 }
 
 /// The one Store read the takeover gate makes: both switches in one
@@ -4425,38 +4447,62 @@ impl<T: Store + ?Sized> TakeoverSwitches for T {
     }
 }
 
-/// Both takeover switches, cached for [`TAKEOVER_SETTINGS_REFRESH`].
+/// The takeover switches, with an "off" answer cached for
+/// [`TAKEOVER_SETTINGS_REFRESH`].
 ///
 /// The loop used to read each switch with its own consistent read every 2 s
 /// on every node — 86,400 authority reads per node per day for a feature
-/// that is off across the fleet. Only the settings reads are cached; with
-/// both switches on, the 2 s cadence and the takeover CAS are unchanged.
-#[derive(Default)]
+/// that is off across the fleet. Only the disabled state's reads are cached
+/// (plan §4): with both switches on, every 2 s tick reads the pair again, so
+/// turning takeover off stops the scan and the CAS on the next tick on every
+/// node. A cached "off" is dropped by a local switch write (the generation)
+/// or after 60 s.
 pub(crate) struct TakeoverGate {
-    cached: Option<(bool, tokio::time::Instant)>,
+    signal: Arc<TakeoverSettingsSignal>,
+    /// When the last "off" was read, and the local write generation then.
+    cached_off: Option<(tokio::time::Instant, u64)>,
+}
+
+impl Default for TakeoverGate {
+    fn default() -> Self {
+        Self::with_signal(Arc::clone(&TAKEOVER_SETTINGS))
+    }
 }
 
 impl TakeoverGate {
-    pub(crate) fn invalidate(&mut self) {
-        self.cached = None;
+    pub(crate) fn with_signal(signal: Arc<TakeoverSettingsSignal>) -> Self {
+        Self {
+            signal,
+            cached_off: None,
+        }
     }
 
     pub(crate) async fn enabled<S: TakeoverSwitches + ?Sized>(&mut self, store: &S) -> bool {
         let now = tokio::time::Instant::now();
-        if let Some((enabled, read_at)) = self.cached {
-            if now.saturating_duration_since(read_at) < TAKEOVER_SETTINGS_REFRESH {
-                return enabled;
+        // Taken before the read, so a write racing the read makes this
+        // answer stale rather than hiding the write for a minute.
+        let generation = self.signal.generation();
+        if let Some((read_at, seen)) = self.cached_off {
+            if seen == generation
+                && now.saturating_duration_since(read_at) < TAKEOVER_SETTINGS_REFRESH
+            {
+                return false;
             }
         }
         match store.takeover_switches().await {
-            Ok(enabled) => {
-                self.cached = Some((enabled, now));
-                enabled
+            Ok(true) => {
+                self.cached_off = None;
+                true
             }
-            // As before, an unreadable switch is off for this tick; the
-            // stale cache is not trusted and the next tick reads again.
+            Ok(false) => {
+                self.cached_off = Some((now, generation));
+                false
+            }
+            // As before, an unreadable switch is off for this tick and the
+            // next tick reads again.
             Err(error) => {
                 tracing::debug!(%error, "media-session takeover switches unavailable");
+                self.cached_off = None;
                 false
             }
         }
@@ -4464,9 +4510,12 @@ impl TakeoverGate {
 
     /// Wait for the loop's next tick and say whether takeover may run on it.
     ///
-    /// On: one `TAKEOVER_INTERVAL` tick, exactly as before. Off (the fleet
-    /// default): the rest of an idle period is slept here, cut short by a
-    /// local switch write, so the caller never reaches the inventory read.
+    /// On: one `TAKEOVER_INTERVAL` tick, exactly as before, and the switches
+    /// are read again on the next one. Off (the fleet default): the rest of
+    /// an idle period is slept here, cut short by a local switch write, so
+    /// the caller never reaches the inventory read. The wake only ends the
+    /// sleep; whether the cache is stale is the generation's call, so a wake
+    /// left over from a write made while on costs no read.
     /// `MissedTickBehavior::Delay` makes the tick after a long sleep fire at
     /// once, so a flip is acted on within one tick.
     pub(crate) async fn wait_for_tick<S: TakeoverSwitches + ?Sized>(
@@ -4480,7 +4529,7 @@ impl TakeoverGate {
         }
         tokio::select! {
             () = tokio::time::sleep(TAKEOVER_IDLE_TICK.saturating_sub(TAKEOVER_INTERVAL)) => {}
-            () = TAKEOVER_SETTINGS.notified() => self.invalidate(),
+            () = self.signal.wake.notified() => {}
         }
         false
     }
@@ -8448,23 +8497,31 @@ mod takeover_gate_tests {
         );
     }
 
+    /// A gate with its own write signal, so parallel tests do not share the
+    /// process-wide one.
+    fn isolated_gate() -> (TakeoverGate, Arc<TakeoverSettingsSignal>) {
+        let signal = Arc::new(TakeoverSettingsSignal::default());
+        (TakeoverGate::with_signal(Arc::clone(&signal)), signal)
+    }
+
     /// Flipping the switch on this node wakes the loop within one tick,
-    /// and with both switches on the cadence is the unchanged 2 s while the
-    /// switches are still read only once a minute.
+    /// and with both switches on the cadence is the unchanged 2 s with one
+    /// pair read per tick: an "on" is never cached (plan §4).
     #[tokio::test(start_paused = true)]
     async fn takeover_loop_wakes_on_a_local_flip_and_keeps_its_two_second_cadence() {
         let switches = Arc::new(Switches::default());
-        let mut gate = TakeoverGate::default();
+        let (mut gate, signal) = isolated_gate();
         let mut interval = takeover_interval();
         // Settle into the off state.
         for _ in 0..3 {
             assert!(!gate.wait_for_tick(&mut interval, switches.as_ref()).await);
         }
         let flip = Arc::clone(&switches);
+        let flip_signal = Arc::clone(&signal);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(3)).await;
             flip.on.store(true, Ordering::SeqCst);
-            takeover_settings_changed();
+            flip_signal.changed();
         });
         let flipped_from = tokio::time::Instant::now();
         loop {
@@ -8489,9 +8546,79 @@ mod takeover_gate_tests {
             (59..=61).contains(&ticks),
             "enabled takeover keeps its 2 s cadence, ticked {ticks} times in 120 s"
         );
+        assert_eq!(
+            switches.reads.load(Ordering::SeqCst) - reads_before,
+            ticks,
+            "and reads the switch pair once per tick, never reusing an \"on\""
+        );
+    }
+
+    /// PR #405 review P2: an admin turns takeover off on this node while it
+    /// is on. The very next tick must refuse, and so must every tick after.
+    #[tokio::test(start_paused = true)]
+    async fn takeover_loop_stops_acting_within_one_tick_of_a_local_disable() {
+        let switches = Switches::default();
+        switches.on.store(true, Ordering::SeqCst);
+        let (mut gate, signal) = isolated_gate();
+        let mut interval = takeover_interval();
+        assert!(gate.wait_for_tick(&mut interval, &switches).await);
+
+        switches.on.store(false, Ordering::SeqCst);
+        signal.changed();
+        let disabled_at = tokio::time::Instant::now();
+        let mut acted = 0;
+        while disabled_at.elapsed() < Duration::from_secs(68) {
+            if gate.wait_for_tick(&mut interval, &switches).await {
+                acted += 1;
+            }
+        }
+        assert_eq!(
+            acted, 0,
+            "a local disable must stop the scan and CAS from the next tick"
+        );
+    }
+
+    /// The same disable written on another node (no local signal) is seen
+    /// on the next 2 s tick too, because an "on" answer is never reused.
+    #[tokio::test(start_paused = true)]
+    async fn takeover_loop_sees_a_remote_disable_on_the_next_tick() {
+        let switches = Switches::default();
+        switches.on.store(true, Ordering::SeqCst);
+        let (mut gate, _signal) = isolated_gate();
+        let mut interval = takeover_interval();
+        assert!(gate.wait_for_tick(&mut interval, &switches).await);
+
+        switches.on.store(false, Ordering::SeqCst);
         assert!(
-            switches.reads.load(Ordering::SeqCst) - reads_before <= 2,
-            "and reads the switches once per minute, not per tick"
+            !gate.wait_for_tick(&mut interval, &switches).await,
+            "a disable written elsewhere must be seen on the next tick"
+        );
+    }
+
+    /// A switch write made while takeover is on (e.g. re-saving "on") must
+    /// not cost the later off state an extra read: the leftover wake ends one
+    /// sleep, but the cached "off" read after that write is still current.
+    #[tokio::test(start_paused = true)]
+    async fn takeover_loop_ignores_a_wake_left_over_from_a_write_made_while_on() {
+        let switches = Switches::default();
+        switches.on.store(true, Ordering::SeqCst);
+        let (mut gate, signal) = isolated_gate();
+        let mut interval = takeover_interval();
+        assert!(gate.wait_for_tick(&mut interval, &switches).await);
+        signal.changed();
+        assert!(gate.wait_for_tick(&mut interval, &switches).await);
+
+        // Turned off on another node: the next tick reads "off" and caches it.
+        switches.on.store(false, Ordering::SeqCst);
+        let reads_before = switches.reads.load(Ordering::SeqCst);
+        let off_since = tokio::time::Instant::now();
+        while off_since.elapsed() < Duration::from_secs(50) {
+            assert!(!gate.wait_for_tick(&mut interval, &switches).await);
+        }
+        assert_eq!(
+            switches.reads.load(Ordering::SeqCst) - reads_before,
+            1,
+            "one read of \"off\", then the cache holds for the rest of the minute"
         );
     }
 }

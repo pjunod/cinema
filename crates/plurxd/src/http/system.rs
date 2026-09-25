@@ -3424,7 +3424,9 @@ pub async fn update_settings(
         }
     }
     if req.monarr_url.is_some() || req.monarr_api_key.is_some() {
-        // The drain caches the pair for 60 s; a write here is seen at once.
+        // The drain caches the pair for 60 s. A write here is seen at once
+        // only if this node holds the `watched:outbox` lease; the owner, when
+        // it is another node, sees it within its 60 s refresh.
         state.watched.settings_changed();
     }
     if let Some(on) = req.monarr_watched_sync {
@@ -3711,7 +3713,9 @@ pub async fn update_settings(
             .await?;
     }
     if req.cluster_media_pool_enabled.is_some() || req.cluster_session_takeover_enabled.is_some() {
-        // The takeover loop caches both switches for 60 s; wake it now.
+        // The takeover loop caches an "off" for 60 s; drop it and wake the
+        // loop now. An "on" is never cached, so turning takeover off is seen
+        // on the next 2 s tick here and on every other node.
         crate::media_sessions::takeover_settings_changed();
     }
     if let Some(mode) = &req.sub_mode {
