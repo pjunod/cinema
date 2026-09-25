@@ -1289,7 +1289,8 @@ test_anchor = "testLibraryChannelExecutesPlaybackDecision"
 [[fixes]]
 id = "apple.library-channel-notification-error"
 commits = ["fbddb917"]
-source = "clients/apple/Sources/LibraryChannels.swift"
+# A-02 moved the finite notification callback into the shared item observer.
+source = "clients/apple/Sources/PlayerItemObserver.swift"
 source_anchor = "notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey]"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testLibraryChannelCapturesFailureNotificationError"
