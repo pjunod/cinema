@@ -2146,7 +2146,18 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # awaits `wait_with_output` under a 180 s timeout, so it cannot outlive the
 # test. No producer, no session, nothing registered.
 # +1 VOD successor handoff test fixture (a running predecessor child).
-expected_occurrences = 49
+# 49 -> 46 with P-02 M3, the one child launcher (measured). -4: the scan
+# `ffprobe -version` reporter probe (scan/probe.rs), the held decode-fact
+# probe (decode_facts.rs `spawn_configured_probe`), the Live TV caption audit
+# fixture and the library-root `find` (media_pool.rs) no longer call
+# `.spawn()` themselves; each starts through `process::spawn_job_owned`,
+# which is now their owner and gives them a priority class and an Activity
+# row. +1: `process::output_job_owned_blocking`, the launcher's synchronous
+# form for a caller already inside `spawn_blocking`; it attaches the job and
+# registers the child exactly as `spawn_job_owned` does and waits for it
+# before returning, so it creates no detached owner. The census test counts
+# exactly these two launcher spawns.
+expected_occurrences = 46
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2841,7 +2852,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Merged with main's C-08 M5 release-evidence metrics (#500) at
 # `259d087ed`: the value is the whole merged tree, measured by zeroing this
 # row after the merge.
-expected_occurrences = 969
+# 969 -> 972 with P-02 M3 (measured). All three are test-only: the priority
+# tests' re-exec child sleeps until it is killed (`std::thread::sleep`), the
+# stop test bounds its wait for the killed child with `tokio::time::timeout`,
+# and the Activity HTTP test bounds the same wait. No production timer.
+expected_occurrences = 972
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3085,7 +3100,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Merged with main's K-09 subtitle cluster extraction and the architecture
 # review client milestones (#507, #506): the value is the whole merged tree
 # re-measured after the merge.
-expected_occurrences = 173
+# 173 -> 176 with P-02 M3 (measured). Test-only: the priority tests' re-exec
+# sleeper and the refused-priority `/bin/sh` child (process/priority.rs), and
+# the Activity HTTP test's `sleep 300` child (http/mod.rs). Each starts
+# through `spawn_job_owned` or `output_job_owned`, is `kill_on_drop` or
+# awaited, and its job is dropped by the test.
+expected_occurrences = 176
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3454,7 +3474,14 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Merged with main's VOD successor encoder-permit handoff (#513) at
 # `8251d14f7`: the value is the whole merged tree, measured by zeroing this
 # row after the merge.
-expected_occurrences = 387
+# 387 -> 381 with P-02 M3, the one child launcher (measured). -7: the
+# `.spawn()` / `.output()` calls that started children outside the launcher
+# (scan/probe.rs 1, decode_facts.rs 1, live_tv/caption_audit_tests.rs 2,
+# media_pool.rs 1, subtitle_ride_along.rs 2) now go through
+# `spawn_job_owned` / `output_job_owned` / `output_job_owned_blocking`.
+# +1: the blocking launcher's own `.spawn()` in process/mod.rs (see
+# method-spawn above).
+expected_occurrences = 381
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3607,7 +3634,12 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Merged with main's C-08 M5 release-evidence metrics (#500) at
 # `259d087ed`: the value is the whole merged tree, measured by zeroing this
 # row after the merge.
-expected_occurrences = 399
+# 399 -> 403 with P-02 M3 (measured). +2 in process/mod.rs: the blocking
+# launcher kills and reaps its child (`kill`, `wait`) when the job cannot be
+# attached, so a failed attach never strands a running process. +2
+# test-only: the stop test's and the Activity HTTP test's `child.wait()` for
+# the child they killed, each under a timeout.
+expected_occurrences = 403
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -3647,7 +3679,11 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # `live_tv::tests::process_exists`, a signal-0 probe that delivers nothing;
 # it asserts that an orphaned child is still alive before its retry and gone
 # after it.
-expected_occurrences = 49
+# 49 -> 50 with P-02 M3 (measured). Test-only: the exec-ordering test's
+# `libc::execv` from inside a `pre_exec`, which reproduces the decode-fact
+# probe's exec-from-`pre_exec` to show that a priority registered after it
+# never runs. The child is owned by `spawn_job_owned` and killed on drop.
+expected_occurrences = 50
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -3742,7 +3778,10 @@ pattern = "kill_on_drop\\s*\\("
 # the cancellation backstop; the worker explicitly awaits ordinary exit and
 # kills/reaps on loss, deadline, or foreground preemption.
 # +1 the same test child, so a failing assertion cannot leak it.
-expected_occurrences = 87
+# 87 -> 89 with P-02 M3 (measured). Test-only: the priority tests' re-exec
+# sleeper and the Activity HTTP test's `sleep 300` child are `kill_on_drop`,
+# so a failed assertion cannot strand either.
+expected_occurrences = 89
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
