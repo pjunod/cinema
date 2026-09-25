@@ -1328,6 +1328,36 @@ test("each cliff is scored against its own rate and player window", () => {
   assert.match(unapplied.errors[0], /never applied cliff 2/);
 });
 
+test("second cliff baseline uses the stable tail after early first-window impairment", () => {
+  const firstWindow = Array.from({ length: 76 }, (_, second) => ({
+    at_ms: second * 1000,
+    absolute_time: Math.max(0, second - 20),
+  }));
+  const wholeWindowRate = firstWindow.at(-1).absolute_time / 75;
+  assert.ok(wholeWindowRate < CRITERIA.baseline_minimum_clock_rate);
+  const tailRate = lab.tailClockRate(firstWindow, 1000);
+  assert.equal(tailRate, 1);
+  const first = observation();
+  const second = observation({
+    shaping: {
+      ...first.shaping,
+      stages: [
+        ...first.shaping.stages,
+        { ...shapedStage("after-cliff-2", 350, {
+          spanMs: 45_000, rate: 340, mediaRate: 320,
+        }), entered_at_ms: 87_000 },
+      ],
+    },
+    baseline_clock_rate: tailRate,
+  });
+  assert.equal(lab.scoreRecovery(CRITERIA, {
+    ...second, baseline_clock_rate: wholeWindowRate,
+  }, 2).outcome, "browser_playback");
+  assert.equal(lab.scoreRecovery(CRITERIA, second, 2).outcome, "passed");
+  assert.equal(lab.tailClockRate(firstWindow.filter((row) => row.at_ms !== 70_000), 1000), 1);
+  assert.equal(lab.tailClockRate(firstWindow.filter((row) => row.at_ms < 65_000 || row.at_ms > 71_000), 1000), 0);
+});
+
 test("browser observer applies both cliffs after separate complete windows", async () => {
   const profile = lab.parseNetworkProfile("8mbps-to-1.1mbps-to-350kbps@0.01");
   const applied = [];

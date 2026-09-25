@@ -2519,6 +2519,34 @@ async function sampleWindow(driver, seconds, intervalMs, originMs, sink) {
   return last;
 }
 
+/** A sustained media-clock baseline immediately before a later cliff. */
+function tailClockRate(samples, intervalMs, seconds = 10) {
+  const end = samples.at(-1);
+  if (!end || !Number.isFinite(end.at_ms) || !Number.isFinite(end.absolute_time)
+      || end.at_ms < seconds * 1000) return 0;
+  const cutoff = end.at_ms - seconds * 1000;
+  const largestGap = Math.max(intervalMs * 3, 1000);
+  let before = null;
+  let after = null;
+  for (const row of samples) {
+    if (!Number.isFinite(row.at_ms) || !Number.isFinite(row.absolute_time)) return 0;
+    if (row.at_ms <= cutoff) before = row;
+    if (row.at_ms >= cutoff) { after = row; break; }
+  }
+  if (!before || !after || after.at_ms - before.at_ms > largestGap) return 0;
+  let previous = after;
+  for (const row of samples) {
+    if (row.at_ms <= after.at_ms) continue;
+    if (row.at_ms - previous.at_ms > largestGap) return 0;
+    previous = row;
+  }
+  const fraction = after.at_ms === before.at_ms
+    ? 0 : (cutoff - before.at_ms) / (after.at_ms - before.at_ms);
+  const atCutoff = before.absolute_time
+    + (after.absolute_time - before.absolute_time) * fraction;
+  return Math.max(0, (end.absolute_time - atCutoff) / seconds);
+}
+
 /**
  * Hold the link high until the session has proven itself, then apply every
  * requested cliff. Each recovery window is timestamped and scored from its
@@ -2539,9 +2567,8 @@ async function observeShapedCliff(driver, shaper, testCase, start) {
   const beforeCliff = await sampleWindow(
     driver, shaper.profile.cliff_after_seconds, intervalMs, baselineStart, baseline,
   );
-  let priorStart = start;
   let priorEnd = beforeCliff;
-  let priorElapsed = (performance.now() - baselineStart) / 1000;
+  const baselineElapsed = (performance.now() - baselineStart) / 1000;
   let stageBaseline = baseline;
   const windows = [];
   for (let cliffIndex = 1; cliffIndex < shaper.profile.stages.length; cliffIndex += 1) {
@@ -2561,14 +2588,15 @@ async function observeShapedCliff(driver, shaper, testCase, start) {
     const afterCliff = await sampleWindow(
       driver, criteria.recovery_observe_seconds ?? 45, intervalMs, cliffOrigin, timeline,
     );
-    const elapsed = (performance.now() - cliffOrigin) / 1000;
     const observation = {
       // Take an immutable snapshot before advancing. The final window freezes
       // the shaper, so the report and its last score use one byte account.
       shaping: cliffIndex === shaper.profile.stages.length - 1
         ? shaper.freezeTelemetry() : shaper.telemetrySnapshot(),
-      baseline_clock_rate: priorElapsed > 0
-        ? (priorEnd.video.absolute_time - priorStart.video.absolute_time) / priorElapsed : 0,
+      baseline_clock_rate: cliffIndex === 1
+        ? (baselineElapsed > 0
+          ? (beforeCliff.video.absolute_time - start.video.absolute_time) / baselineElapsed : 0)
+        : tailClockRate(stageBaseline, intervalMs),
       pre_cliff_runway_seconds: Number(priorEnd.video.runway || 0),
       baseline_error: priorEnd.video.error
         ? `media error ${priorEnd.video.error.code}: ${priorEnd.video.error.message || "unknown"}`
@@ -2591,9 +2619,7 @@ async function observeShapedCliff(driver, shaper, testCase, start) {
       observation,
       score: scoreRecovery(criteria, observation, cliffIndex),
     });
-    priorStart = transitionStart;
     priorEnd = afterCliff;
-    priorElapsed = elapsed;
     stageBaseline = timeline;
   }
   const failed = windows.find((window) => window.score.errors.length);
@@ -4314,6 +4340,7 @@ module.exports = {
   scoreRecovery,
   scoreCase,
   sampledVideoGap,
+  tailClockRate,
   shaperBurstBoundKbps,
   shaperClaimBoundBytes,
   timeToSustained,
