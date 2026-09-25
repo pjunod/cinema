@@ -1,0 +1,25 @@
+version = 1
+
+[[coverage]]
+commits = ["5fddd974"]
+points = ["live-tv.integration"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+PR #496 review finding 2. The orphan owner awaited remove_dir_all while it \
+held the orphan list, in the retry pass and in drain_orphans, and \
+drain_orphans took the list with no deadline, so one directory on a stalled \
+mount held every stop, drain and shutdown past SESSION_DRAIN_TIMEOUT and held \
+a failed cleanup's handoff before retire_session. Each orphan's removal now \
+runs on its own task and retry_orphan never waits; drain_orphans bounds its \
+wait for the list by its deadline. \
+a_hung_orphan_removal_holds_up_no_handoff_and_no_drain_past_its_deadline \
+(live_tv::tests) turns on a #[cfg(test)] seam under which every orphan \
+removal hangs, runs a retry loop as scratch_sweep_loop does, and requires a \
+retry pass to return within 1 s, a second failed cleanup to hand over and \
+retire its session, a drain_before that wants both stuck orphans to answer \
+with an error by SESSION_DRAIN_TIMEOUT (+100 ms), and a drain that wants none \
+to succeed at once. With the removal awaited inline under the orphan lock \
+again (the seam applied to that inline await) and the list taken without a \
+deadline, the retry pass never returns and the test fails at its first bound \
+(exit 101, run on nuc3). Runs in the local and hosted Rust gates.
+"""
