@@ -2018,7 +2018,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # test tasks. The architecture-review build adds four: the bounded boot-only
 # caption probes and shutdown-bound file-grant pruning loop. None elects a
 # rolling producer or outlives its request or queue owner.
-expected_occurrences = 610
+# +5 VOD successor handoff: one production task, the handoff expiry wake (one
+# sleep-then-kick per parked predecessor, bounded by the 2 s window), and four in its tests.
+expected_occurrences = 615
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2109,7 +2111,8 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # `kill_on_drop`, its stdin is written and closed in the same `join!` that
 # awaits `wait_with_output` under a 180 s timeout, so it cannot outlive the
 # test. No producer, no session, nothing registered.
-expected_occurrences = 48
+# +1 VOD successor handoff test fixture (a running predecessor child).
+expected_occurrences = 49
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2738,7 +2741,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 921 -> 937: K-09 adds 15 bounded worker, consumer and test waits for one
 # leased source publication. `file_grants::prune_loop` adds one daily interval
 # with a shutdown-token exit. None chooses a playback recipe or retry.
-expected_occurrences = 937
+# +8 VOD successor handoff: the 2 s handoff/reservation deadlines, the 250 ms
+# successor poll, the expiry wake instant, and test deadlines.
+expected_occurrences = 945
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2969,7 +2974,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # before publication. Six further commands are finite test fixtures: source
 # mux/probe, direct tee comparison, ASS filter/render checks, and a missing
 # subtitle source. None owns playback's rolling process or retry policy.
-expected_occurrences = 171
+# +1 VOD successor handoff test: a real sleeping child stands in for the running
+# predecessor encoder, so yielding is observed as an actual reap.
+expected_occurrences = 172
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3321,7 +3328,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # calls and one HLS fixture `Response::status()` assertion. The book-content
 # handler adds one `Response::status()` read for inline range headers; neither
 # response-status read launches a process.
-expected_occurrences = 380
+# +1 the same VOD successor handoff test child.
+expected_occurrences = 381
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3441,7 +3449,8 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # path awaits the child; cancellation, deadline, and foreground preemption
 # each kill and then reap that same child before releasing the claim. These
 # seven calls add no second process owner or rolling recovery decision.
-expected_occurrences = 388
+# +3 the same test child is killed and waited on at teardown.
+expected_occurrences = 391
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -3571,7 +3580,8 @@ pattern = "kill_on_drop\\s*\\("
 # 85 -> 86 with K-09's leased no-index FFmpeg source pass. Kill-on-drop is
 # the cancellation backstop; the worker explicitly awaits ordinary exit and
 # kills/reaps on loss, deadline, or foreground preemption.
-expected_occurrences = 86
+# +1 the same test child, so a failing assertion cannot leak it.
+expected_occurrences = 87
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
