@@ -203,3 +203,18 @@ Raw trace SHA-256 `a3bb6d003e81b382bbfa273822bee0f06fbf75f8988a9f7f8a02a470c4d04
 A read-only ADB pass saw five transports representing four physical devices: TCL 9445X had USB and Wi-Fi transports, plus Pixel 10 Pro Fold, Pixel 11 Pro XL and Motorola razr ultra 2025. All four still had `tv.plurx.app` 0.3.0 versionCode 124, `DEBUGGABLE`, with the same signing certificate SHA-256 `5cefd0c7db3f0a8d6fd818937425b7647b3222f9ed1419d79883a12c3e168bce`. The 9445X was awake and unlocked with Plurx Home foreground; a passive screen check showed populated Continue watching, Next up and Recently added rails. The other three were locked and dozing. No playback, paging, filter, notification or Home interaction was performed. The screenshot was discarded; its hash is in the sanitized receipt. No application or device state changed.
 
 Receipt `/private/tmp/plurx-android-physical-inventory-20260925.json` SHA-256 `d31372ba321ae493c790f4b507b0c0b6e3c91ef6ada1ddb6b0647d6638eb228a`. This proves physical availability and an old debug baseline only. Current-main signed release build 125 and D-02/A-03 device acceptance remain owed; the established release signing identity and four `PLURX_ANDROID_*` inputs were not found.
+
+## Exact merged-main three-voter rollout and passive baseline — 15:03 UTC
+
+The serial Ansible deployment of merged main `37baf6e0b509dc7adff882d1a40cc70c8a8538fd` exited 0 for `nynuc`, `m6` and `nuc4` with no failed or unreachable hosts. An independent synchronized read-only capture at 15:03:41 UTC verified that each checkout and running OCI revision matched that SHA, Docker was healthy with zero restarts, `/readyz` and `/metrics` returned 200, and the build line was `v0.3.0-4117-g37baf6e0b`. All three reported three fresh voters, zero stale voters, quorum available, term 18070, known leader `nuc4` and zero Raft apply lag. The metrics requests started in the same reported second. Private summary `/Users/pjunod/code/plurx-agent/codex-owed-evidence-receipts-20260925/three-voter-37b-20260925T150341Z/summary.json` SHA-256 `f545b4b2b492ae5cdbde5ba1e78ff104dceb131e6a13f05b9186136008728668`.
+
+| Row | Three-voter point observation | Acceptance still owed |
+|---|---|---|
+| K-02 | Commit and applied gauges, B/E/S/W bytes, snapshot counts; zero apply lag and fresh three-voter quorum. | Gap-free four-node 24-hour series and approved follower restart/catch-up. |
+| C-05 | Sidecar schema 10; `fragment_indexes` positive 2,261 / 1,518 / 4,291, pending and negative zero; backfill counters zero. | Active postdeploy convergence and availability behavior. |
+| C-08 | Metrics bodies 392,726–393,483 bytes; M5 TTFF, seek-to-picture, watched, stalled, delivered and admission families present. Planned start-outcome and scratch families absent. | Four-node normal-use hour, JSON logging and controlled active flows. |
+| P-02 | Open-file limits 524,288 soft/hard; file descriptors 57 / 62 / 68. | Two-transcode/direct/DVR busy sample and week without EMFILE. |
+| K-06 | NTP offsets +1.345 ms / −78 µs / −1.519 ms; no `plurx_cluster_clock` metric. | Runtime metric and one-hour idle/loaded peer uncertainty. |
+| S-11 | QSV available 1 / 0 / 1; m6 had one process-local encoder and one tone-map count, others zero. | Seven reset-aware days and controlled use. |
+
+This is a passive point sample. `nuc3` remains stopped for authenticated clean learner rejoin. No four-node continuity collector is active; process-local counters and sampled zeroes do not prove acceptance over time.
