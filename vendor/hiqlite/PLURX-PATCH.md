@@ -1,8 +1,9 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries nineteen compatibility patches for clustered
-deployments:
+Apache-2.0. Plurx carries twenty patches for clustered deployments. An
+upstream release can retire the seven generic bugs and the one dependency-only
+constraint; it cannot retire the twelve Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -29,6 +30,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 17 | Gate `cryptr/s3` behind Hiqlite `s3` | generic bug | pending M6 | Upstream release no longer enables S3 dependencies when backup and S3 are off. |
 | 18 | Scope the vendored `s3-simple` override to this manifest | dependency-only | — | Upstream cryptr accepts `s3-simple` 0.9 or newer, which already carries these dependency-only corrections. |
 | 19 | Install the `ring` rustls provider for the HTTP clients | generic bug | pending M6 | Upstream release installs or declares a rustls crypto provider for its `rustls-no-provider` Reqwest clients. |
+| 20 | Compile `ring` as the only rustls provider | plurx policy | — | Never; Plurx installs `ring` in every process, so a second compiled provider is an unused C build and an ambiguous default. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -195,9 +197,35 @@ made-up URL and prevents the fork from being declared fully tracked.
   ours, which is how the accidental inheritance went unnoticed.
   `crates/plurx-core/tests/hiqlite_tls_provider.rs` builds a real client in a
   binary of its own and fails if the install goes away.
+- The `rustls`-family dependencies no longer ask for `aws-lc-rs`. Upstream
+  reached it three ways: `axum-server`'s `tls-rustls` feature (which is
+  `tls-rustls-no-provider` plus `rustls/aws-lc-rs`), `rustls`'s
+  `prefer-post-quantum` feature (which is `aws_lc_rs` plus a reordering of that
+  provider's key-exchange groups), and `tokio-rustls`'s default features. This
+  manifest now declares `axum-server` with `tls-rustls-no-provider` only, drops
+  `prefer-post-quantum`, and declares `tokio-rustls` with
+  `default-features = false` and `logging`, `ring` and `tls12` (the defaults
+  minus `aws_lc_rs`). Every process that reaches this crate's TLS already runs
+  on `ring` (`start_node`, the proxy, `http_client` and `plurx-core` all install
+  it), so the removed provider was compiled, with its CMake/C `aws-lc-sys`
+  build, and never selected; with `ring` alone rustls also stops refusing to
+  choose a default. `RustlsConfig`, `bind_rustls` and `from_tcp_rustls` are
+  all `tls-rustls-no-provider` items. `crates/plurx-core/tests/rustls_single_provider.rs`
+  fails if any of the three routes returns. The optional `s3` and `full`
+  configurations still resolve `aws-lc-rs`, through the `reqwest` `rustls`
+  feature that cryptr and `s3-simple` select; Plurx builds neither, and every
+  entry point in them still installs `ring` explicitly.
 
-Remove this vendor when an upstream Hiqlite release contains all nineteen
-patches and Plurx has upgraded to it. Until then, the sparse-roster regression in
+Remove this vendor when both halves of its exit hold. First, the rows an
+upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18 and 19: the
+`generic bug` and `dependency-only` kinds) have met their drop conditions in
+releases Plurx has upgraded to. Second, none of the `plurx policy` rows
+(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16 and 20) still needs a patch. Their
+drop condition is `Never` by design (ARCHITECTURE §7 decision 10), so no
+upstream release retires them on its own: a policy row leaves only when
+upstream offers a way to express it without patching this source, or when the
+owner decides Plurx no longer needs it, recorded as a change to that row. Until
+both halves hold this vendor stays. Meanwhile, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
 and the snapshot RPC error-boundary plus queue-saturated reset tests above keep
 the transport-recovery patches load-bearing.
