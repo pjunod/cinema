@@ -8,6 +8,8 @@ members = [
     "crates/plurxd",
 ]
 exclude = [
+    "vendor/bitvec_helpers",
+    "vendor/dolby_vision",
     "vendor/hiqlite",
     "vendor/hiqlite-wal",
     "vendor/rust_decimal",
@@ -141,6 +143,13 @@ overflow-checks = true
 
 [profile.release]
 lto = "thin"
+# Measured 2026-09-25 on nuc3 (docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md
+# §5.6): `debug = "line-tables-only"` with `strip = "none"` gives a fully
+# symbolicated backtrace and a 420 MiB binary (5.3x); `strip = "debuginfo"`
+# gives named frames without lines at 109 MiB (+36 %, +11.5 % gzipped);
+# packed split debuginfo gives 230 MiB plus a 177 MiB .dwp. Which one ships
+# is Paul's call (that plan's §7); until then the profile is main's, and
+# `plurxd diagnostic-panic` is there to check whichever lands.
 strip = "symbols"
 
 # Patch Hiqlite's sparse-membership, WAL-recovery, and optional-dependency
@@ -159,6 +168,14 @@ strip = "symbols"
 # 0.39.1; `deny.toml`'s ban on that aws-lc-sys version is the tripwire, and
 # this row has to come back with it.
 [patch.crates-io]
+# dolby_vision 3.4.0 sizes allocations from unbounded ue(v) counts in the
+# RPU it is parsing; a corrupted or hostile RPU could abort plurxd. The
+# vendored copy refuses counts that cannot fit in the bits left. See
+# vendor/dolby_vision/PLURX-PATCH.md.
+dolby_vision = { path = "vendor/dolby_vision" }
+# Its bit reader: two Exp-Golomb overflows refused as data. See
+# vendor/bitvec_helpers/PLURX-PATCH.md.
+bitvec_helpers = { path = "vendor/bitvec_helpers" }
 hiqlite = { path = "vendor/hiqlite" }
 hiqlite-wal = { path = "vendor/hiqlite-wal" }
 rust_decimal = { path = "vendor/rust_decimal" }
