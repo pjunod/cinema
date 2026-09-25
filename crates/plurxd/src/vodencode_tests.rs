@@ -300,6 +300,11 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     )
     .await
     .expect("old source session");
+    assert_eq!(
+        old.shared.sessions.lock().await["old"].delivery.method(),
+        "transcode",
+        "an encoded VOD session's bytes are transcode bytes"
+    );
     let _ = fetched_bytes(&old, "old", "seg00000.m4s").await;
     let old_rendition = rendition_of(&old, "old").await;
     let old_key = old_rendition.key.clone();

@@ -16722,7 +16722,7 @@ impl TranscodeManager {
             hw_slot: std::sync::Mutex::new(None),
             sw_permit: std::sync::Mutex::new(None),
             sw_delta_permit: std::sync::Mutex::new(None),
-            delivery: Meter::new(),
+            delivery: Meter::for_method(crate::delivery::Method::Transcode.metric_label()),
             http_waits: HttpWaitLedger::default(),
             readrate: 0.0,
             suspended: AtomicBool::new(false),
@@ -20697,6 +20697,12 @@ impl TranscodeManager {
         self.admissions.wait_for_slot()
     }
 
+    /// Encoder threads the software pool has reserved right now.
+    #[cfg(test)]
+    pub(crate) fn test_software_threads_in_use(&self) -> usize {
+        self.admissions.software_in_use()
+    }
+
     #[cfg(test)]
     pub(crate) async fn test_publish_supported_quality(&self, quality: u8) -> Encoder {
         let encoder = self.encoder().await;
@@ -22162,7 +22168,7 @@ impl TranscodeManager {
             hw_slot: std::sync::Mutex::new(hw_slot),
             sw_permit: std::sync::Mutex::new(sw_permit),
             sw_delta_permit: std::sync::Mutex::new(None),
-            delivery: Meter::new(),
+            delivery: Meter::for_method(crate::delivery::Method::Transcode.metric_label()),
             http_waits: HttpWaitLedger::default(),
             readrate: pacing
                 .readrate
@@ -22751,7 +22757,7 @@ impl TranscodeManager {
             hw_slot: std::sync::Mutex::new(None),
             sw_permit: std::sync::Mutex::new(None),
             sw_delta_permit: std::sync::Mutex::new(None),
-            delivery: Meter::new(),
+            delivery: Meter::for_method(crate::delivery::Method::HlsCopy.metric_label()),
             http_waits: HttpWaitLedger::default(),
             readrate: pacing
                 .readrate

@@ -186,6 +186,12 @@ impl ArtworkCoordinator {
     }
 
     async fn derive_permit(&self) -> Option<OwnedSemaphorePermit> {
+        // Granted, timed out, or abandoned because the request went away
+        // while it queued: the wait happened, and the timer records it when
+        // it drops, which is on every one of those paths.
+        let _timer = crate::telemetry::AdmissionWaitTimer::start(
+            crate::telemetry::AdmissionPool::ImageMaterialize,
+        );
         tokio::time::timeout(
             DERIVATIVE_ADMISSION_WAIT,
             Arc::clone(&self.derive_permits).acquire_owned(),
@@ -3330,6 +3336,50 @@ mod tests {
         assert_eq!(maximum.load(Ordering::SeqCst), PEER_FETCH_CONCURRENCY);
         assert_eq!(admitted, PEER_FETCH_CONCURRENCY);
         assert_eq!(rejected, 24 - PEER_FETCH_CONCURRENCY);
+    }
+
+    #[tokio::test]
+    async fn a_derive_permit_wait_is_timed_into_the_image_materialize_pool() {
+        use crate::telemetry::{admission_waits_for_test, AdmissionPool};
+        let coordinator = ArtworkCoordinator::new();
+        let before = admission_waits_for_test(AdmissionPool::ImageMaterialize);
+        let _permit = coordinator
+            .derive_permit()
+            .await
+            .expect("an idle pool admits");
+        let after = admission_waits_for_test(AdmissionPool::ImageMaterialize);
+        assert!(after > before, "{before} -> {after}");
+    }
+
+    /// A derive that queues behind a full pool and is abandoned there (its
+    /// request dropped) is still one observation.
+    #[tokio::test]
+    async fn an_abandoned_derive_permit_wait_is_still_timed() {
+        use crate::telemetry::{admission_waits_on_this_thread, AdmissionPool};
+        use std::future::Future;
+        let coordinator = ArtworkCoordinator::new();
+        let held = Arc::clone(&coordinator.derive_permits)
+            .acquire_many_owned(
+                u32::try_from(coordinator.derive_permits.available_permits())
+                    .expect("permit count"),
+            )
+            .await
+            .expect("take the whole pool");
+        let before = admission_waits_on_this_thread(AdmissionPool::ImageMaterialize);
+        {
+            let mut queued = Box::pin(coordinator.derive_permit());
+            let parked = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(queued.as_mut().poll(cx).is_pending())
+            })
+            .await;
+            assert!(parked, "the derive queued behind the full pool");
+        }
+        assert_eq!(
+            admission_waits_on_this_thread(AdmissionPool::ImageMaterialize) - before,
+            1,
+            "the abandoned wait is recorded once"
+        );
+        drop(held);
     }
 
     #[tokio::test]

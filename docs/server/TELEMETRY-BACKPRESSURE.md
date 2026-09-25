@@ -518,7 +518,10 @@ the only settings read is the paired one in the writer.
 1. Move `METRICS.record(&event)` to the emit side, before the enqueue.
 2. Tests:
    `metrics_are_recorded_with_retention_off` (set `retain_days = 0`, emit a
-   `ttff`, assert `plurx_ttff_ms_count{method="remux"}` rose and
+   `ttff`, assert `plurx_ttff_ms_count{method="remux"}` rose (since C-08 M5
+   the family also carries `client`, so on a current build this is the
+   `method="remux",client="other"` line for a server-raised event, or
+   `sum by (method)` over all seven) and
    `playback_events` is empty);
    `a_dropped_event_is_still_counted` (full queue; the metric moves, the
    drop counter moves, no row);
@@ -526,7 +529,8 @@ the only settings read is the paired one in the writer.
 
 Acceptance: `cargo test -p plurxd telemetry` green; on a node with
 `telemetry_retain_days = 0`, `curl -s $HOST/metrics | grep plurx_ttff_ms_count`
-is nonzero after one play, and
+is nonzero after one play (the grep matches every `client` series the family
+now has; sum them), and
 `GET /api/v1/system/playback-events?limit=5` is empty.
 
 ### 5.4 M4 — coalesce, reserve, drain (`core/telemetry-drop-policy`)

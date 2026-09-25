@@ -2014,13 +2014,47 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # owns a process, a recipe or a recovery decision. Seven are test fixtures:
 # four `spawn_blocking` calls that run a finite FFmpeg encode or remux to
 # completion, and three request senders joined before their tests end.
+# 587 -> 591 (measured) with L-02 M3/M4. Production, three: one
+# `tokio::task::spawn_blocking` in `LiveTvManager::touch_incarnation`, a
+# write of one small JSON file every 30 s while anything is live, awaited by
+# the scratch-sweep loop that calls it; one `tokio::task::spawn_blocking` in
+# `inspect_scratch`, the whole scratch directory walk that used to be one
+# blocking-pool dispatch per entry, awaited by the scan task; and the
+# `tokio::spawn` in `spawn_scratch_scan` that runs one `inspect_scratch` for a
+# session's tick. A session holds at most one such task (`inventory_scan`),
+# polls it each tick for up to `SESSION_TICK`, and aborts it when the tick
+# loop ends; a scan stalled in a hung `stat` is kept, never replaced, so a
+# stalled mount pins one blocking thread per session rather than one per
+# tick. Test-only, one: the `#[cfg(test)]` `tokio::spawn(pending())` that
+# stands in for such a hung scan, aborted by the same path. No timer, no
+# process, no producer.
+# Merged with main's subtitle acquisition: the value is the whole merged
+# tree re-measured after the merge, the sum of both contributions.
+# Merged with main's FFmpeg write boundary (#505): the value is the whole
+# merged tree re-measured after the merge.
+# 604 -> 607 (measured) with the PR #496 review response. Production, one:
+# the `tokio::spawn` in `LiveTvManager::spawn_orphan_removal` that runs one
+# `tokio::fs::remove_dir_all` of an orphaned session's scratch directory, so
+# that the orphan list is never held across filesystem I/O. Its handle is the
+# orphan record's `removal`; at most one is in flight per orphan, a later
+# retry reads its result, and one stalled on a hung mount is kept rather than
+# replaced, so it pins one blocking thread and never a lock, a drain or a
+# handoff. It owns no process, no producer and no recovery decision; it is
+# dropped (detached) with its record. Test-only, two: the `#[cfg(test)]`
+# `tokio::spawn(pending())` standing in for such a hung removal, and the
+# retry loop in
+# `a_hung_orphan_removal_holds_up_no_handoff_and_no_drain_past_its_deadline`
+# that runs `retry_orphans` as `scratch_sweep_loop` does, aborted at the end.
 # 600 -> 610: K-09 adds six joined subtitle extraction, verification and
 # test tasks. The architecture-review build adds four: the bounded boot-only
 # caption probes and shutdown-bound file-grant pruning loop. None elects a
 # rolling producer or outlives its request or queue owner.
 # +5 VOD successor handoff: one production task, the handoff expiry wake (one
 # sleep-then-kick per parked predecessor, bounded by the 2 s window), and four in its tests.
-expected_occurrences = 615
+# Merged with main's K-09 subtitle cluster extraction and the architecture
+# review client milestones (#507, #506): the value is the whole merged tree
+# re-measured after the merge.
+expected_occurrences = 622
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2738,12 +2772,76 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # playback-progress watchdog or chooses a recipe. The other ten are test-only
 # and awaited: the receiver tests' sleeps and timeouts, and in `copyseg.rs`
 # the bounded grant-wait and starvation-signal checks.
+# 901 -> 913 (measured) with L-02 M3/M4: three new in production, one
+# replaced, nine in tests. The scratch-sweep loop's `tokio::time::sleep(ORPHAN_RETRY)` replaces its
+# `sleep(SCRATCH_SWEEP_INTERVAL)` (the hourly sweep now runs when due inside
+# the five-second loop), so that one is a replacement, and the loop still
+# ends on the background shutdown token; `drain_orphans`'
+# `tokio::time::sleep(50 ms)` between retries, bounded by the drain's own
+# `SESSION_DRAIN_TIMEOUT` deadline; the session tick's
+# `tokio::time::timeout(SESSION_TICK, scan)` that waits for its one inventory
+# scan without abandoning it; and the warm-start restart's
+# `tokio::time::timeout(SESSION_DRAIN_TIMEOUT, child.wait())`, which reaps
+# the FFmpeg a disagreeing warm plan started before the start restarts cold
+# (an unconfirmed exit hands the child to the session's cleanup exactly as
+# the tick loop's own end does). Test-only, nine: the start-path tests'
+# bounded waits in `live_tv::tests` (`watch_once_cold`, `publishable_session`,
+# the warm, disagreeing and byte-exact starts, the hung-scan test's start and
+# its poll for the session's end, and the orphan retry loop). Each bounds one
+# test wait. None owns a producer.
+# Merged with main's subtitle acquisition: the value is the whole merged
+# tree re-measured after the merge, the sum of both contributions.
+# Merged with main's FFmpeg write boundary (#505): the value is the whole
+# merged tree re-measured after the merge.
+# 933 -> 942 (measured) with the PR #496 review response. Production, one:
+# `drain_orphans` now takes the orphan list under
+# `tokio::time::timeout_at(deadline, ...)`, the drain's own
+# `SESSION_DRAIN_TIMEOUT` deadline, so a drain answers by its deadline
+# whatever holds the list. Test-only, eight, each bounding one test wait: in
+# `a_joiner_of_a_warm_opening_starts_when_the_opener_leaves_before_attaching`
+# the 300 ms pause before the opener is stopped and the 25 s bound on the
+# joiner's answer; in
+# `a_hung_orphan_removal_holds_up_no_handoff_and_no_drain_past_its_deadline`
+# the retry loop's `sleep(ORPHAN_RETRY)`, a 10 ms pause, and the bounds on
+# a retry pass, a failed cleanup's handoff and the two drains. None is a
+# playback-progress watchdog, owns a producer or chooses a recipe. (The two
+# `tokio::time::advance` calls the review response removed are not this
+# shape.)
 # 921 -> 937: K-09 adds 15 bounded worker, consumer and test waits for one
 # leased source publication. `file_grants::prune_loop` adds one daily interval
 # with a shutdown-token exit. None chooses a playback recipe or retry.
+# 921 -> 923 (measured after merging main's 921; was 901 -> 903 on the
+# branch's older base) with C-08 M5: two test-only `tokio::time::sleep`s in
+# `http::tests` -- a 5 ms poll while `a_ttff_beacon_is_labelled_by_the_requesters_client_class`
+# waits for the handler's spawned recorder, and the 1.1 s gap between the two
+# progress beats in `live_progress_beats_credit_watched_seconds_to_the_named_method`,
+# which is the wall time the watched-seconds ledger credits. Neither bounds a
+# producer, a process or a response. The `tokio::time::timeout` in
+# `ArtworkCoordinator::derive_permit` and in `RegisteredWait::wait` were
+# re-bound to a local, not added.
+# 923 -> 924 (measured) with the #500 review round: one test-only
+# `tokio::time::sleep` of 1.2 s in
+# `http::tests::a_beat_after_another_nodes_write_credits_only_the_time_since_it`,
+# the wall time between a peer's simulated progress commit and this node's
+# next beat, which is what the watched-seconds credit is measured against.
+# `ArtworkCoordinator::derive_permit`'s `tokio::time::timeout` is unchanged
+# in count (it lost its `let permit =` binding, nothing else). Bounds no
+# producer, process or response.
+# 940 (measured by zeroing this row) after merging `origin/main` at
+# `68c29657b`: main's 937 (K-09 and `file_grants::prune_loop`, reviewed
+# above) plus this branch's three test-only sleeps reviewed above.
 # +8 VOD successor handoff: the 2 s handoff/reservation deadlines, the 250 ms
 # successor poll, the expiry wake instant, and test deadlines.
-expected_occurrences = 945
+# Merged with main's K-09 subtitle cluster extraction and the architecture
+# review client milestones (#507, #506): the value is the whole merged tree
+# re-measured after the merge.
+# Merged with main's VOD successor encoder-permit handoff (#513) at
+# `8251d14f7`: the value is the whole merged tree, measured by zeroing this
+# row after the merge.
+# Merged with main's C-08 M5 release-evidence metrics (#500) at
+# `259d087ed`: the value is the whole merged tree, measured by zeroing this
+# row after the merge.
+expected_occurrences = 969
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2968,6 +3066,14 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # through the upload endpoint, so the tests can compare the objects byte for
 # byte. Each runs to completion inside `spawn_blocking` before its fixture is
 # dropped.
+# 161 -> 162 (measured) with L-02 M4: one test-only
+# `tokio::process::Command::new("sleep")` in
+# `live_tv::tests::a_failed_cleanup_retires_the_session_and_keeps_the_child_until_reaped`,
+# spawned through `spawn_job_owned` as the unconfirmed FFmpeg an orphan
+# record must keep. The test's orphan retry kills and reaps it, and asserts
+# it gone; its job owns it if the test fails first.
+# Merged with main's FFmpeg write boundary (#505): the value is the whole
+# merged tree re-measured after the merge.
 # 163 -> 171 with K-09. The leased no-index source worker creates one FFmpeg
 # process, owns its stderr drain and explicit kill/reap on loss, timeout, and
 # preemption. One local ffprobe validates a newly produced Matroska subtitle
@@ -2976,7 +3082,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # subtitle source. None owns playback's rolling process or retry policy.
 # +1 VOD successor handoff test: a real sleeping child stands in for the running
 # predecessor encoder, so yielding is observed as an actual reap.
-expected_occurrences = 172
+# Merged with main's K-09 subtitle cluster extraction and the architecture
+# review client milestones (#507, #506): the value is the whole merged tree
+# re-measured after the merge.
+expected_occurrences = 173
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3328,8 +3437,24 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # calls and one HLS fixture `Response::status()` assertion. The book-content
 # handler adds one `Response::status()` read for inline range headers; neither
 # response-status read launches a process.
+# 374 -> 375 (measured after merging main's 374; was 370 -> 371 on the
+# branch's older base) with C-08 M5: one `Response::status()` read in
+# `http::stream::count_direct_play_bytes`, which leaves a non-success direct
+# play response unwrapped. An HTTP status code on the handler's own response;
+# no child process, no producer, nothing to own.
+# 375 -> 380 (measured) with the #500 review round: five test-only
+# `Response::status()` reads in
+# `http::tests::a_direct_play_get_credits_exactly_its_body_to_delivered_bytes`
+# (the ranged GET, the whole GET, the HEAD twice, and the 416). HTTP status
+# codes of in-process router responses; no process is launched.
+# 386 (measured by zeroing this row) after merging `origin/main` at
+# `68c29657b`: main's 380 (reviewed above) plus this branch's six reviewed
+# above.
 # +1 the same VOD successor handoff test child.
-expected_occurrences = 381
+# Merged with main's VOD successor encoder-permit handoff (#513) at
+# `8251d14f7`: the value is the whole merged tree, measured by zeroing this
+# row after the merge.
+expected_occurrences = 387
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3445,12 +3570,44 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # `std::sync::Barrier::wait` calls in `live_tv::dvr::tests`
 # (`retirement_is_atomic_against_a_consumer_attaching` lines its two threads
 # up each round). The pattern matches the method name; neither is a process.
+# 381 -> 385 (measured) with L-02 M3/M4. Two in `LiveTvManager::retry_orphan`:
+# the orphan owner's `start_kill` and non-blocking `try_wait` on a child a
+# failed session cleanup could not confirm gone. It now owns that child's
+# termination (the session no longer does, having been retired); the record
+# is dropped only after `try_wait` reports an exit, which is when its job and
+# encoder admission are released. Two in the warm-start restart in
+# `run_live_session_inner`: `start_kill` and a bounded `wait` on the FFmpeg a
+# disagreeing warm plan started, before the start restarts cold; if the exit
+# is not confirmed the child goes to `session.process`, and so to the same
+# cleanup and orphan path as any other session end.
 # 381 -> 388 with K-09's leased no-index FFmpeg source worker. Its normal
 # path awaits the child; cancellation, deadline, and foreground preemption
 # each kill and then reap that same child before releasing the claim. These
 # seven calls add no second process owner or rolling recovery decision.
+# 381 -> 383 (measured) with C-08 M5: two test-only `RegisteredWait::wait`
+# calls in `waitpool::tests::an_admitted_wait_is_timed_into_the_vod_blocked_get_pool`
+# (one satisfied, one run to its 5 ms deadline). `RegisteredWait` is the
+# in-process blocked-GET pool's oneshot; neither call addresses or reaps an
+# operating-system process.
+# 383 -> 385 (measured) with the #500 review round: two test-only
+# `RegisteredWait::wait` calls in
+# `waitpool::tests::an_abandoned_or_unawaited_wait_is_still_timed_once` (one
+# polled once and then dropped mid-wait, one satisfied). The in-process
+# blocked-GET pool's oneshot again; neither addresses or reaps a process.
+# 392 (measured by zeroing this row) after merging `origin/main` at
+# `68c29657b`: main's 388 (K-09's source worker, reviewed above) plus this
+# branch's four reviewed above.
 # +3 the same test child is killed and waited on at teardown.
-expected_occurrences = 391
+# Merged with main's K-09 subtitle cluster extraction and the architecture
+# review client milestones (#507, #506): the value is the whole merged tree
+# re-measured after the merge.
+# Merged with main's VOD successor encoder-permit handoff (#513) at
+# `8251d14f7`: the value is the whole merged tree, measured by zeroing this
+# row after the merge.
+# Merged with main's C-08 M5 release-evidence metrics (#500) at
+# `259d087ed`: the value is the whole merged tree, measured by zeroing this
+# row after the merge.
+expected_occurrences = 399
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -3486,7 +3643,11 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # `producer_spawn.rs`'s tests. Signal 0 sends nothing: it is the liveness probe
 # the drop and VOD-slot fixtures use to prove the shared builder's child is gone
 # after the owner is dropped. It terminates nothing and ships nowhere.
-expected_occurrences = 48
+# 48 -> 49 (measured) with L-02 M4: one test-only `libc::kill(pid, 0)` in
+# `live_tv::tests::process_exists`, a signal-0 probe that delivers nothing;
+# it asserts that an orphaned child is still alive before its retry and gone
+# after it.
+expected_occurrences = 49
 
 [[module_structures]]
 id = "kill-on-drop-construction"
