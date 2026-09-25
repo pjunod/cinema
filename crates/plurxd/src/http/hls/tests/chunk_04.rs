@@ -1570,9 +1570,12 @@
                     reasons.insert(reason.to_owned());
                 }
                 None => {
+                    // rustfmt gives a wrapped signature a trailing comma; the
+                    // shape is the same one either way.
                     let normalized = arguments.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let normalized = normalized.trim_end_matches(',');
                     assert!(
-                        FORWARDING.contains(&normalized.as_str()),
+                        FORWARDING.contains(&normalized),
                         "a settlement is passed a reason this scan cannot read: {normalized:?}. \
                          Pass the reason as a literal at the call site, or add the new \
                          forwarding shape here deliberately.",
