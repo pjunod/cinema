@@ -6425,6 +6425,7 @@ async function vendoredHlsStartupTests(){
     sample.xhr.progress(80_000);
     assert.equal(sample.player.abr.recentEstimateKbps,300,"60 kB over 1.6 s is measured, not inferred from runway");
     assert.equal(sample.player.abr.recentEstimateAtMs,1_600);
+    assert.equal(sample.player.abr.recentEstimateSource,'progress');
     assert.equal(sample.xhr.stockProgress,3,"hls.js keeps its own progress accounting");
     sample.player.controlIntentGeneration=2;
     sample.setNow(3_300);

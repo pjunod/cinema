@@ -450,6 +450,8 @@ function createHlsStartupLoader(StockLoader,episode){
           if(kbps&&player.abr){
             player.abr.recentEstimateKbps=kbps;
             player.abr.recentEstimateAtMs=now;
+            player.abr.recentEstimateSource='progress';
+            player.abr.recentEstimateUrl=String(context.url||'');
           }
         });
       }
@@ -769,8 +771,19 @@ function wireHlsObservers(hls,startup,video,observesCurrent){
         })
       : null;
     if(sampleKbps&&p.abr){
-      p.abr.recentEstimateKbps=sampleKbps;
-      p.abr.recentEstimateAtMs=performance.now();
+      const now=performance.now();
+      // The completed fragment's full-load average can include fast bytes
+      // from before a cliff. Preserve a fresher within-fragment byte delta
+      // until the next request supplies its own measurement.
+      const recentProgress=p.abr.recentEstimateSource==='progress'
+        &&p.abr.recentEstimateUrl===String(d.frag&&d.frag.url||'')
+        &&now-p.abr.recentEstimateAtMs<=3000;
+      if(!recentProgress){
+        p.abr.recentEstimateKbps=sampleKbps;
+        p.abr.recentEstimateAtMs=now;
+        p.abr.recentEstimateSource='complete';
+        p.abr.recentEstimateUrl=String(d.frag&&d.frag.url||'');
+      }
     }
     if(b<=(p.segBytes|0)) return;
     p.segBytes=b;
