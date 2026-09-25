@@ -19,7 +19,7 @@ targets `main`. Package boundaries are commits in one PR under the user's
 | Android delivery facts and presentation | Local checks passed | `148829768`; `:app:assembleDebug` and 35 selected unit tests passed. |
 | Adversarial implementation review | Findings addressed | One review found Apple Compact label drift, Android aspect basis, unattached web plan facts, and stale handoff ledger. Follow-up code and tests passed their focused checks. |
 | History evidence | Passed locally | `make history-check` on the current merged base found 2,303 corrective commits, 281 client-fix anchors, ten post-boundary landing commits. One anchor per branch corrective client commit; current main carries errata for earlier PRs #519 and #522. |
-| Fast lane | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | Run 3062 passed scope, mobile version, policy, web, Apple, Android and Windows. Rust stopped before compilation when the runner cache pruner could not meet its disk reserve. The runner's unused Docker build cache was reclaimed; use the PR's current-head `Main promotion gate` for the final result. |
+| Fast lane | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | Run 3062 passed scope, mobile version, policy, web, Apple, Android and Windows; Rust stopped at runner cache cleanup. Run 3076 found an index/header status contradiction in this page. Both were corrected; use the PR's current-head `Main promotion gate` for the final result. |
 | PR merge | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | The PR is the authoritative merge record. Merge requires a successful current-head `Main promotion gate`. |
 | Production and physical session evidence | Unavailable | No real Live TV Cozi session or physical phone/TV capture was available in this isolated checkout. The stream frame is planned on web/Apple and measured only from an eligible Android player sample. |
 
@@ -66,6 +66,12 @@ The host's Docker build cache had 17.45 GB unused; the documented operator
 cleanup reclaimed it and left 64 GiB free on the host. No CI policy or
 playback code was changed for this infrastructure failure. The next ready
 head and any retry are reported on PR #526.
+
+Run 3076 reached the policy preflight and found one documentation status
+contradiction: the index marked this live progress page `open`, while its
+header said the implementation was `built`. The index now marks the ledger
+`live`, matching its purpose. The compile lanes were skipped after that
+preflight failure.
 
 ## Scope decisions
 
