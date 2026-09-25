@@ -24,8 +24,10 @@ WHERE EXISTS (SELECT 1 FROM background_job_waiters
           AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))))
   OR EXISTS (SELECT 1 FROM background_jobs
     WHERE state = 'cancelling' AND lease_expires_ms <= json_extract($1, '$.now_ms'))
-  OR EXISTS (SELECT 1 FROM background_jobs WHERE state = 'running' AND failed_attempts >= 4
+  OR EXISTS (SELECT 1 FROM background_jobs WHERE state = 'running' AND failed_attempts >= attempt_limit - 1
     AND lease_expires_ms <= json_extract($1, '$.now_ms'))
+  OR EXISTS (SELECT 1 FROM background_jobs WHERE retry_deadline_ms > 0 AND retry_deadline_ms <= json_extract($1, '$.now_ms')
+    AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms'))))
   OR EXISTS (SELECT 1 FROM background_job_attempts old
     WHERE old.finished_at_ms IS NOT NULL AND old.resolve_until_ms <= json_extract($1, '$.now_ms')
       AND (SELECT COUNT(*) FROM background_job_attempts newer

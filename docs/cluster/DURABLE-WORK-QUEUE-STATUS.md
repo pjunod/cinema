@@ -106,3 +106,15 @@ implementation is claimed; “compiled” does not mean tests passed.
   attempts and reservations. A backend contract exercises one shared build,
   independent cancellation and delivery after a scheduler restart. These
   Store paths are compiled but not yet connected to the fragment worker.
+
+- 2026-09-25: fragment publication/delivery foundation committed and pushed as
+  `82e79ba89`; pinned Clippy, formatting, catalog and JavaScript checks passed.
+  Fragment execution has not yet switched queues.
+
+- 2026-09-25: the common queue now carries the fragment adapter's bounded
+  attempt history, diagnostics and fixed retry deadline. It calls the existing
+  typed index retry policy, including its half-hour initial retry and seven-day
+  window, rather than substituting the transcode backoff. The configured
+  attempt limit is captured on acceptance so an accepted job keeps a stable
+  budget; setting changes apply to newly accepted jobs. Core and Hiqlite tests
+  compile with Rust 1.97.1; execution remains deferred to the final fast lane.

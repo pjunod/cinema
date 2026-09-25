@@ -11,8 +11,8 @@ pub use super::background_jobs_delivery::{
     DeliveryIntent, JobWaiter, WaiterCursor, WaiterPage, WaiterQuery,
 };
 use super::background_jobs_delivery::{DELIVERIES_SQL, WAITERS_SQL};
-pub use super::background_jobs_fragment::PublishFragmentJob;
 use super::background_jobs_fragment::PUBLISH_FRAGMENT_SQL;
+pub use super::background_jobs_fragment::{FragmentJobFailure, PublishFragmentJob};
 use super::background_jobs_maintenance::{CANCEL_WAITER_SQL, MAINTENANCE_NEEDED, MAINTENANCE_SQL};
 use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
 pub use super::background_jobs_publication::{
@@ -120,6 +120,8 @@ pub(super) const JOB_JSON: &str = r#"json_object(
       'claim_id', claim_id, 'fence', fence, 'revision', revision,
       'lease_expires_ms', lease_expires_ms) ELSE NULL END,
     'fence', fence, 'revision', revision, 'failed_attempts', failed_attempts,
+    'attempt_limit', attempt_limit, 'retry_deadline_ms', retry_deadline_ms,
+    'attempt_errors', attempt_errors, 'index_diagnostic_json', index_diagnostic_json,
     'yield_count', yield_count, 'abandoned_count', abandoned_count,
     'not_before_ms', not_before_ms, 'checkpoint', json(checkpoint_json),
     'result_ref', result_ref, 'last_error_code', last_error_code,
@@ -129,6 +131,8 @@ pub(super) const JOB_JSON: &str = r#"json_object(
 pub(super) const CLAIM_SQL: &str = r#"
 UPDATE background_jobs SET
   failed_attempts = failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
+  attempt_errors = CASE WHEN state = 'running' THEN
+    attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired' ELSE attempt_errors END,
   state = 'running', owner_node_id = json_extract($1, '$.node_id'),
   owner_boot_id = json_extract($1, '$.boot_id'), claim_id = json_extract($1, '$.claim_id'),
   fence = fence + 1, revision = revision + 1,
@@ -139,7 +143,8 @@ WHERE id = json_extract($1, '$.job_id')
   AND kind = json_extract($1, '$.kind') AND payload_version = json_extract($1, '$.payload_version')
   AND (target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
   AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))
-  AND failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END < 5
+  AND (retry_deadline_ms = 0 OR retry_deadline_ms > json_extract($1, '$.now_ms'))
+  AND failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END < attempt_limit
   AND not_before_ms <= json_extract($1, '$.now_ms')
   AND EXISTS (SELECT 1 FROM background_job_waiters WHERE job_id = background_jobs.id
     AND state = 'pending' AND (deadline_ms IS NULL OR deadline_ms > json_extract($1, '$.now_ms')))
@@ -169,6 +174,7 @@ WITH inputs AS (
     AND job.revision = json_extract(token, '$.revision')
     AND job.lease_expires_ms = json_extract(token, '$.lease_expires_ms')
     AND job.lease_expires_ms > now_ms AND job.state = 'running'
+    AND (job.retry_deadline_ms = 0 OR job.retry_deadline_ms > now_ms)
     AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || job.owner_node_id)
     AND job.revision < 9223372036854775807
 )
@@ -182,13 +188,17 @@ const SETTLE_SQL: &str = r#"
 UPDATE background_jobs SET
   state = CASE json_extract($1, '$.settlement.disposition')
     WHEN 'yield' THEN 'queued'
-    WHEN 'retry' THEN CASE WHEN failed_attempts + 1 >= 5 THEN 'failed' ELSE 'queued' END
+    WHEN 'retry' THEN CASE WHEN failed_attempts + 1 >= attempt_limit THEN 'failed' ELSE 'queued' END
     WHEN 'fail' THEN 'failed'
     WHEN 'stop' THEN 'cancelled' WHEN 'cancel' THEN 'cancelled' END,
   failed_attempts = failed_attempts + CASE WHEN json_extract($1, '$.settlement.disposition') IN ('retry','fail') THEN 1 ELSE 0 END,
   not_before_ms = COALESCE(json_extract($1, '$.settlement.not_before_ms'), not_before_ms),
   checkpoint_json = CASE WHEN json_extract($1, '$.settlement.disposition') = 'yield'
     THEN json_extract($1, '$.settlement.checkpoint') ELSE checkpoint_json END,
+  retry_deadline_ms = COALESCE(json_extract($1, '$.retry_deadline_ms'), retry_deadline_ms),
+  index_diagnostic_json = COALESCE(json_extract($1, '$.index_diagnostic_json'), index_diagnostic_json),
+  attempt_errors = CASE WHEN json_extract($1, '$.settlement.disposition') IN ('retry','fail') THEN
+    attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || COALESCE(json_extract($1, '$.attempt_error'), json_extract($1, '$.settlement.error_code')) ELSE attempt_errors END,
   last_error_code = json_extract($1, '$.settlement.error_code'),
   owner_node_id = NULL, owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL,
   revision = revision + 1, updated_at_ms = json_extract($1, '$.now_ms')
@@ -481,6 +491,10 @@ pub struct BackgroundJob {
     pub fence: i64,
     pub revision: i64,
     pub failed_attempts: i64,
+    pub attempt_limit: i64,
+    pub retry_deadline_ms: i64,
+    pub attempt_errors: String,
+    pub index_diagnostic_json: String,
     /// Compacted resolved attempt counts; the latest detailed attempts remain.
     pub yield_count: i64,
     pub abandoned_count: i64,
@@ -779,6 +793,10 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn job_candidates(&self, query: CandidateQuery) -> Result<CandidatePage, StoreError>;
     async fn renew_jobs(&self, request: RenewJobs) -> Result<Vec<RenewOutcome>, StoreError>;
     async fn settle_job(&self, request: SettleJob) -> Result<Option<BackgroundJob>, StoreError>;
+    async fn fail_fragment_job(
+        &self,
+        request: FragmentJobFailure,
+    ) -> Result<Option<BackgroundJob>, StoreError>;
     async fn cancel_job(&self, request: CancelJob) -> Result<Option<BackgroundJob>, StoreError>;
     async fn cancel_waiter(
         &self,
@@ -812,6 +830,25 @@ pub(super) trait QueueSql: Send + Sync {
 fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, StoreError> {
     serde_json::from_str(value)
         .map_err(|error| StoreError::Database(format!("invalid background job row: {error}")))
+}
+
+async fn enqueue_body<T: QueueSql>(
+    store: &T,
+    request: &EnqueueJob,
+) -> Result<serde_json::Value, StoreError> {
+    let fragment_policy = matches!(request.payload, JobPayload::FragmentIndexBuild { .. })
+        || matches!(&request.payload, JobPayload::ArtifactHydrate { artifact_key, .. } if artifact_key.starts_with("fragment:"));
+    let limit = if fragment_policy {
+        let rows = store.queue_sql("SELECT json_quote(value) AS result_json FROM settings WHERE key = json_extract($1, '$.key')".into(),
+            encode(&serde_json::json!({"key": super::keys::ANALYSIS_MAX_ATTEMPTS}))?, false, true).await?;
+        let configured: Option<String> = rows.first().map(|row| decode(row)).transpose()?;
+        super::bounded_analysis_max_attempts(configured.as_deref())
+    } else {
+        5
+    };
+    let mut body = serde_json::to_value(request).map_err(|error| invalid(&error.to_string()))?;
+    body["attempt_limit"] = limit.into();
+    Ok(body)
 }
 
 #[async_trait]
@@ -885,8 +922,7 @@ impl<T: QueueSql> BackgroundJobStore for T {
             },
         };
         request.validate()?;
-        let mut body =
-            serde_json::to_value(request).map_err(|error| invalid(&error.to_string()))?;
+        let mut body = enqueue_body(self, &request).await?;
         body["delivery_parent"] = intent.job_id.into();
         let rows = self
             .queue_sql(ENQUEUE_SQL.into(), encode(&body)?, true, true)
@@ -1046,6 +1082,7 @@ impl<T: QueueSql> BackgroundJobStore for T {
               WHERE kind IN (SELECT value FROM json_each($1, '$.kinds')) AND payload_version = 1
                 AND (target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
                 AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))
+                AND (retry_deadline_ms = 0 OR retry_deadline_ms > json_extract($1, '$.now_ms'))
                 AND not_before_ms <= json_extract($1, '$.now_ms')
                 AND EXISTS (SELECT 1 FROM background_job_waiters WHERE job_id = background_jobs.id
                   AND state = 'pending' AND (deadline_ms IS NULL OR deadline_ms > json_extract($1, '$.now_ms')))
@@ -1129,6 +1166,81 @@ impl<T: QueueSql> BackgroundJobStore for T {
         )
     }
 
+    async fn fail_fragment_job(
+        &self,
+        request: FragmentJobFailure,
+    ) -> Result<Option<BackgroundJob>, StoreError> {
+        request.token.validate()?;
+        if request.now_ms < 0 {
+            return Err(invalid("invalid index failure time"));
+        }
+        let Some(job) = self.background_job(&request.token.job_id).await? else {
+            return Ok(None);
+        };
+        if job.token.as_ref() != Some(&request.token) || job.state != JobState::Running {
+            return Ok(None);
+        }
+        let payload = job.supported_payload()?;
+        if !matches!(payload, JobPayload::FragmentIndexBuild { .. })
+            && !matches!(&payload, JobPayload::ArtifactHydrate { artifact_key, .. } if artifact_key.starts_with("fragment:"))
+        {
+            return Err(invalid("index retry policy used for another job kind"));
+        }
+        let attempt = job.failed_attempts + 1;
+        let decision = crate::content_analysis::index_retry_decision(
+            request.code,
+            request.transient_allowlisted,
+            attempt as u32,
+            job.attempt_limit as u32,
+            request.now_ms,
+            job.retry_deadline_ms,
+        );
+        let mut diagnostic = request.diagnostic;
+        diagnostic.version = 1;
+        diagnostic.code = request.code.as_str().into();
+        diagnostic.retryable = decision.retryable;
+        diagnostic.claim_fence = request.token.fence;
+        diagnostic.attempt = attempt;
+        diagnostic.recorded_at_ms = request.now_ms;
+        let diagnostic = diagnostic.encode_bounded().map_err(StoreError::Task)?;
+        let terminal = if attempt >= job.attempt_limit {
+            "attempt_limit"
+        } else {
+            decision
+                .terminal_code
+                .map(|code| code.as_str())
+                .unwrap_or(request.code.as_str())
+        };
+        let settlement = if decision.retryable {
+            JobSettlement::Retry {
+                error_code: terminal.into(),
+                not_before_ms: decision.next_attempt_at_ms,
+            }
+        } else {
+            JobSettlement::Fail {
+                error_code: terminal.into(),
+            }
+        };
+        let mut body = serde_json::to_value(SettleJob {
+            token: request.token,
+            settlement,
+            now_ms: request.now_ms,
+        })
+        .map_err(|error| invalid(&error.to_string()))?;
+        body["retry_deadline_ms"] = decision.retry_deadline_ms.into();
+        body["index_diagnostic_json"] = diagnostic.into();
+        body["attempt_error"] = request.code.as_str().into();
+        let rows = self
+            .queue_sql(
+                format!("{SETTLE_SQL} RETURNING {JOB_JSON} AS result_json"),
+                encode(&body)?,
+                true,
+                true,
+            )
+            .await?;
+        rows.first().map(|row| decode(row)).transpose()
+    }
+
     async fn settle_job(&self, request: SettleJob) -> Result<Option<BackgroundJob>, StoreError> {
         request.token.validate()?;
         if request.now_ms < 0 {
@@ -1195,7 +1307,12 @@ impl<T: QueueSql> BackgroundJobStore for T {
     async fn enqueue_job(&self, request: EnqueueJob) -> Result<EnqueueOutcome, StoreError> {
         request.validate()?;
         let rows = self
-            .queue_sql(ENQUEUE_SQL.to_owned(), encode(&request)?, true, true)
+            .queue_sql(
+                ENQUEUE_SQL.to_owned(),
+                encode(&enqueue_body(self, &request).await?)?,
+                true,
+                true,
+            )
             .await?;
         let row = rows
             .first()
@@ -1223,8 +1340,7 @@ impl<T: QueueSql> BackgroundJobStore for T {
         {
             return Err(invalid("invalid background producer lease replacement"));
         }
-        let mut body =
-            serde_json::to_value(request).map_err(|error| invalid(&error.to_string()))?;
+        let mut body = enqueue_body(self, &request).await?;
         body["producer_lease"] =
             serde_json::to_value(&lease).map_err(|error| invalid(&error.to_string()))?;
         body["producer_replacement"] =
@@ -1264,6 +1380,8 @@ impl<T: QueueSql> BackgroundJobStore for T {
                     && token.node_id == request.node_id
                     && token.boot_id == request.boot_id
                     && token.lease_expires_ms > request.now_ms
+                    && (previous.retry_deadline_ms == 0
+                        || previous.retry_deadline_ms > request.now_ms)
                 {
                     Ok(ClaimOutcome::Claimed {
                         job: Box::new(previous),
@@ -1339,6 +1457,12 @@ impl<T: QueueSql> BackgroundJobStore for T {
             }
             if token.lease_expires_ms <= request.now_ms {
                 return Ok(ClaimResolution::ExpiredOrPruned);
+            }
+            if job.state == JobState::Running
+                && job.retry_deadline_ms > 0
+                && job.retry_deadline_ms <= request.now_ms
+            {
+                return Ok(ClaimResolution::LostOwnership);
             }
             return match job.state {
                 JobState::Running => Ok(ClaimResolution::Running { token }),

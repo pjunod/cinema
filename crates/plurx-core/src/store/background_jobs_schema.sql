@@ -14,6 +14,10 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     lease_expires_ms INTEGER,
     failed_attempts INTEGER NOT NULL DEFAULT 0 CHECK (failed_attempts >= 0),
+    attempt_limit INTEGER NOT NULL DEFAULT 5 CHECK (attempt_limit BETWEEN 1 AND 20),
+    retry_deadline_ms INTEGER NOT NULL DEFAULT 0 CHECK (retry_deadline_ms >= 0),
+    attempt_errors TEXT NOT NULL DEFAULT '' CHECK (length(attempt_errors) <= 2048),
+    index_diagnostic_json TEXT NOT NULL DEFAULT '' CHECK (length(CAST(index_diagnostic_json AS BLOB)) <= 8192),
     yield_count INTEGER NOT NULL DEFAULT 0 CHECK (yield_count >= 0),
     abandoned_count INTEGER NOT NULL DEFAULT 0 CHECK (abandoned_count >= 0),
     not_before_ms INTEGER NOT NULL,
@@ -123,7 +127,7 @@ BEGIN
 
     INSERT INTO background_jobs (
         id, kind, payload_version, payload_json, dedupe_key, priority,
-        state, target_node_id, not_before_ms, created_at_ms, updated_at_ms)
+        state, target_node_id, not_before_ms, created_at_ms, updated_at_ms, attempt_limit)
     SELECT json_extract(NEW.result_json, '$.job_id'),
         json_extract(NEW.request_json, '$.payload.kind'), 1,
         json_extract(NEW.request_json, '$.payload'),
@@ -132,7 +136,8 @@ BEGIN
         json_extract(NEW.request_json, '$.payload.target_node_id'),
         json_extract(NEW.request_json, '$.not_before_ms'),
         json_extract(NEW.request_json, '$.now_ms'),
-        json_extract(NEW.request_json, '$.now_ms')
+        json_extract(NEW.request_json, '$.now_ms'),
+        COALESCE(json_extract(NEW.request_json, '$.attempt_limit'), 5)
     WHERE json_extract(NEW.result_json, '$.outcome') = 'accepted'
         AND NOT EXISTS (SELECT 1 FROM background_jobs
             WHERE id = json_extract(NEW.result_json, '$.job_id'));
@@ -197,7 +202,8 @@ END;
 -- next statement
 CREATE TRIGGER IF NOT EXISTS background_job_settlement_effects
 AFTER UPDATE ON background_jobs
-WHEN OLD.state IN ('running','cancelling') AND NEW.state NOT IN ('running','cancelling')
+WHEN (OLD.state IN ('running','cancelling') AND NEW.state NOT IN ('running','cancelling'))
+    OR (OLD.state = 'queued' AND NEW.state = 'failed')
 BEGIN
     DELETE FROM background_job_reservations WHERE job_id = NEW.id AND fence = OLD.fence;
     UPDATE background_job_attempts SET finished_at_ms = NEW.updated_at_ms,
@@ -328,9 +334,18 @@ BEGIN
         last_error_code = 'execution_abandoned', owner_node_id = NULL,
         owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL,
         revision = revision + 1, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
-    WHERE id IN (SELECT id FROM background_jobs WHERE state = 'running' AND failed_attempts >= 4
+    WHERE id IN (SELECT id FROM background_jobs WHERE state = 'running' AND failed_attempts >= attempt_limit - 1
         AND lease_expires_ms <= json_extract(NEW.request_json, '$.now_ms')
         AND revision < 9223372036854775807 ORDER BY lease_expires_ms, id LIMIT 128);
+    UPDATE background_jobs SET state = 'failed',
+        failed_attempts = failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
+        last_error_code = 'index_retry_window_expired', owner_node_id = NULL,
+        owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL,
+        revision = revision + 1, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE id IN (SELECT id FROM background_jobs WHERE retry_deadline_ms > 0
+        AND retry_deadline_ms <= json_extract(NEW.request_json, '$.now_ms')
+        AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract(NEW.request_json, '$.now_ms')))
+        AND revision < 9223372036854775807 ORDER BY retry_deadline_ms, id LIMIT 128);
     DELETE FROM background_job_attempts WHERE (job_id, fence) IN (
         SELECT old.job_id, old.fence FROM background_job_attempts old
         WHERE old.finished_at_ms IS NOT NULL

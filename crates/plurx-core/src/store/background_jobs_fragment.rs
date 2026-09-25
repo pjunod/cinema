@@ -12,6 +12,15 @@ pub struct PublishFragmentJob {
     pub now_ms: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct FragmentJobFailure {
+    pub token: JobToken,
+    pub code: crate::content_analysis::IndexFailureCode,
+    pub transient_allowlisted: bool,
+    pub diagnostic: crate::content_analysis::IndexDiagnostic,
+    pub now_ms: i64,
+}
+
 pub(super) const PUBLISH_FRAGMENT_SQL: &str = r#"
 WITH request AS (SELECT json($1) AS body), snapshot AS (
   SELECT body, job.id, job.state, job.result_ref,
@@ -24,6 +33,7 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
       AND job.claim_id = json_extract(body, '$.token.claim_id') AND job.fence = json_extract(body, '$.token.fence')
       AND job.revision = json_extract(body, '$.token.revision')
       AND job.lease_expires_ms = json_extract(body, '$.token.lease_expires_ms')
+      AND (job.retry_deadline_ms = 0 OR job.retry_deadline_ms > json_extract(body, '$.now_ms'))
       AND job.lease_expires_ms > json_extract(body, '$.now_ms') AND job.revision < 9223372036854775807
       AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || job.owner_node_id)
       AND ((job.kind = 'fragment_index_build'

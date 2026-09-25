@@ -538,3 +538,62 @@ async fn background_jobs_repeated_crashes_exhaust_budget_without_automatic_reset
         EnqueueOutcome::Existing { .. }
     ));
 }
+
+#[tokio::test]
+async fn background_jobs_fragment_retry_keeps_its_window_history_and_configured_limit() {
+    use crate::content_analysis::{
+        IndexDiagnostic, IndexFailureCode, INDEX_RETRY_BASE_MS, INDEX_RETRY_WINDOW_MS,
+    };
+    use crate::store::SettingsStore;
+    let store = SqliteStore::open_in_memory().expect("store");
+    store
+        .put_setting(super::keys::ANALYSIS_MAX_ATTEMPTS, "2")
+        .await
+        .expect("policy");
+    let request = enqueue(1_000);
+    store.enqueue_job(request.clone()).await.expect("enqueue");
+    let job = claimed(&store, claim(&request.id, 0, 1_000)).await;
+    assert_eq!(job.attempt_limit, 2);
+    let retry = store
+        .fail_fragment_job(FragmentJobFailure {
+            token: job.token.expect("token"),
+            code: IndexFailureCode::IndexBudgetExceeded,
+            transient_allowlisted: false,
+            diagnostic: IndexDiagnostic::default(),
+            now_ms: 1_001,
+        })
+        .await
+        .expect("failure")
+        .expect("settled");
+    assert_eq!(retry.state, JobState::Queued);
+    assert_eq!(retry.not_before_ms, 1_001 + INDEX_RETRY_BASE_MS);
+    assert_eq!(retry.retry_deadline_ms, 1_001 + INDEX_RETRY_WINDOW_MS);
+    let second = claimed(
+        &store,
+        claim(&request.id, retry.revision, retry.not_before_ms),
+    )
+    .await;
+    let failed = store
+        .fail_fragment_job(FragmentJobFailure {
+            token: second.token.expect("token"),
+            code: IndexFailureCode::IndexBudgetExceeded,
+            transient_allowlisted: false,
+            diagnostic: IndexDiagnostic::default(),
+            now_ms: retry.not_before_ms + 1,
+        })
+        .await
+        .expect("second failure")
+        .expect("settled");
+    assert_eq!(failed.state, JobState::Failed);
+    assert_eq!(failed.last_error_code.as_deref(), Some("attempt_limit"));
+    assert_eq!(
+        failed.attempt_errors,
+        "index_budget_exceeded,index_budget_exceeded"
+    );
+    assert_eq!(failed.retry_deadline_ms, retry.retry_deadline_ms);
+    let diagnostic =
+        IndexDiagnostic::decode_bounded(&failed.index_diagnostic_json).expect("bounded diagnostic");
+    assert_eq!(diagnostic.claim_fence, 2);
+    assert_eq!(diagnostic.attempt, 2);
+    assert!(!diagnostic.retryable);
+}
