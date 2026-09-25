@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-24 23:53 UTC · **Base:** `f600d2823`
+**Status:** open · **Updated:** 2026-09-25 01:53 UTC · **Base:** `f600d2823`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -12,7 +12,7 @@ the acceptance evidence named by its plan.
 |---|---|---|---|
 | D-02 · Android lifecycle | M7 builder `78830ec99` and M5 audio-sink classification `38ece806e` on [draft PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506); production and test Kotlin compile green | Resolve M1 prepared-commit boundary; finish M2-M4 and M8-M9 | Plan execution log and workboard row |
 | D-03 · Android credentials and release | Reconnaissance; M2, M7 and M8 repo half are on main | Finish capability, release and device milestones | Plan execution log and workboard row |
-| A-02 · Apple controller | Seek-fence `da5c6050a`, locked credential-pair `f30ef466b`, finite item observer `89d3c3672` on [draft PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506); iOS/tvOS and iOS test-target compilation green | Finish 5.2 prepared successor and 5.3-5.6; review and fast lane when ready | Plan execution log and workboard row |
+| A-02 · Apple controller | Seek fences, credential lock and finite observer on [draft PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506); 5.3-5.6 on durable branch `codex/a02-restore-20260924` through `c353d1349`; iOS/tvOS compile green with targeted concurrency | Integrate branch into draft PR, write final regression coverage, run one review and fast lane, then qualify remote controls on physical Apple TV/iPhone | Plan execution log and workboard row |
 | A-03 · Native library paging | Reconnaissance; 5.1 is on main | Finish 5.2-5.5 | Plan execution log and workboard row |
 | W-02 · Web player decomposition | 5.4 `8907b9cf5` and 5.5 `cb7042ea2`/`858c8bc01` splits on draft #506; playback-lab startup fix `2a6fbc855`; JS syntax green | Finish type baseline/browser acceptance, then review and fast lane | Plan execution log and workboard row |
 | L-03 · Shared Live TV transport | Reconnaissance; #482 is on main | Finish M2 and M4 | Plan execution log and workboard row |
