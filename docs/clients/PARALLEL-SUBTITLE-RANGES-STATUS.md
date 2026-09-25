@@ -26,9 +26,10 @@ The client retry ladder is unchanged. No deployment is part of this work.
 
 ## 2. Evidence before implementation
 
-The first milestone is `ccb795c8`. Its normal commit hook passed catalog
-lint, pinned workspace/all-target Clippy, formatting and JavaScript syntax.
-Behavioral test execution remains after the single adversarial review.
+The implementation milestones are `ccb795c8`, `e4cbdb7c` and `ad7dda80`.
+Their normal commit hooks passed catalog lint, pinned workspace/all-target
+Clippy, formatting and JavaScript syntax. Behavioral test execution remains
+after the single adversarial review.
 
 Pinned local Rust 1.97.1 was verified with `rustup run 1.97.1 rustc --version`;
 `rustup run 1.97.1 cargo check -p plurxd --all-targets --offline` passed on the
@@ -44,10 +45,11 @@ and text cues every ten seconds. The bounded command used input seek to 90 s,
 | `/usr/bin/ffmpeg`, Debian 5.1.9 | 11,836,386 | 2,065,526 | relative to output start |
 | `/usr/lib/jellyfin-ffmpeg/ffmpeg`, configured production 8.1.2 | 11,836,410 | 2,458,742 | absolute source time |
 
-Both bounded runs made three input seeks. Existing cue normalization accounts
-for the two timestamp bases. These synthetic results establish a bounded
-seek for this container and codec, not a fleet latency measurement. Boundary
-cues and other formats still need explicit verification.
+Both bounded runs made three input seeks and exposed two timestamp bases.
+The sparse-cue correction in §5 supersedes this initial output-seek variant
+and removes timestamp-base inference from the indexed path. These synthetic
+results establish input seeking for this container and codec, not a fleet
+latency measurement or a physical byte bound for every subtitle layout.
 
 ## 3. Implementation and verification
 
