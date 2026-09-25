@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** review fixes integrated; final compile pending · **Updated:** 2026-09-25 02:56 UTC · **Base:** `f600d2823`
+**Status:** reviewed head compiled; fast lane pending · **Updated:** 2026-09-25 03:00 UTC · **Base:** `f600d2823`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -28,8 +28,10 @@ pager account isolation, web capacity-offer loss, an Apple paging race, and the
 pre-existing D-03 bearer handoff. Web playback and capacity fixes are committed
 at `b20982f60`; Apple fixes are integrated at `dafb4bb5e` and `12331fb35`;
 resume now returns the caption master at `676b62393`; Android fixes are
-integrated at `dc26817db` and `22e9bf667`. The final combined compile is
-pending. The D-03 milestone remains open
+integrated at `dc26817db` and `22e9bf667`. The combined `bc5fee5d2` head passed pinned Rust check, pinned Clippy with
+`-D warnings`, iOS/tvOS simulator build, Android app/test-source compilation,
+Rust formatting, JavaScript syntax, and a clean merge-tree against current
+`main`. The fast lane has not run. The D-03 milestone remains open
 until the external-reader call sites use scoped grants. No second adversarial
 review will be requested for this PR. The fast lane has not run.
 
