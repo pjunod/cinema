@@ -46,4 +46,6 @@ version = 1
 
 enforce_after = "448e803daba8ec7706350aedbe0562fd99454644"
 
-errata = []
+errata = [
+  { commit = "e2dfc6b77", reason = "Landing commit for #512. Its corrective commit 1831ee89 (fix(live-tv): refuse empty caption audit results) names tests/operations/test_live_tv_caption_audit.py::test_audit_requires_one_completed_test, but the test is a method of LiveTvCaptionAuditCase, so the line does not resolve. The test exists and covers the fix; the resolvable name is tests/operations/test_live_tv_caption_audit.py::LiveTvCaptionAuditCase::test_audit_requires_one_completed_test. A landing commit cannot be amended." },
+]
