@@ -172,7 +172,10 @@ it unit-tests without a video element:
   (`buffered.end − currentTime`), and — new — the server's `recent_speed`
   from the session status endpoint (read at most every 5 s): on a JIT server the download estimate
   measures `min(link, encode)`, and a producer below 1× with shrinking
-  runway is actionable *before* the client ever stalls.
+  runway is actionable *before* the client ever stalls. A prepared successor
+  begins publishing its own fragment progress and completion estimates only
+  after it becomes the attached player; its staging traffic cannot change the
+  incumbent's bandwidth history.
 - **Severe pressure** requires a fresh transfer estimate below 0.7× the
   current rung. A stall or ≤1.5 s of runway supplies urgency, but never
   invents a bandwidth cause. The controller selects the highest rung whose

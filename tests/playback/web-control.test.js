@@ -6565,6 +6565,50 @@ async function vendoredHlsStartupTests(){
     assert.equal(sample.manifest().listeners.progress,undefined,"manifest bytes are not media throughput");
   }
 
+  {
+    // A staged HLS instance becomes the attached player without a new open.
+    // Its own loader must start sampling only then, and a later cliff must
+    // not be decided from the predecessor's expired bandwidth sample.
+    const sample=new Function("PlaybackPolicy",[
+      "let now=0;const performance={now:()=>now};",
+      "const predecessor={};const successor={};let PLAYER={hls:predecessor,sessionId:'old',abr:{recentEstimateKbps:1097,recentEstimateAtMs:-70000}};",
+      "const state={hls:successor,sessionId:'new'};",
+      "class StockLoader{load(context,config,callbacks){return this.openAndSendXhr(context.xhr,context,config);}openAndSendXhr(xhr){xhr.onprogress=()=>{};}}",
+      "class FakeXHR{constructor(status=200){this.status=status;this.listeners={};}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});this.listeners.progress?.({loaded});}}",
+      shippedSource("attachedPreparedHls"),
+      shippedSource("createPreparedHlsLoader"),
+      shippedSource("notePreparedHlsFragmentLoaded"),
+      "const Loader=createPreparedHlsLoader(StockLoader,PLAYER,state);const loader=new Loader({});",
+      "const xhr=new FakeXHR();loader.load({xhr,url:'/new/frag1',frag:{type:'main',duration:2}}, {}, {});",
+      "return {player:PLAYER,state,xhr,setNow:value=>{now=value;},attach(){PLAYER.hls=successor;PLAYER.sessionId='new';},reject(){const bad=new FakeXHR(503);loader.load({xhr:bad,url:'/new/frag2',frag:{type:'main',duration:2}}, {}, {});return bad;},complete(data){notePreparedHlsFragmentLoaded(PLAYER,state,data);}};",
+    ].join("\n"))(require("../../crates/plurxd/src/web/playback-policy.js"));
+    sample.xhr.progress(20_000);
+    sample.setNow(1_600);sample.xhr.progress(80_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,1097,
+      "staging traffic cannot replace the attached predecessor's estimate");
+    sample.attach();
+    sample.xhr.progress(100_000);
+    sample.setNow(3_200);sample.xhr.progress(160_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,300);
+    assert.equal(sample.player.abr.recentEstimateAtMs,3_200);
+    sample.complete({frag:{url:'/new/frag1',duration:2,
+      stats:{loaded:100_000,loading:{start:1_600,end:3_200}}}});
+    assert.equal(sample.player.abr.recentEstimateKbps,300,
+      "a complete average cannot overwrite fresh progress from the same fragment");
+    const rejected=sample.reject();rejected.progress(20_000);
+    sample.setNow(4_800);rejected.progress(160_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,300,
+      "non-2xx successor bytes cannot become bandwidth evidence");
+    sample.complete({frag:{url:'/new/frag3',duration:2,
+      stats:{loaded:100_000,loading:{start:3_200,end:4_800}}}});
+    assert.equal(sample.player.abr.recentEstimateKbps,500,
+      "the attached successor publishes a fresh complete-fragment estimate");
+    sample.player.hls={};
+    sample.setNow(6_400);sample.xhr.progress(240_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,500,
+      "a retired successor cannot overwrite its replacement's estimate");
+  }
+
   async function actualVendoredLoaderCase({xhrSetup=null}={}){
     const policy=require("../../crates/plurxd/src/web/playback-policy.js");
     let now=0,nextTimer=0;

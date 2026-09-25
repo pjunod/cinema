@@ -318,10 +318,12 @@ function preparedSelectionText(selection){
 }
 function preparedHlsAttach(p,state,spare){
   const tgt=bufferTargets(p&&p.bufSegSecs);
+  const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
   const hls=new Hls({
     maxBufferLength:tgt.fwd,
     backBufferLength:tgt.back,
     ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
+    ...(StockLoader?{loader:createPreparedHlsLoader(StockLoader,p,state)}:{}),
     fragLoadPolicy:vodClientContract().fragLoadPolicy,
     // Told before the first fragment, exactly as the incumbent was: seeking
     // after attach downloads the opening of the successor and throws it away,
@@ -367,10 +369,74 @@ function preparedHlsAttach(p,state,spare){
   if(Hls.Events.BUFFER_APPENDED) hls.on(Hls.Events.BUFFER_APPENDED,()=>{
     if(current()) notePreparedBuffer(p,state);
   });
+  if(Hls.Events.FRAG_LOADED) hls.on(Hls.Events.FRAG_LOADED,(_,d)=>{
+    notePreparedHlsFragmentLoaded(p,state,d);
+  });
   hls.on(Hls.Events.ERROR,(_,d)=>{
     if(!current()||!d||!d.fatal) return;
     failPreparedReplacement(p,state,String(d.details||d.type||"hls.js fatal error"));
   });
+}
+// The staged pipeline does not own the viewer's bandwidth history until it is
+// exposed. Once attached it must measure its own fragments: otherwise the
+// predecessor's last sample ages out, and a later cliff can only take the slow
+// two-sample voluntary path even while the successor's hls.js EWMA falls.
+function attachedPreparedHls(p,state){
+  return PLAYER===p&&p.hls===state.hls&&p.sessionId===state.sessionId;
+}
+function createPreparedHlsLoader(StockLoader,p,state){
+  return class PlurxPreparedLoader extends StockLoader{
+    load(context,config,callbacks){
+      this.plurxMediaProgress=null;
+      return super.load(context,config,callbacks);
+    }
+    openAndSendXhr(xhr,context,config){
+      if(context&&context.frag&&context.frag.type==='main'
+        &&context.frag.duration>0&&typeof xhr.addEventListener==='function'){
+        xhr.addEventListener('progress',event=>{
+          if(!attachedPreparedHls(p,state)||!(xhr.status>=200&&xhr.status<300)) return;
+          const loaded=Number(event&&event.loaded),now=performance.now();
+          if(!(loaded>0)) return;
+          const previous=this.plurxMediaProgress;
+          if(!previous||previous.xhr!==xhr||loaded<previous.bytes){
+            this.plurxMediaProgress={xhr,bytes:loaded,at:now};
+            return;
+          }
+          const bytes=loaded-previous.bytes;
+          if(now-previous.at<1500||bytes<16*1024) return;
+          this.plurxMediaProgress={xhr,bytes:loaded,at:now};
+          const kbps=PlaybackPolicy.transferSampleKbps({loadedBytes:bytes,
+            loadingStartMs:previous.at,loadingEndMs:now});
+          if(kbps&&p.abr){
+            p.abr.recentEstimateKbps=kbps;
+            p.abr.recentEstimateAtMs=now;
+            p.abr.recentEstimateSource='progress';
+            p.abr.recentEstimateUrl=String(context.url||'');
+          }
+        });
+      }
+      return super.openAndSendXhr(xhr,context,config);
+    }
+  };
+}
+function notePreparedHlsFragmentLoaded(p,state,d){
+  if(!attachedPreparedHls(p,state)||!p.abr) return;
+  const stats=d&&((d.frag&&d.frag.stats)||d.stats);
+  const loaded=stats&&(stats.loaded||stats.total);
+  const loading=stats&&stats.loading||{};
+  const kbps=loaded>0&&d.frag&&d.frag.duration>0
+    ?PlaybackPolicy.transferSampleKbps({loadedBytes:loaded,
+      loadingStartMs:loading.start,loadingEndMs:loading.end}):null;
+  if(!kbps) return;
+  const now=performance.now(),url=String(d.frag.url||'');
+  // A completed request can average bytes from both sides of a cliff. Keep
+  // the fresher within-request progress delta until a new request measures it.
+  if(p.abr.recentEstimateSource==='progress'&&p.abr.recentEstimateUrl===url
+    &&now-p.abr.recentEstimateAtMs<=3000) return;
+  p.abr.recentEstimateKbps=kbps;
+  p.abr.recentEstimateAtMs=now;
+  p.abr.recentEstimateSource='complete';
+  p.abr.recentEstimateUrl=url;
 }
 function resumePreparedIncumbentLoad(p,state){
   if(!state) return;
