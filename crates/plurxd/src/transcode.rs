@@ -6789,7 +6789,10 @@ impl Session {
             let insufficient = !end_list
                 && rolling_insufficient_capacity(playback_rate, producer_speed)
                 && match clock.served.as_ref() {
-                    None => end_ms >= initial_runway_ms,
+                    // Before the first snapshot there is no deadline to
+                    // restart, and a held producer's recent speed is the last
+                    // one it measured before the stop, not a capacity reading.
+                    None => !held_for_scratch && end_ms >= initial_runway_ms,
                     Some(served) => {
                         clock.hard_deadline.is_some_and(|deadline| now >= deadline)
                             && end_ms <= served.end_ms
