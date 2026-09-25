@@ -42,7 +42,6 @@ ANDROID_HOME_DIR="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 ADB="${PLURX_ADB:-$ANDROID_HOME_DIR/platform-tools/adb}"
 XCRUN="${PLURX_XCRUN:-xcrun}"
 
-APPLE_BUNDLE_ID="tv.plurx.app"
 ANDROID_PACKAGE="tv.plurx.app"
 
 # Unanchored, case-insensitive match against ro.product.model with spaces
@@ -409,25 +408,8 @@ PY
       *) warn "$name: unsupported platform $platform — skipped"; record_skipped "$name (platform $platform)"; continue ;;
     esac
 
-    current="$("$XCRUN" devicectl device info apps --device "$ident" \
-      --bundle-id "$APPLE_BUNDLE_ID" --json-output - 2>/dev/null \
-      | python3 -c '
-import json,sys
-try:
-    d=json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-for a in d.get("result",{}).get("apps",[]):
-    print(a.get("version") or "")
-    break
-' || true)"
-
-    if [[ "$current" == "$APPLE_BUILD" ]]; then
-      log "$name already on build $APPLE_BUILD — skipped"
-      record_skipped "$name (already $APPLE_BUILD)"
-      continue
-    fi
-
+    # A matching CFBundleVersion can still be an older source tree. Install
+    # the just-built exact-main archive on every reachable paired device.
     log "installing plurx $VERSION ($APPLE_BUILD) on $name [$platform]"
     if "$XCRUN" devicectl device install app --device "$ident" "$app" >/dev/null; then
       record_installed "$name [$platform] → $VERSION ($APPLE_BUILD)"
