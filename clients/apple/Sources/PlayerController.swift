@@ -1765,7 +1765,7 @@ final class PlayerController: ObservableObject {
             ProcessInfo.processInfo.systemUptime
         },
         waitResumeSample: @escaping @MainActor () async -> Void = {
-            try? await Task.sleep(for: .milliseconds(50))
+            try? await Task.sleep(for: PlayerController.resumeSampleDelay)
         }
     ) {
         self.player = player
@@ -1797,6 +1797,10 @@ final class PlayerController: ObservableObject {
     /// a fresh start was not bounded at all, which is what let a title AVPlayer
     /// neither readies nor fails hold the open forever behind a black screen.
     static let itemReadinessDeadlineSeconds = 15
+    /// Separate from the observed readiness path: these delays coalesce seek
+    /// intent and sample resume presentation, respectively.
+    private static let seekCoalescingDelay: Duration = .milliseconds(100)
+    private static let resumeSampleDelay: Duration = .milliseconds(50)
     /// Film time that may pass on a black screen before the picture is judged
     /// undecodable. Above `PlayerAttachmentRecoveryState`'s five-second
     /// establishment window on purpose: audio-only progress must not be able
@@ -3537,7 +3541,7 @@ final class PlayerController: ObservableObject {
             // Coalesce native and replacement seeks alike. Executing every
             // scrub event makes AVPlayer and the server race old destinations.
             if !intentAlreadyPublished {
-                try? await Task.sleep(for: .milliseconds(100))
+                try? await Task.sleep(for: Self.seekCoalescingDelay)
             }
             guard !Task.isCancelled,
                   seekAttempt.seek == generation,
