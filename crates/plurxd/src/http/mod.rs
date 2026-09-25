@@ -363,6 +363,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/live-tv/guide"
         | "/api/v1/live-tv/guide/readiness"
         | "/api/v1/live-tv/guide/refresh"
+        | "/api/v1/live-tv/sessions/{capability}/master.m3u8"
         | "/api/v1/live-tv/sessions/{capability}/index.m3u8"
         | "/api/v1/live-tv/sessions/{capability}/status"
         | "/api/v1/live-tv/sessions/{capability}/keepalive"
@@ -1538,6 +1539,10 @@ pub fn router(state: AppState) -> Router {
             post(live_tv::start_session).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
+        )
+        .route(
+            "/live-tv/sessions/{capability}/master.m3u8",
+            get(live_tv::master),
         )
         .route(
             "/live-tv/sessions/{capability}/index.m3u8",

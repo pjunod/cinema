@@ -3218,6 +3218,7 @@ pub(crate) struct LiveTvManager {
     /// counter: cycling is the point, and which day it starts on is not.
     guide_revalidation_cursor: AtomicU64,
     graph_cache: tokio::sync::Mutex<Option<CachedGraphProbe>>,
+    caption_proofs: StdMutex<Vec<caption_probe::CaptionProof>>,
     source_formats: StdMutex<HashMap<SourceFormatKey, CachedSourceFormat>>,
     registry: Arc<StdMutex<LiveTvRegistry>>,
     /// Owner-sampled during the DVR loop. Public overview reads this atomic;
@@ -3265,6 +3266,7 @@ impl LiveTvManager {
             relayed_guide: tokio::sync::Mutex::new(None),
             guide_revalidation_cursor: AtomicU64::new(0),
             graph_cache: tokio::sync::Mutex::new(None),
+            caption_proofs: StdMutex::new(Vec::new()),
             source_formats: StdMutex::new(HashMap::new()),
             registry: Arc::clone(&metrics.registry),
             dvr_storage_free_bytes: AtomicU64::new(u64::MAX),
@@ -3277,6 +3279,25 @@ impl LiveTvManager {
         });
         manager.adopt_persisted_guide();
         manager
+    }
+
+    /// Probe this node's exact FFmpeg build in the background. Until a graph
+    /// has completed its end-to-end proof, sessions publish no caption group.
+    pub(crate) fn start_caption_probe(self: &Arc<Self>) {
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            let system = Arc::clone(&manager.system);
+            match tokio::spawn(caption_probe::probe_available_graphs(system)).await {
+                Ok(proofs) => {
+                    tracing::info!(graphs = proofs.len(), "caption graph probe complete");
+                    *manager
+                        .caption_proofs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = proofs;
+                }
+                Err(error) => tracing::warn!(%error, "caption graph probe unavailable"),
+            }
+        });
     }
 
     /// Make a guide loaded from disk visible to everything that reads the
@@ -3986,7 +4007,10 @@ impl LiveTvManager {
         }
         Ok(LiveTvActivated {
             session_id: session.capability.clone(),
-            playlist_url: format!("/api/v1/live-tv/sessions/{}/index.m3u8", session.capability),
+            playlist_url: format!(
+                "/api/v1/live-tv/sessions/{}/master.m3u8",
+                session.capability
+            ),
             channel: session.channel_with_source_format(),
             output: session.output(),
             delivery: session.delivery(),
@@ -5996,7 +6020,7 @@ async fn run_live_session_inner(
             deinterlace_output: config.deinterlace_output,
         }
     };
-    let delivery = crate::live_tv_delivery::resolve_live_delivery(
+    let mut delivery = crate::live_tv_delivery::resolve_live_delivery(
         &source,
         session.request.playback.as_ref(),
         &policy,
@@ -6051,6 +6075,32 @@ async fn run_live_session_inner(
             || "copy/remux".to_owned(),
             |admission| admission.encoder.label().to_owned(),
         );
+    }
+    // The fixture is 1080i MPEG-2 with AC-3. Only a matching source graph
+    // can use its proof; H.264 copy and other source families stay unadvertised
+    // until their own production graph has been proven on this FFmpeg build.
+    if source.video_codec.as_deref() == Some("mpeg2video")
+        && delivery.video_action == LiveTrackAction::Encode
+        && delivery.deinterlace
+    {
+        let encoder = admission.as_ref().map(|value| value.encoder.label());
+        let proofs = owner
+            .caption_proofs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(proof) = proofs.iter().find(|proof| {
+            Some(proof.encoder.as_str()) == encoder
+                && proof.packaging == delivery.packaging
+                && Some(proof.deinterlace) == delivery.deinterlace_output
+                && proof.output_height == delivery.output.height
+        }) {
+            delivery
+                .reasons
+                .push(crate::live_tv_delivery::LiveDeliveryReason {
+                    code: "captions_advertised".to_owned(),
+                    explanation: proof.services.join(","),
+                });
+        }
     }
     session.set_delivery(delivery.clone());
     let transcode_plan = LiveTvTranscodePlan::new(
@@ -8468,8 +8518,8 @@ pub(crate) fn unix_seconds() -> i64 {
 #[cfg(test)]
 mod atsc_audio_tests;
 
-#[cfg(test)]
-mod caption_audit_tests;
+#[path = "live_tv/caption_audit_tests.rs"]
+mod caption_probe;
 
 #[cfg(test)]
 mod tests {
