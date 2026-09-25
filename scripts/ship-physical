@@ -23,9 +23,8 @@
 #   scripts/ship-physical --keep             # keep the release worktree afterwards
 #
 # Android ships the signed release variant, never the debuggable debug APK:
-# set PLURX_ANDROID_KEYSTORE, PLURX_ANDROID_KEYSTORE_PASSWORD,
-# PLURX_ANDROID_KEY_ALIAS and PLURX_ANDROID_KEY_PASSWORD, the same four inputs
-# `make android-release` and the Ansible role take (docs/PUBLISHING.md 5.1).
+# set the durable release key, audited predecessor key, lineage and expected
+# release certificate inputs listed in docs/PUBLISHING.md 5.1.
 #
 # What it will not do: downgrade an app, install to a device it cannot name,
 # or ship an artifact that fails codesign/apksigner verification.
@@ -43,7 +42,6 @@ ANDROID_HOME_DIR="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 ADB="${PLURX_ADB:-$ANDROID_HOME_DIR/platform-tools/adb}"
 XCRUN="${PLURX_XCRUN:-xcrun}"
 
-APPLE_BUNDLE_ID="tv.plurx.app"
 ANDROID_PACKAGE="tv.plurx.app"
 
 # Unanchored, case-insensitive match against ro.product.model with spaces
@@ -134,16 +132,26 @@ fi
 # never the fallback: a missing input stops the run here, before any work.
 if [[ $DO_ANDROID -eq 1 ]]; then
   for var in PLURX_ANDROID_KEYSTORE PLURX_ANDROID_KEYSTORE_PASSWORD \
-             PLURX_ANDROID_KEY_ALIAS PLURX_ANDROID_KEY_PASSWORD; do
+             PLURX_ANDROID_KEY_ALIAS PLURX_ANDROID_KEY_PASSWORD \
+             PLURX_ANDROID_OLD_KEYSTORE PLURX_ANDROID_OLD_KEYSTORE_PASSWORD \
+             PLURX_ANDROID_OLD_KEY_ALIAS PLURX_ANDROID_OLD_KEY_PASSWORD \
+             PLURX_ANDROID_LINEAGE PLURX_ANDROID_RELEASE_CERT_SHA256; do
     [[ -n "${!var:-}" ]] || fail \
       "$var is required for the signed Android release build (docs/PUBLISHING.md 5.1); there is no debug fallback"
   done
   [[ -f "$PLURX_ANDROID_KEYSTORE" ]] || fail "PLURX_ANDROID_KEYSTORE=$PLURX_ANDROID_KEYSTORE is not a file"
+  [[ -f "$PLURX_ANDROID_OLD_KEYSTORE" ]] || fail "PLURX_ANDROID_OLD_KEYSTORE is not a file"
+  [[ -f "$PLURX_ANDROID_LINEAGE" ]] || fail "PLURX_ANDROID_LINEAGE is not a file"
   # Gradle resolves a relative storeFile against clients/android/app inside the
   # release worktree, not against where this script was started.
   PLURX_ANDROID_KEYSTORE="$(cd "$(dirname "$PLURX_ANDROID_KEYSTORE")" && pwd -P)/$(basename "$PLURX_ANDROID_KEYSTORE")"
+  PLURX_ANDROID_OLD_KEYSTORE="$(cd "$(dirname "$PLURX_ANDROID_OLD_KEYSTORE")" && pwd -P)/$(basename "$PLURX_ANDROID_OLD_KEYSTORE")"
+  PLURX_ANDROID_LINEAGE="$(cd "$(dirname "$PLURX_ANDROID_LINEAGE")" && pwd -P)/$(basename "$PLURX_ANDROID_LINEAGE")"
   export PLURX_ANDROID_KEYSTORE PLURX_ANDROID_KEYSTORE_PASSWORD \
-         PLURX_ANDROID_KEY_ALIAS PLURX_ANDROID_KEY_PASSWORD
+         PLURX_ANDROID_KEY_ALIAS PLURX_ANDROID_KEY_PASSWORD \
+         PLURX_ANDROID_OLD_KEYSTORE PLURX_ANDROID_OLD_KEYSTORE_PASSWORD \
+         PLURX_ANDROID_OLD_KEY_ALIAS PLURX_ANDROID_OLD_KEY_PASSWORD \
+         PLURX_ANDROID_LINEAGE PLURX_ANDROID_RELEASE_CERT_SHA256
   log "Android release signing keystore: $PLURX_ANDROID_KEYSTORE"
 fi
 
@@ -319,16 +327,16 @@ if [[ $DO_ANDROID -eq 1 ]]; then
   fi
 
   if [[ $DRY_RUN -eq 0 ]]; then
+    log "applying and verifying the debug-to-release signing lineage"
+    run python3 "$WORKTREE/scripts/sign-android-release"
+  fi
+
+  if [[ $DRY_RUN -eq 0 ]]; then
     if [[ -n "$APKSIGNER" && -x "$APKSIGNER" ]]; then
       log "verifying the APK signature"
-      certs="$("$APKSIGNER" verify --print-certs "$APK")" || fail "APK failed apksigner verification"
-      # A debug-signed "release" installs on a device that has never seen the
-      # upload key and then blocks every properly signed upgrade.
-      if [[ "$certs" == *"CN=Android Debug"* ]]; then
-        fail "APK is signed with the Android debug key, not the upload key; refusing to ship it"
-      fi
+      "$APKSIGNER" verify --min-sdk-version 28 --max-sdk-version 28 "$APK" || fail "APK failed apksigner verification"
     else
-      warn "apksigner not found; shipping the APK unverified"
+      fail "apksigner not found; refusing to ship an unverified APK"
     fi
   fi
 fi
@@ -400,25 +408,8 @@ PY
       *) warn "$name: unsupported platform $platform — skipped"; record_skipped "$name (platform $platform)"; continue ;;
     esac
 
-    current="$("$XCRUN" devicectl device info apps --device "$ident" \
-      --bundle-id "$APPLE_BUNDLE_ID" --json-output - 2>/dev/null \
-      | python3 -c '
-import json,sys
-try:
-    d=json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-for a in d.get("result",{}).get("apps",[]):
-    print(a.get("version") or "")
-    break
-' || true)"
-
-    if [[ "$current" == "$APPLE_BUILD" ]]; then
-      log "$name already on build $APPLE_BUILD — skipped"
-      record_skipped "$name (already $APPLE_BUILD)"
-      continue
-    fi
-
+    # A matching CFBundleVersion can still be an older source tree. Install
+    # the just-built exact-main archive on every reachable paired device.
     log "installing plurx $VERSION ($APPLE_BUILD) on $name [$platform]"
     if "$XCRUN" devicectl device install app --device "$ident" "$app" >/dev/null; then
       record_installed "$name [$platform] → $VERSION ($APPLE_BUILD)"
@@ -464,19 +455,15 @@ if [[ $DO_ANDROID -eq 1 ]]; then
     pkginfo="$("$ADB" -s "$serial" shell dumpsys package "$ANDROID_PACKAGE" 2>/dev/null || true)"
     current="$(printf '%s\n' "$pkginfo" \
       | awk -F= '/versionCode=/{print $2}' | awk '{print $1}' | head -1)"
-    # A debuggable install is the pre-release debug build. Matching its
-    # versionCode is not "already installed": skipping it would leave the
-    # bearer readable through `run-as` with the run reported as a success.
+    # A debuggable install is the pre-release debug build. Even a signed app
+    # with an equal versionCode may be an older source tree: a version number
+    # alone cannot prove that the exact current-main APK is installed.
     debuggable=0
     if [[ "$pkginfo" == *DEBUGGABLE* ]]; then debuggable=1; fi
 
     if [[ -n "$current" ]]; then
-      if [[ "$current" == "$ANDROID_CODE" && $debuggable -eq 1 ]]; then
-        warn "$model has a debuggable build of versionCode $ANDROID_CODE — replacing it with the release build"
-      elif [[ "$current" == "$ANDROID_CODE" ]]; then
-        log "$model already on versionCode $ANDROID_CODE — skipped"
-        record_skipped "$model (already $ANDROID_CODE)"
-        continue
+      if [[ $debuggable -eq 1 ]]; then
+        warn "$model has a debuggable build of versionCode $current — replacing it with the release build"
       fi
       # A downgrade keeps /data, so older code inherits whatever schema the
       # newer build wrote. Refuse it rather than corrupting the install.
@@ -492,9 +479,9 @@ if [[ $DO_ANDROID -eq 1 ]]; then
       record_installed "$model [$serial] → $VERSION ($ANDROID_CODE)"
     else
       if [[ "$install_out" == *INSTALL_FAILED_UPDATE_INCOMPATIBLE* ]]; then
-        # Nothing is uninstalled here: that drops the sign-in and every offline
-        # download under files/offline/, so it stays the operator's decision.
-        warn "$model: the installed plurx is signed with a different key — normally the debug build from before the release switch (docs/clients/CLIENT-DEPLOY-PROMPT.md, 2026-09-23 note). Android cannot upgrade across signers. The one-time step is 'adb -s $serial uninstall $ANDROID_PACKAGE', which also deletes the device's sign-in and offline downloads; after it, rerun this script and it installs the signed release build."
+        # The lineage is intended to retain sign-in and offline downloads.
+        # A mismatch is a stop condition, never an automatic uninstall.
+        warn "$model: signing lineage was not accepted; keeping the existing install and app data. Verify the installed certificate, API level and lineage before retrying."
       else
         warn "$model: install failed: $(printf '%s\n' "$install_out" | tail -1)"
       fi

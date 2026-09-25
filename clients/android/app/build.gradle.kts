@@ -85,10 +85,12 @@ android {
 
     defaultConfig {
         applicationId = "tv.plurx.app"
-        // 23 covers phones and the vast majority of Android TV / Google TV boxes.
-        minSdk = 23
+        // Certificate rotation preserves existing data only on Android 9+.
+        // All variants require API 28 so release distribution and development
+        // builds share an explicit supported-platform policy.
+        minSdk = 28
         targetSdk = 37
-        versionCode = 127
+        versionCode = 128
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -128,7 +130,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // The upload key, never the debug key. `release` already clears
+            // The durable app signing key, never the debug key. `release` already clears
             // `debuggable`, which is what `adb shell run-as` follows; the
             // signer is a separate property and this is it.
             signingConfig = signingConfigs.getByName("release")
