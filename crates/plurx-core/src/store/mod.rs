@@ -5554,11 +5554,12 @@ impl CatalogueReader {
     }
 
     /// A bounded read of per-user watch state (K-04 M2). On top of the
-    /// catalogue permit, the local replica must have applied the user's
-    /// read-your-write fence — the latest watch write this process
-    /// acknowledged for them, or the client's echoed `read_after`, whichever
-    /// is larger. With neither there is nothing to prove against and
-    /// Authority answers; see [`watch_fence`].
+    /// catalogue permit, the local replica must have applied the client's
+    /// echoed `read_after`, raised to the latest watch write this process
+    /// acknowledged for the user when that is newer. Without `read_after`
+    /// Authority answers, whatever this process recorded: its own older
+    /// write proves nothing about a later one through a peer. See
+    /// [`watch_fence`].
     #[cfg(feature = "hiqlite-store")]
     async fn bounded_watch<T, F, Fut>(
         &self,
