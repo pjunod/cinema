@@ -13,17 +13,19 @@ impl FileGrantStore for SqliteStore {
         token_hash: &str,
         file_id: i64,
         user_id: i64,
+        source_token_hash: &str,
         created_at: i64,
         expires_at: i64,
     ) -> Result<(), StoreError> {
         let id = id.to_owned();
         let token_hash = token_hash.to_owned();
+        let source_token_hash = source_token_hash.to_owned();
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO file_grants
-                 (id, token_hash, file_id, user_id, purpose, created_at, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, 'open_in', ?5, ?6)",
-                params![id, token_hash, file_id, user_id, created_at, expires_at],
+                 (id, token_hash, file_id, user_id, source_token_hash, purpose, created_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'open_in', ?6, ?7)",
+                params![id, token_hash, file_id, user_id, source_token_hash, created_at, expires_at],
             )?;
             Ok(())
         })
@@ -35,8 +37,10 @@ impl FileGrantStore for SqliteStore {
         self.with_conn(move |conn| {
             Ok(conn
                 .query_row(
-                    "SELECT id, file_id, user_id, expires_at, revoked_at
-                     FROM file_grants WHERE token_hash = ?1 AND purpose = 'open_in'",
+                    "SELECT g.id, g.file_id, g.user_id, g.expires_at, g.revoked_at,
+                            EXISTS (SELECT 1 FROM tokens t WHERE t.token_hash = g.source_token_hash
+                                      AND t.user_id = g.user_id)
+                     FROM file_grants g WHERE g.token_hash = ?1 AND g.purpose = 'open_in'",
                     params![token_hash],
                     |row| {
                         Ok(FileGrant {
@@ -45,6 +49,7 @@ impl FileGrantStore for SqliteStore {
                             user_id: row.get(2)?,
                             expires_at: row.get(3)?,
                             revoked_at: row.get(4)?,
+                            source_active: row.get::<_, i64>(5)? != 0,
                         })
                     },
                 )

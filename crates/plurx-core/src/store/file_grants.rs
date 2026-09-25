@@ -9,6 +9,7 @@ pub const FILE_GRANTS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS file_grants (
     token_hash TEXT NOT NULL UNIQUE,
     file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source_token_hash TEXT NOT NULL,
     purpose TEXT NOT NULL CHECK (purpose = 'open_in'),
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
@@ -24,6 +25,8 @@ pub struct FileGrant {
     pub user_id: i64,
     pub expires_at: i64,
     pub revoked_at: Option<i64>,
+    /// Logout invalidates this grant even if minting raced with revocation.
+    pub source_active: bool,
 }
 
 #[async_trait]
@@ -34,6 +37,7 @@ pub trait FileGrantStore: Send + Sync {
         token_hash: &str,
         file_id: i64,
         user_id: i64,
+        source_token_hash: &str,
         created_at: i64,
         expires_at: i64,
     ) -> Result<(), StoreError>;

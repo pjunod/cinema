@@ -1160,6 +1160,7 @@ const TABLES: &[TablePlan] = &[
             "token_hash",
             "file_id",
             "user_id",
+            "source_token_hash",
             "purpose",
             "created_at",
             "expires_at",
