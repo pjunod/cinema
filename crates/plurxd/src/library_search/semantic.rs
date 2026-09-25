@@ -45,15 +45,7 @@ struct Encoder {
 impl Encoder {
     fn load(dir: &Path) -> Result<Self> {
         let config: Config = serde_json::from_slice(&std::fs::read(dir.join("config.json"))?)?;
-        let mut tokenizer =
-            Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| anyhow::anyhow!("{e}"))?;
-        tokenizer
-            .with_padding(None)
-            .with_truncation(Some(tokenizers::TruncationParams {
-                max_length: 256,
-                ..Default::default()
-            }))
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let tokenizer = load_tokenizer(dir)?;
         let weights = std::fs::read(dir.join("model.safetensors"))?;
         let vb = VarBuilder::from_buffered_safetensors(weights, DTYPE, &Device::Cpu)?;
         Ok(Self {
@@ -75,6 +67,20 @@ impl Encoder {
             .to_vec1::<f32>()?;
         normalize(output)
     }
+}
+/// The tokenizer exactly as inference configures it, shared with the backend
+/// equivalence test so that test measures what `embed` actually encodes.
+fn load_tokenizer(dir: &Path) -> Result<Tokenizer> {
+    let mut tokenizer =
+        Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| anyhow::anyhow!("{e}"))?;
+    tokenizer
+        .with_padding(None)
+        .with_truncation(Some(tokenizers::TruncationParams {
+            max_length: 256,
+            ..Default::default()
+        }))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(tokenizer)
 }
 fn normalize(mut values: Vec<f32>) -> Result<Vec<f32>> {
     let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
@@ -403,6 +409,143 @@ mod tests {
         let v = normalize(vec![1.; DIM]).expect("vector");
         assert!((v.iter().map(|x| x * x).sum::<f32>() - 1.).abs() < 0.00001);
     }
+    /// Every component type `tokenizers` 0.22 builds on its `SysRegex`, which
+    /// is the only thing its `onig` / `fancy-regex` backend choice changes:
+    /// `Split` and `ByteLevel` pre-tokenizers and the `Replace` normalizer.
+    const REGEX_BACKED: [&str; 3] = ["Split", "ByteLevel", "Replace"];
+
+    fn regex_backed_components(node: &serde_json::Value, found: &mut Vec<String>) {
+        match node {
+            serde_json::Value::Object(map) => {
+                if let Some(kind) = map.get("type").and_then(|kind| kind.as_str()) {
+                    if REGEX_BACKED.contains(&kind) {
+                        found.push(kind.to_owned());
+                    }
+                }
+                map.values()
+                    .for_each(|child| regex_backed_components(child, found));
+            }
+            serde_json::Value::Array(items) => items
+                .iter()
+                .for_each(|child| regex_backed_components(child, found)),
+            _ => {}
+        }
+    }
+
+    // Shared with the two-backend harness in spikes/tokenizer-backends.
+    include!("testdata/tokenizer_programmatic_inputs.rs");
+
+    fn corpus() -> Vec<String> {
+        let fixture = include_str!("testdata/tokenizer_corpus.txt")
+            .lines()
+            .filter(|line| !line.starts_with("# "))
+            .map(str::to_owned);
+        let extra = std::env::var("PLURX_TEST_TOKENIZER_CORPUS")
+            .map(|path| std::fs::read_to_string(path).expect("PLURX_TEST_TOKENIZER_CORPUS"))
+            .unwrap_or_default();
+        fixture
+            .chain(programmatic_inputs())
+            .chain(extra.lines().map(str::to_owned))
+            .collect()
+    }
+
+    /// K-08 M4 (`docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md` §3.7(a)):
+    /// the embedding is a function of the token ids, so swapping the regex
+    /// backend is admissible only if ids are identical, not similar.
+    ///
+    /// This test cannot compare the two backends. `candle-core` 0.11.0 turns on
+    /// `tokenizers/onig` for every non-wasm target and tokenizers uses onig
+    /// whenever that feature is on, so plurxd only ever runs `onig`. What it
+    /// checks is two things. Structurally, the pinned tokenizer uses no
+    /// component that consults the regex backend, so the backend cannot reach
+    /// an id for any input. As a regression pin, the fixture corpus still
+    /// encodes on `onig` to exactly the ids recorded in
+    /// `testdata/tokenizer_corpus.ids`. The comparison itself is
+    /// `make tokenizer-backends` (spikes/tokenizer-backends): it builds
+    /// tokenizers alone once per backend, encodes this same corpus with each
+    /// build, checks both against the same recorded ids and `cmp`s the two
+    /// outputs.
+    ///
+    /// `PLURX_TEST_TOKENIZER_CORPUS` appends a further corpus (one input per
+    /// line, e.g. a library's titles and overviews), here and in the harness.
+    /// `PLURX_TEST_TOKENIZER_IDS_OUT` writes every input's ids.
+    /// `PLURX_TEST_TOKENIZER_RECORD=1` rewrites the recorded ids instead of
+    /// comparing them.
+    #[test]
+    #[ignore = "needs the pinned tokenizer; set PLURX_TEST_MINILM_DIR to verified model files"]
+    fn tokenizer_backends_agree() {
+        let dir = PathBuf::from(std::env::var("PLURX_TEST_MINILM_DIR").expect("model directory"));
+        let raw = std::fs::read(dir.join("tokenizer.json")).expect("tokenizer.json");
+        let (_, pinned, _) = FILES[1];
+        assert_eq!(
+            hex::encode(Sha256::digest(&raw)),
+            pinned,
+            "not the pinned tokenizer"
+        );
+
+        let json: serde_json::Value = serde_json::from_slice(&raw).expect("tokenizer json");
+        let mut found = Vec::new();
+        regex_backed_components(&json["normalizer"], &mut found);
+        regex_backed_components(&json["pre_tokenizer"], &mut found);
+        assert!(
+            found.is_empty(),
+            "the pinned tokenizer uses regex-backed components {found:?}; the \
+             backend choice can change its ids"
+        );
+
+        let tokenizer = load_tokenizer(&dir).expect("tokenizer");
+        let inputs = corpus();
+        let ids: Vec<String> = inputs
+            .iter()
+            .map(|input| {
+                let encoding = tokenizer.encode(input.as_str(), true).expect("encode");
+                encoding
+                    .get_ids()
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
+        println!(
+            "tokenizer_backends_agree: {} inputs, {} ids",
+            inputs.len(),
+            ids.iter()
+                .map(|line| line.split(' ').count())
+                .sum::<usize>()
+        );
+        if let Ok(out) = std::env::var("PLURX_TEST_TOKENIZER_IDS_OUT") {
+            std::fs::write(out, ids.join("\n") + "\n").expect("write ids");
+        }
+
+        let recorded_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/library_search/testdata/tokenizer_corpus.ids");
+        let fixture_len = include_str!("testdata/tokenizer_corpus.txt")
+            .lines()
+            .filter(|line| !line.starts_with("# "))
+            .count()
+            + programmatic_inputs().len();
+        if std::env::var("PLURX_TEST_TOKENIZER_RECORD").as_deref() == Ok("1") {
+            std::fs::write(&recorded_path, ids[..fixture_len].join("\n") + "\n")
+                .expect("record ids");
+            return;
+        }
+        let recorded = include_str!("testdata/tokenizer_corpus.ids");
+        let recorded: Vec<&str> = recorded.lines().collect();
+        assert_eq!(
+            recorded.len(),
+            fixture_len,
+            "recorded ids are stale; re-record on onig"
+        );
+        for (index, (actual, expected)) in ids.iter().zip(&recorded).enumerate() {
+            assert_eq!(
+                actual, expected,
+                "first divergence at fixture input {index}: {:?}",
+                inputs[index]
+            );
+        }
+    }
+
     #[test]
     #[ignore = "downloads are opt-in; set PLURX_TEST_MINILM_DIR to verified model files"]
     fn embedded_model_distinguishes_meaning() {

@@ -1248,12 +1248,19 @@ impl ActivationMarker {
 /// Install the process-level rustls provider every TLS path here depends on.
 ///
 /// `rustls` panics rather than erroring when a process reaches TLS with no
-/// default provider, and the crate is built with more than one provider feature
-/// reachable, so it will not choose for us. `plurxd run` used to be covered only
-/// by accident: `hiqlite::start_node` installs one on the server side, which the
-/// maintenance commands never call, so `reset-password` and `refresh-metadata`
-/// aborted on every activated node. Installing here rather than in one binary's
-/// entry point keeps a future caller from reintroducing that gap.
+/// default provider and more than one provider feature compiled. `plurxd run`
+/// used to be covered only by accident: `hiqlite::start_node` installs one on the
+/// server side, which the maintenance commands never call, so `reset-password`
+/// and `refresh-metadata` aborted on every activated node. Installing here rather
+/// than in one binary's entry point keeps a future caller from reintroducing that
+/// gap.
+///
+/// Since K-08 §3.6 option A the workspace graph compiles `ring` as the only
+/// rustls provider (`vendor/hiqlite` no longer asks for `aws-lc-rs` through
+/// `axum-server/tls-rustls`, `rustls/prefer-post-quantum` or `tokio-rustls`'s
+/// default features), so rustls would now select `ring` on its own. The explicit
+/// install stays: it names the choice where a reader looks for it, and
+/// `tests/rustls_single_provider.rs` is what fails if a second provider returns.
 ///
 /// Idempotent: a losing race or an already-installed provider returns `Err`,
 /// which is the same end state as winning.
@@ -5514,6 +5521,41 @@ mod tests {
             hiqlite_management.contains(".client_write(QueryWrite::RTT)")
                 && hiqlite_management.contains("state.raft_db.raft.trigger().snapshot().await?"),
             "the local client snapshot hook must anchor writer metadata before the real OpenRaft trigger"
+        );
+    }
+
+    /// K-08 §3.6 / M3: the provider this crate installs is `ring`, suites and
+    /// key-exchange groups alike, so no hybrid post-quantum group is offered.
+    /// `prefer-post-quantum` only ever reordered the `aws-lc-rs` provider's
+    /// groups; this pins that the provider the process negotiates with is not
+    /// that one, which is the premise that made dropping the feature neutral.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn installed_provider_is_ring() {
+        install_default_crypto_provider();
+        let installed = rustls::crypto::CryptoProvider::get_default()
+            .expect("install_default_crypto_provider leaves a process provider");
+        let ring = rustls::crypto::ring::default_provider();
+        let suites = |provider: &rustls::crypto::CryptoProvider| {
+            provider
+                .cipher_suites
+                .iter()
+                .map(|suite| suite.suite())
+                .collect::<Vec<_>>()
+        };
+        let groups = |provider: &rustls::crypto::CryptoProvider| {
+            provider
+                .kx_groups
+                .iter()
+                .map(|group| group.name())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(suites(installed), suites(&ring));
+        assert_eq!(groups(installed), groups(&ring));
+        assert!(
+            !groups(installed).contains(&rustls::NamedGroup::X25519MLKEM768),
+            "the installed provider offers a hybrid post-quantum group, so it is \
+             not ring and dropping prefer-post-quantum was not behaviour-neutral"
         );
     }
 

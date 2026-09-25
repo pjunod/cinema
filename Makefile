@@ -156,6 +156,34 @@ spike-lock-check: ## Prove the isolated spike's lockfile still resolves
 	@#   cargo update --manifest-path spikes/hiqlite-m0/Cargo.toml --workspace
 	@$(CARGO) metadata --locked --manifest-path spikes/hiqlite-m0/Cargo.toml \
 	  --format-version 1 >/dev/null
+	@# spikes/tokenizer-backends depends on no workspace crate, so nothing can
+	@# strand its lockfile; checking it here keeps the committed lock honest.
+	@$(CARGO) metadata --locked --manifest-path spikes/tokenizer-backends/Cargo.toml \
+	  --format-version 1 >/dev/null
+
+.PHONY: tokenizer-backends
+tokenizer-backends: ## K-08 M4: onig vs fancy-regex token ids (PLURX_TEST_MINILM_DIR=<pinned tokenizer.json dir>)
+	@# plurxd cannot build fancy-regex (candle-core forces tokenizers/onig), so
+	@# the comparison builds tokenizers alone, once per backend. Each run checks
+	@# the fixture ids against plurxd's recorded ones; PLURX_TEST_TOKENIZER_CORPUS
+	@# appends a further corpus to both runs.
+	@test -n "$(PLURX_TEST_MINILM_DIR)" || { \
+	  echo "set PLURX_TEST_MINILM_DIR to a directory holding the pinned tokenizer.json" >&2; exit 2; }
+	@set -e; out=$$(mktemp -d); \
+	for backend in onig fancy-regex; do \
+	  $(CARGO) run --locked --release --quiet \
+	    --manifest-path spikes/tokenizer-backends/Cargo.toml \
+	    --no-default-features --features $$backend -- \
+	    "$(PLURX_TEST_MINILM_DIR)" "$$out/$$backend.ids"; \
+	done; \
+	$(CARGO) tree --locked --manifest-path spikes/tokenizer-backends/Cargo.toml \
+	  --no-default-features --features fancy-regex -e normal,build --prefix none \
+	  > "$$out/fancy-regex.tree"; \
+	if grep -q '^onig_sys ' "$$out/fancy-regex.tree"; then \
+	  echo "the fancy-regex build still compiles onig_sys" >&2; exit 1; fi; \
+	cmp "$$out/onig.ids" "$$out/fancy-regex.ids"; \
+	echo "tokenizer-backends: onig and fancy-regex ids identical over $$(wc -l < "$$out/onig.ids") inputs; no onig_sys in the fancy-regex graph"; \
+	rm -rf "$$out"
 
 .PHONY: hiqlite-spike
 hiqlite-spike: ## Run the isolated M0 raft/SQLite semantic proof
