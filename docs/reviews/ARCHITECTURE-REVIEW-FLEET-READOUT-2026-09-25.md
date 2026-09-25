@@ -424,3 +424,105 @@ Server request counts, frame times, filtering, and other devices remain open.
 The existing remote playback/caption tests use `DEBUG`-only fixture launch
 arguments, so this Release paging run does not test A-02 playback or L-03
 caption rendering.
+
+## A-04 merged-main Chrome two-cliff revisit — 21:12 UTC
+
+On exact merged main `8ae8cab1e136`, a source-exact Chrome run shaped the
+two stages to 1099.3 and 349.1 kb/s with zero shaper errors. The first cliff
+**failed** its recovery check: a prepared-handoff `commit_timeout` led to a
+reopen, 12.009 s to first downshift, two restarts and a 5.0665 s maximum
+video gap. The second cliff passed its local check. Concurrent fleet and
+mobile builds were active during this run, so it is a failed candidate trace,
+not a complete D3 baseline. Raw, normalized and JUnit private receipts are
+`/private/tmp/codex-a04-exact-main8ae8-20260925/raw.json` (SHA-256
+`703901043f2a227a172f39d4a375f7882ff72fdbb9fa2afcd2c13f3b3385d9d6`),
+normalized SHA-256 `533882e8d91085281b156ee9ff31b0a33765fc4f300dbe522c5ea24406ee9dec`,
+and JUnit SHA-256 `5ff9d9bec5afa19164b91c83c8ce210a5a3d5d2b6540092bcab19cdefaa9a3`.
+A quiet-load exact-base rerun and the other browser/native/HDR rows remain owed.
+
+The idle-host rerun used the same source-exact binary
+`v0.3.0-4346-g96dfaa95a` after the concurrent builds ended. It measured
+7999.9, 1099.3 and 349.1 kb/s across baseline and both cliffs, with zero
+shaper errors. Both local recovery checks **passed**: 720→240p in 5.4614 s
+with a 100 ms maximum video gap, then 240→144p in 6.8382 s with a 66.8 ms
+maximum gap. Both sampled baselines were at least 0.998×; there were zero
+restarts, waits, stalls or hitches. The raw receipt is
+`/private/tmp/codex-a04-idle8ae8-20260925/raw.json` (SHA-256
+`201f361345c9b4534859579e8497a87b10ae9cf75331348e0d25e66ec784bc69`),
+normalized SHA-256 `78ef88f3e4ca2629936e6fc967b0eb01342e650eac5202580903e6362ba6746a`,
+and JUnit SHA-256 `bfd72f0894f4e6512b86568272ba6f51b31b24c93f02faf57bc5889c73ca5d4d`.
+The loaded-host failure and idle-host pass show a load-sensitive candidate;
+they do not complete the stable D3 platform matrix. A final exact-base trace
+is due after downstream merges.
+
+## W-02 exact-main browser checks — 21:13–21:17 UTC
+
+On `8ae8cab1e136`, an Acorn AST check measured `attachHls` at 15 lines
+(`player.js` 521–535) and `play` at 28 (`decode-tiers.js` 611–638), within
+the 5.4/5.5 orchestration limits. A real Chrome
+`scripts/web-hls-startup-browser-check` passed worker/fallback, local seek
+and reporter observations (log SHA-256
+`a2cb1fd711694b5f0c082f56db6d15ba83f09ced6f38b024afdfb730ec7c8c4d`; fixture
+SHA-256 `3e26afeaeeb2c3c053fdbcc720736a499254d3a971618d36b29c98a4fe80ca58`).
+The two first frames took 25.644 and 25.557 s; local +10 s seek logged
+zero new sessions, while the reporter named missing `core/cards.js` in its
+banner and reports.
+`scripts/subtitle-readiness-browser-check` passed a 0→1 cue transition
+within one session (log SHA-256
+`6703149bca4f2a9a8b5b9fce7cb92a7f57fabf06468adf729a5e8777df3798ac`; fixture
+SHA-256 `12c26f0692cd4764483b295ce9af32d98bb19bba0539f970368c8dbf66870961`).
+It recorded two empty subtitle-segment requests and one sidecar request.
+Logs are local under `/private/tmp/codex-w02-*-8ae8cab1e.log`.
+
+The full `make web-check` stopped at settings-sections case 30/31 on this
+tree because its Developer fixture omitted the shipped
+`subtitlePlaybackRangesCard` (`/private/tmp/codex-w02-web-check-8ae8cab1e.log`,
+SHA-256 `ce3c52956d1bc3ee93dab62039cdb8b2e55bb49e1a046112ea5af05fd479c739`).
+Fix `dac82e9e89c4` is queued for batched PR #527; no post-fix run is claimed
+here. The 5.1–5.3 `scripts/web-types` checker and baselines are absent, so
+the type-ratchet and full 5.4/5.5 acceptance remain open. Physical TV
+input evidence is also owed.
+
+## Exact main four-node rollout and interim observation — 21:22 UTC
+
+Pinned `8ae8cab1e136d0ac59fb9905f10b4a846b67ea5d` was deployed serially
+to the three voters (`nynuc`, `m6`, `nuc4`) and then to learner `nuc3` after
+the voter quorum, leader and apply lag remained healthy. Both Ansible plays
+finished with zero failed or unreachable hosts. At 21:22:28 UTC an
+independent SSH check of every node found both checkout and running OCI
+revision equal to that SHA, stamped binary `v0.3.0-4315-g8ae8cab1e`, Docker
+healthy with zero restarts, `/readyz` and `/metrics` HTTP 200, three fresh
+voters, zero stale voters, one learner, quorum available, leader known and
+apply lag zero. The sanitized four-node receipt is
+`/private/tmp/codex-fleet-main8ae8-after-rollout-20260925.json` (SHA-256
+`80bcdb418588e520e45b9fec1145ff721c72907aee8b8c97036a8ee20a7b661d`).
+The voter and learner deployment logs are local under
+`/private/tmp/codex-fleet-main8ae8-{voters,learner}-20260925.log`.
+
+This point sample also found a 524,288 soft/hard open-file limit on each
+container, 49–71 open FDs, OOM adjustment zero, NTP synchronized, and no
+`metadata_ahead_of_wal`, `EMFILE` or panic strings in each node's last ten
+minutes of Plurxd logs. All four exported DB/WAL/snapshot/log size gauges,
+backfill result counters and encoder/tone-map session families; the latter
+two had zero sessions at this idle point. The `/metrics` bodies were
+approximately 394 KiB. These are point observations, not the named active
+backfill, normal-use hour, busy-evening, clock-uncertainty or duration passes.
+
+An agent-owned, read-only **interim** collector started after the exact-build
+check at 21:25 UTC. Its single fleet process records all four nodes every
+30 seconds with UTC timestamps, exact build, quorum/raft and selected storage,
+backfill and encoder/tone-map metrics; every fifth minute it also records
+SSH-verified checkout/OCI, health, restart count, readiness, FD/open-file
+limits and recent WAL/EMFILE/panic counts. A separate bounded C-08 process
+records full `/metrics` HTTP status, body size, scrape duration and selected
+exposition hygiene every five minutes for one hour. The fleet process stops
+after seven days or at a shared 256 MiB file cap. Its first four HTTP ticks
+and first four SSH checks passed exact build/OCI and health; the C-08 first
+four scrapes were HTTP 200 and exact build. Files and bounded configuration
+are under
+`/Users/pjunod/code/plurx-agent/codex-fleet-main8ae8-observation-20260925/`.
+An initial launchd attempt had no route to the LAN; those failed ticks were
+discarded before the network-capable observation window began. Downstream
+main merges will require a new exact-main rollout and a fresh uniform-build
+window; this `8ae8cab1e136` observation cannot count toward the final-main
+one-hour, 24-hour or seven-day duration acceptance.
