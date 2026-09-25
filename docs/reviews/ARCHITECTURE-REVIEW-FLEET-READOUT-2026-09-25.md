@@ -425,10 +425,10 @@ The existing remote playback/caption tests use `DEBUG`-only fixture launch
 arguments, so this Release paging run does not test A-02 playback or L-03
 caption rendering.
 
-## A-04 merged-main Chrome two-cliff revisit — 21:12 UTC
+## A-04 candidate-branch Chrome two-cliff revisit — 21:12 UTC
 
-On exact merged main `8ae8cab1e136`, a source-exact Chrome run shaped the
-two stages to 1099.3 and 349.1 kb/s with zero shaper errors. The first cliff
+On the A-04 candidate branch based on merged main `8ae8cab1e136`, a
+Chrome run using binary `v0.3.0-4346-g96dfaa95a` shaped the two stages to 1099.3 and 349.1 kb/s with zero shaper errors. The first cliff
 **failed** its recovery check: a prepared-handoff `commit_timeout` led to a
 reopen, 12.009 s to first downshift, two restarts and a 5.0665 s maximum
 video gap. The second cliff passed its local check. Concurrent fleet and
@@ -438,9 +438,9 @@ not a complete D3 baseline. Raw, normalized and JUnit private receipts are
 `703901043f2a227a172f39d4a375f7882ff72fdbb9fa2afcd2c13f3b3385d9d6`),
 normalized SHA-256 `533882e8d91085281b156ee9ff31b0a33765fc4f300dbe522c5ea24406ee9dec`,
 and JUnit SHA-256 `5ff9d9bec5afa19164b91c83c8ce210a5a3d5d2b6540092bcab19cdefaa9a3`.
-A quiet-load exact-base rerun and the other browser/native/HDR rows remain owed.
+A merged-main binary trace and the other browser/native/HDR rows remain owed.
 
-The idle-host rerun used the same source-exact binary
+The idle-host rerun used the same candidate-branch binary
 `v0.3.0-4346-g96dfaa95a` after the concurrent builds ended. It measured
 7999.9, 1099.3 and 349.1 kb/s across baseline and both cliffs, with zero
 shaper errors. Both local recovery checks **passed**: 720→240p in 5.4614 s
@@ -452,7 +452,8 @@ restarts, waits, stalls or hitches. The raw receipt is
 normalized SHA-256 `78ef88f3e4ca2629936e6fc967b0eb01342e650eac5202580903e6362ba6746a`,
 and JUnit SHA-256 `bfd72f0894f4e6512b86568272ba6f51b31b24c93f02faf57bc5889c73ca5d4d`.
 The loaded-host failure and idle-host pass show a load-sensitive candidate;
-they do not complete the stable D3 platform matrix. A final exact-base trace
+they do not constitute a binary trace of merged main `8ae8cab1e136` or
+complete the stable D3 platform matrix. A final exact-base trace
 is due after downstream merges.
 
 ## W-02 exact-main browser checks — 21:13–21:17 UTC
@@ -497,7 +498,10 @@ apply lag zero. The sanitized four-node receipt is
 `/private/tmp/codex-fleet-main8ae8-after-rollout-20260925.json` (SHA-256
 `80bcdb418588e520e45b9fec1145ff721c72907aee8b8c97036a8ee20a7b661d`).
 The voter and learner deployment logs are local under
-`/private/tmp/codex-fleet-main8ae8-{voters,learner}-20260925.log`.
+`/private/tmp/codex-fleet-main8ae8-{voters,learner}-20260925.log`;
+their SHA-256 digests are
+`f1f53e1f9d14e618cbaa164b61bf92737bcea0ed41dbf814b4fbd24a74b98331`
+and `ab647c5ba79161a27cd1a1d4d68c421413c9169efa0fa6cc9a83ebb407a83d36`.
 
 This point sample also found a 524,288 soft/hard open-file limit on each
 container, 49–71 open FDs, OOM adjustment zero, NTP synchronized, and no
@@ -526,3 +530,38 @@ discarded before the network-capable observation window began. Downstream
 main merges will require a new exact-main rollout and a fresh uniform-build
 window; this `8ae8cab1e136` observation cannot count toward the final-main
 one-hour, 24-hour or seven-day duration acceptance.
+
+## Signed Release physical interaction follow-up — 21:34 UTC
+
+On the Google TV Streamer, exact-main Android Release code128 showed an
+authenticated, populated Home. Selecting an existing title and Resume opened
+player controls. The Android media session reported `PLAYING`, but position
+remained `-1` and speed `0.0` before Home, one second after Home, and on
+return. This does **not** prove decoded playback or D-02 owner pause/resume.
+Movies View all showed 377 of 459 items loaded and 331 matching; selecting
+Unwatched showed 459 of 459 loaded and 328 matching, stable after four
+seconds. That is a bounded Android TV library/filter observation, not the
+named Lenovo, end-scroll, server-request or frame trace pass for A-03. Four
+phones were locked. No app was uninstalled or cleared and no credential or
+private content was read. Sanitized receipt:
+`/private/tmp/codex-android-release128-google-tv-acceptance-20260925.json`,
+SHA-256 `9018c904acb52ee6748e9fba0951dc2a3ef9d668981f29e3f011d86b10867c51`.
+
+The existing signed Release Bedroom Apple TV XCUIResult contains a UI
+activity timeline: app launch at 21:03:11.810 UTC, first wait for the
+library summary at 21:03:53.374, 58 remote Down activities between
+21:03:45.771 and 21:04:18.503, and a paging screenshot attachment at
+21:04:19.534. The passing assertion confirms the loaded count exceeded its
+initial page. The sanitized activity summary is
+`/private/tmp/codex-apple-main8ae8-tvos-release-activity-summary-20260925.json`
+(SHA-256 `74ae9263952a07893eaa5df29573779fd2f9a44182b7771223c1f6dd8b310cde`).
+Read-only server audit found no retained access-log file on the four nodes.
+The surviving `nynuc` Plurxd log had 15 lines in the test interval, with no
+GET/POST, library/collection, cursor or page entry; the other three current
+containers started after that interval. It cannot supply request/page or
+frame timing attribution. Sanitized audit SHA-256:
+`0efa8df36ae4f5254a9ae61ae25d7ce48a7336c62556d2b17bb7100ad9b324d9`.
+No Apple app reinstall or further test was performed. The existing Apple
+playback/caption test fixture enters through `#if DEBUG`, so it does not
+establish signed Release A-02 playback or L-03 captions; request/frame,
+filter and controller playback evidence remain owed.
