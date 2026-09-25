@@ -226,7 +226,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   // Protocol and quality switching have separate cards. Streaming must not
   // write either field: a card that saves a field it does not show can turn
   // something back on that an operator deliberately turned off.
-  const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvws", "pvmb", "pvbg", "serr"];
+  const streaming = ["prr", "phr", "phb", "pha", "pvod", "pvws", "pvmb", "pvbg", "serr"];
+  const autoQuality = ["pabr", "aqerr", "aqstate"];
   const liveRecovery = ["dvlr", "dvlrerr"];
   const developer = ["pcpv1", "dverr"];
   const prepared = ["pqh", "pqherr", "pqhstate"];
@@ -239,6 +240,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   return Promise.all([
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
+    run("saveAutoQuality", autoQuality)({ disabled: false }),
     run("saveLiveHlsRecovery", liveRecovery)({ disabled: false }),
     run("savePlaybackCompatibility", developer)({ disabled: false }),
     run("savePreparedQuality", prepared)({ disabled: false }),
@@ -247,7 +249,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   ]).then(() => {
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
-      "hls_ahead_max_secs", "hls_burst_secs", "hls_readrate", "playback_auto_abr",
+      "hls_ahead_max_secs", "hls_burst_secs", "hls_readrate",
       "stream_readrate", "vod_block_budget_secs", "vod_blocked_get_cap",
       "vod_materialize_budget_secs", "vod_presentation",
       "vod_working_set_bytes",
@@ -258,6 +260,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     );
     assert.deepEqual(Object.keys(writes.savePlaybackCompatibility.body).sort(), ["playback_control_protocol_v1"]);
     assert.deepEqual(Object.keys(writes.savePreparedQuality.body), ["prepared_quality_handoff"]);
+    assert.deepEqual(Object.keys(writes.saveAutoQuality.body), ["playback_auto_abr"]);
+    assert.equal(writes.saveAutoQuality.path, "/settings");
     // Its own card, its own field. The verified-decode request renames cached
     // transcodes on covered paths, so it must never ride along with a save an
     // operator made for something else.
@@ -389,7 +393,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // portable backup and fenced restore and reached `developerPanel`
       // without being composed here, so this whole gate died on its name.
       shippedSource("clusterBackupCard"),
-      shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
+      shippedSource("autoQualityCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
       shippedSource("playbackPanel"), shippedSource("metadataPanel"),
@@ -453,7 +457,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503", "subsrc", "chthumb"])
+  for (const id of ["pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "subsrc", "chthumb"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   // Absent from the settings document is on: chapter thumbnails default on.
   assert.match(html, /TOG:chthumb\|[^|]*\|[^|]*\|checked=true/);
@@ -472,12 +476,14 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.doesNotMatch(html, /HDHomeRun Live TV|CARDHEAD:Programme guide/);
   for (const route of ["livetv", "playback", "cluster"])
     assert.ok(html.includes(`href="#/settings/${route}"`), `${route} has a destination link`);
+  assert.match(html, /FOOT:saveAutoQuality/);
   assert.match(html, /FOOT:savePreparedQuality/);
   assert.match(html, /Seek scratch accounting/);
   for (const id of ["pcpv1", "dvlr", "dvrenabled", "lcenabled", "lcsubjectenabled", "ca-enabled", "dvwin"])
     assert.ok(!html.includes(`TOG:${id}|`), `Developer no longer owns ${id}`);
   assert.doesNotMatch(html, /Playback surface contract|Web HLS startup recovery|HEVC sample-entry admission|Source probe compatibility|Search and classification|id="ui-enable"/);
   const playback = panels.playbackPanel(settings, readiness);
+  assert.doesNotMatch(playback, /TOG:pabr\|/, "Auto quality belongs to Developer");
   for (const id of ["pcpv1", "dvlr"])
     assert.match(playback, new RegExp(`TOG:${id}\\|[^|]*\\|[^|]*\\|checked=true`));
   assert.match(playback, /FOOT:savePlaybackCompatibility/);
@@ -499,6 +505,8 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(html, /reopen loop/);
   assert.match(html, /One recovery per playback, and it is never given back/);
   assert.match(html, /best-effort selected-stream diagnostics/);
+  assert.match(html, /Chrome shaped-network recovery[\s\S]*?not met/);
+  assert.match(html, /These observations never gate this checkbox/);
   const quality = panels.preparedQualityCard(settings, readiness);
   assert.match(quality, /TOG:pqh\|[^|]*\|[^|]*\|checked=true/);
   assert.match(quality, /FOOT:savePreparedQuality/);
