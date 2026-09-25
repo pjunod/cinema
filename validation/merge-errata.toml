@@ -46,4 +46,6 @@ version = 1
 
 enforce_after = "448e803daba8ec7706350aedbe0562fd99454644"
 
-errata = []
+[[errata]]
+commit = "e2dfc6b77aa965e039b111038bb15a6ca352aab1"
+reason = "PR #512's landing merge omitted the Regression-Test trailer carried by corrective commit 1831ee8981acbf702078e6cf3f856c6c40bfd0fe. Its retained evidence is tests/operations/test_live_tv_caption_audit.py::test_audit_requires_one_completed_test. The immutable landing message cannot be repaired; this row records that omission."
