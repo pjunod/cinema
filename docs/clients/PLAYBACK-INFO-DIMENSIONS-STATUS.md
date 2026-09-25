@@ -13,10 +13,10 @@ workflow instruction.
 | Step | State | Evidence |
 |---|---|---|
 | Fresh base and toolchains | Done | Fresh Forgejo clone at the base above; Node 26.8.1, Python 3.14.7, Xcode 27.0, JDK 21.0.11. |
-| Shared web, Apple and Android field contract | Building | One label and field order across all clients and modes. |
-| Web delivery facts and presentation | Pending | Source and planned stream frames, separate player display, reasons and attachment checks. |
-| Apple delivery facts and presentation | Pending | Optional DTO decoding, planned output and presentation size. |
-| Android delivery facts and presentation | Pending | Eligible Media3 frame sample, approximate pixel aspect and planned fallback. |
+| Shared web, Apple and Android field contract | Implemented; unverified | `3e970ec42`; one label and field order across clients and modes. |
+| Web delivery facts and presentation | Implemented; unverified | `3e970ec42`; source and planned frames, separate browser display, reason text and serial guard. |
+| Apple delivery facts and presentation | Implemented; unverified | `3e970ec42`; optional DTO decoding, planned output and presentation size. |
+| Android delivery facts and presentation | Implemented; unverified | `3e970ec42`; eligible Media3 frame sample, approximate pixel aspect and planned fallback. |
 | Adversarial implementation review | Pending | Run once the integrated PR is ready for `main`; address findings before fast lane. |
 | Fast lane and affected builds | Pending | Run after review on the exact candidate commit. |
 | PR merge | Pending | Merge only after the required gate and qualification receipt. |
@@ -24,9 +24,15 @@ workflow instruction.
 
 ## How to read the states
 
-`Building` means code is in progress and has not passed the final gate.
-`Pending` means no completion evidence exists. A green fixture alone does not
+`Implemented; unverified` means code exists but has not passed the final
+test pass or implementation review. `Pending` means no completion evidence exists. A green fixture alone does not
 verify a real broadcast's output dimensions or aspect.
+
+The tracked pre-commit hook was installed in the isolated clone after its
+initial absence. The first commit was amended through it; catalog lint, Rust
+formatting, Clippy and embedded JavaScript syntax passed on `3e970ec42`.
+Focused regressions and native builds remain pending under the requested
+post-review test timing.
 
 ## Scope decisions
 
