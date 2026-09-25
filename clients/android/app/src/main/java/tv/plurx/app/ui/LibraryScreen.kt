@@ -204,4 +204,3 @@ internal fun matchesFilter(item: Item, filter: WatchFilter): Boolean {
         WatchFilter.Watched -> watched
     }
 }
-
