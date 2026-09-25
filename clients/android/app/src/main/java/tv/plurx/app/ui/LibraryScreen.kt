@@ -19,6 +19,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.LaunchedEffect
@@ -85,6 +86,7 @@ fun LibraryScreen(
     LaunchedEffect(pager, filter) {
         pager.setDriveToCompletion(filter != WatchFilter.Everything)
     }
+    DisposableEffect(pager) { onDispose { pager.setDriveToCompletion(false) } }
     LaunchedEffect(pager, filter) {
         combine(pager.state, snapshotFlow { filter }.debounce(150)) { state, selected -> state.decided to selected }
             .mapLatest { (snapshot, selected) ->
