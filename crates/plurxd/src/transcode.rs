@@ -1341,11 +1341,32 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
             )
         })
     });
+    // One staged batch is not by itself enough to hold on. Every scheduled
+    // publication must reach `consumed + initial runway`, and in steady state
+    // that is exactly one batch past the previous snapshot: a producer held
+    // at `published + batch` is one segment short whenever the cycle is
+    // observed late, the clock falls back to publishing a single segment, and
+    // the hold then stops the producer one segment further on -- 2 s published
+    // per 16 s cycle, forever. Keep producing until the media the next
+    // publication will ask for exists: the initial runway past the client's
+    // accepted anchor, plus the guard for the consumption that anchor has not
+    // yet reported. That frontier is never beyond the clock's own
+    // `allowed_end_ms`, so the worst-case lead and the batched publication
+    // are unchanged; only the deadlock between the two is removed.
+    let next_publication_produced = published_end_ms.is_none_or(|produced_end_ms| {
+        let rate = rolling_playback_rate(Some(demand));
+        let frontier_ms = rolling_initial_runway_ms(rate)
+            .saturating_add(((ROLLING_PUBLICATION_GUARD_MS as f64) * rate).ceil() as i64);
+        media_origin_ms
+            .saturating_add(produced_end_ms)
+            .saturating_sub(demand.buffer_anchor_ms())
+            >= frontier_ms
+    });
     let hold = hard_hold.or_else(|| {
         (!starting)
             .then_some(staged_publication_seconds)
             .flatten()
-            .filter(|staged| *staged >= publication_target_seconds)
+            .filter(|staged| *staged >= publication_target_seconds && next_publication_produced)
             .map(|_| AheadHold {
                 reason: AheadHoldReason::Time,
                 release_value: 0,

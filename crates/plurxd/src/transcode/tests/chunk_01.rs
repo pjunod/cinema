@@ -1283,6 +1283,12 @@
                 crate::playback_control::ClientPlatform::Web,
             );
             snapshot.demand = demand;
+            // The started fixture has produced 64 s and published 48 s. A
+            // viewer at the start of that window already has what the next
+            // publication needs, so once it turns active the producer is
+            // time-paced rather than released to produce for it.
+            snapshot.position_ms = 0;
+            snapshot.buffered_from_ms = Some(0);
             if demand != crate::playback_control::PlaybackDemand::Active {
                 snapshot.playback_rate = 0.0;
                 snapshot.render_state = crate::playback_control::RenderState::Waiting;
