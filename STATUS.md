@@ -1,6 +1,6 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-24 · Kept current by the working agent in the same
+**Updated:** 2026-09-25 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
@@ -69,15 +69,16 @@ tracks never win, `und` is no language, the track is mapped by PID).
 
 ## P-03: the regression ledger stops growing, and releases get a weekly cadence
 
-**Branch `plan/P-03`, draft pull request; not merged, nothing deployed.**
+**Merged by #489 (`995b60f3e`); phase B switched on 2026-09-25 by branch
+`ci/p03-enforce` with Paul's approval** — the boundary is `8251d14f7`, and a
+corrective pull request now needs a resolving `Regression-Test:` line.
 Executes [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
 under Paul's two 2026-09-23 decisions. Built: the `Regression-Test:` field
 (checked before merge in the tree the merge will produce), the landing-commit
 audit that replaces new `validation/regressions.d/` fragments past a boundary
 commit, `scripts/release-cut`, and a Monday release-readiness run that tags a
-merged release only from a green gate. Nothing is in force yet: the boundary
-is set by a one-line follow-up once this lands, and the first weekly tag
-waits for `publish_main` to have a trigger (P-01). This page is now the
+merged release only from a green gate. The boundary is set (phase B); the
+first weekly tag still waits for `publish_main` to have a trigger (P-01). This page is now the
 newest sections plus an index; older sections moved verbatim into each
 folder's `STATUS-HISTORY.md`. The execution log in the plan is the record.
 

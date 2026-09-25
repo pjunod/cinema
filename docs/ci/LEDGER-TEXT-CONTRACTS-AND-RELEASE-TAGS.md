@@ -705,6 +705,17 @@ ledger keeps growing.
    prints exactly the lines to paste). A landing commit that misses it turns
    the next pull request's `make history-check` red until a
    `validation/merge-errata.toml` row records it.
+   **Set 2026-09-25 to `8251d14f7`, not to `995b60f3e`** (the landing
+   commit of #489, which carried M3 and M4). The switch-on came fifteen
+   landing commits after that merge, and phase A was in force for all of
+   them: corrective commits landed without lines and new fragments were
+   written for commits past `995b60f3e`. With the boundary there, `main`
+   gave 62 errors — 34 fragment mappings the freeze refuses, which no
+   erratum can excuse and §4 forbids deleting, and 28 corrective commits
+   each needing a permanent erratum. This question's own reason (no
+   boundary before a commit that could not have carried the trailer)
+   applies to every commit landed under phase A, so the boundary is the
+   last of them: `main`'s tip when the switch was made.
 5. **How many landing commits per week actually carry a corrective change —
    measured, and the answer sits on the line this question draws.** By pull
    request title, 18 a week. By what a landing brings in — the rule §3.1 step
@@ -715,6 +726,9 @@ ledger keeps growing.
    B starts with that volume, or with a narrower "title only" rule that §3.1
    step 4 would then also have to adopt, is a question for Paul before the
    boundary pull request**, not a choice this branch made.
+   **ANSWERED 2026-09-25:** Paul approved switching phase B on as built
+   ("p-03 is fine"), so it starts with the rule §3.1 step 4 uses, not a
+   title-only one.
 
 
 ---
@@ -737,3 +751,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [#485](http://192.168.4.7:3000/noirr/plurx/pulls/485) (draft) | **Done, with one deviation.** `STATUS.md` 2,890 → 382 lines: the eight newest sections stay (the ten newest alone are now 407 lines, so §3.4's ten and M6's 400-line bound cannot both hold; the bound wins), a new P-03 section, and 46 index rows. The 46 older sections moved verbatim into `docs/{ci,clients,cluster,features,playback-control,streaming}/STATUS-HISTORY.md` under headings dated by the commit that first recorded each; only relative link targets were re-based (checked mechanically). `STATUS_PAGES` gains all six; `tests/operations/test_status_page_shape.py` asserts the length and that every index-linked document is guarded. Each document is indexed with a `**Status:**` header. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M7 | [#485](http://192.168.4.7:3000/noirr/plurx/pulls/485) (draft) | **Buildable half done; the first tag is blocked, and no tag was cut.** `scripts/release-cut` (refuses an empty `[Unreleased]`, an existing tag or section; dates the changelog and its links; sets the workspace version, both native marketing versions and both build counters; relocks `Cargo.lock` and the spike lock; **corrected after review:** the first dry run checked only `make spike-lock-check` and `cargo metadata --locked`, and the tree it left failed `make operations-check` because the status documents still quoted the old build counters — the cut now rewrites them, see the review-fix row), `release-readiness.yml` on `0 6 * * 1` with a `tag` job that only a green scheduled run of a pending release reaches, `test_contracts.py`'s readiness assertion inverted, `RELEASING.md` on `0.3.x`, OPERATIONS.md's node → changelog procedure. **Blocked:** `publish_main` still cannot fire (`ci.yml` is `push: tags: [v*]` + dispatch; the job needs a push to `main`; unchanged since `3cd127e2`), so per §6 no release PR should merge before RUST-TEST-EXECUTION-POLICY §3.1(b) lands. **Owed by an operator:** a `RELEASE_TAG_TOKEN` repository secret (a run-token tag push starts no workflow). The fleet acceptance is §6's GPT prompt, after the first tag. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review fixes (M3, M4, M7) | [#485](http://192.168.4.7:3000/noirr/plurx/pulls/485) (draft) | The single adversarial review ([comment 4256](http://192.168.4.7:3000/noirr/plurx/pulls/485#issuecomment-4256)) raised one P1 and three P2s; all four are fixed, each pinned by a test that fails with its production hunk reverted. **P1:** `--pending` names the release commit, not HEAD (correction 9); the workflow checks it out before `make release-check` and the tag job re-resolves it (`test_pending_names_the_release_commit_never_main_s_tip`, the reviewer's own reproduction). **P2:** the cut rewrites every status line quoting the version or a build counter, the Apple ones through `validation/apple_build.py`, whose status-line anchors now follow the tree being read (`test_the_cut_real_tree_passes_the_build_claim_sweeps`); `scripts/release-cut` run on this head in a scratch worktree, lockfiles included, leaves `make operations-check` and `make spike-lock-check` green. **P2:** phase B asks a landing line only of corrective commits (correction 8, `test_an_anchored_commit_that_is_not_corrective_needs_no_landing_line`); with the boundary at `99d4abf8c` on this head the pre-fix checker reports 28 errors and the fixed one 27, and the one difference is the anchored `refactor(apple)` commit `d49a079b`. **P2:** the test-marker rule (correction 10, three tests in `tests/validation/test_test_markers.py`). `origin/main` @ `07fe785d3` merged (one conflict, the work board). |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | phase B | `ci/p03-enforce` | **Phase B in force**, on Paul's 2026-09-25 approval. `validation/merge-errata.toml` sets `enforce_after = "8251d14f7…"` and the fast lane's field step loses `continue-on-error` in the same change (`test_the_lane_blocks_on_the_field_exactly_when_a_boundary_is_set`). **Deviation from §7.4:** the boundary is `main`'s tip at the switch-on, not #489's landing commit `995b60f3e`; with `995b60f3e` `make history-check` exits 2 on `main` with 62 errors (34 fragment mappings past it that the freeze refuses and no erratum excuses, 28 corrective commits landed without a line), all made while phase A was in force (§7.4's note). With `8251d14f7`: `make history-check` EXIT=0 (`0 landing commits past the boundary`). No errata rows. |

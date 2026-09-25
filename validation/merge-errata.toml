@@ -10,13 +10,19 @@
 # phase C for everything at or before it, which keeps the rule and the
 # fragments it was written under, forever.
 #
-# It is deliberately unset here. The boundary has to be a commit that already
-# exists on `main` when the audit that reads it is running, and it must be no
-# earlier than the merge that introduces the audit: an earlier boundary would
-# demand trailers on landing commits that were made before the trailer
-# existed and that nobody can amend. The first landing commit on `main` after
-# this audit merges is therefore the boundary, and setting it is a one-line
-# PR made once that commit exists.
+# It is set to 8251d14f7, the tip of `main` when phase B was switched on
+# (2026-09-25, Paul's approval). It must be no earlier than the merge that
+# introduced this audit -- an earlier boundary would demand trailers on
+# landing commits made before the trailer existed and that nobody can amend --
+# and, for the same reason, no earlier than the last landing commit made while
+# phase A was still in force. The plan named the audit's own landing commit
+# (995b60f3e, #489), but phase A ran on `main` for fifteen landing commits
+# after it, and in that time corrective commits landed without lines and new
+# fragments were written for commits past 995b60f3e, both correct under the
+# rules then in force. A boundary there gave 62 errors on `main`: 34 fragment
+# mappings the freeze refuses, which no erratum can excuse and which the plan
+# forbids deleting, and 28 corrective commits that would each need a
+# permanent erratum. Everything at or before 8251d14f7 is phase C.
 #
 # Starting phase B is one change of two lines: set `enforce_after` here, and
 # remove `continue-on-error: true` from the fast lane's "Check the pull
@@ -34,6 +40,6 @@
 
 version = 1
 
-# enforce_after = "<the first landing commit on main after this audit merges>"
+enforce_after = "8251d14f75a54e9e84fec890cb8e3afadaad064b"
 
 errata = []
