@@ -1,6 +1,6 @@
 # Android double Back — Sol build and delivery handoff
 
-**Status:** implementation reviewed on current main; final gate pending ·
+**Status:** focused Android validation passed; main fast lane pending ·
 **Written:** 2026-09-25 · **Updated:** 2026-09-25
 **Executes:** Fable's approved diagnosis and navigation contract in the
 [RCA and proposed fix](ANDROID-DOUBLE-BACK-RCA-AND-FIX.md), including the
@@ -446,3 +446,19 @@ counts, review disposition, and physical results or pending cases. Separate
 “implemented,” “tests passed,” “merged,” and “released”; report only the
 states actually reached. Update this handoff and the RCA in the same task
 so the next reader does not inherit the temporary uncommitted-candidate state.
+
+### 9.1 Execution update — 2026-09-25
+
+The selected navigation patch and Media3 opt-in were committed to the
+separate agent branch on main `60f3803d1`. Draft [PR #523](http://192.168.4.7:3000/noirr/plurx/pulls/523)
+received one adversarial agent review with no actionable findings. The
+reviewed Android source at `855e46cf8` built app and test APKs, passed
+`lintDebug`, and passed seven selected API 36 emulator tests with zero
+failures, errors, or skips. Four docs index tests and the PR regression-field
+check passed. Exact commands are on the [status page](ANDROID-DOUBLE-BACK-STATUS.md).
+
+The user's 2026-09-25 delivery instruction defers the full Android JVM suite
+to a later batch process and calls for one post-review fast lane run. Thus
+the M3 full-suite acceptance above is explicitly deferred, not claimed
+complete. Physical phone and Android TV acceptance is still pending. Merge
+and release are not yet claimed.

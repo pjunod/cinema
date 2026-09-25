@@ -1,7 +1,7 @@
 # Android double Back — root cause and proposed navigation fix
 
-**Status:** navigation patch reviewed on current main; final gate pending;
-not released · **Written:** 2026-09-25 · **Updated:** 2026-09-25
+**Status:** focused Android validation passed; main fast lane pending; not
+released · **Written:** 2026-09-25 · **Updated:** 2026-09-25
 
 Companion to [the Android client guide](../../clients/android/README.md)
 and [the development pipeline](../DEVELOPMENT_PIPELINE.md). This document
@@ -211,8 +211,13 @@ unit and instrumented tests; the rebased lint result is not claimed green.
 
 The delivery branch adds a file-level Media3 `UnstableApi` opt-in to
 `PlaybackService.kt`, following the convention already used by
-`PlayerScreen.kt`. The service behavior is unchanged. Its final lint result
-is pending the current-head validation pass.
+`PlayerScreen.kt`. The service behavior is unchanged. The focused final
+validation on `855e46cf8` passed `lintDebug`, built both APKs, and passed all
+seven selected API 36 emulator tests with zero failures, errors, or skips.
+The [delivery status](ANDROID-DOUBLE-BACK-STATUS.md) has the exact command
+and scope. The full Android JVM suite is deferred to the requested batch
+process; the historical 763-test result above remains evidence for the
+older candidate, not this branch.
 
 To repeat the historical proof, start a disposable emulator and substitute its serial
 below. Run from the repository root:
