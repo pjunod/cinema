@@ -27,9 +27,26 @@ This proves installation of current `main`, not any plan's playback/device accep
 
 A post-promotion read-only signing inventory found no Android signing secret in the Forgejo repository or organization, no signed release APK among the available action artifacts, no APK release package, and no signing values on the controller or four nodes. Main specifies Android versionCode 125. Creating a new key would create a different update identity; the existing four debug installations were left intact. The [draft mobile-role PR #23](https://github.com/pjunod/ansible/pull/23) is not a substitute for the missing identity.
 
-### 1.2 Post-promotion Apple install — 2026-09-25
+## 1.2 Post-promotion Apple install — 2026-09-25
 
 After [PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506) merged as `44cdfccc7`, `scripts/ship-physical --apple` built and verified signed iOS and tvOS Release artifacts from that exact main commit. The command exited 0 and installed Plurx 0.3.0, build 183, on all six reachable physical Apple devices: `17air`, `17promax`, Bedroom Apple TV 4K, iPad Mini, iPad Pro M4 and iPhone 18 Pro. Independent `devicectl device info apps` reads confirmed `tv.plurx.app` build 183 on all six. Bedroom Apple TV, iPad Pro and iPhone launched the app. The other three rejected launch with `Locked` or `RequestDenied`; `16pro` was unavailable. The signed build and install log is `/Users/pjunod/code/plurx-agent/codex-postmerge-apple-deploy-20260925.log` (SHA-256 `21079bcf10ecc7b34914cac0f6da2e2208af75b63db02eb2a72094a5ba82e8cb`). An app launch is not visual playback, remote-control, library-paging, caption or adaptive-quality acceptance, so A-02, A-03, L-03 and A-04 keep those device checks open.
+
+A read-only CoreDevice screenshot of the iPad Pro shows build 183 in the foreground on Home with library and Continue Watching content loaded. The image is `/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/apple-ipad-pro-build183-home-20260925.png` (SHA-256 `4bb5d7e71bd42621d4d3bc2dbfe729e45b60dabf7854a1fa7f490810c534ac47`). The iPhone displayed its lock screen; Bedroom Apple TV's sleeping display made screenshot capture fail with CoreDevice error 25005. CoreDevice has no tap or remote input command. This screenshot proves foreground content loading only; it does not exercise paging, playback or captions.
+
+## 1.3 Post-promotion four-node rollout — 2026-09-25
+
+From the agent-owned Ansible clone, `ansible-playbook -i media/inventory.yml media/deploy.yml --private-key ~/code/plurx-agent/.ssh-deploy-key -e sync=false -e only=plurx --limit nynuc,m6,nuc4,nuc3` completed with zero failed or unreachable hosts. It deployed main `44cdfccc7fab9cdb1a4057601fbbb05aa99d565b` serially and exited 0. The deployment log is `/Users/pjunod/code/plurx-agent/codex-postmerge-node-deploy-20260925.log` (SHA-256 `58276dad42e3348e0743e3af39551e893e03e079999cf2c887c009e7a3b6ad6b`). The same SHA still resolved from remote `main` after rollout.
+
+Independent SSH verification at 05:14:47–49 UTC read the Git checkout, running binary, Docker health/restart/image identity, `/readyz` and `/metrics` on every node:
+
+| Node | Running binary | Image SHA-256 | Health / restarts / `/readyz` | Build metric |
+|---|---|---|---|---|
+| `nynuc` | `v0.3.0-3974-g44cdfccc7` | `425371ef5a5d42e891c1d69f69230087383ae02d96295cd65e8f0fe8729da16e` | healthy / 0 / 200 | `v0.3.0-3974-g44cdfccc7` |
+| `m6` | `v0.3.0-3974-g44cdfccc7` | `e40b28d56e4c0a73e56cf1659410df820d9d2400368a801b723045e462c7e120` | healthy / 0 / 200 | `v0.3.0-3974-g44cdfccc7` |
+| `nuc4` | `v0.3.0-3974-g44cdfccc7` | `068fe7148983b6c945edc893891d340ff3242982132d3a61d2587db39c5bd181` | healthy / 0 / 200 | `v0.3.0-3974-g44cdfccc7` |
+| `nuc3` | `v0.3.0-3974-g44cdfccc7` | `92a6467f9ae5bb80a16ed7c05d8462d7694086ad0d2a5567cfa9adaaf9c72a19` | healthy / 0 / 200 | `v0.3.0-3974-g44cdfccc7` |
+
+The selected-metric collector's first four-node, HTTP-200 tick on that same build was 05:14:11 UTC, followed by another at 05:14:41. Earlier connection refusals and build changes are retained in the raw history. This establishes a new uniform-build start, not a completed one-hour, 24-hour or seven-day observation. Android release installation remains blocked as described in §1.1.
 
 ## 2. Read-only measurements — useful baselines, not acceptance
 
