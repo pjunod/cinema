@@ -364,3 +364,63 @@ Current main `c99a29090` differed from deployed healthy `60f3803d1` only in `val
 A dedicated signed-in Chrome tab on `m6` played channel 8.1 past 106 seconds at 1280×720, `readyState=4`; Playback info reported server-converted H.264/AAC MPEG-TS. The visible Live TV caption selector listed only **Off**, `video.textTracks` had zero entries, and Playback info said no caption track was listed by the player. No caption text appeared. The browser stream was stopped; the tuner page then reported all four tuners idle. The separate isolated Chrome profile on port 9341 reached only Sign in, so the signed-in check used its own tab in the existing Chrome profile; no authentication state was copied.
 
 This is a caption-positive source with an **open M4 web visual acceptance**, unlike the earlier source-empty #520 revisit. The concurrent source stream and web HLS session were different tuner streams, and this run did not decode the HLS output; it cannot assign the missing track to the graph probe, playlist advertisement, or browser. A bounded source-to-HLS-to-selector comparison is next. Sanitized local receipt: `/Users/pjunod/code/plurx-agent/codex-l03-caption-evidence-20260925/l03-channel-8-1-caption-positive-web-off-20260925.json` (SHA-256 `e3f93552a5bed5cd9668dc92c972a5706a16c5c176dcd5d80bbbe63bad21abe2`).
+
+## Exact-main physical Release installs — 20:54–21:00 UTC
+
+After [PR #524](http://192.168.4.7:3000/noirr/plurx/pulls/524) merged,
+remote `main` and the independent deployment clone resolved to exact
+`8ae8cab1e136d0ac59fb9905f10b4a846b67ea5d`. The signed iOS and tvOS
+Release archives built from that source with Apple team `YHK542LK23`, passed
+`codesign --verify --deep --strict`, and installed in place on all six reachable
+physical Apple devices: `17air`, `17promax`, Bedroom Apple TV, iPad Mini,
+iPad Pro, and iPhone. Independent CoreDevice app queries found bundle
+`tv.plurx.app`, version `0.3.0`, build **185** on all six. All six app data
+containers remained accessible and held root entries last modified before
+the install; no uninstall or data reset was requested. The build/install log
+and sanitized independent device receipt are local at
+`/private/tmp/codex-apple-main8ae8-rollout-20260925.log` and
+`/private/tmp/codex-apple-main8ae8-physical-20260925.json` (receipt SHA-256
+`edd908aabc51a5f4ace78ede63731c39f1c3da4147cc6c6787c6740358bc5b6a`).
+Direct CoreDevice launches of the six Release apps were refused as locked or
+request denied at this point. Installation and retained-container observations
+do not prove A-02 controller playback, A-03 paging, L-03 captions, or A-04
+adaptive quality.
+
+The Android physical deployment on the same exact source built one
+lineage-signed, non-debuggable Release APK, versionCode **128**, SHA-256
+`0e8c90c9fce830ed114adf449b70b14fcb1f6af5a3499ab916a9ff4d4d70056b`.
+It was installed with `adb install -r` on five distinct reachable devices:
+TCL 9445X, Google TV Streamer, Pixel 10 Pro Fold, Pixel 11 Pro XL, and
+Motorola razr ultra 2025. The installed base APK hash and effective release
+signer `52c046be28f437ca19601b728617c6d4d1c85a13726092e06ac7d66738ff6c37`
+matched on every device; none remained debuggable, and each
+`firstInstallTime` was unchanged. No uninstall or data clear occurred.
+Sanitized receipt `/private/tmp/codex-android-release128-physical-20260925.json`
+has SHA-256 `64d7ec0a3616105110fa417282ce95e86f8439bfbbfdd111b9eadf4cccf8e88f`.
+
+Four Android phones were locked on the immediate revisit. The unlocked Google
+TV Streamer launched the signed Release main activity in 564 ms, with a
+resumed activity, running process and a 75-node UI tree owned by the package.
+That proves a cold launch, not D-02 lifecycle recovery, A-03 paging or D-03
+offline retention. The sanitized interaction receipt is
+`/private/tmp/codex-android-release128-interaction-20260925.json` (SHA-256
+`b8407738257ea1dc46e548c6073ccbbf19530234bbfb3eef8de454b5d22b1209`).
+Xiaomi 25019PNF3C, Lenovo TB322FC and iPhone 16 Pro were absent from the
+physical inventory and received no install.
+
+## Bedroom Apple TV Release remote paging — 21:03–21:04 UTC
+
+The exact `8ae8cab1e136` source also built a signed **Release**
+`plurx-tvOS-physical` UI-test runner. On the physical Bedroom Apple TV,
+`testLibraryPagingWithRemote` passed one test with zero failures in 73.97 s:
+XCUIRemote entered the Movies collection and moved focus until the loaded
+count rose beyond its first page. An independent post-test CoreDevice query
+still found `tv.plurx.app` 0.3.0, build 185. The result bundle is local at
+`/private/tmp/codex-apple-main8ae8-tvos-release-paging.xcresult`; the bounded
+run log SHA-256 is
+`e64fc2848e0e6fbd751770b97ba647e9b0650d1e9af2258237d9f61e93b173dc`.
+This closes the Apple TV Release remote-paging interaction check for A-03.
+Server request counts, frame times, filtering, and other devices remain open.
+The existing remote playback/caption tests use `DEBUG`-only fixture launch
+arguments, so this Release paging run does not test A-02 playback or L-03
+caption rendering.
