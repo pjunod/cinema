@@ -412,6 +412,10 @@ paths = [
   # adds a newly-required column breaks it, so it belongs with the model whose
   # persistence it reproduces.
   "crates/plurx-core/examples/catalogue_fixture.rs",
+  # K-05's query-plan tool over that fixture: it drives the real stores'
+  # hot catalogue reads, captures the statements they trace, and records
+  # each plan and its cold and warm timings on both backends' schemas.
+  "crates/plurx-core/examples/query_plans/{main,calls,bench}.rs",
   "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,testfixtures}.rs",
   "crates/plurx-core/src/content_analysis.rs",
   "crates/plurx-core/src/store/mod.rs",
@@ -453,6 +457,9 @@ paths = [
   "crates/plurx-core/src/cluster/migration.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/sqlite/mod.rs",
+  # K-05 section 3.9: poisoned-connection recovery and the boot integrity
+  # check that refuses a corrupt database before migration touches it.
+  "crates/plurx-core/src/store/sqlite/housekeeping.rs",
   "crates/plurxd/tests/cluster_activation.rs",
 ]
 checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth"]
