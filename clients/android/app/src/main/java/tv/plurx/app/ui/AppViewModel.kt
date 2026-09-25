@@ -214,6 +214,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     } ?: SavedSessionValidation.ServerUnavailable
                     when (validation) {
                         is SavedSessionValidation.Authenticated -> {
+                            if (currentUserId != validation.user.id) invalidateLibraryPager()
                             currentUser = validation.user
                             currentUserId = validation.user.id
                             settings.saveSession(
@@ -230,11 +231,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             syncOfflineProgress()
                         }
                         SavedSessionValidation.InvalidToken -> {
+                            invalidateLibraryPager()
                             Session.token = null
                             settings.clearToken()
                             _phase.value = Phase.NeedLogin
                         }
                         is SavedSessionValidation.Expired -> {
+                            invalidateLibraryPager()
                             // Same sign-out, but the login screen says why:
                             // "Signed out after 90 days of inactivity."
                             Session.token = null
@@ -310,6 +313,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val resp = api().login(LoginReq(username = user.trim(), password = pass))
+                invalidateLibraryPager()
                 Session.token = resp.token
                 currentUser = resp.user
                 currentUserId = resp.user.id
@@ -388,6 +392,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun endExpiredSession(message: String) {
         if (Session.token == null) return
         settings.clearToken()
+        invalidateLibraryPager()
         Session.token = null
         currentUser = null
         currentUserId = null
@@ -407,6 +412,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val capturedOrigin = Session.origin
             val capturedToken = Session.token
             _busy.value = true
+            invalidateLibraryPager()
             OfflineBooks.interruptProfile(instance, user)
             var cancellation: CancellationException? = null
             val confirmed = try {
@@ -468,6 +474,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * relaunch before the next login must not offer it to a different one.
      */
     fun changeServer() {
+        invalidateLibraryPager()
         OfflineBooks.interruptProfile(serverInstanceId, currentUserId)
         Session.token = null
         Session.displayModeMatch = false
@@ -692,15 +699,39 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { settings.saveViewerPreferences(updated) }
     }
 
+    private data class LibraryPagerProfile(
+        val origin: String,
+        val serverInstanceId: String?,
+        val userId: Long?,
+        val token: String?,
+    )
+
     private var activeLibraryPager: LibraryPager? = null
+    private var activeLibraryPagerProfile: LibraryPagerProfile? = null
+
+    private fun invalidateLibraryPager() {
+        activeLibraryPager?.invalidate()
+        activeLibraryPager = null
+        activeLibraryPagerProfile = null
+    }
 
     internal fun libraryPager(ids: List<Long>, sort: String): LibraryPager {
+        val profile = LibraryPagerProfile(Session.origin, serverInstanceId, currentUserId, Session.token)
         val active = activeLibraryPager
-        if (active != null && active.ids == ids && active.sort == sort) return active
-        active?.setDriveToCompletion(false)
+        if (active != null && activeLibraryPagerProfile == profile && active.ids == ids && active.sort == sort) {
+            return active
+        }
+        invalidateLibraryPager()
+        // Never let an in-flight page borrow the next profile's global bearer.
+        val boundApi = profile.token?.let { Net.api(profile.origin, Net.profileClient(it)) }
         return LibraryPager(ids, sort, viewModelScope) { id, offset, order ->
-            api().libraryItems(id, limit = 200, offset = offset, sort = order)
-        }.also { activeLibraryPager = it }
+            if (activeLibraryPagerProfile != profile) throw CancellationException("Library profile changed")
+            val source = boundApi ?: error("Sign in to load this library")
+            source.libraryItems(id, limit = 200, offset = offset, sort = order)
+        }.also {
+            activeLibraryPager = it
+            activeLibraryPagerProfile = profile
+        }
     }
 
     // ---- Suspend loaders used by individual screens --------------------------
@@ -886,6 +917,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun connectToOrigin(normalized: String) {
+        invalidateLibraryPager()
         // In memory and on disk, the token travels with the origin: this
         // server has not authenticated us yet, so nothing may be sent as if
         // it had.
@@ -904,6 +936,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun bindOrigin(value: String, token: String?) {
+        invalidateLibraryPager()
         origin = value
         Session.origin = value
         Session.token = token
@@ -942,6 +975,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun backfillServerIdentity() {
         val info = catchingUnlessCancelled { api().server() }.getOrNull() ?: return
         serverName = info.name
+        if (serverInstanceId != info.instance_id) invalidateLibraryPager()
         serverInstanceId = info.instance_id
         Session.displayModeMatch = info.display_mode_match
         settings.saveServerIdentity(origin, info.instance_id)
