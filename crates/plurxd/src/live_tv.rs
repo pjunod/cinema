@@ -1552,6 +1552,7 @@ impl LiveTvSession {
     fn release_seat(&self) {
         if self.seat_reserved.swap(false, Ordering::AcqRel) {
             if let Some(transport) = self.transport() {
+                transport.warm_opener_done(&self.capability);
                 transport.release_seat();
             }
         }
@@ -4198,7 +4199,7 @@ impl LiveTvManager {
                             seats: 1,
                         });
                         if warm_facts.is_some() {
-                            transport.open_warm();
+                            transport.open_warm(&capability);
                         }
                         registry
                             .transports
@@ -11603,6 +11604,91 @@ exec /bin/cat > {sink}"#,
             agrees(&same_command),
             "an identical command agrees whatever produced it"
         );
+    }
+
+    /// PR #496 review finding 1. A warm opening's fan-out collects the opening
+    /// sample, and it used to begin only once a consumer attached. A joiner
+    /// cannot attach before that sample's probe, so if the warm opener ended
+    /// before attaching — here it is stopped while it still waits for an
+    /// encoder slot — nothing ever attached, nothing was probed, and the
+    /// joiner hung to its start deadline and failed with "the tuner sent no
+    /// data … no signal". The joiner must start once the opener is gone and
+    /// admission is free, planning from the probe of the opening sample.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_joiner_of_a_warm_opening_starts_when_the_opener_leaves_before_attaching() {
+        let root = crate::test_tempdir().expect("root");
+        let (manager, _tuner) =
+            start_path_fixture(root.path(), &publishing_ffmpeg(root.path(), false), 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+        let cold = watch_once_cold(&manager).await;
+        let out_h = cold
+            .delivery
+            .as_ref()
+            .map(|delivery| delivery.output.height)
+            .unwrap_or(480);
+        // Hold every software encoder admission, so the warm opener waits for
+        // one after it has opened the transport.
+        let mut held = Vec::new();
+        while let Ok(admission) = manager
+            .transcode
+            .admit_live_tv(480, "mpeg2video", None, out_h, Duration::ZERO)
+            .await
+        {
+            held.push(admission);
+            assert!(held.len() <= 64, "the encoder pool is bounded");
+        }
+        let before = start_plans(&manager);
+        let started = tokio::time::Instant::now();
+        let opener = spawn_start(&manager, fixture_request(2));
+        admitted_transports(&manager, 1).await;
+        let joiner = spawn_start(&manager, fixture_request(3));
+        let transports = admitted_transports(&manager, 2).await;
+        assert!(
+            Arc::ptr_eq(&transports[0], &transports[1]),
+            "the second start joined the warm opening"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let opener_capability = manager
+            .registry
+            .lock()
+            .expect("registry")
+            .sessions
+            .values()
+            .find(|session| session.request.user_id == 2)
+            .map(|session| session.capability.clone())
+            .expect("the opener is registered");
+        manager
+            .stop_local(&opener_capability)
+            .await
+            .expect("stop the opener");
+        assert!(
+            opener.await.expect("opener task").is_err(),
+            "the opener ended before it attached"
+        );
+        drop(held);
+        let joined = tokio::time::timeout(Duration::from_secs(25), joiner)
+            .await
+            .expect("the joiner answers")
+            .expect("joiner task");
+        assert!(
+            joined.is_ok(),
+            "the joiner must start once the opener is gone and admission is free, after {:?}: {:?}",
+            started.elapsed(),
+            joined.err()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the joiner waited out its start budget: {:?}",
+            started.elapsed()
+        );
+        let after = start_plans(&manager);
+        assert_eq!(
+            after[1] - before[1],
+            1,
+            "the joiner planned from the opening sample's probe: {before:?} -> {after:?}"
+        );
+        manager.shutdown().await.expect("shutdown");
     }
 
     fn fixture_request(user_id: i64) -> LiveTvStartRequest {

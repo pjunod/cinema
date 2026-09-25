@@ -199,6 +199,12 @@ pub(crate) struct DvrTransport {
     /// holding a prefix, and probes the opening sample beside the feed as
     /// verification. Set before the worker starts; never changes after.
     warm_opening: AtomicBool,
+    /// A warm opening's opener, by capability, until it has attached or given
+    /// its seat back. Joiners wait for the opening sample's probe, and on a
+    /// warm opening only the running fan-out collects that sample, so once
+    /// the opener is gone without attaching the fan-out must run without it
+    /// (see `await_first_consumer`).
+    warm_opener: std::sync::Mutex<Option<String>>,
     /// The probe of the opening sample (epoch 1), kept apart from the newest
     /// publication so a warm opener reads the verdict on *this tune's first
     /// bytes* even if a later re-probe has already replaced it.
@@ -249,14 +255,43 @@ impl DvrTransport {
             scratch: init.scratch,
             metrics: init.metrics,
             warm_opening: AtomicBool::new(false),
+            warm_opener: std::sync::Mutex::new(None),
             opening: std::sync::Mutex::new(None),
         })
     }
 
-    /// Mark this transport's opening as warm. Only its opener may call this,
-    /// and only before `spawn_transport_worker`.
-    pub(crate) fn open_warm(&self) {
+    /// Mark this transport's opening as warm, opened by the session
+    /// `opener`. Only its opener may call this, and only before
+    /// `spawn_transport_worker`.
+    pub(crate) fn open_warm(&self, opener: &str) {
+        *self
+            .warm_opener
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(opener.to_owned());
         self.warm_opening.store(true, Ordering::Release);
+    }
+
+    /// The session `capability` has attached, or is giving its seat back.
+    /// If it is this warm opening's opener, the opening stops waiting for it.
+    /// Called before the seat is released, so an opener that attached is
+    /// already in the viewer list when it is seen gone.
+    pub(crate) fn warm_opener_done(&self, capability: &str) {
+        let mut opener = self
+            .warm_opener
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if opener.as_deref() == Some(capability) {
+            *opener = None;
+        }
+    }
+
+    fn warm_opener_gone(&self) -> bool {
+        self.is_warm_opening()
+            && self
+                .warm_opener
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
     }
 
     fn is_warm_opening(&self) -> bool {
@@ -663,16 +698,33 @@ impl DvrTransport {
     /// FFmpeg starts from the bytes its plan was made from. Returns false if
     /// nothing will ever attach (every admitted consumer gave up) or the
     /// transport was cancelled.
+    ///
+    /// A warm opening also stops waiting once its opener has gone without
+    /// attaching while another consumer still holds a seat (plan L-02 §3.3).
+    /// That consumer is a joiner waiting for the opening sample's probe, and
+    /// on a warm opening the sample is collected by the running fan-out, not
+    /// before it; waiting on for an attach that the joiner is itself waiting
+    /// behind would hold both until the joiner's start deadline. The fan-out
+    /// then collects and probes the sample from the tuner's first byte with
+    /// nobody attached, exactly as a cold transport probes its prefix before
+    /// anyone attaches, and the joiner plans from it.
     async fn await_first_consumer(&self) -> bool {
         loop {
             let changed = self.consumers_changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
+            // Read before the consumer lists: an opener that attached pushed
+            // its viewer before it was marked done, so gone-and-unattached
+            // below means it really left without attaching.
+            let opener_gone = self.warm_opener_gone();
             if !self.live_sinks().is_empty() || !self.live_viewers().is_empty() {
                 return true;
             }
             if self.try_retire() {
                 return false;
+            }
+            if opener_gone {
+                return true;
             }
             tokio::select! {
                 biased;
