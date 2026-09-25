@@ -222,9 +222,11 @@ function settleDirectedChange(p,change,why,detail){
   owned.outcome=why;
   owned.outcomeAt=performance.now();
   if(detail!=null) owned.detail=detail;
-  // Requested and delivered are the same rung now, so the selection goes back
-  // to plain Auto -- a stable digest rather than a standing ask.
-  p.autoRequestedHeight=null;
+  // The successor is visible, but the server has not accepted its committed
+  // acknowledgement yet. Keep the exact selection that staged it until that
+  // exchange succeeds: changing to plain Auto here makes the server reject
+  // the commit as a different ask and retire the stream we just exposed.
+  if(why!=="committed"||!owned.autoMove) p.autoRequestedHeight=null;
   if(owned.autoMove&&p.abr){
     if(why==="committed"){
       const now=performance.now(), move=owned.autoMove;
@@ -397,8 +399,12 @@ function startPlaybackControl(v,p,bootstrap){
     const attachment=p.mediaAttachment;
     const owner=Object.freeze({lifecycleId:CONTROL_CLIENT_ID,
       attachmentGeneration:startPlaybackControl.captureGeneration=(startPlaybackControl.captureGeneration||0)+1});
+    // A prepared commit swaps the DOM video while retaining this reporter to
+    // deliver the acknowledgement on the predecessor's control session.
+    // Sample the visible successor after that swap, never the retired node.
     const capture=()=>p.mediaAttachment===attachment&&playbackOwnsAttachedMedia(p)
-      ?PlurxPlaybackControl.capture(playbackControlSnapshot(v,p),p.controlIntentGeneration||0,owner):null;
+      ?PlurxPlaybackControl.capture(playbackControlSnapshot(document.getElementById("video"),p),
+        p.controlIntentGeneration||0,owner):null;
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
       clientInstanceId:CONTROL_CLIENT_ID,
       capture,

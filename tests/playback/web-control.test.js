@@ -5460,10 +5460,16 @@ async function main() {
     assert.equal(p.autoFallbackInFlight, false);
     assert.equal(p.autoHeight, 1080, "the committed rung is the next tick's delivered height");
     assert.equal(p.abr.switches.length, 1, "prepared Auto success is recorded as a switch");
+    assert.equal(p.autoRequestedHeight, 1080,
+      "the committed acknowledgement must retain the selection that staged the successor");
+    assert.deepEqual(h.selection().quality, { mode: "auto", height: 1080 },
+      "clearing the ask before acknowledgement makes the server retire the successor");
+    const committed=h.pending("active");
+    assert.equal(committed.state,"committed");
+    h.settle({acknowledgement:committed});
     assert.equal(p.autoRequestedHeight, null,
-      "a committed rung is the delivered one now; the selection returns to plain Auto");
-    assert.deepEqual(h.selection().quality, { mode: "auto" },
-      "…which is a stable digest rather than a standing ask");
+      "only an accepted committed acknowledgement returns selection to plain Auto");
+    assert.deepEqual(h.selection().quality, { mode: "auto" });
   }
   {
     // A viewer who picks by hand overrides whatever the controller wanted.

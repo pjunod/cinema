@@ -151,7 +151,15 @@ function settlePlaybackControlAcknowledgement(p,request){
   // Matched on both fields rather than on identity: the reporter replays a
   // retried request, and the object it replays is the one that was queued.
   const at=queue.findIndex(entry=>entry.action_id===sent.action_id&&entry.state===sent.state);
-  if(at!==-1) queue.splice(at,1);
+  if(at!==-1){
+    queue.splice(at,1);
+    const change=p.directedChange;
+    if(sent.state==="committed"&&change&&change.committedActionId===sent.action_id
+       &&change.outcome==="committed"&&change.autoMove){
+      p.autoRequestedHeight=null;
+      change.committedActionId=null;
+    }
+  }
 }
 
 function preparedVideoElement(){
@@ -604,6 +612,8 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     if(p.preparedCommitting===state) p.preparedCommitting=null;
     // The switch the viewer asked for happened. Nothing owes them a reopen,
     // and the rung they asked for is the one being delivered.
+    if(p.directedChange&&p.directedChange.autoMove)
+      p.directedChange.committedActionId=state.actionId;
     settleDirectedChange(p,p.directedChange,"committed",
       Math.round(performance.now()-((p.directedChange&&p.directedChange.tappedAt)||performance.now())));
     retirePreparedPredecessor(p,state);
