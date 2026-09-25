@@ -3997,7 +3997,8 @@ async function main() {
         // successor is exposed, so a corrective seek can no longer put a
         // blank element in front of the viewer.
         shippedSource("alignPreparedReplacement"), shippedSource("preparedAlignSeek"),
-        shippedSource("preparedAlignedBuffered"), shippedSource("exposePreparedReplacement"),
+        shippedSource("preparedAlignedBuffered"), shippedSource("exposePreparedReplacementAtFrame"),
+        shippedSource("exposePreparedReplacement"),
         // M3's instruments. Sliced rather than stubbed, so a commit in this
         // harness exercises the real recording and the assertions below can
         // read what it recorded.
@@ -4146,6 +4147,26 @@ async function main() {
     offset: 0, vod: true, hls: null, prepared: null, priorKbps: 0,
     controlAcknowledgement: null, pendingMediaChange: null, wantsPlayback: true,
   }, overrides);
+
+  // A warmed successor remains transparent until its next decoded frame;
+  // the current video stays authoritative during that one-frame rendezvous.
+  {
+    const h = preparedHarness();
+    h.live.currentTime = 20;
+    h.live.ranges = [[18, 29]];
+    const incumbent = { destroy() {} };
+    const p = h.set(preparedPlayer({ hls: incumbent }));
+    h.handle(prepareAction());
+    h.spare.frameCallback();
+    h.instances[0].events.manifest();
+    h.spare.currentTime = 20;
+    h.spare.ranges = [[20, 30]];
+    h.instances[0].events.append();
+    assert.equal(p.hls, incumbent, "the predecessor stays visible until the warm frame callback");
+    assert.equal(h.spare.id, "video-prepared");
+    h.spare.frameCallback();
+    assert.equal(p.hls, h.instances[0], "the successor becomes authoritative on its next frame");
+  }
 
   // Preparing a second HLS pipeline temporarily gives it the shaped link.
   // Every abort and the bounded pause must restore incumbent loading.

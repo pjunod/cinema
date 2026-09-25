@@ -275,6 +275,8 @@ function beginPreparedReplacement(p,action){
     selection:action.effective_selection,
     startAtSec:preparedLocalPositionMs(filmMs+startLeadMs,originMs)/1000,
     state:"building",hls:null,metadata:false,buffered:false,
+    warmFrameReady:false,warmFrameCallbackId:null,
+    exposeFrameTimer:null,exposeFrameCallbackId:null,
     incumbentHls:null,incumbentLoadPaused:false,incumbentResumeTimer:null,
     frameTimer:null,framePollTimer:null,frameListener:null,startedAt:Date.now()};
   p.prepared=state;
@@ -293,6 +295,12 @@ function beginPreparedReplacement(p,action){
     spare.style.pointerEvents="none";
     spare.style.zIndex="1";
     spare.style.display="";
+    if(typeof spare.requestVideoFrameCallback==="function"){
+      try{ state.warmFrameCallbackId=spare.requestVideoFrameCallback(()=>{
+        state.warmFrameCallbackId=null;
+        if(preparedState(p)===state) state.warmFrameReady=true;
+      }); }catch(e){}
+    }
     if(preferNativeHls(spare)||!window.Hls||!Hls.isSupported()) preparedNativeAttach(p,state,spare);
     else preparedHlsAttach(p,state,spare);
   }catch(error){
@@ -463,7 +471,7 @@ function commitPreparedReplacement(p,state){
   const drift=Math.abs((spare.currentTime||0)-wanted)*1000;
   // Already on the incumbent's second: nothing to wait for, and the exposure
   // is the same synchronous block it has always been.
-  if(drift<=PREPARED_ALIGN_SLACK_MS) return exposePreparedReplacement(p,state,v,spare,filmMs);
+  if(drift<=PREPARED_ALIGN_SLACK_MS) return exposePreparedReplacementAtFrame(p,state,v,spare,filmMs);
   // Otherwise finish aligning BEFORE the successor is seen or heard. The
   // corrective seek used to be the line above, with nothing between it and the
   // element swap; a seek is asynchronous, so the successor had nothing decoded
@@ -498,7 +506,7 @@ async function alignPreparedReplacement(p,state,v,spare){
       const filmMs=playbackFilmPositionMs(v,p);
       const target=preparedLocalPositionMs(filmMs,state.mediaOriginMs)/1000;
       if(Math.abs((spare.currentTime||0)-target)*1000<=PREPARED_ALIGN_SLACK_MS)
-        return exposePreparedReplacement(p,state,v,spare,filmMs);
+        return exposePreparedReplacementAtFrame(p,state,v,spare,filmMs);
     }
   }
   if(!live()) return false;
@@ -538,6 +546,30 @@ function preparedAlignedBuffered(spare){
     }
   }catch(e){}
   return false;
+}
+// A decoded successor frame while it is nearly transparent proves that Chrome
+// is presenting the prepared layer. Expose on its next frame instead of at an
+// arbitrary point between two 30-fps pictures. A browser that does not render
+// the warm layer keeps the immediate path; a missed next frame is bounded.
+function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
+  if(!state.warmFrameReady||typeof spare.requestVideoFrameCallback!=="function")
+    return exposePreparedReplacement(p,state,v,spare,filmMs);
+  let settled=false;
+  const finish=()=>{
+    if(settled) return;
+    settled=true;
+    if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
+    if(state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
+      try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
+    state.exposeFrameCallbackId=null;
+    if(PLAYER!==p||preparedState(p)!==state||document.getElementById("video")!==v
+      ||preparedVideoElement()!==spare||!playbackOwnsAttachedMedia(p)) return;
+    exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+  };
+  state.exposeFrameTimer=setTimeout(finish,100);
+  try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(finish); }
+  catch(e){ finish(); }
+  return true;
 }
 // Phase two: the exposure, unchanged. Intent is sampled at the last reversible
 // boundary, mute and rate are applied before display, the elements swap, and

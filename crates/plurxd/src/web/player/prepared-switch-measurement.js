@@ -282,6 +282,13 @@ function freePreparedReplacement(p,state){
   markPreparedSettlement(p,state.actionId);
   const spare=preparedVideoElement();
   if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+  if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
+  if(spare&&state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
+    try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
+  state.exposeFrameCallbackId=null;
+  if(spare&&state.warmFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
+    try{ spare.cancelVideoFrameCallback(state.warmFrameCallbackId); }catch(e){}
+  state.warmFrameCallbackId=null;
   if(state.framePollTimer!=null){ clearTimeout(state.framePollTimer); state.framePollTimer=null; }
   if(state.frameListener&&spare){
     try{ spare.removeEventListener("timeupdate",state.frameListener); }catch(e){}

@@ -180,6 +180,9 @@ it unit-tests without a video element:
   and hls.js EWMA estimates **in one move**. The reserve covers a partial
   fragment progress window that straddles a cliff; using nominal bitrate
   admitted 480p on a measured 1.1 Mb/s link and forced a second restart.
+  A draining runway also treats a fresh transfer below 0.75× the current
+  rung's encoded peak as severe; this catches the second 350 kb/s cliff while
+  its first partial sample still looks close to 240p's nominal bitrate.
   The fresh transfer sample expires after 15 s. The stable EWMA deliberately
   remembers the pre-cliff link, so the fresh bound prevents that memory from
   admitting an intermediate rung.
@@ -223,7 +226,8 @@ The web player offers a prepared successor for an Auto rung move when its
 incumbent can still present. It starts the successor at most three seconds
 ahead, waits until the successor overlaps the incumbent's film position and
 has two seconds buffered beyond it, aligns the two elements, then exposes the
-successor. The incumbent remains available until the successor presents a
+successor on its next decoded frame if the warm layer is rendering. That wait
+is bounded to 100 ms. The incumbent remains available until the successor presents a
 frame. A stalled incumbent or a failed preparation falls back to a bounded
 reopen, which can interrupt playback. The interruption has an SLO
 ([PERF-PLAN.md](../performance/PERF-PLAN.md) §8.6, decision 4: p95 ≤ 2.5 s on LAN,
