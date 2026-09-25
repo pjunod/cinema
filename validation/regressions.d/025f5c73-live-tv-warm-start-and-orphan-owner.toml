@@ -5,14 +5,14 @@ commits = ["025f5c73"]
 points = ["live-tv.integration", "live.dvr", "cluster.media-observation"]
 checks = ["rust-gate", "rust-gate-ci", "live-tv-two-node"]
 reason = """
-Plan L-02 M3 (L6) and M4 (L9). M4 corrects three defects: a session whose \
+Plan L-02 M3 (L6) and M4 (L9). M4 corrects two defects: a session whose \
 cleanup failed was never retired, so it stayed in the registry counted against \
 MAX_TERMINAL_TOMBSTONES and 256 of them refused every start for good; a hung \
 scratch scan, awaited inline by the session tick, stopped the tick and with it \
 the producer-progress timer that is the only thing that ends a published \
-session whose producer stopped; and nothing pruned expired tombstones on a \
-quiet owner, so a burst of ends refused starts until some later lookup pruned \
-them. Each retained test below was run with its production hunk reverted and \
+session whose producer stopped. (A third, "nothing pruned expired tombstones \
+on a quiet owner", was withdrawn after the PR #496 review: request_session \
+already pruned them in the start's own lock hold.) Each retained test below was run with its production hunk reverted and \
 failed (exit 101), then passed with it restored. \
 a_failed_cleanup_retires_the_session_and_keeps_the_child_until_reaped \
 (live_tv::tests) runs a real session worker whose FFmpeg exit is withheld: the \
@@ -26,11 +26,7 @@ claim lets the sweep delete the live child's directory. \
 a_failed_scratch_cleanup_retires_the_session_and_a_drain_waits_for_the_directory \
 is the same handoff for an undeletable directory. \
 two_hundred_failed_cleanups_do_not_refuse_starts runs 300 failing cleanups and \
-requires none left registered, the orphan list bounded at ORPHAN_MAX, and the \
-recovery history admitting once the minute has passed. \
-a_full_recovery_history_admits_again_once_its_minute_is_up fills the history \
-with 256 tombstones and requires admission after the minute with nothing else \
-pruning; without the prune in recovery_history_admits it stays refused. \
+requires none left registered and the orphan list bounded at ORPHAN_MAX. \
 a_hung_inventory_does_not_stack_and_the_progress_timer_still_ends_the_session \
 publishes a start through the loopback HDHomeRun, then hangs every scan: the \
 session must end on the producer-progress timer with exactly one scan started \
