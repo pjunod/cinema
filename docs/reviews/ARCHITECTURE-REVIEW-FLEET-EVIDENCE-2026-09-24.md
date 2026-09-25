@@ -25,9 +25,11 @@ At 01:48 UTC `origin/main` was still exact `f600d28230222005441cfc62301c306785c8
 
 This proves installation of current `main`, not any plan's playback/device acceptance. Android release remains uninstalled: the current session has none of the four release-signing inputs, a filename search in the likely local signing locations found only `~/.android/debug.keystore`, and ADB at 02:01:42 UTC found four attached Android devices: TCL 9445X, Pixel 10 Pro Fold, Pixel 11 Pro XL, and Motorola razr ultra 2025. Each runs Cinema 0.3.0, versionCode 124, with `DEBUGGABLE` set. A debug build is not substituted for the required signed release; Xiaomi and Lenovo remained absent.
 
+A post-promotion read-only signing inventory found no Android signing secret in the Forgejo repository or organization, no signed release APK among the available action artifacts, no APK release package, and no signing values on the controller or four nodes. Main specifies Android versionCode 125. Creating a new key would create a different update identity; the existing four debug installations were left intact. The [draft mobile-role PR #23](https://github.com/pjunod/ansible/pull/23) is not a substitute for the missing identity.
+
 ### 1.2 Post-promotion Apple install — 2026-09-25
 
-After [PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506) merged as `44cdfccc7`, `scripts/ship-physical --apple` built and verified signed iOS and tvOS Release artifacts from that exact main commit. The command exited 0 and installed Plurx 0.3.0, build 183, on all six reachable physical Apple devices: `17air`, `17promax`, Bedroom Apple TV 4K, iPad Mini, iPad Pro M4 and iPhone 18 Pro. Independent `devicectl device info apps` reads confirmed `tv.plurx.app` build 183 on all six. Bedroom Apple TV, iPad Pro and iPhone launched the app. The other three rejected launch with `Locked` or `RequestDenied`; `16pro` was unavailable. The signed build and install log is `/Users/pjunod/code/plurx-agent/codex-postmerge-apple-deploy-20260925.log`. An app launch is not visual playback, remote-control, library-paging, caption or adaptive-quality acceptance, so A-02, A-03, L-03 and A-04 keep those device checks open.
+After [PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506) merged as `44cdfccc7`, `scripts/ship-physical --apple` built and verified signed iOS and tvOS Release artifacts from that exact main commit. The command exited 0 and installed Plurx 0.3.0, build 183, on all six reachable physical Apple devices: `17air`, `17promax`, Bedroom Apple TV 4K, iPad Mini, iPad Pro M4 and iPhone 18 Pro. Independent `devicectl device info apps` reads confirmed `tv.plurx.app` build 183 on all six. Bedroom Apple TV, iPad Pro and iPhone launched the app. The other three rejected launch with `Locked` or `RequestDenied`; `16pro` was unavailable. The signed build and install log is `/Users/pjunod/code/plurx-agent/codex-postmerge-apple-deploy-20260925.log` (SHA-256 `21079bcf10ecc7b34914cac0f6da2e2208af75b63db02eb2a72094a5ba82e8cb`). An app launch is not visual playback, remote-control, library-paging, caption or adaptive-quality acceptance, so A-02, A-03, L-03 and A-04 keep those device checks open.
 
 ## 2. Read-only measurements — useful baselines, not acceptance
 
@@ -65,6 +67,8 @@ documentation commit.
 
 The exact PR #506 candidate server was built with pinned Rust 1.97.1 and used by `scripts/playback-lab run --suite stall-recovery --browser chrome --network-profile 8mbps-to-1.1mbps-to-350kbps@12`. The run reached a first frame and the first cliff. The 1,100 kb/s stage measured 1,099.3 kb/s media throughput over 74.873 seconds. Recovery took 20.9 seconds against a 10-second limit, with one automatic restart, first downshift at 20.833 seconds, an 8.0996-second maximum transition video gap, eight wait events, fifteen hitches and zero seconds of downshift runway. The result failed. The second 350 kb/s stage has `entered_at_ms: null` and zero bytes, so this run provides no second-cliff result. Raw and normalized reports are `/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/web-chrome-two-cliff-pr506.json` (SHA-256 `474b2b18554eb91254e5f10c9521af14b3dd05d59ce1b2488af8705b782d0f7d`) and the matching `.normalized.json` (SHA-256 `bcf809cd920a3d613ce11f15606e250b9059cb0a1a240fcef2052edb18812613`). The platform matrix and second cliff remain owed.
 
+The two Firefox attempts stopped before WebDriver created a session, with zero shaped bytes and no playback metrics. Their temporary `browser.log` files were not retained, so the process-exit cause is unknown. A subsequent harness doctor reported that Firefox and geckodriver are absent from the current host; no exact-main Firefox rerun was claimed.
+
 ### 2.2 L-03 broadcast caption service capture — 2026-09-25
 
 At about 02:08 UTC, `nynuc` reached the HDHomeRun FLEX 4K at
@@ -96,6 +100,12 @@ Safari, physical Apple and Android caption-menu rows, plus post-advertising
 playback, remain owed. ADB found no connected Shield or Android TV; the
 three attached phones reported caption setting `null` (unset), which does
 not prove enabled or disabled.
+
+### 2.3 L-03 source-service follow-up on merged main
+
+At 04:59 UTC, `nynuc` ran image and binary revision `44cdfccc7`. All four HDHomeRun tuners were idle before and after one 30-second channel 6.1 capture. The 23,261,068-byte MPEG-2 interlaced capture had 849 frames with caption data. An exact current-module caption analyzer test in the agent-owned clone passed and found 608 CC1 dialogue (359 characters) and 708 SERVICE1 dialogue (387 characters); SERVICE2–6 had zero characters. The raw broadcast capture was deleted after analysis. The small machine-readable receipt at `/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/l03-channel-6-1-postmerge-caption-source-44cdf-20260925.json` records the capture SHA-256, command, build identity, probe and test result. The analyzer used local FFmpeg 9.0.1 rather than the deployed encoder graph, so the observation verifies broadcast source services only. Post-advertising and physical-client caption rendering remain owed.
+
+This run exposed a stale `scripts/live-tv-caption-audit` test selector that silently selected zero tests. PR #512 updates both wrapper selectors to the current `caption_probe` module; the exact analyzer test above was invoked directly on the pre-fix source and passed. The wrapper repair still needs its merge gate.
 
 The Raft size-gauge values at 23:36 UTC, in bytes, are kept here so later readings have a comparison point:
 
@@ -166,7 +176,7 @@ active or authenticated acceptance checks.
 | `C-08` | Preliminary snapshot in §2; acceptance open | One-hour normal-use scrape series; literal label regex has metric-name false positives; JSON mode restart, browser RED sanity and media-body flow remain. |
 | `L-01` | No acceptance run | media1 336-hour guide vs 2 MiB clip; mixed NAS/local sink interruption and metrics. |
 | `L-02` | No acceptance run | Three §6.3 fleet prompts: settings failover budget, peer resolution, and start/cleanup observations; M3/M4 implementation also pending. |
-| `L-03` | Prompt A captured three real channels; prompt C Chrome baseline found an English track hidden and no drawn text (§2.1); acceptance open | Shared-transport physical pass, M3 prompt B and remaining prompt C native rows, M2 client device pass and M4 post-advertising caption pass. #482 already merged. |
+| `L-03` | Prompt A captured three real channels; prompt C Chrome baseline found an English track hidden and no drawn text (§2.2); acceptance open | Shared-transport physical pass, M3 prompt B and remaining prompt C native rows, M2 client device pass and M4 post-advertising caption pass. #482 already merged. |
 | `W-01` | No acceptance run | Progressive-remux browser/device matrix, post-deploy event rate and journal. |
 | `W-02` | Readiness repair; no §5.4–5.5 acceptance | Browser, lock-screen, headset and LG/Fire TV input evidence; 5.4/5.5 also await 5.1-5.3 type baseline and Playwright. |
 | `A-01` | No acceptance run | Apple TV HDMI mode matrix; iPhone interruption/route matrix. |
