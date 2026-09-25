@@ -159,6 +159,18 @@ function settlePlaybackControlAcknowledgement(p,request){
       p.autoRequestedHeight=null;
       change.committedActionId=null;
     }
+    const pending=p.preparedControlPending;
+    if(sent.state==="committed"&&pending&&pending.actionId===sent.action_id){
+      p.preparedControlPending=null;
+      if(pending.bootstrap&&p.sessionId===pending.sessionId){
+        // The predecessor reporter owns the commit response; start the
+        // successor reporter only after that callback has finished.
+        setTimeout(()=>{
+          if(PLAYER===p&&p.sessionId===pending.sessionId&&playbackOwnsAttachedMedia(p))
+            startPlaybackControl(document.getElementById("video"),p,pending.bootstrap);
+        },0);
+      }
+    }
   }
 }
 
@@ -256,7 +268,8 @@ function beginPreparedReplacement(p,action){
   const startLeadMs=Math.min(PREPARED_BUFFER_LEAD_MS+2000,
     Math.max(0,Math.round((bufferRunway(v)-3)*1000)));
   const state={actionId:action.action_id,sessionId:action.session_id,
-    playlistUrl:action.playlist_url,mediaOriginMs:originMs,offeredOriginMs,
+    playlistUrl:action.playlist_url,controlBootstrap:action.control||null,
+    mediaOriginMs:originMs,offeredOriginMs,
     selection:action.effective_selection,
     startAtSec:preparedLocalPositionMs(filmMs+startLeadMs,originMs)/1000,
     state:"building",hls:null,metadata:false,buffered:false,
@@ -614,6 +627,8 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     // and the rung they asked for is the one being delivered.
     if(p.directedChange&&p.directedChange.autoMove)
       p.directedChange.committedActionId=state.actionId;
+    p.preparedControlPending={actionId:state.actionId,sessionId:state.sessionId,
+      bootstrap:state.controlBootstrap};
     settleDirectedChange(p,p.directedChange,"committed",
       Math.round(performance.now()-((p.directedChange&&p.directedChange.tappedAt)||performance.now())));
     retirePreparedPredecessor(p,state);

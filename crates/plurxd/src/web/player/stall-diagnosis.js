@@ -382,7 +382,9 @@ async function autoControllerTick(){
   if(!playbackOwnsAttachedMedia(p)) return;
   if(!(SERVER&&SERVER.playback_auto_abr)||!p||!v||!p.abr||qualityForce()!=='auto'||!p.started||v.paused||p.abr.switching) return;
   if(p.autoFallbackInFlight) return;
-  await pollSessionHealth(true);
+  if(p.healthObservedAt==null
+    ||performance.now()-p.healthObservedAt>=PlaybackPolicy.AUTO_DEFAULTS.sampleMs)
+    await pollSessionHealth(true);
   // Re-checked after the poll for the same reason it is checked before it: the
   // unawaited `maybeDecodeRescue()` earlier in this interval can have claimed
   // the automatic move while this tick was waiting on the health request.

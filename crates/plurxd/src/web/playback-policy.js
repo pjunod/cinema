@@ -13,6 +13,9 @@
 
   const AUTO_DEFAULTS = Object.freeze({
     sampleMs: 5_000,
+    // A 5s decision clock plus a prepared successor's first fragments missed
+    // the 10s cliff budget even when the handoff itself was seamless.
+    decisionMs: 1_000,
     safeEstimateFactor: 0.95,
     severeEstimateRatio: 0.7,
     mildHeadroom: 1.3,

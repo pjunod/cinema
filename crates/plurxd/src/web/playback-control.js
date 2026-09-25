@@ -116,6 +116,8 @@
       && typeof action.session_id === "string" && action.session_id !== ""
       && preparedPlaylistUrl(action.session_id, action.playlist_url) !== null
       && boundedInteger(action.media_origin_ms, 0, MAX_MEDIA_MS)
+      && (action.control == null || (validBootstrap(action.control)
+        && action.control.url === `/api/v1/hls/${action.session_id}/control`))
       && validEffectiveSelection(action.effective_selection);
   }
 

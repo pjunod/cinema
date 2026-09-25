@@ -2134,6 +2134,32 @@ async function main() {
   assert.equal(PREPARE_FIXTURE.media_origin_ms, 0);
   assert.equal(PREPARE_FIXTURE.playlist_url,
     `/api/v1/hls/${PREPARE_SESSION}/index.m3u8`);
+  const successorBootstrap={...bootstrap(),
+    url:`/api/v1/hls/${PREPARE_SESSION}/control`,
+    generation:"55555555-5555-4555-8555-555555555555"};
+  assert.equal(control.validPreparation({...PREPARE_FIXTURE,control:successorBootstrap}),true);
+  assert.equal(control.validPreparation({...PREPARE_FIXTURE,
+    control:{...successorBootstrap,url:"/api/v1/hls/other/control"}}),false,
+  "a preparation cannot hand the reporter to another session");
+  {
+    const live={id:"video"}, started=[];
+    let scheduled=null;
+    const player={sessionId:PREPARE_SESSION,
+      preparedControlPending:{actionId:PREPARE_ACTION_ID,sessionId:PREPARE_SESSION,
+        bootstrap:successorBootstrap},
+      controlAcknowledgements:[{action_id:PREPARE_ACTION_ID,state:"committed"}]};
+    const settle=new Function("PLAYER","document","setTimeout","playbackOwnsAttachedMedia",
+      "startPlaybackControl",`${shippedSource("settlePlaybackControlAcknowledgement")};
+        return settlePlaybackControlAcknowledgement;`)(player,{getElementById:()=>live},
+      fn=>{scheduled=fn;},()=>true,(video,p,controlBootstrap)=>
+        started.push({video,p,controlBootstrap}));
+    settle(player,{acknowledgement:{action_id:PREPARE_ACTION_ID,state:"committed"}});
+    assert.equal(player.controlAcknowledgements.length,0);
+    assert.equal(started.length,0,"the old reporter finishes its accepted exchange first");
+    scheduled();
+    assert.deepEqual(started,[{video:live,p:player,controlBootstrap:successorBootstrap}],
+      "the successor reporter is bound to the visible element and its own session");
+  }
   {
     // A whole exchange, so the fixture is proven through `validResponse` and
     // not only through the validator it happens to call.

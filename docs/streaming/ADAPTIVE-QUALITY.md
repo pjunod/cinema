@@ -156,8 +156,9 @@ The web controller is gated by the node-wide admin setting
 off preserves the server-selected Auto stream and every manual ladder rung,
 but performs no client-side rung switch or supply-stall rescue.
 
-**Implementation status (2026-08-14):** the web controller is implemented in
-the pure playback-policy module and sampled by the embedded player every 5 s.
+**Implementation status (2026-09-25):** the web controller is implemented in
+the pure playback-policy module and decides every 1 s. Its server-health read
+remains at most once per 5 s.
 The constants below are the live defaults. The browser shaping run remains the
 acceptance evidence for a host on which Chrome can start; unit tests do not
 stand in for that run.
@@ -165,11 +166,11 @@ stand in for that run.
 A client-side controller, roughly 120 lines, extracted as a pure function so
 it unit-tests without a video element:
 
-- **Sample** every 5 s: `hls.bandwidthEstimate` (hls.js's EWMA over real
+- **Sample** every 1 s: `hls.bandwidthEstimate` (hls.js's EWMA over real
   segment downloads), stalls (a `waiting` event after playback started, or
   hls.js `bufferStalledError`), buffer runway
   (`buffered.end − currentTime`), and — new — the server's `recent_speed`
-  from the session status endpoint: on a JIT server the download estimate
+  from the session status endpoint (read at most every 5 s): on a JIT server the download estimate
   measures `min(link, encode)`, and a producer below 1× with shrinking
   runway is actionable *before* the client ever stalls.
 - **Severe pressure** (an active supply stall, ≤1.5 s of runway, three
@@ -199,7 +200,7 @@ it unit-tests without a video element:
 - **One automatic move in flight.** The decode rescue, the supply rescue and a
   rung switch all open a replacement session, and all three yield at that
   request before anything on the player records the attempt. They therefore
-  share a single claim, taken before the request rather than after it: one 5 s
+  share a single claim, taken before the request rather than after it: one 1 s
   sample opens at most one replacement session, a refused path consumes none of
   its own one-shot latches and re-evaluates on the next sample, and a failed
   open releases the claim rather than wedging every later rescue. The viewer's

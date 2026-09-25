@@ -908,6 +908,7 @@ impl ControlResponseV1 {
                     playlist_url,
                     media_origin_ms,
                     effective_selection,
+                    ..
                 } => prepared_payload_is_valid(
                     Some(action_id),
                     session_id,
@@ -1773,6 +1774,10 @@ pub(crate) enum ControlAction {
         action_id: String,
         session_id: String,
         playlist_url: String,
+        /// The staged session's own reporter identity. The incumbent reporter
+        /// carries the commit, then this one renews the successor's lease.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        control: Option<ControlBootstrap>,
         /// Exact source position the successor's session-relative zero maps
         /// to. Without it a client cannot align the second timeline with the
         /// first, and the commit boundary is expressed in film time.
@@ -1802,6 +1807,7 @@ pub(crate) struct PreparedSuccessorAction {
     pub deadline_ms: i64,
     pub session_id: String,
     pub playlist_url: String,
+    pub control: Option<ControlBootstrap>,
     pub media_origin_ms: i64,
     pub effective_selection: EffectiveSelection,
 }
@@ -1812,6 +1818,7 @@ impl PreparedSuccessorAction {
             action_id: uuid::Uuid::new_v4().to_string(),
             session_id: self.session_id,
             playlist_url: self.playlist_url,
+            control: self.control,
             media_origin_ms: self.media_origin_ms,
             effective_selection: self.effective_selection,
         }
@@ -14946,6 +14953,7 @@ mod tests {
         // survive to be acknowledged.
         let binding = || PreparedActionBinding {
             successor: PreparedSuccessorAction {
+                control: None,
                 staged_incarnation_id: staged.clone(),
                 deadline_ms: i64::MAX,
                 session_id: "session".to_owned(),
@@ -14954,6 +14962,7 @@ mod tests {
                 effective_selection: selection.clone(),
             },
             action: ControlAction::Prepare {
+                control: None,
                 action_id: action_id.clone(),
                 session_id: "session".to_owned(),
                 playlist_url: "/hls/session/index.m3u8".to_owned(),
@@ -16640,6 +16649,7 @@ mod tests {
             let control = ControlState {
                 prepared_action: Some(PreparedActionBinding {
                     successor: PreparedSuccessorAction {
+                        control: None,
                         staged_incarnation_id: staged.clone(),
                         deadline_ms: i64::MAX,
                         session_id: "session".to_owned(),
@@ -16656,6 +16666,7 @@ mod tests {
                         },
                     },
                     action: ControlAction::Prepare {
+                        control: None,
                         action_id: action_id.clone(),
                         session_id: "session".to_owned(),
                         playlist_url: "/hls/session/index.m3u8".to_owned(),
@@ -16903,6 +16914,7 @@ mod tests {
     fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         let session = uuid::Uuid::new_v4().to_string();
         let honest = ControlAction::Prepare {
+            control: None,
             action_id: uuid::Uuid::new_v4().to_string(),
             session_id: session.clone(),
             playlist_url: format!("/api/v1/hls/{session}/master.m3u8"),
@@ -16927,6 +16939,7 @@ mod tests {
             (
                 "a protocol-relative URL onto another host",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("//attacker.invalid/{session_id}/master.m3u8"),
@@ -16937,6 +16950,7 @@ mod tests {
             (
                 "an absolute URL onto another host",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("https://example.invalid/{session_id}/master.m3u8"),
@@ -16947,6 +16961,7 @@ mod tests {
             (
                 "no session at all",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: String::new(),
                     playlist_url: "/api/v1/hls//master.m3u8".to_owned(),
@@ -16957,6 +16972,7 @@ mod tests {
             (
                 "no action id to fence the acknowledgement with",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: String::new(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
@@ -16967,6 +16983,7 @@ mod tests {
             (
                 "an action id that acknowledgements cannot parse",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: "not-a-uuid".to_owned(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
@@ -16977,6 +16994,7 @@ mod tests {
             (
                 "a backslash-relative URL, which browsers treat as //",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/\\attacker.invalid/{session_id}/master.m3u8"),
@@ -16987,6 +17005,7 @@ mod tests {
             (
                 "the session named only in a query parameter",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/anything/at/all.m3u8?session={session_id}"),
@@ -16997,6 +17016,7 @@ mod tests {
             (
                 "the session named only in a fragment",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/anything/at/all.m3u8#{session_id}"),
@@ -17007,6 +17027,7 @@ mod tests {
             (
                 "a path that climbs out of the session's own",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/../../../etc/master.m3u8"),
@@ -17017,6 +17038,7 @@ mod tests {
             (
                 "encoded dot segments normalized after validation",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/%2e%2e/%2e%2e/settings"),
@@ -17027,6 +17049,7 @@ mod tests {
             (
                 "an internal backslash normalized as a path separator",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}\\..\\settings"),
@@ -17037,6 +17060,7 @@ mod tests {
             (
                 "an arbitrary same-origin route containing the session id",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/settings/{session_id}/master.m3u8"),
@@ -17047,6 +17071,7 @@ mod tests {
             (
                 "a session id that is not one",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: "a".to_owned(),
                     playlist_url: "//attacker.invalid/a/master.m3u8".to_owned(),
@@ -17057,6 +17082,7 @@ mod tests {
             (
                 "an origin before the start of the film",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
@@ -17071,6 +17097,7 @@ mod tests {
         let mut invalid_selection = effective_selection;
         invalid_selection.height = crate::transcode::MAX_HEIGHT + 1;
         let invalid_nested = ControlAction::Prepare {
+            control: None,
             action_id,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
@@ -17100,6 +17127,7 @@ mod tests {
     fn a_relayed_preparation_needs_the_declared_vocabulary() {
         let session = uuid::Uuid::new_v4().to_string();
         let action = ControlAction::Prepare {
+            control: None,
             action_id: uuid::Uuid::new_v4().to_string(),
             session_id: session.clone(),
             playlist_url: format!("/api/v1/hls/{session}/master.m3u8"),
@@ -17120,6 +17148,7 @@ mod tests {
     fn prepare_action() -> ControlAction {
         let session = uuid::Uuid::new_v4().to_string();
         ControlAction::Prepare {
+            control: None,
             action_id: uuid::Uuid::new_v4().to_string(),
             session_id: session.clone(),
             playlist_url: format!("/api/v1/hls/{session}/master.m3u8"),
@@ -17225,6 +17254,7 @@ mod tests {
             ));
             let prepared_session_id = uuid::Uuid::new_v4().to_string();
             let successor = PreparedSuccessorAction {
+                control: None,
                 staged_incarnation_id: staged_incarnation_id.clone(),
                 deadline_ms: i64::MAX,
                 session_id: prepared_session_id.clone(),
@@ -17480,6 +17510,7 @@ mod tests {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),
@@ -17595,6 +17626,7 @@ mod tests {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),
@@ -17975,6 +18007,7 @@ mod tests {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id,
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),
@@ -18072,6 +18105,7 @@ mod tests {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),
@@ -18235,6 +18269,7 @@ mod tests {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),
@@ -18325,6 +18360,7 @@ mod tests {
             ));
             let prepared_session_id = uuid::Uuid::new_v4().to_string();
             let successor = PreparedSuccessorAction {
+                control: None,
                 staged_incarnation_id: staged_incarnation_id.clone(),
                 deadline_ms: preparation_deadline,
                 session_id: prepared_session_id.clone(),
@@ -18418,6 +18454,7 @@ mod tests {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: preparation_deadline,
             session_id: prepared_session_id.clone(),
@@ -18566,6 +18603,7 @@ mod tests {
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id,
             deadline_ms: i64::MAX,
             session_id: session_id.clone(),
@@ -18619,6 +18657,7 @@ mod tests {
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id,
             deadline_ms: i64::MAX,
             session_id: session_id.clone(),
@@ -18679,6 +18718,7 @@ mod tests {
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id,
             deadline_ms: i64::MAX,
             session_id: session_id.clone(),
@@ -18732,6 +18772,7 @@ mod tests {
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id,
             deadline_ms: 10_000,
             session_id: session_id.clone(),
@@ -19443,6 +19484,7 @@ mod tests {
         let request = request();
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: "successor-1".to_owned(),
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),
@@ -19529,6 +19571,7 @@ mod tests {
         );
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),

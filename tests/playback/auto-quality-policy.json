@@ -20,6 +20,7 @@
   "defaults_source": "AUTO_DEFAULTS in crates/plurxd/src/web/playback-policy.js, asserted equal by the runner",
   "defaults": {
     "sampleMs": 5000,
+    "decisionMs": 1000,
     "safeEstimateFactor": 0.95,
     "severeEstimateRatio": 0.7,
     "mildHeadroom": 1.3,

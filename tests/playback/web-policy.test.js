@@ -342,7 +342,7 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
     (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
     () => {},
     (v, p) => order.push(["sampled", v, p]),
-    { AUTO_DEFAULTS: { sampleMs: 1000 } },
+    { AUTO_DEFAULTS: { sampleMs: 5000, decisionMs: 1000 } },
     () => { installedMediaSession += 1; },
   );
   const v = { id: "v" }, p = { id: "p" };
@@ -352,6 +352,8 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
   assert.equal(installedMediaSession, 2, "a re-arm left the OS transport pointing at the old stream");
   const half = intervals.find((entry) => entry.ms === 500);
   assert.ok(half, "armPlaybackSampling no longer arms a 500 ms tick");
+  assert.ok(intervals.find((entry) => entry.ms === 1000),
+    "Auto decides every second while its health reads remain on the slower cadence");
   half.fn();
   assert.deepEqual(order.at(-1), ["sampled", v, p]);
   assert.match(shippedSource("adoptPlaybackMediaElement"), /setInterval\(\(\)=>playbackSamplingTick\(v,p\),500\)/);
