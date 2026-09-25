@@ -3752,7 +3752,6 @@ class Controller internal constructor(
         externalListeners.forEach { successor.addListener(it) }
 
         player = successor
-        if (plan.isAudioOnly) mediaSession.setPlayer(successor)
         mediaSession.setPlayer(successor)
         // A different `ExoPlayer` with its own item is on the screen now, so
         // it gets its own single `BEHIND_LIVE_WINDOW` recovery. This path never
@@ -3892,7 +3891,6 @@ class Controller internal constructor(
         retiredPlayer = failedSuccessor
         retiredParkedAtMs = monotonicNowMs()
         player = predecessor.player
-        if (plan.isAudioOnly) mediaSession.setPlayer(player)
         mediaSession.setPlayer(predecessor.player)
         return true
     }
