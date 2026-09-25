@@ -4221,7 +4221,7 @@ async function main() {
     h.live.ranges = [[18, 29]];
     const p = h.set(preparedPlayer({ hls: { destroy() {} } }));
     h.handle(prepareAction());
-    assert.equal(h.instances[0].config.startPosition, 22);
+    assert.equal(h.instances[0].config.startPosition, 23);
     h.instances[0].events.manifest();
     h.spare.currentTime = 24;
     h.spare.ranges = [[24, 30]];

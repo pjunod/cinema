@@ -263,11 +263,11 @@ function beginPreparedReplacement(p,action){
   const originMs=sessionMediaOriginMs({vod:!!p.vod,media_origin_ms:offeredOriginMs});
   const filmMs=playbackFilmPositionMs(v,p);
   // A replacement that begins encoding at the incumbent's current second
-  // spends its entire preparation chasing a moving playhead. Begin up to two
+  // spends its entire preparation chasing a moving playhead. Begin up to three
   // seconds ahead when the incumbent already has enough runway to play
   // until that second. The buffer gate below still requires overlap with the
   // actual incumbent position before exposure, so this cannot skip content.
-  const startLeadMs=Math.min(PREPARED_BUFFER_LEAD_MS,
+  const startLeadMs=Math.min(PREPARED_BUFFER_LEAD_MS+1000,
     Math.max(0,Math.round((bufferRunway(v)-3)*1000)));
   const state={actionId:action.action_id,sessionId:action.session_id,
     playlistUrl:action.playlist_url,controlBootstrap:action.control||null,
