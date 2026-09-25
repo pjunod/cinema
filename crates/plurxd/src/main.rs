@@ -5832,6 +5832,75 @@ mod startup_tests {
         }
     }
 
+    /// Every tracing event in a split child names its parent's target.
+    ///
+    /// The S-14 moves put code from `transcode.rs`, `http/hls.rs` and
+    /// `vodserve.rs` into `#[path]` child modules, and an event's default
+    /// target is its `module_path!()`: without an explicit target a moved line
+    /// would be labelled `plurxd::transcode::manager_start` instead of
+    /// `plurxd::transcode` in the console, in journald and in the log view.
+    /// The walk covers every file on disk, so a new child is scanned without
+    /// being listed. Test children (`tests.rs`, `tests/`) are skipped.
+    #[test]
+    fn split_children_log_under_their_parent_target() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut events = 0;
+        for (directory, target) in [
+            ("transcode", "plurxd::transcode"),
+            ("http/hls", "plurxd::http::hls"),
+            ("vod", "plurxd::vodserve"),
+        ] {
+            let mut files = Vec::new();
+            let mut directories = vec![src.join(directory)];
+            while let Some(directory) = directories.pop() {
+                for entry in std::fs::read_dir(&directory).expect("a split directory") {
+                    let path = entry.expect("a directory entry").path();
+                    if path.file_stem().and_then(|stem| stem.to_str()) == Some("tests") {
+                        continue;
+                    }
+                    if path.is_dir() {
+                        directories.push(path);
+                    } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                        files.push(path);
+                    }
+                }
+            }
+            assert!(
+                files.len() > 1,
+                "{directory}: the walk reached no child modules"
+            );
+            let pinned = format!("target: \"{target}\",");
+            for path in files {
+                let source = std::fs::read_to_string(&path).expect("a readable child");
+                for level in ["trace", "debug", "info", "warn", "error"] {
+                    let call = format!("tracing::{level}!(");
+                    for (at, _) in source.match_indices(&call) {
+                        assert!(
+                            source[at + call.len()..].trim_start().starts_with(&pinned),
+                            "{}: the `{call}` at byte {at} logs under its own module path, \
+                             not `{target}`",
+                            path.display()
+                        );
+                        events += 1;
+                    }
+                }
+                // Other event and span forms take the same default; none is
+                // used in a child today, so any one appearing is a new case.
+                for form in ["tracing::event!(", "_span!(", "instrument"] {
+                    assert!(
+                        !source.contains(form),
+                        "{}: `{form}` in a split child needs its target pinned too",
+                        path.display()
+                    );
+                }
+            }
+        }
+        assert!(
+            events >= 299,
+            "the scan found {events} events; the split moved 299"
+        );
+    }
+
     /// `tracing-subscriber` turns ANSI on whenever the `ansi` feature is
     /// compiled and `NO_COLOR` is unset, with no TTY detection anywhere, so a
     /// systemd unit or a container gets escape bytes in its journal unless
