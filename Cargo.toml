@@ -143,7 +143,14 @@ overflow-checks = true
 
 [profile.release]
 lto = "thin"
-strip = "symbols"
+# Line tables and symbols stay in the release binary so a panic's backtrace
+# names files and lines (docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md
+# §3.5, release-profile PR 1). `strip = "symbols"` had left `RUST_BACKTRACE=1`
+# with an empty "stack backtrace:" on the shipped binary; the cost is binary
+# size, measured in that plan's §5.6, and no runtime cost. `strip =
+# "debuginfo"` would remove the line tables again, so it is "none".
+debug = "line-tables-only"
+strip = "none"
 
 # Patch Hiqlite's sparse-membership, WAL-recovery, and optional-dependency
 # compatibility without advisory ignores. Path packages are
@@ -166,6 +173,9 @@ strip = "symbols"
 # vendored copy refuses counts that cannot fit in the bits left. See
 # vendor/dolby_vision/PLURX-PATCH.md.
 dolby_vision = { path = "vendor/dolby_vision" }
+# Its bit reader: two Exp-Golomb overflows refused as data. See
+# vendor/bitvec_helpers/PLURX-PATCH.md.
+bitvec_helpers = { path = "vendor/bitvec_helpers" }
 hiqlite = { path = "vendor/hiqlite" }
 hiqlite-wal = { path = "vendor/hiqlite-wal" }
 rust_decimal = { path = "vendor/rust_decimal" }
