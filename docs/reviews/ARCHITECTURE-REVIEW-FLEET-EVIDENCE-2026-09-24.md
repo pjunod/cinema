@@ -25,6 +25,10 @@ At 01:48 UTC `origin/main` was still exact `f600d28230222005441cfc62301c306785c8
 
 This proves installation of current `main`, not any plan's playback/device acceptance. Android release remains uninstalled: the current session has none of the four release-signing inputs, a filename search in the likely local signing locations found only `~/.android/debug.keystore`, and ADB at 02:01:42 UTC found four attached Android devices: TCL 9445X, Pixel 10 Pro Fold, Pixel 11 Pro XL, and Motorola razr ultra 2025. Each runs Cinema 0.3.0, versionCode 124, with `DEBUGGABLE` set. A debug build is not substituted for the required signed release; Xiaomi and Lenovo remained absent.
 
+### 1.2 Post-promotion Apple install — 2026-09-25
+
+After [PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506) merged as `44cdfccc7`, `scripts/ship-physical --apple` built and verified signed iOS and tvOS Release artifacts from that exact main commit. The command exited 0 and installed Plurx 0.3.0, build 183, on all six reachable physical Apple devices: `17air`, `17promax`, Bedroom Apple TV 4K, iPad Mini, iPad Pro M4 and iPhone 18 Pro. Independent `devicectl device info apps` reads confirmed `tv.plurx.app` build 183 on all six. Bedroom Apple TV, iPad Pro and iPhone launched the app. The other three rejected launch with `Locked` or `RequestDenied`; `16pro` was unavailable. The signed build and install log is `/Users/pjunod/code/plurx-agent/codex-postmerge-apple-deploy-20260925.log`. An app launch is not visual playback, remote-control, library-paging, caption or adaptive-quality acceptance, so A-02, A-03, L-03 and A-04 keep those device checks open.
+
 ## 2. Read-only measurements — useful baselines, not acceptance
 
 All reads used the running `f600d2823` image and local `/metrics`. They establish that the instrumentation is present and provide a dated starting point. Counters reset on restart, so a zero near deploy says nothing about a week of use.
@@ -57,7 +61,11 @@ the normalized report has SHA-256
 These artifacts are local to the observing host and are not part of this
 documentation commit.
 
-### 2.1 L-03 broadcast caption service capture — 2026-09-25
+### 2.1 A-04 first-cliff trace on the PR #506 candidate
+
+The exact PR #506 candidate server was built with pinned Rust 1.97.1 and used by `scripts/playback-lab run --suite stall-recovery --browser chrome --network-profile 8mbps-to-1.1mbps-to-350kbps@12`. The run reached a first frame and the first cliff. The 1,100 kb/s stage measured 1,099.3 kb/s media throughput over 74.873 seconds. Recovery took 20.9 seconds against a 10-second limit, with one automatic restart, first downshift at 20.833 seconds, an 8.0996-second maximum transition video gap, eight wait events, fifteen hitches and zero seconds of downshift runway. The result failed. The second 350 kb/s stage has `entered_at_ms: null` and zero bytes, so this run provides no second-cliff result. Raw and normalized reports are `/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/web-chrome-two-cliff-pr506.json` (SHA-256 `474b2b18554eb91254e5f10c9521af14b3dd05d59ce1b2488af8705b782d0f7d`) and the matching `.normalized.json` (SHA-256 `bcf809cd920a3d613ce11f15606e250b9059cb0a1a240fcef2052edb18812613`). The platform matrix and second cliff remain owed.
+
+### 2.2 L-03 broadcast caption service capture — 2026-09-25
 
 At about 02:08 UTC, `nynuc` reached the HDHomeRun FLEX 4K at
 `192.168.5.191`. The exact deployed `f600d2823` checkout ran
