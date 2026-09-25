@@ -516,6 +516,21 @@ class Controller internal constructor(
     private val targetPresentationDeadline = playbackIntent.targetPresentationDeadline
     private val targetPresentationOwner = targetPresentationDeadline.claimOwner(monotonicNowMs())
     private var presentationForeground = true
+    private var lifecyclePaused = false
+    private var pendingLifecyclePauseCallback = false
+
+    private fun effectivePlayWhenReady(): Boolean =
+        playbackIntent.playbackRequested && !lifecyclePaused
+
+    /** Keep the viewer's intent untouched while ON_STOP suppresses output. */
+    private fun applyEffectivePlayWhenReady() {
+        val target = effectivePlayWhenReady()
+        if (lifecyclePaused && playbackIntent.playbackRequested && player.playWhenReady != target) {
+            pendingLifecyclePauseCallback = true
+            viewerTransport.ownerStopping()
+        }
+        player.playWhenReady = target
+    }
     private var mediaMutationEpoch = 0L
 
     /**
@@ -560,7 +575,8 @@ class Controller internal constructor(
                     // returned, and that callback is where the owner's own stop
                     // has to be told apart from a viewer's pause.
                     if (!value) viewerTransport.ownerStopping()
-                    player.playWhenReady = value
+                    if (value && lifecyclePaused) applyEffectivePlayWhenReady()
+                    else player.playWhenReady = value
                 }
             override val positionMs: Long get() = realPosition()
             // `playbackParameters.speed` is the requested SETTING and stays
@@ -1029,6 +1045,11 @@ class Controller internal constructor(
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
             if (!playbackControlBootstrapFence.isActive()) return
+            if (pendingLifecyclePauseCallback && !playWhenReady) {
+                pendingLifecyclePauseCallback = false
+                sampleTargetPresentationDeadline()
+                return
+            }
             // Includes MediaSession transport controls. Internal replacement
             // writes always apply this same latest value; transient buffering
             // and audio-focus suppression do not replace viewer intent.
@@ -1040,6 +1061,12 @@ class Controller internal constructor(
                 // nothing — but the owner's stop-before-raise arrives here too,
                 // and it is the owner deciding rather than the viewer.
                 viewerTransport.report(playWhenReady)?.let(surfaceOwner::playbackRequested)
+                // A notification can ask a stopped video activity to play.
+                // Remember that viewer intent, then keep the owner pause in force.
+                if (playWhenReady && !presentationForeground && !plan.isAudioOnly) {
+                    setPresentationForeground(foreground = false)
+                    applyEffectivePlayWhenReady()
+                }
             }
             sampleTargetPresentationDeadline()
         }
@@ -1144,7 +1171,7 @@ class Controller internal constructor(
     }
 
     init {
-        player.playWhenReady = playbackIntent.playbackRequested
+        applyEffectivePlayWhenReady()
         player.addListener(listener)
         player.addAnalyticsListener(preparedSwitchAnalytics(player))
         pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
@@ -1367,7 +1394,7 @@ class Controller internal constructor(
                 markIntentExecuted(sequence, recipe)
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
-                player.playWhenReady = playbackIntent.playbackRequested
+                applyEffectivePlayWhenReady()
                 armTrackSelections()
             }
             // A cached session holds the whole stream: native seeking, no
@@ -1563,7 +1590,7 @@ class Controller internal constructor(
         }
         playbackControl.clearVerdict()
         stallGuard.setPlaybackRequested(playbackIntent, !playbackIntent.playbackRequested) {
-            player.playWhenReady = it
+            player.playWhenReady = it && !lifecyclePaused
         }
         playbackControl.playerChanged()
     }
@@ -1760,7 +1787,7 @@ class Controller internal constructor(
                 }
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
-                player.playWhenReady = playbackIntent.playbackRequested
+                applyEffectivePlayWhenReady()
                 armTrackSelections()
             }
             PlaybackMediaTransport.ProgressiveRemux -> {
@@ -1776,7 +1803,7 @@ class Controller internal constructor(
                 }
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
-                player.playWhenReady = playbackIntent.playbackRequested
+                applyEffectivePlayWhenReady()
                 armTrackSelections()
             }
             PlaybackMediaTransport.HlsCopy,
@@ -1906,7 +1933,7 @@ class Controller internal constructor(
                     }
                     player.prepare()
                     playbackTelemetry.prepared(attempt)
-                    player.playWhenReady = playbackIntent.playbackRequested
+                    applyEffectivePlayWhenReady()
                     armTrackSelections()
                 }
             } finally {
@@ -2197,7 +2224,7 @@ class Controller internal constructor(
                     attachRecipe(recipe)
                     player.prepare()
                     playbackTelemetry.prepared(attempt)
-                    player.playWhenReady = playbackIntent.playbackRequested
+                    applyEffectivePlayWhenReady()
                     armTrackSelections()
                 }
             } finally {
@@ -2471,7 +2498,7 @@ class Controller internal constructor(
             markIntentExecuted(sequence, recipe)
         }
         player.prepare()
-        player.playWhenReady = playbackIntent.playbackRequested
+        applyEffectivePlayWhenReady()
         armTrackSelections()
         return true
     }
@@ -2790,13 +2817,38 @@ class Controller internal constructor(
         ) playbackControl.playerChanged()
     }
 
-    /** STARTED includes visible PiP; stopped/background activities suspend this deadline. */
-    fun setPresentationForeground(foreground: Boolean) {
+    /** STARTED includes visible PiP; stopped video is owner-paused without changing intent. */
+    fun setPresentationForeground(foreground: Boolean, inPictureInPicture: Boolean = false) {
         if (!playbackControlBootstrapFence.isActive()) return
-        if (presentationForeground != foreground) stallGuard.invalidateObservation()
-        presentationForeground = foreground
+        val visible = foreground || inPictureInPicture
+        if (presentationForeground != visible) stallGuard.invalidateObservation()
+        presentationForeground = visible
+        val lifecycle = lifecyclePlaybackTransition(
+            ownerPaused = lifecyclePaused,
+            foreground = foreground,
+            inPictureInPicture = inPictureInPicture,
+            audioOnly = plan.isAudioOnly,
+            viewerRequested = playbackIntent.playbackRequested,
+        )
+        lifecyclePaused = lifecycle.ownerPaused
+        when (lifecycle.effect) {
+            LifecyclePlaybackEffect.PauseVideo -> {
+                applyEffectivePlayWhenReady()
+                playbackTelemetry.report(
+                    event = "playback_lifecycle_pause",
+                    level = "info",
+                    message = "Video paused when its activity stopped",
+                    detail = "intent=play",
+                )
+            }
+            LifecyclePlaybackEffect.ResumeVideo -> {
+                pendingLifecyclePauseCallback = false
+                player.playWhenReady = true
+            }
+            LifecyclePlaybackEffect.None -> if (visible) pendingLifecyclePauseCallback = false
+        }
         // Android has no hidden page; this is the contract's `hidden`.
-        surfaceOwner.hidden(!foreground)
+        surfaceOwner.hidden(!visible)
         sampleTargetPresentationDeadline()
     }
 
@@ -3264,7 +3316,9 @@ class Controller internal constructor(
         sessionlessStallRecoveryPositionMs = null
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
-        stallGuard.setPlaybackRequested(playbackIntent, true) { player.playWhenReady = it }
+        stallGuard.setPlaybackRequested(playbackIntent, true) {
+            player.playWhenReady = it && !lifecyclePaused
+        }
         playbackControl.playerChanged()
     }
 
@@ -3708,7 +3762,9 @@ class Controller internal constructor(
         )
         val previous = player
         val previousVolume = previous.volume
-        val previousPlayWhenReady = playbackIntent.playbackRequested
+        // An ON_STOP owner pause survives the prepared item becoming active;
+        // intent remains Play and foreground entry can resume the new player.
+        val previousPlayWhenReady = effectivePlayWhenReady()
         val previousPlaybackParameters = previous.playbackParameters
         val predecessor = PreparedPredecessor(
             player = previous,
