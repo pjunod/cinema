@@ -2,7 +2,7 @@
 
 **Status:** evidence-only snapshot · **Source:** [architecture-review workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) at `f600d2823` · **Observed:** 2026-09-24
 
-This record separates the four-node deployment and short, read-only observations from the longer fleet and physical-device acceptance owed by the plans. It was assembled in a fresh Forgejo clone and copied deployment playbook. No plan owner or landed milestone claim changed. No client was installed, no active playback was started, and no disruptive drill was run.
+This record separates the four-node deployment and short, read-only observations from the longer fleet and physical-device acceptance owed by the plans. It was assembled in a fresh Forgejo clone and copied deployment playbook. No plan owner or landed milestone claim changed. At this snapshot no client was installed, no active playback was started, and no disruptive drill was run.
 
 ## 1. Deployment — four inventory nodes run `f600d2823`
 
@@ -19,6 +19,12 @@ The copied playbook ran with `sync=false`, `only=plurx`, and `--limit nuc4,nuc3`
 
 All four had Docker restart count zero at 23:36:14–16 UTC. Both `plurxd` and `plurx-discovery` were healthy on `nuc3`. Its `/api/v1/server` returns 503 with `learner_route_ineligible` because it is a non-voting learner; `/readyz` is 200. A second bounded 30-second log window at 23:38:06–07 UTC had zero `ERROR` lines on every node. That is a short post-deploy observation, not a soak or unit-test result.
 
+## 1.1 Physical Apple install — 2026-09-25
+
+At 01:48 UTC `origin/main` was still exact `f600d28230222005441cfc62301c306785c852ce`. From this agent's own clone, `scripts/ship-physical --apple` built signed iOS and tvOS Release artifacts with the configured development team, verified both signatures, and installed plurx 0.3.0, Apple build 182, on every reachable physical Apple device in CoreDevice's inventory: `17air`, `17promax`, `Bedroom` Apple TV 4K, `iPad Mini`, `iPad Pro`, and `iPhone`. The first run also attempted shutdown simulators because CoreDevice reported their tunnel as `disconnected`; the script now filters on `reality=physical` (`df62a015b`), and the clean rerun installed all six with exit 0. `16pro` was unavailable and received no install. The local clean-run log is `/Users/pjunod/code/plurx-agent/codex-apple-deploy-20260925-clean.log`, SHA-256 `ab5f5ebab63560a7ed666aa626eb856d568f40977762837ee5f4283900240b4c`.
+
+This proves installation of current `main`, not any plan's playback/device acceptance. Android release remains uninstalled: the current session has none of the four release-signing inputs, a filename search in the likely local signing locations found only `~/.android/debug.keystore`, and ADB currently sees only the TCL 9445X online (one prior wireless endpoint is offline). A debug build is not substituted for the required signed release.
+
 ## 2. Read-only measurements — useful baselines, not acceptance
 
 All reads used the running `f600d2823` image and local `/metrics`. They establish that the instrumentation is present and provide a dated starting point. Counters reset on restart, so a zero near deploy says nothing about a week of use.
@@ -32,7 +38,7 @@ All reads used the running `f600d2823` image and local `/metrics`. They establis
 | `K-06` | `timedatectl show -p NTPSynchronized` reported `yes` on all four at 23:31:28–29 UTC. | `chronyc` is absent on `nuc3` and no `plurx_cluster_clock_` metric exists in this build. NTP status is not the plan's offset and uncertainty measurement. |
 | `C-05` | `plurx_index_validation_backfill_total` was zero for `validated`, `refused`, and `gone` on all four at 23:38:57–58 UTC. | A counter snapshot does not establish backfill convergence on an active library. |
 | `P-02` | `/proc/1/limits` in `plurxd` showed 524288 soft and hard open-file limits on every node at 23:38:37–38 UTC; no EMFILE appeared in the preceding five minutes. | Busy-evening sample and a week without EMFILE remain. |
-| `D-03` | Physical inventory showed connected Apple TV 4K, iPhones and iPad, plus Pixel 11 Pro XL, Motorola razr ultra 2025, TCL 9445X, Google TV Streamer and Pixel 10 Pro Fold through `adb`. | Required Xiaomi 25019PNF3C was absent. The current control environment lacked `PLURX_DEVELOPMENT_TEAM` and all four Android release-signing inputs, and the `plurx-agent` mobile role still names `app-debug.apk`. No release APK or client was installed. |
+| `D-03` | Physical inventory showed connected Apple TV 4K, iPhones and iPad, plus Pixel 11 Pro XL, Motorola razr ultra 2025, TCL 9445X, Google TV Streamer and Pixel 10 Pro Fold through `adb`. | Required Xiaomi 25019PNF3C was absent. The current control environment lacked `PLURX_DEVELOPMENT_TEAM` and all four Android release-signing inputs, and the `plurx-agent` mobile role still names `app-debug.apk`. No release APK or Android client was installed; six reachable physical Apple devices received exact main on 2026-09-25 (§1.1). |
 
 Three client-side updates were reported by the coordinating session on
 2026-09-24. They are branch work and trace evidence, not merged fleet or device
