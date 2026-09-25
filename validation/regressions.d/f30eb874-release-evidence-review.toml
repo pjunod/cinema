@@ -1,0 +1,53 @@
+version = 1
+
+[[coverage]]
+commits = ["f30eb874"]
+points = ["server.api", "watch-state.sync", "playback.pipeline", "library.catalog", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "web-static"]
+reason = """
+The #500 review of C-08 M5 found three release-evidence series that did not
+measure what OPERATIONS.md said. Each fix is pinned by a test that was run
+on nuc3 with its production hunk reverted and failed.
+
+Row 3's numerator. The web reports a long stall from persistentWait at its
+8 s mark with the time so far, and endWait returned without the rest, so a
+90 s web stall counted about 8 s. endWait now closes a reported wait with a
+`stall_end` beacon carrying the remainder, and the server credits it to the
+same kind without counting a second stall.
+`telemetry::tests::a_stall_reported_while_frozen_is_credited_its_whole_length_once`
+records `stall` 8,000 ms and `stall_end` 82,000 ms under
+`supply-persistent`, asserts 90.000 stalled seconds and one stall, that a
+`stall_end` without `ms` adds nothing, and that `stall_end` is a lifecycle
+event; with the `stall_end` arm removed the supply cell reads 8.000. The
+web-control case "the close carries exactly the time after the first
+report" (tests/playback/web-control.test.js) drives the shipped
+persistentWait to a report at 8,001 ms and the shipped endWait at 90,001 ms
+and asserts exactly one `stall_end` with `ms` 82,000 and the report's
+detail; with endWait's reported branch reverted to `return` it gets none.
+
+Rows 3 and 8's denominator. WatchLedger compared a beat only with the
+viewer's previous beat on the same node, so beats alternating between N
+nodes were credited N times. The progress handler now passes the durable
+progress row it read before writing, and a row moved by another writer
+since this node's last beat becomes the baseline.
+`telemetry::tests::beats_alternating_between_nodes_are_credited_once_cluster_wide`
+alternates ten minutes of 10 s beats between two ledgers over a shared row
+and asserts 600,000 ms (1,180,000 with the rebase removed), that a paused
+alternating viewer credits nothing, and that one node with its own
+coalesced commits in the row credits exactly its wall time.
+`http::tests::a_beat_after_another_nodes_write_credits_only_the_time_since_it`
+posts two real progress beats with a direct store commit between them and
+asserts exactly 1,000 ms credited on the test's thread; with the handler
+passing no row it credits 1,203.
+
+Row 6. `vod_blocked_get` and `image_materialize` recorded after their
+await, so a GET aborted mid-wait and a registration whose recheck returned
+early were never observed. Both now time from `AdmissionWaitTimer`, which
+records on drop. `waitpool::tests::an_abandoned_or_unawaited_wait_is_still_timed_once`
+drops a parked wait after one poll, drops an unawaited registration, and
+serves a third, asserting 1, 2 and 3 observations on the test's thread
+(served counts once, not again at drop); reverted to record-after-await,
+the aborted wait records 0. `http::images::tests::an_abandoned_derive_permit_wait_is_still_timed`
+parks a derive behind a full pool and drops it, asserting one observation;
+reverted, 0.
+"""
