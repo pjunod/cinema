@@ -522,6 +522,20 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
+        method: "enqueue_or_promote_subtitle_source",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "claim_analysis_request_foreground",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
         method: "enqueue_analysis_request",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -1015,6 +1029,7 @@ mod tests {
         ),
         ("coordination.rs", include_str!("sqlite/coordination.rs")),
         ("dv_conversion.rs", include_str!("sqlite/dv_conversion.rs")),
+        ("file_grants.rs", include_str!("sqlite/file_grants.rs")),
         ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
         (
             "fragment_index_cluster.rs",
@@ -1190,8 +1205,11 @@ mod tests {
         // because the count is the authorization for the delete. Registering
         // it is this commit's whole change to this list; M3 added the
         // boundary and left it unnamed.
+        // 100 with subtitle-source enqueue and foreground claim. The enqueue
+        // joins or promotes before inserting; the claim writes its attempt
+        // row only when it wins the conditional request update.
         //
-        // 99 with K-05's `with_read_txn`: a read-pool helper that holds one
+        // 101 with K-05's `with_read_txn`: a read-pool helper that holds one
         // `BEGIN DEFERRED` across a closure's statements so a library page
         // and its count come from one snapshot. It reads only; M1 added the
         // boundary and this registers it.
@@ -1200,7 +1218,7 @@ mod tests {
         // transaction boundary has to be a deliberate edit here. That is the
         // point of the assertion: two of the sites above reached main without
         // one, and ten more did before this correction.
-        assert_eq!(methods.len(), 99);
+        assert_eq!(methods.len(), 101);
     }
 
     #[test]

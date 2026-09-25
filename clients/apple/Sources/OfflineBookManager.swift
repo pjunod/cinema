@@ -312,7 +312,7 @@ final class OfflineBookManager: ObservableObject {
 
     func syncPendingProgress() async {
         guard let instance = settings.instanceId, let user = settings.userId,
-              !settings.origin.isEmpty, Session.shared.token != nil else { return }
+              !settings.origin.isEmpty, Session.shared.credentials.token != nil else { return }
         let pending = await catalog.newestPending(serverInstanceId: instance, userId: user)
         let api = PlurxAPI(origin: settings.origin)
         for snapshot in pending {

@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -285,6 +286,7 @@ data class LiveTvStarted(
     val channel: LiveTvChannel,
     val live: Boolean = false,
     val delivery: LiveTvDelivery? = null,
+    val playlist_url: String,
 )
 
 @Serializable
@@ -359,6 +361,10 @@ data class LiveTvGuideReadiness(
  * a refusal minted outside the Live TV module, which is itself the fact that
  * matters.
  */
+data class LiveTvWatchable(val channelId: String, val guideNumber: String) {
+    val offer: String get() = "Watch $guideNumber instead"
+}
+
 class LiveTvFailure(
     val code: String,
     val retry: String? = null,
@@ -370,7 +376,10 @@ class LiveTvFailure(
      * is a server that got as far as trying.
      */
     val status: Int? = null,
-) : Exception(liveTvMessage(code))
+    val watchable: List<LiveTvWatchable> = emptyList(),
+) : Exception(liveTvMessage(code) + if (code == "tuner_capacity" && watchable.isNotEmpty()) {
+    " " + watchable.joinToString(" · ") { it.offer } + "."
+} else "")
 
 /**
  * The copy this client has of its own, or null. Null is a real answer: it is
@@ -427,6 +436,15 @@ internal fun liveTvTypedFailure(body: String, status: Int, starting: Boolean): L
         retry = if (code == null) null else field("retry")?.contentOrNull,
         ownerDecided = if (code == null) null else field("owner_decided")?.booleanOrNull,
         status = status,
+        watchable = if (code == "tuner_capacity") {
+            runCatching { envelope?.get("watchable")?.jsonArray }.getOrNull()
+                ?.mapNotNull { entry ->
+                    val row = entry as? JsonObject ?: return@mapNotNull null
+                    val id = runCatching { row["channel_id"]?.jsonPrimitive?.contentOrNull }.getOrNull()
+                    val number = runCatching { row["guide_number"]?.jsonPrimitive?.contentOrNull }.getOrNull()
+                    if (id.isNullOrBlank() || number.isNullOrBlank()) null else LiveTvWatchable(id, number)
+                }?.distinctBy { it.channelId } ?: emptyList()
+        } else emptyList(),
     )
 }
 
@@ -529,6 +547,32 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
     internal fun playlistUrl(capability: String): String {
         if (capability.isEmpty() || capability.length > 1024) throw LiveTvFailure("no_answer")
         return url("live-tv", "sessions", capability, "index.m3u8").toString()
+    }
+
+    /**
+     * The activation chooses the playable playlist. M4 returns a master
+     * playlist with caption renditions. A legacy resume may still return the
+     * media playlist; promote it to the same capability's master so resumed
+     * playback retains captions. Keep it on this origin and exact session path.
+     */
+    internal fun playbackUrl(started: LiveTvStarted): String {
+        val capability = started.session_id
+        if (capability.isEmpty() || capability.length > 1024) throw LiveTvFailure("no_answer")
+        val master = url("live-tv", "sessions", capability, "master.m3u8")
+        val index = url("live-tv", "sessions", capability, "index.m3u8")
+        return when (started.playlist_url) {
+            master.encodedPath -> master.toString()
+            index.encodedPath -> master.toString()
+            else -> throw LiveTvFailure("no_answer")
+        }
+    }
+
+    /** Probe the media playlist for liveness before rewinding a live decoder. */
+    internal suspend fun playlistIsLive(capability: String): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val probe = Request.Builder().url(playlistUrl(capability)).head().build()
+            mediaClient.newCall(probe).execute().use { it.code == 200 }
+        }.getOrDefault(false)
     }
 
     private suspend fun request(

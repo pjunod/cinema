@@ -1153,13 +1153,14 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             ),
         )
         self.assertEqual(replicated.count("TransactionShape::WriteReadBack"), 2)
-        # 98 includes seven recording-event boundaries, subject_write, two
+        # 101 includes seven recording-event boundaries, subject_write, two
         # content-analysis repair boundaries added to the previous 87, and
-        # C-04's `delete_token_by_prefix_for_user`; 99 adds K-05's read-only
+        # C-04's `delete_token_by_prefix_for_user`, plus subtitle-source
+        # enqueue and foreground claim; 101 adds K-05's read-only
         # `with_read_txn` snapshot. Each is explicitly classified in
         # replicated.rs; its census assertion remains a deliberate count
         # rather than a value derived from the same table.
-        self.assertIn("assert_eq!(methods.len(), 99);", replicated)
+        self.assertIn("assert_eq!(methods.len(), 101);", replicated)
 
         # The shape records a real difference between the backends rather than
         # a promise about future work: the replicated twin cannot hold it, and

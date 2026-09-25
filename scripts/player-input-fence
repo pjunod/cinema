@@ -53,7 +53,9 @@ WHOLE_FILE_ALLOWLIST = {
 # and one file, so a NEW token in the same file still fails.
 TOKEN_FILE_ALLOWLIST = {
     ("MPRemoteCommandCenter", Path("clients/apple/Sources/PlayerController.swift")):
-        "The media-remote commands are installed here and routed through PlayerInputRouting.",
+        "The finite-media commands are installed here and routed through PlayerInputRouting.",
+    ("MPRemoteCommandCenter", Path("clients/apple/Sources/RemoteCommandOwner.swift")):
+        "LiveRemoteCommands owns the live stacks' targets and checks RemoteCommandOwner before dispatch.",
 }
 
 # The web app is several independent applications (docs/clients/WEB-SHELL-LAYOUT.md).

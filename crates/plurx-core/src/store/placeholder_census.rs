@@ -91,6 +91,7 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
     ),
     ("coordination.rs", include_str!("sqlite/coordination.rs")),
     ("dv_conversion.rs", include_str!("sqlite/dv_conversion.rs")),
+    ("file_grants.rs", include_str!("sqlite/file_grants.rs")),
     ("dvr.rs", include_str!("sqlite/dvr.rs")),
     ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
     (
@@ -849,7 +850,8 @@ fn is_sqlite_candidate(text: &str) -> bool {
 /// main contributed (field order, luminance) and this one are the whole
 /// difference between the pre-merge sets; no other literal changed shape.
 ///
-/// 93 -> 95 on K-05's branch, re-measured site by site against `origin/main`
+/// +2 on K-05's branch (93 -> 95 before main's two subtitle-source sites
+/// below, so 97 with them), re-measured site by site against `origin/main`
 /// (the census printed every unchecked literal on both trees): the query-plan
 /// capture needs each hot statement's SQL in a binding it can hand to
 /// `trace_statement` before running it, which takes three statements that
@@ -860,7 +862,10 @@ fn is_sqlite_candidate(text: &str) -> bool {
 /// left the directory for `sql_source` and takes its unchecked site with it.
 /// Each of the three runs in the SQLite contracts, where rusqlite refuses a
 /// wrong parameter count at run time.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 95;
+// Subtitle-source discovery prepares its shared candidate query before the
+// `query_map` binding, and ready retirement composes its shared
+// uncovered-ordinal predicate before binding in the next statement.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 97;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

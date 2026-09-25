@@ -50,9 +50,6 @@ version = 1
 "fallBackToInPlaceReplacement::self.viewerActionEpoch == actionEpoch" = 1
 "isCurrentLifecycle::lifecycleGeneration == generation" = 1
 "isSuperseded::generation != openGeneration" = 1
-"issueSeek::actionEpoch == viewerActionEpoch" = 4
-"issueSeek::generation == seekState.generation" = 4
-"issueSeek::openGeneration == itemGeneration" = 2
 "load::initialDecisionGeneration == generation" = 3
 "offerPreparedQualityChange::self.viewerActionEpoch != actionEpoch" = 1
 "reconcileNativeMediaSelections::actionEpoch != viewerActionEpoch" = 1
@@ -79,7 +76,6 @@ version = 1
 "startResumePresentationMonitor::attempt.attachmentGeneration == self.openGeneration" = 1
 "startResumePresentationMonitor::self.lifecycleGeneration == attempt.lifecycleGeneration" = 1
 "startResumePresentationMonitor::self.viewerActionEpoch == attempt.viewerActionEpoch" = 1
-"startStatusPolling::self.openGeneration == generation" = 1
 "updatePGSOverlaySelection::self.pgsOverlaySelectionGeneration == selectionGeneration" = 3
 
 [fences]
@@ -87,3 +83,8 @@ seekPresentationDeadline = { function = "beginSeekPresentationMonitor", scopes =
 blackFrameDecodeFailure = { function = "makePeriodicPlaybackObservation", scopes = ["lifecycle", "viewerAction"] }
 stallRecovery = { function = "retrySameDeliveryAfterStall", scopes = ["open", "viewerAction"] }
 itemFailureLadder = { function = "handleItemFailure", scopes = ["open", "viewerAction"] }
+seekIntent = { function = "issueSeek", scopes = ["viewerAction", "seek"] }
+seekIntentAfterControl = { function = "issueSeek", scopes = ["viewerAction", "seek"] }
+nativeSeekCompletion = { function = "issueSeek", scopes = ["open", "viewerAction", "seek"] }
+nativeSeekAfterSelection = { function = "issueSeek", scopes = ["open", "viewerAction", "seek"] }
+recoveryEvidencePoll = { function = "startRecoveryEvidencePoll", scopes = ["open"] }

@@ -2014,7 +2014,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # owns a process, a recipe or a recovery decision. Seven are test fixtures:
 # four `spawn_blocking` calls that run a finite FFmpeg encode or remux to
 # completion, and three request senders joined before their tests end.
-expected_occurrences = 600
+# 600 -> 610: K-09 adds six joined subtitle extraction, verification and
+# test tasks. The architecture-review build adds four: the bounded boot-only
+# caption probes and shutdown-bound file-grant pruning loop. None elects a
+# rolling producer or outlives its request or queue owner.
+expected_occurrences = 610
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2731,7 +2735,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # playback-progress watchdog or chooses a recipe. The other ten are test-only
 # and awaited: the receiver tests' sleeps and timeouts, and in `copyseg.rs`
 # the bounded grant-wait and starvation-signal checks.
-expected_occurrences = 921
+# 921 -> 937: K-09 adds 15 bounded worker, consumer and test waits for one
+# leased source publication. `file_grants::prune_loop` adds one daily interval
+# with a shutdown-token exit. None chooses a playback recipe or retry.
+expected_occurrences = 937
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2956,7 +2963,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # through the upload endpoint, so the tests can compare the objects byte for
 # byte. Each runs to completion inside `spawn_blocking` before its fixture is
 # dropped.
-expected_occurrences = 163
+# 163 -> 171 with K-09. The leased no-index source worker creates one FFmpeg
+# process, owns its stderr drain and explicit kill/reap on loss, timeout, and
+# preemption. One local ffprobe validates a newly produced Matroska subtitle
+# before publication. Six further commands are finite test fixtures: source
+# mux/probe, direct tee comparison, ASS filter/render checks, and a missing
+# subtitle source. None owns playback's rolling process or retry policy.
+expected_occurrences = 171
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3304,7 +3317,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 372 -> 374: the `.status()` on those two test-only FFmpeg commands,
 # inventoried under `process-command-construction` above. Same children,
 # counted once in each sentinel.
-expected_occurrences = 374
+# 374 -> 380: K-09 adds four bounded Matroska probe or render `.output()`
+# calls and one HLS fixture `Response::status()` assertion. The book-content
+# handler adds one `Response::status()` read for inline range headers; neither
+# response-status read launches a process.
+expected_occurrences = 380
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3420,7 +3437,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # `std::sync::Barrier::wait` calls in `live_tv::dvr::tests`
 # (`retirement_is_atomic_against_a_consumer_attaching` lines its two threads
 # up each round). The pattern matches the method name; neither is a process.
-expected_occurrences = 381
+# 381 -> 388 with K-09's leased no-index FFmpeg source worker. Its normal
+# path awaits the child; cancellation, deadline, and foreground preemption
+# each kill and then reap that same child before releasing the claim. These
+# seven calls add no second process owner or rolling recovery decision.
+expected_occurrences = 388
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -3547,7 +3568,10 @@ pattern = "kill_on_drop\\s*\\("
 # of one that exits before registration). Once per host, `kill_on_drop`,
 # bounded by a 120 s `tokio::time::timeout`, awaited to completion through
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
-expected_occurrences = 85
+# 85 -> 86 with K-09's leased no-index FFmpeg source pass. Kill-on-drop is
+# the cancellation backstop; the worker explicitly awaits ordinary exit and
+# kills/reaps on loss, deadline, or foreground preemption.
+expected_occurrences = 86
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
