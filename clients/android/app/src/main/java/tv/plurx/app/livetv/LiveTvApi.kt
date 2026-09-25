@@ -286,6 +286,7 @@ data class LiveTvStarted(
     val channel: LiveTvChannel,
     val live: Boolean = false,
     val delivery: LiveTvDelivery? = null,
+    val playlist_url: String,
 )
 
 @Serializable
@@ -548,7 +549,25 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
         return url("live-tv", "sessions", capability, "index.m3u8").toString()
     }
 
-    /** Probe the same capability playlist before rewinding a live decoder. */
+    /**
+     * The activation chooses the playable playlist. M4 returns a master
+     * playlist with caption renditions. A legacy resume may still return the
+     * media playlist; promote it to the same capability's master so resumed
+     * playback retains captions. Keep it on this origin and exact session path.
+     */
+    internal fun playbackUrl(started: LiveTvStarted): String {
+        val capability = started.session_id
+        if (capability.isEmpty() || capability.length > 1024) throw LiveTvFailure("no_answer")
+        val master = url("live-tv", "sessions", capability, "master.m3u8")
+        val index = url("live-tv", "sessions", capability, "index.m3u8")
+        return when (started.playlist_url) {
+            master.encodedPath -> master.toString()
+            index.encodedPath -> master.toString()
+            else -> throw LiveTvFailure("no_answer")
+        }
+    }
+
+    /** Probe the media playlist for liveness before rewinding a live decoder. */
     internal suspend fun playlistIsLive(capability: String): Boolean = withContext(Dispatchers.IO) {
         runCatching {
             val probe = Request.Builder().url(playlistUrl(capability)).head().build()

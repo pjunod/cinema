@@ -509,7 +509,8 @@ class LiveTvStartCasesTest {
         override suspend fun start(channel: String, requestId: String): LiveTvStarted {
             events += "start:$channel:$requestId"
             error?.let { throw it() }
-            return LiveTvStarted("cap-$channel", this@LiveTvStartCasesTest.channel, live = true)
+            return LiveTvStarted("cap-$channel", this@LiveTvStartCasesTest.channel, live = true,
+                playlist_url = "/api/v1/live-tv/sessions/cap-$channel/master.m3u8")
         }
         override suspend fun release(capability: String) { events += "release:$capability" }
         override suspend fun retire(requestId: String) {

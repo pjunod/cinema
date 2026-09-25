@@ -48,11 +48,16 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
                     role in setOf(PlayerRole.Finite, PlayerRole.Successor) &&
                         isTelevision(this@PlurxPlayerBuilder.context),
                 )
-                // The server owns subtitle selection; a language preference must
-                // not re-enable a text rendition it deliberately left disabled.
-                .setPreferredTextLanguage(null)
-                .setSelectUndeterminedTextLanguage(false)
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                .apply {
+                    // Controller-managed playback owns subtitle selection.
+                    // Live TV, library channels and offline HLS need Media3 to
+                    // discover and render the text renditions in their playlists.
+                    if (role in setOf(PlayerRole.Finite, PlayerRole.Successor, PlayerRole.Audio)) {
+                        setPreferredTextLanguage(null)
+                        setSelectUndeterminedTextLanguage(false)
+                        setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                    }
+                }
                 .build()
         }
         val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
