@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** fast-lane #2944 web contract repaired locally; fresh gate pending · **Updated:** 2026-09-25 03:40 UTC · **Base:** `dafadf043`
+**Status:** file-grant Rust contracts repaired locally; fresh fast lane pending · **Updated:** 2026-09-25 04:13 UTC · **Base:** `dafadf043`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -38,7 +38,7 @@ corrected at `cf5a74a61`, `9301cae1c`, and `39e40d10d`, with their focused
 checks green. New main `dafadf043` was merged into the PR at `47338f39d`;
 its one conflict retained both client-anchor rows. The current-main merged tree passed pinned Rust check and Clippy, iOS/tvOS
 application build, Android app/test-source compilation, and 95 focused
-operations and ownership tests. Its final `make history-check` passed before fast-lane #2944. That gate passed all 505 Linux operations checks, then stopped on a web policy source assertion that still looked inside `play()` after the 5.5 split. Commit `9bf0425f9` follows the shipped `play()` → `presentPlayerChrome()` wiring; the focused web policy suite passed locally. A fresh gate is pending.
+operations and ownership tests. Its final `make history-check` passed before fast-lane #2944. That gate passed all 505 Linux operations checks, then stopped on a web policy source assertion that still looked inside `play()` after the 5.5 split. Commit `9bf0425f9` follows the shipped `play()` → `presentPlayerChrome()` wiring; the focused web policy suite passed locally. Fast-lane #2951 passed policy, Apple, Android, Windows, and web jobs. Its Rust lane passed compilation and Clippy, then reported five file-grant migration/source inventory drifts and two unchanged timing-sensitive tests. `0a774e5ec` updates the schema, all named inventories and rollback fixtures, including the missing v45→v46 migration admission; six focused pinned Rust tests and formatting passed. `dfac3e62e` removes trailing Kotlin whitespace. The two timing-sensitive tests predate this PR and are assigned to the separate unit-failure batch. A fresh fast lane is pending.
 
 ## Current impediments
 
