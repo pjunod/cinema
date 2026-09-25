@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — main advanced through #519/#522 while the 415eb fleet rollout was running; follow-up integrated new main · **Updated:** 2026-09-25 16:58 UTC · **Main:** `60f3803d1`
+**Status:** open — main advanced through #519/#522 while the 415eb fleet rollout was running; follow-up integrated new main · **Updated:** 2026-09-25 16:52 UTC · **Main:** `60f3803d1`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
