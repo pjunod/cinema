@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — PR #516 in draft; three voters on current main, learner rejoin pending · **Updated:** 2026-09-25 13:52 UTC · **Main:** `b47c5ff88`
+**Status:** open — PR #516 in draft; three voters on current main, learner rejoin pending · **Updated:** 2026-09-25 14:04 UTC · **Main:** `b47c5ff88`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -46,7 +46,7 @@ PR #512 records the rollout and baselines and repairs the caption-audit wrapper.
 
 ## Batched follow-up PR
 
-[Draft PR #516](http://192.168.4.7:3000/noirr/plurx/pulls/516) batches the current-main fleet/device evidence and the corrected A-04 browser harness. Commits `196997b65` and `781223a21` provide independent two-cliff shaping/scoring and reject fixtures too short for both windows. The exploratory exact-main Chrome trace held 8→1.1 Mb/s for 75 seconds and 1.1→350 kb/s for 75 seconds; both stages applied, but the first failed recovery and the second began from a degraded baseline. Raw SHA-256 `c0e11b12365bcc3276fa98a738ad148f0574797b0b4974ae961262e9e7701509`; normalized SHA-256 `064ec0f75824730666cc29b6cdd8476d2a8a6c421aa044c08bcefef3bb783ba1`. The one adversarial review has not yet run. The fast lane follows that review and its fixes, immediately before merge.
+[Draft PR #516](http://192.168.4.7:3000/noirr/plurx/pulls/516) batches the current-main fleet/device evidence and the corrected A-04 browser harness. Commits `196997b65` and `781223a21` provide independent two-cliff shaping/scoring and reject fixtures too short for both windows. The exploratory exact-main Chrome trace held 8→1.1 Mb/s for 75 seconds and 1.1→350 kb/s for 75 seconds; both stages applied, but the first failed recovery and the second began from a degraded baseline. Raw SHA-256 `c0e11b12365bcc3276fa98a738ad148f0574797b0b4974ae961262e9e7701509`; normalized SHA-256 `064ec0f75824730666cc29b6cdd8476d2a8a6c421aa044c08bcefef3bb783ba1`. The sole adversarial review of PR #516 found one P2: early first-window stalls could depress the whole-window average used as the second-cliff baseline. Commit `df98c440d` now uses a sampled, sustained 10-second tail immediately before cliff two and adds a regression where early impairment clears before a healthy second recovery. The fast lane follows this fix, immediately before merge.
 
 ## Current impediments
 
