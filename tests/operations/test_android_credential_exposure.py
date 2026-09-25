@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import runpy
 import stat
 import subprocess
 import tempfile
@@ -691,6 +692,28 @@ class ShipPhysicalReleaseVariantCase(unittest.TestCase):
         self.assertIn("signing lineage was not accepted", message)
         self.assertIn("keeping the existing install and app data", message)
         self.assertNotIn(" uninstall ", message)
+
+
+class AndroidLineageCapabilityCase(unittest.TestCase):
+    """A rotated APK must keep the installed app's data capability."""
+
+    def test_old_signer_without_installed_data_is_rejected(self) -> None:
+        helper = runpy.run_path(str(ROOT / "scripts/sign-android-release"))
+        validate = helper["validate_lineage"]
+        old = helper["OLD_CERT_SHA256"]
+        new = "a" * 64
+        report = (
+            "Signer #1 in lineage certificate DN: Old\n"
+            f"Signer #1 in lineage certificate SHA-256 digest: {old}\n"
+            "Has installed data capability: false\n"
+            "Has rollback capability: false\n"
+            "Signer #2 in lineage certificate DN: New\n"
+            f"Signer #2 in lineage certificate SHA-256 digest: {new}\n"
+            "Has installed data capability: true\n"
+        )
+        validate.__globals__["run"] = lambda *args, **kwargs: report.encode()
+        with self.assertRaisesRegex(SystemExit, "cannot preserve installed data"):
+            validate("apksigner", Path("lineage.bin"), new)
 
 
 if __name__ == "__main__":
