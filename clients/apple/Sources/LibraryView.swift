@@ -81,6 +81,7 @@ struct LibraryView: View {
                      : "\(loadedCount) of \(total) loaded · \(visibleItems.count) match")
                     .font(.system(.subheadline, design: .monospaced))
                     .foregroundColor(Palette.muted)
+                    .accessibilityIdentifier("library-loaded-summary")
                 if collection.libraries.count > 1 {
                     Text(collection.libraries.map(\.name).joined(separator: ", "))
                         .font(.caption)
