@@ -262,3 +262,9 @@ Each tuner request completed; temporary TS samples were removed. No browser or s
 The serial `415eb047f` play exited zero, but an independent post-run sample immediately found another rollout already changing the three voters. `nynuc` had checkout and running OCI `60f3803d1` and was healthy; `m6` had checkout `60f3803d1` while its prior OCI remained `415eb047f` and its container was unhealthy, with localhost `:32400` refusing connections; `nuc4` was healthy on `3ca348a77`. The mixed sample receipt SHA-256 is `72dc64d095ce109017e6576b941dbd63f5abfc2c9976f42752821e996502b601`. A separate compose build for `60f3803d1` was observed active on m6.
 
 The GPT rollout stopped new mutations and is identifying that controller while checking quorum. This is a transient observation, not a completed deployment or acceptance receipt. No new four-node duration collector starts from this mixed interval.
+
+## Concurrent controller contained — 17:00 UTC
+
+Read-only process inspection traced the overlapping `deploy.yml` controller to a detached Ansible process on nuc3 that started at 16:44:25 UTC. Its inventory included nuc3 and had no host limit; after nuc4 it would have attempted to start the quarantined learner with its preserved stale WAL. The controller PID was checked to be Ansible and sent `SIGSTOP` before it advanced to nuc3. No learner data was changed by this intervention. The separate `nuc4` build and its health are being observed independently; this paused controller must not be resumed into the all-host play.
+
+`m6` recovered at 16:57:17 UTC with checkout and OCI `60f3803d1`, zero restarts and `/readyz` 200. During its build, `nynuc` and `nuc4` each exposed 2 fresh / 1 stale voters with quorum available, known leader and zero apply lag. That is an incident interval, not uniform-build duration evidence.
