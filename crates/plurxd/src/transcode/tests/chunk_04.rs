@@ -19,7 +19,7 @@
 
         let active = evaluate_flow(FlowInputs {
             physical_ahead: Some(physical),
-            published_end_ms: Some(80_000),
+            produced_end_ms: Some(80_000),
             staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
@@ -27,6 +27,7 @@
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 1_000,
             global_ahead_bytes: 1_000,
             limits,
@@ -41,7 +42,7 @@
         demand.playback_rate = 2.0;
         let faster = evaluate_flow(FlowInputs {
             physical_ahead: Some(physical),
-            published_end_ms: Some(80_000),
+            produced_end_ms: Some(80_000),
             staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
@@ -49,6 +50,7 @@
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 1_000,
             global_ahead_bytes: 1_000,
             limits,
@@ -68,7 +70,7 @@
                 seconds: 0,
                 bytes: 2_001,
             }),
-            published_end_ms: Some(120_000),
+            produced_end_ms: Some(120_000),
             staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
@@ -76,6 +78,7 @@
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 1_000,
             global_ahead_bytes: 1_000,
             limits,
@@ -93,7 +96,7 @@
                 seconds: 10_000,
                 bytes: 0,
             }),
-            published_end_ms: Some(10_000_000),
+            produced_end_ms: Some(10_000_000),
             staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
@@ -101,6 +104,7 @@
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 0,
             global_ahead_bytes: 0,
             limits: AheadLimits {
@@ -151,12 +155,13 @@
                         published_end_ms| {
             evaluate_flow(FlowInputs {
                 physical_ahead: None,
-                published_end_ms,
+                produced_end_ms: published_end_ms,
                 staged_publication_seconds: None,
                 startup_protected: true,
                 media_origin_ms,
                 lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
                 demand: Some(demand),
+                demand_observation_age: None,
                 global_live_bytes: 0,
                 global_ahead_bytes: 0,
                 limits,
@@ -173,12 +178,13 @@
                     seconds: published_end_ms / 1_000,
                     bytes: 0,
                 }),
-                published_end_ms: Some(published_end_ms),
+                produced_end_ms: Some(published_end_ms),
                 staged_publication_seconds: None,
                 startup_protected: true,
                 media_origin_ms,
                 lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
                 demand: Some(demand),
+                demand_observation_age: None,
                 global_live_bytes: 0,
                 global_ahead_bytes: 0,
                 limits,
@@ -258,12 +264,13 @@
                 seconds: 2,
                 bytes: limits.max_bytes + 1,
             }),
-            published_end_ms: Some(2_000),
+            produced_end_ms: Some(2_000),
             staged_publication_seconds: None,
             startup_protected: true,
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 0,
             global_ahead_bytes: 0,
             limits,
@@ -280,12 +287,13 @@
         // must not hand startup protection back.
         let retried = evaluate_flow(FlowInputs {
             physical_ahead: None,
-            published_end_ms: None,
+            produced_end_ms: None,
             staged_publication_seconds: None,
             startup_protected: false,
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 0,
             global_ahead_bytes: 0,
             limits,
@@ -303,12 +311,13 @@
         // when a row of paused clients could otherwise fill a full disk.
         let full_disk = evaluate_flow(FlowInputs {
             physical_ahead: None,
-            published_end_ms: None,
+            produced_end_ms: None,
             staged_publication_seconds: None,
             startup_protected: true,
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 9_000,
             global_ahead_bytes: 9_000,
             limits,
@@ -353,7 +362,7 @@
                 seconds: 10,
                 bytes: 0,
             }),
-            published_end_ms: Some(65_000),
+            produced_end_ms: Some(65_000),
             staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
@@ -361,6 +370,7 @@
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 0,
             global_ahead_bytes: 0,
             limits,

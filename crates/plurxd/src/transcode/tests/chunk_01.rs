@@ -1278,17 +1278,20 @@
         )
         .await;
         let client = uuid::Uuid::new_v4().to_string();
-        let request = |sequence, demand| {
+        let request = |sequence, demand, position_ms: i64| {
             let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
                 crate::playback_control::ClientPlatform::Web,
             );
             snapshot.demand = demand;
-            // The started fixture has produced 64 s and published 48 s. A
-            // viewer at the start of that window already has what the next
-            // publication needs, so once it turns active the producer is
-            // time-paced rather than released to produce for it.
-            snapshot.position_ms = 0;
-            snapshot.buffered_from_ms = Some(0);
+            // The started fixture has produced 64 s and published 48 s, one
+            // whole batch staged. Held on time additionally requires the
+            // producer to have reached what the next publication will ask
+            // for: the clock's desired end (position + 48 s initial runway)
+            // plus the 10 s guard, capped at its allowed end (+64 s). From
+            // position 0 that is 58 s, which 64 s of produced media covers;
+            // from position 10 s it is 68 s, which it does not.
+            snapshot.position_ms = position_ms;
+            snapshot.buffered_from_ms = Some(position_ms);
             if demand != crate::playback_control::PlaybackDemand::Active {
                 snapshot.playback_rate = 0.0;
                 snapshot.render_state = crate::playback_control::RenderState::Waiting;
@@ -1309,7 +1312,11 @@
         let hold = fixture
             .state
             .transcode
-            .hls_session_control(request(1, crate::playback_control::PlaybackDemand::Hold))
+            .hls_session_control(request(
+                1,
+                crate::playback_control::PlaybackDemand::Hold,
+                0,
+            ))
             .await
             .expect("local worker")
             .expect("hold accepted");
@@ -1329,7 +1336,11 @@
         let active = fixture
             .state
             .transcode
-            .hls_session_control(request(2, crate::playback_control::PlaybackDemand::Active))
+            .hls_session_control(request(
+                2,
+                crate::playback_control::PlaybackDemand::Active,
+                0,
+            ))
             .await
             .expect("local worker")
             .expect("active accepted");
@@ -1386,6 +1397,56 @@
         assert_eq!(extra["production_policy"], "explicit_demand");
         assert_eq!(extra["production_target_seconds"], 0);
         assert_eq!(extra["producer_control"]["observation_only"], true);
+
+        // The same staged batch no longer holds a viewer ten seconds further
+        // on: the next publication needs media the producer has not made yet,
+        // so active demand resumes it instead of trapping publication at one
+        // segment per cycle.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let behind = fixture
+            .state
+            .transcode
+            .hls_session_control(request(
+                3,
+                crate::playback_control::PlaybackDemand::Active,
+                10_000,
+            ))
+            .await
+            .expect("local worker")
+            .expect("active accepted");
+        let HlsSessionInfo::Live(behind_status) = behind.status else {
+            panic!("rolling active returned VOD status");
+        };
+        assert!(
+            !behind_status.suspended,
+            "a producer short of the next publication must resume"
+        );
+        assert_eq!(behind_status.hold_reason, None);
+        assert_eq!(behind_status.control_demand, Some("active"));
+        let events = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = fixture
+                    .store
+                    .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                        event: None,
+                        limit: 20,
+                        ..plurx_core::domain::PlaybackEventQuery::default()
+                    })
+                    .await
+                    .expect("flow events");
+                if events.iter().any(|event| event.event == "resume") {
+                    return events;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("resume event persisted");
+        let resume = events
+            .iter()
+            .find(|event| event.event == "resume")
+            .expect("resume event");
+        assert_eq!(resume.hold_reason.as_deref(), Some("time"));
     }
 
     #[tokio::test]
