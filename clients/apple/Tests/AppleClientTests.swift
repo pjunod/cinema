@@ -7108,15 +7108,15 @@ final class AppleClientTests: XCTestCase {
     func testPlaybackQualityChoicesMatchTheAndroidClientAndSpellTheDecisionOverride() {
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.rawValue),
-            ["auto", "original", "2160", "1440", "1080", "720", "480", "360"]
+            ["auto", "original", "2160", "1440", "1080", "720", "480", "360", "240", "144"]
         )
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.label),
-            ["Auto", "Original", "4K · 2160p", "1440p", "1080p", "720p", "480p", "360p"]
+            ["Auto", "Original", "4K · 2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p"]
         )
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.rungHeight),
-            [nil, nil, 2_160, 1_440, 1_080, 720, 480, 360]
+            [nil, nil, 2_160, 1_440, 1_080, 720, 480, 360, 240, 144]
         )
 
         XCTAssertNil(PlaybackQuality.auto.decisionForce)

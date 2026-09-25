@@ -308,7 +308,7 @@ const AUTO_SOFTWARE_HEIGHT: i64 = 720;
 /// sources may follow validated hardware encoders to [`MAX_HEIGHT`].
 const AUTO_HARDWARE_PROBED_HEIGHT: i64 = 1080;
 /// Floor for any requested rung. Below this there is no picture worth the
-/// session; the adaptive ladder itself bottoms out at 360p.
+/// session; the adaptive ladder itself bottoms out here.
 pub const MIN_HEIGHT: i64 = 144;
 /// Ceiling for any requested or resolved rung. Hardware-backed SDR Auto and
 /// explicit quality/source promises may reach it.
@@ -28111,7 +28111,9 @@ fn bitrate_for_height(height: i64) -> u32 {
         h if h >= 1080 => 8_000,
         h if h >= 720 => 4_000,
         h if h >= 480 => 2_000,
-        _ => 1_200,
+        h if h >= 360 => 1_200,
+        h if h >= 240 => 500,
+        _ => 100,
     }
 }
 
@@ -28231,7 +28233,7 @@ fn hdr10_rung_fits(
 /// this lower ladder at 1080. Keeping that top rung out of this shared list
 /// prevents the decision and offline APIs from offering it before a live
 /// session has resolved the node's encoder and pipeline capability.
-pub const LADDER_HEIGHTS: [i64; 4] = [360, 480, 720, 1080];
+pub const LADDER_HEIGHTS: [i64; 6] = [144, 240, 360, 480, 720, 1080];
 
 /// Resolve exactly one step below a session's already-normalized height.
 /// Heights between published rungs land on the next lower rung; a session
@@ -28240,13 +28242,9 @@ pub const LADDER_HEIGHTS: [i64; 4] = [360, 480, 720, 1080];
 /// a new server error path.
 ///
 /// The floor is `current`, never `LADDER_HEIGHTS[0]`. An Auto session's
-/// resolved rung is not ladder-constrained below 360: `auto_height` follows a
-/// sub-360 source, and `auto_height_from_prior` settles at [`MIN_HEIGHT`] on
-/// exactly the starved links that stall and reopen. Answering those with 360
-/// would step the viewer *up* — onto a rung the server's own stored verdict
-/// recorded as starving — and would promise a rung a sub-360 source cannot
-/// feed, which is the advertised-vs-delivered defect `auto_height` already
-/// fixed once.
+/// resolved rung can be below the ladder floor for a very small source or an
+/// unprobed predecessor. Answering those with a larger rung would step the
+/// viewer *up* and promise geometry the source cannot feed.
 fn one_rung_below(current: i64) -> i64 {
     LADDER_HEIGHTS
         .iter()

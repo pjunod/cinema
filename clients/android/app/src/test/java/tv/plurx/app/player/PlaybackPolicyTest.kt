@@ -118,6 +118,8 @@ class PlaybackPolicyTest {
             Rung(720, total_kbps = 4_096),
             Rung(480, total_kbps = 2_048),
             Rung(360, total_kbps = 896),
+            Rung(240, total_kbps = 660),
+            Rung(144, total_kbps = 260),
         )
         val options = qualityOptions(ladder)
 
@@ -129,11 +131,15 @@ class PlaybackPolicyTest {
                 PlaybackQuality.Q720,
                 PlaybackQuality.Q480,
                 PlaybackQuality.Q360,
+                PlaybackQuality.Q240,
+                PlaybackQuality.Q144,
             ),
             options.map { it.quality },
         )
         assertEquals("1080p · 8.2 Mbps", options[2].label)
         assertEquals("360p · 896 kbps", options[5].label)
+        assertEquals("240p · 660 kbps", options[6].label)
+        assertEquals("144p · 260 kbps", options[7].label)
     }
 
     @Test

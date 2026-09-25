@@ -14103,7 +14103,7 @@ mod tests {
             .collect();
         assert_eq!(
             heights,
-            vec![720, 480, 360],
+            vec![720, 480, 360, 240, 144],
             "source-filtered, top first: {body}"
         );
         assert_eq!(body["ladder"][0]["total_kbps"], 4_160, "{body}");

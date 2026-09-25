@@ -265,7 +265,9 @@
         assert_eq!(bitrate_for_height(2160), 20_000);
         assert_eq!(bitrate_for_height(1080), 8_000);
         assert_eq!(bitrate_for_height(720), 4_000);
-        assert_eq!(bitrate_for_height(240), 1_200);
+        assert_eq!(bitrate_for_height(360), 1_200);
+        assert_eq!(bitrate_for_height(240), 500);
+        assert_eq!(bitrate_for_height(144), 100);
     }
 
     #[test]
@@ -1367,8 +1369,8 @@
         assert_eq!(snap_height(900), 720, "equidistant resolves DOWN");
         assert_eq!(
             snap_height(144),
-            360,
-            "below the ladder climbs to its floor"
+            144,
+            "the low rung remains available"
         );
         assert_eq!(
             snap_height(1440),
@@ -1386,7 +1388,7 @@
         let full = ladder(Some(2160));
         assert_eq!(
             full.iter().map(|r| r.height).collect::<Vec<_>>(),
-            vec![1080, 720, 480, 360],
+            vec![1080, 720, 480, 360, 240, 144],
             "the shared lower ladder does not promise unresolved 4K output"
         );
         let top = full[0];
@@ -1398,19 +1400,24 @@
                 .iter()
                 .map(|r| r.height)
                 .collect::<Vec<_>>(),
-            vec![720, 480, 360],
+            vec![720, 480, 360, 240, 144],
             "a 720p file offers 720p and below — never an upscale"
         );
-        assert!(
-            ladder(Some(240)).is_empty(),
-            "nothing to offer below the floor"
+        assert_eq!(
+            ladder(Some(240))
+                .iter()
+                .map(|r| (r.height, r.total_kbps, r.peak_kbps))
+                .collect::<Vec<_>>(),
+            vec![(240, 660, 910), (144, 260, 310)],
+            "the low rungs must be encoded and advertised within the two cliff rates"
         );
+        assert!(ladder(Some(120)).is_empty(), "nothing exists below the floor");
         assert_eq!(
             ladder(None).len(),
-            4,
+            6,
             "an unprobed source has nothing to filter by"
         );
-        assert_eq!(ladder(Some(0)).len(), 4, "0 is not a height");
+        assert_eq!(ladder(Some(0)).len(), 6, "0 is not a height");
 
         let live_four_k = advertised_ladder(Some(2160), MAX_HEIGHT);
         assert_eq!(
@@ -1418,7 +1425,7 @@
                 .iter()
                 .map(|rung| rung.height)
                 .collect::<Vec<_>>(),
-            vec![2160, 1080, 720, 480, 360],
+            vec![2160, 1080, 720, 480, 360, 240, 144],
             "a resolved live hardware session may retain 4K"
         );
         assert_eq!(live_four_k[0].total_kbps, 20_160);
@@ -1435,7 +1442,7 @@
                 .iter()
                 .map(|rung| rung.height)
                 .collect::<Vec<_>>(),
-            vec![1080, 720, 480, 360],
+            vec![1080, 720, 480, 360, 240, 144],
             "an unresolved or HDR ceiling must not advertise 4K"
         );
     }

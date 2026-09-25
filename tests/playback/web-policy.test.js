@@ -1670,6 +1670,36 @@ test("a bandwidth cliff drops from 1080p to the sustainable rung in one move", (
   assert.equal(decision.emergency, true);
 });
 
+test("the two measured A-04 cliffs select encoded low rungs without changing thresholds", () => {
+  const ladder = [
+    ...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 },
+  ];
+  const first = policy.decideRung({
+    ladder,
+    currentHeight: 720,
+    estimateKbps: 8_000,
+    recentEstimateKbps: 1_100,
+    recentEstimateAtMs: 9_000,
+    runwaySeconds: 5,
+    nowMs: 10_000,
+  });
+  assert.equal(first.height, 240);
+  assert.equal(first.reason, "bandwidth cliff");
+  const second = policy.decideRung({
+    ladder,
+    currentHeight: 240,
+    estimateKbps: 1_100,
+    recentEstimateKbps: 350,
+    recentEstimateAtMs: 19_000,
+    runwaySeconds: 5,
+    nowMs: 20_000,
+  });
+  assert.equal(second.height, 144);
+  assert.equal(second.reason, "bandwidth cliff");
+});
+
 test("an active supply stall without a completed slow transfer retains quality", () => {
   const decision = policy.decideRung({
     ladder: serverLadder,

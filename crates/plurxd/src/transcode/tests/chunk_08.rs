@@ -1280,21 +1280,19 @@
         }
     }
 
-    /// An Auto session's resolved rung is NOT ladder-constrained below 360:
-    /// `auto_height` follows a sub-360 source, and `auto_height_from_prior`
-    /// settles at `MIN_HEIGHT` on a starved link — which is exactly the
-    /// population that stalls and reopens. The way down must never hand such a
-    /// session a HIGHER rung. Reverting `one_rung_below`'s `unwrap_or(current)`
-    /// to `unwrap_or(LADDER_HEIGHTS[0])` fails every case here.
+    /// A very small source or an unprobed predecessor can resolve below the
+    /// advertised ladder floor. The way down must never hand such a session a
+    /// HIGHER rung. Reverting `one_rung_below`'s `unwrap_or(current)` to
+    /// `unwrap_or(LADDER_HEIGHTS[0])` fails these cases.
     #[tokio::test]
     async fn a_stall_below_the_ladder_floor_never_steps_up() {
         use plurx_core::store::SqliteStore;
 
         // The unit the defect lived in, across the whole sub-floor range.
         assert_eq!(one_rung_below(MIN_HEIGHT), MIN_HEIGHT);
-        assert_eq!(one_rung_below(240), 240);
-        assert_eq!(one_rung_below(288), 288);
-        assert_eq!(one_rung_below(360), 360);
+        assert_eq!(one_rung_below(240), MIN_HEIGHT);
+        assert_eq!(one_rung_below(288), 240);
+        assert_eq!(one_rung_below(360), 240);
         assert_eq!(one_rung_below(480), 360, "an on-ladder step still steps");
         assert_eq!(
             one_rung_below(2160),
@@ -1315,7 +1313,8 @@
         );
 
         // 144 is where a starved-rung prior puts a client; 240 is a 240p
-        // source's honest Auto answer. Both used to normalize to 360.
+        // source's honest Auto answer. Neither may normalize upwards, and
+        // a stalled 240p session can now step down to the new 144p rung.
         for (index, height) in [MIN_HEIGHT, 240].into_iter().enumerate() {
             let session_id = format!("sub-floor-{height}");
             let playback_id = format!("sub-floor-player-{height}");
@@ -1343,10 +1342,11 @@
             else {
                 panic!("new request owns its claim")
             };
+            let expected = one_rung_below(height);
             assert_eq!(
                 normalized.kind,
-                SessionKind::Transcode { height },
-                "a {height}p Auto stall reopen must repeat {height}p, not step up to a ladder rung"
+                SessionKind::Transcode { height: expected },
+                "a {height}p Auto stall reopen must step down when possible and never step up"
             );
             assert_eq!(
                 mgr.requests
@@ -1354,7 +1354,7 @@
                     .expect("requests")
                     .get(&attempt)
                     .and_then(|entry| entry.target_height),
-                Some(height),
+                Some(expected),
                 "the persisted target must match the answer the client gets"
             );
             drop(claim);

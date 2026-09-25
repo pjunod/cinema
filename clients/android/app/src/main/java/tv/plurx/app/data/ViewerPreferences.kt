@@ -61,7 +61,9 @@ enum class PlaybackQuality(val storageValue: String, val label: String) {
     Q1080("1080", "1080p"),
     Q720("720", "720p"),
     Q480("480", "480p"),
-    Q360("360", "360p");
+    Q360("360", "360p"),
+    Q240("240", "240p"),
+    Q144("144", "144p");
 
     /** The transcode rung this preference names, or null for Auto/Original. */
     val rungHeight: Int? get() = storageValue.toIntOrNull()
