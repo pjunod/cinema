@@ -183,3 +183,7 @@ The same active 6.1 session on exact running b47 nynuc was checked at three poin
 ## PR #516 focused A-04 validation — 14:18 UTC
 
 During the post-review fast-lane phase, `node --test tests/playback/network-shaping.test.js` first found one stale assertion expecting the old unnumbered cliff error. The test now expects the numbered `cliff 1` fault emitted by the two-cliff scorer. A focused rerun passed all 98 shaping contracts (10.997 seconds); the local log is `/private/tmp/plurx-pr516-network-shaping-final.log`, SHA-256 `3d134c95f02516e06c685ac55eea8899eab4c5ce7641fbd85f7e31b437fca4fd`. The ready PR needs a new exact-head fast lane after this correction.
+
+## Merged-main Apple Release install — 14:51 UTC
+
+An agent-owned exact-source checkout at merge `37baf6e0b509dc7adff882d1a40cc70c8a8538fd` built signed iOS and tvOS Release 0.3.0 build 183. `codesign --verify --deep --strict` passed with Team `YHK542LK23`. Forced CoreDevice install and post-install bundle queries succeeded on 17air, 17promax, Bedroom Apple TV, iPad Pro and iPhone 18 Pro; before/after installation URL hashes changed on all five despite the unchanged build number. 16pro and iPad Mini were unavailable. Sanitized receipt `/Users/pjunod/code/plurx-agent/codex-fleet-observation-20260925/apple-37baf6-20260925/receipt.json` SHA-256 `4d4c9ee5518241b39ab042b7035797cdda6854107b0056489ab30777430040e1`; signed archives and build logs are stored beside it. This is exact-source install evidence, not a controller, paging or caption interaction pass.
