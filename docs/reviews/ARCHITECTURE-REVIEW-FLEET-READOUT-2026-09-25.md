@@ -121,6 +121,12 @@ A locally stamped `plurxd --version` reported `v0.3.0-4072-ge2dfc6b77` before an
 
 The browser `playback-lab run` observer initially applied and scored only its first cliff. Commit `36b8f06a5` first made it refuse unsupported multistage browser profiles. Draft PR #516 commits `196997b65` and `781223a21` now apply and score both 75-second cliffs and reject a source shorter than the 177-second two-window minimum. An exploratory Chrome run against exact-main `e2dfc6b77` applied 8→1.1 Mb/s at 19.198 seconds and 1.1→350 kb/s at 94.204 seconds, with measured stage rates 1099.2 and 349.2 kb/s. Recovery at the first cliff failed: no sustained 10 seconds at 0.9×, one restart, first downshift at 21.318 seconds, an 8.6-second maximum video gap, eight waits, one stall and 15 hitches. The second stage began from a 0.747× baseline, so it does not independently prove second-cliff recovery. Raw report `/Users/pjunod/code/plurx-agent/codex-a04-multistage-evidence-20260925/codex-a04-multistage-trace.json` SHA-256 `c0e11b12365bcc3276fa98a738ad148f0574797b0b4974ae961262e9e7701509`; normalized SHA-256 `064ec0f75824730666cc29b6cdd8476d2a8a6c421aa044c08bcefef3bb783ba1`. Safari WebDriver session creation timed out and Firefox/geckodriver were unavailable. These are failed Chrome baselines, not A-04 D3 acceptance.
 
+## A-04 exact-main two-cliff diagnosis — 16:38 UTC
+
+An isolated Chrome run built from exact merged main `415eb047f3b66afd1bf21bd3ea829766080c0e27` reported `v0.3.0-4148-g415eb047f`. Its shaper delivered 1,100.0 kb/s for 74.947 seconds and 350.0 kb/s for 74.922 seconds, with no transport errors. At the first cliff, Auto reopened 720p → 360p after 16.617 seconds, then recorded five stalls, 19 hitches and a 3.003-second maximum video gap. The 75-second window never held 10 seconds at 0.9×. The second cliff was applied, but the 10-second media-clock tail before it ran at 0.867×; its recovery score is invalid.
+
+This is a measured product limit rather than a shaping or scoring failure. The server advertises 360p as the lowest adaptive rung at 1,360 kb/s (1,200 video + 160 audio), above the first cliff's 1,100 kb/s link and far above the second cliff's 350 kb/s link. The trace's 360p clock and buffer repeatedly stopped after the reopen. Changing the scorer cannot make either link sustain that rung. A lower ladder would need explicit video and audio rates, manifest and client compatibility, and a new shaped trace; an earlier credible throughput sample is also needed to address the 16.617-second response. A-04 D3 remains a failed Chrome baseline with Safari, Firefox and physical platforms owed. Raw report SHA-256 `4b3ecdc46de81afd018ceb0a79eaed7e72d2ffdd415cce2a226f00bf88964d91`, normalized SHA-256 `0159b4cb1e8ce47311cb63229d04bf02d0005b515b6fa998997841f3be37fdb6`, receipt `/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/exact-main-415eb047f/receipt.json`.
+
 ## Nuc3 forensic learner inspection — 13:14 UTC
 
 The old unhealthy learner and its competing Compose operation were stopped without modifying the data directory. The original `/srv/plurx` remains intact; a mode-700 copy at `/srv/plurx.forensic-20260925T131450Z` was inspected read-only using the stopped image and `plurx-cluster-check inspect-wal`. Metadata CRC was valid. The retained WAL starts at index 20,745,454 while `last_purged` is 20,750,863 and the snapshot index is 20,750,864; the inspector verdict is `metadata_ahead_of_wal`. The report is `/Users/pjunod/code/plurx-agent/codex-nuc3-incident-evidence-20260925/nuc3-wal-inspection-20260925T131450Z.json` (SHA-256 `0531738625437b4f925dc0985a94a345c12fccef7768d06d2350d837423c2282`). The documented recovery is to keep this data stopped and rejoin a clean learner from the healthy three-voter quorum with authenticated cluster administration. No raw metadata/WAL edit or attempted uncredentialed removal was made. The first exact-current-main four-node tick, and therefore new K-02/S-11 continuous windows, remain owed.
@@ -225,6 +231,132 @@ An isolated server built from PR #520 source `04e55c0d6` with pinned Rust 1.97.1
 
 A first decoded frame in the software run was observed at 15:22:19.654 UTC with `readyState=4` and 1080p, without a click timestamp; it is not a W-02 TTFF bound. Both Live TV sessions were stopped; isolated metrics showed starting=0 and active=0. The isolated server, browser tab, temporary media/build cache and clone were removed. Three HDHomeRun tuners were idle afterward, while a fourth was on 6.1 from other activity; no all-idle claim is made. Sanitized receipt `/Users/pjunod/code/plurx-agent/codex-pr520-caption-acceptance-20260925/receipt.json` SHA-256 `339db095e1aff2015cd7b45833c54edb9d4d9ecbd654a9a7dfc13dde680874eb`.
 
+## TCL debug-build paging baseline — 16:14 UTC
+
+The paired TCL 9445X had Plurx 0.3.0 versionCode 125, still `DEBUGGABLE`, with the earlier Android Debug certificate SHA-256 `5cefd0c7db3f0a8d6fd818937425b7647b3222f9ed1419d79883a12c3e168bce`. Device-local last update was 11:48:44 on 2026-09-25. A read-only pull over paired Wi-Fi verified the installed APK SHA-256 `e9537f2d8a7903bf494bd0d2b678b3e121406a2bfd5ed0bde17a37eb1d7f8b67`; USB truncated its first transfer. No package was installed, uninstalled or signed during this audit.
+
+In the installed app, Home showed populated rails. Opening Movies → View all gave `377 of 458 loaded · 331 match` at the first UIAutomator dump, 3.602 seconds after the tap. Choosing Unwatched gave `458 of 458 loaded · 328 match` at a dump 3.148 seconds later. The filter and Home view were restored. These durations include ADB/UIAutomator overhead and are not first-poster timings. No scroll-to-end, frame-time, server request-count, notification or playback check ran. TCL is not the Lenovo named in A-03's acceptance prompt, and this debug build is not D-03 signed-release acceptance. Sanitized receipt `/Users/pjunod/code/plurx-agent/codex-final-main-apple-20260925/tcl-debug125-baseline.json` SHA-256 `a3337559b4eac75752b11e51c89788a1321f67afe9c7adb6d7055645669c3134`.
+
+## Exact current-main Apple Release — 16:34 UTC
+
+After qualified PR #520 merged as `415eb047f3b66afd1bf21bd3ea829766080c0e27`, an isolated checkout at that exact SHA built iOS and tvOS Release 0.3.0 build 183 with Xcode 27.0. Both apps passed `codesign --verify --deep --strict` for team `YHK542LK23`; executable SHA-256 values were `33d3e0d7efb8569c24f8f89e389f42383defebdc64c6f9c2500b83c45bbe952d` (iOS) and `9558862a2f18906c340a9ce5ebea1a6919559d8ae505a2d5f5ee4f8a8dcf9ca1` (tvOS). Build log SHA-256 `39a85d660de007fec538d305cee95cac7a0c24207f545a37c600bac02c3f9ba8`.
+
+Forced CoreDevice installs succeeded and the bundle/version/build and changed installation URL were independently verified on 17air, 17promax, Bedroom Apple TV, iPad Pro and iPhone 18 Pro. The initial iPad Pro CoreDevice attempt exited 1; one retry succeeded and its installation URL changed. iPad Mini was unavailable and 16pro was absent from the inventory. Install receipt `/Users/pjunod/code/plurx-agent/codex-final-main-apple-20260925/receipt.json` SHA-256 `a128784fffaaa988cbd6410fa6c69a1a1ecef2913b66f8739c07bbdbcb1e28e9`.
+
+All four reachable iOS/iPadOS devices required passcodes. The unlocked Bedroom Apple TV launched the new Plurx executable; its exact process was observed and terminated after the bounded check. The installed CoreDevice tooling provides no remote input path, so no player, paging, caption or adaptive-quality control was exercised. Interaction receipt `/Users/pjunod/code/plurx-agent/codex-final-main-apple-20260925/interaction.json` SHA-256 `6de3351bb209a9bfb0a8b506245bc2d1a747de32da088d39af14c2fe17d727ef`. This is source-exact installation and startup evidence, not A-02, A-03, L-03 or A-04 physical acceptance.
+
+## Exact current-main A-04 Chrome two-cliff trace — 16:38 UTC
+
+An isolated server built from current main `415eb047f3b66afd1bf21bd3ea829766080c0e27` under pinned Rust 1.97.1 reported `v0.3.0-4148-g415eb047f`; its binary SHA-256 was `5d2387e704394edb0915ffd92efce393b82709921367f3818a2290816d6a2917`. Chrome's shipped-player harness applied both network stages at measured 1,100 and 350 kb/s for 74.947 and 74.922 seconds. First-cliff recovery failed: playback never held 10 seconds at 0.9×, one automatic restart occurred, the first Auto downshift took 16.617 seconds against the 10-second limit, and the maximum Auto transition video gap was 3.003 seconds. Nine waits, five stalls and 19 hitches were recorded. The second cliff began from a 0.867× sampled 10-second baseline, below the valid 0.90× threshold, so its recovery could not be scored.
+
+Raw trace, normalized summary and hashed receipt are in `/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/exact-main-415eb047f/`; receipt SHA-256 `6399fc4afb34ea195c2d09724c5a097f7874ec3a2f84ec1f55d2efe50c0203bc`. No matching isolated server or browser debugging process remained after the run. This is a failed Chrome baseline, not A-04 D3 or native-device acceptance.
+
+## Android release signing identity — 16:46 UTC
+
+A distinct RSA-3072 release key was generated outside all repositories under `/Users/pjunod/code/plurx-agent/android-signing/`. The directory is mode 0700; the key, credentials file and debug-to-release lineage are mode 0600. Release certificate SHA-256 is `52c046be28f437ca19601b728617c6d4d1c85a13726092e06ac7d66738ff6c37`; lineage SHA-256 is `7b9030ccfa355beeab3ca4d84236e703a45d976a57a28ee49d74f73a6bf37b7c`. Android build-tools 36 generated the lineage from the audited installed debug signer to the new signer with `installed-data` preservation. No passwords or private key bytes are in this readout.
+
+This establishes signing material only. The follow-up code branch has not passed its sole adversarial review or fast lane; no signed release APK or physical data-preserving canary has been verified, and no Android release install was attempted. Preserve the key and lineage securely because later sideload updates require this identity.
+
+## L-03 exact-main source revisit — 16:40–16:41 UTC
+
+On current main `415eb047f3b66afd1bf21bd3ea829766080c0e27`, three sequential duration-bounded direct HDHomeRun MPEG-TS captures checked channels 6.1, 6.2 and 12.2. FFprobe 9.0.1 decoded 338, 336 and 328 video frames respectively; none had `A/53 Closed Captions` frame side data. The capture hashes and byte counts are in `/Users/pjunod/code/plurx-agent/codex-final-main-l03-captures-20260925/receipt.json`, SHA-256 `afc174bd8f4a40c54f5516cbf7c93fa092bc699b50940aaa5056f7d18b2d739c`.
+
+Each tuner request completed; temporary TS samples were removed. No browser or server run followed because no caption-positive source interval was available. This does not change the earlier caption-positive captures or establish whether the merged web selector renders captions when the broadcast carries them. L-03 M4 visual acceptance remains open.
+
+## Concurrent rollout observed — 16:54 UTC
+
+The serial `415eb047f` play exited zero, but an independent post-run sample immediately found another rollout already changing the three voters. `nynuc` had checkout and running OCI `60f3803d1` and was healthy; `m6` had checkout `60f3803d1` while its prior OCI remained `415eb047f` and its container was unhealthy, with localhost `:32400` refusing connections; `nuc4` was healthy on `3ca348a77`. The mixed sample receipt SHA-256 is `72dc64d095ce109017e6576b941dbd63f5abfc2c9976f42752821e996502b601`. A separate compose build for `60f3803d1` was observed active on m6.
+
+The GPT rollout stopped new mutations and is identifying that controller while checking quorum. This is a transient observation, not a completed deployment or acceptance receipt. No new four-node duration collector starts from this mixed interval.
+
+## Concurrent controller contained — 17:00 UTC
+
+Read-only process inspection traced the overlapping `deploy.yml` controller to a detached Ansible process on nuc3 that started at 16:44:25 UTC. Its inventory included nuc3 and had no host limit; after nuc4 it would have attempted to start the quarantined learner with its preserved stale WAL. The controller PID was checked to be Ansible and sent `SIGSTOP` before it advanced to nuc3. No learner data was changed by this intervention. The separate `nuc4` build and its health are being observed independently; this paused controller must not be resumed into the all-host play.
+
+`m6` recovered at 16:57:17 UTC with checkout and OCI `60f3803d1`, zero restarts and `/readyz` 200. During its build, `nynuc` and `nuc4` each exposed 2 fresh / 1 stale voters with quorum available, known leader and zero apply lag. That is an incident interval, not uniform-build duration evidence.
+
+## TCL Android release-canary baseline — 17:08 UTC
+
+Before any release APK or key-rotation canary, a read-only pass found the paired TCL 9445X awake on its launcher at API 36. Plurx 0.3.0 versionCode 125 remains `DEBUGGABLE`; installed APK SHA-256 is `e9537f2d8a7903bf494bd0d2b678b3e121406a2bfd5ed0bde17a37eb1d7f8b67`, signed by the existing Android Debug certificate SHA-256 `5cefd0c7db3f0a8d6fd818937425b7647b3222f9ed1419d79883a12c3e168bce`. The package's device-local last update is 11:48:44 on 2026-09-25.
+
+App-private metadata, without reading file contents or names, counted one regular file and 11 KiB under `files/offline`, four database files/100 KiB, one datastore file/8 KiB, two shared-preference files/12 KiB, and 1,425 cache files/88,940 KiB. The known `plurx.preferences_pb` datastore is nonempty. The last signed-in Home route was observed at 16:18 UTC; current token presence was deliberately not inspected. Those counts do not identify playable download count, and allocated sizes can change in the background. The app was not launched; no APK was installed, app data changed, credential value read, or private filename recorded. A temporary read-only APK copy used for signer verification was removed.
+
+Sanitized receipt `/Users/pjunod/code/plurx-agent/codex-tcl-release-canary-preflight-20260925/receipt.json` SHA-256 `6a4aaf11cf3d961bf2ba7a60d476c9c64bee7d6813045ed084d068ae4d4db81d`. A future canary must compare post-install state and confirm the viewer is still signed in before treating rotation as data preserving.
+## TCL debug-to-release canary — 17:24 UTC
+
+On one paired TCL 9445X (API 36), the installed code-125 APK was read again through Wi-Fi ADB and matched the audited pre-canary SHA-256 `e9537f2d8a7903bf494bd0d2b678b3e121406a2bfd5ed0bde17a37eb1d7f8b67` and Android Debug signer `5cefd0c7db3f0a8d6fd818937425b7647b3222f9ed1419d79883a12c3e168bce`. Before installation, app-private metadata still counted one file/11 KiB under `files/offline`, one datastore file/8 KiB, four database files/100 KiB, and two shared-preference files/12 KiB. No contents or private filenames were read. The release candidate was `tv.plurx.app` code 126, minimum API 28, APK SHA-256 `37455c3f81553069567f64b317bcd8328aa652ad3bb205bce744dee43f5b8e3f`, with effective API-36 release signer `52c046be28f437ca19601b728617c6d4d1c85a13726092e06ac7d66738ff6c37`.
+
+`adb install -r` on that TCL succeeded without uninstalling or clearing data. The installed APK was pulled independently and matched the candidate SHA and effective release signer. Package manager reports code 126, no `DEBUGGABLE` flag, and the original 2026-08-21 13:31:17 device-local first-install time. On launch, Plurx showed signed-in navigation including Live TV, Downloads, and Settings, with no login/edit fields in the 119-node UI tree. The Downloads tab said “No downloads.” The pre-canary offline file was not proven playable; the non-debuggable release prevents a post-install `run-as` file count. This is one-device evidence for signer rotation, package-manager data preservation, and continuing signed-in UI, but not for playable offline-download retention or the remaining physical feature interactions. Temporary pulled APKs and UI XML were removed from the workstation and device.
+
+Sanitized receipt `/Users/pjunod/code/plurx-agent/codex-tcl-release-canary-20260925/receipt.json` SHA-256 `8c8a05e51a121e0e85d5d47ea01928731b02d25b248efaa52f9e05f3cf45788b`. No credential value was read.
+
+## Merged-main rollout, moving-source race and restored forensic hold — 17:08 UTC
+
+PR #520 passed fast lane #3052 and merged as `415eb047f3b66afd1bf21bd3ea829766080c0e27`. The first agent-owned serial Ansible play began on that main with `sync=false`, `only=plurx`, `force=true`, and host limit `nynuc,m6,nuc4`. Its per-host fetch followed moving `origin/main`: `nynuc` and `m6` completed at `415eb047f`, then `nuc4` completed at `3ca348a77` after #519 moved main. The recap reported no failures, but the three running images did not match. Mixed-source read-only receipt SHA-256 `72dc64d095ce109017e6576b941dbd63f5abfc2c9976f42752821e996502b601` captures the source race during a subsequent overlapping update; it is **not** a uniform-fleet pass. An isolated Ansible commit `0e5dddb92d99063b9d4c9c0931c3afd993793908` adds optional immutable `target_sha`, validates it, and asserts each landed checkout before build for future serial deploys.
+
+A second Ansible controller, already running detached from `nuc3`, advanced `nynuc`, `m6` and `nuc4` to main `60f3803d1d5dc431a919235fab328ae6ea86d394`. Its argv had no `--limit`, and its inventory included `nuc3`. The controller was SIGSTOP-paused while its final `nuc4` build completed, then terminated after the child had exited, before the play could advance to `nuc3`. During the `m6` build, the surviving voters reported two fresh and one stale voter, quorum available, a known leader and zero apply lag; `m6` returned to healthy/ready at 16:57 UTC. At 17:06 UTC and again after the learner stop at 17:08 UTC, independent read-only captures verified all three voter checkouts and running OCI revisions as exact `60f3803d1`, Docker healthy with zero restarts, `/readyz` and `/metrics` 200, three fresh/zero stale voters, quorum available, a known leader and zero apply lag. The post-stop receipt is `/Users/pjunod/code/plurx-agent/codex-final-main-fleet-receipts-20260925/three-voter-60f-post-nuc3-stop-20260925T1708Z/summary.json`, SHA-256 `30787e7f26969c099b1e53498777c27dcd171c8ed478fb02b3d363454e20d292`.
+
+The old `nuc3` Plurxd container was unexpectedly found running from 14:12:58 UTC, with b47 OCI revision and original `/srv/plurx` mounted. Its checkout was `38f61dfe6`, so checkout alone would have misreported the running build. It returned healthy and `/readyz` 200, but that does not erase the earlier `metadata_ahead_of_wal` forensic result or qualify a clean learner rejoin. The container was stopped at 17:07:33 UTC; original `/srv/plurx` and `/srv/plurx.forensic-20260925T131450Z` remained present, and no Ansible controller process remained. Sanitized hold receipt `/Users/pjunod/code/plurx-agent/codex-final-main-fleet-receipts-20260925/nuc3-learner-hold-20260925T1708Z.json` SHA-256 `c0d9da2a16260390097651c7a0d19b043a59ed43d9884279d04abed2889864a1`. The cause of the 14:12 startup was not established.
+
+These are three-voter point observations. Authenticated clean `nuc3` rejoin, gap-free four-node one-hour, 24-hour and seven-day windows, active playback and recording flows, and physical-device interaction evidence remain owed.
+
+## Exact `60f3803d1` passive point sample — 17:10–17:11 UTC
+
+A bounded read-only SSH collector captured exact source and build stamps from `nynuc`, `m6` and `nuc4`, with all three healthy and `/readyz` 200. It selected metrics and read process limits, NTP status, sidecar counts and three named log-message counts. Private receipt `/Users/pjunod/code/plurx-agent/codex-final-main-fleet-receipts-20260925/passive-60f-20260925T1711Z/receipt.json` SHA-256 `e79d0a8c213777c6ec4efdd068fc7c4d972b80709dd2238dad217dfa853414d0` hashes the bounded outputs.
+
+| Row | Passive point value | Acceptance still owed |
+|---|---|---|
+| K-02 | Snapshot build-ok count 1 on each voter, install-ok 1/0/0; DB/WAL/snapshot/log byte gauges present; apply lag 0. | Gap-free four-node 24-hour series and approved follower restart/catch-up. |
+| C-05 | Sidecar schema 10; fragment rows 2,268/1,518/4,291, pending and negative 0 on each; backfill result counters 0. | Active convergence and availability behavior. |
+| C-08 | Metrics bodies 393,549/393,448/392,825 bytes; selected TTFF, watched, stalled and delivered families present, with only m6 nonzero in this process-local sample. | Four-node normal-use hour, JSON logging and controlled active flows. |
+| P-02 | Open-file soft/hard limits 524,288; FD counts 53/55/50; OOM adjustment 0. | Two-transcode/direct/DVR busy sample and week without EMFILE. |
+| K-06 | NTP offsets +546/+836/+948 µs; no `plurx_cluster_clock` family in the selected exposition. | Idle and loaded peer-uncertainty hour with runtime metric. |
+| S-11 | QSV availability 1/0/1; VAAPI and software available on all three; encoder and tone-map sessions zero in this sample. | Seven reset-aware days and controlled use. |
+
+The guide cache stat probe succeeded on `nynuc` and exited 1 on `m6` and `nuc4`; this point sample cannot infer cache freshness on those two hosts. The three named log-message counters were zero in each bounded log tail, which is not a week-long error absence. `nuc3` was stopped before this sample. No active playback, recording or controlled restart was performed.
+
+## Forced `nuc3` one-shot held before learner startup — 17:12–17:15 UTC
+
+A new detached Ansible process began at 17:12:22 UTC on `nuc3` from an SSH session sourced at `192.168.4.143`. Its command explicitly used `only=plurx`, `sync=false`, `force=true` and `--limit nuc3`. This was a one-shot shell under an SSH session, not a resident cron or systemd unit; the initiating task or person was not identified. The play reset the `nuc3` checkout to `60f3803d1` and entered `docker compose up -d --build` against the original `/srv/plurx` mount, which remained under the forensic hold.
+
+The Ansible parent/child and Compose `up` processes were paused before the build could start the learner. After guarded process-identity checks, the buildx client, Compose and exact Ansible process tree were terminated. A final read-only check found no `ansible-playbook`, Compose, buildx, Cargo or Rust compiler process from that run. The old b47 learner container remained exited at its prior 17:07:33 UTC finish time with restart count zero; original `/srv/plurx` and forensic copy directories remained present. Sanitized receipt `/Users/pjunod/code/plurx-agent/codex-final-main-fleet-receipts-20260925/nuc3-targeted-deploy-held-20260925T1715Z.json` SHA-256 `bf5e4d3b2cc9def1390cf10cbf3eda90e1ee2243ccdcdb8be80ae6f04a1ddea1`.
+
+The three exact-`60f3803d1` voters remain the qualified point sample. A clean authenticated `nuc3` rejoin and four-node duration windows remain owed. A new external one-shot could be sent again because its initiating task was not identified.
+
+## Old `nuc3` learner restarted again, then stopped — 17:24–17:36 UTC
+
+A bounded read-only audit found the same old b47 `nuc3` Plurxd container running again from 17:24:54 UTC, with original `/srv/plurx` mounted and the checkout at `60f3803d1`. This running-image/checkout mismatch matters: the new checkout did not make the learner a newly joined member. The exact container was stopped at 17:35:26 UTC. Original and forensic data directories remained present. The three voters continued to report exact checkout and running OCI `60f3803d1`, Docker healthy with zero restarts and `/readyz` 200.
+
+Docker's service had been active since September 20 without a restart, and the container restart policy was `unless-stopped`. No active `ansible-playbook`/Compose build process, Plurxd/deploy systemd service or matching user crontab entry was found at the audit. SSH sessions from `192.168.4.143` opened at 17:24:47 and 17:24:54 UTC around the Docker start event, but the caller command was not logged. An external one-shot is a plausible explanation, not a proven cause. Changing the container restart policy would not block an explicit `docker start` or `compose up`, so it was left unchanged. Sanitized receipt `/Users/pjunod/code/plurx-agent/codex-final-main-fleet-receipts-20260925/nuc3-repeat-restart-stop-20260925T1736Z.json` SHA-256 `8a0efb33d49e77ba87477ed997445f26980973a1b33c5f71ee43ac177a4c02f9`.
+
+The old learner remains quarantined. Its repeated startup does not count as an authenticated clean rejoin or four-node continuity evidence; the source of the external start command must be identified to prevent recurrence.
+
+## Bedroom Apple TV physical Debug input — 17:29–17:43 UTC
+
+A separate agent-owned clone at app-source base `e3195ad85` built the
+`plurx-tvOS-physical` scheme as a signed Debug build 184 for the paired,
+booted Bedroom Apple TV 4K (3rd generation), tvOS 27.0. Its first launch
+failed because the device was asleep; XCUIRemote's Menu press woke it in
+the bounded harness fix `09e8d7d69`. The fixture used item/file 12/12,
+an H.264 movie with one indexed English SubRip track. The Movies category
+used the app's `category:movie` collection ID; read-only catalog metadata
+counted 457 top-level movies across its two shares.
+
+| Physical Debug case | Observation | Scope limit |
+|---|---|---|
+| Playback remote | One XCUIRemote case passed: Play/Pause changed the transport label and Forward 10 seconds appeared. | The case did not assert decoded moving frames, seek accuracy or Release behavior. |
+| Library paging | One XCUIRemote case passed after using the correct category ID: remote navigation increased the loaded count beyond the first page. | Request count, frame time, Android paging and Release behavior remain unmeasured. |
+| VOD subtitle choice | Bounded attempts failed to select a track. The initial harness treated SwiftUI Menu's inaccurate `hasFocus` as a lost focus; a screenshot showed the subtitle icon with the blue tvOS focus ring. A fixed three-right path was also wrong for this launch: its retained screenshot shows Quality focused and Quality's menu open. | No selected subtitle or rendered text was observed. This movie fixture does not test L-03 Live TV captions. |
+
+Private receipt
+`/Users/pjunod/code/plurx-agent/codex-apple-physical-evidence-20260925/receipt.json`
+SHA-256 `347ab4f96d4fce146bdd06f3fa586fb1d38c4e71231ddbf44b89e2c0b5789342`
+hashes retained local test logs and screenshots. The Xcode result bundles remain
+under `/private/tmp/codex-apple-*.xcresult`; they include device diagnostics
+and are not part of the repo. The Debug runner replaced the prior installed
+Release app on this one Apple TV. Exact-main signed Release reinstallation and
+native controller, paging and caption interaction acceptance remain owed.
+
 ## L-03 caption-positive current-main web revisit — 17:45–17:51 UTC
 
 Current main `c99a29090` differed from deployed healthy `60f3803d1` only in `validation/merge-errata.toml`; the web and streaming source was identical. Two bounded direct HDHomeRun 8.1 WRIC-TV MPEG-TS captures sampled the same GMA3 airing. The first (16 seconds, 15,058,628 bytes) had A/53 side data on 911/911 decoded video frames and yielded nine timed CC1 SRT cues. The second (12 seconds, 13,731,676 bytes), taken during web playback, had A/53 data on 639/639 frames and yielded one timed CC1 cue. Local FFmpeg/ffprobe 9.0.1 decoded the transport directly. Raw captures and SRT files were removed after hashing.
@@ -235,22 +367,58 @@ This is a caption-positive source with an **open M4 web visual acceptance**, unl
 
 ## L-03 caption-positive HLS comparison — 17:50–17:59 UTC
 
-On channel 8.1 WRIC-TV, a 12-second direct HDHomeRun capture during signed-in Chrome playback had A/53 on 639/639 decoded MPEG-2 video frames and one timed CC1 cue. Its SHA-256 is `a5f34204ea9c875b4debac6c16a466c4472a17695df00947616579b0ff4ac2a5`. The source was 1280×720 progressive at 60000/1001. From the active `nynuc` server transcode, nine bounded HLS MPEG-TS segments (`000041`–`000049`) decoded as H.264 with A/53 on 540/540 frames and one timed CC1 cue. The joined media SHA-256 is `49cba80bf0a4e8468e85196927aee049085782ce621d2c45279a53367f264f78`. Raw media was removed after hashing and decoding.
+A 12-second direct HDHomeRun capture of 8.1 WRIC-TV during signed-in Chrome
+playback had A/53 on 639/639 decoded MPEG-2 frames and one timed CC1 cue.
+Its SHA-256 is `a5f34204ea9c875b4debac6c16a466c4472a17695df00947616579b0ff4ac2a5`.
+The source was 1280×720 progressive at 60000/1001. Nine bounded HLS
+MPEG-TS segments from the active `nynuc` transcode (`000041`–`000049`)
+decoded as H.264 with A/53 on 540/540 frames and one CC1 cue; the joined
+media SHA-256 is
+`49cba80bf0a4e8468e85196927aee049085782ce621d2c45279a53367f264f78`.
+Raw media was removed after hashing and decoding.
 
-At media time 89.994 seconds, Chrome was playing with `readyState=4` and 1280×720 output, but its Live TV selector offered only Off and `video.textTracks.length` was zero. The deployed runtime `60f3803d1` has the same web and streaming code as observed main `c99a29090`. Its startup caption probe generated only 1080i MPEG-2 input and advertised only graphs that deinterlaced it. The progressive 720p graph therefore had no proof and the HLS master reported `CLOSED-CAPTIONS=NONE`, even though the HLS media retained CC1. This isolates the missing browser track to probe/playlist advertisement; it does not establish a drawn-caption pass.
+At media time 89.994 seconds, Chrome was playing with `readyState=4` at
+1280×720, but the Live TV selector offered only Off and
+`video.textTracks.length` was zero. The deployed `60f3803d1` runtime had the
+same web and streaming source as then-current main `c99a29090`. Its startup
+caption proof covered only 1080i MPEG-2 graphs with deinterlacing. The
+progressive 720p graph had no proof, so the master reported
+`CLOSED-CAPTIONS=NONE` despite CC1 in the encoded segments. This locates
+the missing track at proof/playlist advertisement for that source and build;
+it does not establish a drawn-caption pass.
 
-[Draft PR #528](http://192.168.4.7:3000/noirr/plurx/pulls/528), rebased onto main `196d2a43e`, adds a 720p59.94 CC1/SERVICE1 startup fixture, proves available progressive graphs using the production command, and matches the proof to source height and deinterlace mode. Pinned Rust compile and Clippy passed; no test or adversarial review has run. After merge and deployment, the caption-positive selector, selected track and drawn text still need direct web/native verification. Sanitized receipt `/Users/pjunod/code/plurx-agent/codex-l03-caption-evidence-20260925/l03-8-1-hls-diagnosis-20260925.json`, SHA-256 `5e79da98c9353f202a699fcc71de84dba6fb4c368e375611278009e2b88ec31f`.
+[PR #528](http://192.168.4.7:3000/noirr/plurx/pulls/528) adds a 720p59.94
+CC1/SERVICE1 fixture and matches proof to source height and deinterlace
+mode. After its merge and deployment, caption choice and rendered text still
+need web, tvOS and Android TV checks. Sanitized receipt
+`/Users/pjunod/code/plurx-agent/codex-l03-caption-evidence-20260925/l03-8-1-hls-diagnosis-20260925.json`
+has SHA-256
+`5e79da98c9353f202a699fcc71de84dba6fb4c368e375611278009e2b88ec31f`.
 
-## Premerge qualification and physical refusals — 18:27–18:45 UTC
+## Bounded physical acceptance refusals — 18:27–18:53 UTC
 
-Open [PR #524](http://192.168.4.7:3000/noirr/plurx/pulls/524) has signed Android versionCode 127 candidate head `9ad5dc2525` against main `1d68af6eb`. Fast lane #3086 encountered a version collision; replacement #3089 (API run 3110) was waiting at 18:45 UTC. Neither run is recorded here as a passing promotion gate, and #524 has not merged. Exact-current-main rollout remains owed on all three healthy voters, after authenticated clean rejoin on `nuc3`, and on the six paired Apple devices (17air, 17promax, Bedroom Apple TV, iPad Mini, iPad Pro, iPhone 18 Pro). The 16pro was unavailable. The reachable Android set is TCL 9445X, Google TV Streamer, Pixel 10 Pro Fold, Pixel 11 Pro XL and Motorola razr ultra 2025; the TCL also has a duplicate Wi-Fi ADB transport. Inventory receipt SHA-256 `c0f9f79027ce1d9507f9b5119da935ced6f6321646aad7fd50d99b6a1bb81415`.
+The TCL 9445X had signed release126 installed without a debug flag, but its
+keyguard and NotificationShade stayed foreground after bounded wake, Back,
+Home and one swipe. D-02 Notification Pause and A-03 paging/filter/playback
+controls were unavailable; no result is claimed. Sanitized receipt
+`/private/tmp/codex-tcl-premerge-acceptance-20260925.json` has SHA-256
+`817966025b459ac3afa4897666dce3779d638106433bcb99af85b46a94f2b412`.
 
-A bounded TCL 9445X interaction attempt at 18:27:20 UTC found signed release-126 installed and not debuggable, but the keyguard was still showing and NotificationShade stayed foreground after Back, Home, wake and one standard upward swipe. No Plurx control was visible; D-02 Notification Pause and A-03 paging/filter/playback checks were unrun. No install, clear-data or credential read occurred in that attempt. Sanitized receipt `/private/tmp/codex-tcl-premerge-acceptance-20260925.json`, SHA-256 `817966025b459ac3afa4897666dce3779d638106433bcb99af85b46a94f2b412`. This signed release-126 refusal is separate from the pending code-127 exact-main release.
+The Bedroom Apple TV test found `player-subtitles`, but its remote focus
+landed on adjacent Playback quality and Select opened Quality. The test did
+not select a subtitle track; this VOD fixture does not test L-03 Live TV.
+Sanitized diagnosis `/private/tmp/codex-apple-caption-diagnostic-20260925.json`
+has SHA-256
+`603fcd799b8a6ca4061b47d727de3897db3e6a5bca8f65bb5f32cdff41902d2f`.
 
-A read-only synchronized refresh at 18:30:41 UTC found `nynuc`, `m6` and `nuc4` healthy with zero container restarts, `/readyz` and `/metrics` 200, and checkout/running OCI revision still `60f3803d1`. `nuc3` stayed stopped with original data preserved for authenticated clean learner rejoin. This is a point sample, not a deployment or continuity window. Private receipt `/private/tmp/codex-fleet-readonly-refresh-20260925.json`, SHA-256 `253506d73ab66f6616d7a67ea995e30a6275a44fa86b544440f6fd203285bd15`.
-
-The Bedroom Apple TV caption remote attempt located `player-subtitles`, but XCUIRemote focus landed on the adjacent Playback quality control and Select opened Quality. That test did not select a caption track and does not establish a product caption pass or failure. A focus-harness correction is prepared separately for integration after #524; physical caption selection and drawn-text acceptance remain owed. Sanitized diagnosis `/private/tmp/codex-apple-caption-diagnostic-20260925.json`, SHA-256 `603fcd799b8a6ca4061b47d727de3897db3e6a5bca8f65bb5f32cdff41902d2f`.
-
-### Google TV Streamer offline-retention baseline refusal — 18:50–18:53 UTC
-
-The unlocked Google TV Streamer launched signed-in Plurx on debuggable versionCode 125. Android reported television `uiMode=0x24`; this build hides Downloads on television and `OfflineDownloads.canUse` refuses queueing there. Metadata-only app-private inspection found one offline/media file of zero bytes and no offline/books files. No playable downloaded item or offline playback was established. The temporary redacted UI dump was removed and the device returned to launcher/sleep. No APK install or uninstall, app clear-data, library change, title or credential read occurred. The pre/post in-place release-127 offline-retention check remains owed on an unlocked supported non-TV Android device with a verified playable download. Sanitized receipt `/private/tmp/codex-google-tv-offline-baseline-20260925.json`, SHA-256 `b9ea4ad58421421d2598198a63e8b4601402a1a8e82ab4e015847b337336b8ea`.
+An unlocked Google TV Streamer launched signed-in Plurx on debuggable
+versionCode 125. Android reported television `uiMode=0x24`; that build hides
+Downloads on television and `OfflineDownloads.canUse` refuses queueing.
+Metadata-only inspection found one zero-byte offline/media file and no
+offline/books files. No playable offline item was established. The temporary
+redacted UI dump was removed, and the device returned to launcher/sleep.
+No APK install, uninstall or clear-data occurred. Offline retention remains
+owed on an unlocked supported Android device with a verified playable
+download. Sanitized receipt
+`/private/tmp/codex-google-tv-offline-baseline-20260925.json` has SHA-256
+`b9ea4ad58421421d2598198a63e8b4601402a1a8e82ab4e015847b337336b8ea`.

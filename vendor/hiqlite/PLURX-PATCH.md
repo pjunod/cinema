@@ -1,9 +1,9 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries twenty patches for clustered deployments. An
+Apache-2.0. Plurx carries twenty-one patches for clustered deployments. An
 upstream release can retire the seven generic bugs and the one dependency-only
-constraint; it cannot retire the twelve Plurx policies:
+constraint; it cannot retire the thirteen Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -31,6 +31,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 18 | Scope the vendored `s3-simple` override to this manifest | dependency-only | — | Upstream cryptr accepts `s3-simple` 0.9 or newer, which already carries these dependency-only corrections. |
 | 19 | Install the `ring` rustls provider for the HTTP clients | generic bug | pending M6 | Upstream release installs or declares a rustls crypto provider for its `rustls-no-provider` Reqwest clients. |
 | 20 | Compile `ring` as the only rustls provider | plurx policy | — | Never; Plurx installs `ring` in every process, so a second compiled provider is an unused C build and an ambiguous default. |
+| 21 | Report the committed Raft log index of a write (`WriteAck`) | plurx policy | — | Never; Plurx's watch-state read-your-write fence (K-04 M2) requires this negotiated response shape. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -215,12 +216,32 @@ made-up URL and prevents the fork from being declared fully tracked.
   configurations still resolve `aws-lc-rs`, through the `reqwest` `rustls`
   feature that cryptr and `s3-simple` select; Plurx builds neither, and every
   entry point in them still installs `ring` explicitly.
+- `Client::execute_acked` and `Client::execute_returning_map_acked` return a
+  `WriteAck` carrying the Raft log index of the committed entry beside the
+  usual result: from `ClientWriteResponse::log_id` on the leader, and through
+  the API stream on every other node. The stream half is negotiated per
+  connection so no request encoding changes: the client adds
+  `x-hiqlite-write-ack: raft-log-index-v1` to its WebSocket upgrade request,
+  and only a leader that saw that header answers `Execute` and
+  `ExecuteReturning` with the new `ExecuteAcked` and `ExecuteReturningAcked`
+  response variants, appended after every deployed ordinal. An older leader
+  ignores the header and keeps sending the original variants, which the new
+  client still accepts and reports as an unknown index (`None`); an older
+  client never sends the header and so never receives a variant it cannot
+  decode; a proxy decodes and re-issues requests through its own client, so
+  its callers see `None`. The plain `execute` and `execute_returning*` methods
+  keep their signatures and discard the index.
+  `network::api::tests::write_ack_variants_are_appended_after_every_deployed_response_ordinal`
+  pins the ordinals, `write_ack_log_index_is_sent_only_on_a_negotiated_connection`
+  pins the negotiation, and Plurx's
+  `watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_write`
+  store contract drives a real streamed write end to end.
 
 Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18 and 19: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
-(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16 and 20) still needs a patch. Their
+(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20 and 21) still needs a patch. Their
 drop condition is `Never` by design (ARCHITECTURE §7 decision 10), so no
 upstream release retires them on its own: a policy row leaves only when
 upstream offers a way to express it without patching this source, or when the

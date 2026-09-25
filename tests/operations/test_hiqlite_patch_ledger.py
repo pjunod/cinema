@@ -8,11 +8,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LEDGERS = (
-    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 20),
+    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 21),
     (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 3),
 )
 
-NUMBER_WORDS = {3: "three", 20: "twenty"}
+NUMBER_WORDS = {3: "three", 21: "twenty-one"}
 
 # `quick-xml` 0.39.4 is the release RUSTSEC-2026-0194 and RUSTSEC-2026-0195
 # name. 0.41 is the first constraint that cannot resolve back onto it and the

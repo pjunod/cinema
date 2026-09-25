@@ -1,6 +1,30 @@
 version = 1
 enforce_after = "e8a910f"
 
+[[fixes]]
+id = "web.live-tv-picture-evidence"
+commits = ["148829768"]
+source = "crates/plurxd/src/web/live-tv.js"
+source_anchor = "function normalizeLiveTvPictureFacts("
+test = "tests/web/live-tv.test.js"
+test_anchor = "picture facts keep broadcast, planned frame and browser display distinct"
+
+[[fixes]]
+id = "apple.playback-info-compact-field-parity"
+commits = ["8252fe99d"]
+source = "clients/apple/Sources/PlaybackInfoPanel.swift"
+source_anchor = "static let compactFields:"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPlaybackInfoRowsMatchTheSharedFieldList"
+
+[[fixes]]
+id = "android.live-tv-eligible-video-sample"
+commits = ["bf6edae2f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "internal fun eligibleLiveTvVideoSample("
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
+test_anchor = "playbackPictureSeparatesPlanSampleAndPlayerDisplay"
+
 # The unmerged counter-fallback proposals were superseded by callback
 # lifecycle repair; retain their history mappings against the current proof.
 # The capacity 503 this player's previous start produced was codeless, so
@@ -2670,3 +2694,42 @@ source = "crates/plurxd/src/web/player/watch-presentation.js"
 source_anchor = "function watchPopoverBounds(){"
 test = "tests/web/watch-and-browse.browser.cjs"
 test_anchor = "the top of the menu, outside the picture, is reachable"
+
+# The physical tvOS UI run verifies the wake before launch path on a sleeping
+# Apple TV; playback and paging both exercised this helper on hardware.
+[[fixes]]
+id = "apple.physical-tvos-wake-before-launch"
+commits = ["5b0501ad"]
+source = "clients/apple/UITests/TVPhysicalInputTests.swift"
+source_anchor = "private func wakeDevice()"
+test = "clients/apple/UITests/TVPhysicalInputTests.swift"
+test_anchor = "func testPlaybackRemoteControls() throws"
+
+# The lineage capability regression rejects a predecessor certificate that
+# would lose the existing install's data during key rotation.
+[[fixes]]
+id = "android.release-lineage-installed-data-capability"
+commits = ["0967eb15"]
+source = "scripts/sign-android-release"
+source_anchor = "def validate_lineage(apksigner: str, lineage: Path, expected_new: str) -> None:"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "def test_old_signer_without_installed_data_is_rejected(self) -> None:"
+
+# The exact-source reinstall contract prevents equal version numbers from
+# silently leaving stale Apple archives on paired devices.
+[[fixes]]
+id = "apple.physical-exact-archive-reinstall"
+commits = ["2b80c558"]
+source = "scripts/ship-physical"
+source_anchor = "# the just-built exact-main archive on every reachable paired device."
+test = "tests/operations/test_contracts.py"
+test_anchor = "def test_ship_physical_is_a_self_contained_device_path(self):"
+# The same departing detail button can still be clicked during its exit
+# animation. The test uses the real navigation controller and displayed arrow.
+[[fixes]]
+id = "android.double-back-entry-ownership"
+commits = ["f5ab17a35"]
+source = "clients/android/app/src/main/java/tv/plurx/app/BackNavigation.kt"
+source_anchor = "internal fun NavController.popBackStackFrom(entry: NavBackStackEntry): Boolean {"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/BackNavigationTest.kt"
+test_anchor = "fun secondBackDuringExitAnimationKeepsHomeVisible()"
