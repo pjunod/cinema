@@ -623,6 +623,12 @@ struct OpenPublicationResponse: Codable, Hashable {
     let limits: PublicationLimits
 }
 
+struct FileGrantResponse: Codable, Hashable {
+    let url: String
+    let expiresAt: Int
+    let grantId: String
+}
+
 struct ReadingState: Codable, Hashable {
     let fileId: Int
     let revision: ReadingRevision
