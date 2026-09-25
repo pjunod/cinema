@@ -218,6 +218,7 @@ impl TranscodeManager {
             || qualified.decode().input_codec() != Some(codec)
         {
             tracing::warn!(
+                target: "plurxd::transcode",
                 codec,
                 backend = backend.name(),
                 "artifact qualification changed the resolved decode path; keeping its stable identity"
@@ -401,6 +402,7 @@ impl TranscodeManager {
                             .is_ok()
                         {
                             tracing::warn!(
+                                target: "plurxd::transcode",
                                 file_id = file.id,
                                 reason = reason.label(),
                                 "the configured ffprobe changed on disk after startup; bound facts are refused until plurxd restarts"
@@ -409,6 +411,7 @@ impl TranscodeManager {
                     }
                     DecodePlanFallbackReason::RefusedSourceChanged => {
                         tracing::warn!(
+                            target: "plurxd::transcode",
                             file_id = file.id,
                             reason = reason.label(),
                             %error,
@@ -422,6 +425,7 @@ impl TranscodeManager {
                     DecodePlanFallbackReason::ProbeFailed
                     | DecodePlanFallbackReason::IdentityIo => {
                         tracing::warn!(
+                            target: "plurxd::transcode",
                             file_id = file.id,
                             reason = reason.label(),
                             %error,
@@ -430,6 +434,7 @@ impl TranscodeManager {
                     }
                     DecodePlanFallbackReason::Invariant => {
                         tracing::error!(
+                            target: "plurxd::transcode",
                             file_id = file.id,
                             reason = reason.label(),
                             %error,
@@ -438,6 +443,7 @@ impl TranscodeManager {
                     }
                 }
                 tracing::debug!(
+                    target: "plurxd::transcode",
                     file_id = file.id,
                     reason = reason.label(),
                     %error,
@@ -710,6 +716,7 @@ impl TranscodeManager {
         // an HDR title did before this rung existed.
         if subtitle_burn {
             tracing::info!(
+                target: "plurxd::transcode",
                 file = file.id,
                 "a burned subtitle track tone-maps: subtitle white is a code value, and on a PQ \
                  output it lands at the top of the curve"
@@ -725,6 +732,7 @@ impl TranscodeManager {
         let preferred = self.encoder().await;
         if !matches!(preferred, Encoder::Software | Encoder::Qsv) {
             tracing::info!(
+                target: "plurxd::transcode",
                 file = file.id,
                 encoder = preferred.label(),
                 "this node's encoder has no measured Main10 route; tone-mapping to SDR rather \
@@ -735,6 +743,7 @@ impl TranscodeManager {
         if route == plurx_core::playback::HdrRoute::Passthrough {
             if !self.hdr10_passthrough {
                 tracing::info!(
+                    target: "plurxd::transcode",
                     file = file.id,
                     "this ffmpeg did not prove the HDR10 passthrough encode; tone-mapping to SDR"
                 );
@@ -748,6 +757,7 @@ impl TranscodeManager {
             // node running stock ffmpeg, with no log line naming the reason.
             if encoder == Encoder::Qsv && !self.hdr10_passthrough_qsv {
                 tracing::info!(
+                    target: "plurxd::transcode",
                     file = file.id,
                     "this node did not prove the QSV Main10 encode for a plain HDR source; using \
                      the measured software/SDR route"
@@ -762,6 +772,7 @@ impl TranscodeManager {
         }
         if encoder == Encoder::Qsv && !self.dovi_passthrough_qsv {
             tracing::info!(
+                target: "plurxd::transcode",
                 file = file.id,
                 "this node did not prove the Dolby Vision HDR10 QSV encode graph; using the measured software/SDR route"
             );
@@ -769,6 +780,7 @@ impl TranscodeManager {
         }
         if !self.dovi_passthrough {
             tracing::info!(
+                target: "plurxd::transcode",
                 file = file.id,
                 "this ffmpeg did not prove the Dolby Vision HDR10 passthrough renderer; \
                  using the tone-mapped SDR rung"

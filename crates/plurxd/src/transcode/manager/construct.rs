@@ -30,6 +30,7 @@ impl TranscodeManager {
         let subtitle_cache = work_dir.join(".subtitle-cache");
         if let Err(err) = std::fs::create_dir_all(&runtime_cache) {
             tracing::warn!(
+                target: "plurxd::transcode",
                 path = %runtime_cache.display(),
                 "could not create ffmpeg runtime cache: {err}"
             );
@@ -307,6 +308,7 @@ impl TranscodeManager {
         );
         if let Err(err) = std::fs::create_dir_all(&self.runtime_cache) {
             tracing::warn!(
+                target: "plurxd::transcode",
                 path = %self.runtime_cache.display(),
                 "could not create ffmpeg runtime cache: {err}"
             );
@@ -515,7 +517,10 @@ impl TranscodeManager {
                     let _ = sender.send(available_cache_scratch_bytes(&sample_path));
                 })
             {
-                tracing::debug!(%error, "could not start cache scratch sampler");
+                tracing::debug!(
+                    target: "plurxd::transcode",
+                    %error, "could not start cache scratch sampler"
+                );
             }
             loop {
                 tokio::select! {
@@ -703,7 +708,10 @@ impl TranscodeManager {
         let cache_hit = match self.resolve_movie_plan(file, &opts, encoder).await {
             Ok(plan) => self.verified_cache_hit(&plan).await,
             Err(reason) => {
-                tracing::debug!(file_id = file.id, %reason, "offer cannot name an artifact");
+                tracing::debug!(
+                    target: "plurxd::transcode",
+                    file_id = file.id, %reason, "offer cannot name an artifact"
+                );
                 false
             }
         };
@@ -788,7 +796,10 @@ impl TranscodeManager {
             Ok(policy) if policy.generation == expected => None,
             Ok(_) => Some(OfflineProduceOutcome::PolicyChanged),
             Err(error) => {
-                tracing::warn!(%error, "speculative publication could not verify transcode policy");
+                tracing::warn!(
+                    target: "plurxd::transcode",
+                    %error, "speculative publication could not verify transcode policy"
+                );
                 Some(OfflineProduceOutcome::Yielded)
             }
         }

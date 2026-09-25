@@ -150,6 +150,7 @@ async fn settle_media_session_request_claim(
             Ok(Ok(_)) => return,
             Ok(Err(error)) => {
                 tracing::warn!(
+                    target: "plurxd::http::hls",
                     %error,
                     user_id,
                     "media-session request cleanup is retrying"
@@ -164,6 +165,7 @@ async fn settle_media_session_request_claim(
         tokio::time::sleep(REQUEST_CLAIM_SETTLEMENT_RETRY_DELAY.min(remaining)).await;
     }
     tracing::error!(
+        target: "plurxd::http::hls",
         user_id,
         retry_after_ms = 60_000,
         "media-session request cleanup exhausted its bound; claim expiry remains the durable fallback"

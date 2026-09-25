@@ -165,6 +165,7 @@ pub(super) async fn master_playlist_response_local_before(
     // multivariant subtitle group.
     if query.diagnostic.is_none() && should_serve_high_tier_media_playlist(&file, &context) {
         tracing::info!(
+            target: "plurxd::http::hls",
             session = %crate::transcode::session_log_id(session),
             codecs = %context.codecs,
             "serving high-tier HEVC through the direct media-playlist envelope"
@@ -218,6 +219,7 @@ pub(super) fn playlist_error(session: &str, err: PlaylistError) -> ApiError {
         | PlaylistError::InsufficientCapacity(_) => StatusCode::BAD_GATEWAY,
     };
     tracing::warn!(
+        target: "plurxd::http::hls",
         session = %crate::transcode::session_log_id(session),
         code = err.code(),
         retryable = err.retryable(),

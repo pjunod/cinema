@@ -2383,3 +2383,25 @@
             )
             .await;
     }
+
+    /// A split child logs under its parent's target. `playlist_error` moved to
+    /// `http/hls/playlist.rs`, a `#[path]` child whose default target is
+    /// `plurxd::http::hls::playlist`; the console, journald and the log view
+    /// label the line with the target, and a move does not change a log line.
+    #[test]
+    fn a_line_logged_by_an_hls_child_keeps_the_hls_target() {
+        use tracing_subscriber::prelude::*;
+        let logs = std::sync::Arc::new(crate::logbuf::LogBuffer::new(8));
+        let guard = crate::test_tracing_default(
+            tracing_subscriber::registry()
+                .with(crate::logbuf::BufferLayer(std::sync::Arc::clone(&logs))),
+        );
+        let _ = playlist_error("sess-target", PlaylistError::SessionGone);
+        drop(guard);
+        let refused = logs
+            .tail("trace", 8)
+            .into_iter()
+            .find(|entry| entry.message.contains("HLS playlist request refused"))
+            .expect("the refusal is logged");
+        assert_eq!(refused.target, "plurxd::http::hls");
+    }

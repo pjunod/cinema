@@ -44,6 +44,7 @@ pub(super) async fn exact_hls_context_before(
     match inspected {
         Ok(Ok(context)) => {
             tracing::info!(
+                target: "plurxd::http::hls",
                 session = %crate::transcode::session_log_id(session),
                 phase = "init_inspection",
                 outcome = "ready",
@@ -66,6 +67,7 @@ pub(super) async fn exact_hls_context_before(
             )
             .await?;
             tracing::warn!(
+                target: "plurxd::http::hls",
                 session = %crate::transcode::session_log_id(session),
                 phase = "init_inspection",
                 outcome = error.log_code(),
@@ -76,6 +78,7 @@ pub(super) async fn exact_hls_context_before(
         }
         Err(_) => {
             tracing::warn!(
+                target: "plurxd::http::hls",
                 session = %crate::transcode::session_log_id(session),
                 phase = "init_inspection",
                 outcome = "response_publication_timeout",

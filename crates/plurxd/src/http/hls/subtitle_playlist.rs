@@ -603,6 +603,7 @@ pub(super) async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSour
     {
         Ok(Some(bytes)) => {
             tracing::info!(
+                target: "plurxd::http::hls",
                 session = %crate::transcode::session_log_id(session),
                 file_id = file.id,
                 index,
@@ -684,6 +685,7 @@ pub(super) async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSour
                 .await
                 .map_err(|_| response_publication_timeout())?;
                 tracing::info!(
+                    target: "plurxd::http::hls",
                     session = %crate::transcode::session_log_id(session),
                     file_id = file.id,
                     index,
@@ -786,6 +788,7 @@ pub(super) async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSour
                     Err(_) => false,
                 };
                 tracing::debug!(
+                    target: "plurxd::http::hls",
                     session = %crate::transcode::session_log_id(session),
                     file_id = file.id,
                     index,
@@ -818,6 +821,7 @@ pub(super) async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSour
                             .map(|remaining| remaining.as_secs().max(1))
                             .unwrap_or(1);
                     tracing::info!(
+                        target: "plurxd::http::hls",
                         session = %crate::transcode::session_log_id(session),
                         file_id = file.id,
                         index,

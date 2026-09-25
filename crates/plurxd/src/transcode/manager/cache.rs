@@ -74,6 +74,7 @@ impl TranscodeManager {
             // members may continue serving it; fenced GC owns global
             // retirement.
             tracing::warn!(
+                target: "plurxd::transcode",
                 recipe = %location.recipe_hash,
                 storage = %location.node_id,
                 reason,
@@ -101,6 +102,7 @@ impl TranscodeManager {
         {
             Ok(invalidated) => {
                 tracing::warn!(
+                    target: "plurxd::transcode",
                     recipe = %location.recipe_hash,
                     node = %location.node_id,
                     storage_class = %location.storage_class,
@@ -113,6 +115,7 @@ impl TranscodeManager {
             }
             Err(error) => {
                 tracing::error!(
+                    target: "plurxd::transcode",
                     recipe = %location.recipe_hash,
                     node = %location.node_id,
                     storage_class = %location.storage_class,
@@ -613,6 +616,7 @@ impl TranscodeManager {
         let cache = self.cache.as_ref()?;
         if !Self::plan_matches_request(plan, file, opts) {
             tracing::error!(
+                target: "plurxd::transcode",
                 file_id = file.id,
                 "cache lookup refused: the plan does not describe this request"
             );
@@ -632,9 +636,15 @@ impl TranscodeManager {
                     // an empty cache. With the name in both logs the disagreement
                     // is one `grep` rather than a bisect.
                     if let Err(e) = other {
-                        tracing::warn!(recipe = %hash, error = %e, "cache lookup failed");
+                        tracing::warn!(
+                            target: "plurxd::transcode",
+                            recipe = %hash, error = %e, "cache lookup failed"
+                        );
                     }
-                    tracing::debug!(recipe = %hash, file = file.id, "transcode cache miss");
+                    tracing::debug!(
+                        target: "plurxd::transcode",
+                        recipe = %hash, file = file.id, "transcode cache miss"
+                    );
                     return None;
                 }
             };
@@ -665,12 +675,12 @@ impl TranscodeManager {
                             .report_io_failure("shared_serve_preflight_failed")
                             .await;
                     }
-                    tracing::warn!(recipe = %hash, %error, "shared cache read failed; trying node-local cache");
+                    tracing::warn!(target: "plurxd::transcode", recipe = %hash, %error, "shared cache read failed; trying node-local cache");
                     let local = match self.local_cache_read_location(&hash, cache).await {
                         Ok(Some(local)) => local,
                         Ok(None) => return None,
                         Err(error) => {
-                            tracing::warn!(recipe = %hash, %error, "local cache fallback lookup failed");
+                            tracing::warn!(target: "plurxd::transcode", recipe = %hash, %error, "local cache fallback lookup failed");
                             return None;
                         }
                     };
@@ -688,7 +698,10 @@ impl TranscodeManager {
             None
         } else {
             let Some(guard) = self.cache_readers.begin_lookup(&hash) else {
-                tracing::debug!(recipe = %hash, file = file.id, "cache entry is being evicted");
+                tracing::debug!(
+                    target: "plurxd::transcode",
+                    recipe = %hash, file = file.id, "cache entry is being evicted"
+                );
                 return None;
             };
             Some(guard)
@@ -710,6 +723,7 @@ impl TranscodeManager {
             // directory — the row survives what the filesystem does not.
             if tokio::fs::metadata(dir.join("index.m3u8")).await.is_err() {
                 tracing::warn!(
+                    target: "plurxd::transcode",
                     recipe = %hash,
                     dir = %dir.display(),
                     "cache row points at a directory with no playlist — treating as a miss"
@@ -722,6 +736,7 @@ impl TranscodeManager {
                 let manifest_path = dir.join(plurx_core::transcode::manifest::MANIFEST_FILE);
                 if tokio::fs::metadata(&manifest_path).await.is_err() {
                     tracing::warn!(
+                        target: "plurxd::transcode",
                         recipe = %hash,
                         dir = %dir.display(),
                         "cache location has a fenced manifest digest but no manifest — treating as a miss"
@@ -746,6 +761,7 @@ impl TranscodeManager {
                     Ok(manifest) => Some(manifest),
                     Err(error) => {
                         tracing::warn!(
+                            target: "plurxd::transcode",
                             recipe = %hash,
                             dir = %dir.display(),
                             %error,
@@ -845,6 +861,7 @@ impl TranscodeManager {
             .await
         {
             tracing::warn!(
+                target: "plurxd::transcode",
                 session = %session_log_id(&session_id),
                 rejection = ?reason,
                 "rolling actor rejected cached response-publication ownership"
@@ -978,6 +995,7 @@ impl TranscodeManager {
             .await
         {
             tracing::warn!(
+                target: "plurxd::transcode",
                 session = %session_log_id(&session_id),
                 rejection = ?reason,
                 "cached rolling session registration rejected"
@@ -985,6 +1003,7 @@ impl TranscodeManager {
             return None;
         }
         tracing::info!(
+            target: "plurxd::transcode",
             session = %session_log_id(&session_id), recipe = %hash, file = file.id,
             "serving a cached transcode — no encoder started"
         );

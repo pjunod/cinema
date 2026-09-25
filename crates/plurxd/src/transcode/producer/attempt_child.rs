@@ -230,7 +230,10 @@ impl AttemptChild {
             Ok(job) => Some(job),
             Err(error) => {
                 let _ = child.start_kill();
-                tracing::error!(%error, "child could not be assigned to its process job");
+                tracing::error!(
+                    target: "plurxd::transcode",
+                    %error, "child could not be assigned to its process job"
+                );
                 None
             }
         };
@@ -397,6 +400,7 @@ impl AttemptChild {
                                             let _ = reply.send(Err(error));
                                         } else {
                                             tracing::error!(
+                                                target: "plurxd::transcode",
                                                 producer_attempt,
                                                 %error,
                                                 "dropped producer could not be terminated"
@@ -484,6 +488,7 @@ impl AttemptChild {
             }
             Err(error) => {
                 tracing::error!(
+                    target: "plurxd::transcode",
                     producer_attempt,
                     %error,
                     "producer process exit could not be observed"

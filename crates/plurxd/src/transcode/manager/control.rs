@@ -1033,6 +1033,7 @@ impl TranscodeManager {
             return false;
         };
         tracing::info!(
+            target: "plurxd::transcode",
             session = %session_log_id(session_id),
             requested_reason = reason,
             winning_reason = %outcome.cause,
@@ -1334,7 +1335,7 @@ impl TranscodeManager {
                         return;
                     }
                     Err(error) => {
-                        tracing::error!(%error, "session terminal projection attempt failed; retrying");
+                        tracing::error!(target: "plurxd::transcode", %error, "session terminal projection attempt failed; retrying");
                         tokio::task::yield_now().await;
                     }
                 }
@@ -1453,6 +1454,7 @@ impl TranscodeManager {
                     // The detached retirement winner owns the single event;
                     // this loop only records local teardown progress.
                     tracing::warn!(
+                        target: "plurxd::transcode",
                         session = %session_log_id(&session_id),
                         "transcode session self-fenced after quorum loss"
                     );
@@ -1684,6 +1686,7 @@ impl TranscodeManager {
             Ok(Err(_)) => false,
             Err(_) => {
                 tracing::warn!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(session_id),
                     reason,
                     "session teardown outlived its deadline; fenced, teardown continues detached"

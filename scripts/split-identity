@@ -31,6 +31,16 @@ added visibility pushes some signatures past the line limit, so rustfmt
 wrapped them; formatting the reconstruction unwraps exactly those) before a
 byte-for-byte comparison with the base parent. The base parent is itself
 checked to be a rustfmt fixed point so formatting cannot hide a difference.
+A child's tracing events also carry an explicit ``target:`` naming the
+parent's module path, so the move does not relabel its log lines (a
+``#[path]`` child's default target is its own ``module_path!()``). Each
+was inserted in one of three spellings, which reconstruction removes
+exactly: its own line directly after a ``tracing::<level>!(`` that ends
+its line; ``target: "...", `` directly after the opening parenthesis; or,
+for a one-line call the pin would push past the line limit, the call
+wrapped as ``(`` / pin / the untouched arguments / ``)``. The base parents
+contain no ``target: "`` at all (checked), and any other spelling is left
+in place to fail the comparison.
 
 This one-shot helper is deleted before the plan PR is promoted.
 """
@@ -39,6 +49,7 @@ from __future__ import annotations
 
 import difflib
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -247,6 +258,51 @@ RELOCATED: dict[str, tuple[str, str]] = {
 }
 
 
+# The module path each parent's events were labelled with before the split.
+LOG_TARGETS: dict[str, str] = {
+    "crates/plurxd/src/transcode.rs": "plurxd::transcode",
+    "crates/plurxd/src/http/hls.rs": "plurxd::http::hls",
+    "crates/plurxd/src/vodserve.rs": "plurxd::vodserve",
+}
+
+
+def unpinned_targets(parent: str, text: str) -> tuple[str, int]:
+    call = r"(tracing::(?:trace|debug|info|warn|error)!\()"
+    pin = 'target: "' + re.escape(LOG_TARGETS[parent]) + '",'
+    count = 0
+
+    # A call that fitted on one line but not with its target was wrapped:
+    # the pin and the untouched argument text each on their own line, four
+    # spaces in, and the closing parenthesis back at the call's indentation.
+    # It is unwrapped only if the one line it came from fits the limit, so a
+    # call that was already written with one argument line because it did
+    # not fit keeps its shape and only loses the pin line below. One that
+    # did fit and was wrapped by hand anyway would be joined here and fail
+    # the comparison loudly.
+    def unwrap(match: re.Match[str]) -> str:
+        nonlocal count
+        if len(match["inner"]) != len(match["outer"]) + 4:
+            return match[0]
+        source = match.string
+        line_start = source.rfind("\n", 0, match.start()) + 1
+        line_end = source.find("\n", match.end())
+        rest = source[match.end() : len(source) if line_end < 0 else line_end]
+        width = match.start() - line_start + len(match[1]) + len(match["args"]) + 1 + len(rest)
+        if width > 100:
+            return match[0]
+        count += 1
+        return match[1] + match["args"] + ")"
+
+    text = re.sub(
+        call + r"\n(?P<inner> *)" + pin + r"\n(?P=inner)(?P<args>[^\n]*)\n(?P<outer> *)\)",
+        unwrap,
+        text,
+    )
+    text, own_line = re.subn(call + r"\n *" + pin + r"(?=\n)", r"\1", text)
+    text, inline = re.subn(call + pin + " ", r"\1", text)
+    return text, count + own_line + inline
+
+
 def unsplit_visibility(parent: str, text: str) -> tuple[str, int]:
     added = text.count("pub(super) ")
     text = text.replace("pub(super) ", "")
@@ -302,6 +358,7 @@ def impl_split_reconstruction(
 ) -> tuple[str, str]:
     bodies: list[str] = []
     added = 0
+    targets = 0
     for chunk_rel in chunks:
         chunk_path = str(pathlib.Path(parent).parent / chunk_rel)
         text = read(chunk_path)
@@ -309,6 +366,8 @@ def impl_split_reconstruction(
         if not text.startswith(prefix) or not text.endswith("\n}\n"):
             raise SystemExit(f"{chunk_path}: lost its exact impl-chunk wrapper")
         body, count = unsplit_visibility(parent, text[len(prefix) : -len("}\n")])
+        body, pinned = unpinned_targets(parent, body)
+        targets += pinned
         added += count
         bodies.append(body)
     if added != expected:
@@ -316,7 +375,8 @@ def impl_split_reconstruction(
     rebuilt = header + "\n".join(bodies) + "}\n"
     return (
         replace_marker(parent_text, marker, rebuilt),
-        f"{marker}: {len(chunks)} impl chunks, {added} pub(super) additions",
+        f"{marker}: {len(chunks)} impl chunks, {added} pub(super) additions, "
+        f"{targets} log targets",
     )
 
 
@@ -340,13 +400,15 @@ def moves_reconstructions() -> tuple[dict[str, str], list[str]]:
             raise SystemExit(f"{child_path}: lost its exact structural header")
         child = child[len(CHILD_HEADER) :]
         child, added = unsplit_visibility(parent, child)
+        child, targets = unpinned_targets(parent, child)
         if added != expected:
             raise SystemExit(
                 f"{child_path}: pub(super) additions expected {expected}, got {added}"
             )
         parents[parent] = replace_marker(text, marker, child)
         report.append(
-            f"{child_path}: {child.count(chr(10))} lines, {added} pub(super) additions"
+            f"{child_path}: {child.count(chr(10))} lines, {added} pub(super) additions, "
+            f"{targets} log targets"
         )
     for parent, marker, header, chunks, expected in IMPL_SPLITS:
         text = parents.get(parent) or read(parent)
@@ -402,6 +464,10 @@ def main() -> int:
         ok = True
         for source, current in reconstructions.items():
             original = baseline(base, source)
+            if 'target: "' in original:
+                print(f"{source}: base already spells a log target; the removal is not injective")
+                ok = False
+                continue
             if rustfmt(original) != original:
                 print(f"{source}: base is not a rustfmt fixed point")
                 ok = False

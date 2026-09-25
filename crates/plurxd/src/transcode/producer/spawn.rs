@@ -435,6 +435,7 @@ pub(super) fn spawn_ffmpeg(
             // it ran) distinguishes "ffmpeg died early" from "ffmpeg is still
             // running but produced nothing".
             tracing::warn!(
+                target: "plurxd::transcode",
                 session = %session_log_id(&sid), encoder = encoder_label,
                 elapsed_s = started.elapsed().as_secs(),
                 "transcode ffmpeg process ended"
@@ -509,6 +510,7 @@ pub(super) fn spawn_ffmpeg_pipe(
             )
             .await;
             tracing::warn!(
+                target: "plurxd::transcode",
                 session = %session_log_id(&sid), encoder = "copy",
                 elapsed_s = started.elapsed().as_secs(),
                 "transcode ffmpeg process ended"

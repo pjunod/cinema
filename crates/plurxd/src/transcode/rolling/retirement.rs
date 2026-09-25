@@ -130,6 +130,7 @@ async fn own_published_attempt_cleanup(
                             .await
                         {
                             tracing::warn!(
+                                target: "plurxd::transcode",
                                 session = %session_log_id(&sid),
                                 producer_attempt,
                                 decision_sequence,
@@ -141,6 +142,7 @@ async fn own_published_attempt_cleanup(
                     }
                 }
                 tracing::info!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(&sid),
                     producer_attempt,
                     cause = cause_kind,
@@ -160,6 +162,7 @@ async fn own_published_attempt_cleanup(
             }
             Err(error) => {
                 tracing::error!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(&sid),
                     producer_attempt,
                     cause = cause_kind,
@@ -397,6 +400,7 @@ pub(super) fn spawn_rolling_scratch_cleanup_owner(
                     owned.retention_garbage_bytes.store(0, Release);
                     settle_rolling_scratch_release(&owned);
                     tracing::debug!(
+                        target: "plurxd::transcode",
                         session = %session_log_id(&session_id),
                         path = %dir.display(),
                         attempt,
@@ -405,6 +409,7 @@ pub(super) fn spawn_rolling_scratch_cleanup_owner(
                     return;
                 }
                 Ok(Err(error)) => tracing::warn!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(&session_id),
                     path = %dir.display(),
                     attempt,
@@ -412,6 +417,7 @@ pub(super) fn spawn_rolling_scratch_cleanup_owner(
                     "rolling retirement scratch cleanup attempt failed"
                 ),
                 Err(_) => tracing::warn!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(&session_id),
                     path = %dir.display(),
                     attempt,
@@ -425,6 +431,7 @@ pub(super) fn spawn_rolling_scratch_cleanup_owner(
         }
         hold_rolling_scratch_charge(&owned, "cleanup_exhausted");
         tracing::error!(
+            target: "plurxd::transcode",
             session = %session_log_id(&session_id),
             path = %dir.display(),
             attempts = ROLLING_SCRATCH_CLEANUP_ATTEMPTS,
@@ -529,6 +536,7 @@ fn spawn_retired_presentation_cleanup_owner(
             }
             hold_rolling_scratch_charge(&retired.session, "unlink_failed");
             tracing::warn!(
+                target: "plurxd::transcode",
                 session = %session_log_id(&session_id),
                 path = %retired.session.dir.display(),
                 attempt,
@@ -598,6 +606,7 @@ fn spawn_rolling_scratch_conversion_owner(session_id: String, session: Arc<Sessi
             }
             if convert_rolling_scratch_charge(&session).await {
                 tracing::debug!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(&session_id),
                     attempt,
                     "retired rolling scratch reservation converted to measured inventory"
@@ -606,6 +615,7 @@ fn spawn_rolling_scratch_conversion_owner(session_id: String, session: Arc<Sessi
             }
         }
         tracing::warn!(
+            target: "plurxd::transcode",
             session = %session_log_id(&session_id),
             attempts = ROLLING_SCRATCH_CONVERSION_ATTEMPTS,
             reason = ?session
@@ -636,6 +646,7 @@ async fn settle_rolling_scratch_charge(session_id: &str, session: &Arc<Session>)
     if !barrier.settle(&ledger, key, deadline).await {
         ledger.note_conservative(key, "writer_stalled");
         tracing::warn!(
+            target: "plurxd::transcode",
             session = %session_log_id(session_id),
             budget_ms = ROLLING_SCRATCH_WRITER_SETTLE.as_millis(),
             "a scratch writer outlived retirement settlement; the producer charge stands"
@@ -736,6 +747,7 @@ async fn own_prepublication_cleanup(
             }
             Err(error) => {
                 tracing::error!(
+                    target: "plurxd::transcode",
                     path = %session.dir.display(),
                     %error,
                     "prepublication producer reap was not confirmed; retaining admission and retrying cleanup"
@@ -989,6 +1001,7 @@ async fn own_rolling_retirement(
             }
             Err(error) => {
                 tracing::error!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(&session_id),
                     path = %session.dir.display(),
                     %error,

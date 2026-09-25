@@ -32,6 +32,7 @@ async fn settle_decode_recovery(
     match recovery.ledger.settle(outcome, unix_ms()).await {
         Ok(crate::playback_control::RecoverySettlement::Settled) => {}
         Ok(settlement) => tracing::error!(
+            target: "plurxd::transcode",
             session = %session_log_id(sid),
             decision_sequence,
             outcome = ?outcome,
@@ -40,6 +41,7 @@ async fn settle_decode_recovery(
              this playback will find it still held"
         ),
         Err(error) => tracing::error!(
+            target: "plurxd::transcode",
             session = %session_log_id(sid),
             decision_sequence,
             outcome = ?outcome,
@@ -116,6 +118,7 @@ pub(super) async fn execute_prepublication_transcode_retry(
             // spend, and installing anyway is the second automatic recovery
             // the ledger exists to make impossible.
             tracing::warn!(
+                target: "plurxd::transcode",
                 session = %session_log_id(sid),
                 decision_sequence,
                 failed_attempt,
@@ -269,6 +272,7 @@ pub(super) async fn execute_prepublication_transcode_retry(
                 .await
             {
                 tracing::error!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(sid),
                     decision_sequence,
                     ?acknowledgement_error,
@@ -303,6 +307,7 @@ pub(super) async fn execute_prepublication_transcode_retry(
         .await;
     }
     tracing::info!(
+        target: "plurxd::transcode",
         session = %session_log_id(sid),
         producer_attempt,
         encoder = retry.encoder.label(),
@@ -396,6 +401,7 @@ async fn execute_prepublication_copy_retry(
                 .await
             {
                 tracing::error!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(sid),
                     decision_sequence,
                     ?acknowledgement_error,
@@ -408,6 +414,7 @@ async fn execute_prepublication_copy_retry(
     };
     replacement.complete();
     tracing::info!(
+        target: "plurxd::transcode",
         session = %session_log_id(sid),
         producer_attempt,
         encoder = "copy",
@@ -477,6 +484,7 @@ async fn publish_copy_reader_outcome(
     let classification = match outcome {
         copyseg::Outcome::Completed(counts) => {
             tracing::info!(
+                target: "plurxd::transcode",
                 session = %session_log_id(sid),
                 producer_attempt,
                 build = crate::version::BUILD,
@@ -487,6 +495,7 @@ async fn publish_copy_reader_outcome(
         }
         copyseg::Outcome::ReaderFailed { reason, counts } => {
             tracing::error!(
+                target: "plurxd::transcode",
                 session = %session_log_id(sid),
                 producer_attempt,
                 counts = %copyseg::summary(&counts),
@@ -496,6 +505,7 @@ async fn publish_copy_reader_outcome(
         }
         copyseg::Outcome::InvalidHevcConfiguration(reason) => {
             tracing::error!(
+                target: "plurxd::transcode",
                 session = %session_log_id(sid),
                 producer_attempt,
                 "copy segmenter produced invalid HEVC configuration: {reason}"
@@ -504,6 +514,7 @@ async fn publish_copy_reader_outcome(
         }
         copyseg::Outcome::Unsupported(reason) => {
             tracing::warn!(
+                target: "plurxd::transcode",
                 session = %session_log_id(sid),
                 producer_attempt,
                 "copy segmenter rejected the stream shape: {reason}"
@@ -512,6 +523,7 @@ async fn publish_copy_reader_outcome(
         }
         copyseg::Outcome::Cancelled(counts) => {
             tracing::debug!(
+                target: "plurxd::transcode",
                 session = %session_log_id(sid),
                 producer_attempt,
                 counts = %copyseg::summary(&counts),
@@ -527,6 +539,7 @@ async fn publish_copy_reader_outcome(
         .await
     {
         tracing::warn!(
+            target: "plurxd::transcode",
             session = %session_log_id(sid),
             producer_attempt,
             ?classification,
@@ -586,6 +599,7 @@ pub(super) fn spawn_copy_reader_owner(
                     // starting anyway would put bytes into a directory whose
                     // final inventory has already been measured and committed.
                     tracing::debug!(
+                        target: "plurxd::transcode",
                         session = %session_log_id(&sid),
                         producer_attempt,
                         "copy reader refused: this incarnation was retired before it could write"
@@ -625,6 +639,7 @@ pub(super) fn spawn_copy_reader_owner(
                     return;
                 }
                 tracing::error!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(&sid),
                     producer_attempt,
                     %join_error,
@@ -641,6 +656,7 @@ pub(super) fn spawn_copy_reader_owner(
                     .await
                 {
                     tracing::warn!(
+                        target: "plurxd::transcode",
                         session = %session_log_id(&sid),
                         producer_attempt,
                         ?rejection,
@@ -666,6 +682,7 @@ async fn retire_upload_lane(session: &Session) {
             .is_err()
         {
             tracing::warn!(
+                target: "plurxd::transcode",
                 "the replaced attempt's uploads did not settle in 15 s; they stay refused"
             );
         }
@@ -740,6 +757,7 @@ async fn classify_successful_transcode_exit(
         .classify_producer_exit_before(evidence, probe.deadline)
         .await;
     tracing::info!(
+        target: "plurxd::transcode",
         session = %session_log_id(sid),
         producer_attempt = probe.producer_attempt,
         probe_sequence = probe.probe_sequence,
@@ -795,6 +813,7 @@ async fn run_prepublication_producer_executor(
                         Ok(PublishedFailureCleanupOutcome::Reaped) => {
                             if let Err(error) = registration.settle_expected().await {
                                 tracing::error!(
+                                    target: "plurxd::transcode",
                                     session = %session_log_id(&sid),
                                     producer_attempt = probe.producer_attempt,
                                     disposition = ?disposition,
@@ -812,6 +831,7 @@ async fn run_prepublication_producer_executor(
                         }
                         Err(_) => {
                             tracing::error!(
+                                target: "plurxd::transcode",
                                 session = %session_log_id(&sid),
                                 producer_attempt = probe.producer_attempt,
                                 disposition = ?disposition,
@@ -898,6 +918,7 @@ async fn run_prepublication_producer_executor(
                                 Ok(PublishedFailureCleanupOutcome::Reaped) => {
                                     if let Err(error) = registration.settle_expected().await {
                                         tracing::error!(
+                                            target: "plurxd::transcode",
                                             session = %session_log_id(&sid),
                                             producer_attempt = *failed_attempt,
                                             decision_sequence = *decision_sequence,
@@ -917,6 +938,7 @@ async fn run_prepublication_producer_executor(
                                 }
                                 Err(_) => {
                                     tracing::error!(
+                                        target: "plurxd::transcode",
                                         session = %session_log_id(&sid),
                                         producer_attempt = *failed_attempt,
                                         decision_sequence = *decision_sequence,
@@ -1008,6 +1030,7 @@ async fn run_prepublication_producer_executor(
                         .await;
                     } else {
                         tracing::error!(
+                            target: "plurxd::transcode",
                             session = %session_log_id(&sid),
                             "producer decision observer became unavailable after first-media handoff; actor lifetime fence retained"
                         );
@@ -1076,6 +1099,7 @@ pub(super) fn spawn_prepublication_executor_owner(
                         &monitor_sid,
                     );
                     tracing::error!(
+                        target: "plurxd::transcode",
                         session = %session_log_id(&monitor_sid),
                         producer_attempt,
                         reason = %unexpected_exit,

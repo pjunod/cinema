@@ -198,6 +198,7 @@ pub(super) async fn stored_marker_destinations(
         Ok(None) => return Vec::new(),
         Err(error) => {
             tracing::warn!(
+                target: "plurxd::vodserve",
                 file_id = file.id,
                 %error,
                 "could not read timeline annotations for marker prewarm"

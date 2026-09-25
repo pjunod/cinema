@@ -320,11 +320,13 @@ pub(super) fn settle_streamed_response_completion(
         {
             Ok(Ok(())) => {}
             Ok(Err(rejection)) => tracing::debug!(
+                target: "plurxd::http::hls",
                 session = %crate::transcode::session_log_id(&session),
                 ?rejection,
                 "discarded exact response completion after publication state changed"
             ),
             Err(_) => tracing::warn!(
+                target: "plurxd::http::hls",
                 session = %crate::transcode::session_log_id(&session),
                 "exact response completion exceeded its control deadline"
             ),

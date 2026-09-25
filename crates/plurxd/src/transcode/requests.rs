@@ -63,6 +63,7 @@ impl RequestClaim<'_> {
             // to leave unsaid.
             debug_assert!(false, "completed claim lost its own reservation");
             tracing::warn!(
+                target: "plurxd::transcode",
                 session = %session_log_id(session_id),
                 "request claim vanished before completion; a replay may duplicate this session"
             );

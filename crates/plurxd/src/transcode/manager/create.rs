@@ -377,6 +377,7 @@ impl TranscodeManager {
             entries.insert(key.to_owned(), Arc::downgrade(&successor));
         }
         tracing::warn!(
+            target: "plurxd::transcode",
             reason,
             fenced = fenceable.len(),
             "reclaimed a player's replacement key from a hold that could not use it"
@@ -485,6 +486,7 @@ impl TranscodeManager {
                     if let Some(reason) = live_recovery_reason {
                         if self.live_hls_recovery_enabled().await? {
                             tracing::warn!(
+                                target: "plurxd::transcode",
                                 file_id = req.file_id,
                                 refusal = reason.label(),
                                 "VOD prerequisite unavailable; using temporary live-HLS recovery"
@@ -657,6 +659,7 @@ impl TranscodeManager {
                 // rather than a full re-encode to overlay nothing.
                 Some(index) if self.burn_track_is_stored_empty(file, index).await => {
                     tracing::info!(
+                        target: "plurxd::transcode",
                         file_id = file.id,
                         subtitle_index = index,
                         "the burn track has no cues; serving the copy without an overlay"
@@ -768,6 +771,7 @@ impl TranscodeManager {
             // item restores the stricter comparison.
             crate::ffmpeg::note_reporter_drift_admission();
             tracing::info!(
+                target: "plurxd::transcode",
                 file_id = file.id,
                 "admitted a held source on its media facts: its stored scan came from a \
                  different FFprobe build"
@@ -794,6 +798,7 @@ impl TranscodeManager {
                 ),
             };
             tracing::warn!(
+                target: "plurxd::transcode",
                 file_id = file.id,
                 detail = %detail,
                 "refusing an encoded session: the held source does not match its stored probe"
@@ -842,6 +847,7 @@ impl TranscodeManager {
                     crate::subtitles::BurnSource::File(handle) => (Some(burn), Some(handle)),
                     crate::subtitles::BurnSource::Nothing => {
                         tracing::info!(
+                            target: "plurxd::transcode",
                             file_id = file.id,
                             subtitle_index = burn.subtitle_index,
                             "the selected subtitle track has no cues; starting without an overlay"
@@ -1418,6 +1424,7 @@ impl TranscodeManager {
                             .await;
                     }
                     tracing::info!(
+                        target: "plurxd::transcode",
                         session = %session_log_id(session_id),
                         "resurrected a vod session from its durable route"
                     );
@@ -1524,7 +1531,7 @@ impl TranscodeManager {
                                 "request {key} resolved to a target that differs from its session"
                             ));
                         }
-                        tracing::debug!(session = %session_log_id(&session_id), request_id = key, "idempotent create: same session");
+                        tracing::debug!(target: "plurxd::transcode", session = %session_log_id(&session_id), request_id = key, "idempotent create: same session");
                         return Ok(Claimed::Recovered(info));
                     }
                     // Its session is gone; the entry is stale, not

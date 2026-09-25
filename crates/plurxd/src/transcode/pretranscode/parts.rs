@@ -308,13 +308,17 @@ pub(super) async fn retain_part_health(
         Ok(encoded) if encoded.len() as u64 <= MAX_PART_HEALTH_BYTES => encoded,
         Ok(encoded) => {
             tracing::warn!(
+                target: "plurxd::transcode",
                 bytes = encoded.len(),
                 "a part health record exceeded its bound and was not retained"
             );
             return;
         }
         Err(error) => {
-            tracing::warn!(%error, "a part health record could not be sealed");
+            tracing::warn!(
+                target: "plurxd::transcode",
+                %error, "a part health record could not be sealed"
+            );
             return;
         }
     };
@@ -322,7 +326,10 @@ pub(super) async fn retain_part_health(
         .atomic_write_child(PART_HEALTH_FILE, &encoded)
         .await
     {
-        tracing::warn!(%error, "a part health record could not be written");
+        tracing::warn!(
+            target: "plurxd::transcode",
+            %error, "a part health record could not be written"
+        );
     }
 }
 
@@ -378,13 +385,17 @@ pub(super) async fn retain_generation_health(
         Ok(encoded) if encoded.len() as u64 <= MAX_PART_HEALTH_BYTES => encoded,
         Ok(encoded) => {
             tracing::warn!(
+                target: "plurxd::transcode",
                 bytes = encoded.len(),
                 "a generation health ledger exceeded its bound and was not retained"
             );
             return;
         }
         Err(error) => {
-            tracing::warn!(%error, "a generation health ledger could not be sealed");
+            tracing::warn!(
+                target: "plurxd::transcode",
+                %error, "a generation health ledger could not be sealed"
+            );
             return;
         }
     };
@@ -392,7 +403,10 @@ pub(super) async fn retain_generation_health(
         .atomic_write_child(GENERATION_HEALTH_FILE, &encoded)
         .await
     {
-        tracing::warn!(%error, "a generation health ledger could not be written");
+        tracing::warn!(
+            target: "plurxd::transcode",
+            %error, "a generation health ledger could not be written"
+        );
     }
 }
 
@@ -507,6 +521,7 @@ pub(super) async fn assembled_publication(
         // good generation, so it is still adopted — but nothing this pass
         // observed describes them.
         tracing::info!(
+            target: "plurxd::transcode",
             "adopting an assembled generation that these parts did not produce; \
              it carries no producer health receipt"
         );

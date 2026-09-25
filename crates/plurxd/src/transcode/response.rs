@@ -605,6 +605,7 @@ impl SegmentDelivery {
         self.slow_read_reported = true;
         let waited_ms = elapsed.as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
+            target: "plurxd::transcode",
             session = %session_log_id(&self.session_id),
             segment = %self.segment,
             waited_ms,
@@ -644,6 +645,7 @@ impl SegmentDelivery {
         }
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
+            target: "plurxd::transcode",
             session = %session_log_id(&self.session_id),
             segment = %self.segment,
             delivered_bytes = self.delivered_bytes,
@@ -691,6 +693,7 @@ impl SegmentDelivery {
         self.terminal = true;
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::error!(
+            target: "plurxd::transcode",
             session = %session_log_id(&self.session_id),
             segment = %self.segment,
             delivered_bytes = self.delivered_bytes,
@@ -722,6 +725,7 @@ impl Drop for SegmentDelivery {
         self.terminal = true;
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
+            target: "plurxd::transcode",
             session = %session_log_id(&self.session_id),
             segment = %self.segment,
             delivered_bytes = self.delivered_bytes,

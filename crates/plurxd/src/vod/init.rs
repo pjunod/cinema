@@ -79,7 +79,7 @@ pub(super) async fn regenerate_init_head(
         crate::ffmpeg::drain_diagnostics(stderr)
     );
     if !diagnostic.trim().is_empty() {
-        tracing::warn!(%diagnostic, "VOD head regeneration diagnostic");
+        tracing::warn!(target: "plurxd::vodserve", %diagnostic, "VOD head regeneration diagnostic");
     }
     let muxer = muxer?;
     if !source.unchanged() {

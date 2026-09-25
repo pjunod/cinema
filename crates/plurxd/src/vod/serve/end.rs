@@ -39,6 +39,7 @@ impl VodServe {
                 Some(terminal_reason(cause)),
             );
             tracing::info!(
+                target: "plurxd::vodserve",
                 session = %session_log_id(&session_id),
                 rendition = %rendition.key,
                 "vod session ended for good: {cause:?}"
@@ -105,6 +106,7 @@ impl VodServe {
             let terminal_cause = match session.tombstone {
                 Some(Terminal::Replaced) if cause != Terminal::Replaced => {
                     tracing::info!(
+                        target: "plurxd::vodserve",
                         session = %session_log_id(session_id),
                         durable_cause = cause.durable_reason(),
                         "refined provisional VOD terminal cause from durable route"

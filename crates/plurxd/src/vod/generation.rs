@@ -23,7 +23,10 @@ pub(super) async fn spawn_generation(
     // `finish` produces the tail entries.
     let at = video_entry_at_or_before(&rendition.plan, at);
     let Some(entry) = rendition.plan.entry(at) else {
-        tracing::warn!(rendition = %rendition.key, "no plan entry {at} to spawn at");
+        tracing::warn!(
+            target: "plurxd::vodserve",
+            rendition = %rendition.key, "no plan entry {at} to spawn at"
+        );
         return;
     };
     let start_seconds = entry.start_ticks as f64 / f64::from(rendition.timescale);
@@ -134,10 +137,13 @@ pub(super) async fn spawn_generation(
             crate::ffmpeg::drain_diagnostics(stderr),
         );
         if !diagnostic.trim().is_empty() {
-            tracing::warn!(rendition = %key, generation = epoch, %diagnostic, "VOD producer diagnostic");
+            tracing::warn!(target: "plurxd::vodserve", rendition = %key, generation = epoch, %diagnostic, "VOD producer diagnostic");
         }
     });
-    tracing::info!(rendition = %rendition_key_field(at), "spawned a producer generation");
+    tracing::info!(
+        target: "plurxd::vodserve",
+        rendition = %rendition_key_field(at), "spawned a producer generation"
+    );
 }
 
 pub(super) async fn recipe_engine_is_current(recipe: &Recipe) -> bool {
@@ -374,6 +380,7 @@ async fn establish_or_verify(
                 Err(refused) => {
                     if matches!(refused, InitRefused::PromotionDrift { .. }) {
                         tracing::error!(
+                            target: "plurxd::vodserve",
                             rendition = %rendition.key,
                             "promotion is no longer a pure function of stored inputs: {refused}"
                         );
@@ -418,6 +425,7 @@ async fn establish_or_verify(
                     .expect("an identity just established from this muxer init serves it");
                 if let Err(error) = store_identity(&rendition.identity_path(), &identity).await {
                     tracing::warn!(
+                        target: "plurxd::vodserve",
                         rendition = %rendition.key,
                         "persisting identity.json: {error}"
                     );
@@ -504,6 +512,7 @@ async fn on_generation_end(
                 );
             } else {
                 tracing::debug!(
+                    target: "plurxd::vodserve",
                     rendition = %rendition.key,
                     "generation ended (produced through {produced_through:?})"
                 );
@@ -526,6 +535,7 @@ pub(super) async fn on_init_drift(shared: &Arc<Shared>, rendition: &Arc<Renditio
             sub_saturating(&shared.working_set, freed.bytes);
             if let Some(error) = freed.error {
                 tracing::warn!(
+                    target: "plurxd::vodserve",
                     rendition = %rendition.key,
                     "purging after adopted-identity drift: {error}"
                 );
@@ -534,6 +544,7 @@ pub(super) async fn on_init_drift(shared: &Arc<Shared>, rendition: &Arc<Renditio
         let _ = tokio::fs::remove_file(rendition.identity_path()).await;
         *rendition.identity.lock().await = IdentityState::default();
         tracing::info!(
+            target: "plurxd::vodserve",
             rendition = %rendition.key,
             "adopted identity no longer matches this pipeline; purged to \
              planned-only to establish fresh: {cause}"
@@ -558,6 +569,7 @@ pub(super) fn record_failure(
     cause: String,
 ) {
     tracing::warn!(
+        target: "plurxd::vodserve",
         rendition = %rendition.key,
         decision = decision.status(),
         "producer failed: {cause}"

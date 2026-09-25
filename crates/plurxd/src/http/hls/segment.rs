@@ -222,6 +222,7 @@ pub(super) async fn vod_resurrected_before(
     // gate and resurrecting a terminal capability.
     let Some(adoption) = state.transcode.session_adoption_token(session) else {
         tracing::warn!(
+            target: "plurxd::http::hls",
             session = %crate::transcode::session_log_id(session),
             "public VOD resurrection admission is full"
         );
@@ -272,6 +273,7 @@ pub(super) fn vod_error(session: &str, err: crate::vodserve::VodError) -> ApiErr
     use crate::vodserve::VodError;
     let log = |code: &str, message: &str| {
         tracing::warn!(
+            target: "plurxd::http::hls",
             session = %crate::transcode::session_log_id(session),
             code,
             "vod request refused: {message}"
@@ -544,6 +546,7 @@ async fn vod_segment_response_before(
             if normalize_high_tier_hevc_init(&file, &mut init) {
                 transformed = true;
                 tracing::info!(
+                    target: "plurxd::http::hls",
                     session = %crate::transcode::session_log_id(session),
                     "translated the HEVC High-tier initialization record for Apple HLS"
                 );
@@ -756,6 +759,7 @@ async fn vod_segment_response_before(
                         "media response exceeded its maximum admitted body lifetime".to_owned(),
                     );
                     tracing::warn!(
+                        target: "plurxd::http::hls",
                         session = %crate::transcode::session_log_id(&pump_session),
                         delivered_bytes = delivered,
                         expected_bytes = len,
@@ -770,6 +774,7 @@ async fn vod_segment_response_before(
                         "media response made no progress before its body deadline".to_owned(),
                     );
                     tracing::warn!(
+                        target: "plurxd::http::hls",
                         session = %crate::transcode::session_log_id(&pump_session),
                         delivered_bytes = delivered,
                         expected_bytes = len,
@@ -794,6 +799,7 @@ async fn vod_segment_response_before(
                         ),
                     );
                     tracing::warn!(
+                        target: "plurxd::http::hls",
                         session = %crate::transcode::session_log_id(&pump_session),
                         delivered_bytes = delivered,
                         expected_bytes = len,
@@ -1188,12 +1194,14 @@ pub(super) async fn segment_local_before(
         if let Ok((context, file, _)) = session_file(state, session, publication_deadline).await {
             if strip_unadvertised_dolby_vision(&context, &mut init) {
                 tracing::info!(
+                    target: "plurxd::http::hls",
                     session = %crate::transcode::session_log_id(session),
                     "removed a Dolby Vision record the playlist does not advertise"
                 );
             }
             if normalize_high_tier_hevc_init(&file, &mut init) {
                 tracing::info!(
+                    target: "plurxd::http::hls",
                     session = %crate::transcode::session_log_id(session),
                     "translated the HEVC High-tier initialization record for Apple HLS"
                 );
@@ -1265,6 +1273,7 @@ pub(super) async fn segment_local_before(
     }
     if crate::transcode::is_init_object(seg) && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
         tracing::warn!(
+            target: "plurxd::http::hls",
             session = %crate::transcode::session_log_id(session),
             init_bytes = opened.len,
             limit_bytes = APPLE_INIT_REWRITE_LIMIT_BYTES,

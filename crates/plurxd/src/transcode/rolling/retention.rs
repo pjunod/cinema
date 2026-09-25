@@ -111,6 +111,7 @@ fn ensure_retention_cleanup(session: &Session) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     tracing::warn!(
+                        target: "plurxd::transcode",
                         garbage = ?path.file_name(),
                         %error,
                         "retention garbage cleanup failed; bytes remain charged for retry"
@@ -249,6 +250,7 @@ pub(super) async fn gc_expired_segments(session: &Session) {
                     Ok(metadata) => i64::try_from(metadata.len()).unwrap_or(i64::MAX),
                     Err(error) => {
                         tracing::warn!(
+                            target: "plurxd::transcode",
                             producer_attempt,
                             segment = %name,
                             %error,
@@ -261,6 +263,7 @@ pub(super) async fn gc_expired_segments(session: &Session) {
                 moved.push((name, garbage, measured_bytes.max(indexed_bytes)));
             }
             Err(error) => tracing::warn!(
+                target: "plurxd::transcode",
                 producer_attempt,
                 segment = %name,
                 %error,

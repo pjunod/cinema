@@ -205,6 +205,7 @@ impl TranscodeManager {
                             plurx_core::fmp4::HevcSampleEntryLayout::Multiple { count } => count,
                         };
                         tracing::info!(
+                            target: "plurxd::transcode",
                             session = %session_log_id(session_id),
                             file_id = session.file_id,
                             start_seconds = session.start_seconds,
@@ -1173,6 +1174,7 @@ impl TranscodeManager {
             )),
             Err(_) => {
                 tracing::warn!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(session_id),
                     waited_s = budget.as_secs(),
                     "playlist preparation exhausted its one absolute HTTP budget"
@@ -1312,6 +1314,7 @@ impl TranscodeManager {
                         if !session.cached {
                             if let Err(reason) = validate_rolling_target(&bytes) {
                                 tracing::error!(
+                                    target: "plurxd::transcode",
                                     session = %session_log_id(session_id),
                                     producer_attempt,
                                     %reason,
@@ -1445,6 +1448,7 @@ impl TranscodeManager {
                                     .map(|duration| duration.as_secs() as i64)
                                     .unwrap_or(session.started_unix);
                                 tracing::info!(
+                                    target: "plurxd::transcode",
                                     session = %session_log_id(session_id),
                                     first_retained_index,
                                     wall_seconds_since_start =
@@ -1497,6 +1501,7 @@ impl TranscodeManager {
                 }
                 if session.cached {
                     tracing::error!(
+                        target: "plurxd::transcode",
                         session = %session_log_id(session_id),
                         "cached playlist was missing, empty, oversized, or failed its manifest"
                     );
@@ -1535,6 +1540,7 @@ impl TranscodeManager {
             // recovery path must not be reported as terminal.
             if tokio::time::Instant::now().into_std() >= deadline {
                 tracing::warn!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(session_id),
                     waited_s = budget.as_secs(),
                     "no usable HLS playlist within the startup budget; telling the client \
@@ -1749,6 +1755,7 @@ impl TranscodeManager {
         };
         if requested_visibility.is_some_and(|visibility| !visibility.is_servable(Instant::now())) {
             tracing::warn!(
+                target: "plurxd::transcode",
                 session = %session_log_id(session_id),
                 segment = name,
                 first_retained_segment = ?first_retained,
@@ -1812,6 +1819,7 @@ impl TranscodeManager {
                 Err(error) if error.is_capacity() => return Err(SegmentOpenError::Capacity),
                 Ok(None) | Err(_) => {
                     tracing::error!(
+                        target: "plurxd::transcode",
                         session = %session_log_id(session_id),
                         segment = name,
                         "cached object failed its generation manifest"
@@ -1996,6 +2004,7 @@ impl TranscodeManager {
                 if idx.is_some() && waited >= SEGMENT_WAIT_EVENT_MIN {
                     let waited_ms = waited.as_millis().min(i64::MAX as u128) as i64;
                     tracing::warn!(
+                        target: "plurxd::transcode",
                         session = %session_log_id(session_id),
                         segment = name,
                         waited_ms,
@@ -2068,6 +2077,7 @@ impl TranscodeManager {
                 let failure = session.failure_reason();
                 let waited_ms = started_waiting.elapsed().as_millis().min(i64::MAX as u128) as i64;
                 tracing::error!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(session_id),
                     segment = name,
                     waited_ms,
@@ -2110,6 +2120,7 @@ impl TranscodeManager {
                     let waited_ms =
                         started_waiting.elapsed().as_millis().min(i64::MAX as u128) as i64;
                     tracing::warn!(
+                        target: "plurxd::transcode",
                         session = %session_log_id(session_id),
                         segment = name,
                         requested_segment = ?idx,
@@ -2128,6 +2139,7 @@ impl TranscodeManager {
                 let waited_ms = started_waiting.elapsed().as_millis().min(i64::MAX as u128) as i64;
                 let reason = "producer_timeout";
                 tracing::error!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(session_id),
                     segment = name,
                     waited_ms,

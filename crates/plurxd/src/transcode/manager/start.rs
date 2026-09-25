@@ -96,6 +96,7 @@ impl TranscodeManager {
                     {
                         let (hw_slot, sw_permit) = bundle.into_parts();
                         tracing::info!(
+                            target: "plurxd::transcode",
                             threads = estimate.cpu_threads,
                             "software decode into a hardware encoder; reserving the CPU it will spend"
                         );
@@ -117,7 +118,10 @@ impl TranscodeManager {
                         "a hardware slot is free but this title decodes in software and the CPU pool is spent ({} of {sw_budget} threads reserved); try again in a moment",
                         self.admissions.software_in_use()
                     );
-                    tracing::warn!(class = %work.software_class(), "{why}");
+                    tracing::warn!(
+                        target: "plurxd::transcode",
+                        class = %work.software_class(), "{why}"
+                    );
                     return Err(capacity_error(why));
                 }
 
@@ -139,6 +143,7 @@ impl TranscodeManager {
                     ) {
                         Some(permit) => {
                             tracing::info!(
+                                target: "plurxd::transcode",
                                 class = %work.software_class(),
                                 threads = permit.threads(),
                                 "hardware transcode slots full; this class runs comfortably in software here, so starting it there"
@@ -154,12 +159,18 @@ impl TranscodeManager {
                                 "all {max} hardware transcode slots are in use and the software CPU pool is spent ({} of {sw_budget} threads reserved); try again in a moment",
                                 self.admissions.software_in_use()
                             );
-                            tracing::warn!(class = %work.software_class(), "{why}");
+                            tracing::warn!(
+                                target: "plurxd::transcode",
+                                class = %work.software_class(), "{why}"
+                            );
                             Err(capacity_error(why))
                         }
                     },
                     Admission::Refused(why) => {
-                        tracing::warn!(class = %work.software_class(), "{why}");
+                        tracing::warn!(
+                            target: "plurxd::transcode",
+                            class = %work.software_class(), "{why}"
+                        );
                         Err(capacity_error(why))
                     }
                     Admission::Hardware(_) => unreachable!("hardware returned above"),
@@ -195,7 +206,7 @@ impl TranscodeManager {
                     max_wait.as_secs_f64()
                 )
             };
-            tracing::warn!(class = %work.software_class(), "{why}");
+            tracing::warn!(target: "plurxd::transcode", class = %work.software_class(), "{why}");
             return Err(capacity_error(why));
         }
     }
@@ -349,6 +360,7 @@ impl TranscodeManager {
         if let Some(burn) = subtitle_burn.as_ref() {
             if let Some(reason) = crate::pipeprobe::burn_filters().await.refusal(burn.bitmap) {
                 tracing::warn!(
+                    target: "plurxd::transcode",
                     file = file_id,
                     subtitle = burn.subtitle_index,
                     bitmap = burn.bitmap,
@@ -491,6 +503,7 @@ impl TranscodeManager {
             plurx_core::domain::ScanType::from_field_order(file.field_order.as_deref()),
         );
         tracing::info!(
+            target: "plurxd::transcode",
             session = %session_log_id(&session_id), encoder = encoder.label(), pipeline = opts.pipeline.name(),
             proven = self.pipeline.name(), hdr = file.hdr.as_deref().unwrap_or("sdr"),
             peak_nits = plan.options().tone_map_peak_nits,
@@ -617,6 +630,7 @@ impl TranscodeManager {
                             })
                             .unwrap_or_else(|error| {
                                 tracing::warn!(
+                                    target: "plurxd::transcode",
                                     session = %session_log_id(&session_id),
                                     "no software-decode alternate for this session: {error}"
                                 );
@@ -625,6 +639,7 @@ impl TranscodeManager {
                         }
                         Err(error) => {
                             tracing::warn!(
+                                target: "plurxd::transcode",
                                 session = %session_log_id(&session_id),
                                 "software-decode alternate did not resolve: {error}"
                             );
@@ -667,6 +682,7 @@ impl TranscodeManager {
                             })),
                             Ok(Some(existing)) => {
                                 tracing::info!(
+                                    target: "plurxd::transcode",
                                     session = %session_log_id(&session_id),
                                     state = existing.state.as_str(),
                                     "this playback has already used its recovery budget; \
@@ -681,6 +697,7 @@ impl TranscodeManager {
                                 // a source that has already proven it does not
                                 // decode.
                                 tracing::warn!(
+                                    target: "plurxd::transcode",
                                     session = %session_log_id(&session_id),
                                     %error,
                                     "the recovery budget could not be read; withholding the \
@@ -957,6 +974,7 @@ impl TranscodeManager {
             return Err(reason);
         }
         tracing::info!(
+            target: "plurxd::transcode",
             session = %session_log_id(&session_id), file_id, target_height, start_seconds,
             encoder = encoder.label(), "started actor-owned prepublication transcode session"
         );
@@ -1199,6 +1217,7 @@ impl TranscodeManager {
             || asked.convert_dolby_vision != options.convert_dolby_vision
         {
             tracing::info!(
+                target: "plurxd::transcode",
                 file_id,
                 asked_preserve = asked.preserve_dolby_vision,
                 asked_convert = asked.convert_dolby_vision,
@@ -1264,6 +1283,7 @@ impl TranscodeManager {
             legacy_args(&upload.base_url(0))
         };
         tracing::info!(
+            target: "plurxd::transcode",
             session = %session_log_id(&session_id),
             file_id,
             start_seconds,
@@ -1598,6 +1618,7 @@ impl TranscodeManager {
             );
         }
         tracing::info!(
+            target: "plurxd::transcode",
             session = %session_log_id(&session_id),
             file_id,
             start_seconds,

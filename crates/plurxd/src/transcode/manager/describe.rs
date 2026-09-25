@@ -178,12 +178,15 @@ impl TranscodeManager {
         {
             Ok(value) => plurx_core::store::stored_switch(value.as_deref(), false),
             Err(error) => {
-                tracing::warn!(%error, "could not read automatic decoder recovery setting; keeping it off");
+                tracing::warn!(target: "plurxd::transcode", %error, "could not read automatic decoder recovery setting; keeping it off");
                 false
             }
         };
         self.set_automatic_decoder_recovery(enabled);
-        tracing::info!(enabled, "published automatic decoder recovery setting");
+        tracing::info!(
+            target: "plurxd::transcode",
+            enabled, "published automatic decoder recovery setting"
+        );
     }
 
     /// What this node measured, and what it may therefore honour.
@@ -264,6 +267,7 @@ impl TranscodeManager {
             Ok(value) => self.artifact_qualification_readiness(value.as_deref() == Some("1")),
             Err(error) => {
                 tracing::warn!(
+                    target: "plurxd::transcode",
                     %error,
                     "could not read the verified-decode request; keeping the unqualified identity"
                 );
@@ -278,6 +282,7 @@ impl TranscodeManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = readiness.clone();
         if previous != readiness.effective {
             tracing::warn!(
+                target: "plurxd::transcode",
                 namespace = readiness.effective.namespace(),
                 previous = previous.namespace(),
                 requested,
@@ -287,6 +292,7 @@ impl TranscodeManager {
             );
         } else {
             tracing::info!(
+                target: "plurxd::transcode",
                 namespace = readiness.effective.namespace(),
                 requested,
                 covered = readiness.covered_decoders.len(),
@@ -323,6 +329,7 @@ impl TranscodeManager {
             std::sync::atomic::Ordering::Relaxed,
         );
         tracing::info!(
+            target: "plurxd::transcode",
             namespace = qualification.namespace(),
             "published the effective artifact identity"
         );
@@ -545,6 +552,7 @@ impl TranscodeManager {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
         tracing::info!(
+            target: "plurxd::transcode",
             requested_mode = snapshot
                 .requested_mode
                 .map_or("family_default", RateMode::as_str),
@@ -566,6 +574,7 @@ impl TranscodeManager {
             normalize_rate_control_request(raw_mode.as_deref(), raw_quality.as_deref());
         if corrupt {
             tracing::warn!(
+                target: "plurxd::transcode",
                 rate_mode = raw_mode.as_deref().unwrap_or_default(),
                 quality = raw_quality.as_deref().unwrap_or_default(),
                 "invalid durable rate-control pair — using bitrate"
@@ -625,10 +634,14 @@ impl TranscodeManager {
             match self.refresh_rate_control().await {
                 Ok(Some(_)) => {}
                 Ok(None) => tracing::debug!(
+                    target: "plurxd::transcode",
                     "rate-control refresh deferred for live/offline work or occupied encoder capacity"
                 ),
                 Err(error) => {
-                    tracing::warn!(%error, "could not refresh replicated rate-control settings")
+                    tracing::warn!(
+                        target: "plurxd::transcode",
+                        %error, "could not refresh replicated rate-control settings"
+                    )
                 }
             }
             if stop_after_first {
@@ -668,6 +681,7 @@ impl TranscodeManager {
             // Startup settings changed during the probe. The runtime refresher
             // will validate the new complete pair under background admission.
             tracing::info!(
+                target: "plurxd::transcode",
                 "rate-control settings changed during boot validation; deferring refresh"
             );
         }
@@ -713,6 +727,7 @@ impl TranscodeManager {
             // response reports the replicated winner's requested pair.
             if self.refresh_rate_control_locked().await?.is_none() {
                 tracing::info!(
+                    target: "plurxd::transcode",
                     "concurrent rate-control winner will be validated by the background refresher"
                 );
             }
@@ -974,6 +989,7 @@ impl TranscodeManager {
         })?;
         for (session_id, _session) in removed {
             tracing::info!(
+                target: "plurxd::transcode",
                 session = %session_log_id(&session_id),
                 playback = %session_log_id(playback_id),
                 "reaped superseded transcode session (this player started a new one)"

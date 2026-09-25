@@ -154,6 +154,7 @@ impl Drop for PrepublicationStartSettlement {
             });
         } else {
             tracing::error!(
+                target: "plurxd::transcode",
                 path = %dir.display(),
                 "runtime ended before cancelled prepublication scratch could be removed"
             );
@@ -566,6 +567,7 @@ pub(super) fn report_producer_health(
         .map(crate::decoder_health::DecodeFaultKind::name);
     if fault.is_some() || receipt.video_decode_error_records > 0 {
         tracing::warn!(
+            target: "plurxd::transcode",
             attempt,
             plan = %receipt.plan_digest,
             qualification = receipt.qualification.name(),
@@ -579,6 +581,7 @@ pub(super) fn report_producer_health(
         return;
     }
     tracing::debug!(
+        target: "plurxd::transcode",
         attempt,
         plan = %receipt.plan_digest,
         qualification = receipt.qualification.name(),

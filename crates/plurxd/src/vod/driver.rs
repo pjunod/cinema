@@ -183,6 +183,7 @@ async fn report_permit_wait(
     let first = !rendition.permit_wait_logged.swap(true, Relaxed);
     if first {
         tracing::info!(
+            target: "plurxd::vodserve",
             rendition = %rendition.key,
             priority = ?refusal.priority,
             hardware_used = refusal.pool.hardware_used,
@@ -201,6 +202,7 @@ async fn report_permit_wait(
         );
     } else if let Ok((predecessor, true)) = &handoff {
         tracing::info!(
+            target: "plurxd::vodserve",
             rendition = %rendition.key,
             handoff_from = %predecessor,
             "prepared successor asked its predecessor for its encoder permit"
@@ -364,6 +366,7 @@ fn finish_handoff_yield(
     successor: Option<Arc<Rendition>>,
 ) {
     tracing::info!(
+        target: "plurxd::vodserve",
         rendition = %rendition.key,
         successor = successor.as_ref().map_or("gone", |successor| successor.key.as_str()),
         "gave this viewer's encoder permit to its prepared successor"
@@ -508,7 +511,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     match perform_driver_step(shared, rendition, step).await {
                         Ok(_) => {}
                         Err(error) => {
-                            tracing::warn!(rendition = %rendition.key, "retiring encoder before admission: {error}");
+                            tracing::warn!(target: "plurxd::vodserve", rendition = %rendition.key, "retiring encoder before admission: {error}");
                             return;
                         }
                     }
@@ -550,7 +553,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             match perform_driver_step(shared, rendition, terminate).await {
                 Ok(_) => {}
                 Err(error) => {
-                    tracing::debug!(rendition = %rendition.key, "retiring prewarm producer: {error}");
+                    tracing::debug!(target: "plurxd::vodserve", rendition = %rendition.key, "retiring prewarm producer: {error}");
                 }
             }
             rendition.kick();
@@ -572,7 +575,10 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     Ok(_) => {}
                     Err(error) => {
                         clear_marker_prewarm_dispatch(rendition);
-                        tracing::warn!(rendition = %rendition.key, "performing {step:?}: {error}");
+                        tracing::warn!(
+                            target: "plurxd::vodserve",
+                            rendition = %rendition.key, "performing {step:?}: {error}"
+                        );
                     }
                 }
             }
@@ -585,7 +591,10 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 match perform_driver_step(shared, rendition, step).await {
                     Ok(_) => {}
                     Err(error) => {
-                        tracing::debug!(rendition = %rendition.key, "performing {step:?}: {error}");
+                        tracing::debug!(
+                            target: "plurxd::vodserve",
+                            rendition = %rendition.key, "performing {step:?}: {error}"
+                        );
                     }
                 }
                 if let Some(successor) = successor {
@@ -602,7 +611,10 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     Ok(Performed::Done) => {}
                     Err(error) => {
                         clear_marker_prewarm_dispatch(rendition);
-                        tracing::warn!(rendition = %rendition.key, "performing {step:?}: {error}");
+                        tracing::warn!(
+                            target: "plurxd::vodserve",
+                            rendition = %rendition.key, "performing {step:?}: {error}"
+                        );
                     }
                 }
             }
@@ -616,6 +628,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                         sub_saturating(&shared.working_set, freed.bytes);
                         if let Some(error) = freed.error {
                             tracing::warn!(
+                                target: "plurxd::vodserve",
                                 rendition = %rendition.key,
                                 freed = freed.bytes,
                                 "eviction sweep stopped early: {error}"
@@ -644,18 +657,24 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                             {
                                 Ok(_) => {}
                                 Err(error) => {
-                                    tracing::warn!(rendition = %rendition.key, "terminating producer after a zero-progress capacity sweep: {error}");
+                                    tracing::warn!(target: "plurxd::vodserve", rendition = %rendition.key, "terminating producer after a zero-progress capacity sweep: {error}");
                                 }
                             }
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(rendition = %rendition.key, "make_room: {error}");
+                        tracing::warn!(
+                            target: "plurxd::vodserve",
+                            rendition = %rendition.key, "make_room: {error}"
+                        );
                     }
                 }
             }
             Step::Report { hold } => {
-                tracing::warn!(rendition = %rendition.key, "producer stalled: {hold:?}");
+                tracing::warn!(
+                    target: "plurxd::vodserve",
+                    rendition = %rendition.key, "producer stalled: {hold:?}"
+                );
             }
         }
         break;

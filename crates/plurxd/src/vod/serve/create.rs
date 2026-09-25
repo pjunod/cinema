@@ -247,7 +247,7 @@ impl VodServe {
                 // The first rollout phase is write/shadow plus prefer-v2.
                 // Per-key fallback preserves an already healthy v1 title
                 // until this exact source/pipeline key is fully available.
-                tracing::debug!(file_id = file.id, %reason, "v2 fragment index unavailable; using v1");
+                tracing::debug!(target: "plurxd::vodserve", file_id = file.id, %reason, "v2 fragment index unavailable; using v1");
                 (
                     self.shared
                         .store
@@ -525,6 +525,7 @@ impl VodServe {
         drop(attachment);
         rendition.kick();
         tracing::info!(
+            target: "plurxd::vodserve",
             session = %session_log_id(&session_id),
             rendition = %rendition.key,
             file = file.id,

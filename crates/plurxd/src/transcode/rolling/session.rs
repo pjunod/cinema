@@ -666,6 +666,7 @@ impl Session {
             while !session.control.is_retired() {
                 if let Err(reason) = session.publication_cycle(&session_id).await {
                     tracing::error!(
+                        target: "plurxd::transcode",
                         session = %session_log_id(&session_id),
                         %reason,
                         "rolling publication clock retired an invalid presentation"
@@ -1018,6 +1019,7 @@ impl Session {
         drop(clock);
         self.control.request_flow();
         tracing::debug!(
+            target: "plurxd::transcode",
             session = %session_log_id(session_id),
             producer_attempt,
             revision,
@@ -1373,7 +1375,10 @@ impl Session {
         };
         match outcome {
             Ok(outcome) => {
-                tracing::trace!(terminal = ?outcome.cause(), "rolling session end observed");
+                tracing::trace!(
+                    target: "plurxd::transcode",
+                    terminal = ?outcome.cause(), "rolling session end observed"
+                );
                 Ok(outcome.cause())
             }
             Err(_) => {
@@ -1396,7 +1401,10 @@ impl Session {
     pub(super) async fn settle_authority_fence(&self) {
         match self.control.authority_fence().await {
             Ok(outcome) => {
-                tracing::trace!(terminal = ?outcome.cause(), "rolling authority fence observed");
+                tracing::trace!(
+                    target: "plurxd::transcode",
+                    terminal = ?outcome.cause(), "rolling authority fence observed"
+                );
             }
             Err(_) => self.control.fence_unavailable(),
         }
@@ -1842,6 +1850,7 @@ impl Session {
                     Ok(None) => {
                         let first_error = first_error.as_ref().unwrap_or(&error);
                         tracing::error!(
+                            target: "plurxd::transcode",
                             producer_attempt,
                             first_error = %first_error,
                             retry_error = %error,
@@ -1854,6 +1863,7 @@ impl Session {
                     }
                     Err(status_error) => {
                         tracing::error!(
+                            target: "plurxd::transcode",
                             producer_attempt,
                             signal_error = %error,
                             %status_error,
@@ -2127,7 +2137,10 @@ impl Session {
                 return;
             };
             if rebuilt {
-                tracing::debug!("segment index rebuilt — the playlist was truncated or replaced");
+                tracing::debug!(
+                    target: "plurxd::transcode",
+                    "segment index rebuilt — the playlist was truncated or replaced"
+                );
             }
             // Resolve the frontier against the fresh index: a segment served
             // before its EXTINF was known gets its real end time now.

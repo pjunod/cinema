@@ -659,6 +659,7 @@ pub(super) fn plan_review_for(
             );
             if review.mismatched {
                 tracing::warn!(
+                    target: "plurxd::http::hls",
                     file_id = log.file_id,
                     user_id = log.user_id,
                     client_build = %log.client_build,
@@ -704,6 +705,7 @@ pub(super) fn plan_review_for(
         Some(caps) => {
             plan_derivation::count_unusable_caps();
             tracing::warn!(
+                target: "plurxd::http::hls",
                 file_id = log.file_id,
                 client_build = %log.client_build,
                 caps_version = caps.v,
@@ -720,6 +722,7 @@ pub(super) fn plan_review_for(
         None => {
             plan_derivation::count_legacy_trusted();
             tracing::warn!(
+                target: "plurxd::http::hls",
                 file_id = log.file_id,
                 client_build = %log.client_build,
                 "create trusted the client's plan echo: this build sends no caps document"
@@ -1293,6 +1296,7 @@ async fn create_with_purpose(
                 .await
                 .map_err(|error| {
                     tracing::warn!(
+                        target: "plurxd::http::hls",
                         playback = %req.playback_id,
                         "recording the viewer's selection on create failed: {error}"
                     );
@@ -1347,6 +1351,7 @@ async fn create_with_purpose(
     // decided nothing except which clients could burn at all.
     if req.subtitle_burn_sdr.is_some() {
         tracing::debug!(
+            target: "plurxd::http::hls",
             file_id = id,
             subtitle_burn = req.subtitle_burn,
             subtitle_burn_sdr = req.subtitle_burn_sdr,
@@ -1983,6 +1988,7 @@ async fn create_with_purpose(
                 // The armed guard aborts an invalid local result just as the
                 // peer transport rejects and aborts an invalid remote result.
                 tracing::warn!(
+                    target: "plurxd::http::hls",
                     owner_node_id = %candidate,
                     "media worker returned an invalid start contract"
                 );
@@ -1991,7 +1997,10 @@ async fn create_with_purpose(
                 )));
             }
             Err(error) => {
-                tracing::debug!(owner_node_id = %candidate, "media worker start attempt failed");
+                tracing::debug!(
+                    target: "plurxd::http::hls",
+                    owner_node_id = %candidate, "media worker start attempt failed"
+                );
                 last_error = Some(error);
             }
         }
@@ -2316,10 +2325,16 @@ async fn create_with_purpose(
                         publication_guard.disarm();
                     }
                     Ok(Err(error)) => {
-                        tracing::warn!(?error, "detached media activation settled unsuccessfully");
+                        tracing::warn!(
+                            target: "plurxd::http::hls",
+                            ?error, "detached media activation settled unsuccessfully"
+                        );
                     }
                     Err(error) => {
-                        tracing::error!(%error, "detached media activation task failed");
+                        tracing::error!(
+                            target: "plurxd::http::hls",
+                            %error, "detached media activation task failed"
+                        );
                     }
                 }
             });
@@ -2496,7 +2511,10 @@ fn spawn_activation_abandonment(state: AppState, activation: MediaSessionActivat
             )
             .await
         {
-            tracing::warn!(%error, "provisional media activation abandonment failed");
+            tracing::warn!(
+                target: "plurxd::http::hls",
+                %error, "provisional media activation abandonment failed"
+            );
         }
     });
 }
@@ -2550,6 +2568,7 @@ pub(super) async fn settle_activation_publication_cleanup(
             Ok(Err(error)) => {
                 if settlement_attempt == 1 || settlement_attempt.is_multiple_of(15) {
                     tracing::warn!(
+                        target: "plurxd::http::hls",
                         %error,
                         settlement_attempt,
                         "activation response reaper is retrying exact settlement"
@@ -2559,6 +2578,7 @@ pub(super) async fn settle_activation_publication_cleanup(
             Err(_) => {
                 if settlement_attempt == 1 || settlement_attempt.is_multiple_of(15) {
                     tracing::warn!(
+                        target: "plurxd::http::hls",
                         settlement_attempt,
                         "activation response reaper timed out exact settlement"
                     );
@@ -2897,7 +2917,10 @@ pub(super) async fn abort_started_session(
         )
         .await
     {
-        tracing::warn!(error = ?error, "remote cluster-start abort did not settle");
+        tracing::warn!(
+            target: "plurxd::http::hls",
+            error = ?error, "remote cluster-start abort did not settle"
+        );
     }
 }
 
@@ -2953,7 +2976,10 @@ pub(in crate::http) async fn prime_live_prepared_session(
     {
         Ok(started) => started,
         Err(error) => {
-            tracing::warn!(%error, "rolling prepared successor could not start");
+            tracing::warn!(
+                target: "plurxd::http::hls",
+                %error, "rolling prepared successor could not start"
+            );
             return false;
         }
     };
@@ -3147,6 +3173,7 @@ pub(super) async fn settle_armed_activation_handoff(
         return true;
     }
     tracing::warn!(
+        target: "plurxd::http::hls",
         incarnation = %predecessor_incarnation,
         safety_window_seconds = TERMINAL_PROJECTION_SAFETY_WINDOW.as_secs(),
         "predecessor acknowledgement was unavailable through the response-lifetime safety boundary"
@@ -3234,6 +3261,7 @@ pub(super) async fn complete_activation_handoff_until(
             Ok(Err(error)) => {
                 drop(serving_transition);
                 tracing::warn!(
+                    target: "plurxd::http::hls",
                     error = ?error,
                     incarnation = %successor.incarnation_id,
                     "successor publication-fence completion is retrying"
@@ -3273,6 +3301,7 @@ pub(super) async fn project_activation_predecessor_until(
                     route.terminal_reason.as_deref(),
                 ) else {
                     tracing::error!(
+                        target: "plurxd::http::hls",
                         incarnation = %predecessor_incarnation,
                         terminal_reason = ?route.terminal_reason,
                         "ended activation predecessor has no valid durable terminal cause"
@@ -3381,7 +3410,7 @@ pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
     if error.contains("already used") {
         return ApiError::Conflict(error);
     }
-    tracing::warn!(file = file_id, "session create failed: {error}");
+    tracing::warn!(target: "plurxd::http::hls", file = file_id, "session create failed: {error}");
     // A sidecar this start needs is still being produced. Nothing is wrong and
     // nothing about the request should change — the only useful answer is
     // "ask again", which is what `startup_timeout` already means to every
@@ -3475,6 +3504,9 @@ pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
 }
 
 fn session_store_error(operation: &'static str, error: plurx_core::error::StoreError) -> ApiError {
-    tracing::warn!(%error, operation, "media-session Store operation failed");
+    tracing::warn!(
+        target: "plurxd::http::hls",
+        %error, operation, "media-session Store operation failed"
+    );
     ApiError::ServiceUnavailable(format!("{operation}: {error}"))
 }

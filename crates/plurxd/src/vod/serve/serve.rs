@@ -126,6 +126,7 @@ impl VodServe {
         .is_err()
         {
             tracing::warn!(
+                target: "plurxd::vodserve",
                 "a VOD terminal cleanup outlived {:?} of maintenance waiting; \
                  continuing this pass without it",
                 TERMINAL_CLEANUP_MAINTENANCE_WAIT
@@ -231,6 +232,7 @@ impl VodServe {
             };
             if removed.is_some() {
                 tracing::debug!(
+                    target: "plurxd::vodserve",
                     session = %session_log_id(&candidate.session_id),
                     "released an expired VOD terminal response-owner tombstone"
                 );
@@ -275,6 +277,7 @@ impl VodServe {
                 // gone, never between registry removal and detach.
                 rendition.detach_reader(&self.shared.pool, &id).await;
                 tracing::info!(
+                    target: "plurxd::vodserve",
                     session = %session_log_id(&id),
                     rendition = %rendition.key,
                     "vod session idle-reaped (sliding TTL)"

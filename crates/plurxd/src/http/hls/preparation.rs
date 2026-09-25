@@ -1168,7 +1168,10 @@ pub(super) async fn process_preparation_candidate(
     {
         Ok(value) => plurx_core::store::stored_switch(value.as_deref(), true),
         Err(error) => {
-            tracing::warn!(%error, "prepared-handoff setting could not be read");
+            tracing::warn!(
+                target: "plurxd::http::hls",
+                %error, "prepared-handoff setting could not be read"
+            );
             return;
         }
     };
@@ -1214,7 +1217,10 @@ pub(super) async fn process_preparation_candidate(
     {
         Ok(candidate) => candidate,
         Err(error) => {
-            tracing::warn!(?error, "prepared successor could not be planned");
+            tracing::warn!(
+                target: "plurxd::http::hls",
+                ?error, "prepared successor could not be planned"
+            );
             crate::playback_control::record_preparation_staged(false);
             return;
         }
@@ -1858,7 +1864,7 @@ pub(super) async fn retire_prepared_worker(
         )
         .await
     {
-        tracing::warn!(?error, owner = %owner_node_id, %reason, "remote prepared worker cleanup did not settle");
+        tracing::warn!(target: "plurxd::http::hls", ?error, owner = %owner_node_id, %reason, "remote prepared worker cleanup did not settle");
     }
 }
 

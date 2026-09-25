@@ -34,9 +34,15 @@ impl TranscodeManager {
             match tokio::fs::remove_dir_all(&path).await {
                 Ok(()) => {
                     removed += 1;
-                    tracing::info!(dir = %path.display(), "removed orphaned transcode directory");
+                    tracing::info!(
+                        target: "plurxd::transcode",
+                        dir = %path.display(), "removed orphaned transcode directory"
+                    );
                 }
-                Err(e) => tracing::warn!(dir = %path.display(), error = %e, "orphan sweep failed"),
+                Err(e) => tracing::warn!(
+                    target: "plurxd::transcode",
+                    dir = %path.display(), error = %e, "orphan sweep failed"
+                ),
             }
         }
         removed
@@ -126,6 +132,7 @@ impl TranscodeManager {
                         drop(suspended_at);
                         drop(transition);
                         tracing::info!(
+                            target: "plurxd::transcode",
                             session = %session_log_id(session_id),
                             previous_hold_reason = ?previous_reason,
                             hold_reason = ?hold.reason,
@@ -226,6 +233,7 @@ impl TranscodeManager {
             crate::playback_control::record_producer_hold(hold.reason);
             drop(transition);
             tracing::info!(
+                target: "plurxd::transcode",
                 session = %session_log_id(session_id),
                 suspend_count,
                 hold_reason = ?hold.reason,
@@ -268,6 +276,7 @@ impl TranscodeManager {
             }
             drop(transition);
             tracing::info!(
+                target: "plurxd::transcode",
                 session = %session_log_id(session_id),
                 suspend_count = session.suspend_count.load(Relaxed),
                 ahead_seconds = ahead.map(|ahead| ahead.seconds),
@@ -346,6 +355,7 @@ impl TranscodeManager {
                 // than an anonymous 500. The figures are the operator's only
                 // way to tell a full budget from a stuck cleanup.
                 tracing::warn!(
+                    target: "plurxd::transcode",
                     charged = refusal.charged,
                     requested = refusal.requested,
                     configured = refusal.configured,
@@ -409,6 +419,7 @@ impl TranscodeManager {
             }
         }
         tracing::debug!(
+            target: "plurxd::transcode",
             session = %session_log_id(session_id),
             class = class.label(),
             shortened = shortened.is_some(),
@@ -725,6 +736,7 @@ impl TranscodeManager {
                     continue;
                 }
                 tracing::info!(
+                    target: "plurxd::transcode",
                     session = %session_log_id(&id),
                     idle_seconds,
                     last_request,

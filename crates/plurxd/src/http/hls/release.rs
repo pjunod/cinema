@@ -124,6 +124,7 @@ pub(super) async fn release_with_slots(
             Ok(status) => status,
             Err(error) => {
                 tracing::error!(
+                    target: "plurxd::http::hls",
                     %error,
                     session = %crate::transcode::session_log_id(&session),
                     "media-session release transaction panicked; transferred to lifecycle reconciliation"
@@ -139,7 +140,10 @@ pub(super) async fn release_with_slots(
     match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), settlement_task).await {
         Ok(Ok(status)) => status,
         Ok(Err(error)) => {
-            tracing::warn!(%error, "media-session release settlement task failed");
+            tracing::warn!(
+                target: "plurxd::http::hls",
+                %error, "media-session release settlement task failed"
+            );
             StatusCode::SERVICE_UNAVAILABLE
         }
         // Dropping JoinHandle detaches the still-owned cleanup task.
@@ -181,6 +185,7 @@ pub(super) async fn release_session(
         Ok(route) => route,
         Err(error) => {
             tracing::warn!(
+                target: "plurxd::http::hls",
                 %error,
                 session = %crate::transcode::session_log_id(&session),
                 "durable media-session release is commit-unknown; transferred to lifecycle reconciliation"
@@ -223,6 +228,7 @@ pub(super) async fn release_session(
                     .await
                 {
                     tracing::debug!(
+                        target: "plurxd::http::hls",
                         session = %crate::transcode::session_log_id(&session),
                         class = class.label(),
                         in_ms = deadline.saturating_duration_since(Instant::now()).as_millis(),
@@ -273,6 +279,7 @@ pub(super) async fn release_session(
                         }
                         Err(error) => {
                             tracing::warn!(
+                                target: "plurxd::http::hls",
                                 error = ?error,
                                 session = %crate::transcode::session_log_id(&session),
                                 owner = %route.owner_node_id,

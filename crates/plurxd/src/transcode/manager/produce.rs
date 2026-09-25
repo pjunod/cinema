@@ -108,7 +108,10 @@ impl TranscodeManager {
         let policy = match self.try_pretranscode_policy_snapshot().await {
             Ok(policy) => policy,
             Err(error) => {
-                tracing::warn!(%error, "speculative worker could not read transcode policy");
+                tracing::warn!(
+                    target: "plurxd::transcode",
+                    %error, "speculative worker could not read transcode policy"
+                );
                 return Ok(PretranscodeProduceOutcome::Yielded);
             }
         };
@@ -261,7 +264,7 @@ impl TranscodeManager {
         {
             Ok(plan) => plan,
             Err(error) => {
-                tracing::warn!(package = package_id, %error, "offline decode alternate did not resolve");
+                tracing::warn!(target: "plurxd::transcode", package = package_id, %error, "offline decode alternate did not resolve");
                 return None;
             }
         };
@@ -272,7 +275,10 @@ impl TranscodeManager {
             }
             Ok(None) => None,
             Err(error) => {
-                tracing::warn!(package = package_id, %error, "offline decode alternate is unsafe");
+                tracing::warn!(
+                    target: "plurxd::transcode",
+                    package = package_id, %error, "offline decode alternate is unsafe"
+                );
                 None
             }
         }
@@ -407,7 +413,7 @@ impl TranscodeManager {
                 let consumed = match recovery_begin {
                     Ok(consumed) => consumed,
                     Err(error) => {
-                        tracing::warn!(package = %package.id, %error, "offline recovery budget could not be consumed");
+                        tracing::warn!(target: "plurxd::transcode", package = %package.id, %error, "offline recovery budget could not be consumed");
                         // Retrying primary without authoritative proof that
                         // the one-shot budget was consumed is unsafe. Settle
                         // this attempt as terminal; the package coordinator
@@ -422,6 +428,7 @@ impl TranscodeManager {
                 recovery_state = OfflineRecoveryState::Pending;
                 recovery_began_now = true;
                 tracing::warn!(
+                    target: "plurxd::transcode",
                     package = %package.id,
                     failed_recipe = primary_hash,
                     "offline decode fault consumed the durable recovery budget"
@@ -476,7 +483,7 @@ impl TranscodeManager {
                     {
                         Ok(installed) => installed,
                         Err(error) => {
-                            tracing::warn!(package = %package.id, %error, "offline recovery alternate could not be installed");
+                            tracing::warn!(target: "plurxd::transcode", package = %package.id, %error, "offline recovery alternate could not be installed");
                             return Ok(OfflineProduceOutcome::StoreUnavailable);
                         }
                     };
@@ -646,7 +653,7 @@ impl TranscodeManager {
         let cached = match self.store.cache_hit(&hash, &cache.node_id).await {
             Ok(cached) => cached,
             Err(error) => {
-                tracing::warn!(recipe = %hash, %error, "cache lookup unavailable during production");
+                tracing::warn!(target: "plurxd::transcode", recipe = %hash, %error, "cache lookup unavailable during production");
                 return Ok(OfflineProduceOutcome::StoreUnavailable);
             }
         };
@@ -719,6 +726,7 @@ impl TranscodeManager {
                 // packages over a bookkeeping fault is the trade this rule
                 // exists to refuse.
                 tracing::error!(
+                    target: "plurxd::transcode",
                     recipe = %hash,
                     namespace = plan.artifact_namespace(),
                     "a health-qualified cache row has no receipt permitting its reuse"
@@ -858,7 +866,7 @@ impl TranscodeManager {
                 {
                     Ok(completed) => completed,
                     Err(error) => {
-                        tracing::warn!(recipe = %hash, %error, "queue cache-hit settlement unavailable");
+                        tracing::warn!(target: "plurxd::transcode", recipe = %hash, %error, "queue cache-hit settlement unavailable");
                         return Ok(OfflineProduceOutcome::StoreUnavailable);
                     }
                 };
@@ -881,7 +889,7 @@ impl TranscodeManager {
                 {
                     Ok(current) => current,
                     Err(error) => {
-                        tracing::warn!(package = package_id, %error, "offline cache-hit claim check unavailable");
+                        tracing::warn!(target: "plurxd::transcode", package = package_id, %error, "offline cache-hit claim check unavailable");
                         return Ok(OfflineProduceOutcome::StoreUnavailable);
                     }
                 };
@@ -984,6 +992,7 @@ impl TranscodeManager {
                 .is_err()
             {
                 tracing::debug!(
+                    target: "plurxd::transcode",
                     recipe = %hash,
                     file = file.id,
                     "cache entry claimed elsewhere; standing down"
@@ -991,6 +1000,7 @@ impl TranscodeManager {
                 return Ok(OfflineProduceOutcome::ClaimedElsewhere);
             }
             tracing::info!(
+                target: "plurxd::transcode",
                 recipe = %hash,
                 file = file.id,
                 "resuming a portable transcode left unfinished"
@@ -1040,7 +1050,7 @@ impl TranscodeManager {
                         .touch_cache_claim(&hash, &cache.node_id)
                         .await
                     {
-                        tracing::warn!(recipe = %hash, error = %error, "could not mark a fenced pre-transcode as still in progress");
+                        tracing::warn!(target: "plurxd::transcode", recipe = %hash, error = %error, "could not mark a fenced pre-transcode as still in progress");
                     }
                 } else {
                     self.touch_claim(&hash, &cache.node_id).await;
@@ -1234,6 +1244,7 @@ impl TranscodeManager {
         // rather than about where it was filed.
         if !generation_permits_reuse(plan, manifest.as_ref()) {
             tracing::warn!(
+                target: "plurxd::transcode",
                 recipe = %hash,
                 namespace = plan.artifact_namespace(),
                 manifest = manifest.is_some(),
@@ -1297,7 +1308,7 @@ impl TranscodeManager {
             {
                 Ok(completed) => completed,
                 Err(error) => {
-                    tracing::warn!(recipe = %hash, %error, "queue completion settlement unavailable");
+                    tracing::warn!(target: "plurxd::transcode", recipe = %hash, %error, "queue completion settlement unavailable");
                     return Ok(OfflineProduceOutcome::StoreUnavailable);
                 }
             };
@@ -1345,7 +1356,7 @@ impl TranscodeManager {
                 {
                     Ok(completed) => completed,
                     Err(error) => {
-                        tracing::warn!(package = package_id, recipe = %hash, %error, "offline cache completion unavailable");
+                        tracing::warn!(target: "plurxd::transcode", package = package_id, recipe = %hash, %error, "offline cache completion unavailable");
                         return Ok(OfflineProduceOutcome::StoreUnavailable);
                     }
                 };
@@ -1381,12 +1392,14 @@ impl TranscodeManager {
                 .await
             {
                 Ok(true) => tracing::info!(
+                    target: "plurxd::transcode",
                     recipe = %hash,
                     generation = %manifest.generation_id,
                     "portable transcode published to the shared cache"
                 ),
                 Ok(false) => {}
                 Err(error) => tracing::warn!(
+                    target: "plurxd::transcode",
                     recipe = %hash,
                     generation = %manifest.generation_id,
                     %error,
@@ -1397,6 +1410,7 @@ impl TranscodeManager {
         drop(publication_guard);
         let _ = quarantine_remove_cache_tree(&temp, 3).await;
         tracing::info!(
+            target: "plurxd::transcode",
             recipe = %hash,
             file = file.id,
             height = opts.target_height,
@@ -1423,7 +1437,7 @@ impl TranscodeManager {
     /// cleanup working correctly.
     async fn touch_claim(&self, hash: &str, node_id: &str) {
         if let Err(e) = self.store.touch_cache_claim(hash, node_id).await {
-            tracing::warn!(recipe = %hash, error = %e, "could not mark a pre-transcode as still in progress");
+            tracing::warn!(target: "plurxd::transcode", recipe = %hash, error = %e, "could not mark a pre-transcode as still in progress");
         }
     }
 
@@ -1475,6 +1489,7 @@ impl TranscodeManager {
                 assembled_publication(&assembled, &parts, generation_health.settle()).await
             {
                 tracing::info!(
+                    target: "plurxd::transcode",
                     recipe = %hash,
                     segments = published.segments,
                     "resuming an assembled generation awaiting integrity publication"
@@ -1484,6 +1499,7 @@ impl TranscodeManager {
         }
         if !parts.is_empty() {
             tracing::info!(
+                target: "plurxd::transcode",
                 recipe = %hash, parts = parts.len(),
                 from_s = crate::produce::resume_at_ms(&parts) / 1000,
                 "picking up where an earlier pass stopped"
@@ -1509,7 +1525,10 @@ impl TranscodeManager {
                 return Ok(None);
             }
             if Instant::now() >= deadline {
-                tracing::debug!(recipe = %hash, "producer out of time for this run");
+                tracing::debug!(
+                    target: "plurxd::transcode",
+                    recipe = %hash, "producer out of time for this run"
+                );
                 return Ok(None);
             }
             // Do not even start while a viewer is queuing — and never spend
@@ -1658,6 +1677,7 @@ impl TranscodeManager {
             let execution = execution.observing_qualified_grammar(observation.qualified_logging());
             let args = transcode::hls_args(plan, &execution);
             tracing::info!(
+                target: "plurxd::transcode",
                 recipe = %hash, part = parts.len(), from_s = part_opts.start_seconds,
                 encoder = encoder.label(), "pre-transcode part starting"
             );
@@ -1786,6 +1806,7 @@ impl TranscodeManager {
                 }
                 PartEnd::Preempted | PartEnd::Deadline => {
                     tracing::info!(
+                        target: "plurxd::transcode",
                         recipe = %hash, spawned,
                         produced_s = crate::produce::resume_at_ms(&parts) / 1000,
                         "pre-transcode yielded"
@@ -1826,6 +1847,7 @@ impl TranscodeManager {
             }
         }
         tracing::warn!(
+            target: "plurxd::transcode",
             recipe = %hash, parts = parts.len(),
             "pre-transcode preempted too many times; giving up on this run"
         );

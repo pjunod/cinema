@@ -34,7 +34,7 @@ impl EncodedGenerationScanner {
                 Ok(entries) => Some(entries),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
                 Err(error) => {
-                    tracing::warn!(path = %self.base.display(), %error, "cannot discover obsolete encoded VOD generations");
+                    tracing::warn!(target: "plurxd::vodserve", path = %self.base.display(), %error, "cannot discover obsolete encoded VOD generations");
                     return Vec::new();
                 }
             };
@@ -48,7 +48,10 @@ impl EncodedGenerationScanner {
                 Some(Ok(entry)) => entry,
                 Some(Err(error)) => {
                     examined += 1;
-                    tracing::warn!(%error, "cannot inspect a VOD rendition directory entry");
+                    tracing::warn!(
+                        target: "plurxd::vodserve",
+                        %error, "cannot inspect a VOD rendition directory entry"
+                    );
                     continue;
                 }
                 None => {

@@ -23,7 +23,10 @@ impl Shared {
             .await
             {
                 Ok(discovered) => pending.extend(discovered),
-                Err(error) => tracing::warn!(%error, "encoded VOD generation discovery failed"),
+                Err(error) => tracing::warn!(
+                    target: "plurxd::vodserve",
+                    %error, "encoded VOD generation discovery failed"
+                ),
             }
         }
 
@@ -35,6 +38,7 @@ impl Shared {
             };
             if let Err(error) = self.store.forget_rendition_plan(&candidate.key).await {
                 tracing::warn!(
+                    target: "plurxd::vodserve",
                     rendition = %candidate.key,
                     %error,
                     "cannot forget an obsolete encoded rendition plan"
@@ -50,6 +54,7 @@ impl Shared {
                 Ok(Err(error)) if error.kind() == io::ErrorKind::NotFound => true,
                 Ok(Err(error)) => {
                     tracing::warn!(
+                        target: "plurxd::vodserve",
                         path = %candidate.path.display(),
                         %error,
                         "cannot remove an obsolete encoded VOD generation"
@@ -57,7 +62,10 @@ impl Shared {
                     false
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "encoded VOD generation removal failed");
+                    tracing::warn!(
+                        target: "plurxd::vodserve",
+                        %error, "encoded VOD generation removal failed"
+                    );
                     false
                 }
             };
@@ -71,7 +79,10 @@ impl Shared {
             }
         }
         if removed > 0 {
-            tracing::info!(removed, "reconciled obsolete encoded VOD generations");
+            tracing::info!(
+                target: "plurxd::vodserve",
+                removed, "reconciled obsolete encoded VOD generations"
+            );
         }
         removed
     }
@@ -383,7 +394,10 @@ impl Shared {
                 } else {
                     sub_saturating(&self.working_set, claimed);
                 }
-                tracing::info!(rendition = %key, "replacing a failed rendition on create");
+                tracing::info!(
+                    target: "plurxd::vodserve",
+                    rendition = %key, "replacing a failed rendition on create"
+                );
             }
         }
 
@@ -498,6 +512,7 @@ impl Shared {
             Some(theirs) => Ok(theirs),
             None => {
                 tracing::warn!(
+                    target: "plurxd::vodserve",
                     rendition = %key,
                     "lost the plan race but the stored plan is gone; serving ours"
                 );
@@ -579,6 +594,7 @@ impl Shared {
                 .map_err(|error| format!("reconciling the rendition directory: {error}"))?;
             if !report.adopted.is_empty() || !report.forgotten.is_empty() {
                 tracing::info!(
+                    target: "plurxd::vodserve",
                     rendition = %key,
                     adopted = report.adopted.len(),
                     forgotten = report.forgotten.len(),
@@ -611,6 +627,7 @@ impl Shared {
                                     format!("re-writing the regenerated init: {error}")
                                 })?;
                                 tracing::info!(
+                                    target: "plurxd::vodserve",
                                     rendition = %key,
                                     "head regeneration re-derived a missing init.mp4; \
                                      every adopted segment kept"
@@ -639,6 +656,7 @@ impl Shared {
                                 let freed = dir.purge(&mut manifest).await;
                                 if let Some(error) = freed.error {
                                     tracing::warn!(
+                                        target: "plurxd::vodserve",
                                         rendition = %key,
                                         "purging after a failed head regeneration: {error}"
                                     );
@@ -646,6 +664,7 @@ impl Shared {
                                 let _ =
                                     tokio::fs::remove_file(dir.path().join(IDENTITY_NAME)).await;
                                 tracing::info!(
+                                    target: "plurxd::vodserve",
                                     rendition = %key,
                                     "head regeneration could not verify the adopted \
                                      rendition; purged to planned-only: {why}"
@@ -670,11 +689,13 @@ impl Shared {
                         let freed = dir.purge(&mut manifest).await;
                         if let Some(error) = freed.error {
                             tracing::warn!(
+                                target: "plurxd::vodserve",
                                 rendition = %key,
                                 "purging an unverifiable rendition: {error}"
                             );
                         }
                         tracing::info!(
+                            target: "plurxd::vodserve",
                             rendition = %key,
                             "purged an adopted rendition with no stored identity"
                         );
@@ -758,6 +779,7 @@ impl Shared {
         if let Err(refused) = manifest.reserve(&budgets) {
             if !rendition.warned_admission.swap(true, Relaxed) {
                 tracing::info!(
+                    target: "plurxd::vodserve",
                     rendition = %rendition.key,
                     "rendition stays working-set-only: {refused:?}"
                 );
@@ -767,6 +789,7 @@ impl Shared {
         // The identity file is part of the promise; sync it with the rest.
         if let Err(error) = sync_file(&rendition.identity_path()).await {
             tracing::warn!(
+                target: "plurxd::vodserve",
                 rendition = %rendition.key,
                 "could not sync identity.json before admission: {error}"
             );
@@ -774,6 +797,7 @@ impl Shared {
         }
         if let Err(error) = rendition.dir.make_durable(manifest).await {
             tracing::warn!(
+                target: "plurxd::vodserve",
                 rendition = %rendition.key,
                 "make_durable refused, staying un-admitted: {error}"
             );
@@ -789,6 +813,7 @@ impl Shared {
                 // away.
                 self.kick_all();
                 tracing::info!(
+                    target: "plurxd::vodserve",
                     rendition = %rendition.key,
                     bytes,
                     "rendition completed and admitted to the cache"
@@ -797,6 +822,7 @@ impl Shared {
             Err(refused) => {
                 if !rendition.warned_admission.swap(true, Relaxed) {
                     tracing::info!(
+                        target: "plurxd::vodserve",
                         rendition = %rendition.key,
                         "completion refused, staying un-admitted: {refused:?}"
                     );
@@ -898,6 +924,7 @@ impl Shared {
                 sub_saturating(&shared.working_set, manifest.materialized_bytes());
                 if let Some(error) = freed.error {
                     tracing::warn!(
+                        target: "plurxd::vodserve",
                         rendition = %rendition.key,
                         "purging a dormant rendition: {error}"
                     );
@@ -908,6 +935,7 @@ impl Shared {
             // Freed bytes are node-wide news (see `try_admit`).
             shared.kick_all();
             tracing::info!(
+                target: "plurxd::vodserve",
                 rendition = %rendition.key,
                 "purged a dormant un-admitted rendition"
             );

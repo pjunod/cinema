@@ -1979,7 +1979,10 @@ async fn staged_successor_action(
         return Ok(None);
     };
     if staged.expected_predecessor_incarnation_id != predecessor.incarnation_id {
-        tracing::warn!("staged playback generation names the wrong predecessor");
+        tracing::warn!(
+            target: "plurxd::http::hls",
+            "staged playback generation names the wrong predecessor"
+        );
         return Err(());
     }
     if staged.deadline_ms <= unix_ms() {
@@ -1990,10 +1993,16 @@ async fn staged_successor_action(
         .media_session_route_by_incarnation(&staged.staged_incarnation_id)
         .await
         .map_err(|error| {
-            tracing::warn!(?error, "staged media-session route read failed");
+            tracing::warn!(
+                target: "plurxd::http::hls",
+                ?error, "staged media-session route read failed"
+            );
         })?
         .ok_or_else(|| {
-            tracing::warn!("staged playback generation has no media-session route");
+            tracing::warn!(
+                target: "plurxd::http::hls",
+                "staged playback generation has no media-session route"
+            );
         })?;
     if successor.incarnation_id != staged.staged_incarnation_id
         || successor.user_id != predecessor.user_id
@@ -2004,15 +2013,21 @@ async fn staged_successor_action(
         || successor.publication_ready_at_ms
             != plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
     {
-        tracing::warn!("staged media-session route failed its authority checks");
+        tracing::warn!(
+            target: "plurxd::http::hls",
+            "staged media-session route failed its authority checks"
+        );
         return Err(());
     }
     let start = control_start_response(&successor).ok_or_else(|| {
-        tracing::warn!("staged media-session response is unreadable");
+        tracing::warn!(target: "plurxd::http::hls", "staged media-session response is unreadable");
     })?;
     let recipe =
         serde_json::from_str::<RemoteStartRequest>(&successor.recipe_json).map_err(|_| {
-            tracing::warn!("staged media-session recipe is unreadable");
+            tracing::warn!(
+                target: "plurxd::http::hls",
+                "staged media-session recipe is unreadable"
+            );
         })?;
     if !recipe.is_valid()
         || recipe.incarnation_id != successor.incarnation_id
@@ -2025,7 +2040,10 @@ async fn staged_successor_action(
             &successor.session_id,
         )
     {
-        tracing::warn!("staged media-session payload failed its identity checks");
+        tracing::warn!(
+            target: "plurxd::http::hls",
+            "staged media-session payload failed its identity checks"
+        );
         return Err(());
     }
     let prepared = crate::playback_control::PreparedSuccessorAction {
@@ -2047,7 +2065,10 @@ async fn staged_successor_action(
         prepared.media_origin_ms,
         &prepared.effective_selection,
     ) {
-        tracing::warn!("staged media-session action payload is invalid");
+        tracing::warn!(
+            target: "plurxd::http::hls",
+            "staged media-session action payload is invalid"
+        );
         return Err(());
     }
     Ok(Some(prepared))
@@ -2211,7 +2232,10 @@ pub(crate) async fn control_local(
             // Not fatal. The deadline and the cross-node sweep are both still
             // behind this, so a failed early release costs the rest of the
             // window, not correctness.
-            tracing::debug!(%error, "a switched acknowledgement could not release the drain");
+            tracing::debug!(
+                target: "plurxd::http::hls",
+                %error, "a switched acknowledgement could not release the drain"
+            );
         }
     }
     response
@@ -2352,7 +2376,10 @@ pub(super) async fn control_local_with_settlement_capacity(
             read
         };
         read.map_err(|error| {
-            tracing::warn!(?error, "staged playback generation read failed");
+            tracing::warn!(
+                target: "plurxd::http::hls",
+                ?error, "staged playback generation read failed"
+            );
         })
     };
     let ledger_unavailable = staged_read.is_err();
@@ -2725,6 +2752,7 @@ pub(super) async fn control_local_with_settlement_capacity(
             }
             Err(error) => {
                 tracing::warn!(
+                    target: "plurxd::http::hls",
                     session = %crate::transcode::session_log_id(&route.session_id),
                     "recording the viewer's selection failed: {error}"
                 );
@@ -2969,6 +2997,7 @@ pub(super) async fn control_local_with_settlement_capacity(
         );
     }
     tracing::debug!(
+        target: "plurxd::http::hls",
         session = %crate::transcode::session_log_id(&route.session_id),
         owner_epoch,
         sequence = result.accepted_sequence,
