@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — #524 merged as `8ae8cab1e1`; #528’s sole review P1 was fixed and its focused caption regression passed under pinned Rust 1.97.1. The exact-head fast lane and postdeploy web/native drawn-caption acceptance remain open, alongside Android/Apple rollout, A-04 traces and fleet duration evidence. · **Updated:** 2026-09-25 21:08 UTC · **Main:** `8ae8cab1e1`
+**Status:** open — #528 is merge-ready on main `0915b3ee9`; its sole review P1 is fixed and the pinned focused regression passed. The history erratum merged with #533, and exact-head fast lane is pending. Postdeploy web/native drawn-caption acceptance, current-main device rollout, A-04 traces and fleet duration evidence remain open. · **Updated:** 2026-09-25 22:00 UTC · **Main:** `0915b3ee9`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
