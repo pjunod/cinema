@@ -11,6 +11,16 @@ PR title alone) counts as having claimed or finished work. It lives in the
 repository so every vendor reads and writes it the same way: through git and
 the Forgejo API, with no vendor-specific tooling.
 
+**Fleet source boundary, 2026-09-25 22:00 UTC:** PR #533 advanced `main` to
+`0915b3ee9e62` at 21:52 UTC. All four nodes and the currently installed
+Apple/Android signed Release builds still run prior main `8ae8cab1e136`.
+Their receipts and the running one-hour collector are historical exact-build
+evidence, not current-main acceptance. That collector is retained through
+its bounded endpoint; final-main rollout and duration windows must restart
+after the remaining code PRs merge. PR #533 independently included the #524
+immutable-landing erratum and reports green fast lane #3129; draft evidence
+PR #536 adds no duplicate erratum.
+
 ## How to claim, work and finish a plan
 
 Every executing session follows this exactly. The reason for each rule is the
