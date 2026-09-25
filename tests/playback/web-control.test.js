@@ -4200,7 +4200,7 @@ async function main() {
     h.live.ranges = [[18, 29]];
     const p = h.set(preparedPlayer({ hls: { destroy() {} } }));
     h.handle(prepareAction());
-    assert.equal(h.instances[0].config.startPosition, 23);
+    assert.equal(h.instances[0].config.startPosition, 24);
     h.instances[0].events.manifest();
     h.spare.currentTime = 24;
     h.spare.ranges = [[24, 30]];
@@ -4292,8 +4292,8 @@ async function main() {
     assert.equal(h.spare.playbackRate, 1.5);
     assert.equal(h.spare.paused, true, "a pause during preparation survives the switch");
     assert.equal(h.spare.style.display, "", "…and visible only after the switch");
-    assert.equal(h.spare.style.opacity, "1", "…at full opacity on its warmed layer");
-    assert.equal(h.live.style.opacity, "0.001", "…with the predecessor still composited for rollback");
+    assert.equal(h.spare.style.opacity, "", "…without the warm overlay's opacity");
+    assert.equal(h.live.style.display, "none");
     assert.equal(h.live.muted, true);
     assert.equal(p.prepared, null, "the slot is free once the switch is made");
     assert.equal(latest(h).state, "buffer_ready",
@@ -4361,7 +4361,6 @@ async function main() {
     assert.equal(successor.destroyed, true, "rollback destroys the frame-less successor");
     assert.equal(h.live.id, "video");
     assert.equal(h.live.style.display, "");
-    assert.equal(h.live.style.opacity, "", "rollback restores the incumbent's full picture");
     assert.equal(h.live.muted, true);
     assert.equal(h.live.volume, 0.4);
     assert.equal(h.live.defaultPlaybackRate, 1.25);

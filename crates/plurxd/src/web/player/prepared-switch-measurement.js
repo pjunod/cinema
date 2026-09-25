@@ -110,9 +110,6 @@ function rollbackPreparedReplacement(p,state,successor){
   retired.id="video";
   successor.id="video-prepared";
   retired.style.display="";
-  retired.style.opacity=predecessor.opacity||"";
-  retired.style.pointerEvents=predecessor.pointerEvents||"";
-  retired.style.zIndex=predecessor.zIndex||"";
   retired.muted=predecessor.muted;
   try{
     retired.volume=predecessor.volume;
