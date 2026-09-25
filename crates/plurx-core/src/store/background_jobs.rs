@@ -59,10 +59,19 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
   FROM request
 ), classified AS (
   SELECT *, CASE
+    WHEN json_type(body, '$.producer_lease') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM job_leases WHERE resource = json_extract(body, '$.producer_lease.resource')
+      AND owner_node_id = json_extract(body, '$.producer_lease.owner_node_id')
+      AND fence = json_extract(body, '$.producer_lease.fence')
+      AND revision = json_extract(body, '$.producer_lease.revision')
+      AND expires_at_ms = json_extract(body, '$.producer_lease.expires_at_unix_ms')
+      AND expires_at_ms > json_extract(body, '$.now_ms')
+      AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || owner_node_id)
+    ) THEN 'producer_fenced'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
     WHEN active_state = 'cancelling' THEN 'job_cancelling'
-    WHEN active_job IS NOT NULL AND active_payload != json_extract(body, '$.payload') THEN 'conflict'
+    WHEN active_job IS NOT NULL AND json_remove(active_payload, '$.reason') != json_remove(json_extract(body, '$.payload'), '$.reason') THEN 'conflict'
     WHEN EXISTS (SELECT 1 FROM background_jobs WHERE id = json_extract(body, '$.id')) THEN 'conflict'
     WHEN (SELECT COUNT(*) FROM background_job_waiters) >= 16384 THEN 'queue_full'
     WHEN json_extract(body, '$.request.scope') LIKE 'user:%' AND (SELECT COUNT(*) FROM background_job_waiters
@@ -107,6 +116,7 @@ pub(super) const JOB_JSON: &str = r#"json_object(
 
 pub(super) const CLAIM_SQL: &str = r#"
 UPDATE background_jobs SET
+  failed_attempts = failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
   state = 'running', owner_node_id = json_extract($1, '$.node_id'),
   owner_boot_id = json_extract($1, '$.boot_id'), claim_id = json_extract($1, '$.claim_id'),
   fence = fence + 1, revision = revision + 1,
@@ -117,6 +127,7 @@ WHERE id = json_extract($1, '$.job_id')
   AND kind = json_extract($1, '$.kind') AND payload_version = json_extract($1, '$.payload_version')
   AND (target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
   AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))
+  AND failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END < 5
   AND not_before_ms <= json_extract($1, '$.now_ms')
   AND EXISTS (SELECT 1 FROM background_job_waiters WHERE job_id = background_jobs.id
     AND state = 'pending' AND (deadline_ms IS NULL OR deadline_ms > json_extract($1, '$.now_ms')))
@@ -161,7 +172,7 @@ UPDATE background_jobs SET
     WHEN 'yield' THEN 'queued'
     WHEN 'retry' THEN CASE WHEN failed_attempts + 1 >= 5 THEN 'failed' ELSE 'queued' END
     WHEN 'fail' THEN 'failed'
-    WHEN 'cancel' THEN 'cancelled' END,
+    WHEN 'stop' THEN 'cancelled' WHEN 'cancel' THEN 'cancelled' END,
   failed_attempts = failed_attempts + CASE WHEN json_extract($1, '$.settlement.disposition') IN ('retry','fail') THEN 1 ELSE 0 END,
   not_before_ms = COALESCE(json_extract($1, '$.settlement.not_before_ms'), not_before_ms),
   checkpoint_json = CASE WHEN json_extract($1, '$.settlement.disposition') = 'yield'
@@ -433,7 +444,9 @@ impl JobToken {
 pub struct BackgroundJob {
     pub id: String,
     pub payload_version: i64,
-    pub payload: JobPayload,
+    /// Preserve future payloads for listing and cancellation. Only
+    /// `supported_payload` grants typed execution access to this binary.
+    pub payload: serde_json::Value,
     pub dedupe_key: String,
     pub priority: u8,
     pub state: JobState,
@@ -450,6 +463,18 @@ pub struct BackgroundJob {
     pub last_error_code: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+impl BackgroundJob {
+    pub fn supported_payload(&self) -> Result<JobPayload, StoreError> {
+        if self.payload_version != 1 {
+            return Err(invalid("unsupported background payload version"));
+        }
+        let payload: JobPayload = serde_json::from_value(self.payload.clone())
+            .map_err(|error| invalid(&format!("unsupported background payload: {error}")))?;
+        payload.validate()?;
+        Ok(payload)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -525,6 +550,7 @@ pub enum EnqueueOutcome {
         retry_after_ms: i64,
     },
     QueueFull,
+    ProducerFenced,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -665,6 +691,9 @@ pub enum JobSettlement {
     Fail {
         error_code: String,
     },
+    Stop {
+        error_code: String,
+    },
     Cancel,
 }
 
@@ -698,7 +727,17 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    /// Authoritative single-job lookup for ownership-sensitive cleanup.
+    async fn background_job(&self, id: &str) -> Result<Option<BackgroundJob>, StoreError>;
+    async fn background_staging_jobs(&self, node_id: &str) -> Result<Vec<String>, StoreError>;
     async fn enqueue_job(&self, request: EnqueueJob) -> Result<EnqueueOutcome, StoreError>;
+    /// Atomically advance the discovery lease with the admission verdict.
+    async fn enqueue_job_fenced(
+        &self,
+        request: EnqueueJob,
+        lease: crate::cluster::coordination::Lease,
+        replacement: crate::cluster::coordination::Lease,
+    ) -> Result<EnqueueOutcome, StoreError>;
     async fn claim_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError>;
     async fn list_jobs(&self, query: JobQuery) -> Result<JobPage, StoreError>;
@@ -738,6 +777,38 @@ fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, StoreError> 
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn background_job(&self, id: &str) -> Result<Option<BackgroundJob>, StoreError> {
+        if uuid::Uuid::parse_str(id).is_err() {
+            return Err(invalid("invalid background job id"));
+        }
+        let rows = self.queue_sql(format!("SELECT {JOB_JSON} AS result_json FROM background_jobs WHERE id = json_extract($1, '$.id')"),
+            encode(&serde_json::json!({"id": id}))?, false, true).await?;
+        rows.first().map(|row| decode(row)).transpose()
+    }
+
+    async fn background_staging_jobs(&self, node_id: &str) -> Result<Vec<String>, StoreError> {
+        if !identifier(node_id) {
+            return Err(invalid("invalid background staging node"));
+        }
+        let rows = self
+            .queue_sql(
+                "SELECT json_quote(id) AS result_json FROM background_jobs job
+            WHERE kind = 'transcode_prepare' AND state IN ('queued','running','cancelling')
+            AND EXISTS (SELECT 1 FROM background_job_attempts attempt WHERE attempt.job_id = job.id
+                AND attempt.owner_node_id = json_extract($1, '$.node_id'))
+            ORDER BY id LIMIT 4097"
+                    .into(),
+                encode(&serde_json::json!({"node_id": node_id}))?,
+                false,
+                true,
+            )
+            .await?;
+        if rows.len() > MAX_ACTIVE_JOBS {
+            return Err(invalid("background staging inventory exceeds active bound"));
+        }
+        rows.iter().map(|row| decode(row)).collect()
+    }
+
     async fn publish_transcode_job(
         &self,
         request: PublishTranscodeJob,
@@ -911,7 +982,7 @@ impl<T: QueueSql> BackgroundJobStore for T {
                     return Err(invalid("invalid background failure retry"));
                 }
             }
-            JobSettlement::Fail { error_code } => {
+            JobSettlement::Fail { error_code } | JobSettlement::Stop { error_code } => {
                 if !identifier(error_code) || error_code.len() > 64 {
                     return Err(invalid("invalid background failure code"));
                 }
@@ -954,6 +1025,49 @@ impl<T: QueueSql> BackgroundJobStore for T {
         decode(row)
     }
 
+    async fn enqueue_job_fenced(
+        &self,
+        mut request: EnqueueJob,
+        lease: crate::cluster::coordination::Lease,
+        replacement: crate::cluster::coordination::Lease,
+    ) -> Result<EnqueueOutcome, StoreError> {
+        request.now_ms = crate::cluster::coordination::unix_ms()?;
+        request.validate()?;
+        if lease.resource != replacement.resource
+            || lease.owner_node_id != replacement.owner_node_id
+            || lease.fence != replacement.fence
+            || lease.fence == 0
+            || lease.fence > i64::MAX as u64
+            || lease.revision == 0
+            || lease.revision >= i64::MAX as u64
+            || replacement.revision != lease.revision + 1
+            || replacement.expires_at_unix_ms <= lease.expires_at_unix_ms
+        {
+            return Err(invalid("invalid background producer lease replacement"));
+        }
+        let mut body =
+            serde_json::to_value(request).map_err(|error| invalid(&error.to_string()))?;
+        body["producer_lease"] =
+            serde_json::to_value(&lease).map_err(|error| invalid(&error.to_string()))?;
+        body["producer_replacement"] =
+            serde_json::to_value(replacement).map_err(|error| invalid(&error.to_string()))?;
+        let rows = self
+            .queue_sql(ENQUEUE_SQL.to_owned(), encode(&body)?, true, true)
+            .await?;
+        let outcome: EnqueueOutcome = decode(
+            rows.first()
+                .ok_or_else(|| invalid("missing background admission verdict"))?,
+        )?;
+        if matches!(outcome, EnqueueOutcome::ProducerFenced) {
+            return Err(StoreError::FenceRejected {
+                resource: lease.resource,
+                owner_node_id: lease.owner_node_id,
+                fence: lease.fence,
+            });
+        }
+        Ok(outcome)
+    }
+
     async fn claim_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError> {
         request.validate()?;
         // Replaying an acknowledged or ambiguous claim must return its current
@@ -985,7 +1099,11 @@ impl<T: QueueSql> BackgroundJobStore for T {
             return Ok(ClaimOutcome::Cancelled);
         }
         if previous.payload_version != request.payload_version
-            || previous.payload.kind() != request.kind
+            || previous
+                .supported_payload()
+                .map(|payload| payload.kind())
+                .ok()
+                != Some(request.kind)
         {
             return Ok(ClaimOutcome::Unsupported);
         }

@@ -393,3 +393,144 @@ async fn background_jobs_receipts_survive_seven_days_and_domain_identity_outlive
         }
     }
 }
+
+#[tokio::test]
+async fn background_jobs_discovery_lease_advances_with_every_admission_verdict() {
+    use crate::cluster::coordination::{unix_ms, LeaseClaim};
+    use crate::store::CoordinationStore;
+    let store = SqliteStore::open_in_memory().expect("store");
+    let now = unix_ms().expect("clock");
+    let LeaseClaim::Acquired(lease) = store
+        .acquire_lease("candidate:test", "node-a", now, now + 90_000)
+        .await
+        .expect("lease")
+    else {
+        panic!("lease held")
+    };
+    let request = enqueue(now);
+    let replacement = lease.publication_successor().expect("replacement");
+    assert!(matches!(
+        store
+            .enqueue_job_fenced(request.clone(), lease.clone(), replacement.clone())
+            .await
+            .expect("admission"),
+        EnqueueOutcome::Accepted { .. }
+    ));
+    assert!(matches!(
+        store
+            .enqueue_job_fenced(request.clone(), lease, replacement.clone())
+            .await,
+        Err(crate::error::StoreError::FenceRejected { .. })
+    ));
+    let third = replacement.publication_successor().expect("replacement");
+    assert!(matches!(
+        store
+            .enqueue_job_fenced(request.clone(), replacement, third.clone())
+            .await
+            .expect("receipt"),
+        EnqueueOutcome::Existing { .. }
+    ));
+    let mut collision = request;
+    collision.request.request_digest = "d".repeat(64);
+    let fourth = third.publication_successor().expect("replacement");
+    assert!(matches!(
+        store
+            .enqueue_job_fenced(collision, third, fourth.clone())
+            .await
+            .expect("conflict"),
+        EnqueueOutcome::Conflict
+    ));
+    let mut next = enqueue(now);
+    next.dedupe_key = "fragment:2".into();
+    assert!(matches!(
+        store
+            .enqueue_job_fenced(
+                next,
+                fourth.clone(),
+                fourth.publication_successor().expect("replacement")
+            )
+            .await
+            .expect("next admission"),
+        EnqueueOutcome::Accepted { .. }
+    ));
+}
+
+#[tokio::test]
+async fn background_jobs_unknown_payloads_remain_visible_and_cancellable() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    let request = enqueue(1_000);
+    store.enqueue_job(request.clone()).await.expect("enqueue");
+    QueueSql::queue_sql(
+        &store,
+        "UPDATE background_jobs SET payload_version = 2,
+        payload_json = '{\"kind\":\"future_operation\",\"future_field\":true}'
+        WHERE id = json_extract($1, '$.id')"
+            .into(),
+        serde_json::json!({"id": request.id}).to_string(),
+        true,
+        true,
+    )
+    .await
+    .expect("newer writer");
+    let job = store
+        .background_job(&request.id)
+        .await
+        .expect("read")
+        .expect("visible");
+    assert_eq!(job.payload["kind"], "future_operation");
+    assert!(job.supported_payload().is_err());
+    assert!(matches!(
+        store
+            .claim_job(claim(&request.id, 0, 1_000))
+            .await
+            .expect("claim"),
+        ClaimOutcome::Unsupported
+    ));
+    assert_eq!(
+        store
+            .cancel_job(CancelJob {
+                job_id: request.id,
+                now_ms: 1_001
+            })
+            .await
+            .expect("cancel")
+            .expect("job")
+            .state,
+        JobState::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn background_jobs_repeated_crashes_exhaust_budget_without_automatic_reset() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    let request = enqueue(1_000);
+    store.enqueue_job(request.clone()).await.expect("enqueue");
+    for crash in 0..5 {
+        let job = claimed(
+            &store,
+            claim(&request.id, crash, 1_000 + crash * JOB_LEASE_MS),
+        )
+        .await;
+        assert_eq!(job.failed_attempts, crash);
+    }
+    let now_ms = 1_000 + 5 * JOB_LEASE_MS;
+    assert!(matches!(
+        store
+            .claim_job(claim(&request.id, 5, now_ms))
+            .await
+            .expect("bounded retry"),
+        ClaimOutcome::Contended
+    ));
+    store.maintain_jobs(now_ms).await.expect("upkeep");
+    let job = store
+        .background_job(&request.id)
+        .await
+        .expect("read")
+        .expect("job");
+    assert_eq!(job.state, JobState::Failed);
+    assert_eq!(job.failed_attempts, 5);
+    assert!(matches!(
+        store.enqueue_job(request).await.expect("repeat request"),
+        EnqueueOutcome::Existing { .. }
+    ));
+}

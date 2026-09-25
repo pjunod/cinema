@@ -589,14 +589,35 @@ fn orphan_inventory_authorized(snapshot: &OwnershipSnapshot) -> bool {
     snapshot.complete || snapshot.has_owners
 }
 
+async fn queue_staging_jobs(
+    store: &Arc<dyn Store>,
+    node_id: &str,
+) -> Result<Vec<String>, plurx_core::error::StoreError> {
+    let mut jobs = store.background_staging_jobs(node_id).await?;
+    // Preserve sealed legacy staging during the bounded cutover import.
+    jobs.extend(store.pretranscode_staging_jobs(node_id).await?);
+    jobs.sort_unstable();
+    jobs.dedup();
+    Ok(jobs)
+}
+
+async fn queue_job(
+    store: &Arc<dyn Store>,
+    id: &str,
+) -> Result<Option<plurx_core::domain::PretranscodeJob>, plurx_core::error::StoreError> {
+    match store.background_job(id).await? {
+        Some(job) => plurx_core::store::background_jobs_pretranscode::projection(&job).map(Some),
+        None => store.pretranscode_job(id).await,
+    }
+}
+
 async fn ownership_snapshot(
     store: &Arc<dyn Store>,
     root: &Path,
     node_id: &str,
 ) -> Result<OwnershipSnapshot, plurx_core::error::StoreError> {
     let inventory = store.cache_ownership_inventory(node_id).await?;
-    let queue_jobs = store
-        .pretranscode_staging_jobs(node_id)
+    let queue_jobs = queue_staging_jobs(store, node_id)
         .await?
         .into_iter()
         .collect::<HashSet<_>>();
@@ -678,7 +699,7 @@ async fn delete_final_batch(
             owned_paths.insert(path);
         }
     }
-    let queue_jobs = match store.pretranscode_staging_jobs(node_id).await {
+    let queue_jobs = match queue_staging_jobs(store, node_id).await {
         Ok(jobs) => jobs.into_iter().collect::<HashSet<_>>(),
         Err(error) => {
             tracing::warn!(%error, "cache: could not recheck queue ownership; keeping bytes");
@@ -696,9 +717,11 @@ async fn delete_final_batch(
             if !queue_jobs.contains(job_id) {
                 false
             } else {
-                match store.pretranscode_job(job_id).await {
+                match queue_job(store, job_id).await {
                     Ok(Some(job)) => {
-                        job.state == "running" && job.owner_node_id == node_id && job.fence == fence
+                        matches!(job.state.as_str(), "running" | "cancelling")
+                            && job.owner_node_id == node_id
+                            && job.fence == fence
                     }
                     Ok(None) => false,
                     Err(error) => {
@@ -752,7 +775,7 @@ async fn delete_staging_batch(
         .filter(|entry| !entry.complete)
         .map(|entry| entry.recipe_hash)
         .collect::<HashSet<_>>();
-    let queue_jobs = match store.pretranscode_staging_jobs(node_id).await {
+    let queue_jobs = match queue_staging_jobs(store, node_id).await {
         Ok(jobs) => jobs.into_iter().collect::<HashSet<_>>(),
         Err(error) => {
             tracing::warn!(%error, "cache: could not recheck queue ownership; keeping bytes");

@@ -31,7 +31,7 @@ use plurx_core::transcode::{
 };
 use sha2::{Digest as _, Sha256};
 use tokio::process::Child;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::admission::Admission;
 use crate::admission::TranscodeResourceEstimate;
@@ -11856,238 +11856,113 @@ async fn bound_source_snapshot(
     .flatten()
 }
 
-/// Renewal-safe view of a distributed queue claim.
-///
-/// Heartbeat replacement takes the write lock; publication and settlement
-/// retain a read lock through the backend CAS. A completion can therefore use
-/// neither the predecessor expiry nor a token invalidated between checking and
-/// writing.
+/// Media projection and physical admission for one common durable claim.
+/// The queue fence serializes renewals and publication; cloned producer
+/// requests retain capacity until every child has joined.
 #[derive(Clone)]
 pub struct PretranscodeFence {
-    state: Arc<RwLock<Option<PretranscodeJob>>>,
-    revoked: Arc<AtomicBool>,
+    job: PretranscodeJob,
+    durable: crate::background_jobs::JobFence,
+    admission: Arc<PretranscodeAdmission>,
 }
 
-type PretranscodeSettlementFuture<'a> = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<bool, plurx_core::error::StoreError>> + Send + 'a>,
->;
+pub(crate) struct PretranscodeAdmission {
+    encoder: Encoder,
+    threads: usize,
+    _permit: crate::admission::TranscodePermit,
+}
 
 impl PretranscodeFence {
-    pub fn new(job: PretranscodeJob) -> Self {
+    pub(crate) fn new(
+        job: PretranscodeJob,
+        durable: crate::background_jobs::JobFence,
+        admission: PretranscodeAdmission,
+    ) -> Self {
         Self {
-            state: Arc::new(RwLock::new(Some(job))),
-            revoked: Arc::new(AtomicBool::new(false)),
+            job,
+            durable,
+            admission: Arc::new(admission),
         }
     }
 
     pub async fn snapshot(&self) -> Option<PretranscodeJob> {
-        self.state.read().await.clone()
-    }
-
-    pub async fn renew(
-        &self,
-        store: &dyn Store,
-        now_unix_ms: i64,
-        lease_expires_ms: i64,
-    ) -> Result<bool, plurx_core::error::StoreError> {
-        let mut state = self.state.write().await;
-        if self.revoked.load(Acquire) {
-            return Ok(false);
-        }
-        let Some(current) = state.clone() else {
-            return Ok(false);
-        };
-        let renewed = store
-            .renew_pretranscode_job(&current, now_unix_ms, lease_expires_ms)
-            .await;
-        if self.revoked.load(Acquire) {
-            return match renewed {
-                Ok(Some(replacement)) => {
-                    // Retain an acknowledged replacement only so retirement
-                    // can return this now-unowned row to the queue.
-                    *state = Some(replacement);
-                    Ok(false)
-                }
-                Ok(None) => {
-                    *state = None;
-                    Ok(false)
-                }
-                Err(error) => {
-                    *state = None;
-                    Err(error)
-                }
-            };
-        }
-        match renewed {
-            Ok(Some(replacement))
-                if renewal_response_is_authoritative(&current, &replacement, unix_ms()) =>
-            {
-                *state = Some(replacement);
-                Ok(true)
-            }
-            Ok(Some(replacement)) => {
-                // The backend renewed before the predecessor deadline but
-                // answered too late for continuous local authority. Keep the
-                // exact acknowledged token for deterministic retirement while
-                // synchronously blocking publication and settlement.
-                *state = Some(replacement);
-                self.revoke();
-                Ok(false)
-            }
-            Ok(None) => {
-                *state = None;
-                Ok(false)
-            }
-            Err(error) => {
-                // Renewal uncertainty is loss of publication authority, not
-                // permission to keep the last token until its wall-clock TTL.
-                *state = None;
-                Err(error)
-            }
-        }
-    }
-
-    pub fn revoke(&self) {
-        self.revoked.store(true, Release);
-    }
-
-    pub async fn invalidate(&self, expected: &PretranscodeJob) -> bool {
-        let mut state = self.state.write().await;
-        if state.as_ref() != Some(expected) {
-            return false;
-        }
-        *state = None;
-        true
-    }
-
-    async fn settle<'a, F>(&'a self, operation: F) -> Result<bool, plurx_core::error::StoreError>
-    where
-        F: FnOnce(PretranscodeJob, i64) -> PretranscodeSettlementFuture<'a>,
-    {
-        if self.revoked.load(Acquire) {
-            return Ok(false);
-        }
-        let mut state = self.state.write().await;
-        if self.revoked.load(Acquire) {
-            return Ok(false);
-        }
-        let Some(job) = state.clone() else {
-            return Ok(false);
-        };
-        let observed_at = unix_ms();
-        // The backend owns its deadline. An equal outer timeout can drop a
-        // still-committing Hiqlite request, while SQLite's blocking
-        // transaction cannot be cancelled safely at all.
-        let result = operation(job, observed_at).await;
-        // Every settlement is terminal for this running token.
-        *state = None;
-        result
-    }
-
-    pub async fn retire(&self, store: &dyn Store) -> Result<(), plurx_core::error::StoreError> {
-        self.revoke();
-        let mut state = self.state.write().await;
-        let Some(job) = state.clone() else {
-            return Ok(());
-        };
-        let now_unix_ms = unix_ms();
-        let result = store
-            .yield_pretranscode_job(&job, now_unix_ms, now_unix_ms)
-            .await;
-        *state = None;
-        result.map(|_| ())
+        let token = self.durable.snapshot().await?;
+        let mut job = self.job.clone();
+        job.fence = token.fence;
+        job.lease_expires_ms = token.lease_expires_ms;
+        Some(job)
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn complete(
         &self,
-        store: &dyn Store,
+        _store: &dyn Store,
         recipe_hash: &str,
         relative_dir: &str,
         bytes: i64,
         expected_previous_bytes: Option<i64>,
         manifest_digest: &str,
-        now_unix_ms: i64,
+        _now_unix_ms: i64,
     ) -> Result<bool, plurx_core::error::StoreError> {
-        let _ = now_unix_ms;
-        self.settle(move |job, observed_at| {
-            Box::pin(async move {
-                store
-                    .complete_pretranscode_job(
-                        &job,
-                        recipe_hash,
-                        CACHE_RECIPE_VERSION,
-                        relative_dir,
-                        bytes,
-                        expected_previous_bytes,
-                        manifest_digest,
-                        observed_at,
-                    )
-                    .await
+        self.durable
+            .publish_transcode(plurx_core::store::background_jobs::TranscodeJobOutput {
+                recipe_hash: recipe_hash.into(),
+                recipe_version: CACHE_RECIPE_VERSION,
+                relative_dir: relative_dir.into(),
+                bytes,
+                expected_previous_bytes,
+                manifest_digest: manifest_digest.into(),
             })
-        })
-        .await
+            .await
     }
 
     pub async fn yield_job(
         &self,
-        store: &dyn Store,
+        _store: &dyn Store,
         now_unix_ms: i64,
         not_before_ms: i64,
     ) -> Result<bool, plurx_core::error::StoreError> {
-        self.settle(move |job, observed_at| {
-            Box::pin(async move {
-                store
-                    .yield_pretranscode_job(&job, observed_at, not_before_ms.max(now_unix_ms))
-                    .await
+        self.durable
+            .settle(plurx_core::store::background_jobs::JobSettlement::Yield {
+                checkpoint: None,
+                not_before_ms: not_before_ms.max(now_unix_ms),
             })
-        })
-        .await
+            .await
     }
 
     pub async fn fail_job(
         &self,
-        store: &dyn Store,
+        _store: &dyn Store,
         error_code: &str,
         now_unix_ms: i64,
         not_before_ms: i64,
     ) -> Result<bool, plurx_core::error::StoreError> {
-        self.settle(move |job, observed_at| {
-            Box::pin(async move {
-                store
-                    .fail_pretranscode_job(
-                        &job,
-                        error_code,
-                        observed_at,
-                        not_before_ms.max(now_unix_ms),
-                    )
-                    .await
+        self.durable
+            .settle(plurx_core::store::background_jobs::JobSettlement::Retry {
+                error_code: error_code.into(),
+                not_before_ms: not_before_ms.max(now_unix_ms),
             })
-        })
-        .await
+            .await
     }
 
     pub async fn cancel_job(
         &self,
-        store: &dyn Store,
+        _store: &dyn Store,
         error_code: &str,
-        now_unix_ms: i64,
+        _now_unix_ms: i64,
     ) -> Result<bool, plurx_core::error::StoreError> {
-        let _ = now_unix_ms;
-        self.settle(move |job, observed_at| {
-            Box::pin(async move {
-                store
-                    .cancel_pretranscode_job(&job, error_code, observed_at)
-                    .await
+        self.durable
+            .settle(plurx_core::store::background_jobs::JobSettlement::Stop {
+                error_code: error_code.into(),
             })
-        })
-        .await
+            .await
     }
 }
 
 /// A backend may commit a renewal before the old deadline but deliver its
 /// response after that deadline. Local publication authority is continuous
 /// only when the response itself arrives while the predecessor is still live.
+#[cfg(test)]
 fn renewal_response_is_authoritative(
     previous: &PretranscodeJob,
     replacement: &PretranscodeJob,
@@ -14671,6 +14546,47 @@ impl TranscodeManager {
     /// Speculative work never reserves a queue row while foreground/offline
     /// encoding already owns or is waiting for this node's capacity. A race
     /// after this observation is still resolved by admission before ffmpeg.
+    /// Acquire real media capacity before durable ownership. The decoder is
+    /// not resolved yet, so reserve the conservative whole-pipeline CPU share
+    /// as well as the selected hardware session. Planning cannot oversubscribe
+    /// a viewer's admission pool.
+    pub(crate) async fn admit_pretranscode(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        target_height: i64,
+    ) -> Result<Option<PretranscodeAdmission>, String> {
+        if !self.pretranscode_worker_idle() {
+            return Ok(None);
+        }
+        let policy = self
+            .try_pretranscode_policy_snapshot()
+            .await
+            .map_err(|error| error.to_string())?;
+        // Selection from the boot inventory performs no source probes. The
+        // later bound-source planner may fall back to software, for which the
+        // same conservative CPU reservation is already held.
+        let encoder = self.caps.choose(&policy.requested_encoder);
+        let threads = Workload::of(file, target_height).software_threads();
+        let estimate = TranscodeResourceEstimate {
+            hardware_slot: encoder != Encoder::Software,
+            cpu_threads: threads,
+            decoder_threads: None,
+        };
+        Ok(self
+            .admissions
+            .try_admit_bundle(
+                self.max_hw_sessions().await,
+                self.software_budget().await,
+                &estimate,
+                Priority::Background,
+            )
+            .map(|permit| PretranscodeAdmission {
+                encoder,
+                threads,
+                _permit: permit,
+            }))
+    }
+
     pub fn pretranscode_worker_idle(&self) -> bool {
         !self.admissions.live_is_waiting()
             && self.admissions.in_use() == 0
@@ -16980,6 +16896,12 @@ impl TranscodeManager {
         let encoder = self
             .encoder_for_file_with_preference(file, &policy.requested_encoder)
             .await?;
+        if pretranscode_fence
+            .as_ref()
+            .is_some_and(|fence| fence.admission.encoder != encoder && encoder != Encoder::Software)
+        {
+            return Ok(PretranscodeProduceOutcome::PolicyChanged);
+        }
         if !policy
             .acceptable_encoder_families()
             .iter()
@@ -18298,7 +18220,7 @@ impl TranscodeManager {
             offline_package_id,
             offline_claim_generation,
             publication_fence: _,
-            pretranscode_fence: _,
+            pretranscode_fence,
             expected_policy_generation: _,
             expected_source_snapshot: _,
             bound_source,
@@ -18376,7 +18298,10 @@ impl TranscodeManager {
             // reservation, so producer parts and live software sessions can
             // no longer oversubscribe every core between them.
             let mut sw_hold = None;
-            let slot = if encoder == Encoder::Software {
+            let slot = if pretranscode_fence.is_some() {
+                // The shared-queue claim already holds both real permits.
+                None
+            } else if encoder == Encoder::Software {
                 match self.admissions.try_admit_software(
                     self.software_budget().await,
                     Workload::of(file, opts.target_height).software_threads(),
@@ -18413,7 +18338,10 @@ impl TranscodeManager {
                 // What the Background permit reserved is what this part may
                 // spend. Not part of the recipe hash, so resumed parts and
                 // cache identity are unaffected.
-                software_threads: sw_hold.as_ref().map(|p| p.threads() as u32),
+                software_threads: pretranscode_fence
+                    .as_ref()
+                    .map(|fence| fence.admission.threads as u32)
+                    .or_else(|| sw_hold.as_ref().map(|p| p.threads() as u32)),
                 ..opts.clone()
             };
             let source_offset_permit = if let Some(source) = &bound_source {
@@ -18646,6 +18574,9 @@ impl TranscodeManager {
                     // that the next part must not reuse a number with.
                     if !produced {
                         let _ = remove_staged_child(temp, &part_name).await;
+                    }
+                    if pretranscode_fence.is_some() {
+                        return Ok(None);
                     }
                     if yield_to_offline
                         && self

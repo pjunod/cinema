@@ -114,6 +114,13 @@ CREATE TABLE IF NOT EXISTS background_job_commands (
 CREATE TRIGGER IF NOT EXISTS background_job_enqueue_command
 AFTER INSERT ON background_job_commands WHEN NEW.operation = 'enqueue'
 BEGIN
+    UPDATE job_leases SET
+        revision = json_extract(NEW.request_json, '$.producer_replacement.revision'),
+        expires_at_ms = json_extract(NEW.request_json, '$.producer_replacement.expires_at_unix_ms'),
+        updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE resource = json_extract(NEW.request_json, '$.producer_lease.resource')
+        AND json_extract(NEW.result_json, '$.outcome') != 'producer_fenced';
+
     INSERT INTO background_jobs (
         id, kind, payload_version, payload_json, dedupe_key, priority,
         state, target_node_id, not_before_ms, created_at_ms, updated_at_ms)
@@ -149,10 +156,21 @@ BEGIN
         json_extract(NEW.request_json, '$.now_ms')
     WHERE json_extract(NEW.result_json, '$.outcome') = 'accepted';
 
+    UPDATE background_job_waiters SET priority = MAX(priority,
+        json_extract(NEW.request_json, '$.priority'))
+    WHERE request_scope = json_extract(NEW.request_json, '$.request.scope')
+        AND request_id = json_extract(NEW.request_json, '$.request.request_id')
+        AND state = 'pending'
+        AND json_extract(NEW.result_json, '$.outcome') = 'existing';
+
     UPDATE background_jobs SET priority = MAX(priority,
         json_extract(NEW.request_json, '$.priority'))
     WHERE id = json_extract(NEW.result_json, '$.job_id')
-        AND json_extract(NEW.result_json, '$.outcome') = 'accepted';
+        AND state IN ('queued','running')
+        AND json_extract(NEW.result_json, '$.outcome') IN ('accepted','existing')
+        AND EXISTS (SELECT 1 FROM background_job_waiters
+            WHERE request_scope = json_extract(NEW.request_json, '$.request.scope')
+            AND request_id = json_extract(NEW.request_json, '$.request.request_id') AND state = 'pending');
 
     DELETE FROM background_job_commands WHERE id = NEW.id;
 END;
@@ -183,7 +201,8 @@ WHEN OLD.state IN ('running','cancelling') AND NEW.state NOT IN ('running','canc
 BEGIN
     DELETE FROM background_job_reservations WHERE job_id = NEW.id AND fence = OLD.fence;
     UPDATE background_job_attempts SET finished_at_ms = NEW.updated_at_ms,
-        outcome = CASE WHEN NEW.state = 'queued' AND NEW.failed_attempts = OLD.failed_attempts
+        outcome = CASE WHEN NEW.last_error_code = 'execution_abandoned' THEN 'lease_expired'
+          WHEN NEW.state = 'queued' AND NEW.failed_attempts = OLD.failed_attempts
           THEN 'yielded' WHEN NEW.state = 'queued' THEN 'retry' ELSE NEW.state END,
         error_code = NEW.last_error_code
     WHERE job_id = NEW.id AND fence = OLD.fence AND finished_at_ms IS NULL;
@@ -287,6 +306,13 @@ BEGIN
     WHERE id IN (SELECT id FROM background_jobs WHERE state = 'cancelling'
         AND lease_expires_ms <= json_extract(NEW.request_json, '$.now_ms')
         AND revision < 9223372036854775807 ORDER BY lease_expires_ms, id LIMIT 128);
+    UPDATE background_jobs SET state = 'failed', failed_attempts = failed_attempts + 1,
+        last_error_code = 'execution_abandoned', owner_node_id = NULL,
+        owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL,
+        revision = revision + 1, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE id IN (SELECT id FROM background_jobs WHERE state = 'running' AND failed_attempts >= 4
+        AND lease_expires_ms <= json_extract(NEW.request_json, '$.now_ms')
+        AND revision < 9223372036854775807 ORDER BY lease_expires_ms, id LIMIT 128);
     DELETE FROM background_job_attempts WHERE (job_id, fence) IN (
         SELECT old.job_id, old.fence FROM background_job_attempts old
         WHERE old.finished_at_ms IS NOT NULL
@@ -314,8 +340,8 @@ CREATE TRIGGER IF NOT EXISTS background_job_attempt_compaction
 BEFORE DELETE ON background_job_attempts WHEN OLD.finished_at_ms IS NOT NULL
 BEGIN
     UPDATE background_jobs SET
-        yield_count = yield_count + CASE WHEN OLD.outcome = 'yielded' THEN 1 ELSE 0 END,
-        abandoned_count = abandoned_count + CASE WHEN OLD.outcome = 'lease_expired' THEN 1 ELSE 0 END
+        yield_count = yield_count + CASE WHEN OLD.outcome = 'yielded' AND yield_count < 9223372036854775807 THEN 1 ELSE 0 END,
+        abandoned_count = abandoned_count + CASE WHEN OLD.outcome = 'lease_expired' AND abandoned_count < 9223372036854775807 THEN 1 ELSE 0 END
     WHERE id = OLD.job_id;
 END;
 
@@ -391,4 +417,26 @@ BEGIN
     WHERE job_id = json_extract(NEW.result_json, '$.job_id') AND state = 'pending'
         AND json_extract(NEW.result_json, '$.outcome') = 'published';
     DELETE FROM background_job_commands WHERE id = NEW.id;
+END;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_job_source_changed
+AFTER UPDATE OF size, mtime ON files WHEN NEW.size != OLD.size OR NEW.mtime != OLD.mtime
+BEGIN
+    UPDATE background_jobs SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE 'cancelling' END,
+        last_error_code = 'source_changed', revision = revision + 1
+    WHERE kind = 'transcode_prepare' AND state IN ('queued','running')
+        AND json_extract(payload_json, '$.file_id') = OLD.id AND revision < 9223372036854775807
+        AND (json_extract(payload_json, '$.source_size') != NEW.size
+            OR json_extract(payload_json, '$.source_mtime') != NEW.mtime);
+END;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_job_source_deleted
+AFTER DELETE ON files
+BEGIN
+    UPDATE background_jobs SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE 'cancelling' END,
+        last_error_code = 'source_changed', revision = revision + 1
+    WHERE kind = 'transcode_prepare' AND state IN ('queued','running')
+        AND json_extract(payload_json, '$.file_id') = OLD.id AND revision < 9223372036854775807;
 END;

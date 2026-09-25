@@ -122,7 +122,7 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
                         JobPublishOutcome::AlreadyPublished { .. }
                     ));
                 }
-                "source_replaced" => assert!(matches!(result, JobPublishOutcome::SourceChanged)),
+                "source_replaced" => assert!(matches!(result, JobPublishOutcome::LostOwnership)),
                 _ => assert!(matches!(result, JobPublishOutcome::LostOwnership)),
             }
             assert_eq!(

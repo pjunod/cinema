@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1 foundation in progress · **Updated:** 2026-09-25 ·
+**Status:** M1 worker integration in progress · **Updated:** 2026-09-25 ·
 **Branch:** `codex/durable-cluster-work` ·
 **Base:** `9f9786b2e` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
@@ -14,7 +14,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 |---|---|---|
 | Isolated clone | Complete | Agent-owned `/private/tmp/plurx-durable-work-agent`; original checkout untouched |
 | Compiler | Ready | Rust 1.97.1; core + Hiqlite all-target compile and baseline daemon compile passed |
-| M1 durable queue and pre-transcode | In progress | Foundation committed as `346f4241a`; adding waiter cancellation, candidate paging and bounded attempt compaction; publication, receipt retention and workers remain |
+| M1 durable queue and pre-transcode | In progress | Queue ownership, publication and upkeep committed; pre-transcode discovery/worker integration being compiled. Legacy cutover and fault-injection coverage remain |
 | M2 fragment analysis and hydration | Planned | Preserve request identity, history and target completion |
 | M3 UI, recovery and migration | Planned | Advisory requirements, admin operations, bounded cutover |
 | E0 subtitle and library workers | Planned | Reuse newly landed subtitle extraction implementation |
@@ -75,3 +75,22 @@ implementation is claimed; “compiled” does not mean tests passed.
   hook passed. Three commits pushed to draft PR #532, confirmed `draft: true`
   through Forgejo. The draft deliberately has no final review or test receipt.
   Scope remains the full requested programme, with the durable core first.
+
+- 2026-09-25: pre-transcode discovery and execution now use the common queue
+  in this draft. Singleton discovery fencing advances atomically with the
+  admission verdict. Workers reserve real hardware/CPU admission before the
+  durable claim, resolve ambiguous ownership by boot/claim identity, and
+  self-cancel at the monotonic lease deadline. Publication and retirement
+  serialize against renewal. Cache cleanup recognizes both shared and legacy
+  ownership while migration remains unfinished.
+
+- 2026-09-25: added regression contracts for cancellation racing retirement,
+  a blocked snapshot after revocation, discovery-lease reuse, unsupported
+  payload visibility, and repeated worker crashes exhausting their budget.
+  Test execution remains deferred. Source-change cancellation, bounded retry
+  delays and conservative pre-claim CPU admission are implementation choices;
+  the conservative reservation can reduce hardware-only background throughput
+  until a plan-specific estimate is available before claim.
+
+- 2026-09-25: Rust 1.97.1 workspace Clippy with all targets and denied warnings
+  passed for the integrated pre-transcode path. No tests have been executed.

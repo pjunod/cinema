@@ -18,6 +18,8 @@ WHERE EXISTS (SELECT 1 FROM background_job_waiters
     WHERE state IN ('pending','awaiting_hydration') AND deadline_ms <= json_extract($1, '$.now_ms'))
   OR EXISTS (SELECT 1 FROM background_jobs
     WHERE state = 'cancelling' AND lease_expires_ms <= json_extract($1, '$.now_ms'))
+  OR EXISTS (SELECT 1 FROM background_jobs WHERE state = 'running' AND failed_attempts >= 4
+    AND lease_expires_ms <= json_extract($1, '$.now_ms'))
   OR EXISTS (SELECT 1 FROM background_job_attempts old
     WHERE old.finished_at_ms IS NOT NULL AND old.resolve_until_ms <= json_extract($1, '$.now_ms')
       AND (SELECT COUNT(*) FROM background_job_attempts newer

@@ -99,6 +99,7 @@ mod consistent_read_census;
 pub mod background_jobs;
 pub use background_jobs::BackgroundJobStore;
 mod background_jobs_maintenance;
+pub mod background_jobs_pretranscode;
 mod background_jobs_publication;
 #[cfg(test)]
 mod background_jobs_tests;

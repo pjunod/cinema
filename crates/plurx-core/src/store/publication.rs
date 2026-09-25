@@ -986,6 +986,28 @@ impl<'a> PublicationStore<'a> {
         .await
     }
 
+    /// Admit a speculative request through the shared durable queue while
+    /// preserving the singleton discovery publication fence.
+    pub async fn enqueue_durable_pretranscode(
+        &self,
+        job: &NewPretranscodeJob,
+    ) -> Result<bool, StoreError> {
+        let request = super::background_jobs_pretranscode::enqueue_request(job)?;
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                let outcome = self
+                    .store
+                    .enqueue_job_fenced(request, lease, replacement)
+                    .await?;
+                Ok(matches!(
+                    outcome,
+                    super::background_jobs::EnqueueOutcome::Accepted { .. }
+                ))
+            })
+        })
+        .await
+    }
+
     /// Enqueue one speculative generation under the singleton candidate-pass
     /// lease. Worker ownership is allocated later by the queue row itself.
     pub async fn enqueue_pretranscode_job(

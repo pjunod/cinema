@@ -13,7 +13,7 @@ use plurx_core::cluster::coordination::{ClusterJobAuthority, StoreCoordinator};
 use plurx_core::domain::ArtworkAttempt;
 use plurx_core::domain::{
     BookMetadataPatch, BookMetadataSource, Item, ItemKind, Library, LibraryKind, MediaFile,
-    MetadataPatch, NewPretranscodeJob, OfflinePackageStats, PlaybackEvent, PretranscodeJob,
+    MetadataPatch, NewPretranscodeJob, OfflinePackageStats, PlaybackEvent,
     PretranscodeRequirements,
 };
 use plurx_core::error::StoreError;
@@ -43,7 +43,7 @@ use crate::logbuf::{LogBuffer, LogBuffers};
 use crate::offline::OfflineManager;
 use crate::schedule::{due_jobs, DueJob, GlobalSchedule};
 use crate::trakt::TraktManager;
-use crate::transcode::{PretranscodeFence, PretranscodeProduceOutcome, TranscodeManager};
+use crate::transcode::{PretranscodeProduceOutcome, TranscodeManager};
 
 const FRAGMENT_INDEX_VALIDATION_PAGE: u32 = 64;
 const FRAGMENT_INDEX_VALIDATION_INTERVAL: Duration = Duration::from_secs(30);
@@ -2335,8 +2335,6 @@ const MAX_REQUESTS: usize = 256;
 /// request-history ring; overflow is terminal and visible to the caller.
 const MAX_PENDING_PER_LIBRARY: usize = 256;
 
-const PRETRANSCODE_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
-const PRETRANSCODE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(10);
 const PRETRANSCODE_REFUSAL_TTL_MS: i64 = 10 * 60 * 1_000;
 // The store admits at most 4,096 active queue rows. Retaining that entire
 // bounded universe avoids rotating one unreadable high-priority row back into
@@ -2922,163 +2920,6 @@ async fn fragment_index_requested_video_options(
         .first()
         .map(|(video, _)| *video)
         .unwrap_or_else(|| plurx_core::transcode::CopyVideoOptions::new(have_dovi, false)))
-}
-
-/// Heartbeat and self-fence for one distributed queue row.
-struct ActivePretranscodeJob {
-    fence: PretranscodeFence,
-    cancel: tokio_util::sync::CancellationToken,
-    lost: tokio_util::sync::CancellationToken,
-    heartbeat: Option<tokio::task::JoinHandle<Result<(), StoreError>>>,
-}
-
-impl ActivePretranscodeJob {
-    fn start(store: Arc<dyn Store>, job: PretranscodeJob) -> Self {
-        let fence = PretranscodeFence::new(job);
-        let heartbeat_fence = fence.clone();
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let heartbeat_cancel = cancel.clone();
-        let lost = tokio_util::sync::CancellationToken::new();
-        let heartbeat_lost = lost.clone();
-        let heartbeat = tokio::spawn(async move {
-            let mut heartbeat_error = None;
-            let mut ticker = tokio::time::interval(PRETRANSCODE_HEARTBEAT);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            ticker.tick().await;
-            loop {
-                tokio::select! {
-                    _ = heartbeat_cancel.cancelled() => break,
-                    _ = ticker.tick() => {}
-                }
-                let Some(current) = heartbeat_fence.snapshot().await else {
-                    heartbeat_lost.cancel();
-                    break;
-                };
-                let now_unix_ms = clock_ms();
-                if now_unix_ms >= current.lease_expires_ms {
-                    let _ = heartbeat_fence.invalidate(&current).await;
-                    heartbeat_lost.cancel();
-                    tracing::warn!(
-                        job = current.id,
-                        fence = current.fence,
-                        "pre-transcode queue heartbeat missed its lease deadline"
-                    );
-                    break;
-                }
-                let expires_at =
-                    now_unix_ms.saturating_add(
-                        PRETRANSCODE_LEASE_TTL.as_millis().min(i64::MAX as u128) as i64,
-                    );
-                let renewal = heartbeat_fence.renew(store.as_ref(), now_unix_ms, expires_at);
-                tokio::pin!(renewal);
-                let expiry = tokio::time::sleep(lease_time_remaining(current.lease_expires_ms));
-                tokio::pin!(expiry);
-                let mut stop_after_renewal = false;
-                let renewed = tokio::select! {
-                    _ = heartbeat_cancel.cancelled() => {
-                        // A renewal may already have crossed the backend
-                        // boundary. Drain it before retirement so an
-                        // acknowledged replacement cannot be stranded.
-                        stop_after_renewal = true;
-                        renewal.await
-                    }
-                    _ = &mut expiry => {
-                        stop_after_renewal = true;
-                        heartbeat_fence.revoke();
-                        heartbeat_lost.cancel();
-                        let result = renewal.await;
-                        tracing::warn!(
-                            job = current.id,
-                            fence = current.fence,
-                            "pre-transcode queue renewal exceeded its lease deadline and self-fenced"
-                        );
-                        result
-                    }
-                    result = &mut renewal => result,
-                };
-                match renewed {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        heartbeat_lost.cancel();
-                        tracing::warn!(
-                            job = current.id,
-                            fence = current.fence,
-                            "pre-transcode queue job lost its fence"
-                        );
-                        break;
-                    }
-                    Err(error) => {
-                        heartbeat_lost.cancel();
-                        tracing::warn!(
-                            job = current.id,
-                            fence = current.fence,
-                            %error,
-                            "pre-transcode queue renewal failed and self-fenced"
-                        );
-                        heartbeat_error = Some(error);
-                        break;
-                    }
-                }
-                if stop_after_renewal {
-                    break;
-                }
-            }
-            heartbeat_fence.revoke();
-            if let Err(error) = heartbeat_fence.retire(store.as_ref()).await {
-                tracing::warn!(%error, "pre-transcode queue retirement was ambiguous");
-                if heartbeat_error.is_none() {
-                    heartbeat_error = Some(error);
-                }
-            }
-            match heartbeat_error {
-                Some(error) => Err(error),
-                None => Ok(()),
-            }
-        });
-        Self {
-            fence,
-            cancel,
-            lost,
-            heartbeat: Some(heartbeat),
-        }
-    }
-
-    fn fence(&self) -> PretranscodeFence {
-        self.fence.clone()
-    }
-
-    fn loss_token(&self) -> tokio_util::sync::CancellationToken {
-        self.lost.clone()
-    }
-
-    async fn finish(mut self) {
-        self.fence.revoke();
-        self.lost.cancel();
-        self.cancel.cancel();
-        if let Some(heartbeat) = self.heartbeat.take() {
-            match heartbeat.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "pre-transcode cleanup was ambiguous after settlement");
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "pre-transcode heartbeat task failed during settlement");
-                }
-            }
-        }
-    }
-}
-
-impl Drop for ActivePretranscodeJob {
-    fn drop(&mut self) {
-        self.fence.revoke();
-        self.cancel.cancel();
-        self.lost.cancel();
-        // Dropping a JoinHandle detaches the task. Cancellation makes it
-        // drain any dispatched renewal and retire the final acknowledged
-        // token; aborting here would recreate the late-write race.
-        let _ = self.heartbeat.take();
-    }
 }
 
 impl JobManager {
@@ -6739,7 +6580,7 @@ impl JobManager {
                 not_before_ms: created_at_ms,
                 created_at_ms,
             };
-            match publisher.enqueue_pretranscode_job(&job).await {
+            match publisher.enqueue_durable_pretranscode(&job).await {
                 Ok(true) => {
                     enqueued += 1;
                     tracing::info!(
@@ -10272,29 +10113,13 @@ impl JobManager {
         let mut produced = 0_u64;
         let mut skipped = 0_u64;
         let mut reasons = std::collections::BTreeMap::<&'static str, u64>::new();
-        let has_refusals = !self.pretranscode_refusals.lock().await.is_empty();
-        if has_refusals {
-            let active_job_ids = match self.store.active_pretranscode_job_ids().await {
-                Ok(ids) if ids.len() <= 4_096 => ids.into_iter().collect::<HashSet<_>>(),
-                Ok(_) => {
-                    tracing::error!("active speculative queue exceeded its hard row bound");
-                    *reasons.entry("active_queue_bound_exceeded").or_default() += 1;
-                    self.emit_producer_pass(produced, skipped, serde_json::json!(reasons));
-                    return;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "could not prune stale node-local queue refusals");
-                    *reasons.entry("refusal_prune_failed").or_default() += 1;
-                    self.emit_producer_pass(produced, skipped, serde_json::json!(reasons));
-                    return;
-                }
-            };
-            let now_unix_ms = clock_ms();
-            self.pretranscode_refusals
-                .lock()
-                .await
-                .retain(|id, retry_at| *retry_at > now_unix_ms && active_job_ids.contains(id));
+        if let Err(error) = self.store.maintain_jobs(clock_ms()).await {
+            tracing::warn!(%error, "durable queue upkeep unavailable");
         }
+        self.pretranscode_refusals
+            .lock()
+            .await
+            .retain(|_, retry_at| *retry_at > clock_ms());
         for index in 0..PRODUCE_MAX_PER_PASS {
             if self.stop_producing.load(Ordering::Relaxed) || std::time::Instant::now() >= deadline
             {
@@ -10342,8 +10167,6 @@ impl JobManager {
                 break;
             }
             let now_unix_ms = clock_ms();
-            let expires_at = now_unix_ms
-                .saturating_add(PRETRANSCODE_LEASE_TTL.as_millis().min(i64::MAX as u128) as i64);
             let excluded_job_ids = {
                 let mut refusals = self.pretranscode_refusals.lock().await;
                 refusals.retain(|_, retry_at| *retry_at > now_unix_ms);
@@ -10353,18 +10176,17 @@ impl JobManager {
                     .cloned()
                     .collect::<Vec<_>>()
             };
-            let job = match self
-                .store
-                .claim_pretranscode_job(
-                    node,
-                    &capabilities,
-                    &excluded_job_ids,
-                    now_unix_ms,
-                    expires_at,
-                )
-                .await
+            let (job, active, fence) = match crate::background_jobs::claim_pretranscode(
+                Arc::clone(&self.store),
+                Arc::clone(&self.job_authority),
+                &transcode,
+                node,
+                &capabilities,
+                &excluded_job_ids,
+            )
+            .await
             {
-                Ok(Some(job)) => job,
+                Ok(Some(claim)) => claim,
                 Ok(None) => break,
                 Err(error) => {
                     tracing::warn!(%error, "could not claim speculative-transcode work");
@@ -10372,9 +10194,7 @@ impl JobManager {
                     break;
                 }
             };
-            let active = ActivePretranscodeJob::start(Arc::clone(&self.store), job.clone());
-            let fence = active.fence();
-            let lost = active.loss_token();
+            let lost = active.fence().loss_token();
             let file = match self.store.get_file(job.file_id).await {
                 Ok(Some(file))
                     if file.size == job.source_size && file.mtime == job.source_mtime =>
@@ -10561,10 +10381,7 @@ impl JobManager {
                 }
                 Err(error) => {
                     let now_unix_ms = clock_ms();
-                    let exponent = u32::try_from(job.attempts.clamp(0, 7)).unwrap_or(0);
-                    let backoff_ms = 30_000_i64
-                        .saturating_mul(1_i64 << exponent)
-                        .min(60 * 60 * 1_000);
+                    let backoff_ms = crate::background_jobs::retry_delay_ms(&job.id, job.attempts);
                     let _ = fence
                         .fail_job(
                             self.store.as_ref(),
