@@ -70,7 +70,7 @@ tracks never win, `und` is no language, the track is mapped by PID).
 ## P-03: the regression ledger stops growing, and releases get a weekly cadence
 
 **Merged by #489 (`995b60f3e`); phase B switched on 2026-09-25 by branch
-`ci/p03-enforce` with Paul's approval** — the boundary is `8251d14f7`, and a
+`ci/p03-enforce` with Paul's approval** — the boundary is `448e803da`, and a
 corrective pull request now needs a resolving `Regression-Test:` line.
 Executes [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
 under Paul's two 2026-09-23 decisions. Built: the `Regression-Test:` field
