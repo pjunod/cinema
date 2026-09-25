@@ -292,7 +292,7 @@ function playbackProgressTick(v,p){
   watch.fired=true;
   p.waitAt=now-Math.max(age,pendingLandingAge);
   p.waitStartedRunway=bufferRunway(v);
-  p.waitReported=false;
+  p.waitReported=false; p.waitReportedMs=null; p.waitReportedDetail=null;
   persistentWait(v,p,p.waitAt,p._seekToken||0,p.controlIntentGeneration||0).catch(()=>{});
 }
 function settlePlaybackControlSeek(v,p,presentedMediaTime,presentedFrameSequence){

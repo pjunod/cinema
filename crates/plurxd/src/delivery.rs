@@ -108,6 +108,16 @@ impl Method {
         }
     }
 
+    /// The playback-metrics vocabulary for this method: `hls-copy` is a
+    /// remux delivered as HLS, so the two share `remux`.
+    pub fn metric_label(self) -> &'static str {
+        match self {
+            Method::Direct => "direct_play",
+            Method::Remux | Method::HlsCopy => "remux",
+            Method::Transcode => "transcode",
+        }
+    }
+
     /// True when nothing else in the process is keeping this delivery's
     /// lifetime, so [`DirectPlays`] has to. Written as a match rather than
     /// `== Direct` so a fifth delivery method cannot be added without

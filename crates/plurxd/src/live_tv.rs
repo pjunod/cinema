@@ -197,6 +197,28 @@ const RETIRED_TTL: Duration = TERMINAL_TOMBSTONE_TTL;
 /// a recording for nothing.
 const STRAY_EVICTION_IDLE: Duration = Duration::from_secs(15);
 const SCRATCH_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// How often the orphan owner retries what a failed session cleanup left
+/// behind: a child whose exit was not confirmed, or a scratch directory that
+/// could not be removed. The same loop as the hourly scratch sweep.
+const ORPHAN_RETRY: Duration = Duration::from_secs(5);
+/// How many orphans the owner keeps. Past this the oldest *scratch-only*
+/// orphan is dropped (its directory is left to the hourly sweep); an orphan
+/// still holding an unconfirmed child is never dropped, because an encoder
+/// slot held by a live process is a fact, not a leak.
+const ORPHAN_MAX: usize = 64;
+/// Where the owner records its own incarnation, beside the persisted guide.
+const INCARNATION_FILE: &str = "incarnation.json";
+const INCARNATION_VERSION: u32 = 1;
+/// How often a node with anything live refreshes `last_seen_at`.
+const INCARNATION_TOUCH: Duration = Duration::from_secs(30);
+/// How recently the previous process must have been seen for an unknown
+/// capability to be explained as "the owner restarted": the longest a
+/// session could have gone unused before it ended anyway (unactivated for
+/// `PROVISIONAL_TIMEOUT`, then idle for `CAPABILITY_IDLE_TIMEOUT`), plus one
+/// `INCARNATION_TOUCH` of staleness in `last_seen_at` itself.
+const INCARNATION_RESTART_WINDOW: Duration = Duration::from_secs(
+    PROVISIONAL_TIMEOUT.as_secs() + CAPABILITY_IDLE_TIMEOUT.as_secs() + INCARNATION_TOUCH.as_secs(),
+);
 
 /// How often this node refreshes its one validated observation of the
 /// replicated Live TV settings. Every live session validates against that
@@ -1370,6 +1392,152 @@ struct LiveTvProcess {
     stderr: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// What a session whose cleanup failed still owns once it has left the
+/// registry (plan L-02 §3.4). The session itself is retired at once, so it
+/// stops counting against the tuner slots and against
+/// `MAX_TERMINAL_TOMBSTONES`; this record keeps the child — and with it the
+/// job and the encoder admission — and the scratch directory, until the
+/// owner's retry loop has confirmed both gone. The directory is in
+/// `scratch_claims` for as long as the record exists, so the hourly sweep
+/// never removes a directory a still-alive FFmpeg may be writing into.
+struct OrphanSession {
+    capability: String,
+    /// The configuration generation the session ran under: a drain of that
+    /// generation must still wait for this child, as it waited for the session.
+    generation: i64,
+    directory: PathBuf,
+    /// Present while the child's exit is unconfirmed.
+    process: Option<LiveTvProcess>,
+    /// The removal of `directory` in flight, if any: at most one, on its own
+    /// task, and never awaited under the `orphans` lock. A removal stalled on
+    /// a hung mount is kept rather than replaced, so it pins one blocking
+    /// thread and holds up nothing else.
+    removal: Option<OrphanRemoval>,
+    since: tokio::time::Instant,
+    attempts: u32,
+}
+
+type OrphanRemoval = tokio::task::JoinHandle<io::Result<()>>;
+
+/// Which orphans a drain must see gone before it may acknowledge.
+enum OrphanScope {
+    /// Only the orphans of the sessions being cancelled.
+    Sessions,
+    /// Those, and every orphan from a configuration older than this.
+    Before(i64),
+    /// Every orphan (shutdown).
+    All,
+}
+
+/// The incarnation file: who this process is, when it started, and when it
+/// was last seen with something live.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PersistedIncarnation {
+    version: u32,
+    incarnation: String,
+    started_at: i64,
+    last_seen_at: i64,
+}
+
+/// This owner's incarnation, and what the previous one left on disk.
+///
+/// Server-side only: a capability never carries it, so nothing a client
+/// holds changes. It exists so an unknown capability can be answered
+/// honestly — "the owner restarted" only when a previous process was seen
+/// recently enough to have been serving it, and otherwise "not available",
+/// never "expired", which the owner cannot know.
+struct OwnerIncarnation {
+    path: Option<PathBuf>,
+    current: StdMutex<PersistedIncarnation>,
+    /// `last_seen_at` of the previous process, if it left a readable file.
+    prior_seen_at: Option<i64>,
+    last_touch: StdMutex<tokio::time::Instant>,
+}
+
+impl OwnerIncarnation {
+    fn adopt(path: Option<PathBuf>) -> Self {
+        let prior_seen_at = path.as_deref().and_then(|path| {
+            let bytes = std::fs::read(path).ok()?;
+            let prior: PersistedIncarnation = serde_json::from_slice(&bytes).ok()?;
+            (prior.version == INCARNATION_VERSION).then_some(prior.last_seen_at)
+        });
+        let now = unix_seconds();
+        let incarnation = Self {
+            path,
+            current: StdMutex::new(PersistedIncarnation {
+                version: INCARNATION_VERSION,
+                incarnation: uuid::Uuid::new_v4().simple().to_string(),
+                started_at: now,
+                last_seen_at: now,
+            }),
+            prior_seen_at,
+            last_touch: StdMutex::new(tokio::time::Instant::now()),
+        };
+        incarnation.write();
+        incarnation
+    }
+
+    /// Record `last_seen_at = now`. Small and synchronous; the loop that
+    /// calls it runs it on the blocking pool.
+    fn write(&self) {
+        let Some(path) = self.path.as_ref() else {
+            return;
+        };
+        let current = {
+            let mut current = self
+                .current
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            current.last_seen_at = unix_seconds();
+            current.clone()
+        };
+        let written = (|| -> std::io::Result<()> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let bytes = serde_json::to_vec(&current)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, &bytes)?;
+            std::fs::rename(&tmp, path)
+        })();
+        if let Err(error) = written {
+            tracing::warn!(kind = %error.kind(), "recording the Live TV owner incarnation");
+        }
+    }
+
+    /// Whether a touch is due: something is live and the last one is
+    /// `INCARNATION_TOUCH` old.
+    fn touch_due(&self, held: usize) -> bool {
+        if held == 0 {
+            return false;
+        }
+        let mut last = self
+            .last_touch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if last.elapsed() < INCARNATION_TOUCH {
+            return false;
+        }
+        *last = tokio::time::Instant::now();
+        true
+    }
+
+    /// The sentence for a capability that is neither registered nor
+    /// tombstoned here. The code stays `capability_expired` (410, retry now)
+    /// whichever sentence it carries; only the words change.
+    fn unknown_capability_message(&self, now_unix: i64) -> &'static str {
+        let restarted = self.prior_seen_at.is_some_and(|seen| {
+            now_unix.saturating_sub(seen) <= INCARNATION_RESTART_WINDOW.as_secs() as i64
+        });
+        if restarted {
+            "the tuner owner restarted; press Watch to start again"
+        } else {
+            "this live-TV session is not available on the tuner owner; press Watch to start again"
+        }
+    }
+}
+
 impl LiveTvSession {
     fn transport(&self) -> Option<Arc<dvr::DvrTransport>> {
         self.transport
@@ -1391,6 +1559,7 @@ impl LiveTvSession {
     fn release_seat(&self) {
         if self.seat_reserved.swap(false, Ordering::AcqRel) {
             if let Some(transport) = self.transport() {
+                transport.warm_opener_done(&self.capability);
                 transport.release_seat();
             }
         }
@@ -1740,6 +1909,13 @@ impl LiveTvRegistry {
         self.retired.retain(|_, (expires_at, _)| *expires_at > now);
     }
 
+    /// Whether the recovery history has room for one more request. The start
+    /// path asks this in the same lock hold as, and just after,
+    /// `request_session`, which has already pruned expired tombstones.
+    fn recovery_history_admits(&self) -> bool {
+        self.sessions.len() + self.terminals.len() < MAX_TERMINAL_TOMBSTONES
+    }
+
     /// Every session a viewer's public request id currently maps to. Usually
     /// zero or one — but `LiveTvRequestKey` includes the ingress's serving
     /// generation, so a fence blip between a POST and its replay legitimately
@@ -1927,6 +2103,13 @@ pub(crate) struct LiveTvMetrics {
     /// Consumers a shared transport stopped feeding, indexed
     /// `[viewer, recording][backlog, fenced]`: four fixed series.
     consumer_evictions: [[AtomicU64; 2]; 2],
+    /// Viewer plans by where their facts came from, indexed by
+    /// `StartPlanSource`.
+    start_plans: [AtomicU64; 4],
+    /// Orphans the owner still holds, `[process, scratch]`: a record counts
+    /// under `process` while its child is unconfirmed, and under `scratch`
+    /// once only its directory is left. Both return to zero.
+    orphans: [AtomicU64; 2],
 }
 
 #[derive(Default)]
@@ -2002,6 +2185,46 @@ impl LiveTvMetrics {
             }
         }
         out
+    }
+
+    fn set_orphans(&self, orphans: &[OrphanSession]) {
+        let process = orphans
+            .iter()
+            .filter(|orphan| orphan.process.is_some())
+            .count();
+        self.orphans[0].store(process as u64, Ordering::Release);
+        self.orphans[1].store((orphans.len() - process) as u64, Ordering::Release);
+    }
+
+    fn observe_start_plan(&self, source: StartPlanSource) {
+        self.start_plans[source as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `warm_disagreed` should be rare: when it is not, the facts cache
+    /// outlives the mux format and its expiry is wrong.
+    fn start_plans_prometheus(&self) -> String {
+        let mut out = String::from(
+            "# HELP plurx_live_tv_start_plan_total Live TV viewer plans by where their source facts came from: cold (this tune's opening probe), joined (a shared transport's facts), warm_agreed (cached facts this tune's probe then re-proved), warm_disagreed (cached facts it contradicted; the start restarted cold).\n\
+             # TYPE plurx_live_tv_start_plan_total counter\n",
+        );
+        for (index, label) in StartPlanSource::LABELS.into_iter().enumerate() {
+            out.push_str(&format!(
+                "plurx_live_tv_start_plan_total{{source=\"{label}\"}} {}\n",
+                self.start_plans[index].load(Ordering::Acquire),
+            ));
+        }
+        out
+    }
+
+    fn orphans_prometheus(&self) -> String {
+        format!(
+            "# HELP plurx_live_tv_orphans Ended Live TV sessions whose cleanup the owner is still retrying: process (FFmpeg exit unconfirmed; it keeps its encoder slot) or scratch (only the directory is left).\n\
+             # TYPE plurx_live_tv_orphans gauge\n\
+             plurx_live_tv_orphans{{kind=\"process\"}} {}\n\
+             plurx_live_tv_orphans{{kind=\"scratch\"}} {}\n",
+            self.orphans[0].load(Ordering::Acquire),
+            self.orphans[1].load(Ordering::Acquire),
+        )
     }
 
     fn observe_settings_read(&self, site: SettingsReadSite, ok: bool) {
@@ -3078,6 +3301,44 @@ struct CachedSourceFormat {
     format: LiveTvSourceFormat,
 }
 
+/// The complete probe result a channel's last tune produced — everything the
+/// delivery planner reads — under the same key and the same expiry as its
+/// `CachedSourceFormat` (20 minutes, clipped to the current programme's end,
+/// where a mux most often changes format). A warm opener plans from it
+/// without waiting for a probe, and publishes only once this tune's own probe
+/// has re-proven the plan (plan L-02 §3.3).
+#[derive(Clone)]
+struct CachedSourceFacts {
+    expires_at: tokio::time::Instant,
+    facts: LiveSourceFacts,
+}
+
+/// How a viewer's session came by the facts it plans from, and so which
+/// `plurx_live_tv_start_plan_total` series it counts under.
+enum LiveStartKind {
+    /// It opened the tuner and waited for the opening probe.
+    Cold,
+    /// It opened the tuner planning from cached facts; the opening probe
+    /// verifies them before anything is published.
+    Warm(Box<LiveSourceFacts>),
+    /// It joined a transport already open and planned from that transport's
+    /// facts.
+    Joined,
+}
+
+/// `plurx_live_tv_start_plan_total{source}`, indexed as the label list.
+#[derive(Clone, Copy)]
+enum StartPlanSource {
+    Cold = 0,
+    Joined = 1,
+    WarmAgreed = 2,
+    WarmDisagreed = 3,
+}
+
+impl StartPlanSource {
+    const LABELS: [&'static str; 4] = ["cold", "joined", "warm_agreed", "warm_disagreed"];
+}
+
 /// One node's latest validated reading of the replicated Live TV settings.
 ///
 /// The sessions used to take this reading each, four times a second between
@@ -3220,6 +3481,7 @@ pub(crate) struct LiveTvManager {
     graph_cache: tokio::sync::Mutex<Option<CachedGraphProbe>>,
     caption_proofs: StdMutex<Vec<caption_probe::CaptionProof>>,
     source_formats: StdMutex<HashMap<SourceFormatKey, CachedSourceFormat>>,
+    source_facts: StdMutex<HashMap<SourceFormatKey, CachedSourceFacts>>,
     registry: Arc<StdMutex<LiveTvRegistry>>,
     /// Owner-sampled during the DVR loop. Public overview reads this atomic;
     /// they never stat the recording filesystem themselves.
@@ -3229,8 +3491,30 @@ pub(crate) struct LiveTvManager {
     /// The one settings observation every live session on this node validates
     /// against, refreshed by `settings_observer_loop`.
     fence: FenceObserver,
+    /// Sessions that left the registry with a child or a directory still to
+    /// confirm gone (plan L-02 §3.4). Held only for bookkeeping: no holder
+    /// waits on the filesystem, because each orphan's directory removal runs
+    /// on its own task (`OrphanSession::removal`). A tokio mutex so a drain
+    /// can bound its wait for it by the drain deadline.
+    orphans: tokio::sync::Mutex<Vec<OrphanSession>>,
+    incarnation: OwnerIncarnation,
     #[cfg(test)]
     fail_settings_reads: AtomicBool,
+    /// Test seam: the kernel has not confirmed an FFmpeg exit. Cleanup then
+    /// fails exactly as it does when `child.wait()` outlasts its deadline, and
+    /// the orphan owner's `try_wait` sees the child as still running.
+    #[cfg(test)]
+    withhold_reaps: AtomicBool,
+    /// Test seam: every scratch inventory scan started from now on hangs, as
+    /// a `stat` on a stalled mount does.
+    #[cfg(test)]
+    hang_scratch_scans: AtomicBool,
+    #[cfg(test)]
+    scratch_scans_started: AtomicU64,
+    /// Test seam: every orphan directory removal started from now on hangs,
+    /// as `remove_dir_all` on a stalled mount does.
+    #[cfg(test)]
+    hang_orphan_removals: AtomicBool,
     metrics: Arc<LiveTvMetrics>,
 }
 
@@ -3245,6 +3529,7 @@ impl LiveTvManager {
         guide_store: PathBuf,
     ) -> Arc<Self> {
         let metrics = Arc::new(LiveTvMetrics::default());
+        let incarnation = OwnerIncarnation::adopt(Some(guide_store.join(INCARNATION_FILE)));
         let guide_cache = GuideCache::with_store(guide_store);
         let lineup_wake = Arc::clone(&guide_cache.wake);
         let manager = Arc::new(Self {
@@ -3268,13 +3553,24 @@ impl LiveTvManager {
             graph_cache: tokio::sync::Mutex::new(None),
             caption_proofs: StdMutex::new(Vec::new()),
             source_formats: StdMutex::new(HashMap::new()),
+            source_facts: StdMutex::new(HashMap::new()),
             registry: Arc::clone(&metrics.registry),
             dvr_storage_free_bytes: AtomicU64::new(u64::MAX),
             scratch_claims: StdMutex::new(HashSet::new()),
             scratch_sweep_gate: tokio::sync::Mutex::new(()),
             fence: FenceObserver::new(Arc::clone(&metrics)),
+            orphans: tokio::sync::Mutex::new(Vec::new()),
+            incarnation,
             #[cfg(test)]
             fail_settings_reads: AtomicBool::new(false),
+            #[cfg(test)]
+            withhold_reaps: AtomicBool::new(false),
+            #[cfg(test)]
+            hang_scratch_scans: AtomicBool::new(false),
+            #[cfg(test)]
+            scratch_scans_started: AtomicU64::new(0),
+            #[cfg(test)]
+            hang_orphan_removals: AtomicBool::new(false),
             metrics,
         });
         manager.adopt_persisted_guide();
@@ -3479,6 +3775,15 @@ impl LiveTvManager {
                 && channel_ids.contains(key.channel_id.as_str())
                 && value.expires_at > now
         });
+        self.source_facts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|key, value| {
+                key.generation == generation
+                    && key.device_id == device_id
+                    && channel_ids.contains(key.channel_id.as_str())
+                    && value.expires_at > now
+            });
         for channel in &mut snapshot.channels {
             let key = SourceFormatKey {
                 generation,
@@ -3512,6 +3817,49 @@ impl LiveTvManager {
                 },
             );
         expires_at
+    }
+
+    /// Remember the facts a session planned from, for the next opener of this
+    /// channel. Same expiry rule as the UI's source format.
+    fn record_source_facts(
+        &self,
+        key: SourceFormatKey,
+        guide_number: &str,
+        facts: LiveSourceFacts,
+    ) {
+        let now_wall = unix_seconds();
+        let expires_at = self.source_format_expiry(guide_number, now_wall);
+        let ttl = Duration::from_secs(expires_at.saturating_sub(now_wall).max(0) as u64);
+        self.source_facts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                key,
+                CachedSourceFacts {
+                    expires_at: tokio::time::Instant::now() + ttl,
+                    facts,
+                },
+            );
+    }
+
+    /// Unexpired cached facts for exactly this generation, device and channel.
+    fn warm_source_facts(&self, key: &SourceFormatKey) -> Option<LiveSourceFacts> {
+        let now = tokio::time::Instant::now();
+        self.source_facts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .filter(|cached| cached.expires_at > now)
+            .map(|cached| cached.facts.clone())
+    }
+
+    /// The cached facts no longer describe the mux: a warm start disagreed,
+    /// or a running session saw the format change.
+    fn forget_source_facts(&self, key: &SourceFormatKey) {
+        self.source_facts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(key);
     }
 
     fn source_format_expiry(&self, guide_number: &str, observed_at: i64) -> i64 {
@@ -3809,6 +4157,25 @@ impl LiveTvManager {
             address,
             serving_generation,
         };
+        // Plan L-02 §3.3: facts this owner probed on this channel, under this
+        // configuration and device, still inside their expiry, from which
+        // this request's plan resolves. Used only if this start opens the
+        // tuner; a joiner plans from its transport's facts.
+        let warm_facts = self
+            .warm_source_facts(&SourceFormatKey {
+                generation: config.generation,
+                device_id: device_id.clone(),
+                channel_id: request.channel_id.clone(),
+            })
+            .filter(|facts| {
+                crate::live_tv_delivery::resolve_live_delivery(
+                    facts,
+                    request.playback.as_ref(),
+                    &live_quality_policy(&config, request.playback.is_some()),
+                    &live_execution_support(&self.system),
+                )
+                .is_ok()
+            });
         // One decision per registry lock hold, and at most one retry after
         // waiting for a transport to close — never a wait while holding the
         // lock, and never a second transport for one channel.
@@ -3829,7 +4196,7 @@ impl LiveTvManager {
                 if let Some(existing) = registry.request_session(&request)? {
                     break (Some(existing), None);
                 }
-                if registry.sessions.len() + registry.terminals.len() >= MAX_TERMINAL_TOMBSTONES {
+                if !registry.recovery_history_admits() {
                     return Err(LiveTvError::Capacity(
                         "live-TV request recovery history is full; retry after one minute".into(),
                     ));
@@ -3863,6 +4230,9 @@ impl LiveTvManager {
                             metrics: Arc::clone(&self.metrics),
                             seats: 1,
                         });
+                        if warm_facts.is_some() {
+                            transport.open_warm(&capability);
+                        }
                         registry
                             .transports
                             .insert(request.channel_id.clone(), Arc::clone(&transport));
@@ -3912,6 +4282,11 @@ impl LiveTvManager {
                 .fetch_add(1, Ordering::Relaxed);
             return wait_for_startup(existing, true).await;
         }
+        let kind = match (opened.as_ref(), warm_facts) {
+            (Some(_), Some(facts)) => LiveStartKind::Warm(Box::new(facts)),
+            (Some(_), _) => LiveStartKind::Cold,
+            (None, _) => LiveStartKind::Joined,
+        };
         if let Some(transport) = opened {
             self.spawn_transport_worker(&transport, client);
         }
@@ -3919,7 +4294,7 @@ impl LiveTvManager {
         let manager = Arc::downgrade(self);
         let worker_session = Arc::clone(&session);
         let worker = tokio::spawn(async move {
-            run_live_session(manager, worker_session, config).await;
+            run_live_session(manager, worker_session, config, kind).await;
         });
         *session
             .worker
@@ -4203,7 +4578,9 @@ impl LiveTvManager {
         let Some(session) = session else {
             return Ok(());
         };
-        self.cancel_and_wait(vec![session]).await.map(|_| ())
+        self.cancel_and_wait(vec![session], OrphanScope::Sessions)
+            .await
+            .map(|_| ())
     }
 
     pub(crate) async fn drain_before(
@@ -4242,7 +4619,8 @@ impl LiveTvManager {
                 .cloned()
                 .collect::<Vec<_>>()
         };
-        self.cancel_and_wait(sessions).await
+        self.cancel_and_wait(sessions, OrphanScope::Before(drain_before_generation))
+            .await
     }
 
     pub(crate) async fn shutdown(&self) -> Result<usize, LiveTvError> {
@@ -4255,12 +4633,17 @@ impl LiveTvManager {
             registry.closing = true;
             registry.sessions.values().cloned().collect::<Vec<_>>()
         };
-        self.cancel_and_wait(sessions).await
+        let drained = self.cancel_and_wait(sessions, OrphanScope::All).await;
+        // A clean stop is the last moment this process is seen. A capability
+        // presented to the next process soon after is explained as a restart.
+        self.incarnation.write();
+        drained
     }
 
     async fn cancel_and_wait(
         &self,
         sessions: Vec<Arc<LiveTvSession>>,
+        orphans: OrphanScope,
     ) -> Result<usize, LiveTvError> {
         let count = sessions.len();
         for session in &sessions {
@@ -4288,35 +4671,13 @@ impl LiveTvManager {
                     })?;
             }
         }
+        let capabilities = sessions
+            .iter()
+            .map(|session| session.capability.clone())
+            .collect::<HashSet<_>>();
         for session in sessions {
-            let failed_cleanup = session
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .cleanup
-                .as_ref()
-                .is_some_and(Result::is_err);
-            if failed_cleanup {
-                let cleanup = cleanup_session(&session).await;
-                session
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .cleanup = Some(cleanup.clone());
-                cleanup?;
-                self.retire_session(&session);
-            }
             loop {
                 let notified = session.changed.notified();
-                if let Some(Err(error)) = session
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .cleanup
-                    .clone()
-                {
-                    return Err(error);
-                }
                 let present = self
                     .registry
                     .lock()
@@ -4335,7 +4696,222 @@ impl LiveTvManager {
                     })?;
             }
         }
+        // A session whose cleanup failed has left the registry, but what it
+        // could not release is the orphan owner's now. A drain acknowledges
+        // disappearance, so it waits for that too, under the same deadline —
+        // exactly as it used to wait for the un-retired session itself.
+        self.drain_orphans(
+            |orphan| {
+                capabilities.contains(&orphan.capability)
+                    || match orphans {
+                        OrphanScope::Sessions => false,
+                        OrphanScope::Before(generation) => orphan.generation < generation,
+                        OrphanScope::All => true,
+                    }
+            },
+            deadline,
+        )
+        .await?;
         Ok(count)
+    }
+
+    #[cfg(test)]
+    fn reap_withheld(&self) -> bool {
+        self.withhold_reaps.load(Ordering::Acquire)
+    }
+
+    #[cfg(not(test))]
+    fn reap_withheld(&self) -> bool {
+        false
+    }
+
+    /// Take over what a session's failed cleanup left: its process, if the
+    /// child's exit was not confirmed, and its directory. Claimed for the
+    /// sweeper before the session leaves the registry.
+    async fn adopt_orphan(&self, session: &LiveTvSession) {
+        let process = session.process.lock().await.take();
+        self.scratch_claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session.directory.clone());
+        let mut orphans = self.orphans.lock().await;
+        orphans.push(OrphanSession {
+            capability: session.capability.clone(),
+            generation: session.request.config_generation,
+            directory: session.directory.clone(),
+            process,
+            removal: None,
+            since: tokio::time::Instant::now(),
+            attempts: 0,
+        });
+        self.bound_orphans(&mut orphans);
+        self.metrics.set_orphans(&orphans);
+    }
+
+    /// One retry of one orphan. True when nothing is left to confirm.
+    ///
+    /// Never waits on the filesystem: the directory is removed on its own
+    /// task, and a later retry reads the result. The caller holds the orphan
+    /// list, and every drain, stop, shutdown and cleanup handoff needs that
+    /// list, so one stalled removal must not hold it (PR #496 review 2).
+    fn retry_orphan(&self, orphan: &mut OrphanSession) -> bool {
+        orphan.attempts = orphan.attempts.saturating_add(1);
+        if let Some(process) = orphan.process.as_mut() {
+            if !self.reap_withheld() {
+                let _ = process.child.start_kill();
+                match process.child.try_wait() {
+                    Ok(Some(_)) => {
+                        if let Some(stderr) = process.stderr.take() {
+                            stderr.abort();
+                        }
+                        // Drops the job and the encoder admission with it.
+                        orphan.process = None;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(kind = %error.kind(), "checking an orphaned Live TV FFmpeg");
+                    }
+                }
+            }
+        }
+        if orphan.process.is_some() {
+            return false;
+        }
+        if let Some(removal) = orphan.removal.as_ref() {
+            if !removal.is_finished() {
+                return false;
+            }
+            let finished = orphan
+                .removal
+                .take()
+                .and_then(futures_util::FutureExt::now_or_never);
+            match finished {
+                Some(Ok(Ok(()))) => return true,
+                Some(Ok(Err(error))) if error.kind() == io::ErrorKind::NotFound => return true,
+                Some(Ok(Err(error))) => {
+                    if orphan.attempts.is_power_of_two() {
+                        tracing::warn!(
+                            kind = %error.kind(),
+                            attempts = orphan.attempts,
+                            age_s = orphan.since.elapsed().as_secs(),
+                            "an orphaned Live TV scratch directory still cannot be removed"
+                        );
+                    }
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "an orphaned Live TV scratch removal task failed");
+                }
+                None => {}
+            }
+        }
+        orphan.removal = Some(self.spawn_orphan_removal(&orphan.directory));
+        false
+    }
+
+    /// Start one removal of an orphan's directory on its own task.
+    fn spawn_orphan_removal(&self, directory: &Path) -> OrphanRemoval {
+        #[cfg(test)]
+        if self.hang_orphan_removals.load(Ordering::Acquire) {
+            return tokio::spawn(std::future::pending());
+        }
+        let directory = directory.to_owned();
+        tokio::spawn(async move { tokio::fs::remove_dir_all(&directory).await })
+    }
+
+    /// Release the sweeper claim of every orphan that is finished with.
+    fn release_orphan_claims<'a>(&self, done: impl IntoIterator<Item = &'a OrphanSession>) {
+        let mut claims = self
+            .scratch_claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for orphan in done {
+            claims.remove(&orphan.directory);
+        }
+    }
+
+    /// Keep at most `ORPHAN_MAX`, dropping the oldest scratch-only orphans.
+    fn bound_orphans(&self, orphans: &mut Vec<OrphanSession>) {
+        while orphans.len() > ORPHAN_MAX {
+            let Some(oldest) = orphans
+                .iter()
+                .enumerate()
+                .filter(|(_, orphan)| orphan.process.is_none())
+                .min_by_key(|(_, orphan)| orphan.since)
+                .map(|(index, _)| index)
+            else {
+                break;
+            };
+            let dropped = orphans.remove(oldest);
+            tracing::error!(
+                attempts = dropped.attempts,
+                "dropping the oldest orphaned Live TV scratch directory; the hourly sweep still sees it"
+            );
+            self.release_orphan_claims([&dropped]);
+        }
+    }
+
+    /// The orphan owner's pass: retry every orphan once.
+    async fn retry_orphans(&self) {
+        let mut orphans = self.orphans.lock().await;
+        if orphans.is_empty() {
+            return;
+        }
+        let mut kept = Vec::with_capacity(orphans.len());
+        for mut orphan in orphans.drain(..) {
+            if self.retry_orphan(&mut orphan) {
+                self.release_orphan_claims([&orphan]);
+            } else {
+                kept.push(orphan);
+            }
+        }
+        *orphans = kept;
+        self.bound_orphans(&mut orphans);
+        self.metrics.set_orphans(&orphans);
+    }
+
+    /// Retry the orphans `wanted` selects until none is left or `deadline`
+    /// passes. Other orphans are left to the retry loop. Bounded by
+    /// `deadline` throughout, including the wait for the orphan list: a
+    /// removal stalled on a hung mount keeps its orphan here until the
+    /// deadline, and holds up nothing else.
+    async fn drain_orphans(
+        &self,
+        wanted: impl Fn(&OrphanSession) -> bool,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), LiveTvError> {
+        let overdue = || {
+            LiveTvError::StreamFailed(
+                "live-TV cleanup was not confirmed before the drain deadline".into(),
+            )
+        };
+        loop {
+            {
+                let mut orphans = tokio::time::timeout_at(deadline, self.orphans.lock())
+                    .await
+                    .map_err(|_| overdue())?;
+                let mut kept = Vec::with_capacity(orphans.len());
+                let mut remaining = 0usize;
+                for mut orphan in orphans.drain(..) {
+                    if !wanted(&orphan) {
+                        kept.push(orphan);
+                    } else if self.retry_orphan(&mut orphan) {
+                        self.release_orphan_claims([&orphan]);
+                    } else {
+                        remaining += 1;
+                        kept.push(orphan);
+                    }
+                }
+                *orphans = kept;
+                self.metrics.set_orphans(&orphans);
+                if remaining == 0 {
+                    return Ok(());
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(overdue());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     fn retire_session(&self, session: &LiveTvSession) {
@@ -4409,7 +4985,7 @@ impl LiveTvManager {
             (live, ended)
         };
         if !live.is_empty() {
-            let _ = self.cancel_and_wait(live).await;
+            let _ = self.cancel_and_wait(live, OrphanScope::Sessions).await;
             return LiveTvRetireOutcome::Stopped;
         }
         if ended {
@@ -4474,7 +5050,7 @@ impl LiveTvManager {
             (resumed, pending, ended, strays)
         };
         if !strays.is_empty() {
-            let _ = self.cancel_and_wait(strays).await;
+            let _ = self.cancel_and_wait(strays, OrphanScope::Sessions).await;
         }
         if let Some(session) = resumed {
             session
@@ -4667,17 +5243,41 @@ impl LiveTvManager {
         removed
     }
 
+    /// The hourly scratch sweep, the orphan owner's `ORPHAN_RETRY` pass, and
+    /// the incarnation touch share one loop.
     pub(crate) async fn scratch_sweep_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        let mut next_sweep = tokio::time::Instant::now();
         loop {
-            let removed = self.sweep_orphan_scratch().await;
-            if removed > 0 {
-                tracing::info!(removed, "swept orphaned Live TV scratch directories");
+            if tokio::time::Instant::now() >= next_sweep {
+                let removed = self.sweep_orphan_scratch().await;
+                if removed > 0 {
+                    tracing::info!(removed, "swept orphaned Live TV scratch directories");
+                }
+                next_sweep = tokio::time::Instant::now() + SCRATCH_SWEEP_INTERVAL;
             }
+            self.retry_orphans().await;
+            self.touch_incarnation().await;
             tokio::select! {
                 _ = shutdown.cancelled() => return,
-                _ = tokio::time::sleep(SCRATCH_SWEEP_INTERVAL) => {}
+                _ = tokio::time::sleep(ORPHAN_RETRY) => {}
             }
         }
+    }
+
+    /// Refresh `last_seen_at` every `INCARNATION_TOUCH` while anything is
+    /// live, so a crash leaves a recent enough value to explain the
+    /// capabilities it stranded.
+    async fn touch_incarnation(self: &Arc<Self>) {
+        let held = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .held();
+        if !self.incarnation.touch_due(held) {
+            return;
+        }
+        let manager = Arc::clone(self);
+        let _ = tokio::task::spawn_blocking(move || manager.incarnation.write()).await;
     }
 
     pub(crate) fn metrics_handle(&self) -> Arc<LiveTvMetrics> {
@@ -5536,6 +6136,8 @@ impl LiveTvMetrics {
             + &self.dvr_sink_failures_prometheus()
             + &self.settings_reads_prometheus()
             + &self.fence_observations_prometheus()
+            + &self.orphans_prometheus()
+            + &self.start_plans_prometheus()
             + &transports
     }
 }
@@ -5561,7 +6163,9 @@ impl LiveTvManager {
             return Err(tombstone.error.clone());
         }
         Err(LiveTvError::CapabilityExpired(
-            "live-TV capability expired".into(),
+            self.incarnation
+                .unknown_capability_message(unix_seconds())
+                .into(),
         ))
     }
 }
@@ -5808,8 +6412,9 @@ async fn run_live_session(
     manager: Weak<LiveTvManager>,
     session: Arc<LiveTvSession>,
     config: LiveTvConfig,
+    kind: LiveStartKind,
 ) {
-    let result = run_live_session_inner(&manager, &session, &config).await;
+    let result = run_live_session_inner(&manager, &session, &config, kind).await;
     session.cancel.cancel();
     // Detach before anything slower: the transport's fan-out sees this
     // viewer gone on its next chunk, and if it was the last consumer the
@@ -5817,7 +6422,10 @@ async fn run_live_session(
     session.detach_from_transport();
     // Join the child and its bounded stderr reader before classifying startup
     // failure; otherwise EOF can beat the decoder diagnostic to the waiter.
-    let cleanup = cleanup_session(&session).await;
+    let withhold_reap = manager
+        .upgrade()
+        .is_some_and(|manager| manager.reap_withheld());
+    let cleanup = cleanup_session(&session, withhold_reap).await;
     let diagnostic = *session
         .encoder_diagnostic
         .lock()
@@ -5844,20 +6452,25 @@ async fn run_live_session(
         drop(state);
         session.changed.notify_waiters();
     }
+    let manager = manager.upgrade();
+    if let (Some(manager), Err(error)) = (manager.as_ref(), cleanup.as_ref()) {
+        // Plan L-02 §3.4: the session leaves the registry either way. What it
+        // could not release — an unconfirmed child with its job and encoder
+        // admission, or a directory — moves to the orphan owner first, so
+        // there is no instant at which neither holds it.
+        tracing::error!(
+            kind = %error,
+            "Live TV session cleanup did not finish before its deadline; the owner keeps retrying it"
+        );
+        manager.adopt_orphan(&session).await;
+    }
     session
         .state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .cleanup = Some(cleanup.clone());
+        .cleanup = Some(cleanup);
     session.changed.notify_waiters();
-    if let Some(manager) = manager.upgrade() {
-        if let Err(error) = cleanup {
-            tracing::error!(
-                kind = %error,
-                "Live TV session cleanup could not remove scratch before its deadline"
-            );
-            return;
-        }
+    if let Some(manager) = manager {
         manager.retire_session(&session);
     }
 }
@@ -5903,9 +6516,14 @@ async fn remove_session_directory(path: &Path) -> Result<(), LiveTvError> {
     }
 }
 
-async fn cleanup_session(session: &LiveTvSession) -> Result<(), LiveTvError> {
+async fn cleanup_session(session: &LiveTvSession, withhold_reap: bool) -> Result<(), LiveTvError> {
     // The mutex also serializes retries after a failed physical cleanup.
     let mut process = session.process.lock().await;
+    if withhold_reap && process.is_some() {
+        return Err(LiveTvError::StreamFailed(
+            "FFmpeg exit was not confirmed before the cleanup deadline".into(),
+        ));
+    }
     if let Some(process) = process.as_mut() {
         let _ = process.child.start_kill();
         tokio::time::timeout(SESSION_DRAIN_TIMEOUT, process.child.wait())
@@ -5937,6 +6555,7 @@ async fn run_live_session_inner(
     manager: &Weak<LiveTvManager>,
     session: &Arc<LiveTvSession>,
     config: &LiveTvConfig,
+    kind: LiveStartKind,
 ) -> Result<(), LiveTvError> {
     let owner = manager
         .upgrade()
@@ -5979,397 +6598,557 @@ async fn run_live_session_inner(
         LiveTvError::StreamFailed("the live-TV session has no tuner connection".into())
     })?;
     let startup_deadline = session.started + STARTUP_TIMEOUT;
-    let source = transport
-        .source_for_viewer(&session.cancel, startup_deadline)
-        .await?;
-    let observed = LiveTvSourceFormat {
-        video_width: source.width,
-        video_height: source.height,
-        scan: source.field_order.as_deref().map(|order| {
-            if matches!(order, "progressive" | "unknown") {
-                "progressive".to_owned()
-            } else {
-                "interlaced".to_owned()
-            }
-        }),
-        audio_channels: source.audio_channels,
-        audio_layout: source.audio_layout.clone(),
-        observed_at: unix_seconds(),
+    let facts_key = SourceFormatKey {
+        generation: config.generation,
+        device_id: session.device_id.clone(),
+        channel_id: session.channel.id.clone(),
     };
-    session.source_format_expires_at.store(
-        observed
-            .observed_at
-            .saturating_add(SOURCE_FORMAT_TTL.as_secs() as i64),
-        Ordering::Release,
-    );
-    *session
-        .source_format
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observed.clone());
-    let policy = if session.request.playback.is_some() {
-        LiveQualityPolicy {
-            max_height: (config.max_output_height > 0).then_some(config.max_output_height),
-            max_bitrate_bps: None,
-            deinterlace_output: config.deinterlace_output,
-        }
-    } else {
-        // Mixed-version starts keep the exact old H.264/AAC height profile.
-        LiveQualityPolicy {
-            max_height: Some(config.output_height),
-            max_bitrate_bps: None,
-            deinterlace_output: config.deinterlace_output,
+    // Plan L-02 §3.3. A warm opener plans from the facts this channel's last
+    // tune produced and starts its FFmpeg now, fed from the tuner's first
+    // byte; `verifying` then holds publication until the transport's probe of
+    // those same first bytes has re-proven the plan. Everyone else plans
+    // from the facts of this tune, as before, and leaves them for the next
+    // opener.
+    let (mut source, mut verifying) = match kind {
+        LiveStartKind::Warm(facts) => (*facts, true),
+        other => {
+            let source = transport
+                .source_for_viewer(&session.cancel, startup_deadline)
+                .await?;
+            owner.record_source_facts(
+                facts_key.clone(),
+                &session.channel.guide_number,
+                source.clone(),
+            );
+            owner.metrics.observe_start_plan(match other {
+                LiveStartKind::Joined => StartPlanSource::Joined,
+                _ => StartPlanSource::Cold,
+            });
+            (source, false)
         }
     };
-    let mut delivery = crate::live_tv_delivery::resolve_live_delivery(
-        &source,
-        session.request.playback.as_ref(),
-        &policy,
-        &LiveExecutionSupport {
-            video_encode: !owner.system.ffmpeg.trim().is_empty(),
-            audio_encode: !owner.system.ffmpeg.trim().is_empty(),
-            // The VOD probe does not prove this live command applies that
-            // graph. Reject required HDR conversion honestly; compatible HDR
-            // copy routes remain available.
-            tone_map: false,
-        },
-    )
-    .map_err(LiveTvError::CodecUnsupported)?;
-    if delivery.audio_track != 0 {
-        let selected = LiveTvSourceFormat {
-            audio_channels: delivery.source.audio_channels,
-            audio_layout: delivery.source.audio_layout.clone(),
-            ..observed
+    let policy = live_quality_policy(config, session.request.playback.is_some());
+    let support = live_execution_support(&owner.system);
+    let system = Arc::clone(&owner.system);
+    drop(owner);
+    loop {
+        let owner = manager
+            .upgrade()
+            .ok_or_else(|| LiveTvError::StreamFailed("live-TV manager stopped".into()))?;
+        let observed = LiveTvSourceFormat {
+            video_width: source.width,
+            video_height: source.height,
+            scan: source.field_order.as_deref().map(|order| {
+                if matches!(order, "progressive" | "unknown") {
+                    "progressive".to_owned()
+                } else {
+                    "interlaced".to_owned()
+                }
+            }),
+            audio_channels: source.audio_channels,
+            audio_layout: source.audio_layout.clone(),
+            observed_at: unix_seconds(),
         };
+        session.source_format_expires_at.store(
+            observed
+                .observed_at
+                .saturating_add(SOURCE_FORMAT_TTL.as_secs() as i64),
+            Ordering::Release,
+        );
         *session
             .source_format
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(selected);
-    }
-    let admission = if delivery.video_action == LiveTrackAction::Encode {
-        let source_height = source.height.unwrap_or(delivery.output.height);
-        let source_codec = source.video_codec.as_deref().unwrap_or("unknown");
-        Some(tokio::select! {
-            biased;
-            _ = session.cancel.cancelled() => {
-                return Err(LiveTvError::CapabilityExpired(
-                    "the live-TV start was cancelled before admission".into(),
-                ));
-            }
-            admission = owner.transcode.admit_live_tv(
-                source_height,
-                source_codec,
-                source.hdr.as_deref(),
-                delivery.output.height,
-                ADMISSION_WAIT,
-            ) => admission.map_err(LiveTvError::Capacity)?,
-        })
-    } else {
-        None
-    };
-    {
-        let mut state = session
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.encoder = admission.as_ref().map_or_else(
-            || "copy/remux".to_owned(),
-            |admission| admission.encoder.label().to_owned(),
-        );
-    }
-    // The fixture is 1080i MPEG-2 with AC-3. Only a matching source graph
-    // can use its proof; H.264 copy and other source families stay unadvertised
-    // until their own production graph has been proven on this FFmpeg build.
-    if source.video_codec.as_deref() == Some("mpeg2video")
-        && delivery.video_action == LiveTrackAction::Encode
-        && delivery.deinterlace
-    {
-        let encoder = admission.as_ref().map(|value| value.encoder.label());
-        let proofs = owner
-            .caption_proofs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(proof) = proofs.iter().find(|proof| {
-            Some(proof.encoder.as_str()) == encoder
-                && proof.packaging == delivery.packaging
-                && Some(proof.deinterlace) == delivery.deinterlace_output
-                && proof.output_height == delivery.output.height
-        }) {
-            delivery
-                .reasons
-                .push(crate::live_tv_delivery::LiveDeliveryReason {
-                    code: "captions_advertised".to_owned(),
-                    explanation: proof.services.join(","),
-                });
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observed.clone());
+        let delivery = crate::live_tv_delivery::resolve_live_delivery(
+            &source,
+            session.request.playback.as_ref(),
+            &policy,
+            &support,
+        )
+        .map_err(LiveTvError::CodecUnsupported)?;
+        if delivery.audio_track != 0 {
+            let selected = LiveTvSourceFormat {
+                audio_channels: delivery.source.audio_channels,
+                audio_layout: delivery.source.audio_layout.clone(),
+                ..observed
+            };
+            *session
+                .source_format
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(selected);
         }
-    }
-    session.set_delivery(delivery.clone());
-    let transcode_plan = LiveTvTranscodePlan::new(
-        &owner.system,
-        delivery,
-        admission.as_ref().map(|value| value.encoder),
-        admission
-            .as_ref()
-            .and_then(crate::transcode::LiveAdmission::software_threads),
-    )?;
-    let (mut child, child_job) =
-        spawn_live_ffmpeg(&owner.system, &transcode_plan, &session.directory)?;
-    let stdin = child.stdin.take();
-    let source_format_changed = Arc::new(AtomicBool::new(false));
-    let input_format = Arc::new(StdMutex::new(None));
-    let stderr = child.stderr.take().map(|stderr| {
-        tokio::spawn(capture_live_stderr(
-            stderr,
-            Arc::clone(&session.decoder_unavailable),
-            Arc::clone(&session.encoder_diagnostic),
-            Arc::clone(&session.source_format),
-            Arc::clone(&session.source_format_expires_at),
-            Arc::clone(&source_format_changed),
-            Arc::clone(&input_format),
-        ))
-    });
-    let Some(stdin) = stdin else {
-        *session.process.lock().await = Some(LiveTvProcess {
-            child,
-            _job: child_job,
-            _admission: admission,
-            stderr,
-        });
-        return Err(LiveTvError::StreamFailed(
-            "live-TV FFmpeg did not expose stdin".into(),
+        let admission = if delivery.video_action == LiveTrackAction::Encode {
+            let source_height = source.height.unwrap_or(delivery.output.height);
+            let source_codec = source.video_codec.as_deref().unwrap_or("unknown");
+            Some(tokio::select! {
+                biased;
+                _ = session.cancel.cancelled() => {
+                    return Err(LiveTvError::CapabilityExpired(
+                        "the live-TV start was cancelled before admission".into(),
+                    ));
+                }
+                admission = owner.transcode.admit_live_tv(
+                    source_height,
+                    source_codec,
+                    source.hdr.as_deref(),
+                    delivery.output.height,
+                    ADMISSION_WAIT,
+                ) => admission.map_err(LiveTvError::Capacity)?,
+            })
+        } else {
+            None
+        };
+        {
+            let mut state = session
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.encoder = admission.as_ref().map_or_else(
+                || "copy/remux".to_owned(),
+                |admission| admission.encoder.label().to_owned(),
+            );
+        }
+        // The caption advertisement is published with the delivery but is
+        // not part of the plan FFmpeg is built from, so a warm start's
+        // agreement check compares plans, not the proof list's state.
+        session.set_delivery(advertise_proven_captions(
+            &owner
+                .caption_proofs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            &source,
+            delivery.clone(),
+            admission.as_ref().map(|value| value.encoder.label()),
         ));
-    };
-    // Attach only now that this viewer's own resources exist (its scratch
-    // and its FFmpeg's stdin), so the fan-out never feeds a queue nothing
-    // drains (plan §3.3).
-    let (consumer, feed) =
-        dvr::ViewerConsumer::new(session.capability.clone(), session.cancel.clone());
-    if let Err(error) = session.attach_consumer(Arc::clone(&consumer)) {
-        *session.process.lock().await = Some(LiveTvProcess {
-            child,
-            _job: child_job,
-            _admission: admission,
-            stderr,
+        let transcode_plan = LiveTvTranscodePlan::new(
+            &owner.system,
+            delivery,
+            admission.as_ref().map(|value| value.encoder),
+            admission
+                .as_ref()
+                .and_then(crate::transcode::LiveAdmission::software_threads),
+        )?;
+        let (mut child, child_job) =
+            spawn_live_ffmpeg(&owner.system, &transcode_plan, &session.directory)?;
+        let stdin = child.stdin.take();
+        let source_format_changed = Arc::new(AtomicBool::new(false));
+        let input_format = Arc::new(StdMutex::new(None));
+        let stderr = child.stderr.take().map(|stderr| {
+            tokio::spawn(capture_live_stderr(
+                stderr,
+                Arc::clone(&session.decoder_unavailable),
+                Arc::clone(&session.encoder_diagnostic),
+                Arc::clone(&session.source_format),
+                Arc::clone(&session.source_format_expires_at),
+                Arc::clone(&source_format_changed),
+                Arc::clone(&input_format),
+            ))
         });
-        return Err(error);
-    }
-    let pump_failure = Arc::new(StdMutex::new(None));
-    let pump = tokio::spawn(pump_viewer_feed(
-        feed,
-        stdin,
-        session.cancel.clone(),
-        Arc::clone(&session.tuner_bytes),
-        Arc::clone(&pump_failure),
-    ));
-    let serving = owner.serving.clone();
-    drop(owner);
+        let Some(stdin) = stdin else {
+            *session.process.lock().await = Some(LiveTvProcess {
+                child,
+                _job: child_job,
+                _admission: admission,
+                stderr,
+            });
+            return Err(LiveTvError::StreamFailed(
+                "live-TV FFmpeg did not expose stdin".into(),
+            ));
+        };
+        // Attach only now that this viewer's own resources exist (its scratch
+        // and its FFmpeg's stdin), so the fan-out never feeds a queue nothing
+        // drains (plan §3.3).
+        let (consumer, feed) =
+            dvr::ViewerConsumer::new(session.capability.clone(), session.cancel.clone());
+        if let Err(error) = session.attach_consumer(Arc::clone(&consumer)) {
+            *session.process.lock().await = Some(LiveTvProcess {
+                child,
+                _job: child_job,
+                _admission: admission,
+                stderr,
+            });
+            return Err(error);
+        }
+        let pump_failure = Arc::new(StdMutex::new(None));
+        let pump = tokio::spawn(pump_viewer_feed(
+            feed,
+            stdin,
+            session.cancel.clone(),
+            Arc::clone(&session.tuner_bytes),
+            Arc::clone(&pump_failure),
+        ));
+        let serving = owner.serving.clone();
+        drop(owner);
 
-    let mut tick = tokio::time::interval(SESSION_TICK);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut ticks = 0u64;
-    let mut published = false;
-    let mut recorded_source_observation = session
-        .channel
-        .source_format
-        .as_ref()
-        .map_or(0, |format| format.observed_at);
-    let mut input_checked = false;
-    let observe = async {
-        loop {
-            tick.tick().await;
-            if session.cancel.is_cancelled() {
-                break Ok(());
-            }
-            if let Some(status) = child.try_wait().map_err(|error| {
-                LiveTvError::StreamFailed(format!("waiting for FFmpeg: {error}"))
-            })? {
-                break Err(LiveTvError::StreamFailed(format!(
-                    "live-TV FFmpeg exited with {status}"
-                )));
-            }
-            // An eviction ends this session on this tick, under its own
-            // reason. The pump may still be blocked writing to an FFmpeg that
-            // stopped reading, for up to `TUNER_READ_TIMEOUT`; waiting for it
-            // would keep that FFmpeg and its encode permit, and report the
-            // stall instead of the eviction (plan L-03 §3.2).
-            if pump.is_finished() || consumer.evicted().is_some() {
-                break Err(viewer_stream_error(&pump_failure, &consumer, &transport));
-            }
-            if !input_checked {
-                let input = input_format
+        let mut tick = tokio::time::interval(SESSION_TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut ticks = 0u64;
+        let mut published = false;
+        let mut recorded_source_observation = session
+            .channel
+            .source_format
+            .as_ref()
+            .map_or(0, |format| format.observed_at);
+        let mut input_checked = false;
+        // At most one inventory scan in flight (plan L-02 §3.4). A scan that has
+        // not returned within a tick — a `stat` on a stalled mount — is kept and
+        // polled again on the next tick rather than replaced, so a hung
+        // filesystem cannot pile up blocking-pool threads, and the tick carries
+        // on to the startup and producer-progress timers, which end the session.
+        let mut inventory_scan: Option<ScratchScanTask> = None;
+        let observe = async {
+            loop {
+                tick.tick().await;
+                if session.cancel.is_cancelled() {
+                    break Ok(None);
+                }
+                if let Some(status) = child.try_wait().map_err(|error| {
+                    LiveTvError::StreamFailed(format!("waiting for FFmpeg: {error}"))
+                })? {
+                    break Err(LiveTvError::StreamFailed(format!(
+                        "live-TV FFmpeg exited with {status}"
+                    )));
+                }
+                // An eviction ends this session on this tick, under its own
+                // reason. The pump may still be blocked writing to an FFmpeg that
+                // stopped reading, for up to `TUNER_READ_TIMEOUT`; waiting for it
+                // would keep that FFmpeg and its encode permit, and report the
+                // stall instead of the eviction (plan L-03 §3.2).
+                if pump.is_finished() || consumer.evicted().is_some() {
+                    break Err(viewer_stream_error(&pump_failure, &consumer, &transport));
+                }
+                // Plan L-02 §3.3: a warm start publishes nothing until the probe
+                // of this tune's first bytes re-proves its plan. Agreement means
+                // the FFmpeg already running is exactly the one those facts would
+                // have started; anything else restarts the start cold.
+                if verifying {
+                    match transport.opening_facts() {
+                        None => {}
+                        Some(Err(error)) => break Err(error),
+                        Some(Ok(probed)) => match warm_plan_agrees(
+                            &system,
+                            &transcode_plan,
+                            &source,
+                            &probed,
+                            session.request.playback.as_ref(),
+                            &policy,
+                            &support,
+                            &session.directory,
+                        ) {
+                            Some(delivery) => {
+                                verifying = false;
+                                *session
+                                    .source_format
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                    Some(session_source_format(&probed, &delivery));
+                                let owner = manager.upgrade();
+                                session.set_delivery(match &owner {
+                                    Some(owner) => advertise_proven_captions(
+                                        &owner
+                                            .caption_proofs
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                        &probed,
+                                        delivery,
+                                        transcode_plan
+                                            .encoder
+                                            .as_ref()
+                                            .map(|encoder| encoder.label()),
+                                    ),
+                                    None => delivery,
+                                });
+                                if let Some(owner) = owner {
+                                    owner.record_source_facts(
+                                        facts_key.clone(),
+                                        &session.channel.guide_number,
+                                        probed.clone(),
+                                    );
+                                    owner
+                                        .metrics
+                                        .observe_start_plan(StartPlanSource::WarmAgreed);
+                                }
+                                source = probed;
+                            }
+                            None => break Ok(Some(probed)),
+                        },
+                    }
+                }
+                if !input_checked && !verifying {
+                    let input = input_format
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    if let Some(input) = input {
+                        input_checked = true;
+                        if input_contradicts_plan(&source, &input) {
+                            // The facts this viewer planned from do not describe
+                            // the bytes it was fed: the transport's facts are
+                            // stale, and the next viewer re-probes (§2.4 D5).
+                            transport.mark_source_stale();
+                            if let Some(owner) = manager.upgrade() {
+                                owner.forget_source_facts(&facts_key);
+                            }
+                            break Err(LiveTvError::SourceFormatChanged(
+                            "the broadcast changed format since this channel's tuner was last observed; start the channel again so a fresh delivery route can be selected".into(),
+                        ));
+                        }
+                    }
+                }
+                if source_format_changed.load(Ordering::Acquire) {
+                    // The transport's facts no longer describe the mux: the next
+                    // viewer re-probes before it plans (§2.4 D5).
+                    transport.mark_source_stale();
+                    if let Some(owner) = manager.upgrade() {
+                        owner.forget_source_facts(&facts_key);
+                    }
+                    break Err(LiveTvError::SourceFormatChanged(
+                    "the broadcast changed format; start the channel again so a fresh delivery route can be selected".into(),
+                ));
+                }
+
+                let observed = session
+                    .source_format
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
-                if let Some(input) = input {
-                    input_checked = true;
-                    if input_contradicts_plan(&source, &input) {
-                        // The facts this viewer planned from do not describe
-                        // the bytes it was fed: the transport's facts are
-                        // stale, and the next viewer re-probes (§2.4 D5).
-                        transport.mark_source_stale();
-                        break Err(LiveTvError::SourceFormatChanged(
-                            "the broadcast changed format since this channel's tuner was last observed; start the channel again so a fresh delivery route can be selected".into(),
+                if let Some(format) =
+                    observed.filter(|format| format.observed_at > recorded_source_observation)
+                {
+                    if let Some(owner) = manager.upgrade() {
+                        let expires_at = owner.record_source_format(
+                            SourceFormatKey {
+                                generation: config.generation,
+                                device_id: session.device_id.clone(),
+                                channel_id: session.channel.id.clone(),
+                            },
+                            &session.channel.guide_number,
+                            format.clone(),
+                        );
+                        session
+                            .source_format_expires_at
+                            .store(expires_at, Ordering::Release);
+                        recorded_source_observation = format.observed_at;
+                    }
+                }
+
+                let scan = inventory_scan
+                    .get_or_insert_with(|| spawn_scratch_scan(manager, &session.directory));
+                let scanned = match tokio::time::timeout(SESSION_TICK, &mut *scan).await {
+                    Ok(joined) => {
+                        inventory_scan = None;
+                        Some(joined.map_err(|error| {
+                            LiveTvError::StreamFailed(format!("reading live-TV scratch: {error}"))
+                        }))
+                    }
+                    Err(_) => None,
+                };
+                match scanned.map(|joined| joined.and_then(|result| result)) {
+                    Some(Ok(Some(inventory))) => {
+                        let now = tokio::time::Instant::now();
+                        let publishable = {
+                            let mut state = session
+                                .state
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            record_producer_inventory(&mut state, inventory, now)
+                        };
+                        if !published && publishable && !verifying {
+                            let owner = manager.upgrade().ok_or_else(|| {
+                                LiveTvError::StreamFailed("live-TV manager stopped".into())
+                            })?;
+                            ensure_session_fence(&owner, session).await?;
+                            let provisional = LiveTvProvisional {
+                                outcome: LiveTvStartOutcome::Created,
+                                session_id: session.capability.clone(),
+                                capability: session.capability.clone(),
+                                activation_token: session.activation_token.clone(),
+                                channel: session.channel_with_source_format(),
+                                output: session.output(),
+                                delivery: session.delivery(),
+                                config_generation: session.request.config_generation,
+                                owner_serving_generation: session.owner_serving_generation,
+                            };
+                            let mut state = session
+                                .state
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            state.phase = LiveTvSessionPhase::Provisional;
+                            state.provisional_at = Some(now);
+                            state.startup = Some(Ok(provisional));
+                            drop(state);
+                            session.record_codec_qualification_publication(
+                                &owner.transcode,
+                                admission.as_ref(),
+                            );
+                            session.changed.notify_waiters();
+                            published = true;
+                        }
+                    }
+                    Some(Ok(None)) | None => {}
+                    Some(Err(error)) => break Err(error),
+                }
+
+                let now = tokio::time::Instant::now();
+                if !published {
+                    if let Some(reason) = startup_overdue(
+                        session.started,
+                        now,
+                        session.tuner_bytes.load(Ordering::Acquire),
+                        session
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .publication
+                            .as_ref()
+                            .map_or(0, |publication| publication.listed),
+                    ) {
+                        break Err(LiveTvError::StartupTimeout(reason));
+                    }
+                }
+                {
+                    let state = session
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if published && provisional_expired(&state, now) {
+                        break Err(LiveTvError::CapabilityExpired(
+                            "the provisional live-TV start was not activated".into(),
+                        ));
+                    }
+                    if state.activated
+                        && now.duration_since(state.last_touch) >= CAPABILITY_IDLE_TIMEOUT
+                    {
+                        break Err(LiveTvError::CapabilityExpired(
+                            "the live-TV capability became idle".into(),
+                        ));
+                    }
+                    if producer_progress_overdue(published, &state, now) {
+                        break Err(LiveTvError::StreamFailed(
+                            "the live-TV producer stopped advancing".into(),
                         ));
                     }
                 }
-            }
-            if source_format_changed.load(Ordering::Acquire) {
-                // The transport's facts no longer describe the mux: the next
-                // viewer re-probes before it plans (§2.4 D5).
-                transport.mark_source_stale();
-                break Err(LiveTvError::SourceFormatChanged(
-                    "the broadcast changed format; start the channel again so a fresh delivery route can be selected".into(),
-                ));
-            }
-
-            let observed = session
-                .source_format
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(format) =
-                observed.filter(|format| format.observed_at > recorded_source_observation)
-            {
-                if let Some(owner) = manager.upgrade() {
-                    let expires_at = owner.record_source_format(
-                        SourceFormatKey {
-                            generation: config.generation,
-                            device_id: session.device_id.clone(),
-                            channel_id: session.channel.id.clone(),
-                        },
-                        &session.channel.guide_number,
-                        format.clone(),
-                    );
-                    session
-                        .source_format_expires_at
-                        .store(expires_at, Ordering::Release);
-                    recorded_source_observation = format.observed_at;
+                ticks = ticks.wrapping_add(1);
+                if ticks.is_multiple_of(4) {
+                    let owner = manager.upgrade().ok_or_else(|| {
+                        LiveTvError::StreamFailed("live-TV manager stopped".into())
+                    })?;
+                    ensure_session_fence_from_observation(&owner, session).await?;
                 }
             }
-
-            match inspect_scratch(&session.directory).await {
-                Ok(Some(inventory)) => {
-                    let now = tokio::time::Instant::now();
-                    let publishable = {
-                        let mut state = session
-                            .state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        record_producer_inventory(&mut state, inventory, now)
-                    };
-                    if !published && publishable {
-                        let owner = manager.upgrade().ok_or_else(|| {
-                            LiveTvError::StreamFailed("live-TV manager stopped".into())
-                        })?;
-                        ensure_session_fence(&owner, session).await?;
-                        let provisional = LiveTvProvisional {
-                            outcome: LiveTvStartOutcome::Created,
-                            session_id: session.capability.clone(),
-                            capability: session.capability.clone(),
-                            activation_token: session.activation_token.clone(),
-                            channel: session.channel_with_source_format(),
-                            output: session.output(),
-                            delivery: session.delivery(),
-                            config_generation: session.request.config_generation,
-                            owner_serving_generation: session.owner_serving_generation,
-                        };
-                        let mut state = session
-                            .state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        state.phase = LiveTvSessionPhase::Provisional;
-                        state.provisional_at = Some(now);
-                        state.startup = Some(Ok(provisional));
-                        drop(state);
-                        session.record_codec_qualification_publication(
-                            &owner.transcode,
-                            admission.as_ref(),
-                        );
-                        session.changed.notify_waiters();
-                        published = true;
-                    }
+        };
+        let authority_lost = async {
+            loop {
+                if !serving.is_current(session.owner_serving_generation) {
+                    return;
                 }
-                Ok(None) => {}
-                Err(error) => break Err(error),
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
+        };
+        // No Store or filesystem wait may delay cancellation of the upstream and
+        // child. Every observer exit, including `?`, flows through the join below.
+        let terminal = tokio::select! {
+            biased;
+            _ = session.cancel.cancelled() => Ok(None),
+            _ = authority_lost => Err(LiveTvError::OwnerUnavailable(
+                crate::serving_fence::SERVING_FENCED_MESSAGE.into(),
+            )),
+            result = observe => result,
+        };
 
-            let now = tokio::time::Instant::now();
-            if !published {
-                if let Some(reason) = startup_overdue(
-                    session.started,
-                    now,
-                    session.tuner_bytes.load(Ordering::Acquire),
-                    session
+        if let Some(scan) = inventory_scan.take() {
+            scan.abort();
+        }
+        let terminal = match terminal {
+            Ok(Some(probed)) => {
+                // The warm plan was wrong for this tune. Stop the FFmpeg it
+                // started, keep this viewer's seat on the tuner, forget the
+                // cached facts, and start again from the probed ones — the cold
+                // path, inside the same start budget (`session.started` is
+                // unchanged). Nothing was published from the first FFmpeg.
+                pump.abort();
+                let _ = pump.await;
+                let _ = child.start_kill();
+                let reaped = tokio::time::timeout(SESSION_DRAIN_TIMEOUT, child.wait()).await;
+                if !matches!(reaped, Ok(Ok(_))) {
+                    *session.process.lock().await = Some(LiveTvProcess {
+                        child,
+                        _job: child_job,
+                        _admission: admission,
+                        stderr,
+                    });
+                    return Err(LiveTvError::StreamFailed(
+                        "the warm start's FFmpeg exit was not confirmed before it could restart"
+                            .into(),
+                    ));
+                }
+                if let Some(stderr) = stderr {
+                    stderr.abort();
+                    let _ = stderr.await;
+                }
+                // The job goes with this iteration; the encoder admission is
+                // given back now, before the restart asks for its own.
+                drop(admission);
+                if !transport.reserve_seat() {
+                    return Err(transport.terminal_error().unwrap_or_else(|| {
+                        LiveTvError::StreamFailed(
+                            "the shared tuner connection closed before the start could restart"
+                                .into(),
+                        )
+                    }));
+                }
+                session.hold_seat_on(Arc::clone(&transport));
+                transport.detach_viewer(&session.capability);
+                remove_session_directory(&session.directory).await?;
+                tokio::fs::create_dir_all(&session.directory)
+                    .await
+                    .map_err(|error| {
+                        LiveTvError::StreamFailed(format!("creating live-TV scratch: {error}"))
+                    })?;
+                {
+                    let mut state = session
                         .state
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .publication
-                        .as_ref()
-                        .map_or(0, |publication| publication.listed),
-                ) {
-                    break Err(LiveTvError::StartupTimeout(reason));
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.publication = None;
+                    state.newest_listed = None;
+                    state.media_sequence = 0;
+                    state.last_progress = tokio::time::Instant::now();
+                    state.encoder = "pending".to_owned();
                 }
-            }
-            {
-                let state = session
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if published && provisional_expired(&state, now) {
-                    break Err(LiveTvError::CapabilityExpired(
-                        "the provisional live-TV start was not activated".into(),
-                    ));
+                if let Some(owner) = manager.upgrade() {
+                    owner.forget_source_facts(&facts_key);
+                    owner.record_source_facts(
+                        facts_key.clone(),
+                        &session.channel.guide_number,
+                        probed.clone(),
+                    );
+                    owner
+                        .metrics
+                        .observe_start_plan(StartPlanSource::WarmDisagreed);
                 }
-                if state.activated
-                    && now.duration_since(state.last_touch) >= CAPABILITY_IDLE_TIMEOUT
-                {
-                    break Err(LiveTvError::CapabilityExpired(
-                        "the live-TV capability became idle".into(),
-                    ));
-                }
-                if producer_progress_overdue(published, &state, now) {
-                    break Err(LiveTvError::StreamFailed(
-                        "the live-TV producer stopped advancing".into(),
-                    ));
-                }
+                tracing::info!(
+                    channel = %session.channel.guide_number,
+                    "a warm Live TV start's cached source facts did not match this tune; restarting it from the probe"
+                );
+                source = probed;
+                verifying = false;
+                continue;
             }
-            ticks = ticks.wrapping_add(1);
-            if ticks.is_multiple_of(4) {
-                let owner = manager
-                    .upgrade()
-                    .ok_or_else(|| LiveTvError::StreamFailed("live-TV manager stopped".into()))?;
-                ensure_session_fence_from_observation(&owner, session).await?;
-            }
-        }
-    };
-    let authority_lost = async {
-        loop {
-            if !serving.is_current(session.owner_serving_generation) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    };
-    // No Store or filesystem wait may delay cancellation of the upstream and
-    // child. Every observer exit, including `?`, flows through the join below.
-    let terminal = tokio::select! {
-        biased;
-        _ = session.cancel.cancelled() => Ok(()),
-        _ = authority_lost => Err(LiveTvError::OwnerUnavailable(
-            crate::serving_fence::SERVING_FENCED_MESSAGE.into(),
-        )),
-        result = observe => result,
-    };
-
-    session.cancel.cancel();
-    pump.abort();
-    let _ = pump.await;
-    *session.process.lock().await = Some(LiveTvProcess {
-        child,
-        _job: child_job,
-        _admission: admission,
-        stderr,
-    });
-    terminal
+            other => other.map(|_| ()),
+        };
+        session.cancel.cancel();
+        pump.abort();
+        let _ = pump.await;
+        *session.process.lock().await = Some(LiveTvProcess {
+            child,
+            _job: child_job,
+            _admission: admission,
+            stderr,
+        });
+        return terminal;
+    }
 }
 
 /// Whether a session that has not published a segment yet is out of time, and
@@ -7355,6 +8134,147 @@ fn viewer_stream_error(
         .unwrap_or_else(|| LiveTvError::StreamFailed("the tuner stream ended unexpectedly".into()))
 }
 
+/// The quality policy a start plans under: the configured ceiling for a
+/// client that sent its capabilities, and the exact old H.264/AAC height
+/// profile for a mixed-version start that did not.
+fn live_quality_policy(config: &LiveTvConfig, capabilities_sent: bool) -> LiveQualityPolicy {
+    if capabilities_sent {
+        LiveQualityPolicy {
+            max_height: (config.max_output_height > 0).then_some(config.max_output_height),
+            max_bitrate_bps: None,
+            deinterlace_output: config.deinterlace_output,
+        }
+    } else {
+        LiveQualityPolicy {
+            max_height: Some(config.output_height),
+            max_bitrate_bps: None,
+            deinterlace_output: config.deinterlace_output,
+        }
+    }
+}
+
+fn live_execution_support(system: &SystemInfo) -> LiveExecutionSupport {
+    LiveExecutionSupport {
+        video_encode: !system.ffmpeg.trim().is_empty(),
+        audio_encode: !system.ffmpeg.trim().is_empty(),
+        // The VOD probe does not prove this live command applies that
+        // graph. Reject required HDR conversion honestly; compatible HDR
+        // copy routes remain available.
+        tone_map: false,
+    }
+}
+
+/// The source format a session publishes for what it planned from: the
+/// picture and scan of `source`, and the audio of the track `delivery`
+/// selected.
+fn session_source_format(
+    source: &LiveSourceFacts,
+    delivery: &LiveDeliveryPlan,
+) -> LiveTvSourceFormat {
+    LiveTvSourceFormat {
+        video_width: source.width,
+        video_height: source.height,
+        scan: source.field_order.as_deref().map(|order| {
+            if matches!(order, "progressive" | "unknown") {
+                "progressive".to_owned()
+            } else {
+                "interlaced".to_owned()
+            }
+        }),
+        audio_channels: delivery.source.audio_channels,
+        audio_layout: delivery.source.audio_layout.clone(),
+        observed_at: unix_seconds(),
+    }
+}
+
+/// The delivery to publish for `delivery`: with a `captions_advertised`
+/// reason when this node's caption probe proved the exact graph it runs.
+/// The fixture is 1080i MPEG-2 with AC-3. Only a matching source graph can use
+/// its proof; H.264 copy and other source families stay unadvertised until
+/// their own production graph has been proven on this FFmpeg build.
+fn advertise_proven_captions(
+    proofs: &[caption_probe::CaptionProof],
+    source: &LiveSourceFacts,
+    mut delivery: LiveDeliveryPlan,
+    encoder: Option<&str>,
+) -> LiveDeliveryPlan {
+    if source.video_codec.as_deref() == Some("mpeg2video")
+        && delivery.video_action == LiveTrackAction::Encode
+        && delivery.deinterlace
+    {
+        if let Some(proof) = proofs.iter().find(|proof| {
+            Some(proof.encoder.as_str()) == encoder
+                && proof.packaging == delivery.packaging
+                && Some(proof.deinterlace) == delivery.deinterlace_output
+                && proof.output_height == delivery.output.height
+        }) {
+            delivery
+                .reasons
+                .push(crate::live_tv_delivery::LiveDeliveryReason {
+                    code: "captions_advertised".to_owned(),
+                    explanation: proof.services.join(","),
+                });
+        }
+    }
+    delivery
+}
+
+/// Plan L-02 §3.3: whether the FFmpeg a warm start is already running — the
+/// one `running` describes, planned from `cached` facts — is exactly the one
+/// this tune's `probed` facts would have started. Returns the delivery to
+/// publish (the probed facts' own) on agreement, `None` on disagreement.
+///
+/// Agreement is decided on what the facts *produce*, not on a list of the
+/// fields the planner reads: the resolved delivery must be identical apart
+/// from the facts it carries, the FFmpeg argument vector built from it with
+/// the same encoder admission must be identical byte for byte, and on an
+/// encode route the admission's own inputs (source height, codec, HDR) must
+/// be identical, since they chose that encoder. A field list would have to be
+/// kept in step with the planner and the command builder by hand; this
+/// cannot drift from them, because it runs them.
+#[allow(clippy::too_many_arguments)] // the planner's inputs, as the start path holds them
+fn warm_plan_agrees(
+    system: &SystemInfo,
+    running: &LiveTvTranscodePlan,
+    cached: &LiveSourceFacts,
+    probed: &LiveSourceFacts,
+    playback: Option<&crate::live_tv_delivery::LivePlaybackRequest>,
+    policy: &LiveQualityPolicy,
+    support: &LiveExecutionSupport,
+    directory: &Path,
+) -> Option<LiveDeliveryPlan> {
+    if running.delivery.video_action == LiveTrackAction::Encode
+        && (cached.height, &cached.video_codec, &cached.hdr)
+            != (probed.height, &probed.video_codec, &probed.hdr)
+    {
+        return None;
+    }
+    let delivery =
+        crate::live_tv_delivery::resolve_live_delivery(probed, playback, policy, support).ok()?;
+    let mut same_plan = delivery.clone();
+    same_plan.source = running.delivery.source.clone();
+    if same_plan != running.delivery {
+        return None;
+    }
+    let probed_plan = LiveTvTranscodePlan::new(
+        system,
+        delivery.clone(),
+        running.encoder,
+        running.software_threads,
+    )
+    .ok()?;
+    let argv = |plan: &LiveTvTranscodePlan| {
+        live_ffmpeg_command(system, plan, directory).map(|command| {
+            command
+                .as_std()
+                .get_args()
+                .map(std::ffi::OsStr::to_os_string)
+                .collect::<Vec<_>>()
+        })
+    };
+    (argv(running).ok()? == argv(&probed_plan).ok()?).then_some(delivery)
+}
+
 /// Whether the input a viewer's FFmpeg opened contradicts the facts its plan
 /// was made from (plan L-03 §2.4 D5). A joiner plans from its transport's
 /// probe but is fed the live edge, so this is the check that the two agree.
@@ -7373,8 +8293,41 @@ fn input_contradicts_plan(planned: &LiveSourceFacts, input: &LiveTvSourceFormat)
         || differs(planned.audio_channels, input.audio_channels)
 }
 
-async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, LiveTvError> {
-    let mut entries = match tokio::fs::read_dir(directory).await {
+type ScratchScanTask = tokio::task::JoinHandle<Result<Option<ScratchInventory>, LiveTvError>>;
+
+/// Start one inventory scan of a session's scratch on its own task, so the
+/// session's tick can stop waiting for it without abandoning it.
+fn spawn_scratch_scan(manager: &Weak<LiveTvManager>, directory: &Path) -> ScratchScanTask {
+    #[cfg(test)]
+    if let Some(manager) = manager.upgrade() {
+        manager.scratch_scans_started.fetch_add(1, Ordering::AcqRel);
+        if manager.hang_scratch_scans.load(Ordering::Acquire) {
+            return tokio::spawn(std::future::pending());
+        }
+    }
+    #[cfg(not(test))]
+    let _ = manager;
+    let directory = directory.to_owned();
+    tokio::spawn(async move { inspect_scratch(&directory).await })
+}
+
+/// What one walk of a session's scratch directory found: the final segments
+/// by sequence and the init segment, each with its size.
+struct ScratchScan {
+    final_segments: HashMap<u64, (String, u64)>,
+    init: Option<(String, u64)>,
+}
+
+/// The directory walk of `inspect_scratch`, synchronous, so that one
+/// `spawn_blocking` runs all of it: one `read_dir` and one `symlink_metadata`
+/// per entry on the thread that already holds the directory, rather than a
+/// blocking-pool dispatch per entry (plan L-02 §3.4). Every check is the one
+/// the asynchronous walk made, in the same order — the non-regular-entry
+/// rule, the 128 MiB total (which a growing temporary segment reaches before
+/// the playlist changes), the playlist's byte budget, the unexpected-name
+/// rule and the at-most-one-temporary-file rule.
+fn scan_scratch_directory(directory: &Path) -> Result<Option<ScratchScan>, LiveTvError> {
+    let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
@@ -7387,13 +8340,12 @@ async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, L
     let mut final_segments = HashMap::new();
     let mut init = None;
     let mut temporary_count = 0usize;
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|error| LiveTvError::StreamFailed(format!("reading live-TV scratch: {error}")))?
-    {
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            LiveTvError::StreamFailed(format!("reading live-TV scratch: {error}"))
+        })?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let metadata = match tokio::fs::symlink_metadata(entry.path()).await {
+        let metadata = match std::fs::symlink_metadata(entry.path()) {
             Ok(metadata) => metadata,
             // FFmpeg atomically renames temporary output and deletes the
             // oldest window entry while this bounded scan is walking. That
@@ -7445,6 +8397,26 @@ async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, L
             "live-TV scratch contains too many temporary files".into(),
         ));
     }
+    Ok(Some(ScratchScan {
+        final_segments,
+        init,
+    }))
+}
+
+async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, LiveTvError> {
+    let walked = directory.to_owned();
+    let scan = tokio::task::spawn_blocking(move || scan_scratch_directory(&walked))
+        .await
+        .map_err(|error| {
+            LiveTvError::StreamFailed(format!("reading live-TV scratch: {error}"))
+        })??;
+    let Some(ScratchScan {
+        final_segments,
+        init,
+    }) = scan
+    else {
+        return Ok(None);
+    };
     let playlist =
         match read_bounded_regular_file(&directory.join("index.m3u8"), MAX_PLAYLIST_BYTES).await {
             Ok(playlist) => playlist,
@@ -10139,14 +11111,22 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
                         {
                             return;
                         }
-                        let chunk = vec![0x47_u8; 16 * 1024];
-                        let frame = [
-                            format!("{:x}\r\n", chunk.len()).into_bytes(),
-                            chunk,
-                            b"\r\n".to_vec(),
-                        ]
-                        .concat();
-                        while stream.write_all(&frame).await.is_ok() {
+                        // Chunk `n` of a GET is 16 KiB of the byte `n % 251`,
+                        // so a capture of what an FFmpeg was fed shows any
+                        // gap or repeat as a break in the sequence.
+                        let mut sent = 0_usize;
+                        loop {
+                            let chunk = vec![(sent % 251) as u8; 16 * 1024];
+                            let frame = [
+                                format!("{:x}\r\n", chunk.len()).into_bytes(),
+                                chunk,
+                                b"\r\n".to_vec(),
+                            ]
+                            .concat();
+                            if stream.write_all(&frame).await.is_err() {
+                                break;
+                            }
+                            sent += 1;
                             tokio::time::sleep(Duration::from_millis(1)).await;
                         }
                     });
@@ -10183,9 +11163,10 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
         std::fs::write(
             &ffprobe_path,
             format!(
-                "#!/bin/sh\n[ -f '{slow}' ] && /bin/sleep 1\n[ -f '{answer}' ] || exit 1\nexec /bin/cat '{answer}'\n",
+                "#!/bin/sh\n[ -f '{slow}' ] && /bin/sleep 1\n[ -f '{answer}' ] || exit 1\n/bin/cat '{answer}'\nstatus=$?\n/bin/date +%s%N >> '{finished}'\nexit $status\n",
                 slow = root.join("probe.slow").display(),
                 answer = root.join("probe.json").display(),
+                finished = root.join("probe.finished").display(),
             ),
         )
         .expect("fake FFprobe");
@@ -10217,6 +11198,683 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
     }
 
     const PROBED_480: &str = r#"{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width":720,"height":480,"field_order":"tt"},{"codec_type":"audio","codec_name":"ac3","channels":2}]}"#;
+    const PROBED_H264_180: &str = r#"{"streams":[{"codec_type":"video","codec_name":"h264","width":320,"height":180,"field_order":"progressive"},{"codec_type":"audio","codec_name":"aac","channels":2}]}"#;
+
+    /// A scripted FFmpeg for the start-path tests: it logs `<pid> <ns>` to
+    /// `<root>/ffmpeg.spawns`, publishes two listed segments at once, and
+    /// then either discards what it is fed or keeps it in `<root>/stdin-<pid>`.
+    fn publishing_ffmpeg(root: &Path, keep_input: bool) -> String {
+        let sink = if keep_input {
+            format!("'{}/stdin-'$$", root.display())
+        } else {
+            "/dev/null".to_owned()
+        };
+        format!(
+            r#"echo "$$ $(/bin/date +%s%N)" >> '{spawns}'
+for output do playlist="$output"; done
+directory=${{playlist%/*}}
+printf 'transport-stream' > "$directory/segment-000001.ts"
+printf 'transport-stream-two' > "$directory/segment-000002.ts"
+printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n#EXTINF:1.000000,\nsegment-000002.ts\n' > "$playlist.tmp"
+mv "$playlist.tmp" "$playlist"
+exec /bin/cat > {sink}"#,
+            spawns = root.join("ffmpeg.spawns").display(),
+        )
+    }
+
+    /// `(pid, unix nanoseconds)` for every FFmpeg the fixture started, in order.
+    fn ffmpeg_spawns(root: &Path) -> Vec<(u32, u128)> {
+        std::fs::read_to_string(root.join("ffmpeg.spawns"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                let (pid, at) = line.split_once(' ').expect("pid and time");
+                (pid.parse().expect("pid"), at.parse().expect("nanoseconds"))
+            })
+            .collect()
+    }
+
+    /// Unix nanoseconds at which each fixture probe finished, in order.
+    fn probes_finished(root: &Path) -> Vec<u128> {
+        std::fs::read_to_string(root.join("probe.finished"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| line.parse().expect("nanoseconds"))
+            .collect()
+    }
+
+    fn unix_nanos() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after 1970")
+            .as_nanos()
+    }
+
+    fn start_plans(manager: &LiveTvManager) -> [u64; 4] {
+        std::array::from_fn(|index| manager.metrics.start_plans[index].load(Ordering::Acquire))
+    }
+
+    /// Start once cold, stop, and wait for the transport to close: the
+    /// channel's facts are then cached, as they are after any real watch.
+    async fn watch_once_cold(manager: &Arc<LiveTvManager>) -> LiveTvProvisional {
+        let provisional = tokio::time::timeout(
+            Duration::from_secs(10),
+            manager.start_local(fixture_request(1)),
+        )
+        .await
+        .expect("cold start deadline")
+        .expect("cold start");
+        manager
+            .stop_local(&provisional.capability)
+            .await
+            .expect("stop the cold start");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !manager
+            .registry
+            .lock()
+            .expect("registry")
+            .transports
+            .is_empty()
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the cold transport never closed"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        provisional
+    }
+
+    /// The one session registered, once its inventory is publishable.
+    async fn publishable_session(manager: &LiveTvManager) -> Arc<LiveTvSession> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let session = manager
+                .registry
+                .lock()
+                .expect("registry")
+                .sessions
+                .values()
+                .next()
+                .cloned();
+            if let Some(session) = session {
+                let listed = session
+                    .state
+                    .lock()
+                    .expect("state")
+                    .publication
+                    .as_ref()
+                    .map_or(0, |publication| publication.listed);
+                if listed >= STARTUP_LISTED_SEGMENTS {
+                    return session;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no publishable inventory"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Plan L-02 §5.3, the cold half: with nothing cached the start is
+    /// today's sequence — the opening probe finishes before FFmpeg is
+    /// spawned — and it leaves the probed facts for the next opener.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cold_start_probes_before_it_spawns_and_caches_the_facts() {
+        let root = crate::test_tempdir().expect("root");
+        let (manager, tuner) =
+            start_path_fixture(root.path(), &publishing_ffmpeg(root.path(), false), 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+        let key = SourceFormatKey {
+            generation: 1,
+            device_id: "10ABCDEF".into(),
+            channel_id: "7.1".into(),
+        };
+        assert!(manager.warm_source_facts(&key).is_none());
+
+        let provisional = watch_once_cold(&manager).await;
+        let spawns = ffmpeg_spawns(root.path());
+        let probes = probes_finished(root.path());
+        assert_eq!(spawns.len(), 1);
+        assert_eq!(probes.len(), 1);
+        assert!(
+            probes[0] < spawns[0].1,
+            "a cold start spawns only after its probe"
+        );
+        assert_eq!(tuner.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(start_plans(&manager), [1, 0, 0, 0]);
+        let cached = manager
+            .warm_source_facts(&key)
+            .expect("facts cached for the next opener");
+        assert_eq!(cached.video_codec.as_deref(), Some("mpeg2video"));
+        assert_eq!(
+            provisional
+                .delivery
+                .as_ref()
+                .map(|delivery| &delivery.source.video_codec),
+            Some(&cached.video_codec)
+        );
+    }
+
+    /// Plan L-02 §5.3: a warm opener spawns FFmpeg without waiting for the
+    /// prefix and its probe, and still publishes nothing until this tune's
+    /// probe has re-proven the plan — although its inventory was publishable
+    /// long before.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_warm_start_spawns_before_the_prefix_ceiling_and_publishes_only_after_agreement() {
+        let root = crate::test_tempdir().expect("root");
+        let (manager, tuner) =
+            start_path_fixture(root.path(), &publishing_ffmpeg(root.path(), false), 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+        let cold = watch_once_cold(&manager).await;
+
+        // Slow the verification probe so the window is wide and visible.
+        std::fs::write(root.path().join("probe.slow"), b"").expect("slow probe");
+        let requested = unix_nanos();
+        let start = spawn_start(&manager, fixture_request(2));
+        let session = publishable_session(&manager).await;
+        assert_eq!(
+            probes_finished(root.path()).len(),
+            1,
+            "the verification probe has not finished yet"
+        );
+        assert!(
+            session.state.lock().expect("state").startup.is_none(),
+            "a publishable inventory must not be published before the probe agrees"
+        );
+        assert!(
+            session.tuner_bytes.load(Ordering::Acquire) > 0,
+            "the warm FFmpeg is fed while its verification probe is still running"
+        );
+        let warm = tokio::time::timeout(Duration::from_secs(10), start)
+            .await
+            .expect("warm start deadline")
+            .expect("start task")
+            .expect("warm start");
+        let answered = unix_nanos();
+
+        let spawns = ffmpeg_spawns(root.path());
+        let probes = probes_finished(root.path());
+        assert_eq!(
+            spawns.len(),
+            2,
+            "one FFmpeg for the cold start, one for the warm"
+        );
+        assert_eq!(probes.len(), 2);
+        let warm_spawn = spawns[1].1;
+        assert!(
+            warm_spawn - requested < SOURCE_PREFIX_TIME.as_nanos(),
+            "a warm start spawns before the prefix ceiling"
+        );
+        assert!(
+            warm_spawn < probes[1],
+            "…and before its verification probe finished"
+        );
+        assert!(
+            probes[1] <= answered,
+            "the answer came only after the probe"
+        );
+        assert_eq!(
+            start_plans(&manager),
+            [1, 0, 1, 0],
+            "cold, then warm_agreed"
+        );
+        assert_eq!(tuner.gets.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            warm.delivery, cold.delivery,
+            "the same channel, the same plan"
+        );
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    /// Plan L-02 §5.3: the cache says one thing and the mux another. The
+    /// FFmpeg started from the cache is killed and reaped, the start restarts
+    /// from the probe within the same start budget, and only the probed plan
+    /// is ever published.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_warm_start_that_disagrees_restarts_cold_and_never_publishes_the_wrong_plan() {
+        let root = crate::test_tempdir().expect("root");
+        let (manager, tuner) =
+            start_path_fixture(root.path(), &publishing_ffmpeg(root.path(), false), 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+        watch_once_cold(&manager).await;
+
+        // The broadcast changed format since the facts were cached.
+        std::fs::write(root.path().join("probe.json"), PROBED_H264_180).expect("new format");
+        let requested = tokio::time::Instant::now();
+        let provisional = tokio::time::timeout(
+            STARTUP_FEEDING_TIMEOUT,
+            manager.start_local(fixture_request(2)),
+        )
+        .await
+        .expect("the restarted start stays inside the start budget")
+        .expect("restarted start");
+        assert!(requested.elapsed() < STARTUP_FEEDING_TIMEOUT);
+
+        let delivery = provisional.delivery.expect("delivery");
+        assert_eq!(delivery.source.video_codec.as_deref(), Some("h264"));
+        assert_eq!(delivery.source.height, Some(180));
+        assert!(
+            !delivery.deinterlace,
+            "nothing of the cached interlaced plan survives"
+        );
+        let spawns = ffmpeg_spawns(root.path());
+        assert_eq!(spawns.len(), 3, "cold, warm, and the restart");
+        assert!(
+            !process_exists(spawns[1].0),
+            "the FFmpeg started from the wrong facts was killed and reaped"
+        );
+        assert_eq!(
+            start_plans(&manager),
+            [1, 0, 0, 1],
+            "cold, then warm_disagreed"
+        );
+        assert_eq!(
+            tuner.gets.load(Ordering::SeqCst),
+            2,
+            "the restart kept its tuner"
+        );
+        let key = SourceFormatKey {
+            generation: 1,
+            device_id: "10ABCDEF".into(),
+            channel_id: "7.1".into(),
+        };
+        assert_eq!(
+            manager
+                .warm_source_facts(&key)
+                .and_then(|facts| facts.video_codec),
+            Some("h264".into()),
+            "the cache now holds what this tune probed"
+        );
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    /// Plan L-02 §5.3: the warm FFmpeg is fed from the tuner's first byte,
+    /// and every byte after it, once.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_tuner_byte_reaches_ffmpeg_exactly_once_on_a_warm_start() {
+        let root = crate::test_tempdir().expect("root");
+        let (manager, _tuner) =
+            start_path_fixture(root.path(), &publishing_ffmpeg(root.path(), true), 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+        watch_once_cold(&manager).await;
+        let warm = tokio::time::timeout(
+            Duration::from_secs(10),
+            manager.start_local(fixture_request(2)),
+        )
+        .await
+        .expect("warm start deadline")
+        .expect("warm start");
+        assert_eq!(start_plans(&manager), [1, 0, 1, 0]);
+        manager.stop_local(&warm.capability).await.expect("stop");
+
+        let spawns = ffmpeg_spawns(root.path());
+        let fed = std::fs::read(root.path().join(format!("stdin-{}", spawns[1].0)))
+            .expect("the warm FFmpeg's input");
+        assert!(
+            fed.len() > 16 * 1024,
+            "the warm FFmpeg was fed ({} bytes)",
+            fed.len()
+        );
+        for (offset, byte) in fed.iter().enumerate() {
+            let expected = ((offset / (16 * 1024)) % 251) as u8;
+            assert_eq!(
+                *byte, expected,
+                "byte {offset} of the warm FFmpeg's input is not the tuner's byte {offset}: \
+                 a gap or a repeat"
+            );
+        }
+    }
+
+    /// Plan L-02 §5.4: a scratch scan that never returns — a `stat` on a
+    /// stalled mount — is polled on later ticks rather than replaced, so
+    /// exactly one is ever in flight, and the tick keeps running the timers
+    /// that end the session. A published session has no start waiter to time
+    /// it out: awaited inline, as it used to be, the hung scan stopped the
+    /// tick itself, and with it the producer-progress timer that is the only
+    /// thing that ends a session whose producer has stopped.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hung_inventory_does_not_stack_and_the_progress_timer_still_ends_the_session() {
+        let root = crate::test_tempdir().expect("root");
+        let (manager, _tuner) =
+            start_path_fixture(root.path(), &publishing_ffmpeg(root.path(), false), 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+        let provisional = tokio::time::timeout(
+            Duration::from_secs(10),
+            manager.start_local(fixture_request(1)),
+        )
+        .await
+        .expect("start deadline")
+        .expect("published start");
+        let session = manager
+            .session(&provisional.capability)
+            .expect("registered session");
+        let before = manager.scratch_scans_started.load(Ordering::Acquire);
+        manager.hang_scratch_scans.store(true, Ordering::Release);
+
+        let deadline =
+            tokio::time::Instant::now() + PRODUCER_PROGRESS_TIMEOUT + Duration::from_secs(10);
+        while manager
+            .registry
+            .lock()
+            .expect("registry")
+            .sessions
+            .contains_key(&provisional.capability)
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a hung scan must not stop the session's own timers"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let terminal = session.state.lock().expect("state").terminal_error.clone();
+        assert!(
+            matches!(&terminal, Some(LiveTvError::StreamFailed(message)) if message.contains("stopped advancing")),
+            "{terminal:?}"
+        );
+        assert_eq!(
+            manager.scratch_scans_started.load(Ordering::Acquire) - before,
+            1,
+            "one scan in flight from the moment the filesystem hung, never a second"
+        );
+    }
+
+    /// Plan L-02 §5.3: warm facts are exactly this generation, device and
+    /// channel, and only until their expiry.
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_or_foreign_generation_entry_is_cold() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let key = SourceFormatKey {
+            generation: 3,
+            device_id: "10ABCDEF".into(),
+            channel_id: "7.1".into(),
+        };
+        let facts = LiveSourceFacts {
+            video_codec: Some("mpeg2video".into()),
+            height: Some(480),
+            ..LiveSourceFacts::default()
+        };
+        manager.record_source_facts(key.clone(), "7.1", facts.clone());
+        assert_eq!(manager.warm_source_facts(&key), Some(facts));
+        for foreign in [
+            SourceFormatKey {
+                generation: 4,
+                ..key.clone()
+            },
+            SourceFormatKey {
+                device_id: "10FEDCBA".into(),
+                ..key.clone()
+            },
+            SourceFormatKey {
+                channel_id: "7.2".into(),
+                ..key.clone()
+            },
+        ] {
+            assert!(manager.warm_source_facts(&foreign).is_none(), "{foreign:?}");
+        }
+        tokio::time::advance(SOURCE_FORMAT_TTL + Duration::from_secs(1)).await;
+        assert!(
+            manager.warm_source_facts(&key).is_none(),
+            "past its expiry the entry is cold"
+        );
+        manager.record_source_facts(key.clone(), "7.1", LiveSourceFacts::default());
+        manager.forget_source_facts(&key);
+        assert!(manager.warm_source_facts(&key).is_none());
+    }
+
+    /// Plan L-02 §5.3: agreement is an identical delivery and an identical
+    /// FFmpeg command, never a field-by-field guess. Every field the planner
+    /// or the command reads flips it; a field neither reads does not.
+    #[test]
+    fn warm_agreement_is_an_identical_delivery_and_command() {
+        let system = SystemInfo {
+            ffmpeg: "/usr/bin/ffmpeg".into(),
+            ..SystemInfo::default()
+        };
+        let config = LiveTvConfig::from_snapshot(&BTreeMap::new(), "node-a");
+        let policy = live_quality_policy(&config, false);
+        let support = live_execution_support(&system);
+        let directory = Path::new("/scratch/live-tv-agreement");
+        let base = LiveSourceFacts {
+            video_codec: Some("mpeg2video".into()),
+            width: Some(1920),
+            height: Some(1080),
+            field_order: Some("tt".into()),
+            frame_rate: Some(crate::live_tv_delivery::LiveRational {
+                num: 30000,
+                den: 1001,
+            }),
+            audio_codec: Some("ac3".into()),
+            audio_sample_rate: Some(48_000),
+            audio_channels: Some(6),
+            audio_tracks: vec![
+                crate::live_tv_delivery::LiveSourceAudioTrack {
+                    index: 0,
+                    id: Some(0x31),
+                    codec: Some("ac3".into()),
+                    sample_rate: Some(48_000),
+                    channels: Some(6),
+                    layout: Some("5.1(side)".into()),
+                    language: Some("eng".into()),
+                    described: false,
+                },
+                crate::live_tv_delivery::LiveSourceAudioTrack {
+                    index: 1,
+                    id: Some(0x34),
+                    codec: Some("ac3".into()),
+                    sample_rate: Some(48_000),
+                    channels: Some(2),
+                    layout: Some("stereo".into()),
+                    language: Some("spa".into()),
+                    described: false,
+                },
+            ],
+            ..LiveSourceFacts::default()
+        };
+        let delivery =
+            crate::live_tv_delivery::resolve_live_delivery(&base, None, &policy, &support)
+                .expect("base plan");
+        let running = LiveTvTranscodePlan::new(&system, delivery, Some(Encoder::Software), Some(4))
+            .expect("running plan");
+        let agrees = |probed: &LiveSourceFacts| {
+            warm_plan_agrees(
+                &system, &running, &base, probed, None, &policy, &support, directory,
+            )
+            .is_some()
+        };
+        assert!(agrees(&base), "a tune that probes the same facts agrees");
+
+        type Mutation = Box<dyn Fn(&mut LiveSourceFacts)>;
+        let mutations: [(&str, Mutation); 6] = [
+            (
+                "video codec",
+                Box::new(|f| f.video_codec = Some("h264".into())),
+            ),
+            ("height", Box::new(|f| f.height = Some(720))),
+            ("width", Box::new(|f| f.width = Some(1280))),
+            (
+                "field order",
+                Box::new(|f| f.field_order = Some("progressive".into())),
+            ),
+            ("hdr", Box::new(|f| f.hdr = Some("hdr10".into()))),
+            (
+                "selected audio stream id",
+                Box::new(|f| f.audio_tracks[0].id = Some(0x44)),
+            ),
+        ];
+        for (field, mutate) in mutations {
+            let mut probed = base.clone();
+            mutate(&mut probed);
+            assert!(!agrees(&probed), "a changed {field} must disagree");
+        }
+
+        let mut unread = base.clone();
+        unread.audio_tracks[1].language = Some("fra".into());
+        assert!(
+            agrees(&unread),
+            "a field neither the planner nor the command reads agrees"
+        );
+        // The planner reads the audio codec and channel count, but the legacy
+        // profile re-encodes every source to stereo AAC: the command is byte
+        // for byte the same, so the FFmpeg already running is the right one
+        // and it agrees. A field list would have restarted this start.
+        let mut same_command = base.clone();
+        same_command.audio_codec = Some("eac3".into());
+        same_command.audio_channels = Some(2);
+        same_command.audio_tracks[0].codec = Some("eac3".into());
+        same_command.audio_tracks[0].channels = Some(2);
+        same_command.audio_tracks[0].layout = Some("stereo".into());
+        assert!(
+            agrees(&same_command),
+            "an identical command agrees whatever produced it"
+        );
+    }
+
+    /// PR #496 review finding 1. A warm opening's fan-out collects the opening
+    /// sample, and it used to begin only once a consumer attached. A joiner
+    /// cannot attach before that sample's probe, so if the warm opener ended
+    /// before attaching — here it is stopped while it still waits for an
+    /// encoder slot — nothing ever attached, nothing was probed, and the
+    /// joiner hung to its start deadline and failed with "the tuner sent no
+    /// data … no signal". The joiner must start once the opener is gone and
+    /// admission is free, planning from the probe of the opening sample.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_joiner_of_a_warm_opening_starts_when_the_opener_leaves_before_attaching() {
+        let root = crate::test_tempdir().expect("root");
+        let (manager, _tuner) =
+            start_path_fixture(root.path(), &publishing_ffmpeg(root.path(), false), 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+        let cold = watch_once_cold(&manager).await;
+        let out_h = cold
+            .delivery
+            .as_ref()
+            .map(|delivery| delivery.output.height)
+            .unwrap_or(480);
+        // Hold every software encoder admission, so the warm opener waits for
+        // one after it has opened the transport.
+        let mut held = Vec::new();
+        while let Ok(admission) = manager
+            .transcode
+            .admit_live_tv(480, "mpeg2video", None, out_h, Duration::ZERO)
+            .await
+        {
+            held.push(admission);
+            assert!(held.len() <= 64, "the encoder pool is bounded");
+        }
+        let before = start_plans(&manager);
+        let started = tokio::time::Instant::now();
+        let opener = spawn_start(&manager, fixture_request(2));
+        admitted_transports(&manager, 1).await;
+        let joiner = spawn_start(&manager, fixture_request(3));
+        let transports = admitted_transports(&manager, 2).await;
+        assert!(
+            Arc::ptr_eq(&transports[0], &transports[1]),
+            "the second start joined the warm opening"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let opener_capability = manager
+            .registry
+            .lock()
+            .expect("registry")
+            .sessions
+            .values()
+            .find(|session| session.request.user_id == 2)
+            .map(|session| session.capability.clone())
+            .expect("the opener is registered");
+        manager
+            .stop_local(&opener_capability)
+            .await
+            .expect("stop the opener");
+        assert!(
+            opener.await.expect("opener task").is_err(),
+            "the opener ended before it attached"
+        );
+        drop(held);
+        let joined = tokio::time::timeout(Duration::from_secs(25), joiner)
+            .await
+            .expect("the joiner answers")
+            .expect("joiner task");
+        assert!(
+            joined.is_ok(),
+            "the joiner must start once the opener is gone and admission is free, after {:?}: {:?}",
+            started.elapsed(),
+            joined.err()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the joiner waited out its start budget: {:?}",
+            started.elapsed()
+        );
+        let after = start_plans(&manager);
+        assert_eq!(
+            after[1] - before[1],
+            1,
+            "the joiner planned from the opening sample's probe: {before:?} -> {after:?}"
+        );
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    /// The recovery history through the real start path: a start is refused
+    /// with "recovery history is full" while `MAX_TERMINAL_TOMBSTONES`
+    /// unexpired tombstones fill it, and admitted once they have expired —
+    /// the start's own `request_session` prunes them in the same lock hold as
+    /// the check, so nothing else has to (PR #496 review finding 3).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_full_recovery_history_refuses_a_start_until_its_tombstones_expire() {
+        let root = crate::test_tempdir().expect("root");
+        let (manager, _tuner) =
+            start_path_fixture(root.path(), &publishing_ffmpeg(root.path(), false), 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+        let ended = fixture_request(99);
+        {
+            let mut registry = manager.registry.lock().expect("registry");
+            for index in 0..MAX_TERMINAL_TOMBSTONES {
+                registry.terminals.insert(
+                    format!("ended-{index}"),
+                    LiveTvTerminalTombstone {
+                        error: LiveTvError::CapabilityExpired("ended".into()),
+                        request: ended.clone(),
+                        expires_at: tokio::time::Instant::now() + TERMINAL_TOMBSTONE_TTL,
+                    },
+                );
+            }
+        }
+        match manager.start_local(fixture_request(1)).await {
+            Err(LiveTvError::Capacity(message)) => assert!(
+                message.contains("recovery history is full"),
+                "refused for the wrong reason: {message}"
+            ),
+            other => panic!("a full recovery history must refuse the start: {other:?}"),
+        }
+        {
+            let mut registry = manager.registry.lock().expect("registry");
+            let lapsed = tokio::time::Instant::now() - Duration::from_millis(1);
+            for tombstone in registry.terminals.values_mut() {
+                tombstone.expires_at = lapsed;
+            }
+        }
+        watch_once_cold(&manager).await;
+        assert!(
+            manager
+                .registry
+                .lock()
+                .expect("registry")
+                .terminals
+                .keys()
+                .all(|capability| !capability.starts_with("ended-")),
+            "the start pruned the expired tombstones"
+        );
+        manager.shutdown().await.expect("shutdown");
+    }
 
     fn fixture_request(user_id: i64) -> LiveTvStartRequest {
         let mut request = test_session(PathBuf::from("/unused"), 1).request.clone();
@@ -10985,8 +12643,151 @@ Output #0, hls, to 'index.m3u8':
         );
     }
 
+    /// Register `session` as a start would, and run its real worker. With no
+    /// Live TV settings in the store the start fence refuses at once, so the
+    /// worker goes straight to the cleanup and retirement under test.
+    async fn run_session_to_its_end(manager: &Arc<LiveTvManager>, session: &Arc<LiveTvSession>) {
+        {
+            let mut registry = manager.registry.lock().expect("registry");
+            registry.requests.insert(
+                LiveTvRequestKey::from(&session.request),
+                session.capability.clone(),
+            );
+            registry
+                .sessions
+                .insert(session.capability.clone(), Arc::clone(session));
+        }
+        run_live_session(
+            Arc::downgrade(manager),
+            Arc::clone(session),
+            guide_config(session.request.config_generation),
+            LiveStartKind::Cold,
+        )
+        .await;
+    }
+
+    fn orphan_gauges(manager: &LiveTvManager) -> (u64, u64) {
+        (
+            manager.metrics.orphans[0].load(Ordering::Acquire),
+            manager.metrics.orphans[1].load(Ordering::Acquire),
+        )
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: u32) -> bool {
+        // Signal 0 probes without delivering anything. A reaped child is gone;
+        // an unreaped one would still answer, which is the point.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    /// Plan L-02 §3.4 / §5.4. The kernel has not confirmed FFmpeg's exit by
+    /// the cleanup deadline. The session must still leave the registry — it
+    /// used to stay there for ever, counted against the recovery history — but
+    /// the child, its encoder admission and its directory stay owned, by the
+    /// orphan record, until they are confirmed gone; and a drain still waits
+    /// for them.
+    #[cfg(unix)]
     #[tokio::test]
-    async fn live_tv_cleanup_failure_retains_registry_and_can_be_retried() {
+    async fn a_failed_cleanup_retires_the_session_and_keeps_the_child_until_reaped() {
+        let root = crate::test_tempdir().expect("orphan root");
+        let manager = test_manager(root.path());
+        let session = test_session(manager.scratch_root.join("live-tv-orphan-child"), 1);
+        tokio::fs::create_dir_all(&session.directory)
+            .await
+            .expect("session scratch");
+        tokio::fs::write(session.directory.join("index.m3u8"), b"#EXTM3U\n")
+            .await
+            .expect("scratch content");
+        let idle_threads = manager.transcode.test_software_threads_in_use();
+        let admission = manager
+            .transcode
+            .admit_live_tv(1080, "h264", None, 720, Duration::ZERO)
+            .await
+            .expect("software Live TV admission");
+        let admitted_threads = manager.transcode.test_software_threads_in_use();
+        assert!(
+            admitted_threads > idle_threads,
+            "the fixture admission holds threads"
+        );
+        let mut command = tokio::process::Command::new("sleep");
+        command.arg("30");
+        let (child, job) = crate::process_control::spawn_job_owned(&mut command).expect("child");
+        let pid = child.id().expect("child pid");
+        *session.process.lock().await = Some(LiveTvProcess {
+            child,
+            _job: job,
+            _admission: Some(admission),
+            stderr: None,
+        });
+        manager.withhold_reaps.store(true, Ordering::Release);
+
+        run_session_to_its_end(&manager, &session).await;
+
+        assert!(
+            matches!(session.state.lock().expect("state").cleanup, Some(Err(_))),
+            "the cleanup did fail"
+        );
+        {
+            let registry = manager.registry.lock().expect("registry");
+            assert!(
+                !registry.sessions.contains_key(&session.capability),
+                "a failed cleanup must still retire the session"
+            );
+            assert!(registry.requests.is_empty());
+            assert_eq!(registry.held(), 0);
+        }
+        assert!(manager.activities().is_empty());
+        assert_eq!(orphan_gauges(&manager), (1, 0));
+        assert!(process_exists(pid), "the child is not abandoned");
+        assert_eq!(
+            manager.transcode.test_software_threads_in_use(),
+            admitted_threads,
+            "the encoder admission stays with the unconfirmed child"
+        );
+        assert_eq!(
+            manager.sweep_orphan_scratch().await,
+            0,
+            "the sweeper must not remove a directory a live child may write into"
+        );
+        assert!(session.directory.exists());
+        assert!(
+            manager.drain_before(2).await.is_err(),
+            "a drain acknowledges disappearance, so it waits for the orphan too"
+        );
+
+        manager.withhold_reaps.store(false, Ordering::Release);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while orphan_gauges(&manager) != (0, 0) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the orphan was never confirmed gone"
+            );
+            manager.retry_orphans().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !process_exists(pid),
+            "the retry killed and reaped the child"
+        );
+        assert_eq!(
+            manager.transcode.test_software_threads_in_use(),
+            idle_threads,
+            "the admission is released with the reaped child"
+        );
+        assert!(!session.directory.exists());
+        assert!(!manager
+            .scratch_claims
+            .lock()
+            .expect("claims")
+            .contains(&session.directory));
+        assert_eq!(manager.drain_before(2).await.expect("drain after reap"), 0);
+    }
+
+    /// The scratch half of the same handoff: the directory could not be
+    /// removed. The session leaves at once; a drain waits for the directory
+    /// and acknowledges once it is gone.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_scratch_cleanup_retires_the_session_and_a_drain_waits_for_the_directory() {
         let root = crate::test_tempdir().expect("cleanup root");
         let manager = test_manager(root.path());
         let path = root.path().join("not-a-directory");
@@ -10994,31 +12795,213 @@ Output #0, hls, to 'index.m3u8':
             .await
             .expect("cleanup obstruction");
         let session = test_session(path.clone(), 1);
-        session.state.lock().expect("state").cleanup = Some(Err(LiveTvError::StreamFailed(
-            "previous cleanup failed".into(),
-        )));
-        manager
-            .registry
-            .lock()
-            .expect("registry")
-            .sessions
-            .insert(session.capability.clone(), Arc::clone(&session));
-        assert!(manager.drain_before(2).await.is_err());
-        assert_eq!(
-            manager.activities().len(),
-            1,
+        run_session_to_its_end(&manager, &session).await;
+        assert!(manager.activities().is_empty(), "the session left at once");
+        assert_eq!(orphan_gauges(&manager), (0, 1));
+        assert!(
+            manager.drain_before(2).await.is_err(),
             "failed physical cleanup must not acknowledge disappearance"
         );
         tokio::fs::remove_file(&path)
             .await
             .expect("clear fixture obstruction");
-        assert_eq!(manager.drain_before(2).await.expect("retry cleanup"), 1);
-        assert!(manager.activities().is_empty());
-        assert!(matches!(
+        assert_eq!(manager.drain_before(2).await.expect("retry cleanup"), 0);
+        assert_eq!(orphan_gauges(&manager), (0, 0));
+        assert!(
             manager
-                .session_for_request(&LiveTvRequestKey::from(&session.request), &session.request),
-            Err(LiveTvError::CapabilityExpired(_))
-        ));
+                .session_for_request(&LiveTvRequestKey::from(&session.request), &session.request)
+                .is_err(),
+            "a replay finds the tombstone, never a session to start again"
+        );
+    }
+
+    /// PR #496 review finding 2. An orphan's directory removal that never
+    /// returns — `remove_dir_all` on a stalled mount — was awaited while the
+    /// retry pass held the orphan list. The owner's next pass then held it
+    /// for as long as the mount stalled, so the next failed cleanup could not
+    /// hand over (its session stayed registered) and every drain waited for
+    /// the list far past `SESSION_DRAIN_TIMEOUT`. The removal now runs on its
+    /// own task: the owner's pass returns, a failed cleanup still retires its
+    /// session, and a drain that wants the stuck orphan answers at its
+    /// deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_orphan_removal_holds_up_no_handoff_and_no_drain_past_its_deadline() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        manager.hang_orphan_removals.store(true, Ordering::Release);
+        let first_path = root.path().join("stuck-first");
+        tokio::fs::write(&first_path, b"not a directory")
+            .await
+            .expect("cleanup obstruction");
+        let first = test_session(first_path, 1);
+        run_session_to_its_end(&manager, &first).await;
+        assert_eq!(orphan_gauges(&manager), (0, 1));
+
+        // The owner's retry loop, as `scratch_sweep_loop` runs it.
+        let owner = {
+            let manager = Arc::clone(&manager);
+            tokio::spawn(async move {
+                loop {
+                    manager.retry_orphans().await;
+                    tokio::time::sleep(ORPHAN_RETRY).await;
+                }
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), manager.retry_orphans())
+            .await
+            .expect("a retry pass does not wait on the filesystem");
+
+        let second_path = root.path().join("stuck-second");
+        tokio::fs::write(&second_path, b"not a directory")
+            .await
+            .expect("cleanup obstruction");
+        let second = test_session(second_path, 1);
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            run_session_to_its_end(&manager, &second),
+        )
+        .await
+        .expect("a failed cleanup hands over while another removal hangs");
+        assert!(
+            !manager
+                .registry
+                .lock()
+                .expect("registry")
+                .sessions
+                .contains_key(&second.capability),
+            "the second session is retired"
+        );
+        assert_eq!(orphan_gauges(&manager), (0, 2));
+
+        let asked = tokio::time::Instant::now();
+        let drained = tokio::time::timeout(
+            SESSION_DRAIN_TIMEOUT + Duration::from_secs(1),
+            manager.drain_before(2),
+        )
+        .await
+        .expect("a drain answers by its own deadline");
+        assert!(
+            drained.is_err(),
+            "the stuck orphans are not confirmed gone, so the drain does not acknowledge"
+        );
+        assert!(
+            asked.elapsed() <= SESSION_DRAIN_TIMEOUT + Duration::from_millis(100),
+            "the drain overran its deadline: {:?}",
+            asked.elapsed()
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), manager.drain_before(1))
+                .await
+                .expect("a drain that wants no orphan is not held by one")
+                .expect("nothing to drain"),
+            0
+        );
+        owner.abort();
+    }
+
+    /// §5.4: failed cleanups used to stay in the registry for ever, counted in
+    /// `sessions + terminals`, so 256 of them refused every start. Now each is
+    /// retired and leaves only a one-minute tombstone like any other end, and
+    /// the orphan owner is bounded. That a start is refused only while
+    /// unexpired tombstones fill the history is pinned through the real start
+    /// path by `a_full_recovery_history_refuses_a_start_until_its_tombstones_expire`.
+    #[tokio::test(start_paused = true)]
+    async fn two_hundred_failed_cleanups_do_not_refuse_starts() {
+        let root = crate::test_tempdir().expect("cleanup root");
+        let manager = test_manager(root.path());
+        for index in 0..300 {
+            let path = root.path().join(format!("obstruction-{index}"));
+            tokio::fs::write(&path, b"not a directory")
+                .await
+                .expect("cleanup obstruction");
+            let session = test_session(path, 1);
+            run_session_to_its_end(&manager, &session).await;
+        }
+        let orphans = manager.orphans.lock().await.len();
+        assert_eq!(orphans, ORPHAN_MAX, "scratch-only orphans are bounded");
+        assert_eq!(orphan_gauges(&manager), (0, ORPHAN_MAX as u64));
+        assert!(
+            manager
+                .registry
+                .lock()
+                .expect("registry")
+                .sessions
+                .is_empty(),
+            "every failed cleanup retired its session"
+        );
+    }
+
+    /// Plan §3.4 lookup text: the code is `capability_expired` (410, retry
+    /// now) whatever the sentence, and the sentence claims a restart only
+    /// when the previous process was seen recently enough to have served it.
+    #[tokio::test]
+    async fn an_unknown_capability_is_unavailable_unless_a_recent_incarnation_proves_a_restart() {
+        fn unknown_capability_answer(manager: &LiveTvManager) -> String {
+            let capability = format!(
+                "ltv1.{}.{}",
+                base64url_encode(b"node-a"),
+                uuid::Uuid::new_v4()
+            );
+            match manager.session(&capability) {
+                Err(error @ LiveTvError::CapabilityExpired(_)) => {
+                    assert_eq!(error.code(), "capability_expired");
+                    error.to_string()
+                }
+                Err(other) => panic!("wrong error for an unknown capability: {other:?}"),
+                Ok(_) => panic!("an unknown capability was accepted"),
+            }
+        }
+        fn age_incarnation(root: &Path, seconds: i64) {
+            let path = root.join("live-tv-guide").join(INCARNATION_FILE);
+            let mut persisted: PersistedIncarnation =
+                serde_json::from_slice(&std::fs::read(&path).expect("incarnation file"))
+                    .expect("incarnation json");
+            persisted.last_seen_at = unix_seconds() - seconds;
+            std::fs::write(&path, serde_json::to_vec(&persisted).expect("json"))
+                .expect("aged incarnation");
+        }
+
+        let root = crate::test_tempdir().expect("incarnation root");
+        let first = test_manager(root.path());
+        let answer = unknown_capability_answer(&first);
+        assert!(answer.contains("not available"), "{answer}");
+        assert!(
+            !answer.contains("expired") && !answer.contains("restarted"),
+            "{answer}"
+        );
+        drop(first);
+
+        age_incarnation(root.path(), 20);
+        let restarted = test_manager(root.path());
+        let answer = unknown_capability_answer(&restarted);
+        assert!(answer.contains("restarted"), "{answer}");
+        drop(restarted);
+
+        age_incarnation(root.path(), 600);
+        let long_after = test_manager(root.path());
+        let answer = unknown_capability_answer(&long_after);
+        assert!(answer.contains("not available"), "{answer}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_incarnation_is_touched_only_while_something_is_live() {
+        let root = crate::test_tempdir().expect("incarnation root");
+        let incarnation = OwnerIncarnation::adopt(Some(root.path().join(INCARNATION_FILE)));
+        tokio::time::advance(INCARNATION_TOUCH).await;
+        assert!(
+            !incarnation.touch_due(0),
+            "nothing live: nothing to explain later"
+        );
+        assert!(incarnation.touch_due(1));
+        assert!(!incarnation.touch_due(1), "at most once per interval");
+        tokio::time::advance(INCARNATION_TOUCH).await;
+        assert!(incarnation.touch_due(2));
+        let persisted: PersistedIncarnation = serde_json::from_slice(
+            &std::fs::read(root.path().join(INCARNATION_FILE)).expect("written at adoption"),
+        )
+        .expect("incarnation json");
+        assert_eq!(persisted.version, INCARNATION_VERSION);
     }
 
     #[tokio::test(start_paused = true)]
@@ -12096,6 +14079,89 @@ Output #0, hls, to 'index.m3u8':
             .await
             .expect("sixth deletion lag");
         assert!(inspect_scratch(directory).await.is_err());
+    }
+
+    /// Plan L-02 §5.4 / correction 13: the scan moved into one blocking walk
+    /// and kept every predicate. Each case starts from a valid published
+    /// window and breaks exactly one rule.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inspect_scratch_keeps_every_check_in_one_blocking_scan() {
+        async fn valid_window(directory: &Path) {
+            tokio::fs::create_dir_all(directory).await.expect("scratch");
+            tokio::fs::write(directory.join("index.m3u8"), live_playlist(10, 3))
+                .await
+                .expect("playlist");
+            for sequence in 10..=12 {
+                tokio::fs::write(
+                    directory.join(format!("segment-{sequence:06}.ts")),
+                    b"transport",
+                )
+                .await
+                .expect("segment");
+            }
+        }
+        let temp = crate::test_tempdir().expect("scratch root");
+        let baseline = temp.path().join("baseline");
+        valid_window(&baseline).await;
+        assert!(inspect_scratch(&baseline).await.expect("valid").is_some());
+
+        let cases: [(&str, &str); 7] = [
+            ("symlink", "non-regular"),
+            ("subdirectory", "non-regular"),
+            ("growing temporary segment", "128 MiB"),
+            ("oversized playlist", "playlist exceeded"),
+            ("unexpected name", "unexpected filename"),
+            ("two temporary files", "too many temporary"),
+            ("deletion lag", "segment inventory budget"),
+        ];
+        for (case, message) in cases {
+            let directory = temp.path().join(case.replace(' ', "-"));
+            valid_window(&directory).await;
+            match case {
+                "symlink" => {
+                    std::os::unix::fs::symlink(&baseline, directory.join("segment-000013.ts"))
+                        .expect("symlink")
+                }
+                "subdirectory" => {
+                    std::fs::create_dir(directory.join("segment-000013.ts")).expect("subdirectory")
+                }
+                "growing temporary segment" => {
+                    // A temporary segment grows before the playlist changes:
+                    // the playlist is untouched and still names three small
+                    // segments, and the total alone must refuse it.
+                    let file = std::fs::File::create(directory.join("segment-000013.ts.tmp"))
+                        .expect("temporary segment");
+                    file.set_len(200 * 1024 * 1024).expect("sparse 200 MiB");
+                }
+                "oversized playlist" => std::fs::write(
+                    directory.join("index.m3u8"),
+                    vec![b'#'; MAX_PLAYLIST_BYTES as usize + 1],
+                )
+                .expect("oversized playlist"),
+                "unexpected name" => {
+                    std::fs::write(directory.join("notes.txt"), b"x").expect("stray file")
+                }
+                "two temporary files" => {
+                    std::fs::write(directory.join("segment-000013.ts.tmp"), b"x").expect("tmp");
+                    std::fs::write(directory.join("index.m3u8.tmp"), b"x").expect("tmp");
+                }
+                "deletion lag" => {
+                    for sequence in 4..=9 {
+                        std::fs::write(directory.join(format!("segment-{sequence:06}.ts")), b"lag")
+                            .expect("lagging segment");
+                    }
+                }
+                _ => unreachable!(),
+            }
+            match inspect_scratch(&directory).await {
+                Err(error) => assert!(
+                    error.to_string().contains(message),
+                    "{case}: {error} should mention {message}"
+                ),
+                Ok(inventory) => panic!("{case} was accepted: {:?}", inventory.map(|i| i.listed)),
+            }
+        }
     }
 
     #[tokio::test]

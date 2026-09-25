@@ -964,7 +964,7 @@ impl TranscodeManager {
             hw_slot: std::sync::Mutex::new(None),
             sw_permit: std::sync::Mutex::new(None),
             sw_delta_permit: std::sync::Mutex::new(None),
-            delivery: Meter::new(),
+            delivery: Meter::for_method(crate::delivery::Method::Transcode.metric_label()),
             http_waits: HttpWaitLedger::default(),
             readrate: 0.0,
             suspended: AtomicBool::new(false),

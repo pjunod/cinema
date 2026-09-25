@@ -388,6 +388,12 @@ impl TranscodeManager {
         self.admissions.wait_for_slot()
     }
 
+    /// Encoder threads the software pool has reserved right now.
+    #[cfg(test)]
+    pub(crate) fn test_software_threads_in_use(&self) -> usize {
+        self.admissions.software_in_use()
+    }
+
     #[cfg(test)]
     pub(crate) async fn test_publish_supported_quality(&self, quality: u8) -> Encoder {
         let encoder = self.encoder().await;
