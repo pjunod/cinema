@@ -1,11 +1,11 @@
 //! The subtitle-source store's producer: the fragment-index pass keeps every
-//! PGS track it is already reading.
+//! eligible subtitle track it is already reading.
 //!
 //! Design: `docs/clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md` §6.3. The
 //! index pass is one `ffmpeg` child that demuxes the whole file from byte zero
 //! and discards the subtitle packets with `-sn`. This module adds one more
-//! output to that child — a `tee` of a `sup` slave and a `framecrc` companion
-//! per PGS track, and a mandatory `null` sentinel — and afterwards decides,
+//! output to that child — a `tee` of `sup`, `webvtt`, and `matroska` slaves
+//! with packet-count companions and a mandatory `null` sentinel — and decides,
 //! track by track, whether what the pass wrote may be served in place of a
 //! whole-source extraction. [`crate::subtitle_source`] is everything that reads
 //! what this module publishes.
@@ -39,15 +39,74 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use plurx_core::store::{Store, SubtitleSourcePublication};
 use sha2::{Digest, Sha256};
 
 use crate::subtitle_source::{
-    self as store, Consumer, Manifest, SourceStamp, TrackEntry, Verdict, MANIFEST_NAME,
+    self as store, Consumer, Manifest, RepresentationEntry, RepresentationFormat,
+    RepresentationOrigin, SourceStamp, TrackEntry, TrackKind, Verdict, MANIFEST_NAME,
     MANIFEST_VERSION, MAX_TRACK_BYTES,
 };
 
 /// The codec name the probe reports for a PGS track.
 pub(crate) const PGS_CODEC: &str = "hdmv_pgs_subtitle";
+/// The kinds emitted by the held-fd probe. Unknown and unsupported bitmap
+/// codecs never enter a ride-along plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProbedKind {
+    Pgs,
+    Text,
+    TextStyled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProbedTrack {
+    pub(crate) ordinal: i64,
+    pub(crate) kind: ProbedKind,
+    pub(crate) stream_index: u64,
+}
+
+pub(crate) fn eligible_tracks_from_probe(raw: &str) -> Vec<ProbedTrack> {
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    let Some(streams) = document
+        .get("streams")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut indexed = Vec::with_capacity(streams.len());
+    for stream in streams {
+        let Some(index) = stream.get("index").and_then(serde_json::Value::as_u64) else {
+            return Vec::new();
+        };
+        indexed.push((index, stream));
+    }
+    indexed.sort_by_key(|(index, _)| *index);
+    let mut ordinal = 0_i64;
+    let mut eligible = Vec::new();
+    for (stream_index, stream) in indexed {
+        if stream.get("codec_type").and_then(serde_json::Value::as_str) != Some("subtitle") {
+            continue;
+        }
+        let kind = match stream.get("codec_name").and_then(serde_json::Value::as_str) {
+            Some(PGS_CODEC) => Some(ProbedKind::Pgs),
+            Some("subrip" | "mov_text" | "webvtt" | "text") => Some(ProbedKind::Text),
+            Some("ass" | "ssa") => Some(ProbedKind::TextStyled),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            eligible.push(ProbedTrack {
+                ordinal,
+                kind,
+                stream_index,
+            });
+        }
+        ordinal += 1;
+    }
+    eligible
+}
 /// Stage directories live beside the store's `f<id>` directories, under a
 /// name the store's sweep never mistakes for one.
 const STAGE_PREFIX: &str = ".stage-";
@@ -96,36 +155,13 @@ const OS_ERRORS: [&str; 4] = [
 /// asked for. A document this cannot read yields no ordinals, and no
 /// ride-along: guessing an ordinal is how one track's cues get filed under
 /// another's number.
+#[cfg(test)]
 pub(crate) fn pgs_ordinals_from_probe(raw: &str) -> Vec<i64> {
-    let Ok(document) = serde_json::from_str::<serde_json::Value>(raw) else {
-        return Vec::new();
-    };
-    let Some(streams) = document
-        .get("streams")
-        .and_then(serde_json::Value::as_array)
-    else {
-        return Vec::new();
-    };
-    let mut indexed = Vec::with_capacity(streams.len());
-    for stream in streams {
-        let Some(index) = stream.get("index").and_then(serde_json::Value::as_u64) else {
-            return Vec::new();
-        };
-        indexed.push((index, stream));
-    }
-    indexed.sort_by_key(|(index, _)| *index);
-    let mut ordinal = 0_i64;
-    let mut pgs = Vec::new();
-    for (_, stream) in indexed {
-        if stream.get("codec_type").and_then(serde_json::Value::as_str) != Some("subtitle") {
-            continue;
-        }
-        if stream.get("codec_name").and_then(serde_json::Value::as_str) == Some(PGS_CODEC) {
-            pgs.push(ordinal);
-        }
-        ordinal += 1;
-    }
-    pgs
+    eligible_tracks_from_probe(raw)
+        .into_iter()
+        .filter(|track| track.kind == ProbedKind::Pgs)
+        .map(|track| track.ordinal)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +239,9 @@ pub(crate) struct RideAlongGate {
 }
 
 impl RideAlongGate {
-    /// Read the switch, the self-test and the filesystem, now.
+    /// Read the operator's switch and create the stage root. The startup
+    /// self-test, filesystem and free-space probes remain advisory in the
+    /// Developer screen; none silently vetoes an explicit enable.
     ///
     /// `None` is the behaviour that shipped before the producer existed. It
     /// is asked once per pass, so turning the switch off stops the next pass
@@ -214,30 +252,16 @@ impl RideAlongGate {
     ) -> Option<Self> {
         let switch_on = crate::subtitle_source::enabled(store).await;
         let root = store::store_root(runtime_cache);
-        if switch_on && gate_overridden() {
-            return Some(Self { root });
+        if !switch_on {
+            return None;
         }
-        let self_test = self_test_state();
-        // Checked only when the cheaper conditions hold, and after the root
-        // exists: the checks are of the directory the stage will be made in.
-        let (filesystem, space) = if switch_on && matches!(self_test, SelfTest::Passed { .. }) {
-            match tokio::fs::create_dir_all(&root).await {
-                Ok(()) => (local_filesystem(&root), free_space(&root)),
-                Err(error) => {
-                    let reason = format!("creating {}: {error}", root.display());
-                    (Err(reason.clone()), Err(reason))
-                }
-            }
-        } else {
-            (Err("not checked".to_owned()), Err("not checked".to_owned()))
-        };
-        match gate_from(switch_on, &self_test, filesystem, space, root) {
-            Ok(gate) => Some(gate),
-            Err(reason) => {
-                tracing::debug!(%reason, "the PGS ride-along is off for this pass");
-                None
+        if !gate_overridden() {
+            if let Err(error) = tokio::fs::create_dir_all(&root).await {
+                tracing::warn!(%error, path = %root.display(), "creating subtitle-source stage root");
+                return None;
             }
         }
+        Some(Self { root })
     }
 
     /// A gate for a test that exercises the pass itself.
@@ -262,10 +286,10 @@ pub(crate) fn gate_from(
     match self_test {
         SelfTest::Passed { .. } => {}
         SelfTest::NotRun | SelfTest::Running => {
-            return Err("the startup self-test has not passed yet".to_owned())
+            return Err("the startup self-test has not passed yet".to_owned());
         }
         SelfTest::Failed { reason } => {
-            return Err(format!("the startup self-test failed: {reason}"))
+            return Err(format!("the startup self-test failed: {reason}"));
         }
     }
     filesystem.map_err(|reason| format!("the cache is not usable for the ride-along: {reason}"))?;
@@ -273,10 +297,9 @@ pub(crate) fn gate_from(
     Ok(RideAlongGate { root })
 }
 
-/// Whether the next index pass on this node would keep PGS tracks, and if not
-/// why — the gate's own rule, read for display. The same checks as
-/// [`RideAlongGate::open`] and the Developer rows, of the store root when it
-/// exists and of the runtime cache otherwise; nothing is created.
+/// Advisory conditions for relying on stored tracks. Developer settings
+/// displays these readings without overriding the saved switch. Nothing is
+/// created while taking the reading.
 pub(crate) fn gate_verdict(switch_on: bool, runtime_cache: &Path) -> Result<(), String> {
     let root = store::store_root(runtime_cache);
     let checked = if root.is_dir() {
@@ -295,7 +318,7 @@ pub(crate) fn gate_verdict(switch_on: bool, runtime_cache: &Path) -> Result<(), 
 }
 
 /// Whether `path` is on a local filesystem, by `statfs` type. `Ok` names the
-/// filesystem; `Err` says why the ride-along must not use it.
+/// filesystem; `Err` warns that a ride-along may stall on it.
 ///
 /// A blocked file output stalls the demuxer every output shares, so a stage
 /// on a network or FUSE filesystem could hold the index pass itself hostage.
@@ -504,7 +527,7 @@ pub struct ActiveRide {
     pub item_id: i64,
     #[serde(default)]
     pub title: String,
-    /// PGS tracks this pass is keeping.
+    /// Eligible subtitle tracks this pass is keeping.
     pub tracks: usize,
     /// Bytes written into the stage so far — the `.sup` and `.crc` files.
     pub bytes_written: u64,
@@ -657,11 +680,13 @@ pub(crate) struct RideAlongPlan {
     file_id: i64,
     root: PathBuf,
     source: SourceStamp,
-    /// Every PGS ordinal the probe found, in order — the new manifest's
+    /// Every eligible ordinal the probe found, in order — the manifest's
     /// `ordinals`.
     probed: Vec<i64>,
     /// The ordinals this pass extracts; track `i` of the tee is `tracks[i]`.
     tracks: Vec<i64>,
+    kinds: BTreeMap<i64, ProbedKind>,
+    stream_indexes: BTreeMap<i64, u64>,
     /// Settled entries from a manifest for this same source, carried over.
     carried: Vec<TrackEntry>,
     /// Passes already spent on each extracted ordinal for this source.
@@ -679,13 +704,33 @@ pub(crate) struct RideAlongPlan {
 /// the pass holds — size and mtime, and `(dev, ino)` where the platform has
 /// them, the burn path's rule, so a file replaced in place with a new inode
 /// rides again rather than leaving the burn path to miss on it for good —
-/// and every probed ordinal is settled. A file with no PGS track has nothing
+/// and every probed ordinal is settled. A file with no eligible subtitle track has nothing
 /// to latch: no plan, no argv, ever.
+#[cfg(test)]
 pub(crate) async fn plan(
     gate: &RideAlongGate,
     file_id: i64,
     source: &std::fs::File,
     probed: &[i64],
+) -> Option<RideAlongPlan> {
+    let typed: Vec<_> = probed
+        .iter()
+        .map(|ordinal| ProbedTrack {
+            ordinal: *ordinal,
+            kind: ProbedKind::Pgs,
+            stream_index: *ordinal as u64,
+        })
+        .collect();
+    plan_tracks(gate, file_id, source, &typed).await
+}
+
+/// Plan from the live probe's typed eligible ordinals. Hydrated entries do
+/// not establish extraction coverage, so they cannot close this plan.
+pub(crate) async fn plan_tracks(
+    gate: &RideAlongGate,
+    file_id: i64,
+    source: &std::fs::File,
+    probed: &[ProbedTrack],
 ) -> Option<RideAlongPlan> {
     if probed.is_empty() {
         return None;
@@ -718,7 +763,7 @@ pub(crate) async fn plan(
     let mut tracks = Vec::new();
     let mut carried = Vec::new();
     let mut prior_attempts = BTreeMap::new();
-    for ordinal in probed {
+    for ProbedTrack { ordinal, .. } in probed {
         match previous
             .as_ref()
             .and_then(|manifest| manifest.track(*ordinal))
@@ -726,7 +771,13 @@ pub(crate) async fn plan(
             // A `kept` entry is settled only while its file is there: after a
             // power loss or a deletion the manifest can name a track the disk
             // no longer has, and trusting it would miss for good.
-            Some(entry) if entry.settled() && kept_file_present(&dir, entry).await => {
+            Some(entry)
+                if entry.settled()
+                    && entry.representations.iter().all(|representation| {
+                        representation.origin == RepresentationOrigin::Extracted
+                    })
+                    && kept_file_present(&dir, entry).await =>
+            {
                 carried.push(entry.clone())
             }
             Some(entry) => {
@@ -746,7 +797,7 @@ pub(crate) async fn plan(
     let stage = match StageDir::create(&gate.root, STAGE_PREFIX) {
         Ok(stage) => stage,
         Err(error) => {
-            tracing::warn!(file_id, %error, "creating a PGS ride-along stage; this pass does not ride");
+            tracing::warn!(file_id, %error, "creating a subtitle ride-along stage; this pass does not ride");
             return None;
         }
     };
@@ -758,8 +809,16 @@ pub(crate) async fn plan(
         file_id,
         root: gate.root.clone(),
         source: live,
-        probed: probed.to_vec(),
+        probed: probed.iter().map(|track| track.ordinal).collect(),
         tracks,
+        kinds: probed
+            .iter()
+            .map(|track| (track.ordinal, track.kind))
+            .collect(),
+        stream_indexes: probed
+            .iter()
+            .map(|track| (track.ordinal, track.stream_index))
+            .collect(),
         carried,
         prior_attempts,
         stage,
@@ -770,15 +829,29 @@ pub(crate) async fn plan(
 /// A `kept` entry's stored file exists as a regular file; any other verdict
 /// has no file to check.
 async fn kept_file_present(dir: &Path, entry: &TrackEntry) -> bool {
-    if entry.verdict != Verdict::Kept {
-        return true;
+    if entry.representations.is_empty() {
+        return entry.verdict != Verdict::Kept
+            || match entry.file.as_deref() {
+                Some(name) => tokio::fs::metadata(dir.join(name))
+                    .await
+                    .is_ok_and(|metadata| metadata.is_file()),
+                None => false,
+            };
     }
-    match entry.file.as_deref() {
-        Some(name) => tokio::fs::metadata(dir.join(name))
-            .await
-            .is_ok_and(|metadata| metadata.is_file()),
-        None => false,
+    for representation in &entry.representations {
+        if representation.verdict == Verdict::Kept {
+            let Some(name) = representation.file.as_deref() else {
+                return false;
+            };
+            if !tokio::fs::metadata(dir.join(name))
+                .await
+                .is_ok_and(|metadata| metadata.is_file())
+            {
+                return false;
+            }
+        }
     }
+    true
 }
 
 impl RideAlongPlan {
@@ -796,6 +869,14 @@ impl RideAlongPlan {
             source,
             probed: tracks.clone(),
             prior_attempts: tracks.iter().map(|ordinal| (*ordinal, 0)).collect(),
+            kinds: tracks
+                .iter()
+                .map(|ordinal| (*ordinal, ProbedKind::Pgs))
+                .collect(),
+            stream_indexes: tracks
+                .iter()
+                .map(|ordinal| (*ordinal, *ordinal as u64))
+                .collect(),
             tracks,
             carried: Vec::new(),
             stage: StageDir::create(root, STAGE_PREFIX)?,
@@ -819,14 +900,57 @@ impl RideAlongPlan {
         self.stage.path().join(format!("s{ordinal}.crc"))
     }
 
+    fn vtt_path(&self, ordinal: i64) -> PathBuf {
+        self.stage.path().join(format!("s{ordinal}.vtt"))
+    }
+
+    fn mks_path(&self, ordinal: i64) -> PathBuf {
+        self.stage.path().join(format!("s{ordinal}.mks"))
+    }
+
+    fn kind(&self, ordinal: i64) -> ProbedKind {
+        self.kinds.get(&ordinal).copied().unwrap_or(ProbedKind::Pgs)
+    }
+
+    fn outputs(&self) -> Vec<(i64, ProbedKind, RepresentationFormat)> {
+        let mut outputs = Vec::with_capacity(self.tracks.len() * 2);
+        for &ordinal in &self.tracks {
+            let kind = self.kind(ordinal);
+            match kind {
+                ProbedKind::Pgs => outputs.push((ordinal, kind, RepresentationFormat::Sup)),
+                ProbedKind::Text => outputs.push((ordinal, kind, RepresentationFormat::Webvtt)),
+                ProbedKind::TextStyled => {
+                    outputs.push((ordinal, kind, RepresentationFormat::Webvtt));
+                    outputs.push((ordinal, kind, RepresentationFormat::Matroska));
+                }
+            }
+        }
+        outputs
+    }
+
+    fn representation_path(&self, ordinal: i64, format: RepresentationFormat) -> PathBuf {
+        match format {
+            RepresentationFormat::Sup => self.sup_path(ordinal),
+            RepresentationFormat::Webvtt => self.vtt_path(ordinal),
+            RepresentationFormat::Matroska => self.mks_path(ordinal),
+        }
+    }
+
     /// The slaves in tee order: track `i`'s `sup` is `#2i`, its `framecrc`
     /// companion `#2i+1`. The sentinel, last, is not listed.
     fn slave_paths(&self) -> Vec<String> {
-        self.tracks
-            .iter()
-            .flat_map(|ordinal| [self.sup_path(*ordinal), self.crc_path(*ordinal)])
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect()
+        let mut paths = Vec::new();
+        for (ordinal, _, format) in self.outputs() {
+            paths.push(
+                self.representation_path(ordinal, format)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            if format != RepresentationFormat::Matroska {
+                paths.push(self.crc_path(ordinal).to_string_lossy().into_owned());
+            }
+        }
+        paths
     }
 
     /// The argv appended to the index pass, after `pipe:1`.
@@ -837,26 +961,48 @@ impl RideAlongPlan {
     /// silently shifting another track into its place.
     pub(crate) fn args(&self) -> Vec<String> {
         let mut args = vec!["-nostdin".to_owned(), "-y".to_owned()];
-        for ordinal in &self.tracks {
+        for (ordinal, _, _) in self.outputs() {
             args.push("-map".to_owned());
             args.push(format!("0:s:{ordinal}"));
         }
-        args.extend(["-c:s", "copy", "-f", "tee"].map(str::to_owned));
+        for (position, (_, _, format)) in self.outputs().iter().enumerate() {
+            args.push(format!("-c:s:{position}"));
+            args.push(
+                if *format == RepresentationFormat::Webvtt {
+                    "webvtt"
+                } else {
+                    "copy"
+                }
+                .to_owned(),
+            );
+        }
+        args.extend(["-f", "tee"].map(str::to_owned));
         args.push(self.tee_spec());
         args
     }
 
     fn tee_spec(&self) -> String {
-        let mut slaves = Vec::with_capacity(self.tracks.len() * 2 + 1);
-        for (position, ordinal) in self.tracks.iter().enumerate() {
+        let mut slaves = Vec::with_capacity(self.tracks.len() * 3 + 1);
+        for (position, (ordinal, _, format)) in self.outputs().iter().enumerate() {
+            let muxer = match format {
+                RepresentationFormat::Sup => "sup",
+                RepresentationFormat::Webvtt => "webvtt",
+                RepresentationFormat::Matroska => "matroska",
+            };
             slaves.push(format!(
-                "[select={position}:f=sup:onfail=ignore]{}",
-                tee_escape(&self.sup_path(*ordinal).to_string_lossy())
+                "[select={position}:f={muxer}:onfail=ignore]{}",
+                tee_escape(
+                    &self
+                        .representation_path(*ordinal, *format)
+                        .to_string_lossy()
+                )
             ));
-            slaves.push(format!(
-                "[select={position}:f=framecrc:onfail=ignore]{}",
-                tee_escape(&self.crc_path(*ordinal).to_string_lossy())
-            ));
+            if *format != RepresentationFormat::Matroska {
+                slaves.push(format!(
+                    "[select={position}:f=framecrc:onfail=ignore]{}",
+                    tee_escape(&self.crc_path(*ordinal).to_string_lossy())
+                ));
+            }
         }
         // Mandatory: a tee whose every slave failed reports "All tee outputs
         // failed" and takes the process — and the index — down with it.
@@ -906,6 +1052,7 @@ pub(crate) fn tee_escape(text: &str) -> String {
 pub(crate) struct StderrScan {
     slaves: Vec<String>,
     failures: BTreeMap<usize, String>,
+    decoder_errors: Vec<Option<u64>>,
     partial: Vec<u8>,
 }
 
@@ -942,6 +1089,19 @@ impl StderrScan {
     }
 
     fn observe(&mut self, line: &str) {
+        // A decoder can silently drop one malformed input packet from both
+        // the VTT and its framecrc companion. Equal output counts then prove
+        // nothing about completeness (M0 E5), so remember the source stream.
+        if line.contains("Error decoding subtitles:") {
+            let stream = line.split("sist#0:").nth(1).and_then(|tail| {
+                tail.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse::<u64>()
+                    .ok()
+            });
+            self.decoder_errors.push(stream);
+        }
         // "Slave muxer #3 failed: No space left on device, continuing with 4/5 slaves."
         if let Some(rest) = line.split("Slave muxer #").nth(1) {
             let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
@@ -978,6 +1138,12 @@ impl StderrScan {
     pub(crate) fn failure(&self, index: usize) -> Option<&str> {
         self.failures.get(&index).map(String::as_str)
     }
+
+    fn decoder_failed(&self, stream_index: u64) -> bool {
+        self.decoder_errors
+            .iter()
+            .any(|error| error.is_none_or(|index| index == stream_index))
+    }
 }
 
 fn is_os_error(error: &str) -> bool {
@@ -997,6 +1163,16 @@ pub(crate) struct TrackOutcome {
     /// Bytes the pass wrote into the stage for this track, `.sup` and `.crc`.
     pub(crate) written: u64,
     /// Why the track is not `kept`, for the log.
+    pub(crate) reason: Option<String>,
+    pub(crate) representations: Vec<RepresentationOutcome>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RepresentationOutcome {
+    pub(crate) format: RepresentationFormat,
+    pub(crate) verdict: Verdict,
+    pub(crate) sha256: Option<String>,
+    pub(crate) bytes: u64,
     pub(crate) reason: Option<String>,
 }
 
@@ -1100,6 +1276,8 @@ fn walk_sup(file: std::fs::File) -> Result<SupWalk, String> {
 #[derive(Clone)]
 struct VerdictInput {
     tracks: Vec<i64>,
+    kinds: BTreeMap<i64, ProbedKind>,
+    stream_indexes: BTreeMap<i64, u64>,
     stage: PathBuf,
 }
 
@@ -1108,36 +1286,95 @@ struct VerdictInput {
 /// `scan` is `None` when the stderr reader did not finish, so nothing can be
 /// said about slave failures — every track is then `transient`.
 fn verdicts(input: &VerdictInput, scan: Option<&StderrScan>) -> Vec<TrackOutcome> {
+    let mut slave = 0;
     input
         .tracks
         .iter()
-        .enumerate()
-        .map(|(position, ordinal)| {
+        .map(|ordinal| {
+            let kind = input.kinds.get(ordinal).copied().unwrap_or(ProbedKind::Pgs);
             let sup = input.stage.join(format!("s{ordinal}.sup"));
+            let vtt = input.stage.join(format!("s{ordinal}.vtt"));
+            let mks = input.stage.join(format!("s{ordinal}.mks"));
             let crc = input.stage.join(format!("s{ordinal}.crc"));
-            let written = [&sup, &crc]
+            let written = [&sup, &vtt, &mks, &crc]
                 .iter()
                 .filter_map(|path| std::fs::metadata(path).ok())
                 .map(|metadata| metadata.len())
                 .sum();
-            let (verdict, sha256, reason) = match scan {
+            let mut representations = Vec::new();
+            let first_format = if kind == ProbedKind::Pgs {
+                RepresentationFormat::Sup
+            } else {
+                RepresentationFormat::Webvtt
+            };
+            let first = match scan {
                 None => (
                     Verdict::Transient,
                     None,
                     Some("the stderr scan did not finish".to_owned()),
                 ),
-                Some(scan) => judge(
-                    &sup,
+                Some(scan) if kind == ProbedKind::Pgs => {
+                    judge(&sup, &crc, [scan.failure(slave), scan.failure(slave + 1)])
+                }
+                Some(scan) => judge_text_vtt(
+                    &vtt,
                     &crc,
-                    [scan.failure(2 * position), scan.failure(2 * position + 1)],
+                    [scan.failure(slave), scan.failure(slave + 1)],
+                    scan.decoder_failed(
+                        input
+                            .stream_indexes
+                            .get(ordinal)
+                            .copied()
+                            .unwrap_or(*ordinal as u64),
+                    ),
                 ),
             };
+            representations.push(RepresentationOutcome {
+                format: first_format,
+                verdict: first.0,
+                sha256: first.1.clone(),
+                bytes: std::fs::metadata(if kind == ProbedKind::Pgs { &sup } else { &vtt })
+                    .map_or(0, |metadata| metadata.len()),
+                reason: first.2.clone(),
+            });
+            slave += 2;
+            if kind == ProbedKind::TextStyled {
+                let next = match scan {
+                    None => (
+                        Verdict::Transient,
+                        None,
+                        Some("the stderr scan did not finish".to_owned()),
+                    ),
+                    Some(scan) => judge_text_mks(
+                        &mks,
+                        &crc,
+                        scan.failure(slave),
+                        scan.failure(slave - 1),
+                        scan.decoder_failed(
+                            input
+                                .stream_indexes
+                                .get(ordinal)
+                                .copied()
+                                .unwrap_or(*ordinal as u64),
+                        ),
+                    ),
+                };
+                representations.push(RepresentationOutcome {
+                    format: RepresentationFormat::Matroska,
+                    verdict: next.0,
+                    sha256: next.1,
+                    bytes: std::fs::metadata(&mks).map_or(0, |metadata| metadata.len()),
+                    reason: next.2,
+                });
+                slave += 1;
+            }
             TrackOutcome {
                 ordinal: *ordinal,
-                verdict,
-                sha256,
+                verdict: first.0,
+                sha256: first.1,
                 written,
-                reason,
+                reason: first.2,
+                representations,
             }
         })
         .collect()
@@ -1181,7 +1418,7 @@ fn judge(
             return malformed(format!(
                 "no stored track for {} packets: {error}",
                 totals.packets
-            ))
+            ));
         }
     };
     if metadata.len() > MAX_TRACK_BYTES {
@@ -1215,6 +1452,205 @@ fn judge(
         return malformed(format!("the PGS parser refused it: {reason}"));
     }
     (Verdict::Kept, Some(walk.sha256), None)
+}
+
+/// A WebVTT output is complete only when every encoded packet became one
+/// syntactically valid cue. The stderr veto catches corrupt source packets
+/// dropped by *both* the encoder and framecrc (M0 E5).
+fn judge_text_vtt(
+    vtt: &Path,
+    crc: &Path,
+    failures: [Option<&str>; 2],
+    decoder_failed: bool,
+) -> (Verdict, Option<String>, Option<String>) {
+    let transient = |reason: String| (Verdict::Transient, None, Some(reason));
+    let malformed = |reason: String| (Verdict::Malformed, None, Some(reason));
+    if let Some(error) = failures.iter().flatten().find(|error| is_os_error(error)) {
+        return transient(format!("a slave failed with an OS error: {error}"));
+    }
+    let crc_text = match std::fs::read_to_string(crc) {
+        Ok(text) => text,
+        Err(error) => return transient(format!("the framecrc companion is missing: {error}")),
+    };
+    if decoder_failed {
+        return malformed(
+            "ffmpeg reported a subtitle decoder error for this input stream".to_owned(),
+        );
+    }
+    if let Some(error) = failures.iter().flatten().next() {
+        return malformed(format!("a slave failed: {error}"));
+    }
+    let totals = match crc_totals(&crc_text) {
+        Ok(totals) => totals,
+        Err(reason) => return malformed(reason),
+    };
+    if totals.packets == 0 {
+        if totals.header_lines == 0 {
+            return transient("the framecrc companion was never written".to_owned());
+        }
+        return match std::fs::read(vtt)
+            .map_err(|error| format!("reading empty WebVTT: {error}"))
+            .and_then(|bytes| webvtt_cue_count(&bytes))
+        {
+            Ok(0) => (Verdict::Empty, None, None),
+            Ok(cues) => malformed(format!("framecrc is empty but WebVTT has {cues} cues")),
+            Err(reason) => malformed(reason),
+        };
+    }
+    let metadata = match std::fs::metadata(vtt) {
+        Ok(metadata) => metadata,
+        Err(error) => return malformed(format!("the WebVTT output is missing: {error}")),
+    };
+    if metadata.len() == 0 || metadata.len() > 8 * 1024 * 1024 {
+        return malformed(format!(
+            "WebVTT is {} bytes, outside the 8 MiB sidecar bound",
+            metadata.len()
+        ));
+    }
+    let bytes = match std::fs::read(vtt) {
+        Ok(bytes) => bytes,
+        Err(error) => return transient(format!("reading WebVTT: {error}")),
+    };
+    let cues = match webvtt_cue_count(&bytes) {
+        Ok(cues) => cues,
+        Err(reason) => return malformed(reason),
+    };
+    if cues != totals.packets {
+        return malformed(format!(
+            "WebVTT has {cues} cues but framecrc counted {} packets",
+            totals.packets
+        ));
+    }
+    (
+        Verdict::Kept,
+        Some(hex::encode(Sha256::digest(&bytes))),
+        None,
+    )
+}
+
+fn webvtt_cue_count(bytes: &[u8]) -> Result<u64, String> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|error| format!("WebVTT is not UTF-8: {error}"))?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if !text.starts_with("WEBVTT") || !text[6..].starts_with(['\n', '\r', ' ', '\t']) {
+        return Err("WebVTT header is missing".to_owned());
+    }
+    let mut cues = 0;
+    for line in text.lines() {
+        if let Some((start, end)) = line.split_once(" --> ") {
+            let end = end.split_ascii_whitespace().next().unwrap_or("");
+            if !valid_vtt_timestamp(start) || !valid_vtt_timestamp(end) {
+                return Err(format!("invalid WebVTT cue timing: {line}"));
+            }
+            cues += 1;
+        }
+    }
+    Ok(cues)
+}
+
+fn valid_vtt_timestamp(text: &str) -> bool {
+    let parts: Vec<_> = text.split(':').collect();
+    if !(parts.len() == 2 || parts.len() == 3) {
+        return false;
+    }
+    let (seconds, millis) = match parts.last().and_then(|part| part.split_once('.')) {
+        Some(pair) => pair,
+        None => return false,
+    };
+    seconds.len() == 2
+        && seconds.parse::<u8>().is_ok_and(|value| value < 60)
+        && millis.len() == 3
+        && millis.parse::<u16>().is_ok()
+        && parts[..parts.len() - 1]
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn judge_text_mks(
+    mks: &Path,
+    crc: &Path,
+    failure: Option<&str>,
+    crc_failure: Option<&str>,
+    decoder_failed: bool,
+) -> (Verdict, Option<String>, Option<String>) {
+    let transient = |reason: String| (Verdict::Transient, None, Some(reason));
+    let malformed = |reason: String| (Verdict::Malformed, None, Some(reason));
+    if let Some(error) = [failure, crc_failure]
+        .into_iter()
+        .flatten()
+        .find(|error| is_os_error(error))
+    {
+        return transient(format!("a slave failed with an OS error: {error}"));
+    }
+    if decoder_failed {
+        return malformed(
+            "ffmpeg reported a subtitle decoder error for this input stream".to_owned(),
+        );
+    }
+    if let Some(error) = failure {
+        return malformed(format!("the Matroska slave failed: {error}"));
+    }
+    let crc_text = match std::fs::read_to_string(crc) {
+        Ok(text) => text,
+        Err(error) => return transient(format!("the framecrc companion is missing: {error}")),
+    };
+    let totals = match crc_totals(&crc_text) {
+        Ok(totals) => totals,
+        Err(reason) => return malformed(reason),
+    };
+    if totals.packets == 0 {
+        return if totals.header_lines > 0 {
+            (Verdict::Empty, None, None)
+        } else {
+            transient("the framecrc companion was never written".to_owned())
+        };
+    }
+    let bytes = match std::fs::read(mks) {
+        Ok(bytes) => bytes,
+        Err(error) => return malformed(format!("the Matroska output is missing: {error}")),
+    };
+    if bytes.is_empty() || bytes.len() as u64 > MAX_TRACK_BYTES {
+        return malformed(format!(
+            "Matroska is {} bytes, outside the track bound",
+            bytes.len()
+        ));
+    }
+    let probe = std::process::Command::new(crate::ffmpeg::ffprobe_bin())
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "s:0",
+            "-count_packets",
+            "-show_entries",
+            "stream=nb_read_packets",
+            "-of",
+            "default=nokey=1:noprint_wrappers=1",
+        ])
+        .arg(mks)
+        .output();
+    let probe = match probe {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            return malformed(format!(
+                "ffprobe refused Matroska: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Err(error) => return transient(format!("running ffprobe on Matroska: {error}")),
+    };
+    let packets = String::from_utf8_lossy(&probe.stdout).trim().parse::<u64>();
+    if packets.as_ref().ok() != Some(&totals.packets) {
+        return malformed(format!(
+            "Matroska packet count {:?} differs from framecrc {}",
+            packets, totals.packets
+        ));
+    }
+    (
+        Verdict::Kept,
+        Some(hex::encode(Sha256::digest(&bytes))),
+        None,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1265,6 +1701,8 @@ impl RideAlongHarvest {
     pub(crate) async fn take(plan: RideAlongPlan, scan: Option<StderrScan>) -> Self {
         let input = VerdictInput {
             tracks: plan.tracks.clone(),
+            kinds: plan.kinds.clone(),
+            stream_indexes: plan.stream_indexes.clone(),
             stage: plan.stage.path().to_owned(),
         };
         let fallback = input.clone();
@@ -1279,14 +1717,17 @@ impl RideAlongHarvest {
         };
         for outcome in &outcomes {
             record_verdict(outcome);
-            if let Some(reason) = &outcome.reason {
-                tracing::info!(
-                    file_id = plan.file_id,
-                    ordinal = outcome.ordinal,
-                    verdict = ?outcome.verdict,
-                    %reason,
-                    "PGS ride-along track not kept"
-                );
+            for representation in &outcome.representations {
+                if let Some(reason) = &representation.reason {
+                    tracing::info!(
+                        file_id = plan.file_id,
+                        ordinal = outcome.ordinal,
+                        format = ?representation.format,
+                        verdict = ?representation.verdict,
+                        %reason,
+                        "subtitle ride-along representation not kept"
+                    );
+                }
             }
         }
         Self { plan, outcomes }
@@ -1317,22 +1758,54 @@ impl RideAlongHarvest {
                     .copied()
                     .unwrap_or(0)
                     .saturating_add(1);
-                let named = outcome
-                    .sha256
-                    .as_deref()
-                    .filter(|_| outcome.verdict == Verdict::Kept)
-                    .and_then(|sha256| {
-                        store::sup_file_name(*ordinal, sha256).map(|name| (name, sha256.to_owned()))
-                    });
+                let representations: Vec<_> = outcome
+                    .representations
+                    .iter()
+                    .map(|representation| {
+                        let named = representation
+                            .sha256
+                            .as_deref()
+                            .filter(|_| representation.verdict == Verdict::Kept)
+                            .and_then(|sha256| {
+                                store::representation_file_name(
+                                    *ordinal,
+                                    representation.format,
+                                    sha256,
+                                )
+                                .map(|name| (name, sha256.to_owned()))
+                            });
+                        RepresentationEntry {
+                            format: representation.format,
+                            origin: RepresentationOrigin::Extracted,
+                            verdict: if representation.verdict == Verdict::Kept && named.is_none() {
+                                Verdict::Malformed
+                            } else {
+                                representation.verdict
+                            },
+                            attempts,
+                            file: named.as_ref().map(|(name, _)| name.clone()),
+                            sha256: named.map(|(_, sha256)| sha256),
+                            bytes: if representation.verdict == Verdict::Kept {
+                                representation.bytes
+                            } else {
+                                0
+                            },
+                        }
+                    })
+                    .collect();
+                let primary = representations.first()?;
                 Some(TrackEntry {
                     ordinal: *ordinal,
-                    verdict: match (&named, outcome.verdict) {
-                        (None, Verdict::Kept) => Verdict::Malformed,
-                        (_, verdict) => verdict,
+                    kind: match plan.kind(*ordinal) {
+                        ProbedKind::Pgs => TrackKind::Pgs,
+                        ProbedKind::Text => TrackKind::Text,
+                        ProbedKind::TextStyled => TrackKind::TextStyled,
                     },
+                    representations: representations.clone(),
+                    verdict: primary.verdict,
                     attempts,
-                    file: named.as_ref().map(|(name, _)| name.clone()),
-                    sha256: named.map(|(_, sha256)| sha256),
+                    file: primary.file.clone(),
+                    sha256: primary.sha256.clone(),
                 })
             })
             .collect();
@@ -1360,8 +1833,39 @@ impl RideAlongHarvest {
     ///    this one does not;
     /// 4. write the first `.access`, so a new directory is not first in line
     ///    under the size cap.
+    #[cfg(test)]
     pub(crate) async fn publish(self) -> Result<Manifest, String> {
+        self.publish_internal(None).await
+    }
+
+    /// Publish the local bytes first, then expose the representations as
+    /// `extracted` cluster rows. A peer can never fetch a row whose manifest
+    /// rename has not happened yet.
+    pub(crate) async fn publish_with_cluster(
+        self,
+        catalog: &dyn Store,
+        node_id: &str,
+        source_attestation: &str,
+    ) -> Result<Manifest, String> {
+        if source_attestation.len() != 64
+            || !source_attestation
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("invalid portable source attestation".to_owned());
+        }
+        self.publish_internal(Some((catalog, node_id, source_attestation)))
+            .await
+    }
+
+    async fn publish_internal(
+        self,
+        cluster: Option<(&dyn Store, &str, &str)>,
+    ) -> Result<Manifest, String> {
         let dir = store::file_dir(&self.plan.root, self.plan.file_id);
+        let _file_guard = store::file_lock(&self.plan.root, self.plan.file_id)
+            .lock()
+            .await;
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|error| format!("creating {}: {error}", dir.display()))?;
@@ -1370,9 +1874,6 @@ impl RideAlongHarvest {
         // (1)
         let mut placed = Vec::new();
         for track in &mut manifest.tracks {
-            let Some(name) = track.file.clone() else {
-                continue;
-            };
             if self
                 .plan
                 .carried
@@ -1381,31 +1882,45 @@ impl RideAlongHarvest {
             {
                 continue;
             }
-            // Durable before it is named: a manifest that survives a power
-            // loss must not name bytes that did not.
-            let staged = self.plan.sup_path(track.ordinal);
-            let synced = match tokio::fs::File::open(&staged).await {
-                Ok(file) => file.sync_all().await,
-                Err(error) => Err(error),
-            };
-            let placed_now = match synced {
-                Ok(()) => tokio::fs::rename(&staged, dir.join(&name)).await,
-                Err(error) => Err(error),
-            };
-            match placed_now {
-                Ok(()) => placed.push(name),
-                Err(error) => {
-                    tracing::warn!(file_id = self.plan.file_id, ordinal = track.ordinal, %error, "placing a stored PGS track");
-                    track.verdict = Verdict::Transient;
-                    track.file = None;
-                    track.sha256 = None;
+            for representation in &mut track.representations {
+                let Some(name) = representation.file.clone() else {
+                    continue;
+                };
+                // Durable before it is named: a manifest that survives a
+                // power loss must not name bytes that did not.
+                let staged = self
+                    .plan
+                    .representation_path(track.ordinal, representation.format);
+                let synced = match tokio::fs::File::open(&staged).await {
+                    Ok(file) => file.sync_all().await,
+                    Err(error) => Err(error),
+                };
+                let placed_now = match synced {
+                    Ok(()) => tokio::fs::rename(&staged, dir.join(&name)).await,
+                    Err(error) => Err(error),
+                };
+                match placed_now {
+                    Ok(()) => placed.push(name),
+                    Err(error) => {
+                        tracing::warn!(file_id = self.plan.file_id, ordinal = track.ordinal, format = ?representation.format, %error, "placing a stored subtitle representation");
+                        representation.verdict = Verdict::Transient;
+                        representation.file = None;
+                        representation.sha256 = None;
+                        representation.bytes = 0;
+                    }
                 }
+            }
+            if let Some(primary) = track.representations.first() {
+                track.verdict = primary.verdict;
+                track.file = primary.file.clone();
+                track.sha256 = primary.sha256.clone();
             }
         }
 
         // What the directory's manifest names now, read at publish rather
         // than at plan time: another publish may have landed in between.
         let replaced = store::read_manifest(&dir).await;
+        manifest = store::merge_manifest(manifest, replaced.as_ref());
 
         // (2)
         if let Err(error) = write_manifest(&dir, &manifest).await {
@@ -1423,33 +1938,194 @@ impl RideAlongHarvest {
         // (3)
         if let Some(replaced) = replaced {
             for track in &replaced.tracks {
-                let (Some(name), Some(sha256)) = (track.file.as_deref(), track.sha256.as_deref())
-                else {
-                    continue;
+                let reps = if track.representations.is_empty() {
+                    track
+                        .representation(RepresentationFormat::Sup)
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                } else {
+                    track.representations.clone()
                 };
-                // Only a content name this build would write; a manifest
-                // naming a path is not one it will delete through.
-                if store::sup_file_name(track.ordinal, sha256).as_deref() != Some(name)
-                    || names(&manifest, name)
-                {
-                    continue;
+                for representation in reps {
+                    let (Some(name), Some(sha256)) = (
+                        representation.file.as_deref(),
+                        representation.sha256.as_deref(),
+                    ) else {
+                        continue;
+                    };
+                    // Only a content name this build would write; a manifest
+                    // naming a path is not one it will delete through.
+                    if store::representation_file_name(track.ordinal, representation.format, sha256)
+                        .as_deref()
+                        != Some(name)
+                        || names(&manifest, name)
+                    {
+                        continue;
+                    }
+                    let _ = tokio::fs::remove_file(dir.join(name)).await;
                 }
-                let _ = tokio::fs::remove_file(dir.join(name)).await;
             }
         }
 
         // (4)
         store::record_access(&dir).await;
+        if let Some((catalog, node_id, source_attestation)) = cluster {
+            for outcome in &self.outcomes {
+                let Some(track) = manifest.track(outcome.ordinal) else {
+                    continue;
+                };
+                for representation in &track.representations {
+                    if representation.origin != RepresentationOrigin::Extracted
+                        || !outcome
+                            .representations
+                            .iter()
+                            .any(|produced| produced.format == representation.format)
+                    {
+                        continue;
+                    }
+                    let publication = SubtitleSourcePublication {
+                        file_id: self.plan.file_id,
+                        source_size: manifest.source.size as i64,
+                        source_mtime: manifest.source.mtime,
+                        source_attestation: source_attestation.to_owned(),
+                        node_id: node_id.to_owned(),
+                        ordinal: track.ordinal,
+                        kind: match track.kind {
+                            TrackKind::Pgs => "pgs",
+                            TrackKind::Text => "text",
+                            TrackKind::TextStyled => "text_styled",
+                        }
+                        .to_owned(),
+                        format: representation.format.publication_name().to_owned(),
+                        verdict: match representation.verdict {
+                            Verdict::Kept => "kept",
+                            Verdict::Empty => "empty",
+                            Verdict::Malformed => "malformed",
+                            Verdict::Transient => "transient",
+                        }
+                        .to_owned(),
+                        attempts: i64::from(representation.attempts),
+                        origin: "extracted".to_owned(),
+                        sha256: representation.sha256.clone().unwrap_or_default(),
+                        bytes: representation.bytes as i64,
+                        published_at_ms: unix_ms(),
+                    };
+                    catalog
+                        .upsert_subtitle_source_publication(&publication)
+                        .await
+                        .map_err(|error| format!("publishing subtitle-source row: {error}"))?;
+                }
+            }
+        }
         PUBLISHED.fetch_add(1, Ordering::Relaxed);
         Ok(manifest)
     }
 }
 
 fn names(manifest: &Manifest, name: &str) -> bool {
-    manifest
-        .tracks
-        .iter()
-        .any(|track| track.file.as_deref() == Some(name))
+    manifest.tracks.iter().any(|track| {
+        track.file.as_deref() == Some(name)
+            || track
+                .representations
+                .iter()
+                .any(|representation| representation.file.as_deref() == Some(name))
+    })
+}
+
+/// Reconcile rows lost while the verified local manifest survived. Only a
+/// representation this node extracted can establish cluster coverage;
+/// hydrated bytes remain available to peers but never become extraction.
+pub(crate) async fn publish_existing_manifest_rows(
+    catalog: &dyn Store,
+    node_id: &str,
+    root: &Path,
+    file_id: i64,
+    source: &std::fs::File,
+    source_attestation: &str,
+) -> Result<usize, String> {
+    if source_attestation.len() != 64
+        || !source_attestation
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("invalid portable source attestation".to_owned());
+    }
+    let live = crate::fragment_index_cluster::source_stamp(
+        &source
+            .metadata()
+            .map_err(|error| format!("fstat subtitle source: {error}"))?,
+    );
+    let _guard = store::file_lock(root, file_id).lock().await;
+    let dir = store::file_dir(root, file_id);
+    let Some(manifest) = store::read_manifest(&dir).await.filter(|manifest| {
+        manifest.file_id == file_id && manifest.source_matches(&live, Consumer::Burn)
+    }) else {
+        return Ok(0);
+    };
+    let mut written = 0;
+    for track in &manifest.tracks {
+        let representations = if track.representations.is_empty() {
+            track
+                .representation(RepresentationFormat::Sup)
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            track.representations.clone()
+        };
+        for representation in representations {
+            if representation.origin != RepresentationOrigin::Extracted {
+                continue;
+            }
+            let bytes = if representation.verdict == Verdict::Kept {
+                let Some((_, bytes)) = store::open_verified_for_peer(
+                    root,
+                    file_id,
+                    track.ordinal,
+                    representation.format,
+                )
+                .await
+                else {
+                    continue;
+                };
+                bytes as i64
+            } else {
+                0
+            };
+            let publication = SubtitleSourcePublication {
+                file_id,
+                source_size: manifest.source.size as i64,
+                source_mtime: manifest.source.mtime,
+                source_attestation: source_attestation.to_owned(),
+                node_id: node_id.to_owned(),
+                ordinal: track.ordinal,
+                kind: match track.kind {
+                    TrackKind::Pgs => "pgs",
+                    TrackKind::Text => "text",
+                    TrackKind::TextStyled => "text_styled",
+                }
+                .to_owned(),
+                format: representation.format.publication_name().to_owned(),
+                verdict: match representation.verdict {
+                    Verdict::Kept => "kept",
+                    Verdict::Empty => "empty",
+                    Verdict::Malformed => "malformed",
+                    Verdict::Transient => "transient",
+                }
+                .to_owned(),
+                attempts: i64::from(representation.attempts),
+                origin: "extracted".to_owned(),
+                sha256: representation.sha256.unwrap_or_default(),
+                bytes,
+                published_at_ms: unix_ms(),
+            };
+            catalog
+                .upsert_subtitle_source_publication(&publication)
+                .await
+                .map_err(|error| format!("reconciling subtitle-source row: {error}"))?;
+            written += 1;
+        }
+    }
+    Ok(written)
 }
 
 /// Make a directory's entries — the renames just done — durable. Best effort:
@@ -1663,6 +2339,8 @@ pub(crate) async fn run_self_test(
     }
     let input = VerdictInput {
         tracks: plan.tracks.clone(),
+        kinds: plan.kinds.clone(),
+        stream_indexes: plan.stream_indexes.clone(),
         stage: plan.stage().to_owned(),
     };
     let (corrupted_sup, corrupted_crc) = (plan.sup_path(1), plan.crc_path(1));
@@ -2140,6 +2818,7 @@ mod tests {
     use crate::fragindex::{IndexBuild, IndexOutcome};
     use crate::subtitle_source::testing::{settled as settled_entry, stamp_of, write_manifest};
     use crate::subtitle_source::{Live, Lookup, TRANSIENT_ATTEMPTS};
+    use plurx_core::store::ClusterFragmentIndexStore;
 
     const VIDEO: plurx_core::transcode::CopyVideoOptions =
         plurx_core::transcode::CopyVideoOptions::new(false, false);
@@ -2179,6 +2858,60 @@ mod tests {
             {"codec_type": "subtitle", "codec_name": PGS_CODEC},
         ]});
         assert!(pgs_ordinals_from_probe(&unindexed.to_string()).is_empty());
+    }
+
+    #[test]
+    fn eligible_text_ordinals_are_typed_from_the_held_fd_probe() {
+        let raw = probe(&[
+            (8, "subtitle", "ssa"),
+            (0, "video", "h264"),
+            (1, "subtitle", "subrip"),
+            (2, "subtitle", "dvd_subtitle"),
+            (3, "subtitle", "ass"),
+            (4, "subtitle", "mov_text"),
+            (5, "subtitle", "dvb_subtitle"),
+            (6, "subtitle", "webvtt"),
+            (7, "subtitle", "text"),
+            (9, "subtitle", PGS_CODEC),
+            (10, "subtitle", "unknown"),
+        ]);
+        let actual: Vec<_> = eligible_tracks_from_probe(&raw)
+            .into_iter()
+            .map(|track| (track.ordinal, track.kind, track.stream_index))
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                (0, ProbedKind::Text, 1),
+                (2, ProbedKind::TextStyled, 3),
+                (3, ProbedKind::Text, 4),
+                (5, ProbedKind::Text, 6),
+                (6, ProbedKind::Text, 7),
+                (7, ProbedKind::TextStyled, 8),
+                (8, ProbedKind::Pgs, 9),
+            ]
+        );
+    }
+
+    #[test]
+    fn ass_double_map_has_webvtt_and_matroska_slaves_after_the_index_pipe() {
+        let root = crate::test_tempdir().expect("stage");
+        let source = root.path().join("source");
+        std::fs::write(&source, b"x").expect("source");
+        let mut plan = RideAlongPlan::standalone(root.path(), 1, stamp_of(&source), vec![0, 1, 2])
+            .expect("plan");
+        plan.kinds.insert(0, ProbedKind::Text);
+        plan.kinds.insert(1, ProbedKind::TextStyled);
+        let args = plan.args();
+        assert_eq!(args.iter().filter(|arg| arg.as_str() == "0:s:1").count(), 2);
+        assert!(args.windows(2).any(|pair| pair == ["-c:s:2", "copy"]));
+        assert!(args.windows(2).any(|pair| pair == ["-c:s:1", "webvtt"]));
+        let spec = args.last().expect("tee spec");
+        assert!(spec.contains("[select=0:f=webvtt:onfail=ignore]"));
+        assert!(spec.contains("[select=1:f=webvtt:onfail=ignore]"));
+        assert!(spec.contains("[select=2:f=matroska:onfail=ignore]"));
+        assert!(spec.contains("[select=3:f=sup:onfail=ignore]"));
+        assert!(spec.ends_with("|[f=null]-"));
     }
 
     // -- tee escaping ----------------------------------------------------
@@ -2432,10 +3165,271 @@ mod tests {
         );
     }
 
+    #[test]
+    fn text_packet_cue_count_rule_requires_a_valid_webvtt_cue_per_packet() {
+        let stage = crate::test_tempdir().expect("stage");
+        let vtt = stage.path().join("s0.vtt");
+        let crc = stage.path().join("s0.crc");
+        let two = "#software: Lavf\n#media_type 0: subtitle\n0, 1000, 1000, 0, 5, 0x1\n0, 3000, 3000, 0, 5, 0x2\n";
+        std::fs::write(&crc, two).expect("crc");
+        std::fs::write(
+            &vtt,
+            b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\none\n\n00:00:03.000 --> 00:00:04.000\ntwo\n",
+        )
+        .expect("vtt");
+        assert_eq!(
+            judge_text_vtt(&vtt, &crc, [None, None], false).0,
+            Verdict::Kept
+        );
+        std::fs::write(&vtt, b"WEBVTT\n\n00:00:03.000 --> 00:00:04.000\ntwo\n").expect("short vtt");
+        assert_eq!(
+            judge_text_vtt(&vtt, &crc, [None, None], false).0,
+            Verdict::Malformed
+        );
+        std::fs::write(&vtt, b"WEBVTT\n\ninvalid --> cue\ntext\n").expect("bad vtt");
+        assert_eq!(
+            judge_text_vtt(&vtt, &crc, [None, None], false).0,
+            Verdict::Malformed
+        );
+    }
+
+    #[test]
+    fn corrupt_text_packet_decoder_error_vetoes_equal_output_counts_for_only_its_stream() {
+        let stage = crate::test_tempdir().expect("stage");
+        let vtt = stage.path().join("s0.vtt");
+        let crc = stage.path().join("s0.crc");
+        // M0 E5: ffmpeg silently dropped the corrupt first packet from both
+        // outputs, leaving one cue and one framecrc packet.
+        std::fs::write(&vtt, b"WEBVTT\n\n00:00:03.500 --> 00:00:04.500\nsecond\n").expect("vtt");
+        std::fs::write(&crc, b"#software: Lavf\n0, 3500, 3500, 0, 6, 0x1\n").expect("crc");
+        let mut scan = StderrScan::new(Vec::new());
+        scan.feed(b"[sist#0:1/subrip @ 0x1] [dec:srt @ 0x2] Error decoding subtitles: Invalid data found when processing input\n");
+        scan.finish();
+        assert!(scan.decoder_failed(1));
+        assert!(
+            !scan.decoder_failed(2),
+            "an independent text stream is unaffected"
+        );
+        assert_eq!(
+            judge_text_vtt(&vtt, &crc, [None, None], true).0,
+            Verdict::Malformed
+        );
+        assert_eq!(
+            judge_text_vtt(&vtt, &crc, [None, None], false).0,
+            Verdict::Kept
+        );
+    }
+
+    /// Build a source whose first cue is two seconds in. `source_start` moves
+    /// the whole container timeline; the index and direct sidecar see the
+    /// same source bytes under both timestamp regimes.
+    async fn text_source_case(
+        codec: &str,
+        source_start: &str,
+    ) -> (tempfile::TempDir, RideAlongPlan, Vec<u8>) {
+        plurx_core::testfixtures::require_ffmpeg();
+        let dir = crate::test_tempdir().expect("text fixture");
+        let subtitle = dir.path().join(if codec == "ass" {
+            "input.ass"
+        } else {
+            "input.srt"
+        });
+        if codec == "ass" {
+            std::fs::write(&subtitle, "[Script Info]\nScriptType: v4.00+\nPlayResX: 64\nPlayResY: 64\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,18,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:02.00,0:00:04.00,Default,,0,0,0,,{\\pos(12,20)\\b1}Styled line\nDialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,Second line\n").expect("ass");
+        } else {
+            std::fs::write(&subtitle, "1\n00:00:02,000 --> 00:00:04,000\nFirst cue\n\n2\n00:00:05,000 --> 00:00:06,000\nSecond cue\n\n").expect("srt");
+        }
+        let container = if codec == "mov_text" {
+            "mp4"
+        } else {
+            "matroska"
+        };
+        let source = dir.path().join(if codec == "mov_text" {
+            "source.mp4"
+        } else {
+            "source.mkv"
+        });
+        let mut command = std::process::Command::new(plurx_core::testfixtures::ffmpeg());
+        command
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:r=5:d=8",
+                "-i",
+            ])
+            .arg(&subtitle)
+            .args([
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:s:0",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-c:s",
+                codec,
+                "-output_ts_offset",
+                source_start,
+                "-f",
+                container,
+            ])
+            .arg(&source);
+        plurx_core::testfixtures::run(&mut command);
+        let mut file = synthetic_media_file(&source, 8_000).expect("media file");
+        file.id =
+            90_000 + i64::from(codec.as_bytes()[0]) + if source_start == "0" { 0 } else { 1_000 };
+        let probe = std::process::Command::new(crate::ffmpeg::ffprobe_bin())
+            .args(["-v", "error", "-show_streams", "-of", "json"])
+            .arg(&source)
+            .output()
+            .expect("probe");
+        assert!(probe.status.success());
+        let tracks = eligible_tracks_from_probe(&String::from_utf8_lossy(&probe.stdout));
+        assert_eq!(tracks.len(), 1, "one eligible subtitle track");
+        assert_eq!(tracks[0].ordinal, 0);
+        let handle = std::fs::File::open(&source).expect("source");
+        let gate = RideAlongGate::for_test(dir.path().join("store"));
+        let plan = plan_tracks(&gate, file.id, &handle, &tracks)
+            .await
+            .expect("ride");
+        let input = source.to_string_lossy().into_owned();
+        let bin = plurx_core::testfixtures::ffmpeg();
+        let bare = run_ffmpeg(
+            &bin,
+            &crate::fragindex::index_argv(&file, VIDEO, Some(&input), None),
+            dir.path(),
+        )
+        .await
+        .expect("bare pass");
+        let riding = run_ffmpeg(
+            &bin,
+            &crate::fragindex::index_argv(&file, VIDEO, Some(&input), Some(&plan)),
+            dir.path(),
+        )
+        .await
+        .expect("riding pass");
+        assert!(
+            bare.status_ok && riding.status_ok,
+            "{}",
+            riding.stderr_text()
+        );
+        assert_eq!(
+            bare.stdout, riding.stdout,
+            "the index digest's bytes are unchanged"
+        );
+        let mut scan = plan.stderr_scan();
+        scan.feed(&riding.stderr);
+        scan.finish();
+        let verdict_input = VerdictInput {
+            tracks: plan.tracks.clone(),
+            kinds: plan.kinds.clone(),
+            stream_indexes: plan.stream_indexes.clone(),
+            stage: plan.stage().to_owned(),
+        };
+        let outcomes = verdicts(&verdict_input, Some(&scan));
+        assert_eq!(outcomes[0].verdict, Verdict::Kept, "{outcomes:?}");
+        let direct = dir.path().join("direct.vtt");
+        let mut command = std::process::Command::new(&bin);
+        command
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+            .arg(&source)
+            .args(["-map", "0:s:0", "-f", "webvtt"])
+            .arg(&direct);
+        plurx_core::testfixtures::run(&mut command);
+        let vtt = std::fs::read(plan.vtt_path(0)).expect("tee VTT");
+        assert_eq!(
+            vtt,
+            std::fs::read(direct).expect("direct VTT"),
+            "tee and extract_vtt bytes"
+        );
+        assert_eq!(webvtt_cue_count(&vtt).expect("cues"), 2);
+        (dir, plan, vtt)
+    }
+
+    macro_rules! text_case {
+        ($name:ident, $codec:literal, $start:literal) => {
+            #[tokio::test]
+            async fn $name() {
+                let (_dir, plan, _vtt) = text_source_case($codec, $start).await;
+                if $codec == "ass" {
+                    let mks = plan.mks_path(0);
+                    assert!(mks.is_file(), "styled text also keeps Matroska");
+                    assert!(std::fs::metadata(mks).expect("mks").len() > 0);
+                }
+            }
+        };
+    }
+
+    text_case!(subrip_nonzero_first_cue_zero_source_start, "subrip", "0");
+    text_case!(
+        subrip_nonzero_first_cue_nonzero_source_start,
+        "subrip",
+        "7.5"
+    );
+    text_case!(ass_nonzero_first_cue_zero_source_start, "ass", "0");
+    text_case!(ass_nonzero_first_cue_nonzero_source_start, "ass", "7.5");
+    text_case!(
+        mov_text_nonzero_first_cue_zero_source_start,
+        "mov_text",
+        "0"
+    );
+    text_case!(
+        mov_text_nonzero_first_cue_nonzero_source_start,
+        "mov_text",
+        "7.5"
+    );
+
+    #[tokio::test]
+    async fn ass_positioning_and_styling_burn_identically_from_stored_mks_and_source() {
+        let (dir, plan, _) = text_source_case("ass", "0").await;
+        let source = dir.path().join("source.mkv");
+        let render = |subtitle: &Path| {
+            let output = std::process::Command::new(plurx_core::testfixtures::ffmpeg())
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-ss",
+                    "3",
+                    "-i",
+                ])
+                .arg(&source)
+                .args([
+                    "-vf",
+                    &format!("subtitles=filename='{}':si=0", subtitle.display()),
+                    "-frames:v",
+                    "1",
+                    "-pix_fmt",
+                    "rgb24",
+                    "-f",
+                    "rawvideo",
+                    "pipe:1",
+                ])
+                .output()
+                .expect("render");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!output.stdout.is_empty());
+            output.stdout
+        };
+        assert_eq!(render(&source), render(&plan.mks_path(0)));
+    }
+
     // -- the gate ------------------------------------------------------------
 
     #[test]
-    fn the_gate_needs_the_switch_the_self_test_and_a_local_cache() {
+    fn advisory_readiness_reports_the_switch_self_test_and_local_cache() {
         let passed = SelfTest::Passed {
             elapsed_ms: 1,
             version: "8.0.1".into(),
@@ -2687,9 +3681,9 @@ mod tests {
         assert!(!active_rides().iter().any(|ride| ride.file_id == id));
     }
 
-    /// A file with no PGS track has nothing to latch, and never rides.
+    /// A file with no eligible subtitle track has nothing to latch, and never rides.
     #[tokio::test]
-    async fn a_file_with_no_pgs_track_never_rides() {
+    async fn a_file_with_no_eligible_subtitle_track_never_rides() {
         let case = latch_case();
         let gate = RideAlongGate::for_test(case.root.clone());
         for _ in 0..3 {
@@ -2739,10 +3733,11 @@ mod tests {
         std::fs::write(&source, b"x").expect("source");
         let mut file = synthetic_media_file(&source, 60_000).expect("file");
         let bare = file.clone();
-        file.subtitle_streams = (1..=3)
-            .map(|index| plurx_core::domain::SubtitleStream {
+        file.subtitle_streams = [(1, "subrip"), (2, "ass"), (3, PGS_CODEC)]
+            .into_iter()
+            .map(|(index, codec)| plurx_core::domain::SubtitleStream {
                 index,
-                codec: PGS_CODEC.to_owned(),
+                codec: codec.to_owned(),
                 language: Some("eng".into()),
                 title: None,
                 default: index == 1,
@@ -2751,8 +3746,11 @@ mod tests {
             })
             .collect();
         let engine = "e".repeat(64);
-        let plan = RideAlongPlan::standalone(dir.path(), file.id, stamp_of(&source), vec![0, 1, 2])
-            .expect("plan");
+        let mut plan =
+            RideAlongPlan::standalone(dir.path(), file.id, stamp_of(&source), vec![0, 1, 2])
+                .expect("plan");
+        plan.kinds.insert(0, ProbedKind::Text);
+        plan.kinds.insert(1, ProbedKind::TextStyled);
 
         let hashed = plurx_core::transcode::copy_index_pipe_args(&file, VIDEO);
         let without = crate::fragindex::index_argv(&file, VIDEO, None, None);
@@ -3054,7 +4052,10 @@ mod tests {
             "{:?}",
             riding.outcome
         );
-        assert_eq!(verdicts_of(&riding), vec![(1, Verdict::Kept)]);
+        assert_eq!(
+            verdicts_of(&riding),
+            vec![(0, Verdict::Kept), (1, Verdict::Kept)]
+        );
     }
 
     /// (d) A real PGS track with no cues is `empty`.
@@ -3130,6 +4131,13 @@ mod tests {
                 sha256: Some(hex::encode(Sha256::digest(bytes))),
                 written: bytes.len() as u64,
                 reason: None,
+                representations: vec![RepresentationOutcome {
+                    format: RepresentationFormat::Sup,
+                    verdict: Verdict::Kept,
+                    sha256: Some(hex::encode(Sha256::digest(bytes))),
+                    bytes: bytes.len() as u64,
+                    reason: None,
+                }],
             }],
             plan,
         }
@@ -3175,6 +4183,33 @@ mod tests {
             .filter(|name| name.ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[tokio::test]
+    async fn a_publication_row_is_written_only_after_the_manifest_rename() {
+        let case = latch_case();
+        let id = 70_012;
+        let catalog = plurx_core::store::SqliteStore::open_in_memory().expect("catalog");
+        let manifest = harvest_of(&case.root, id, case.stamp, b"PG source")
+            .publish_with_cluster(&catalog, "nuc4", &"a".repeat(64))
+            .await
+            .expect("publish");
+        let rows = catalog
+            .list_subtitle_source_publications(id, case.stamp.size as i64, case.stamp.mtime)
+            .await
+            .expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].origin, "extracted");
+        let dir = store::file_dir(&case.root, id);
+        assert_eq!(store::read_manifest(&dir).await, Some(manifest.clone()));
+        assert!(dir
+            .join(
+                manifest
+                    .track(0)
+                    .and_then(|entry| entry.file.as_deref())
+                    .expect("name")
+            )
+            .is_file());
     }
 
     /// Readers racing a stream of publishes see the old manifest or the new
@@ -3331,20 +4366,20 @@ mod tests {
         assert!(reason.contains("4.4.2-0ubuntu0"), "{reason}");
     }
 
-    /// The gate is closed until the startup self-test passes, and open after.
-    /// Linux only: elsewhere the filesystem check keeps it closed for good.
+    /// The operator may enable the producer before its advisory self-test;
+    /// only the saved manual switch controls entry to the pass.
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn the_ride_along_is_off_until_the_startup_self_test_passes() {
+    async fn the_ride_along_enable_is_not_gated_by_advisory_readiness() {
         plurx_core::testfixtures::require_ffmpeg();
         let cache = fresh_cache();
         let catalog = plurx_core::store::SqliteStore::open_in_memory().expect("catalog");
         set_self_test_state(SelfTest::NotRun);
-        assert!(RideAlongGate::open(&catalog, cache.path()).await.is_none());
+        assert!(RideAlongGate::open(&catalog, cache.path()).await.is_some());
         set_self_test_state(SelfTest::Failed {
             reason: "test".into(),
         });
-        assert!(RideAlongGate::open(&catalog, cache.path()).await.is_none());
+        assert!(RideAlongGate::open(&catalog, cache.path()).await.is_some());
         startup_self_test(
             cache.path().to_owned(),
             tokio_util::sync::CancellationToken::new(),

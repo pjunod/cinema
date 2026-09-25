@@ -1139,6 +1139,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // so the validation column appends after them.
     crate::store::fragindex::FRAGMENT_INDEXES_VALIDATION_COLUMN,
     super::downloaded_subtitles::SCHEMA,
+    // v67: cluster subtitle-source queue constraints and publication metadata.
+    crate::store::fragment_index_cluster::SUBTITLE_SOURCE_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

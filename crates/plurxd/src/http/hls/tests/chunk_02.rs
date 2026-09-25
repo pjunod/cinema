@@ -357,6 +357,88 @@
         }
     }
 
+    #[tokio::test]
+    async fn stored_whole_track_skips_window_warm() {
+        use crate::subtitle_source::{
+            RepresentationEntry, RepresentationFormat, TrackEntry, TrackKind, Verdict,
+        };
+        use sha2::Digest as _;
+
+        let dir = crate::test_tempdir().expect("session directory");
+        let mut fixture = HlsDeliveryFixture::publish(dir.path(), "stored-whole-vtt").await;
+        add_http_text_subtitle(&mut fixture, "stored-whole-vtt").await;
+        let file = fixture
+            .store
+            .get_file(fixture.file_id())
+            .await
+            .expect("lookup")
+            .expect("file");
+        tokio::fs::remove_file(crate::subtitles::vtt_path(
+            &fixture.state.subs_dir,
+            &file,
+            0,
+        ))
+        .await
+        .expect("cold cache");
+        tokio::fs::write(dir.path().join("seg00000.ts"), b"video")
+            .await
+            .expect("video segment");
+        tokio::fs::write(
+            dir.path().join("index.m3u8"),
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.000,\nseg00000.ts\n",
+        )
+        .await
+        .expect("playlist");
+
+        let root = crate::subtitle_source::store_root(&fixture.state.runtime_cache_dir);
+        let local = crate::subtitle_source::file_dir(&root, file.id);
+        std::fs::create_dir_all(&local).expect("store directory");
+        let bytes = b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\ncaption\n";
+        let sha256 = hex::encode(sha2::Sha256::digest(bytes));
+        let name =
+            crate::subtitle_source::representation_file_name(0, RepresentationFormat::Webvtt, &sha256)
+                .expect("name");
+        std::fs::write(local.join(&name), bytes).expect("stored VTT");
+        crate::subtitle_source::testing::write_manifest(
+            &root,
+            file.id,
+            crate::subtitle_source::testing::stamp_of(&file.path),
+            vec![TrackEntry {
+                ordinal: 0,
+                kind: TrackKind::Text,
+                representations: vec![RepresentationEntry {
+                    format: RepresentationFormat::Webvtt,
+                    origin: crate::subtitle_source::RepresentationOrigin::Extracted,
+                    verdict: Verdict::Kept,
+                    attempts: 1,
+                    file: Some(name),
+                    sha256: Some(sha256),
+                    bytes: bytes.len() as u64,
+                }],
+                verdict: Verdict::Kept,
+                attempts: 1,
+                file: None,
+                sha256: None,
+            }],
+        );
+
+        let response = subtitle_vtt_local_before(
+            &fixture.state,
+            "stored-whole-vtt",
+            0,
+            "seg00000.vtt",
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("stored segment");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(crate::subtitles::vtt_path(&fixture.state.subs_dir, &file, 0).exists());
+        assert!(
+            !crate::subtitles::vtt_window_path(&fixture.state.subs_dir, &file, 0, 0, 200).exists(),
+            "the whole-track store answer skips the window warm"
+        );
+    }
+
     /// M7 R-M2 B7: exercise the real subtitle-segment handler boundary while
     /// replacing only the producer. The first requests must not wait for the
     /// held extraction, concurrent first touches must share its production
@@ -483,14 +565,8 @@
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if matches!(
-                    crate::subtitles::read_cached_window(
-                        &fixture.state.subs_dir,
-                        &file,
-                        0,
-                        0,
-                        200,
-                    )
-                    .await,
+                    crate::subtitles::read_cached_window(&fixture.state.subs_dir, &file, 0, 0, 200,)
+                        .await,
                     Ok(Some(_))
                 ) {
                     break;
@@ -730,8 +806,7 @@
             // Fact 6 needs a window that really published, and it has to
             // publish before the storm moves on, so the first destination is
             // driven to completion on its own.
-            let first =
-                subtitle_segment(&fixture.state, session_id, STORM[0], source.as_ref()).await;
+            let first = subtitle_segment(&fixture.state, session_id, STORM[0], source.as_ref()).await;
             assert_eq!(first.status(), StatusCode::OK);
             producer_started(source.as_ref()).await;
             source.release.add_permits(1);
@@ -900,8 +975,8 @@
                 crate::subtitles::peak_window_flights_for_test(session_id),
                 1,
                 "nor two flights, which is the wider span the settlement wait \
-                 exists to keep from overlapping — a displaced flight is still \
-                 alive while it kills its child and clears the registries"
+                     exists to keep from overlapping — a displaced flight is still \
+                     alive while it kills its child and clears the registries"
             );
 
             // Release every held producer before judging what published.
@@ -1809,8 +1884,7 @@
 
             // The producer stays parked for the whole of this request.
             let began = std::time::Instant::now();
-            let response =
-                subtitle_segment(&fixture.state, timeout_session, 1, source.as_ref()).await;
+            let response = subtitle_segment(&fixture.state, timeout_session, 1, source.as_ref()).await;
             let waited = began.elapsed();
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(
@@ -1865,8 +1939,7 @@
             )
             .await;
 
-            let default_off =
-                subtitle_segment(&fixture.state, memo_session, 1, source.as_ref()).await;
+            let default_off = subtitle_segment(&fixture.state, memo_session, 1, source.as_ref()).await;
             assert_eq!(
                 default_off.status(),
                 StatusCode::OK,
@@ -1902,12 +1975,8 @@
                 "Retry-After is the memo's own remaining time, not a constant: got {retry_after}"
             );
             crate::subtitles::release_session_window(memo_session).await;
-            crate::subtitles::forget_whole_track_failure_for_test(
-                &fixture.state.subs_dir,
-                &file,
-                0,
-            )
-            .await;
+            crate::subtitles::forget_whole_track_failure_for_test(&fixture.state.subs_dir, &file, 0)
+                .await;
         }
     }
 
@@ -1936,9 +2005,7 @@
             .expect("predecessor playlist");
         let state = fixture.state.clone();
         let waiting =
-            tokio::spawn(
-                async move { subtitle_playlist_local(&state, "subtitle-handoff", 0).await },
-            );
+            tokio::spawn(async move { subtitle_playlist_local(&state, "subtitle-handoff", 0).await });
         tokio::time::timeout(Duration::from_secs(5), owner_pause.wait())
             .await
             .expect("subtitle request read predecessor playlist");
@@ -1989,8 +2056,7 @@
             .transcode
             .set_subtitle_playlist_commit_pause(Arc::clone(&pause));
         let state = fixture.state.clone();
-        let pending =
-            tokio::spawn(async move { subtitle_playlist_local(&state, session_id, 0).await });
+        let pending = tokio::spawn(async move { subtitle_playlist_local(&state, session_id, 0).await });
         pause.wait().await;
 
         let _successor = install_vod_http_session(&fixture, dir.path(), session_id).await;
@@ -2301,9 +2367,7 @@
     /// A live local worker and a durable route naming it — both halves are
     /// needed, because staging takes the actor's slot *and* writes a row
     /// fenced on the route's current generation.
-    async fn staging_fixture(
-        dir: &std::path::Path,
-    ) -> (HlsDeliveryFixture, String, MediaSessionRoute) {
+    async fn staging_fixture(dir: &std::path::Path) -> (HlsDeliveryFixture, String, MediaSessionRoute) {
         staging_fixture_for_playback(dir, "stage-player").await
     }
 

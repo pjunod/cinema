@@ -187,14 +187,14 @@ function subtitleStorePanel(settings){
   const d=settings.subtitle_store||{};
   const on=settings.subtitle_stored_sources!==false;
   const gate=d.gate||{open:true};
-  const blocked=on&&gate.open===false;
+  const concern=on&&gate.open===false;
   const fp=d.footprint;
   const plural=(n,word)=>`${n} ${word}${n===1?"":"s"}`;
   const size=fp?`${fmtBytes(fp.bytes)||"0 B"} · ${plural(fp.directories,"file")}`:"not measured yet";
   const pill=!on?`<span class="pill">off</span>`
-    :blocked?`<span class="pill bad">not keeping tracks</span>`
+    :concern?`<span class="pill warn">readiness concern</span>`
     :`<span class="pill ok">${esc(size)}</span>`;
-  const why=blocked?`<div class="setwarn">⚠ <b>The index pass on this node keeps no PGS tracks:</b> ${esc(gate.reason||"a requirement is not met")}. Each requirement is checked on ${SUBSRC_SWITCH_LINK}.</div>`:"";
+  const why=concern?`<div class="setwarn">⚠ <b>Review stored-track readiness:</b> ${esc(gate.reason||"a requirement is not met")}. The observations are advisory on ${SUBSRC_SWITCH_LINK}.</div>`:"";
   const ago=d.footprint_age_ms!=null?` (measured ${fmtDur(d.footprint_age_ms)||"just now"}${d.footprint_age_ms>=1000?" ago":""})`:"";
   const measured=fp
     ? `<p class="hint">On this node the store holds <b>${esc(size)}</b>${esc(ago)}, of a ${fmtBytes(d.cap_bytes)||"—"} cap; the least recently used files go first.</p>`

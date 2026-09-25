@@ -578,6 +578,239 @@ BEGIN
 END;
 "#;
 
+/// v46: cluster subtitle extraction requests and portable publication metadata.
+/// This rebuild preserves live v45 requests and their charged attempt history.
+pub const SUBTITLE_SOURCE_SCHEMA: &str = r#"
+CREATE TABLE analysis_attempts_v46_backup AS SELECT * FROM analysis_attempts;
+DROP TABLE analysis_attempts;
+DROP TRIGGER IF EXISTS analysis_requests_cancel_source;
+DROP TRIGGER IF EXISTS analysis_requests_supersede_source;
+DROP TRIGGER IF EXISTS analysis_requests_bound_terminal_history;
+DROP TRIGGER IF EXISTS analysis_requests_lifecycle_counters;
+ALTER TABLE analysis_requests RENAME TO analysis_requests_v45;
+CREATE TABLE analysis_requests (
+    request_id         TEXT PRIMARY KEY,
+    file_id            INTEGER NOT NULL,
+    source_size        INTEGER NOT NULL,
+    source_mtime       INTEGER NOT NULL,
+    component          TEXT NOT NULL CHECK (component IN ('fragment_index','skip_markers','subtitle_source')),
+    video_identity     TEXT NOT NULL DEFAULT '',
+    pipeline_version   TEXT NOT NULL DEFAULT 'legacy-fragment-index',
+    requested_generation TEXT NOT NULL DEFAULT 'legacy-generation',
+    expected_predecessor_generation TEXT NOT NULL DEFAULT '',
+    priority           TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('normal','forced','foreground')),
+    trigger            TEXT NOT NULL DEFAULT 'admin' CHECK (trigger IN ('admin','background','playback')),
+    force_rebuild      INTEGER NOT NULL CHECK (force_rebuild IN (0, 1)),
+    target_node_id     TEXT NOT NULL,
+    state              TEXT NOT NULL CHECK (
+        state IN ('queued', 'running', 'submitted', 'ready', 'failed', 'cancelled')),
+    owner_node_id      TEXT,
+    fence              INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),
+    lease_expires_ms   INTEGER,
+    attempts           INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    not_before_ms      INTEGER NOT NULL,
+    result_cache_key   TEXT,
+    last_error_code    TEXT,
+    cancel_requested   INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+    created_at_ms      INTEGER NOT NULL,
+    updated_at_ms      INTEGER NOT NULL
+) STRICT;
+INSERT INTO analysis_requests (request_id, file_id, source_size, source_mtime, component, video_identity, pipeline_version, requested_generation, expected_predecessor_generation, priority, trigger, force_rebuild, target_node_id, state, owner_node_id, fence, lease_expires_ms, attempts, not_before_ms, result_cache_key, last_error_code, cancel_requested, created_at_ms, updated_at_ms) SELECT request_id, file_id, source_size, source_mtime, component, video_identity, pipeline_version, requested_generation, expected_predecessor_generation, priority, trigger, force_rebuild, target_node_id, state, owner_node_id, fence, lease_expires_ms, attempts, not_before_ms, result_cache_key, last_error_code, cancel_requested, created_at_ms, updated_at_ms FROM analysis_requests_v45;
+DROP TABLE analysis_requests_v45;
+CREATE INDEX analysis_requests_due
+    ON analysis_requests(target_node_id, state, not_before_ms, created_at_ms, request_id);
+CREATE INDEX analysis_requests_status
+    ON analysis_requests(state, updated_at_ms DESC, request_id);
+CREATE UNIQUE INDEX analysis_requests_one_active_source ON analysis_requests(file_id, source_size, source_mtime, component, pipeline_version, video_identity, requested_generation, target_node_id) WHERE state IN ('queued','running','submitted');
+CREATE UNIQUE INDEX analysis_requests_one_active_forced_skip_successor ON analysis_requests(file_id, source_size, source_mtime, component) WHERE component = 'skip_markers' AND force_rebuild = 1 AND state IN ('queued','running','submitted');
+CREATE UNIQUE INDEX analysis_requests_one_active_forced_fragment_successor ON analysis_requests(file_id, source_size, source_mtime, component, pipeline_version, video_identity) WHERE component = 'fragment_index' AND force_rebuild = 1 AND state IN ('queued','running','submitted');
+CREATE INDEX analysis_requests_result_history
+    ON analysis_requests(result_cache_key, updated_at_ms DESC, request_id DESC)
+    WHERE result_cache_key IS NOT NULL AND result_cache_key <> '';
+CREATE INDEX analysis_requests_terminal_identity
+    ON analysis_requests(file_id, source_size, source_mtime, component,
+                         pipeline_version, requested_generation, target_node_id,
+                         updated_at_ms, request_id)
+    WHERE state IN ('ready', 'failed', 'cancelled') AND force_rebuild = 0;
+CREATE TRIGGER analysis_requests_cancel_source BEFORE DELETE ON files
+BEGIN
+    DELETE FROM cluster_fragment_index_heads
+     WHERE generation_cache_key IN (
+       SELECT cache_key FROM cluster_fragment_index_jobs WHERE file_id = OLD.id);
+    UPDATE analysis_attempts
+       SET phase = 'canceled', phase_updated_at_ms = MAX(phase_updated_at_ms, OLD.scanned_at * 1000),
+           terminal_code = 'source_deleted'
+     WHERE (request_id, claim_epoch) IN (
+       SELECT request_id, fence FROM analysis_requests
+        WHERE file_id = OLD.id AND state IN ('running', 'submitted'));
+    UPDATE analysis_requests
+       SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+           fence = fence + 1, cancel_requested = 1,
+           last_error_code = 'source_deleted', updated_at_ms = MAX(updated_at_ms, OLD.scanned_at * 1000)
+     WHERE file_id = OLD.id AND state IN ('queued', 'running', 'submitted');
+END;
+CREATE TRIGGER analysis_requests_supersede_source
+AFTER UPDATE OF size, mtime ON files
+WHEN OLD.size <> NEW.size OR OLD.mtime <> NEW.mtime
+BEGIN
+    DELETE FROM cluster_fragment_index_heads
+     WHERE generation_cache_key IN (
+       SELECT cache_key FROM cluster_fragment_index_jobs
+        WHERE file_id = NEW.id
+          AND (source_size <> NEW.size OR source_mtime <> NEW.mtime));
+    UPDATE cluster_fragment_index_jobs
+       SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+           fence = fence + 1, last_error_code = 'source_superseded',
+           updated_at_ms = MAX(updated_at_ms, NEW.scanned_at * 1000)
+     WHERE file_id = NEW.id AND state IN ('queued', 'running')
+       AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
+    UPDATE analysis_attempts
+       SET phase = 'stale', phase_updated_at_ms = MAX(phase_updated_at_ms, NEW.scanned_at * 1000),
+           terminal_code = 'source_superseded'
+     WHERE (request_id, claim_epoch) IN (
+       SELECT request_id, fence FROM analysis_requests
+        WHERE file_id = NEW.id AND state IN ('running', 'submitted')
+          AND (source_size <> NEW.size OR source_mtime <> NEW.mtime));
+    UPDATE analysis_requests
+       SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+           fence = fence + 1, cancel_requested = 1,
+           last_error_code = 'source_superseded', updated_at_ms = MAX(updated_at_ms, NEW.scanned_at * 1000)
+     WHERE file_id = NEW.id AND state IN ('queued', 'running', 'submitted')
+       AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
+END;
+CREATE TRIGGER analysis_requests_bound_terminal_history
+AFTER UPDATE OF state ON analysis_requests
+WHEN NEW.state IN ('ready', 'failed', 'cancelled')
+BEGIN
+    DELETE FROM analysis_requests
+     WHERE request_id IN (
+       SELECT candidate.request_id FROM analysis_requests candidate
+        WHERE candidate.state IN ('ready', 'failed', 'cancelled')
+          AND candidate.request_id <> NEW.request_id
+          AND (candidate.force_rebuild = 1
+            OR NOT EXISTS (SELECT 1 FROM files
+                 WHERE files.id = candidate.file_id
+                   AND files.size = candidate.source_size
+                   AND files.mtime = candidate.source_mtime)
+            OR EXISTS (SELECT 1 FROM analysis_requests newer
+                 WHERE newer.state IN ('ready', 'failed', 'cancelled')
+                   AND newer.force_rebuild = 0
+                   AND newer.file_id = candidate.file_id
+                   AND newer.source_size = candidate.source_size
+                   AND newer.source_mtime = candidate.source_mtime
+                   AND newer.component = candidate.component
+                   AND newer.pipeline_version = candidate.pipeline_version
+                   AND newer.requested_generation = candidate.requested_generation
+                   AND newer.target_node_id = candidate.target_node_id
+                   AND (newer.updated_at_ms > candidate.updated_at_ms
+                     OR (newer.updated_at_ms = candidate.updated_at_ms
+                       AND newer.request_id > candidate.request_id))))
+        ORDER BY candidate.updated_at_ms, candidate.request_id
+        LIMIT MAX((SELECT COUNT(*) FROM analysis_requests
+                    WHERE state IN ('ready', 'failed', 'cancelled')) - 8192, 0));
+END;
+CREATE TABLE analysis_attempts (
+    request_id          TEXT NOT NULL REFERENCES analysis_requests(request_id) ON DELETE CASCADE,
+    attempt             INTEGER NOT NULL CHECK (attempt > 0),
+    claim_node_id       TEXT NOT NULL,
+    claim_epoch         INTEGER NOT NULL CHECK (claim_epoch > 0),
+    claim_expires_at_ms INTEGER NOT NULL,
+    phase               TEXT NOT NULL CHECK (
+        phase IN ('claimed','source_probe','hashing','staged','running','publishing','retry_wait','published','failed','canceled','stale')),
+    started_at_ms       INTEGER NOT NULL,
+    phase_updated_at_ms INTEGER NOT NULL,
+    terminal_code       TEXT,
+    PRIMARY KEY (request_id, claim_epoch)
+) STRICT;
+CREATE INDEX analysis_attempts_recent
+    ON analysis_attempts(request_id, claim_epoch DESC);
+INSERT INTO analysis_attempts SELECT * FROM analysis_attempts_v46_backup;
+DROP TABLE analysis_attempts_v46_backup;
+CREATE TRIGGER analysis_requests_lifecycle_counters
+AFTER UPDATE OF state ON analysis_requests
+WHEN OLD.state <> NEW.state
+BEGIN
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'claim', 'all', 1 WHERE NEW.state = 'running'
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'lease_loss', 'lease_expired', 1
+       WHERE OLD.state = 'running'
+         AND ((NEW.state = 'queued' AND NEW.last_error_code = 'lease_expired')
+           OR (NEW.state = 'failed'
+             AND OLD.lease_expires_ms IS NOT NULL
+             AND OLD.lease_expires_ms <= NEW.updated_at_ms))
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'retry', CASE NEW.last_error_code
+        WHEN 'lease_expired' THEN 'lease_expired'
+        WHEN 'source_catalog_read_failed' THEN 'source_catalog_read_failed'
+        WHEN 'source_probe_timeout' THEN 'source_probe_timeout'
+        WHEN 'source_unavailable' THEN 'source_unavailable'
+        WHEN 'source_attestation_failed' THEN 'source_attestation_failed'
+        WHEN 'foreground_preempted' THEN 'foreground_preempted'
+        WHEN 'source_attestation_timeout' THEN 'source_attestation_timeout'
+        WHEN 'source_record_failed' THEN 'source_record_failed'
+        WHEN 'queue_write_failed' THEN 'queue_write_failed'
+        WHEN 'queue_full_or_busy' THEN 'queue_full_or_busy'
+        WHEN 'pipeline_version_unavailable' THEN 'pipeline_version_unavailable'
+        ELSE 'other' END, 1
+       WHERE OLD.state = 'running' AND NEW.state = 'queued'
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'cancel', CASE NEW.last_error_code
+        WHEN 'admin_cancelled' THEN 'admin_cancelled'
+        WHEN 'source_deleted' THEN 'source_deleted'
+        ELSE 'other' END, 1
+       WHERE NEW.state = 'cancelled'
+         AND COALESCE(NEW.last_error_code, '') NOT IN ('source_changed','source_superseded')
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'stale', 'source_identity_changed', 1
+       WHERE NEW.state IN ('failed','cancelled')
+         AND NEW.last_error_code IN ('source_changed','source_superseded')
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'failure', CASE NEW.last_error_code
+        WHEN 'attempt_limit' THEN 'attempt_limit'
+        WHEN 'pipeline_version_unavailable' THEN 'pipeline_version_unavailable'
+        WHEN 'stored_probe_invalid' THEN 'stored_probe_invalid'
+        WHEN 'source_duration_missing' THEN 'source_duration_missing'
+        WHEN 'invalid_cache_identity' THEN 'invalid_cache_identity'
+        WHEN 'unsupported' THEN 'unsupported'
+        WHEN 'source_unavailable' THEN 'source_unavailable'
+        ELSE 'other' END, 1
+       WHERE NEW.state = 'failed'
+         AND COALESCE(NEW.last_error_code, '') NOT IN ('source_changed','source_superseded')
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+    INSERT INTO analysis_lifecycle_counters(event, reason, count)
+      SELECT 'publication', 'validated', 1
+       WHERE NEW.state = 'ready' AND NEW.component = 'skip_markers'
+      ON CONFLICT(event, reason) DO UPDATE SET count = count + 1;
+END;
+CREATE TABLE IF NOT EXISTS subtitle_source_publications (
+ file_id INTEGER NOT NULL, source_size INTEGER NOT NULL, source_mtime INTEGER NOT NULL,
+ source_attestation TEXT NOT NULL, node_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('pgs','text','text_styled')),
+ format TEXT NOT NULL CHECK(format IN ('sup','webvtt','matroska')),
+ verdict TEXT NOT NULL CHECK(verdict IN ('kept','empty','malformed','transient')),
+ attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+ origin TEXT NOT NULL CHECK(origin IN ('extracted','hydrated')),
+ sha256 TEXT NOT NULL DEFAULT '', bytes INTEGER NOT NULL DEFAULT 0 CHECK(bytes >= 0),
+ published_at_ms INTEGER NOT NULL,
+ PRIMARY KEY(file_id, source_size, source_mtime, node_id, ordinal, format)
+) STRICT;
+CREATE INDEX IF NOT EXISTS subtitle_source_publications_stamp ON subtitle_source_publications(file_id, source_size, source_mtime, ordinal, format);
+CREATE INDEX IF NOT EXISTS subtitle_source_publications_node ON subtitle_source_publications(node_id, file_id);
+CREATE TRIGGER IF NOT EXISTS subtitle_source_publications_delete_source AFTER DELETE ON files BEGIN
+ DELETE FROM subtitle_source_publications WHERE file_id = OLD.id;
+ END;
+CREATE TRIGGER IF NOT EXISTS subtitle_source_publications_supersede_source AFTER UPDATE OF size, mtime ON files
+ WHEN OLD.size <> NEW.size OR OLD.mtime <> NEW.mtime BEGIN
+ DELETE FROM subtitle_source_publications WHERE file_id = NEW.id AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
+ END;
+"#;
+
 /// SQLite v46 / replicated v26: the code each *charged* attempt ended with.
 ///
 /// A job row keeps one `last_error_code`, wiped on every claim and overwritten
@@ -1092,6 +1325,169 @@ pub struct AnalysisRequest {
     pub updated_at_ms: i64,
 }
 
+/// Portable source identity for a cluster subtitle extraction request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubtitleSourceStamp {
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub pipeline_version: String,
+}
+
+impl SubtitleSourceStamp {
+    pub fn generation(&self, repair_epoch: i64) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"plurx/subtitle-source-request/v1\0");
+        update_field(&mut digest, self.file_id.to_string().as_bytes());
+        update_field(&mut digest, self.source_size.to_string().as_bytes());
+        update_field(&mut digest, self.source_mtime.to_string().as_bytes());
+        update_field(&mut digest, b"subtitle_source");
+        update_field(&mut digest, self.pipeline_version.as_bytes());
+        update_field(&mut digest, repair_epoch.to_string().as_bytes());
+        hex::encode(digest.finalize())
+    }
+}
+
+pub const SUBTITLE_SOURCE_REPAIR_LIMIT: i64 = 3;
+pub const SUBTITLE_SOURCE_REPAIR_WINDOW_MS: i64 = 24 * 60 * 60 * 1_000;
+pub const SUBTITLE_BACKFILL_TERMINAL_SETTLE_MS: i64 = 120_000;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubtitleBackfillCandidate {
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub scanned_at: i64,
+    pub uncovered_ordinals: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubtitleBackfillDiagnostics {
+    /// Holder of the unexpired, cluster-wide discovery lease, if any.
+    pub lease_holder: Option<String>,
+    /// Files with at least one eligible scanner ordinal lacking settled
+    /// extraction coverage, independent of queue cooldown or active work.
+    pub remaining_files: i64,
+    pub remaining_bytes: i64,
+}
+
+pub(crate) const SUBTITLE_BACKFILL_DIAGNOSTICS: &str = r#"
+WITH uncovered AS (
+ SELECT f.id, f.size
+ FROM files AS f
+ WHERE f.size >= 0
+   AND f.container IS NOT NULL
+   AND lower(f.container) NOT IN ('ts','m2ts','mts','m2t','mpegts','tp','trp')
+   AND json_valid(f.subtitle_streams)
+   AND EXISTS (
+       SELECT 1 FROM json_each(f.subtitle_streams) AS s
+       WHERE json_type(s.value, '$.index') = 'integer'
+         AND CAST(json_extract(s.value, '$.index') AS INTEGER) >= 0
+         AND lower(json_extract(s.value, '$.codec')) IN
+             ('hdmv_pgs_subtitle','subrip','srt','ass','ssa','mov_text','webvtt','text')
+         AND NOT EXISTS (
+             SELECT 1 FROM subtitle_source_publications AS p
+             WHERE p.file_id = f.id AND p.source_size = f.size
+               AND p.source_mtime = f.mtime
+               AND p.ordinal = CAST(json_extract(s.value, '$.index') AS INTEGER)
+               AND p.origin = 'extracted'
+               AND (p.verdict IN ('kept','empty','malformed')
+                    OR (p.verdict = 'transient' AND p.attempts >= 3))
+         )
+   )
+)
+SELECT (SELECT owner_node_id FROM job_leases
+        WHERE resource = 'media:subtitle-source:backfill' AND expires_at_ms > $1)
+       AS lease_holder,
+       COUNT(*) AS remaining_files,
+       COALESCE(SUM(size), 0) AS remaining_bytes
+FROM uncovered
+"#;
+
+/// Keyset-paged discovery. Scanner subtitle ordinals are used only to decide
+/// whether a file merits a job; the worker still probes a held source fd and
+/// maps its live ordinals. Coverage is per ordinal, from settled extracted
+/// publications only. Hydrated rows cannot make backfill skip a source.
+pub(crate) const SUBTITLE_BACKFILL_CANDIDATES: &str = r#"
+WITH candidates AS (
+ SELECT f.id AS file_id, f.size AS source_size, f.mtime AS source_mtime,
+        f.scanned_at AS scanned_at,
+        (SELECT COUNT(DISTINCT CAST(json_extract(s.value, '$.index') AS INTEGER))
+         FROM json_each(f.subtitle_streams) AS s
+         WHERE json_type(s.value, '$.index') = 'integer'
+           AND CAST(json_extract(s.value, '$.index') AS INTEGER) >= 0
+           AND lower(json_extract(s.value, '$.codec')) IN
+               ('hdmv_pgs_subtitle','subrip','srt','ass','ssa','mov_text','webvtt','text')
+           AND NOT EXISTS (
+               SELECT 1 FROM subtitle_source_publications AS p
+               WHERE p.file_id = f.id AND p.source_size = f.size
+                 AND p.source_mtime = f.mtime
+                 AND p.ordinal = CAST(json_extract(s.value, '$.index') AS INTEGER)
+                 AND p.origin = 'extracted'
+                 AND (p.verdict IN ('kept','empty','malformed')
+                      OR (p.verdict = 'transient' AND p.attempts >= 3))
+           )) AS uncovered_ordinals
+ FROM files AS f
+ WHERE (f.scanned_at < $1 OR (f.scanned_at = $1 AND f.id < $2))
+   AND f.size >= 0
+   AND f.container IS NOT NULL
+   AND lower(f.container) NOT IN ('ts','m2ts','mts','m2t','mpegts','tp','trp')
+   AND json_valid(f.subtitle_streams)
+   AND NOT EXISTS (
+       SELECT 1 FROM analysis_requests AS r
+       WHERE r.file_id = f.id AND r.source_size = f.size
+         AND r.source_mtime = f.mtime AND r.component = 'subtitle_source'
+         AND (r.state IN ('queued','running','submitted')
+              OR (r.state IN ('ready','failed','cancelled')
+                  AND r.updated_at_ms >= $3))
+   )
+)
+SELECT file_id,source_size,source_mtime,scanned_at,uncovered_ordinals
+FROM candidates WHERE uncovered_ordinals > 0
+ORDER BY scanned_at DESC,file_id DESC LIMIT $4
+"#;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubtitleSourcePublication {
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    /// Portable sampled source digest (`FragmentIndexSourceObservation.source_sha256`).
+    pub source_attestation: String,
+    pub node_id: String,
+    pub ordinal: i64,
+    pub kind: String,
+    pub format: String,
+    pub verdict: String,
+    pub attempts: i64,
+    pub origin: String,
+    pub sha256: String,
+    pub bytes: i64,
+    pub published_at_ms: i64,
+}
+
+pub(super) fn valid_subtitle_source_publication(p: &SubtitleSourcePublication) -> bool {
+    p.file_id > 0
+        && p.source_size >= 0
+        && p.ordinal >= 0
+        && p.attempts >= 0
+        && !p.node_id.is_empty()
+        && p.node_id.len() <= 128
+        && p.source_attestation.len() == 64
+        && p.source_attestation.bytes().all(|b| b.is_ascii_hexdigit())
+        && matches!(p.kind.as_str(), "pgs" | "text" | "text_styled")
+        && matches!(p.format.as_str(), "sup" | "webvtt" | "matroska")
+        && matches!(
+            p.verdict.as_str(),
+            "kept" | "empty" | "malformed" | "transient"
+        )
+        && matches!(p.origin.as_str(), "extracted" | "hydrated")
+        && (p.verdict != "kept"
+            || (p.bytes > 0
+                && p.sha256.len() == 64
+                && p.sha256.bytes().all(|b| b.is_ascii_hexdigit())))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalysisIndexRepairCandidate {
     pub candidate_id: String,
@@ -1288,6 +1684,72 @@ pub struct ClusterFragmentIndexLocation {
 
 #[async_trait]
 pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
+    /// The Developer diagnostic reads coverage independently of queue state.
+    async fn subtitle_backfill_diagnostics(
+        &self,
+        now_ms: i64,
+    ) -> Result<SubtitleBackfillDiagnostics, StoreError>;
+
+    /// Newest eligible live stamps with at least one uncovered scanner ordinal.
+    /// Start at `(i64::MAX, i64::MAX)`; pass the last row's cursor onward.
+    async fn subtitle_backfill_candidates(
+        &self,
+        after_scanned_at: i64,
+        after_id: i64,
+        now_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<SubtitleBackfillCandidate>, StoreError>;
+
+    /// Atomically join or create a request. `None` means the bounded repair
+    /// budget has been exhausted for this stamp during the preceding day.
+    async fn enqueue_or_promote_subtitle_source(
+        &self,
+        stamp: &SubtitleSourceStamp,
+        priority: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError>;
+
+    async fn claim_analysis_request_foreground(
+        &self,
+        request_id: &str,
+        node_id: &str,
+        now_ms: i64,
+        lease_expires_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError>;
+
+    async fn retire_subtitle_source_ready(
+        &self,
+        stamp: &SubtitleSourceStamp,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn upsert_subtitle_source_publication(
+        &self,
+        publication: &SubtitleSourcePublication,
+    ) -> Result<(), StoreError>;
+
+    async fn list_subtitle_source_publications(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+    ) -> Result<Vec<SubtitleSourcePublication>, StoreError>;
+
+    async fn delete_subtitle_source_publications(
+        &self,
+        file_id: i64,
+        node_id: &str,
+    ) -> Result<(), StoreError>;
+
+    async fn delete_subtitle_source_publication(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        node_id: &str,
+        ordinal: i64,
+        format: &str,
+    ) -> Result<(), StoreError>;
     /// Persist an operator request before the source digest (and therefore the
     /// content-addressed worker key) is known. Concurrent duplicate requests
     /// join the one active request for the same file/component/node.

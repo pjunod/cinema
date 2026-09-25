@@ -61,21 +61,20 @@ use plurx_core::store::{
     analysis_backoff_ms, cluster_fragment_index_generation_key, cluster_fragment_index_key,
     requeue_cluster_fragment_index_after_no_holder, AnalysisHistoryCursor, AnalysisHistoryFilter,
     AnalysisHistoryQuery, ArtworkRepairFence, ClusterFragmentIndexArtifact,
-    ClusterFragmentIndexJob, ClusterFragmentIndexLocation, DvConversionMode, DvConversionState,
-    DvRecoveryGuardState, IdentityRepairOutcome, LibraryStore, MediaStore, NewAnalysisRequest,
-    NewClusterFragmentIndexJob, OutboxEntry, PublicationStore, QueueDvConversionOutcome,
-    ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, SqliteStore, Store,
-    ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS, ANALYSIS_METRIC_PRIORITIES,
-    ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS, DV_CONVERSION_LEDGER_READ_MAX,
-    DV_RECOVERY_GUARD_READ_MAX,
+    ClusterFragmentIndexJob, ClusterFragmentIndexLocation, ClusterFragmentIndexStore,
+    DvConversionMode, DvConversionState, DvRecoveryGuardState, IdentityRepairOutcome, LibraryStore,
+    MediaStore, NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
+    QueueDvConversionOutcome, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome,
+    SqliteStore, Store, ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS,
+    ANALYSIS_METRIC_PRIORITIES, ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS,
+    DV_CONVERSION_LEDGER_READ_MAX, DV_RECOVERY_GUARD_READ_MAX,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
-    ApiKeyStore, ClusterFragmentIndexStore, CoordinationStore, DvConversionStore,
-    FencedPublicationStore, HiqliteAuthStore, MediaSessionStore, OfflinePackageStore,
-    PlaybackTelemetryStore, PretranscodeJobStore, ReadingStore, SettingsStore,
-    TimelineAnnotationStore, TraktStore, TranscodeCacheStore, UserStore, WatchStore,
-    AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    ApiKeyStore, CoordinationStore, DvConversionStore, FencedPublicationStore, HiqliteAuthStore,
+    MediaSessionStore, OfflinePackageStore, PlaybackTelemetryStore, PretranscodeJobStore,
+    ReadingStore, SettingsStore, TimelineAnnotationStore, TraktStore, TranscodeCacheStore,
+    UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::store::{CatalogueReader, MetricsStore};
@@ -30631,4 +30630,611 @@ async fn fragment_index_builders_held_by_names_the_builder_on_every_backend() {
         );
     })
     .await;
+}
+
+fn subtitle_source_stamp(file_id: i64) -> plurx_core::store::SubtitleSourceStamp {
+    plurx_core::store::SubtitleSourceStamp {
+        file_id,
+        source_size: 10_000,
+        source_mtime: 1,
+        pipeline_version: "subtitle-source-v1".to_owned(),
+    }
+}
+
+async fn seed_backfill_file(store: &Arc<dyn Store>, prefix: &str, codecs: &[&str]) -> i64 {
+    let (_, id) = seed_file(store, prefix).await;
+    let file = store
+        .get_file(id)
+        .await
+        .expect("read seeded file")
+        .expect("file");
+    let subtitle_streams = codecs
+        .iter()
+        .enumerate()
+        .map(|(index, codec)| plurx_core::domain::SubtitleStream {
+            index: index as i64,
+            codec: (*codec).to_owned(),
+            ..Default::default()
+        })
+        .collect();
+    store
+        .upsert_file(
+            file.item_id,
+            file.path.to_str().expect("fixture path"),
+            file.size,
+            file.mtime,
+            &ProbeResult {
+                container: Some("mkv".to_owned()),
+                subtitle_streams,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("scan subtitle file");
+    id
+}
+
+fn backfill_publication(
+    file_id: i64,
+    ordinal: i64,
+    origin: &str,
+) -> plurx_core::store::SubtitleSourcePublication {
+    plurx_core::store::SubtitleSourcePublication {
+        file_id,
+        source_size: 10_000,
+        source_mtime: 1,
+        source_attestation: "a".repeat(64),
+        node_id: "node-a".to_owned(),
+        ordinal,
+        kind: "pgs".to_owned(),
+        format: "sup".to_owned(),
+        verdict: "kept".to_owned(),
+        attempts: 1,
+        origin: origin.to_owned(),
+        sha256: "b".repeat(64),
+        bytes: 20,
+        published_at_ms: 10,
+    }
+}
+
+#[tokio::test]
+async fn subtitle_backfill_never_selects_full_coverage() {
+    for_each_backend(|store, backend| async move {
+        let covered = seed_backfill_file(&store, "backfill-covered", &["subrip"]).await;
+        let mut extracted_text = backfill_publication(covered, 0, "extracted");
+        extracted_text.kind = "text".to_owned();
+        extracted_text.format = "webvtt".to_owned();
+        store
+            .upsert_subtitle_source_publication(&extracted_text)
+            .await
+            .expect("coverage");
+        let candidates = store
+            .subtitle_backfill_candidates(i64::MAX, i64::MAX, 13, 8)
+            .await
+            .expect("backfill candidates");
+        assert!(
+            candidates.is_empty(),
+            "{backend}: fully covered file selected: {candidates:?}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_backfill_never_selects_active_or_unexpired_terminal_request() {
+    for_each_backend(|store, backend| async move {
+        let active = seed_backfill_file(&store, "backfill-active", &["ass"]).await;
+        store
+            .enqueue_or_promote_subtitle_source(&subtitle_source_stamp(active), "normal", 10)
+            .await
+            .expect("active enqueue")
+            .expect("request");
+        let terminal = seed_backfill_file(&store, "backfill-terminal", &["mov_text"]).await;
+        let queued = store
+            .enqueue_or_promote_subtitle_source(&subtitle_source_stamp(terminal), "foreground", 10)
+            .await
+            .expect("terminal enqueue")
+            .expect("request");
+        let running = store
+            .claim_analysis_request_foreground(&queued.request_id, "node-a", 11, 1000)
+            .await
+            .expect("claim")
+            .expect("running");
+        assert!(store
+            .complete_analysis_request(&running, "stamp", 12)
+            .await
+            .expect("complete"));
+        let candidates = store
+            .subtitle_backfill_candidates(i64::MAX, i64::MAX, 13, 8)
+            .await
+            .expect("backfill candidates");
+        assert!(
+            candidates.is_empty(),
+            "{backend}: active and fresh terminal excluded: {candidates:?}"
+        );
+        let expired = store
+            .subtitle_backfill_candidates(i64::MAX, i64::MAX, 120_013, 8)
+            .await
+            .expect("expired terminal");
+        assert_eq!(
+            expired.iter().map(|row| row.file_id).collect::<Vec<_>>(),
+            vec![terminal],
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_backfill_pgs_only_coverage_still_selects_uncovered_text_ordinal() {
+    for_each_backend(|store, backend| async move {
+        let id =
+            seed_backfill_file(&store, "backfill-partial", &["hdmv_pgs_subtitle", "subrip"]).await;
+        store
+            .upsert_subtitle_source_publication(&backfill_publication(id, 0, "extracted"))
+            .await
+            .expect("PGS publication");
+        let mut hydrated_text = backfill_publication(id, 1, "hydrated");
+        hydrated_text.kind = "text".to_owned();
+        hydrated_text.format = "webvtt".to_owned();
+        store
+            .upsert_subtitle_source_publication(&hydrated_text)
+            .await
+            .expect("hydrated text publication");
+        let candidates = store
+            .subtitle_backfill_candidates(i64::MAX, i64::MAX, 10, 8)
+            .await
+            .expect("backfill candidates");
+        assert_eq!(candidates.len(), 1, "{backend}");
+        assert_eq!(candidates[0].file_id, id, "{backend}");
+        assert_eq!(candidates[0].uncovered_ordinals, 1, "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_backfill_selects_newest_first_with_bounded_page() {
+    for_each_backend(|store, backend| async move {
+        let old = seed_backfill_file(&store, "backfill-old", &["subrip"]).await;
+        let middle = seed_backfill_file(&store, "backfill-middle", &["ass"]).await;
+        let newest = seed_backfill_file(&store, "backfill-newest", &["hdmv_pgs_subtitle"]).await;
+        let first = store
+            .subtitle_backfill_candidates(i64::MAX, i64::MAX, 10, 2)
+            .await
+            .expect("first page");
+        assert_eq!(
+            first.iter().map(|row| row.file_id).collect::<Vec<_>>(),
+            vec![newest, middle],
+            "{backend}"
+        );
+        let last = first.last().expect("page row");
+        let second = store
+            .subtitle_backfill_candidates(last.scanned_at, last.file_id, 10, 2)
+            .await
+            .expect("second page");
+        assert_eq!(
+            second.iter().map(|row| row.file_id).collect::<Vec<_>>(),
+            vec![old],
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_backfill_diagnostics_show_real_lease_holder_and_uncovered_bytes_even_while_request_active(
+) {
+    for_each_backend(|store, backend| async move {
+        let covered = seed_backfill_file(&store, "backfill-diagnostic-covered", &["subrip"]).await;
+        let mut publication = backfill_publication(covered, 0, "extracted");
+        publication.kind = "text".to_owned();
+        publication.format = "webvtt".to_owned();
+        store
+            .upsert_subtitle_source_publication(&publication)
+            .await
+            .expect("cover first file");
+        let pending = seed_backfill_file(&store, "backfill-diagnostic-pending", &["ass"]).await;
+        store
+            .enqueue_or_promote_subtitle_source(&subtitle_source_stamp(pending), "normal", 100)
+            .await
+            .expect("active backfill")
+            .expect("request");
+        let lease = store
+            .acquire_lease("media:subtitle-source:backfill", "node-a", 100, 200)
+            .await
+            .expect("backfill lease");
+        assert!(matches!(lease, LeaseClaim::Acquired(_)), "{backend}");
+        let active = store
+            .subtitle_backfill_diagnostics(150)
+            .await
+            .expect("diagnostics");
+        assert_eq!(active.lease_holder.as_deref(), Some("node-a"), "{backend}");
+        assert_eq!(active.remaining_files, 1, "{backend}");
+        assert_eq!(active.remaining_bytes, 10_000, "{backend}");
+        let expired = store
+            .subtitle_backfill_diagnostics(200)
+            .await
+            .expect("expired lease");
+        assert_eq!(expired.lease_holder, None, "{backend}");
+        assert_eq!(
+            expired.remaining_files, 1,
+            "{backend}: active request must not hide remaining work"
+        );
+        let mut complete = backfill_publication(pending, 0, "extracted");
+        complete.kind = "text_styled".to_owned();
+        complete.format = "webvtt".to_owned();
+        store
+            .upsert_subtitle_source_publication(&complete)
+            .await
+            .expect("cover pending file");
+        let done = store
+            .subtitle_backfill_diagnostics(201)
+            .await
+            .expect("done diagnostics");
+        assert_eq!(
+            (done.remaining_files, done.remaining_bytes),
+            (0, 0),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_three_simultaneous_enqueues_plus_one_backfill_row_yield_one_active_row() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-m2-concurrent").await;
+        let stamp = subtitle_source_stamp(file_id);
+        let backfill = store
+            .enqueue_or_promote_subtitle_source(&stamp, "normal", 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: backfill: {error}"))
+            .expect("backfill row");
+        let mut tasks = Vec::new();
+        for _ in 0..3 {
+            let store = Arc::clone(&store);
+            let stamp = stamp.clone();
+            tasks.push(tokio::spawn(async move {
+                store
+                    .enqueue_or_promote_subtitle_source(&stamp, "foreground", 11)
+                    .await
+            }));
+        }
+        for task in tasks {
+            let joined = task
+                .await
+                .expect("join task")
+                .expect("enqueue")
+                .expect("active request");
+            assert_eq!(joined.request_id, backfill.request_id, "{backend}");
+            assert_eq!(
+                joined.requested_generation,
+                stamp.generation(0),
+                "{backend}"
+            );
+        }
+        let promoted = store
+            .analysis_request(&backfill.request_id)
+            .await
+            .expect("read request")
+            .expect("request retained");
+        assert_eq!(promoted.priority, "foreground", "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_foreground_join_promotes_queued_normal_in_place_and_leaves_running_untouched(
+) {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-m2-promotion").await;
+        let stamp = subtitle_source_stamp(file_id);
+        let queued = store
+            .enqueue_or_promote_subtitle_source(&stamp, "normal", 10)
+            .await
+            .expect("enqueue")
+            .expect("queued");
+        let promoted = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 11)
+            .await
+            .expect("promote")
+            .expect("promoted");
+        assert_eq!(promoted.request_id, queued.request_id, "{backend}");
+        assert_eq!(promoted.priority, "foreground", "{backend}");
+        let running = store
+            .claim_analysis_request_foreground(&queued.request_id, "node-a", 12, 1000)
+            .await
+            .expect("self claim")
+            .expect("running");
+        let joined = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 13)
+            .await
+            .expect("join running")
+            .expect("same running");
+        assert_eq!(joined.request_id, running.request_id, "{backend}");
+        assert_eq!(joined.state, "running", "{backend}");
+        assert_eq!(joined.fence, running.fence, "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_promoted_row_is_claimed_before_forced_and_normal() {
+    for_each_backend(|store, backend| async move {
+        let (_, subtitle_file) = seed_file(&store, "subtitle-m2-order-subtitle").await;
+        let (_, forced_file) = seed_file(&store, "subtitle-m2-order-forced").await;
+        let (_, normal_file) = seed_file(&store, "subtitle-m2-order-normal").await;
+        for (file_id, priority, force) in [
+            (normal_file, "normal", false),
+            (forced_file, "forced", true),
+        ] {
+            store
+                .enqueue_analysis_request(&NewAnalysisRequest {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    component: "fragment_index".to_owned(),
+                    pipeline_version: "m2-order-v1".to_owned(),
+                    video_identity: String::new(),
+                    requested_generation: uuid::Uuid::new_v4().to_string(),
+                    priority: priority.to_owned(),
+                    trigger: "admin".to_owned(),
+                    force_rebuild: force,
+                    target_node_id: "analysis-node".to_owned(),
+                    not_before_ms: 0,
+                    created_at_ms: 0,
+                })
+                .await
+                .expect("enqueue comparison request");
+        }
+        let stamp = subtitle_source_stamp(subtitle_file);
+        store
+            .enqueue_or_promote_subtitle_source(&stamp, "normal", 1)
+            .await
+            .expect("backfill");
+        store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 2)
+            .await
+            .expect("promote");
+        let first = store
+            .claim_analysis_request("analysis-node", 3, 1000)
+            .await
+            .expect("claim first")
+            .expect("first");
+        assert_eq!(first.component, "subtitle_source", "{backend}");
+        let second = store
+            .claim_analysis_request("analysis-node", 4, 1001)
+            .await
+            .expect("claim second")
+            .expect("second");
+        assert_eq!(second.priority, "forced", "{backend}");
+        let third = store
+            .claim_analysis_request("analysis-node", 5, 1002)
+            .await
+            .expect("claim third")
+            .expect("third");
+        assert_eq!(third.priority, "normal", "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_force_rebuild_one_is_refused() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-m2-force-rebuild").await;
+        let stamp = subtitle_source_stamp(file_id);
+        let rejected = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: stamp.generation(0),
+                file_id,
+                source_size: stamp.source_size,
+                source_mtime: stamp.source_mtime,
+                component: "subtitle_source".to_owned(),
+                pipeline_version: stamp.pipeline_version.clone(),
+                video_identity: String::new(),
+                requested_generation: stamp.generation(0),
+                priority: "forced".to_owned(),
+                trigger: "playback".to_owned(),
+                force_rebuild: true,
+                target_node_id: String::new(),
+                not_before_ms: 0,
+                created_at_ms: 0,
+            })
+            .await;
+        assert!(
+            rejected.is_err(),
+            "{backend}: force rebuild must be refused"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_retiring_ready_reenqueues_new_generation_and_fourth_repair_in_day_is_refused(
+) {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-m2-repair").await;
+        let stamp = subtitle_source_stamp(file_id);
+        for epoch in 0..3 {
+            let queued = store
+                .enqueue_or_promote_subtitle_source(&stamp, "foreground", 10 + epoch * 10)
+                .await
+                .expect("enqueue")
+                .expect("queued");
+            assert_eq!(
+                queued.requested_generation,
+                stamp.generation(epoch),
+                "{backend}"
+            );
+            let running = store
+                .claim_analysis_request_foreground(
+                    &queued.request_id,
+                    "node-a",
+                    11 + epoch * 10,
+                    1000 + epoch * 10,
+                )
+                .await
+                .expect("self claim")
+                .expect("running");
+            assert!(
+                store
+                    .complete_analysis_request(&running, "stamp", 12 + epoch * 10)
+                    .await
+                    .expect("complete"),
+                "{backend}"
+            );
+            assert!(
+                store
+                    .retire_subtitle_source_ready(&stamp, 13 + epoch * 10)
+                    .await
+                    .expect("retire"),
+                "{backend}"
+            );
+        }
+        let exhausted = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 41)
+            .await
+            .expect("bounded enqueue");
+        assert!(
+            exhausted.is_none(),
+            "{backend}: fourth repair must be refused"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_publication_crud_is_per_stamp_holder_and_representation() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-m2-publication").await;
+        let row = plurx_core::store::SubtitleSourcePublication {
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_attestation: "a".repeat(64),
+            node_id: "node-a".to_owned(),
+            ordinal: 1,
+            kind: "text".to_owned(),
+            format: "webvtt".to_owned(),
+            verdict: "kept".to_owned(),
+            attempts: 1,
+            origin: "extracted".to_owned(),
+            sha256: "b".repeat(64),
+            bytes: 20,
+            published_at_ms: 10,
+        };
+        store
+            .upsert_subtitle_source_publication(&row)
+            .await
+            .expect("publish");
+        let mut styled = row.clone();
+        styled.format = "matroska".to_owned();
+        styled.kind = "text_styled".to_owned();
+        store
+            .upsert_subtitle_source_publication(&styled)
+            .await
+            .expect("publish styled");
+        let rows = store
+            .list_subtitle_source_publications(file_id, 10_000, 1)
+            .await
+            .expect("list");
+        assert_eq!(rows.len(), 2, "{backend}: representation rows merge");
+        store
+            .delete_subtitle_source_publication(file_id, 10_000, 1, "node-a", 1, "webvtt")
+            .await
+            .expect("delete exact row");
+        let rows = store
+            .list_subtitle_source_publications(file_id, 10_000, 1)
+            .await
+            .expect("list again");
+        assert_eq!(rows, vec![styled], "{backend}: sibling survives");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn replicated_v46_migration_from_v45_preserves_live_analysis_request_rows() {
+    let directory = tempfile::tempdir().expect("v45 migration fixture");
+    let path = directory.path().join("v45.db");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&path).expect("open fixture"));
+    let (_, file_id) = seed_file(&store, "subtitle-m2-migration").await;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let live = store
+        .enqueue_analysis_request(&NewAnalysisRequest {
+            request_id: request_id.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".to_owned(),
+            pipeline_version: "v45-live".to_owned(),
+            video_identity: String::new(),
+            requested_generation: "v45-generation".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "admin".to_owned(),
+            force_rebuild: false,
+            target_node_id: "analysis-node".to_owned(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        })
+        .await
+        .expect("seed v45 live request");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).expect("open downgrade fixture");
+    let current_table: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='analysis_requests'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("current request DDL");
+    let attempts_table: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='analysis_attempts'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("current attempt DDL");
+    let v45_table = current_table
+        .replace(
+            "'fragment_index','skip_markers','subtitle_source'",
+            "'fragment_index','skip_markers'",
+        )
+        .replace("'normal','forced','foreground'", "'normal','forced'")
+        .replace("'admin','background','playback'", "'admin','background'");
+    assert_ne!(
+        v45_table, current_table,
+        "fixture must restore v45 CHECK constraints"
+    );
+    conn.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER IF EXISTS subtitle_source_publications_delete_source; DROP TRIGGER IF EXISTS subtitle_source_publications_supersede_source; DROP TABLE subtitle_source_publications; DROP TRIGGER IF EXISTS analysis_requests_cancel_source; DROP TRIGGER IF EXISTS analysis_requests_supersede_source; DROP TRIGGER IF EXISTS analysis_requests_bound_terminal_history; DROP TRIGGER IF EXISTS analysis_requests_lifecycle_counters; DROP TABLE analysis_attempts; ALTER TABLE analysis_requests RENAME TO analysis_requests_v46_fixture;")
+        .expect("remove v46-only shape");
+    conn.execute_batch(&v45_table)
+        .expect("restore v45 request table");
+    conn.execute_batch("INSERT INTO analysis_requests SELECT * FROM analysis_requests_v46_fixture; DROP TABLE analysis_requests_v46_fixture;")
+        .expect("preserve v45 live row");
+    conn.execute_batch(&attempts_table)
+        .expect("restore v45 attempt table");
+    conn.pragma_update(
+        None,
+        "user_version",
+        plurx_core::store::SQLITE_SCHEMA_VERSION - 1,
+    )
+    .expect("mark true v45 predecessor");
+    drop(conn);
+
+    let migrated = SqliteStore::open(&path).expect("migrate v45 to v46");
+    let preserved = migrated
+        .analysis_request(&request_id)
+        .await
+        .expect("read live row")
+        .expect("live row survived");
+    assert_eq!(preserved, live);
+    let stamp = subtitle_source_stamp(file_id);
+    let fresh = migrated
+        .enqueue_or_promote_subtitle_source(&stamp, "foreground", 20)
+        .await
+        .expect("v46 accepts subtitle source")
+        .expect("new request");
+    assert_eq!(fresh.component, "subtitle_source");
 }

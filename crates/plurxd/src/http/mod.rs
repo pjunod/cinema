@@ -442,7 +442,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/cluster/join/finalize"
         | "/api/v1/cluster/learner/join/redeem"
         | "/api/v1/cluster/learner/join/finalize"
-        | "/internal/media/fragment-index/{cache_key}" => 7,
+        | "/internal/media/fragment-index/{cache_key}"
+        | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         internal_activity::PATH
         | cluster_operations::INTERNAL_PATH
         | internal_auth_revocation::PATH
@@ -1819,6 +1820,10 @@ pub fn router(state: AppState) -> Router {
             get(internal_media::fragment_index),
         )
         .route(
+            "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}",
+            get(internal_media::subtitle_source),
+        )
+        .route(
             crate::media_sessions::START_PATH,
             post(internal_media_sessions::start).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
@@ -2063,7 +2068,17 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         && path
             .strip_prefix(crate::fragment_index_cluster::PEER_PATH_PREFIX)
             .is_some_and(|cache_key| !cache_key.is_empty() && !cache_key.contains('/'));
+    let subtitle_source_read = method == Method::GET
+        && path
+            .strip_prefix("/internal/media/subtitle-source/")
+            .is_some_and(|suffix| {
+                let segments = suffix.split('/').collect::<Vec<_>>();
+                matches!(segments.as_slice(), [file_id, ordinal, "sup" | "webvtt" | "matroska"]
+                    if file_id.parse::<i64>().is_ok_and(|value| value > 0)
+                    && ordinal.parse::<i64>().is_ok_and(|value| value >= 0))
+            });
     if fragment_index_read
+        || subtitle_source_read
         || (method == Method::GET && path == crate::media_pool::SNAPSHOT_PATH)
         || (method == Method::POST
             && matches!(
@@ -3750,6 +3765,7 @@ mod tests {
                 Method::GET,
                 "/internal/media/fragment-index/abc123def456abc123def456abc123de",
             ),
+            (Method::GET, "/internal/media/subtitle-source/7/2/webvtt"),
         ] {
             assert!(learner_route_eligible(&method, path), "{method} {path}");
         }
@@ -3764,6 +3780,19 @@ mod tests {
         assert!(!learner_route_eligible(
             &Method::POST,
             "/internal/media/fragment-index/abc123def456abc123def456abc123de"
+        ));
+        for path in [
+            "/internal/media/subtitle-source/7/2",
+            "/internal/media/subtitle-source/7/2/raw",
+            "/internal/media/subtitle-source/7/2/sup/extra",
+            "/internal/media/subtitle-source/0/2/sup",
+            "/internal/media/subtitle-source/7/-1/sup",
+        ] {
+            assert!(!learner_route_eligible(&Method::GET, path), "{path}");
+        }
+        assert!(!learner_route_eligible(
+            &Method::POST,
+            "/internal/media/subtitle-source/7/2/sup"
         ));
     }
 

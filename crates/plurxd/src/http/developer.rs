@@ -166,6 +166,18 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         true,
     );
+    let cluster_sources_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::SUBTITLE_CLUSTER_SOURCES)
+            .map(String::as_str),
+        false,
+    );
+    let subtitle_backfill_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::SUBTITLE_BACKFILL)
+            .map(String::as_str),
+        false,
+    );
 
     // Absent is on, unlike every other switch here, because a Profile 7 title
     // reaching a Dolby Vision client as HDR10 is what the conversion exists to
@@ -221,6 +233,13 @@ pub(crate) async fn readiness(
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
             subtitle_stored_sources(stored_sources_on, &state.runtime_cache_dir),
+            subtitle_cluster_sources(
+                &state,
+                cluster_sources_on,
+                state.jobs.analysis_queue_enabled().await,
+            )
+            .await,
+            subtitle_backfill(&state, subtitle_backfill_on).await,
             subtitle_not_ready_503(plurx_core::store::stored_switch(
                 settings
                     .get(plurx_core::store::keys::SUBTITLE_NOT_READY_503)
@@ -232,6 +251,160 @@ pub(crate) async fn readiness(
             source_probe_comparison().await,
         ],
     }))
+}
+
+/// Readiness is a report about this node and the peers it can currently see.
+/// Saving either switch goes through Settings without consulting these rows.
+async fn subtitle_cluster_sources(
+    state: &AppState,
+    enabled: bool,
+    queue_enabled: bool,
+) -> DeveloperEnableItem {
+    use crate::subtitle_ride_along::{free_space, local_filesystem};
+
+    let root = crate::subtitle_source::store_root(&state.runtime_cache_dir);
+    let checked = if root.is_dir() {
+        root
+    } else {
+        state.runtime_cache_dir.clone()
+    };
+    let peers = state.membership.media_peers().await;
+    let (peer_status, peer_evidence) = match peers {
+        Ok(peers) if peers.iter().any(|peer| peer.reachable) => (
+            RequirementStatus::Met,
+            format!(
+                "{} reachable media peer(s) currently advertise capacity.",
+                peers.iter().filter(|peer| peer.reachable).count()
+            ),
+        ),
+        Ok(peers) => (
+            RequirementStatus::Unmet,
+            format!(
+                "{} media peer(s) are known, but none currently advertises reachable capacity.",
+                peers.len()
+            ),
+        ),
+        Err(error) => (
+            RequirementStatus::Unobservable,
+            format!("The media peer directory could not be read: {error}"),
+        ),
+    };
+    let (filesystem_status, filesystem_evidence) = match local_filesystem(&checked) {
+        Ok(kind) => (
+            RequirementStatus::Met,
+            format!("{} is on a local filesystem ({kind}).", checked.display()),
+        ),
+        Err(error) => (
+            RequirementStatus::Unmet,
+            format!("{}: {error}", checked.display()),
+        ),
+    };
+    let (space_status, space_evidence) = match free_space(&checked) {
+        Ok(space) => (
+            RequirementStatus::Met,
+            format!("{}: {space}.", checked.display()),
+        ),
+        Err(error) => (
+            RequirementStatus::Unmet,
+            format!("{}: {error}", checked.display()),
+        ),
+    };
+    DeveloperEnableItem {
+        id: "subtitle_cluster_sources",
+        title: "Share stored subtitle tracks across the cluster",
+        enabled: Some(enabled),
+        setting: Some("subtitle_cluster_sources"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "analysis_queue",
+                title: "Cluster analysis queue is enabled",
+                status: if queue_enabled { RequirementStatus::Met } else { RequirementStatus::Unmet },
+                evidence: format!("The cluster analysis scheduler currently reports {}.", if queue_enabled { "available" } else { "unavailable" }),
+            },
+            DeveloperRequirement {
+                id: "schema_v46",
+                title: "Every voter runs schema 46",
+                status: RequirementStatus::Unobservable,
+                evidence: "This binary supports schema 46. The daemon has no per-voter schema-version reading; inspect the committed voter fleet before enabling.".to_owned(),
+            },
+            DeveloperRequirement { id: "reachable_peer", title: "A reachable media peer", status: peer_status, evidence: peer_evidence },
+            DeveloperRequirement { id: "local_cache", title: "A local subtitle store", status: filesystem_status, evidence: filesystem_evidence },
+            DeveloperRequirement { id: "free_space", title: "Space for stored tracks", status: space_status, evidence: space_evidence },
+        ],
+    }
+}
+
+async fn subtitle_backfill(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+    let observed = state
+        .subtitle_backfill_status()
+        .await
+        .map_err(|error| error.to_string());
+    subtitle_backfill_item(enabled, observed)
+}
+
+fn subtitle_backfill_item(
+    enabled: bool,
+    observed: Result<crate::state::SubtitleBackfillStatus, String>,
+) -> DeveloperEnableItem {
+    let (lease, enqueued, remaining, bytes) = match observed {
+        Ok(status) => {
+            let holder = status
+                .lease_holder
+                .as_deref()
+                .unwrap_or("none between passes");
+            (
+                DeveloperRequirement {
+                    id: "backfill_lease",
+                    title: "Exclusive backfill lease",
+                    status: if status.lease_holder.is_some() {
+                        RequirementStatus::Met
+                    } else {
+                        RequirementStatus::Unobservable
+                    },
+                    evidence: format!("Current media:subtitle-source:backfill lease holder: {holder}."),
+                },
+                DeveloperRequirement {
+                    id: "backfill_enqueued",
+                    title: "Files enqueued by this process",
+                    status: RequirementStatus::Met,
+                    evidence: format!("{} files enqueued since this process started.", status.enqueued_process),
+                },
+                DeveloperRequirement {
+                    id: "backfill_remaining",
+                    title: "Eligible files remaining",
+                    status: RequirementStatus::Met,
+                    evidence: format!("{} files still have an eligible subtitle ordinal without settling coverage.", status.remaining_files),
+                },
+                DeveloperRequirement {
+                    id: "backfill_bytes",
+                    title: "Estimated bytes remaining",
+                    status: RequirementStatus::Met,
+                    evidence: format!("{} source bytes across the eligible files; this is an estimate of source reading, not output size.", status.remaining_bytes),
+                },
+            )
+        }
+        Err(error) => {
+            let unavailable = |id: &'static str, title: &'static str| DeveloperRequirement {
+                id,
+                title,
+                status: RequirementStatus::Unobservable,
+                evidence: format!("The backfill diagnostics read failed: {error}."),
+            };
+            (
+                unavailable("backfill_lease", "Exclusive backfill lease"),
+                unavailable("backfill_enqueued", "Files enqueued by this process"),
+                unavailable("backfill_remaining", "Eligible files remaining"),
+                unavailable("backfill_bytes", "Estimated bytes remaining"),
+            )
+        }
+    };
+    DeveloperEnableItem {
+        id: "subtitle_backfill",
+        title: "Backfill uncovered subtitle tracks while idle",
+        enabled: Some(enabled),
+        setting: Some("subtitle_backfill"),
+        requirements: vec![lease, enqueued, remaining, bytes],
+    }
 }
 
 fn cluster_backup(state: &AppState, destination: Option<&String>) -> DeveloperEnableItem {
@@ -719,15 +892,15 @@ fn subtitle_stored_sources(enabled: bool, runtime_cache: &std::path::Path) -> De
         ),
         SelfTest::Failed { reason } => (
             RequirementStatus::Unmet,
-            format!("Failed, so the index pass keeps no PGS tracks on this process: {reason}"),
+            format!("Failed; inspect this ffmpeg build before relying on stored tracks: {reason}"),
         ),
         SelfTest::Running => (
             RequirementStatus::Unobservable,
-            "Running now; the index pass keeps no PGS tracks until it passes.".to_owned(),
+            "Running now; its result is advisory and does not change the saved switch.".to_owned(),
         ),
         SelfTest::NotRun => (
             RequirementStatus::Unobservable,
-            "Has not run in this process; the index pass keeps no PGS tracks until it passes."
+            "Has not run in this process; verify the configured ffmpeg build before relying on stored tracks."
                 .to_owned(),
         ),
     };
@@ -744,11 +917,7 @@ fn subtitle_stored_sources(enabled: bool, runtime_cache: &std::path::Path) -> De
         ),
         Err(reason) => (
             RequirementStatus::Unmet,
-            format!(
-                "{}: {reason}. The index pass keeps no PGS tracks here: a blocked stage \
-                 write would stall the demuxer the index shares.",
-                checked.display()
-            ),
+            format!("{}: {reason}. A blocked stage write may stall the shared index demuxer; the setting remains available.", checked.display()),
         ),
     };
     let (space_status, space_evidence) = match ride_along::free_space(&checked) {
@@ -758,11 +927,7 @@ fn subtitle_stored_sources(enabled: bool, runtime_cache: &std::path::Path) -> De
         ),
         Err(reason) => (
             RequirementStatus::Unmet,
-            format!(
-                "{}: {reason}. The index pass keeps no PGS tracks until there is room: stage \
-                 writes share the disk with the index blob the pass is about to publish.",
-                checked.display()
-            ),
+            format!("{}: {reason}. Stage writes share capacity with the index blob; the setting remains available.", checked.display()),
         ),
     };
     let failed = ride_along::failed_ride_count();
@@ -1774,6 +1939,80 @@ fn channel_subjects(enabled: bool) -> DeveloperEnableItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn developer_item_renders_each_requirement_from_real_probes() {
+        let item = subtitle_backfill_item(
+            true,
+            Ok(crate::state::SubtitleBackfillStatus {
+                lease_holder: Some("node-b".to_owned()),
+                enqueued_process: 7,
+                remaining_files: 12,
+                remaining_bytes: 987_654,
+            }),
+        );
+        assert_eq!(item.enabled, Some(true));
+        assert_eq!(item.setting, Some("subtitle_backfill"));
+        assert_eq!(
+            item.requirements
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [
+                "backfill_lease",
+                "backfill_enqueued",
+                "backfill_remaining",
+                "backfill_bytes"
+            ]
+        );
+        for (row, expected) in
+            item.requirements
+                .iter()
+                .zip(["node-b", "7 files", "12 files", "987654 source bytes"])
+        {
+            assert!(
+                row.evidence.contains(expected),
+                "{}: {}",
+                row.id,
+                row.evidence
+            );
+            assert_eq!(row.status, RequirementStatus::Met);
+        }
+
+        let between_passes = subtitle_backfill_item(
+            true,
+            Ok(crate::state::SubtitleBackfillStatus {
+                lease_holder: None,
+                enqueued_process: 0,
+                remaining_files: 0,
+                remaining_bytes: 0,
+            }),
+        );
+        assert_eq!(
+            between_passes.enabled,
+            Some(true),
+            "a missing lease never changes the saved switch"
+        );
+        assert_eq!(
+            between_passes.requirements[0].status,
+            RequirementStatus::Unobservable
+        );
+        assert!(between_passes.requirements[0]
+            .evidence
+            .contains("none between passes"));
+
+        let unavailable = subtitle_backfill_item(true, Err("store unavailable".to_owned()));
+        assert_eq!(
+            unavailable.enabled,
+            Some(true),
+            "an unavailable probe never changes the saved switch"
+        );
+        assert!(unavailable
+            .requirements
+            .iter()
+            .all(|row| row.status == RequirementStatus::Unobservable
+                && row.evidence.contains("store unavailable")));
+    }
 
     #[test]
     fn android_display_mode_readiness_is_advisory_and_observation_based() {
