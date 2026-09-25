@@ -3,7 +3,7 @@ enforce_after = "e8a910f"
 
 [[fixes]]
 id = "web.live-tv-picture-evidence"
-commits = ["3e970ec42"]
+commits = ["148829768"]
 source = "crates/plurxd/src/web/live-tv.js"
 source_anchor = "function normalizeLiveTvPictureFacts("
 test = "tests/web/live-tv.test.js"
@@ -11,7 +11,7 @@ test_anchor = "picture facts keep broadcast, planned frame and browser display d
 
 [[fixes]]
 id = "apple.live-tv-picture-evidence"
-commits = ["3e970ec42"]
+commits = ["148829768"]
 source = "clients/apple/Sources/LiveTv.swift"
 source_anchor = "struct LiveTvPictureInfo"
 test = "clients/apple/Tests/LiveTvTests.swift"
@@ -19,7 +19,7 @@ test_anchor = "testPictureInfoKeepsSourcePlanAndPresentationSeparate"
 
 [[fixes]]
 id = "android.live-tv-picture-evidence"
-commits = ["3e970ec42"]
+commits = ["148829768"]
 source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
 source_anchor = "internal fun liveTvPictureInfo("
 test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"

@@ -1,6 +1,6 @@
 # Playback information dimensions — implementation status
 
-**Status:** building · **Started:** 2026-09-25 · **Base:** `415eb047f3b66afd1bf21bd3ea829766080c0e27`
+**Status:** building · **Started:** 2026-09-25 · **Current base:** `60f3803d1` (refreshed from initial `415eb047f3`)
 
 This page tracks the playback information repair in one isolated clone. The
 implementation follows the supplied dimensions and aspect handoff. The
@@ -13,10 +13,10 @@ workflow instruction.
 | Step | State | Evidence |
 |---|---|---|
 | Fresh base and toolchains | Done | Fresh Forgejo clone at the base above; Node 26.8.1, Python 3.14.7, Xcode 27.0, JDK 21.0.11. |
-| Shared web, Apple and Android field contract | Implemented; unverified | `3e970ec42`; one label and field order across clients and modes. |
-| Web delivery facts and presentation | Implemented; unverified | `3e970ec42`; source and planned frames, separate browser display, reason text and serial guard. |
-| Apple delivery facts and presentation | Implemented; unverified | `3e970ec42`; optional DTO decoding, planned output and presentation size. |
-| Android delivery facts and presentation | Implemented; unverified | `3e970ec42`; eligible Media3 frame sample, approximate pixel aspect and planned fallback. |
+| Shared web, Apple and Android field contract | Implemented; unverified | `148829768`; one label and field order across clients and modes. |
+| Web delivery facts and presentation | Implemented; unverified | `148829768`; source and planned frames, separate browser display, reason text and serial guard. |
+| Apple delivery facts and presentation | Implemented; unverified | `148829768`; optional DTO decoding, planned output and presentation size. |
+| Android delivery facts and presentation | Implemented; unverified | `148829768`; eligible Media3 frame sample, approximate pixel aspect and planned fallback. |
 | Adversarial implementation review | Pending | Run once the integrated PR is ready for `main`; address findings before fast lane. |
 | Fast lane and affected builds | Pending | Run after review on the exact candidate commit. |
 | PR merge | Pending | Merge only after the required gate and qualification receipt. |
@@ -30,7 +30,8 @@ verify a real broadcast's output dimensions or aspect.
 
 The tracked pre-commit hook was installed in the isolated clone after its
 initial absence. The first commit was amended through it; catalog lint, Rust
-formatting, Clippy and embedded JavaScript syntax passed on `3e970ec42`.
+formatting, Clippy and embedded JavaScript syntax passed before rebasing
+`3e970ec42` onto `60f3803d1`; the exact rebased tree awaits fast lane checks.
 Focused regressions and native builds remain pending under the requested
 post-review test timing.
 
