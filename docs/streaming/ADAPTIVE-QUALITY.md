@@ -173,13 +173,16 @@ it unit-tests without a video element:
   from the session status endpoint (read at most every 5 s): on a JIT server the download estimate
   measures `min(link, encode)`, and a producer below 1× with shrinking
   runway is actionable *before* the client ever stalls.
-- **Severe pressure** (an active supply stall, ≤1.5 s of runway, three
-  supply stalls in 60 s, or an estimate below 0.7× the current rung) selects
-  the highest rung whose `total_kbps` is ≤0.95× the estimate **in one move**.
-  During severe pressure, the stable hls.js EWMA is bounded by the most recent
-  completed-fragment throughput when that sample is at most 15 s old. The EWMA
-  deliberately remembers the pre-cliff link; the fresh bound prevents that
-  memory from admitting an intermediate rung and forcing a second restart.
+- **Severe pressure** requires a fresh transfer estimate below 0.7× the
+  current rung. A stall or ≤1.5 s of runway supplies urgency, but never
+  invents a bandwidth cause. The controller selects the highest rung whose
+  advertised `peak_kbps` fits within 0.75× the lower of the fresh transfer
+  and hls.js EWMA estimates **in one move**. The reserve covers a partial
+  fragment progress window that straddles a cliff; using nominal bitrate
+  admitted 480p on a measured 1.1 Mb/s link and forced a second restart.
+  The fresh transfer sample expires after 15 s. The stable EWMA deliberately
+  remembers the pre-cliff link, so the fresh bound prevents that memory from
+  admitting an intermediate rung.
   If no rung fits, the lowest rung is the only actionable choice. It never
   walks one rung at a time through a
   bandwidth cliff, which leaves the player above the sustainable rate for

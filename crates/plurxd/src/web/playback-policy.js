@@ -18,6 +18,10 @@
     decisionMs: 1_000,
     safeEstimateFactor: 0.95,
     severeEstimateRatio: 0.7,
+    // An in-flight fragment's first progress window can span a link change.
+    // Leave room for that mixed sample and the encoded segment's peak, not
+    // merely its nominal bitrate, when choosing a cliff replacement.
+    severePeakSafetyFactor: 0.75,
     mildHeadroom: 1.3,
     mildSamples: 2,
     cooldownMs: 20_000,
@@ -416,7 +420,9 @@
           ? Math.min(estimate, freshRecentEstimate)
           : freshRecentEstimate)
         : estimate;
-      const safe = highestSafeRung(available, severeEstimate, defaults);
+      const peakCeiling = severeEstimate * defaults.severePeakSafetyFactor;
+      const safe = available.slice().reverse().find(rung =>
+        (rung.peak_kbps || rung.total_kbps) <= peakCeiling) || available[0];
       const safeIndex = safe
         ? closestRungIndex(available, safe.height)
         : currentIndex - 1;

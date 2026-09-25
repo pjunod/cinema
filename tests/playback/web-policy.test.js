@@ -1672,7 +1672,7 @@ test("a bandwidth cliff drops from 1080p to the sustainable rung in one move", (
   assert.equal(decision.emergency, true);
 });
 
-test("the two measured A-04 cliffs select encoded low rungs without changing thresholds", () => {
+test("the two measured A-04 cliffs select encoded low rungs with peak headroom", () => {
   const ladder = [
     ...serverLadder,
     { height: 240, total_kbps: 660, peak_kbps: 910 },
@@ -1687,7 +1687,7 @@ test("the two measured A-04 cliffs select encoded low rungs without changing thr
     runwaySeconds: 5,
     nowMs: 10_000,
   });
-  assert.equal(first.height, 240);
+  assert.equal(first.height, 144);
   assert.equal(first.reason, "bandwidth cliff");
   const second = policy.decideRung({
     ladder,
@@ -1700,6 +1700,17 @@ test("the two measured A-04 cliffs select encoded low rungs without changing thr
   });
   assert.equal(second.height, 144);
   assert.equal(second.reason, "bandwidth cliff");
+});
+
+test("a mixed progress sample cannot select a rung whose peak exceeds the cliff budget", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const decision = policy.decideRung({ladder,currentHeight:720,
+    estimateKbps:8061,recentEstimateKbps:2202,
+    recentEstimateAtMs:9000,runwaySeconds:11,nowMs:10000});
+  assert.equal(decision.height,240);
+  assert.equal(decision.reason,"bandwidth cliff");
 });
 
 test("an active supply stall without a completed slow transfer retains quality", () => {

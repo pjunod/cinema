@@ -23,6 +23,7 @@
     "decisionMs": 1000,
     "safeEstimateFactor": 0.95,
     "severeEstimateRatio": 0.7,
+    "severePeakSafetyFactor": 0.75,
     "mildHeadroom": 1.3,
     "mildSamples": 2,
     "cooldownMs": 20000,
@@ -212,7 +213,7 @@
         "emergency": false,
         "evidence": {"kind": "control-stall-verdict"}
       },
-      "web_current": {"height": 480, "reason": "bandwidth cliff", "action": "switch", "emergency": true},
+      "web_current": {"height": 360, "reason": "bandwidth cliff", "action": "switch", "emergency": true},
       "finding": "The server answered this client's own `stalled` ask with `hold` or `retry_resource`, so production is paused or restarting and a fragment fetched now measures the producer, not the link: on a JIT server a transfer that waits on production reads as a cliff. `decideRung` cannot tell, because no platform hands it the verdict. The web holds the verdict only as a local inside `persistentWait` (crates/plurxd/src/web/player/measurements.js), Android only inside `applyStallVerdict` (Controller.kt), and `autoControllerTick` keeps running through the deferral, so a fresh slow transfer during a held stall takes the emergency branch and reopens a rung lower. This is a gap the fixture records, not an observed field defect: nobody has a trace of it. The build plan's M0.1 settles it by adding `control-stall-verdict` to `namedSuppression`, scoped to the stall deferral (20 s on the web, `CONTROL_STALL_DEFER_DEADLINE_MS`). Upgrades need nothing new here: the stall that prompted the ask already set `lastStallAtMs`, and `stallFree` refuses every upgrade for `stallWindowMs`."
     },
     {
