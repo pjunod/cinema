@@ -63,6 +63,7 @@ struct LibraryView: View {
             runDrive()
         }
         .onChange(of: items) { _, _ in filterNow() }
+        .onDisappear { driveTask?.cancel() }
     }
 
     private var summary: some View {
