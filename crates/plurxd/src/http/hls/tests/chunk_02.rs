@@ -389,6 +389,7 @@
         )
         .await
         .expect("playlist");
+        fixture.mark_started().await;
 
         let root = crate::subtitle_source::store_root(&fixture.state.runtime_cache_dir);
         let local = crate::subtitle_source::file_dir(&root, file.id);

@@ -14869,6 +14869,13 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP INDEX IF EXISTS analysis_requests_one_active_source;
              DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source;
              DROP TABLE IF EXISTS analysis_index_repairs;
+             DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_advance;
+             DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_delete_source;
+             DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_supersede_source;
+             DROP TABLE IF EXISTS subtitle_source_repair_epochs;
+             DROP TRIGGER IF EXISTS subtitle_source_publications_delete_source;
+             DROP TRIGGER IF EXISTS subtitle_source_publications_supersede_source;
+             DROP TABLE IF EXISTS subtitle_source_publications;
              DROP TRIGGER IF EXISTS classification_source_changed;
              DROP TRIGGER IF EXISTS classification_au;
              DROP TRIGGER IF EXISTS classification_ad;

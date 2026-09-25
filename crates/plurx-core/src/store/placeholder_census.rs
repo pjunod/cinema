@@ -847,7 +847,10 @@ fn is_sqlite_candidate(text: &str) -> bool {
 /// placeholders themselves are still covered by this census. The two entries
 /// main contributed (field order, luminance) and this one are the whole
 /// difference between the pre-merge sets; no other literal changed shape.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 93;
+// Subtitle-source discovery prepares its shared candidate query before the
+// `query_map` binding, and ready retirement composes its shared
+// uncovered-ordinal predicate before binding in the next statement.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 95;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

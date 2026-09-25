@@ -510,6 +510,20 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
+        method: "enqueue_or_promote_subtitle_source",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "claim_analysis_request_foreground",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
         method: "enqueue_analysis_request",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -1177,12 +1191,15 @@ mod tests {
         // because the count is the authorization for the delete. Registering
         // it is this commit's whole change to this list; M3 added the
         // boundary and left it unnamed.
+        // 100 with subtitle-source enqueue and foreground claim. The enqueue
+        // joins or promotes before inserting; the claim writes its attempt
+        // row only when it wins the conditional request update.
         //
         // The number is written out rather than derived so that adding a
         // transaction boundary has to be a deliberate edit here. That is the
         // point of the assertion: two of the sites above reached main without
         // one, and ten more did before this correction.
-        assert_eq!(methods.len(), 98);
+        assert_eq!(methods.len(), 100);
     }
 
     #[test]

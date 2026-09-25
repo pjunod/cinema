@@ -3778,6 +3778,22 @@ mod tests {
 
     #[tokio::test]
     async fn ass_positioning_and_styling_burn_identically_from_stored_mks_and_source() {
+        let filters = std::process::Command::new(plurx_core::testfixtures::ffmpeg())
+            .args(["-hide_banner", "-filters"])
+            .output()
+            .expect("query FFmpeg filters");
+        assert!(
+            filters.status.success(),
+            "querying FFmpeg filters: {}",
+            String::from_utf8_lossy(&filters.stderr)
+        );
+        if !String::from_utf8_lossy(&filters.stdout)
+            .lines()
+            .any(|line| line.split_whitespace().nth(1) == Some("subtitles"))
+        {
+            eprintln!("skipping ASS burn comparison: this FFmpeg lacks the subtitles filter");
+            return;
+        }
         let (dir, plan, _) = text_source_case("ass", "0").await;
         let source = dir.path().join("source.mkv");
         let render = |subtitle: &Path| {
@@ -4694,9 +4710,9 @@ mod tests {
                 video_identity: String::new(),
                 requested_generation: "cancel-publish".to_owned(),
                 priority: "foreground".to_owned(),
-                trigger: "test".to_owned(),
+                trigger: "playback".to_owned(),
                 force_rebuild: false,
-                target_node_id: "nuc4".to_owned(),
+                target_node_id: String::new(),
                 not_before_ms: now,
                 created_at_ms: now,
             })

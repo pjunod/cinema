@@ -8995,6 +8995,8 @@ mod tests {
                 "live_hls_recovery",
                 "pgs_overlay",
                 "subtitle_stored_sources",
+                "subtitle_cluster_sources",
+                "subtitle_backfill",
                 "subtitle_not_ready_503",
                 "chapter_thumbnails",
                 "dolby_vision_convert",
@@ -9048,6 +9050,9 @@ mod tests {
                         | "stored_source_self_test"
                         | "stored_source_local_cache"
                         | "stored_source_free_space"
+                        | "local_cache"
+                        | "free_space"
+                        | "chapter_thumbs_cache_space"
                 )
             })
             .collect::<Vec<_>>();
@@ -9086,12 +9091,13 @@ mod tests {
             green,
             vec![
                 "authoritative_store",
-                // The chapter-thumbnail rows read this process: the runtime
-                // cache has room on any host that can run the suite, and the
-                // counters row is a statement of what ran (nothing yet). The
-                // ffmpeg row is absent here because the fixture never probed
-                // a build.
-                "chapter_thumbs_cache_space",
+                "backfill_bytes",
+                "backfill_enqueued",
+                "backfill_remaining",
+                // The chapter-thumbnail work counter is a statement of what
+                // ran (nothing yet); cache space depends on the host disk.
+                // The ffmpeg row is absent here because the fixture never
+                // probed a build.
                 "chapter_thumbs_work",
                 "durable_queue",
                 "rolling_contract_built",

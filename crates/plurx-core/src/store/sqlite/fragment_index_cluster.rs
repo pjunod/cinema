@@ -901,7 +901,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                               OR (component IN ('skip_markers','subtitle_source') AND target_node_id = ''))
                             AND attempts < ?2
                             AND state = 'queued' AND not_before_ms <= ?3
-                          ORDER BY CASE priority WHEN 'foreground' THEN 0 WHEN 'forced' THEN 1 ELSE 2 END,
+                          ORDER BY CASE WHEN priority = 'foreground' THEN 0 ELSE 1 END,
                                    created_at_ms - CASE WHEN priority = 'forced'
                                      THEN ?4 ELSE 0 END,
                                    created_at_ms, request_id LIMIT 1"

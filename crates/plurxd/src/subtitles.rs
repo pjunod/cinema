@@ -33,6 +33,9 @@ const MAX_WINDOW_ENTRIES: usize = 64;
 /// (a stalled mount that never returns bytes and never errors) can no longer
 /// park every waiter forever.
 const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
+// A queue wait must finish before the surrounding sidecar producer's 600 s
+// timeout, so it can report an active remote owner without racing that timer.
+const CLUSTER_WAIT_TIMEOUT: Duration = Duration::from_secs(590);
 
 /// How long a failure is remembered. AVPlayer asks for a VTT segment roughly
 /// every segment duration (~6 s), and before this memo each of those requests
@@ -1081,7 +1084,7 @@ async fn cluster_vtt_into(
             }
             _ => {}
         }
-        if started.elapsed() >= EXTRACTION_TIMEOUT {
+        if started.elapsed() >= CLUSTER_WAIT_TIMEOUT {
             // The queue worker may legitimately own this row longer than the
             // old inline extractor's bound. Expiring our wait must not start
             // a second full-source producer beside that running job.
@@ -1861,7 +1864,7 @@ async fn cluster_wait_burn(
             }
             _ => {}
         }
-        if started.elapsed() >= EXTRACTION_TIMEOUT {
+        if started.elapsed() >= CLUSTER_WAIT_TIMEOUT {
             // A running worker retains the sole producer slot until its own
             // lease/worker deadline. Memo this flight error instead of
             // launching an inline extraction in parallel with it.
@@ -4315,6 +4318,8 @@ mod stored_source_tests {
         let base = crate::test_tempdir().expect("fixture");
         let (file, access) = text_store(base.path(), 93_001, Verdict::Kept);
         let cache = base.path().join("subs");
+        let cached = vtt_path(&cache, &file, 0);
+        remember_failure(&cached, "a flight would hit this memo", NEGATIVE_TTL).await;
         let path = ensure_vtt_with_store(&cache, &file, 0, &access)
             .await
             .expect("stored VTT");
@@ -4322,10 +4327,8 @@ mod stored_source_tests {
             std::fs::read(path).expect("sidecar"),
             b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhello\n"
         );
-        assert!(
-            extractions().lock().await.is_empty(),
-            "store answer starts no flight"
-        );
+        assert_eq!(remembered_failure(&cached).await, None);
+        assert!(!extractions().lock().await.contains_key(&cached));
     }
 
     #[tokio::test]
@@ -4346,11 +4349,14 @@ mod stored_source_tests {
         let base = crate::test_tempdir().expect("fixture");
         let (file, access) = text_store(base.path(), 93_003, Verdict::Empty);
         let cache = base.path().join("subs");
+        let cached = vtt_path(&cache, &file, 0);
+        remember_failure(&cached, "a flight would hit this memo", NEGATIVE_TTL).await;
         let path = ensure_vtt_with_store(&cache, &file, 0, &access)
             .await
             .expect("empty VTT");
         assert_eq!(std::fs::read(path).expect("sidecar"), b"WEBVTT\n\n");
-        assert!(extractions().lock().await.is_empty());
+        assert_eq!(remembered_failure(&cached).await, None);
+        assert!(!extractions().lock().await.contains_key(&cached));
     }
 
     #[tokio::test]
