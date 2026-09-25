@@ -22,7 +22,9 @@ fn enqueue(now_ms: i64) -> EnqueueJob {
             request_digest: "b".repeat(64),
             consumer_kind: "analysis".to_owned(),
             consumer_ref: "analysis:1".to_owned(),
+            target_node_id: None,
             deadline_ms: None,
+            retain_identity: false,
         },
     }
 }
@@ -237,5 +239,157 @@ fn background_jobs_sql_is_valid_for_replicated_execution() {
         format!("{CLAIM_SQL} RETURNING {JOB_JSON} AS result_json"),
     ] {
         super::hiqlite::validate_sql(&sql).expect("replicated SQL");
+    }
+}
+
+#[tokio::test]
+async fn background_jobs_one_cancelled_waiter_does_not_revoke_another_interest() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    let request = enqueue(1_000);
+    store.enqueue_job(request.clone()).await.expect("enqueue");
+    let second = enqueue(1_001);
+    store.enqueue_job(second.clone()).await.expect("join");
+    let job = claimed(&store, claim(&request.id, 0, 1_002)).await;
+    store
+        .cancel_waiter(CancelWaiter {
+            scope: request.request.scope,
+            request_id: request.request.request_id,
+            now_ms: 1_003,
+        })
+        .await
+        .expect("detach");
+    let renewal = store
+        .renew_jobs(RenewJobs {
+            tokens: vec![job.token.expect("token")],
+            now_ms: 1_004,
+        })
+        .await
+        .expect("renew");
+    assert!(matches!(renewal[0], RenewOutcome::Renewed { .. }));
+    assert!(matches!(
+        store.enqueue_job(second).await.expect("receipt"),
+        EnqueueOutcome::Existing {
+            cancelled: false,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn background_jobs_twenty_yields_compact_history_without_spending_failure_budget() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    let request = enqueue(1_000);
+    store.enqueue_job(request.clone()).await.expect("enqueue");
+    let mut revision = 0;
+    for index in 0..20 {
+        let now_ms = 1_000 + index * 180_000;
+        let job = claimed(&store, claim(&request.id, revision, now_ms)).await;
+        assert_eq!(job.fence, index + 1);
+        let settled = store
+            .settle_job(SettleJob {
+                token: job.token.expect("token"),
+                settlement: JobSettlement::Yield {
+                    checkpoint: None,
+                    not_before_ms: now_ms + 1,
+                },
+                now_ms: now_ms + 1,
+            })
+            .await
+            .expect("yield")
+            .expect("settled");
+        assert_eq!(settled.failed_attempts, 0);
+        revision = settled.revision;
+        store.maintain_jobs(now_ms + 2).await.expect("upkeep");
+    }
+    store.maintain_jobs(4_000_000).await.expect("final upkeep");
+    let final_job = claimed(&store, claim(&request.id, revision, 4_000_001)).await;
+    assert_eq!(final_job.fence, 21);
+    assert_eq!(final_job.failed_attempts, 0);
+    assert_eq!(final_job.yield_count, 4);
+}
+
+#[tokio::test]
+async fn background_jobs_expired_cancellation_is_reaped_and_empty_queue_needs_no_write() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    assert!(!store.maintain_jobs(1_000).await.expect("idle"));
+    let request = enqueue(1_000);
+    store.enqueue_job(request.clone()).await.expect("enqueue");
+    claimed(&store, claim(&request.id, 0, 1_000)).await;
+    store
+        .cancel_job(CancelJob {
+            job_id: request.id,
+            now_ms: 2_000,
+        })
+        .await
+        .expect("cancel");
+    assert!(store.maintain_jobs(31_001).await.expect("reap"));
+    let page = store
+        .list_jobs(JobQuery {
+            state: None,
+            kind: None,
+            after_id: None,
+            limit: 100,
+        })
+        .await
+        .expect("page");
+    assert_eq!(page.jobs[0].state, JobState::Cancelled);
+    assert!(page.jobs[0].token.is_none());
+    assert!(!store.maintain_jobs(31_002).await.expect("idle again"));
+}
+
+#[tokio::test]
+async fn background_jobs_receipts_survive_seven_days_and_domain_identity_outlives_details() {
+    for retain_identity in [false, true] {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let mut request = enqueue(1_000);
+        request.request.retain_identity = retain_identity;
+        store.enqueue_job(request.clone()).await.expect("enqueue");
+        store
+            .cancel_job(CancelJob {
+                job_id: request.id.clone(),
+                now_ms: 2_000,
+            })
+            .await
+            .expect("cancel");
+        store
+            .maintain_jobs(REQUEST_RETENTION_MS)
+            .await
+            .expect("before expiry");
+        assert!(matches!(
+            store.enqueue_job(request.clone()).await.expect("retained"),
+            EnqueueOutcome::Existing {
+                cancelled: true,
+                ..
+            }
+        ));
+        let after_expiry = REQUEST_RETENTION_MS + 2_001;
+        store
+            .maintain_jobs(after_expiry)
+            .await
+            .expect("retire details");
+        let page = store
+            .list_jobs(JobQuery {
+                state: None,
+                kind: None,
+                after_id: None,
+                limit: 100,
+            })
+            .await
+            .expect("page");
+        assert!(page.jobs.is_empty());
+        request.id = uuid::Uuid::new_v4().to_string();
+        request.now_ms = after_expiry;
+        let repeated = store.enqueue_job(request).await.expect("after retention");
+        if retain_identity {
+            assert!(matches!(
+                repeated,
+                EnqueueOutcome::Existing {
+                    cancelled: true,
+                    ..
+                }
+            ));
+        } else {
+            assert!(matches!(repeated, EnqueueOutcome::Accepted { .. }));
+        }
     }
 }

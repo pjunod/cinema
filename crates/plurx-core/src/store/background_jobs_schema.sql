@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     lease_expires_ms INTEGER,
     failed_attempts INTEGER NOT NULL DEFAULT 0 CHECK (failed_attempts >= 0),
+    yield_count INTEGER NOT NULL DEFAULT 0 CHECK (yield_count >= 0),
+    abandoned_count INTEGER NOT NULL DEFAULT 0 CHECK (abandoned_count >= 0),
     not_before_ms INTEGER NOT NULL,
     checkpoint_json TEXT CHECK (checkpoint_json IS NULL OR
         (json_valid(checkpoint_json) AND length(CAST(checkpoint_json AS BLOB)) <= 4096)),
@@ -43,7 +45,7 @@ CREATE TABLE IF NOT EXISTS background_job_waiters (
     request_scope TEXT NOT NULL,
     request_id TEXT NOT NULL,
     request_digest TEXT NOT NULL,
-    job_id TEXT NOT NULL REFERENCES background_jobs(id),
+    job_id TEXT NOT NULL,
     consumer_kind TEXT NOT NULL,
     consumer_ref TEXT NOT NULL,
     priority INTEGER NOT NULL CHECK (priority BETWEEN 0 AND 3),
@@ -51,6 +53,8 @@ CREATE TABLE IF NOT EXISTS background_job_waiters (
     target_node_id TEXT,
     deadline_ms INTEGER,
     receipt_expires_ms INTEGER NOT NULL,
+    retain_identity INTEGER NOT NULL DEFAULT 0 CHECK (retain_identity IN (0, 1)),
+    result_ref TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     PRIMARY KEY (request_scope, request_id)
@@ -129,7 +133,7 @@ BEGIN
     INSERT INTO background_job_waiters (
         request_scope, request_id, request_digest, job_id, consumer_kind,
         consumer_ref, priority, state, target_node_id, deadline_ms,
-        receipt_expires_ms, created_at_ms, updated_at_ms)
+        receipt_expires_ms, retain_identity, created_at_ms, updated_at_ms)
     SELECT json_extract(NEW.request_json, '$.request.scope'),
         json_extract(NEW.request_json, '$.request.request_id'),
         json_extract(NEW.request_json, '$.request.request_digest'),
@@ -137,9 +141,10 @@ BEGIN
         json_extract(NEW.request_json, '$.request.consumer_kind'),
         json_extract(NEW.request_json, '$.request.consumer_ref'),
         json_extract(NEW.request_json, '$.priority'), 'pending',
-        json_extract(NEW.request_json, '$.payload.target_node_id'),
+        json_extract(NEW.request_json, '$.request.target_node_id'),
         json_extract(NEW.request_json, '$.request.deadline_ms'),
         json_extract(NEW.result_json, '$.receipt_expires_ms'),
+        COALESCE(json_extract(NEW.request_json, '$.request.retain_identity'), 0),
         json_extract(NEW.request_json, '$.now_ms'),
         json_extract(NEW.request_json, '$.now_ms')
     WHERE json_extract(NEW.result_json, '$.outcome') = 'accepted';
@@ -223,4 +228,167 @@ BEGIN
     SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM background_job_reservations
         WHERE job_id = NEW.id AND fence = NEW.fence AND resource_key = 'source_io')
         THEN RAISE(ABORT, 'background source I/O reservation unavailable') END;
+END;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_job_cancel_waiter_command
+AFTER INSERT ON background_job_commands WHEN NEW.operation = 'cancel_waiter'
+BEGIN
+    UPDATE background_job_waiters SET state = 'cancelled',
+        updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE request_scope = json_extract(NEW.request_json, '$.scope')
+        AND request_id = json_extract(NEW.request_json, '$.request_id')
+        AND state IN ('pending','awaiting_hydration');
+    UPDATE background_jobs SET priority = COALESCE((
+        SELECT MAX(priority) FROM background_job_waiters
+        WHERE job_id = background_jobs.id AND state IN ('pending','awaiting_hydration')
+          AND (deadline_ms IS NULL OR deadline_ms > json_extract(NEW.request_json, '$.now_ms'))), 0)
+    WHERE id = json_extract(NEW.result_json, '$.job_id')
+        AND state IN ('queued','running');
+    UPDATE background_jobs SET
+        state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE 'cancelling' END,
+        revision = revision + 1, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE id = json_extract(NEW.result_json, '$.job_id')
+        AND state IN ('queued','running') AND revision < 9223372036854775807
+        AND NOT EXISTS (SELECT 1 FROM background_job_waiters
+            WHERE job_id = background_jobs.id AND state IN ('pending','awaiting_hydration')
+              AND (deadline_ms IS NULL OR deadline_ms > json_extract(NEW.request_json, '$.now_ms')));
+    DELETE FROM background_job_commands WHERE id = NEW.id;
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command
+AFTER INSERT ON background_job_commands WHEN NEW.operation = 'maintain'
+BEGIN
+    UPDATE background_job_waiters SET state = 'cancelled',
+        updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE (request_scope, request_id) IN (
+        SELECT request_scope, request_id FROM background_job_waiters
+        WHERE state IN ('pending','awaiting_hydration')
+          AND deadline_ms <= json_extract(NEW.request_json, '$.now_ms')
+        ORDER BY deadline_ms, request_scope, request_id LIMIT 128);
+    UPDATE background_jobs SET priority = COALESCE((SELECT MAX(priority)
+        FROM background_job_waiters WHERE job_id = background_jobs.id
+          AND state IN ('pending','awaiting_hydration')
+          AND (deadline_ms IS NULL OR deadline_ms > json_extract(NEW.request_json, '$.now_ms'))), 0)
+    WHERE id IN (SELECT job_id FROM background_job_waiters
+        WHERE state = 'cancelled' AND updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+        ORDER BY job_id LIMIT 128) AND state IN ('queued','running');
+    UPDATE background_jobs SET
+        state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE 'cancelling' END,
+        revision = revision + 1, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE id IN (SELECT job.id FROM background_jobs job
+        WHERE job.state IN ('queued','running') AND job.revision < 9223372036854775807
+          AND NOT EXISTS (SELECT 1 FROM background_job_waiters
+            WHERE job_id = job.id AND state IN ('pending','awaiting_hydration'))
+        ORDER BY job.id LIMIT 128);
+    UPDATE background_jobs SET state = 'cancelled', owner_node_id = NULL,
+        owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL,
+        revision = revision + 1, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE id IN (SELECT id FROM background_jobs WHERE state = 'cancelling'
+        AND lease_expires_ms <= json_extract(NEW.request_json, '$.now_ms')
+        AND revision < 9223372036854775807 ORDER BY lease_expires_ms, id LIMIT 128);
+    DELETE FROM background_job_attempts WHERE (job_id, fence) IN (
+        SELECT old.job_id, old.fence FROM background_job_attempts old
+        WHERE old.finished_at_ms IS NOT NULL
+          AND old.resolve_until_ms <= json_extract(NEW.request_json, '$.now_ms')
+          AND (SELECT COUNT(*) FROM background_job_attempts newer
+            WHERE newer.job_id = old.job_id AND newer.finished_at_ms IS NOT NULL
+              AND newer.fence > old.fence) >= 16
+        ORDER BY old.finished_at_ms, old.job_id, old.fence LIMIT 128);
+    DELETE FROM background_job_waiters WHERE (request_scope, request_id) IN (
+        SELECT request_scope, request_id FROM background_job_waiters
+        WHERE state IN ('succeeded','failed','cancelled') AND retain_identity = 0
+          AND receipt_expires_ms <= json_extract(NEW.request_json, '$.now_ms')
+        ORDER BY receipt_expires_ms, request_scope, request_id LIMIT 128);
+    DELETE FROM background_jobs WHERE id IN (
+        SELECT job.id FROM background_jobs job
+        WHERE job.state IN ('succeeded','failed','cancelled')
+          AND job.updated_at_ms <= json_extract(NEW.request_json, '$.now_ms') - 604800000
+          AND NOT EXISTS (SELECT 1 FROM background_job_waiters
+            WHERE job_id = job.id AND state IN ('pending','awaiting_hydration'))
+        ORDER BY job.updated_at_ms, job.id LIMIT 128);
+    DELETE FROM background_job_commands WHERE id = NEW.id;
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_job_attempt_compaction
+BEFORE DELETE ON background_job_attempts WHEN OLD.finished_at_ms IS NOT NULL
+BEGIN
+    UPDATE background_jobs SET
+        yield_count = yield_count + CASE WHEN OLD.outcome = 'yielded' THEN 1 ELSE 0 END,
+        abandoned_count = abandoned_count + CASE WHEN OLD.outcome = 'lease_expired' THEN 1 ELSE 0 END
+    WHERE id = OLD.job_id;
+END;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_job_retire_details
+BEFORE DELETE ON background_jobs
+BEGIN
+    DELETE FROM background_job_reservations WHERE job_id = OLD.id;
+    DELETE FROM background_job_attempts WHERE job_id = OLD.id;
+END;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_job_publish_transcode_command
+AFTER INSERT ON background_job_commands WHEN NEW.operation = 'publish_transcode'
+BEGIN
+    INSERT INTO transcode_cache_recipes (recipe_hash, file_id, recipe_version, created_at)
+    SELECT json_extract(NEW.request_json, '$.output.recipe_hash'),
+        json_extract(job.payload_json, '$.file_id'),
+        json_extract(NEW.request_json, '$.output.recipe_version'),
+        json_extract(NEW.request_json, '$.now_ms') / 1000
+    FROM background_jobs job WHERE job.id = json_extract(NEW.result_json, '$.job_id')
+        AND json_extract(NEW.result_json, '$.outcome') = 'published'
+    ON CONFLICT(recipe_hash) DO NOTHING;
+
+    UPDATE offline_packages SET actual_bytes = actual_bytes + (
+        json_extract(NEW.request_json, '$.output.bytes') - json_extract(NEW.request_json, '$.output.expected_previous_bytes')),
+        updated_at = json_extract(NEW.request_json, '$.now_ms') / 1000
+    WHERE state = 'ready' AND recipe_hash = json_extract(NEW.request_json, '$.output.recipe_hash')
+        AND node_id = json_extract(NEW.request_json, '$.token.node_id')
+        AND json_extract(NEW.result_json, '$.outcome') = 'published'
+        AND json_extract(NEW.request_json, '$.output.expected_previous_bytes') IS NOT NULL
+        AND EXISTS (SELECT 1 FROM transcode_cache_locations location
+            WHERE location.recipe_hash = offline_packages.recipe_hash
+              AND location.node_id = offline_packages.node_id AND location.storage_class = 'local'
+              AND location.relative_dir = json_extract(NEW.request_json, '$.output.relative_dir')
+              AND location.complete = 1 AND location.manifest_digest IS NULL
+              AND location.bytes = json_extract(NEW.request_json, '$.output.expected_previous_bytes'));
+
+    INSERT INTO transcode_cache_locations (
+        recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
+        manifest_digest, scrub_object_index, publication_generation,
+        last_used_at, last_seen_at, storage_id, generation_id)
+    SELECT json_extract(NEW.request_json, '$.output.recipe_hash'),
+        json_extract(NEW.request_json, '$.token.node_id'), 'local',
+        json_extract(NEW.request_json, '$.output.relative_dir'),
+        json_extract(NEW.request_json, '$.output.bytes'), 1,
+        json_extract(NEW.request_json, '$.output.manifest_digest'), 0, 1,
+        json_extract(NEW.request_json, '$.now_ms') / 1000,
+        json_extract(NEW.request_json, '$.now_ms') / 1000,
+        'node:' || json_extract(NEW.request_json, '$.token.node_id') || ':cache',
+        json_extract(NEW.request_json, '$.output.relative_dir')
+    WHERE json_extract(NEW.result_json, '$.outcome') = 'published'
+    ON CONFLICT(recipe_hash, node_id, storage_class) DO UPDATE SET
+        relative_dir = excluded.relative_dir, storage_id = excluded.storage_id,
+        generation_id = excluded.generation_id, bytes = excluded.bytes, complete = 1,
+        publication_generation = transcode_cache_locations.publication_generation + 1,
+        manifest_digest = excluded.manifest_digest, scrub_object_index = 0,
+        last_seen_at = excluded.last_seen_at;
+
+    UPDATE background_jobs SET state = 'succeeded',
+        result_ref = json_extract(NEW.result_json, '$.result_ref'),
+        owner_node_id = NULL, owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL,
+        revision = revision + 1, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE id = json_extract(NEW.result_json, '$.job_id')
+        AND json_extract(NEW.result_json, '$.outcome') = 'published';
+
+    UPDATE background_job_waiters SET state = CASE
+        WHEN deadline_ms <= json_extract(NEW.request_json, '$.now_ms') THEN 'cancelled'
+        WHEN target_node_id IS NULL OR target_node_id = json_extract(NEW.request_json, '$.token.node_id')
+            THEN 'succeeded' ELSE 'awaiting_hydration' END,
+        result_ref = json_extract(NEW.result_json, '$.result_ref'),
+        updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE job_id = json_extract(NEW.result_json, '$.job_id') AND state = 'pending'
+        AND json_extract(NEW.result_json, '$.outcome') = 'published';
+    DELETE FROM background_job_commands WHERE id = NEW.id;
 END;

@@ -7,6 +7,11 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use super::background_jobs_maintenance::{CANCEL_WAITER_SQL, MAINTENANCE_NEEDED, MAINTENANCE_SQL};
+use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
+pub use super::background_jobs_publication::{
+    JobPublishOutcome, PublishTranscodeJob, TranscodeJobOutput,
+};
 use crate::error::StoreError;
 
 pub const JOB_LEASE_MS: i64 = 30_000;
@@ -94,6 +99,7 @@ pub(super) const JOB_JSON: &str = r#"json_object(
       'claim_id', claim_id, 'fence', fence, 'revision', revision,
       'lease_expires_ms', lease_expires_ms) ELSE NULL END,
     'fence', fence, 'revision', revision, 'failed_attempts', failed_attempts,
+    'yield_count', yield_count, 'abandoned_count', abandoned_count,
     'not_before_ms', not_before_ms, 'checkpoint', json(checkpoint_json),
     'result_ref', result_ref, 'last_error_code', last_error_code,
     'created_at_ms', created_at_ms, 'updated_at_ms', updated_at_ms
@@ -112,6 +118,8 @@ WHERE id = json_extract($1, '$.job_id')
   AND (target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
   AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))
   AND not_before_ms <= json_extract($1, '$.now_ms')
+  AND EXISTS (SELECT 1 FROM background_job_waiters WHERE job_id = background_jobs.id
+    AND state = 'pending' AND (deadline_ms IS NULL OR deadline_ms > json_extract($1, '$.now_ms')))
   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))
   AND fence < 9223372036854775807 AND revision < 9223372036854775807
   AND NOT EXISTS (SELECT 1 FROM background_job_attempts WHERE claim_id = json_extract($1, '$.claim_id'))
@@ -200,8 +208,13 @@ pub enum JobPayload {
     TranscodePrepare {
         file_id: i64,
         source_generation: String,
+        source_size: i64,
+        source_mtime: i64,
         recipe_key: String,
         target_height: u32,
+        policy_generation: String,
+        requirements: crate::domain::PretranscodeRequirements,
+        reason: String,
     },
     FragmentIndexBuild {
         file_id: i64,
@@ -283,13 +296,22 @@ impl JobPayload {
             Self::TranscodePrepare {
                 file_id,
                 source_generation,
+                source_size,
                 recipe_key,
                 target_height,
+                policy_generation,
+                requirements,
+                reason,
+                ..
             } => {
                 *file_id > 0
                     && identifier(source_generation)
+                    && *source_size >= 0
                     && identifier(recipe_key)
                     && (1..=8_640).contains(target_height)
+                    && identifier(policy_generation)
+                    && requirements.validate()
+                    && matches!(reason.as_str(), "in_progress" | "next_up" | "recent")
             }
             Self::FragmentIndexBuild {
                 file_id,
@@ -354,7 +376,10 @@ fn identifier(value: &str) -> bool {
 }
 
 fn digest(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub(super) fn invalid(message: &str) -> StoreError {
@@ -416,6 +441,9 @@ pub struct BackgroundJob {
     pub fence: i64,
     pub revision: i64,
     pub failed_attempts: i64,
+    /// Compacted resolved attempt counts; the latest detailed attempts remain.
+    pub yield_count: i64,
+    pub abandoned_count: i64,
     pub not_before_ms: i64,
     pub checkpoint: Option<serde_json::Value>,
     pub result_ref: Option<String>,
@@ -431,7 +459,12 @@ pub struct JobRequest {
     pub request_digest: String,
     pub consumer_kind: String,
     pub consumer_ref: String,
+    /// Delivery obligation, independent of the node that builds an artifact.
+    pub target_node_id: Option<String>,
     pub deadline_ms: Option<i64>,
+    /// Domain histories retain this compact identity until they release it.
+    #[serde(default)]
+    pub retain_identity: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,6 +489,11 @@ impl EnqueueJob {
             || !digest(&self.request.request_digest)
             || !identifier(&self.request.consumer_kind)
             || !identifier(&self.request.consumer_ref)
+            || self
+                .request
+                .target_node_id
+                .as_deref()
+                .is_some_and(|node| !identifier(node))
             || self.now_ms < 0
             || self.not_before_ms < 0
             || self.now_ms.checked_add(REQUEST_RETENTION_MS).is_none()
@@ -577,6 +615,28 @@ pub struct JobPage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandidateCursor {
+    pub priority: u8,
+    pub created_at_ms: i64,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandidateQuery {
+    pub node_id: String,
+    pub kinds: Vec<JobKind>,
+    pub after: Option<CandidateCursor>,
+    pub now_ms: i64,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandidatePage {
+    pub jobs: Vec<BackgroundJob>,
+    pub next: Option<CandidateCursor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenewJobs {
     pub tokens: Vec<JobToken>,
     pub now_ms: i64,
@@ -621,6 +681,19 @@ pub struct CancelJob {
     pub now_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelWaiter {
+    pub scope: String,
+    pub request_id: String,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelWaiterOutcome {
+    pub job_id: String,
+    pub cancelled: bool,
+}
+
 /// No generic public enqueue endpoint is implied by this internal boundary.
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
@@ -629,9 +702,20 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn claim_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError>;
     async fn list_jobs(&self, query: JobQuery) -> Result<JobPage, StoreError>;
+    async fn job_candidates(&self, query: CandidateQuery) -> Result<CandidatePage, StoreError>;
     async fn renew_jobs(&self, request: RenewJobs) -> Result<Vec<RenewOutcome>, StoreError>;
     async fn settle_job(&self, request: SettleJob) -> Result<Option<BackgroundJob>, StoreError>;
     async fn cancel_job(&self, request: CancelJob) -> Result<Option<BackgroundJob>, StoreError>;
+    async fn cancel_waiter(
+        &self,
+        request: CancelWaiter,
+    ) -> Result<Option<CancelWaiterOutcome>, StoreError>;
+    /// At most 128 rows per upkeep category; no Raft write when nothing is due.
+    async fn maintain_jobs(&self, now_ms: i64) -> Result<bool, StoreError>;
+    async fn publish_transcode_job(
+        &self,
+        request: PublishTranscodeJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
 }
 
 /// Narrow internal SQL bridge: callers cannot submit SQL through Store.
@@ -654,6 +738,124 @@ fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, StoreError> 
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn publish_transcode_job(
+        &self,
+        request: PublishTranscodeJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        request.token.validate()?;
+        let output = &request.output;
+        let relative = std::path::Path::new(&output.relative_dir);
+        if request.now_ms < 0
+            || !digest(&output.recipe_hash)
+            || !digest(&output.manifest_digest)
+            || output.recipe_version <= 0
+            || output.bytes < 0
+            || output
+                .expected_previous_bytes
+                .is_some_and(|previous| previous < 0 || output.bytes < previous)
+            || output.relative_dir.is_empty()
+            || output.relative_dir.len() > 512
+            || output.relative_dir.contains(':')
+            || output
+                .relative_dir
+                .bytes()
+                .any(|byte| byte.is_ascii_control())
+            || output.relative_dir.contains('\\')
+            || output.relative_dir.contains('\0')
+            || !relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(invalid("invalid background transcode publication"));
+        }
+        let rows = self
+            .queue_sql(
+                PUBLISH_TRANSCODE_SQL.to_owned(),
+                encode(&request)?,
+                true,
+                true,
+            )
+            .await?;
+        decode(
+            rows.first()
+                .ok_or_else(|| invalid("background publication returned no verdict"))?,
+        )
+    }
+
+    async fn job_candidates(&self, query: CandidateQuery) -> Result<CandidatePage, StoreError> {
+        if !identifier(&query.node_id)
+            || query.kinds.is_empty()
+            || query.kinds.len() > 10
+            || query.now_ms < 0
+            || query.limit == 0
+            || query.limit > MAX_PAGE_SIZE
+        {
+            return Err(invalid("invalid background candidate query"));
+        }
+        let rows = self.queue_sql(format!(
+            "SELECT {JOB_JSON} AS result_json FROM background_jobs
+              WHERE kind IN (SELECT value FROM json_each($1, '$.kinds')) AND payload_version = 1
+                AND (target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
+                AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))
+                AND not_before_ms <= json_extract($1, '$.now_ms')
+                AND EXISTS (SELECT 1 FROM background_job_waiters WHERE job_id = background_jobs.id
+                  AND state = 'pending' AND (deadline_ms IS NULL OR deadline_ms > json_extract($1, '$.now_ms')))
+                AND (json_extract($1, '$.after') IS NULL
+                  OR priority < json_extract($1, '$.after.priority')
+                  OR (priority = json_extract($1, '$.after.priority')
+                    AND (created_at_ms, id) > (json_extract($1, '$.after.created_at_ms'), json_extract($1, '$.after.id'))))
+              ORDER BY priority DESC, created_at_ms, id LIMIT json_extract($1, '$.limit') + 1"
+        ), encode(&query)?, false, false).await?;
+        let mut jobs: Vec<BackgroundJob> = rows
+            .iter()
+            .map(|row| decode(row))
+            .collect::<Result<_, _>>()?;
+        let more = jobs.len() > query.limit;
+        jobs.truncate(query.limit);
+        let next = more
+            .then(|| {
+                jobs.last().map(|job| CandidateCursor {
+                    priority: job.priority,
+                    created_at_ms: job.created_at_ms,
+                    id: job.id.clone(),
+                })
+            })
+            .flatten();
+        Ok(CandidatePage { jobs, next })
+    }
+
+    async fn cancel_waiter(
+        &self,
+        request: CancelWaiter,
+    ) -> Result<Option<CancelWaiterOutcome>, StoreError> {
+        if !identifier(&request.scope) || !identifier(&request.request_id) || request.now_ms < 0 {
+            return Err(invalid("invalid background waiter cancellation"));
+        }
+        let rows = self
+            .queue_sql(CANCEL_WAITER_SQL.to_owned(), encode(&request)?, true, true)
+            .await?;
+        rows.first().map(|row| decode(row)).transpose()
+    }
+
+    async fn maintain_jobs(&self, now_ms: i64) -> Result<bool, StoreError> {
+        if now_ms < 0 {
+            return Err(invalid("invalid background maintenance time"));
+        }
+        let request = encode(
+            &serde_json::json!({"now_ms": now_ms, "command_id": uuid::Uuid::new_v4().to_string()}),
+        )?;
+        if self
+            .queue_sql(MAINTENANCE_NEEDED.to_owned(), request.clone(), false, false)
+            .await?
+            .is_empty()
+        {
+            return Ok(false);
+        }
+        self.queue_sql(MAINTENANCE_SQL.to_owned(), request, true, true)
+            .await?;
+        Ok(true)
+    }
+
     async fn renew_jobs(&self, request: RenewJobs) -> Result<Vec<RenewOutcome>, StoreError> {
         if request.tokens.is_empty()
             || request.tokens.len() > MAX_RENEW_BATCH
@@ -757,7 +959,7 @@ impl<T: QueueSql> BackgroundJobStore for T {
         // Replaying an acknowledged or ambiguous claim must return its current
         // identity, not compete for a fresh fence. Never adopt another boot.
         let previous = self.queue_sql(
-            format!("SELECT {JOB_JSON} AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id')"),
+            format!("SELECT {JOB_JSON} AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))"),
             encode(&request)?, false, true,
         ).await?;
         let Some(previous) = previous.first() else {
@@ -820,7 +1022,7 @@ impl<T: QueueSql> BackgroundJobStore for T {
             return Ok(ClaimResolution::ExpiredOrPruned);
         }
         let rows = self.queue_sql(format!(
-            "SELECT {JOB_JSON} AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id')
+            "SELECT {JOB_JSON} AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))
              AND EXISTS (SELECT 1 FROM background_job_attempts a WHERE a.job_id = background_jobs.id
                AND a.claim_id = json_extract($1, '$.claim_id')
                AND a.owner_node_id = json_extract($1, '$.node_id')
@@ -862,7 +1064,7 @@ impl<T: QueueSql> BackgroundJobStore for T {
             .map(|row| decode::<serde_json::Value>(row))
             .transpose()?
             .and_then(|value| value.get("fence").and_then(serde_json::Value::as_i64));
-        if attempt_fence != Some(job.fence) || job.state == JobState::Queued {
+        if attempt_fence != Some(job.fence) {
             return Ok(ClaimResolution::LostOwnership);
         }
         Ok(ClaimResolution::Settled {

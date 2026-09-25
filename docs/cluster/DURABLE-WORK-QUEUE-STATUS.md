@@ -14,7 +14,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 |---|---|---|
 | Isolated clone | Complete | Agent-owned `/private/tmp/plurx-durable-work-agent`; original checkout untouched |
 | Compiler | Ready | Rust 1.97.1; core + Hiqlite all-target compile and baseline daemon compile passed |
-| M1 durable queue and pre-transcode | In progress | Typed queue, shared SQLite/Hiqlite SQL, claims, renewal and cancellation compile; publication, retention and worker integration remain |
+| M1 durable queue and pre-transcode | In progress | Foundation committed as `346f4241a`; adding waiter cancellation, candidate paging and bounded attempt compaction; publication, receipt retention and workers remain |
 | M2 fragment analysis and hydration | Planned | Preserve request identity, history and target completion |
 | M3 UI, recovery and migration | Planned | Advisory requirements, admin operations, bounded cutover |
 | E0 subtitle and library workers | Planned | Reuse newly landed subtitle extraction implementation |
@@ -52,3 +52,20 @@ implementation is claimed; “compiled” does not mean tests passed.
   with `hiqlite-store` without executing them. This is not an accepted queue
   implementation: publication, retention, authority integration, worker
   adapters and legacy cutover remain unfinished.
+
+- 2026-09-25: foundation commit `346f4241a` passed the normal tracked hook.
+  Follow-up adds independent waiter cancellation, candidate keyset pages,
+  expired-cancellation cleanup and bounded attempt compaction. Ten queue
+  regression contracts are written, with no test execution yet. No PR has
+  been opened, no branch pushed, and no production node changed.
+
+- 2026-09-25: bounded cleanup now preserves seven-day request receipts and
+  compact domain identities independently of retired job details. Added
+  expiry and retention regressions, target delivery identity independent of
+  execution placement, and the queue interface to the aggregate Store.
+
+- 2026-09-25: typed pre-transcode publication now commits the cache location,
+  manifest digest, queue result and waiter transitions together. A shared
+  backend contract covers acknowledgement replay, source replacement and
+  cancellation before publication. Worker integration and legacy migration
+  are still outstanding; the new queue does not yet execute production work.

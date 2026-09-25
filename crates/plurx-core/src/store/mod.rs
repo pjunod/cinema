@@ -97,6 +97,9 @@ mod placeholder_census;
 mod consistent_read_census;
 
 pub mod background_jobs;
+pub use background_jobs::BackgroundJobStore;
+mod background_jobs_maintenance;
+mod background_jobs_publication;
 #[cfg(test)]
 mod background_jobs_tests;
 pub mod replicated;
@@ -5241,6 +5244,7 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
+    + BackgroundJobStore
     + DvConversionStore
     + MetricsStore
     + UserStore
@@ -5276,6 +5280,7 @@ pub trait Store:
 
 impl<T> Store for T where
     T: SettingsStore
+        + BackgroundJobStore
         + DvConversionStore
         + MetricsStore
         + UserStore
