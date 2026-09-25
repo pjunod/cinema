@@ -590,6 +590,80 @@ header; the unsafe value was not echoed. Private sanitized probe SHA-256:
 The most recent 200 Docker log lines on every node had zero ANSI escapes or
 mentions of that unsafe path; log-hygiene receipt SHA-256
 `210a6e23a85e407830712cbffa9dab98cfa9ba28c6d86128b9258ac91d09d2e0`.
-This checks the safe point surfaces of C-08. JSON-mode restart, client
-play/seek, active backfill/availability, busy P-02 load and duration windows
-were not exercised.
+This checks the safe point surfaces of C-08. At that audit, JSON-mode
+restart, client play/seek, active backfill/availability, busy P-02 load and
+duration windows had not been exercised. The later bounded play/seek is
+recorded below.
+
+For S-11, a separate read-only exact-build inventory found the container's
+FFmpeg compiled H.264 and HEVC NVENC, QSV and VA-API encoders on all four
+nodes, and no VideoToolbox encoder. Host PCI inventory identified Intel
+Arrow Lake Arc Pro on `nynuc`, AMD Phoenix1 on `m6`, and Intel Alder Lake Iris
+Xe on `nuc4`/`nuc3`. This is distinct from the boot probe above: compiled
+NVENC remains unavailable without NVIDIA hardware, and `m6`'s compiled QSV
+is not probe accepted. Sanitized inventory:
+`/private/tmp/codex-s11-main8ae8-encoder-compiled-inventory-20260925.json`,
+SHA-256 `9717b6008e960c66360feff14d02c7d5431a33dd9dea1ed8fccdccce21f415d6`.
+Actual selected family, accepted-session increments and the reset-aware
+seven-day table remain owed.
+
+## Bounded active client and device observations — 21:46–21:53 UTC
+
+An existing authenticated Chrome session on exact-main `nynuc` opened one
+existing 1080p H.264/EAC3 item. Resume rendered 1920×816 video; one Forward
+10 seconds action was made. The video element was ready with `readyState=4`,
+and its time advanced from 1091.08 to 1107.53 seconds during brief resumed
+playback. The player later showed Pause without a visible error and was
+closed. The item title and identifier were omitted from the sanitized receipt
+`/private/tmp/codex-main8ae8-chrome-active-flow-20260925.json` (SHA-256
+`d7894b5a75070a855867dcff63001fc7c074069e8136db62b9e3754e9b60831b`).
+Between the 21:47:36 and 21:50:25 `nynuc` metric samples, item GET 2xx rose
+37, playback GET 2xx 50, playback POST 2xx 68, playback DELETE 2xx one,
+Chrome remux TTFF count one, remux delivered bytes 201,191,996 and remux
+watched seconds 111.226. Playback POST 4xx rose five. Encoder-session,
+tone-map-session, seek and stalled-second counters did not rise. These are
+node-wide counters with other active sessions; none of the full deltas can be
+assigned solely to this Chrome flow. The bounded visual play/seek supports a
+C-05 detail-read and C-08 client-flow point, but supplies no per-request
+latency, active backfill/availability, JSON-mode logging, or normal-use hour.
+It also does not establish selected hardware use for S-11.
+
+The Google TV Streamer on exact-main signed Android Release code128 provided
+stronger D-02 playback evidence than the earlier media-session reading:
+finite-title elapsed labels advanced 1:47→1:58→2:16→2:40; Plurx's AVC decoder
+reported 3,543 rendered/2 dropped frames before Home and 377 rendered/zero
+dropped after return. Home at 21:50:38 entered BUFFERING, then PAUSED by
+21:50:45; return at 21:50:54 resumed PLAYING, with the elapsed label reaching
+2:40 by 21:51:06. An explicit Home plus media-pause at 21:51:37 stayed
+PAUSED after return at 21:51:45. `media_session` position `-1`/speed `0` was
+therefore an insufficient playback oracle. This is a partial Google TV case:
+the named Pixel one-second Home pause and notification, audiobook, Lenovo,
+Shield and failover cases remain open. Sanitized receipt SHA-256
+`4846f3d827fe0e3be858263a32f617335becede099a2f767c2b366250a78138f`.
+
+During the overlapping 21:45:10–21:50:10 C-08 scrapes, total HTTP requests
+rose 1,064/1,309/655/593 on `nynuc`/`m6`/`nuc4`/`nuc3`. All four still had
+315 RED series and exact-build HTTP 200 responses. The 30-second uniform
+samples through 21:51:10 showed no encoder-session or tone-map-session
+increase on any node. Multiple clients overlapped, so these counters do not
+attribute the Google TV frames to a particular server request or prove an
+accepted hardware session. They are interim current-main activity only.
+
+At 21:52 UTC, CoreDevice still showed Bedroom Apple TV paired, booted and
+tunnel-connected. Launching its already-installed signed Release185 app was
+denied by the device with `System is asleep - foreground app launch
+forbidden`. No reinstall or further UI test occurred; A-02 Release playback
+and L-03 native caption interaction remain owed.
+
+The A-04 platform prerequisite probe used a temporary FFmpeg build with
+`zscale`/encoders and a cached Firefox 156.0.1 plus geckodriver 0.37.1 in
+`/private/tmp`; a Firefox WebDriver session returned HTTP 200 after temporary
+profile redirects. Safari automation was enabled and GET status returned
+HTTP 200, but POST session failed with HTTP 500 after 30.01 seconds, before
+playback. No Firefox, Safari or HDR acceptance run occurred. Sanitized
+prerequisite receipt SHA-256
+`ca2efa75ca55978ed5ca347e4b39f942f1fa474c635ca0a15b9282b5d23abe8b`.
+The same Safari POST/session failure persisted in a temporary `gui/501` Aqua
+LaunchAgent with Window Server bootstrap/TCC errors; that job and its port
+were removed. Its follow-up receipt SHA-256 is
+`c35b67a42f1c8d2dba79fad5cc061f24241631b87bc77ec7b063720f91dcff81`.
