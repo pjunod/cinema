@@ -4234,7 +4234,8 @@ async function main() {
     assert.equal(p.hls, incumbent, "the incumbent instance is untouched");
     assert.equal(incumbent.destroyed, false, "…and specifically not destroyed");
     assert.equal(h.spare.muted, true, "the successor is muted until the switch");
-    assert.equal(h.spare.style.display, "none", "…and invisible until the switch");
+    assert.equal(h.spare.style.opacity, "0.001", "…and nearly transparent while its decoder warms");
+    assert.equal(h.spare.style.position, "absolute", "…without shrinking the incumbent's picture");
     // §C6 — the successor's local zero is `media_origin_ms` in film time, so a
     // successor primed for film 900 s whose zero is 600 s starts at 300 s.
     assert.equal(h.instances[0].config.startPosition, 300,
@@ -4291,6 +4292,7 @@ async function main() {
     assert.equal(h.spare.playbackRate, 1.5);
     assert.equal(h.spare.paused, true, "a pause during preparation survives the switch");
     assert.equal(h.spare.style.display, "", "…and visible only after the switch");
+    assert.equal(h.spare.style.opacity, "", "…without the warm overlay's opacity");
     assert.equal(h.live.style.display, "none");
     assert.equal(h.live.muted, true);
     assert.equal(p.prepared, null, "the slot is free once the switch is made");
@@ -5586,7 +5588,7 @@ async function main() {
     assert.equal(h.live.id, "video", "…and the incumbent still owns the picture");
     assert.equal(h.live.style.display, "", "…is still displayed");
     assert.equal(h.live.muted, false, "…and is still audible while the seek runs");
-    assert.equal(h.spare.style.display, "none", "the successor is not exposed yet");
+    assert.equal(h.spare.style.opacity, "0.001", "the successor is not exposed yet");
     assert.equal(p.prepared.state, "committing", "the staging is mid-commit, not exposed");
     // Now it lands, on a range that covers where it landed.
     h.spare.ranges = [[300, 330]];

@@ -284,7 +284,15 @@ function beginPreparedReplacement(p,action){
     playbackContext()));
   try{
     spare.muted=true;
-    spare.style.display="none";
+    // Keep the prepared decoder in the compositor under a nearly transparent
+    // overlay. display:none can suspend its video frames in Chrome, so the
+    // first visible frame may cost several more frame intervals.
+    spare.style.position="absolute";
+    spare.style.inset="0";
+    spare.style.opacity="0.001";
+    spare.style.pointerEvents="none";
+    spare.style.zIndex="1";
+    spare.style.display="";
     if(preferNativeHls(spare)||!window.Hls||!Hls.isSupported()) preparedNativeAttach(p,state,spare);
     else preparedHlsAttach(p,state,spare);
   }catch(error){
@@ -585,6 +593,11 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     spare.playbackRate=intent.playbackRate;
   }catch(e){}
   spare.style.display="";
+  spare.style.position="";
+  spare.style.inset="";
+  spare.style.opacity="";
+  spare.style.pointerEvents="";
+  spare.style.zIndex="";
   spare.removeAttribute("aria-hidden");
   retired.style.display="none";
   retired.muted=true;
