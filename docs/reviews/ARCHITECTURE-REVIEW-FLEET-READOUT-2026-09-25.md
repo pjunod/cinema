@@ -1,6 +1,6 @@
 # Fleet readout — current-main evidence and collection windows
 
-**Status:** preliminary · **Build:** `f600d28230222005441cfc62301c306785c852ce` · **Observed:** 2026-09-25 02:24–02:33 UTC
+**Status:** first-hour readout, mixed builds · **Starting build:** `f600d28230222005441cfc62301c306785c852ce` · **Observed:** 2026-09-25 02:24–03:29 UTC
 
 This appendix records read-only evidence for [K-02](../cluster/RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT.md), [C-05](../server/DETAIL-READS-AND-STORAGE-AVAILABILITY.md), [C-08](../server/OBSERVABILITY-BASELINE.md), [P-02](../ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md), and [S-11](../streaming/CODEC-AND-GPU-QUALIFICATION.md). It supplements the [deployment record](ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md) on the integration branch. The four current nodes are `nynuc` (192.168.5.236), `m6` (192.168.4.14), `nuc4` (192.168.4.8), and learner `nuc3` (192.168.4.7); older plan aliases are not additional machines.
 
@@ -19,6 +19,27 @@ The collector uses a seven-day wall-clock deadline, one file per UTC day, and a 
 The initial selector needed a histogram-suffix correction. Complete K-02 histogram-family samples begin at 02:31:51 UTC; the 24-hour collection deadline was extended ten minutes so that window can fill. At 02:34:28 UTC, the first 48 stored node samples had HTTP 200 and zero request errors. This early clean segment does not imply the later window is gap-free.
 
 No 24-hour or seven-day result exists yet. No voter was restarted, so K-02's applied-index catch-up rate A remains owed. The session and its local files may not survive host shutdown; the final readout must verify the timestamps rather than assume continuity.
+
+## First-hour C-08 readout — mixed-build, interrupted window
+
+The collector's first-hour file at
+`/Users/pjunod/code/plurx-agent/codex-fleet-observation-20260925/first-hour-result.json`
+contains 436 node samples (109 per node) from 02:29:14 to 03:28:41 UTC. Every
+node has a 337-second gap from 02:43:34 to 02:49:11 when the collector process
+ended and was restarted. `nuc3` refused connections at 03:25:11 and 03:25:41
+while new main was deployed. The build gauge changed from `f600d2823` to
+`dafadf043` on `nynuc` at 03:22:11 and on `nuc3` by 03:26:11; `m6` and `nuc4`
+still reported `f600d2823` at 03:28:41. This is not a continuous, single-build
+hour of normal use, so C-08's full-hour acceptance remains owed.
+
+After the hour, five direct `/metrics` scrapes per node all returned HTTP 200.
+The slowest of those five was 0.053 s (`nynuc`), 0.123 s (`m6`), 0.042 s (`nuc4`),
+and 0.127 s (`nuc3`). None of the 20 scrapes contained a UUID-like route value,
+`token`, `/mnt/`, or `file_id=` under the specific hygiene check. The plan's
+literal grep also matches the word `session` in ordinary metric names: 535 hits
+per node across five scrapes. That literal check is not clean. JSON-mode restart,
+media-body flow, and browsing remain owed. The interrupted/mixed-build window
+also cannot satisfy K-02's 24-hour or S-11's seven-day continuity requirements.
 
 ## C-05 — current marker population is converged
 
@@ -64,4 +85,4 @@ The 02:28:44 UTC Raft gauge baseline was:
 
 The collector now includes histogram buckets, counts and sums, so a complete 24-hour run can compute build count and p50/p99. One gauge reading cannot establish whether lag exceeded 64 between scrapes; the interval and all build/uptime continuity checks must be reported with the result.
 
-At 02:32:58 UTC, `nynuc` had one QSV/SDR accepted session since its current process started; the other sampled encoder-session and tone-map counters were zero. Those are process-local starting counts, not seven-day usage or absence evidence. The C-08 one-hour RED series remains in progress. JSON-mode log verification, browsing, and media-body flow in its plan require separate actions and are not claimed here.
+At 02:32:58 UTC, `nynuc` had one QSV/SDR accepted session since its current process started; the other sampled encoder-session and tone-map counters were zero. Those are process-local starting counts, not seven-day usage or absence evidence. The C-08 first hour is described above as an interrupted, mixed-build readout. JSON-mode log verification, browsing, and media-body flow in its plan require separate actions and are not claimed here.
