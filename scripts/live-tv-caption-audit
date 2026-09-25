@@ -88,7 +88,7 @@ if [ "$1" = analyze ]; then
     [ $# -eq 2 ] || usage
     PLURX_CAPTION_ANALYZE=$(cd "$(dirname "$2")" && pwd -P)/$(basename "$2")
     export PLURX_CAPTION_ANALYZE
-    test=live_tv::caption_audit_tests::summarise_the_captions_in_a_capture
+    test=live_tv::caption_probe::summarise_the_captions_in_a_capture
 else
     routes=
     for route in "$@"; do
@@ -104,6 +104,6 @@ else
         PLURX_CAPTION_AUDIT_A53CC=$a53cc
         export PLURX_CAPTION_AUDIT_A53CC
     fi
-    test=live_tv::caption_audit_tests::live_caption_audit_on_this_node
+    test=live_tv::caption_probe::live_caption_audit_on_this_node
 fi
 exec cargo test --locked -p plurxd --bin plurxd "$test" -- --ignored --exact --nocapture
