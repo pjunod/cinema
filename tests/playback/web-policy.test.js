@@ -1687,7 +1687,7 @@ test("the two measured A-04 cliffs select encoded low rungs with peak headroom",
     runwaySeconds: 5,
     nowMs: 10_000,
   });
-  assert.equal(first.height, 144);
+  assert.equal(first.height, 240);
   assert.equal(first.reason, "bandwidth cliff");
   const second = policy.decideRung({
     ladder,

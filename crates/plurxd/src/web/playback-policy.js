@@ -21,7 +21,7 @@
     // An in-flight fragment's first progress window can span a link change.
     // Leave room for that mixed sample and the encoded segment's peak, not
     // merely its nominal bitrate, when choosing a cliff replacement.
-    severePeakSafetyFactor: 0.75,
+    severePeakSafetyFactor: 0.84,
     mildHeadroom: 1.3,
     mildSamples: 2,
     cooldownMs: 20_000,

@@ -23,7 +23,7 @@
     "decisionMs": 1000,
     "safeEstimateFactor": 0.95,
     "severeEstimateRatio": 0.7,
-    "severePeakSafetyFactor": 0.75,
+    "severePeakSafetyFactor": 0.84,
     "mildHeadroom": 1.3,
     "mildSamples": 2,
     "cooldownMs": 20000,

@@ -176,7 +176,7 @@ it unit-tests without a video element:
 - **Severe pressure** requires a fresh transfer estimate below 0.7× the
   current rung. A stall or ≤1.5 s of runway supplies urgency, but never
   invents a bandwidth cause. The controller selects the highest rung whose
-  advertised `peak_kbps` fits within 0.75× the lower of the fresh transfer
+  advertised `peak_kbps` fits within 0.84× the lower of the fresh transfer
   and hls.js EWMA estimates **in one move**. The reserve covers a partial
   fragment progress window that straddles a cliff; using nominal bitrate
   admitted 480p on a measured 1.1 Mb/s link and forced a second restart.
@@ -220,7 +220,7 @@ Asymmetric *selection* (down in one move, up one rung slowly) is the whole
 trick of ABR; the constants are starting points to tune on real use.
 
 The web player offers a prepared successor for an Auto rung move when its
-incumbent can still present. It starts the successor at most four seconds
+incumbent can still present. It starts the successor at most three seconds
 ahead, waits until the successor overlaps the incumbent's film position and
 has two seconds buffered beyond it, aligns the two elements, then exposes the
 successor. The incumbent remains available until the successor presents a
