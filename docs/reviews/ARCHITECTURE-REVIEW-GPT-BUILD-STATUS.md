@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — draft PR #524; three voters on `60f3803d1`, current main `c99a29090` awaits postmerge rollout; nuc3 forensic hold restored · **Updated:** 2026-09-25 17:29 UTC · **Main:** `c99a29090`
+**Status:** open — draft PR #524; three voters on `60f3803d1`, current main `c99a29090` awaits postmerge rollout; nuc3 forensic hold restored · **Updated:** 2026-09-25 17:36 UTC · **Main:** `c99a29090`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -70,6 +70,9 @@ SHA-256 `37455c3f81553069567f64b317bcd8328aa652ad3bb205bce744dee43f5b8e3f`.
 The TCL canary retained sign-in, but a playable offline download was not
 available to prove that narrower data path. PR #524 remains draft pending its
 exact-head fast lane and merge.
+
+At 17:24:54 UTC, the old b47 `nuc3` container was started again on original `/srv/plurx`, with its checkout already at `60f3803d1`. It was stopped at 17:35:26 UTC; original and forensic directories remained. Three voters were still exact `60f3803d1`, healthy/restart-free and `/readyz` 200. Docker had not restarted since September 20; `unless-stopped` alone does not explain this relaunch, and no live Ansible/Compose process, Plurxd/deploy systemd service or matching user cron entry was found. SSH sessions from `192.168.4.143` overlapped the start, but the caller command was not logged, so the external one-shot explanation remains an inference. No restart policy was changed because it would not block `docker start` or `compose up`. Sanitized receipt SHA-256 `8a0efb33d49e77ba87477ed997445f26980973a1b33c5f71ee43ac177a4c02f9`.
+
 
 ## Current impediments
 
