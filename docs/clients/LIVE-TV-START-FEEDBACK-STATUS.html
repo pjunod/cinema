@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Live TV startup and captions repair status</title>
+<style>body{font:16px system-ui;max-width:960px;margin:40px auto;padding:0 24px;color:#18212b;background:#f6f8fa}table{width:100%;border-collapse:collapse;background:white}td,th{text-align:left;vertical-align:top;padding:12px;border-bottom:1px solid #ddd}.status{padding:16px;background:#e8efff}a{color:#174da1}code{font-size:13px}</style>
+<h1>Live TV startup and captions repair</h1>
+<p>Updated: 2026-09-25 · Branch: <code>codex/live-tv-start-feedback</code></p>
+<p class="status" id="summary">Implementation complete. One adversarial review returned three findings; fixes are in progress. Final fast lane and merge are pending. Nothing has been deployed.</p>
+<p>Companion to the <a href="WEB-SHELL-LAYOUT.md">web shell map</a>: this page records the repair, review findings, validation and merge status.</p>
+<table><tr><th>Work</th><th>Status</th></tr>
+<tr><td>Captions</td><td>Move inline captions below the picture; hide fullscreen captions with the controls. Preserve caption selection.</td></tr>
+<tr><td>Startup feedback</td><td>Show tuning, loading, buffering, autoplay and retry actions in the picture. Repeated presses keep the same attempt; old Stop operations cannot detach a newer channel.</td></tr>
+<tr><td>Adversarial review</td><td>One independent review complete. Addressing typed failure actions, pointer-versus-keyboard focus, and caption menu preservation during page refresh.</td></tr>
+<tr><td>Validation</td><td>Before the final-only testing instruction: 72 Live TV regressions, syntax and browser UI checks passed. The broad web run found a pre-existing Developer settings test failure, reproduced on unchanged main. Final checks will run after review fixes.</td></tr>
+<tr><td>PR and merge</td><td>One batched PR will be opened after review fixes, then merged only after the current candidate passes the fast lane.</td></tr>
+<tr><td>Live acceptance</td><td>Browser evidence uses a simulated tuner/media boundary. Physical HDHomeRun acceptance and deployment are not established.</td></tr></table>
+<h2>Decisions</h2>
+<p>Use an independent clone under the agent directory. Treat the already-running review as the single pre-merge review. Keep these repairs enabled as ordinary playback behavior; they do not introduce an optional feature or a readiness gate. Run no full unit suite outside the selected fast lane.</p>
+<p>Green means the selected candidate checks passed; it does not mean the repair is deployed or physical tuner playback has been verified.</p>
+<p><a href="../README.md">Documentation index</a></p></html>

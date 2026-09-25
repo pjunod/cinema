@@ -229,7 +229,7 @@ async function viewLiveTv(generation=PAGE_RENDER_GENERATION){
   // The host follows the route back into its slot; a dock returning here
   // never restarts the stream, it just moves.
   liveTvSetMode("slot");
-  const host=liveTvHost(); if(host) host.hidden=!LIVE_TV_LEASE.current;
+  const host=liveTvHost(); if(host) host.hidden=!LIVE_TV_LEASE.current&&!LIVE_TV.starting;
   try{
     const result=await api("/live-tv/channels",{signal:AbortSignal.timeout(30000)});
     if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
@@ -430,17 +430,18 @@ function liveTvCaptionTrackLabel(track,index){
   return track.label||track.language||`${track.kind==="captions"?"Caption":"Subtitle"} ${index+1}`;
 }
 function liveTvRefreshCaptionControls(){
-  const select=document.getElementById("live-tv-captions");
-  if(!select) return;
   const tracks=liveTvCaptionTracks();
   const signature=JSON.stringify(tracks.map(({track,index})=>[index,track.kind,track.label,track.language]));
-  if(select.dataset.tracks!==signature){
-    select.innerHTML='<option value="off">Off</option>'+tracks.map(({track,index})=>
-      `<option value="${index}">${esc(liveTvCaptionTrackLabel(track,index))}</option>`).join("");
-    select.dataset.tracks=signature;
-  }
   const showing=tracks.find(({track})=>track.mode==="showing");
-  select.value=showing?String(showing.index):"off";
+  for(const select of document.querySelectorAll("[data-live-tv-captions]")){
+    select.parentElement.hidden=tracks.length===0;
+    if(select.dataset.tracks!==signature){
+      select.innerHTML='<option value="off">Off</option>'+tracks.map(({track,index})=>
+        `<option value="${index}">${esc(liveTvCaptionTrackLabel(track,index))}</option>`).join("");
+      select.dataset.tracks=signature;
+    }
+    select.value=showing?String(showing.index):"off";
+  }
   if(document.getElementById("live-tv-stats")) updateLiveTvStats();
 }
 function liveTvSelectCaption(value){
@@ -628,7 +629,9 @@ function liveTvNowBar(channel){
       <br><span class="muted">${esc(channel.guide_number)} · ${esc(channel.guide_name)}${at.now?" · "+esc(liveTvClock(at.now.start))+"–"+esc(liveTvClock(at.now.end)):""}${left!==null?" · "+left+" min left":""}${at.next?" · Next: "+esc(at.next.title):""}</span>
     </span>
     <span class="lt-mini" style="width:120px"><i style="width:${pct}%"></i></span>
+    <button type="button" onclick="resumeLiveTv()" title="Play" aria-label="Play">▶</button>
     <button type="button" onclick="pauseLiveTv()" title="Pause" aria-label="Pause">⏸</button>
+    <label class="lt-captions" hidden>Captions <select data-live-tv-captions aria-label="Live TV captions" onchange="liveTvSelectCaption(this.value)"><option value="off">Off</option></select></label>
     <button type="button" onclick="liveTvTogglePlayerSize()" title="${wide?"Use compact player":"Use original-size player"}" aria-label="${wide?"Use compact player":"Use original-size player"}">${wide?"⤡ Smaller":"⤢ Larger"}</button>
     <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
     ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)" aria-label="Picture-in-picture">⧉</button>':""}
@@ -799,6 +802,7 @@ function renderLiveTvChannels(){
   }
   liveTvWireSlot();
   liveTvPaint();
+  liveTvRefreshCaptionControls();
 }
 // Switching views is a re-render of the browse region and nothing else: it
 // never stops the stream, never restarts it, and never refetches.
@@ -1122,7 +1126,7 @@ function liveTvReveal(){
   if(host.dataset.mode!=="full"||!video||video.paused) return;
   LIVE_TV.idleTimer=setTimeout(()=>{
     const still=document.getElementById("live-tv-video");
-    if(still&&!still.paused&&!still.ended) liveTvIdle();
+    if(still&&!still.paused&&!still.ended&&!host.contains(document.activeElement)) liveTvIdle();
   },PlaybackPolicy.liveContractTiming("hide_after_ms"));
 }
 function liveTvIdle(){
