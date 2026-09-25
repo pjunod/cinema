@@ -75,9 +75,19 @@ Each capture probed as `mpeg2video,tt,30000/1001,`; CC1 and 708 SERVICE1
 carried actual dialogue on all three. SERVICE2–6 had zero text. Seven other
 five-second subchannel samples (23.4, 28.1, 30.1, 45.1, 48.1, 53.1 and
 65.6) were MPEG-2; no H.264 broadcast was found in that bounded sample.
-This establishes service IDs for M4 on the sampled channels. The plan's
-pre-advertising client baseline (prompt C) and post-advertising playback
-remain separate evidence.
+This establishes service IDs for M4 on the sampled channels. Prompt C was
+partly captured at 02:14–02:17 UTC on exact deployed `f600d2823`:
+Chrome on macOS played channel 6.1 from `m6` at 1920×1080 H.264/AAC through
+Intel QuickSync. Playback info showed `Subtitles: Off`. The active video
+exposed one English caption track in `hidden` mode with no active cues, and
+no caption text was drawn during more than 30 seconds. The plan's literal
+`document.querySelector("video")` expression returned `[]` because the first
+video element was inactive; the active second element supplied the track
+observation. Playback stopped and all four tuner slots were idle afterward.
+Safari, physical Apple and Android caption-menu rows, plus post-advertising
+playback, remain owed. ADB found no connected Shield or Android TV; the
+three attached phones reported caption setting `null` (unset), which does
+not prove enabled or disabled.
 
 The Raft size-gauge values at 23:36 UTC, in bytes, are kept here so later readings have a comparison point:
 
@@ -138,7 +148,7 @@ docker exec plurxd grep 'Max open files' /proc/1/limits
 | `C-08` | Preliminary snapshot in §2; acceptance open | One-hour normal-use scrape series; literal label regex has metric-name false positives; JSON mode restart, browser RED sanity and media-body flow remain. |
 | `L-01` | No acceptance run | media1 336-hour guide vs 2 MiB clip; mixed NAS/local sink interruption and metrics. |
 | `L-02` | No acceptance run | Three §6.3 fleet prompts: settings failover budget, peer resolution, and start/cleanup observations; M3/M4 implementation also pending. |
-| `L-03` | Prompt A captured three real channels with CC1 and 708 SERVICE1 dialogue (§2.1); acceptance open | Shared-transport physical pass, M3 prompts B-C, M2 client device pass and M4 post-advertising caption pass after the per-build probe. #482 already merged. |
+| `L-03` | Prompt A captured three real channels; prompt C Chrome baseline found an English track hidden and no drawn text (§2.1); acceptance open | Shared-transport physical pass, M3 prompt B and remaining prompt C native rows, M2 client device pass and M4 post-advertising caption pass. #482 already merged. |
 | `W-01` | No acceptance run | Progressive-remux browser/device matrix, post-deploy event rate and journal. |
 | `W-02` | Readiness repair; no §5.4–5.5 acceptance | Browser, lock-screen, headset and LG/Fire TV input evidence; 5.4/5.5 also await 5.1-5.3 type baseline and Playwright. |
 | `A-01` | No acceptance run | Apple TV HDMI mode matrix; iPhone interruption/route matrix. |

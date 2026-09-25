@@ -691,7 +691,7 @@ records device state; the raw reports remain in the observing agent's own
 | Chrome · 8→1.5 Mb/s | 24.974 s cliff-to-recovery versus 10 s limit; one automatic 720p→360p restart/downshift at 21.198 s; maximum video gap 1.883 s; three transition waits, one stall, five hitches; delivered post-cliff media 1,499.2 kb/s against 360p's advertised 1,360 kb/s. Result: failed. | Presentation-clock stalled seconds were not fully integrated by this report. SDR source makes HDR→SDR count inapplicable. |
 | Chrome · 8→1.1→0.35 Mb/s | Two attempts timed out before the first presented frame. Neither reached a shaped cliff. | All six post-cliff metrics. |
 | Firefox · 8→1.5 Mb/s | WebDriver process closed before a browser session; `Could not find profile folder` in the retained log. | All six metrics. |
-| Safari; Apple TV; iPhone; Android | No valid trace. Safari required local remote-automation enablement; Apple TV was asleep, iPhone locked, Android release signing absent. | Both profiles, physical HDR and all six metrics. |
+| Safari; Apple TV; iPhone; Android | No valid trace. Safari required local remote-automation enablement; Apple TV was asleep, iPhone and iPad locked, Android release signing absent. | Both profiles, physical HDR and all six metrics. |
 
 Chrome raw and normalized reports have SHA-256
 `07da0de627ac695dbfc637d1ef7edb7922bdc267ab4255693fa51a3e34237f05`
