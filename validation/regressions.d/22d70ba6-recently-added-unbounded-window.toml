@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["22d70ba6"]
-points = ["cluster.auth"]
-checks = ["rust-gate"]
-reason = "recently_added_wider_window_offset turned the i64::MAX offset (no bound, the whole candidate set) into i64::MAX - 1 when widening. The plurx-core unit test recently_added_windows_start_at_eight_rows_a_card_and_double in store::sql_source asserts the first windows (191 for 24 cards, 7 for none, i64::MAX for a negative limit), one doubling (191 to 383) and that i64::MAX widens to i64::MAX; the old arithmetic fails it with 9223372036854775806 against 9223372036854775807. The rust gate runs it (the module is compiled with hiqlite-store, which the workspace test enables)."

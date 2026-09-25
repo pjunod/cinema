@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["ea62fa80"]
-points = ["cluster.page-reads", "cluster.auth"]
-checks = ["rust-gate", "cluster-auth"]
-reason = "The replicated Authority recently_added read included Recordings libraries in the catalogue-wide rail while the standalone store and the replicated local read left them out. The store contract catalogue_recently_added_leaves_out_recordings_on_every_backend creates a Movies library with one movie and a Recordings library with one newer video on in-memory SQLite, file SQLite and three Hiqlite voters (the Hiqlite trait method is the Authority read), and asserts the catalogue-wide rail is exactly the movie while the Recordings library's own rail is exactly the recording. Restoring the Authority's statement without the Recordings predicate fails it on hiqlite-3-voter with [2, 1] against [1]. The rust gate runs the SQLite backends; make cluster-check (cluster-store-check) runs the three-voter backend."

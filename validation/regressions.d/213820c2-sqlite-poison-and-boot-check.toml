@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["213820c2"]
-points = ["persistence.upgrades", "cluster.page-reads", "core.media"]
-checks = ["rust-gate"]
-reason = "A standalone SQLite connection whose closure panicked stayed poisoned until restart, and a corrupt database file reached migration before anything noticed. The plurx-core tests under store::sqlite::housekeeping pin the recovery and the boot check: a_panicking_writer_closure_is_validated_and_rolled_back (the next write succeeds, the panic's open transaction is rolled back, outcome validated counted), a_panicking_read_closure_leaves_reads_working (the same for a read-pool slot), a_writer_left_without_foreign_keys_is_reopened (a writer failing validation is replaced from the path, outcome reopened), an_in_memory_writer_that_fails_validation_is_not_replaced (outcome failed, the slot stays poisoned with the error naming it), and a_truncated_database_refuses_startup_with_the_recovery_named (SqliteStore::open refuses a truncated file with the documented message before migration). Restoring the plain lock() error and removing the boot check fails all five; a_check_past_its_budget_is_interrupted_not_failed and health_exposition_has_the_fixed_series pin the budget interrupt and the two fixed series rendered on /metrics. The rust gate runs them."
