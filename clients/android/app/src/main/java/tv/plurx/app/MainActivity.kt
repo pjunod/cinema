@@ -201,14 +201,14 @@ private fun MainNav(
                 libraryIds = entry.arguments!!.getString("ids").orEmpty().split(',').mapNotNull(String::toLongOrNull),
                 title = entry.arguments!!.getString("name").orEmpty(),
                 onOpenItem = { id -> nav.navigate("detail/$id") },
-                onBack = { nav.popBackStack() },
+                onBack = { nav.popBackStackFrom(entry) },
             )
         }
-        composable("search") {
+        composable("search") { entry ->
             SearchScreen(
                 vm = vm,
                 onOpenItem = { id -> nav.navigate("detail/$id") },
-                onBack = { nav.popBackStack() },
+                onBack = { nav.popBackStackFrom(entry) },
             )
         }
         composable(
@@ -227,7 +227,7 @@ private fun MainNav(
                 onMakeChannel = { item ->
                     nav.navigate("library-channels?seedId=${item.id}&seedKind=${Uri.encode(item.kind)}&seedTitle=${Uri.encode(item.title)}")
                 },
-                onBack = { nav.popBackStack() },
+                onBack = { nav.popBackStackFrom(entry) },
             )
         }
         composable(
@@ -240,7 +240,7 @@ private fun MainNav(
             ReaderScreen(
                 itemId = entry.arguments!!.getLong("itemId"),
                 fileId = entry.arguments!!.getLong("fileId"),
-                onExit = { nav.popBackStack() },
+                onExit = { nav.popBackStackFrom(entry) },
             )
         }
         composable(
@@ -249,11 +249,11 @@ private fun MainNav(
         ) { entry ->
             PhotoScreen(
                 itemId = entry.arguments!!.getLong("id"),
-                onBack = { nav.popBackStack() },
+                onBack = { nav.popBackStackFrom(entry) },
             )
         }
-        composable("settings") {
-            SettingsScreen(vm = vm, onBack = { nav.popBackStack() }, onOpenDeveloper = { nav.navigate("developer") })
+        composable("settings") { entry ->
+            SettingsScreen(vm = vm, onBack = { nav.popBackStackFrom(entry) }, onOpenDeveloper = { nav.navigate("developer") })
         }
         composable(
             "live-tv?channel={channel}",
@@ -272,16 +272,16 @@ private fun MainNav(
                 onOpenItem = { id -> nav.navigate("detail/$id") },
                 onOpenRecording = { id -> nav.navigate("recording/${Uri.encode(id)}") },
                 onOpenRecordingActivity = { nav.navigate("recording-activity") },
-                onBack = { nav.popBackStack() },
+                onBack = { nav.popBackStackFrom(entry) },
             )
         }
-        composable("recordings") {
+        composable("recordings") { entry ->
             DvrRecordingsScreen(
                 controller = dvr,
                 onOpenItem = { id -> nav.navigate("detail/$id") },
                 onOpenRecording = { id -> nav.navigate("recording/${Uri.encode(id)}") },
                 onOpenActivity = { nav.navigate("recording-activity") },
-                onBack = { nav.popBackStack() },
+                onBack = { nav.popBackStackFrom(entry) },
             )
         }
         composable(
@@ -292,14 +292,14 @@ private fun MainNav(
                 controller = dvr,
                 recordingId = entry.arguments?.getString("id").orEmpty(),
                 onOpenItem = { id -> nav.navigate("detail/$id") },
-                onBack = { nav.popBackStack() },
+                onBack = { nav.popBackStackFrom(entry) },
             )
         }
-        composable("recording-activity") {
+        composable("recording-activity") { entry ->
             DvrCaptureActivityScreen(
                 controller = dvr,
                 onOpenRecording = { id -> nav.navigate("recording/${Uri.encode(id)}") },
-                onBack = { nav.popBackStack() },
+                onBack = { nav.popBackStackFrom(entry) },
             )
         }
         composable(
@@ -318,18 +318,18 @@ private fun MainNav(
                 onWatchFromStart = { itemId, fileId, channelId ->
                     nav.navigate("player/$itemId/$fileId/0?returnChannel=${Uri.encode(channelId)}")
                 },
-                onBack = { nav.popBackStack() },
+                onBack = { nav.popBackStackFrom(entry) },
             )
         }
-        composable("developer") {
-            LiveTvDeveloperScreen(origin = vm.origin, onBack = { nav.popBackStack() })
+        composable("developer") { entry ->
+            LiveTvDeveloperScreen(origin = vm.origin, onBack = { nav.popBackStackFrom(entry) })
         }
-        composable("downloads") {
+        composable("downloads") { entry ->
             DownloadsScreen(
                 vm = vm,
                 onPlay = { id -> nav.navigate("offline/$id") },
                 onRead = { id -> nav.navigate("offline-book/$id") },
-                onBack = { nav.popBackStack() },
+                onBack = { nav.popBackStackFrom(entry) },
             )
         }
         composable(
@@ -338,7 +338,7 @@ private fun MainNav(
         ) { entry ->
             OfflineBookReaderScreen(
                 bookId = entry.arguments!!.getString("id").orEmpty(),
-                onExit = { nav.popBackStack() },
+                onExit = { nav.popBackStackFrom(entry) },
             )
         }
         composable(
@@ -347,7 +347,7 @@ private fun MainNav(
         ) { entry ->
             OfflinePlayerScreen(
                 downloadId = entry.arguments!!.getString("id").orEmpty(),
-                onExit = { nav.popBackStack() },
+                onExit = { nav.popBackStackFrom(entry) },
             )
         }
         composable(
@@ -398,7 +398,7 @@ private fun MainNav(
                     nav.navigate("detail/${target.itemId}") { popUpTo("home") }
                     nav.navigate("player/${target.itemId}/${target.fileId}/${target.startMs}")
                 },
-                onExit = { nav.popBackStack() },
+                onExit = { nav.popBackStackFrom(entry) },
             )
         }
     }

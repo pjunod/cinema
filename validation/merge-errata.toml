@@ -46,4 +46,14 @@ version = 1
 
 enforce_after = "448e803daba8ec7706350aedbe0562fd99454644"
 
-errata = []
+[[errata]]
+commit = "e2dfc6b77aa965e039b111038bb15a6ca352aab1"
+reason = "PR #512 landed corrective commit 1831ee898 (refuse empty caption audit results) without a Regression-Test trailer in its immutable merge message. The existing regression is tests/operations/test_live_tv_caption_audit.py::test_audit_requires_one_completed_test; fast lane #2976 passed on the reviewed head. PR #516 records this omission after fast lane #3000 found it. Future landing messages must carry the checked trailer."
+
+[[errata]]
+commit = "3ca348a77b769a9a0b72a402a7b6adadc8c966ec"
+reason = """Landing commit of #519 (rolling transcode: a scratch hold does not trip the publication deadline), merged 2026-09-25 16:38 UTC with Forgejo's default title-only message, after the boundary. It brings in corrective commits ef968496 `fix(transcode): a scratch hold does not spend the publication deadline` and bcce76b7 `fix(transcode): a scratch hold does not trip the pre-publication capacity check`. #519's body carried four Regression-Test lines, and all four resolve in 3ca348a77's own tree, but none reached the landing message, and a landing commit cannot be amended. The pinning tests are crates/plurxd/src/transcode/tests/chunk_03.rs::scratch_hold_publication_deadline_waits_out_a_global_scratch_hold and ::scratch_hold_publication_deadline_prepublication_capacity_waits_out_a_global_scratch_hold (a global scratch hold neither spends the publication deadline nor fails the pre-publication capacity check), plus ::scratch_hold_publication_deadline_still_applies_to_a_demand_hold and ::scratch_hold_publication_deadline_still_applies_to_a_bytes_hold (demand and byte holds are still bounded by it)."""
+
+[[errata]]
+commit = "60f3803d1d5dc431a919235fab328ae6ea86d394"
+reason = """Landing commit of #522 (rolling publication: a late cycle cannot trap the producer at one segment), merged 2026-09-25 16:44 UTC with Forgejo's default title-only message, after the boundary. It brings in corrective commits 9a230e4d `fix(streaming): stop the rolling flow hold from trapping publication` and 18e108b4 `fix(streaming): cap the rolling release target at the clock allowance`. Both commits and #522's body carried Regression-Test lines, and all six resolve in 60f3803d1's own tree, but none reached the landing message, and a landing commit cannot be amended. The pinning tests are crates/plurxd/src/transcode/tests/chunk_03.rs::rolling_publication_budget_late_cycle_does_not_trap_a_held_producer, ::rolling_publication_budget_on_time_cycles_keep_batching_and_pacing, ::rolling_publication_budget_barely_faster_producer_recovers_from_late_cycles, ::rolling_publication_budget_double_rate_release_stays_inside_the_allowance and ::rolling_flow_release_target_is_capped_by_the_publication_allowance (a late cycle releases a held producer instead of trapping it at one segment, and the release target stays inside the clock allowance), plus crates/plurxd/src/transcode/tests/chunk_01.rs::accepted_hold_and_active_control_signal_the_real_producer_immediately."""

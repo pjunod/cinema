@@ -269,7 +269,16 @@ data class LiveTvResumeAnswer(val outcome: String, val session: LiveTvStarted? =
     val audio_channels: Int,
 )
 @Serializable data class LiveTvDeliverySource(
+    val width: Int? = null,
+    val height: Int? = null,
+    val video_codec: String? = null,
     val field_order: String? = null,
+    val frame_rate: LiveTvRational? = null,
+    val sample_aspect_ratio: String? = null,
+)
+@Serializable data class LiveTvDeliveryReason(
+    val code: String? = null,
+    val explanation: String? = null,
 )
 @Serializable data class LiveTvDelivery(
     val output: LiveTvDeliveryOutput,
@@ -278,6 +287,8 @@ data class LiveTvResumeAnswer(val outcome: String, val session: LiveTvStarted? =
     val packaging: String,
     val source: LiveTvDeliverySource? = null,
     val deinterlace: Boolean = false,
+    val deinterlace_output: String? = null,
+    val reasons: List<LiveTvDeliveryReason>? = null,
 )
 
 @Serializable

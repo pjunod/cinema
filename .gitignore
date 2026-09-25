@@ -6,6 +6,7 @@
 /fuzz/parsers/artifacts
 /fuzz/parsers/target
 /spikes/hiqlite-m0/target
+/spikes/tokenizer-backends/target
 /vendor/*/target/
 /data
 *.db

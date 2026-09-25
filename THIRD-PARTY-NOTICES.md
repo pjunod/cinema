@@ -15,11 +15,16 @@ and never reaches a shipped artifact (§5).
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
 fields, so an audit claiming to read licenses "from Cargo.lock" has not done
-the work. 499 source-bearing crates in the root workspace · license fields
+the work. 494 source-bearing crates in the root workspace · license fields
 verified 2026-09-17; the graph itself re-checked against `Cargo.lock`
 on 2026-09-22, when the vendored Hiqlite `backup` feature stopped
 enabling S3 and fourteen crates reached only through it left the
-resolution.
+resolution, and on 2026-09-24, when `ring` became the only rustls provider
+and the six crates reached only through `aws-lc-rs` (`aws-lc-rs`,
+`aws-lc-sys`, `cmake`, `dunce`, `fs_extra`, `jobserver`) left it. The
+crate counts and the §4 license summary were recomputed from `cargo metadata`
+on 2026-09-25; `tests/operations/test_license_notices.py` holds the summary,
+the counts and the full list to one another.
 
 ---
 
@@ -139,28 +144,29 @@ such requirement applies.
 
 ## 4. Rust dependencies
 
-513 source-bearing crates resolve into a plurx build, excluding the five
-first-party crates and the six vendored above. Every one is permissive:
+494 source-bearing crates resolve into a plurx build, excluding the five
+first-party crates and the vendored ones above (`s3-simple` resolves only in
+the fork's optional backup graph, never in this one). Every one is permissive:
 
-| `MIT OR Apache-2.0` | 268 |
-| `MIT` | 117 |
-| `Apache-2.0 OR MIT` | 27 |
+| License expression | Crates |
+|---|---:|
+| `MIT OR Apache-2.0` | 261 |
+| `MIT` | 115 |
+| `Apache-2.0 OR MIT` | 25 |
 | `Unicode-3.0` | 18 |
-| `MIT/Apache-2.0` | 17 |
+| `MIT/Apache-2.0` | 16 |
 | `Apache-2.0` | 11 |
 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 5 |
 | `Unlicense OR MIT` | 4 |
 | `Unlicense/MIT` | 4 |
 | `Apache-2.0 OR ISC OR MIT` | 3 |
 | `Apache-2.0/MIT` | 3 |
-| `BSD-3-Clause` | 3 |
-| `ISC` | 3 |
 | `Zlib OR Apache-2.0 OR MIT` | 3 |
 | `Apache-2.0 OR MIT OR Zlib` | 2 |
 | `BSD-2-Clause` | 2 |
 | `BSD-2-Clause OR Apache-2.0 OR MIT` | 2 |
 | `CDLA-Permissive-2.0` | 2 |
-| `ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)` | 2 |
+| `ISC` | 2 |
 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | 2 |
 | `MIT OR Apache-2.0 OR Zlib` | 2 |
 | `(Apache-2.0 OR MIT) AND BSD-3-Clause` | 1 |
@@ -169,10 +175,7 @@ first-party crates and the six vendored above. Every one is permissive:
 | `Apache-2.0 / MIT` | 1 |
 | `Apache-2.0 AND ISC` | 1 |
 | `Apache-2.0 OR BSL-1.0` | 1 |
-| `BSD-3-Clause AND MIT` | 1 |
-| `BSD-3-Clause/MIT` | 1 |
-| `CC0-1.0 OR MIT-0 OR Apache-2.0` | 1 |
-| `ISC AND (Apache-2.0 OR ISC)` | 1 |
+| `BSD-3-Clause` | 1 |
 | `MIT AND BSD-3-Clause` | 1 |
 | `MIT OR BSD-3-Clause` | 1 |
 | `MIT OR Zlib OR Apache-2.0` | 1 |
@@ -188,17 +191,20 @@ Crates under `Unicode-3.0` (18) and `CDLA-Permissive-2.0` (2, the webpki root
 stores) are permissive with attribution requirements, satisfied by this file.
 
 Two limits worth stating rather than hiding. This table reproduces each
-crate's declared SPDX expression only: `aws-lc-sys`, `onig_sys` and `lz4-sys`
+crate's declared SPDX expression only: `onig_sys` and `lz4-sys`
 statically link bundled C whose own upstream notices are not carried here.
-And the repo has four lockfiles — `fuzz/Cargo.lock`,
-`fuzz/parsers/Cargo.lock` and `spikes/hiqlite-m0/Cargo.lock` resolve
-packages the root lock does not (`libfuzzer-sys`, `arbitrary`, `rkyv`, and
-others). All are permissive and none of those workspaces ships in any
-artifact, so they are out of scope for distribution, but they are not
-covered by the table above.
+And the repo has more lockfiles than the root one. `fuzz/Cargo.lock`,
+`fuzz/parsers/Cargo.lock`, `spikes/hiqlite-m0/Cargo.lock` and
+`spikes/tokenizer-backends/Cargo.lock` resolve crate versions the root lock
+does not (`libfuzzer-sys`, `arbitrary`, `rkyv`, `fancy-regex` 0.14.0, and
+others), and `vendor/hiqlite/Cargo.lock`, `vendor/hiqlite-wal/Cargo.lock`,
+`vendor/dolby_vision/Cargo.lock` and `vendor/bitvec_helpers/Cargo.lock` pin
+the vendored crates' own test lanes. All are permissive and none of those
+workspaces ships in any artifact, so they are out of scope for distribution,
+but they are not covered by the table above.
 
 <details>
-<summary>Full crate list (513)</summary>
+<summary>Full crate list (494)</summary>
 
 | Crate | Version | License |
 |---|---|---|
@@ -226,8 +232,6 @@ covered by the table above.
 | `async-trait` | 0.1.91 | MIT OR Apache-2.0 |
 | `atomic-waker` | 1.1.2 | Apache-2.0 OR MIT |
 | `autocfg` | 1.5.1 | Apache-2.0 OR MIT |
-| `aws-lc-rs` | 1.17.3 | ISC AND (Apache-2.0 OR ISC) |
-| `aws-lc-sys` | 0.43.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) |
 | `axum` | 0.8.9 | MIT |
 | `axum-core` | 0.5.6 | MIT |
 | `axum-server` | 0.8.0 | MIT |
@@ -272,7 +276,6 @@ covered by the table above.
 | `clap_builder` | 4.6.2 | MIT OR Apache-2.0 |
 | `clap_derive` | 4.6.1 | MIT OR Apache-2.0 |
 | `clap_lex` | 1.1.0 | MIT OR Apache-2.0 |
-| `cmake` | 0.1.58 | MIT OR Apache-2.0 |
 | `colorchoice` | 1.0.5 | MIT OR Apache-2.0 |
 | `combine` | 4.6.7 | MIT |
 | `compact_str` | 0.9.1 | MIT |
@@ -314,7 +317,6 @@ covered by the table above.
 | `digest` | 0.11.3 | MIT OR Apache-2.0 |
 | `displaydoc` | 0.2.7 | MIT OR Apache-2.0 |
 | `dotenvy` | 0.15.7 | MIT |
-| `dunce` | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 |
 | `dyn-clone` | 1.0.20 | MIT OR Apache-2.0 |
 | `dyn-stack` | 0.13.2 | MIT |
 | `dyn-stack-macros` | 0.1.3 | MIT |
@@ -342,7 +344,6 @@ covered by the table above.
 | `fraction` | 0.16.0 | MIT OR Apache-2.0 |
 | `fs-err` | 3.3.1 | MIT OR Apache-2.0 |
 | `fs4` | 1.1.0 | MIT OR Apache-2.0 |
-| `fs_extra` | 1.3.0 | MIT |
 | `funty` | 2.0.0 | MIT |
 | `futures` | 0.3.33 | MIT OR Apache-2.0 |
 | `futures-channel` | 0.3.33 | MIT OR Apache-2.0 |
@@ -408,7 +409,6 @@ covered by the table above.
 | `jni-macros` | 0.22.4 | MIT OR Apache-2.0 |
 | `jni-sys` | 0.4.1 | MIT OR Apache-2.0 |
 | `jni-sys-macros` | 0.4.1 | MIT OR Apache-2.0 |
-| `jobserver` | 0.1.35 | MIT OR Apache-2.0 |
 | `js-sys` | 0.3.103 | MIT OR Apache-2.0 |
 | `jsonschema` | 0.50.1 | MIT |
 | `jsonschema-regex` | 0.50.1 | MIT |

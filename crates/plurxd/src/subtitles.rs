@@ -2463,28 +2463,10 @@ where
     outcome
 }
 
-/// Extract one bounded span of an embedded text track.
-///
-/// **`-ss` and `-to` go after `-i`, and that is load-bearing.** The obvious
-/// form — `-ss` before the input, so it is an index seek — is wrong twice, and
-/// both failures are silent:
-///
-/// - It rewrites cue timestamps toward zero. `slice_webvtt` and the
-///   `media_origin_seconds` shift both work in absolute source time, so a
-///   zero-based sidecar makes them select nothing and the handler falls back
-///   to the empty segment — which is the exact defect windowing exists to
-///   remove, wearing a different hat and passing a deadline test.
-/// - It does not bound the span. Measured against a fixture with cues at known
-///   times, `-ss 1800 -to 2000 -i src` returns *every cue in the file*.
-///
-/// `-copyts` restores the timestamps and still does not bound, which makes it
-/// the more dangerous near-miss: it fixes the half a reviewer checks.
-///
-/// The form below was measured to be the only one correct on both axes. It is
-/// an output seek, so ffmpeg reads the container from its start — see
-/// [`windowing_is_worthwhile`] for why that is acceptable and where it stops
-/// being so.
-async fn extract_vtt_window(
+/// Extract a playback text window. Indexed Matroska seeks skip preceding
+/// clusters. Copy timestamps without output -ss keeps one absolute timeline
+/// on both old and new FFmpeg; Rust filters preroll without rebasing cues.
+pub(crate) async fn extract_vtt_window(
     tmp: &Path,
     file: &MediaFile,
     index: i64,
@@ -2508,12 +2490,25 @@ async fn extract_vtt_window(
     let input = crate::ffmpeg::windows_source_path(&source.handle)?;
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
-    command
-        .args(["-hide_banner", "-loglevel", "error", "-i"])
-        .arg(&input)
-        .args([
+    command.args(["-hide_banner", "-loglevel", "error"]);
+    let indexed = crate::subtitle_ranges::indexed_text(file, index);
+    if indexed {
+        command.args([
+            "-copyts",
+            "-start_at_zero",
             "-ss",
-            &anchor_seconds.to_string(),
+            &anchor_seconds.saturating_sub(60).max(0).to_string(),
+        ]);
+    }
+    command.arg("-i").arg(&input);
+    // Output -ss rebases subtitles on FFmpeg 5 but not 8. With copyts and
+    // no output seek both emit the full-extraction timeline, even when the
+    // first cue is sparse or the container starts at a nonzero timestamp.
+    if !indexed {
+        command.args(["-ss", &anchor_seconds.to_string()]);
+    }
+    command
+        .args([
             "-to",
             &end.to_string(),
             "-map",
@@ -2521,7 +2516,7 @@ async fn extract_vtt_window(
             "-f",
             "webvtt",
         ])
-        .arg(tmp)
+        .arg("pipe:1")
         .stdin(std::process::Stdio::null())
         // Same reason as the whole-track extractor: the bound is a kill, not
         // merely a stopped wait, or a wedged ffmpeg keeps the stalled mount
@@ -2529,24 +2524,36 @@ async fn extract_vtt_window(
         .kill_on_drop(true);
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(&source.handle, &input)?;
-    let out = crate::process_control::output_job_owned(
+    let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(
         &mut command,
         crate::process_control::ChildWork::realtime("subtitle window for the playhead"),
     )
+    .map_err(|error| format!("spawning subtitle window extraction: {error}"))?
+    .output_to_bounded_file(tmp, MAX_SIDECAR_BYTES)
     .await
-    .map_err(|e| format!("spawning subtitle window extraction: {e}"))?;
-    if !out.status.success() {
-        let why = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("subtitle window extraction failed: {}", why.trim()));
+    .map_err(|error| format!("reading subtitle window extraction: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "subtitle window extraction failed: {}",
+            diagnostics.trim()
+        ));
     }
-    // Normalize before the file is published, so what lands in the cache is
-    // always absolute-time whatever this ffmpeg build chose to emit. Doing it
-    // here rather than at read time means the base is decided once, by the
-    // code that knows the anchor, instead of on every segment request.
-    let extracted = tokio::fs::read(tmp)
+    if !source.unchanged() || source.reopen(file).await.is_err() {
+        return Err("subtitle window source changed during extraction".to_owned());
+    }
+    if !diagnostics.trim().is_empty() {
+        return Err("subtitle window decoder reported an error".to_owned());
+    }
+    let extracted = plurx_core::fs_secure::read_bounded_regular(tmp, MAX_SIDECAR_BYTES)
         .await
         .map_err(|e| format!("reading the extracted subtitle window: {e}"))?;
-    let normalized = normalize_window_cues(&extracted, anchor_seconds);
+    let normalized = if indexed {
+        // Preroll is already in absolute source time. Never infer its base
+        // from the first cue: sparse windows make that ambiguous.
+        crate::subtitle_ranges::filter_absolute_window(&extracted, anchor_seconds, end)?
+    } else {
+        normalize_window_cues(&extracted, anchor_seconds)
+    };
     if normalized != extracted {
         tokio::fs::write(tmp, &normalized)
             .await
@@ -2581,6 +2588,7 @@ pub async fn read_cached_window(
 /// settled on one. It is the only thing that lets a later anchor displace an
 /// earlier flight: without an ordering fact, a second anchor is just a second
 /// request, and the work already running is as likely to be the right work.
+#[allow(clippy::too_many_arguments)]
 pub async fn warm_vtt_window(
     session: &str,
     sequence: Option<u64>,
@@ -2589,7 +2597,10 @@ pub async fn warm_vtt_window(
     index: i64,
     anchor_seconds: i64,
     window_seconds: i64,
+    access: &crate::subtitle_source::StoreAccess,
 ) -> bool {
+    let access = access.clone();
+    let dir_owned = dir.to_owned();
     warm_vtt_window_with(
         session,
         sequence,
@@ -2598,8 +2609,17 @@ pub async fn warm_vtt_window(
         index,
         anchor_seconds,
         window_seconds,
-        |tmp, file, index, anchor_seconds, window_seconds| async move {
-            extract_vtt_window(&tmp, &file, index, anchor_seconds, window_seconds).await
+        move |tmp, file, index, anchor_seconds, window_seconds| async move {
+            crate::subtitle_ranges::prepare(
+                &access,
+                &dir_owned,
+                &tmp,
+                &file,
+                index,
+                anchor_seconds,
+                window_seconds,
+            )
+            .await
         },
     )
     .await
@@ -2635,12 +2655,14 @@ where
     // would become a filename with a minus in it and an `-ss -500`, and the
     // safety should not live only in the caller.
     let anchor_seconds = anchor_seconds.max(0);
-    if !windowing_is_worthwhile(
-        anchor_seconds,
-        duration_seconds,
-        window_seconds,
-        whole_track_progress(dir, file, index).await,
-    ) {
+    if !crate::subtitle_ranges::indexed_text(file, index)
+        && !windowing_is_worthwhile(
+            anchor_seconds,
+            duration_seconds,
+            window_seconds,
+            whole_track_progress(dir, file, index).await,
+        )
+    {
         return false;
     }
     let cached = vtt_window_path(dir, file, index, anchor_seconds, window_seconds);

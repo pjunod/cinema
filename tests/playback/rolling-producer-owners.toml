@@ -426,7 +426,12 @@ also_in = ["crates/plurxd/src/transcode"]
 # waits for the real transcode it started to write its final playlist. Test-only,
 # bounded by its loop count, and it asserts rather than hangs. It owns no
 # producer and decides nothing about recovery.
-expected_occurrences = 46
+# 46 -> 48 with the rolling publication-trap fix: the position-10 resume case
+# in `accepted_hold_and_active_control_signal_the_real_producer_immediately`
+# adds the 300 ms spacing past the control rate limit and a 10 ms poll, inside
+# a two-second timeout, for the already-enqueued `resume` Store event. Both
+# are test-only and own no producer, process or recovery decision.
+expected_occurrences = 48
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -2054,7 +2059,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # Merged with main's K-09 subtitle cluster extraction and the architecture
 # review client milestones (#507, #506): the value is the whole merged tree
 # re-measured after the merge.
-expected_occurrences = 622
+# +3 parallel subtitle ranges (#517), all test-only in subtitle_ranges.rs:
+# peer_refusal_and_timeout_preserve_readable_current_range awaits its owner;
+# cancellation_during_blocking_publish_prevents_obsolete_rename aborts and
+# joins its owner before releasing the staged blocking writer; and
+# current_range_is_readable_before_slow_peer_and_cancel_drops_prefetch aborts
+# and joins its owner and observes the speculative future's Drop. Production
+# run_ranges joins current and ahead futures inside the existing session
+# owner, and starts no independent task or rolling-producer election.
+expected_occurrences = 625
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2852,11 +2865,25 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Merged with main's C-08 M5 release-evidence metrics (#500) at
 # `259d087ed`: the value is the whole merged tree, measured by zeroing this
 # row after the merge.
+# +5 parallel subtitle ranges (#517): three production timeouts and two
+# test-only guards. internal_media::subtitle_range bounds its worker to 25 s;
+# run_ranges bounds speculative ahead work to 30 s inside the session owner;
+# prefetch bounds membership discovery to 2 s inside that ahead future.
+# Cancelling an owner drops these futures and their timers; none elects a
+# rolling producer. The two 2 s test guards bound staged-file cleanup and
+# current-cache publication polling, and are awaited before fixture teardown.
+# +3 rolling publication-trap fix: the two test-only sleeps reviewed under
+# `all-async-sleeps` and the two-second `tokio::time::timeout` that bounds the
+# resume-event poll in the same test. No production timer is added.
 # 969 -> 972 with P-02 M3 (measured). All three are test-only: the priority
 # tests' re-exec child sleeps until it is killed (`std::thread::sleep`), the
 # stop test bounds its wait for the killed child with `tokio::time::timeout`,
 # and the Activity HTTP test bounds the same wait. No production timer.
-expected_occurrences = 972
+# Merged with main at `3c89ad2ee` (#517 parallel subtitle ranges and the
+# rolling publication-trap change): the value is the whole merged tree,
+# measured by zeroing this row after the merge: main's 977 plus this branch's three test-only
+# timers reviewed above.
+expected_occurrences = 980
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3100,12 +3127,24 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Merged with main's K-09 subtitle cluster extraction and the architecture
 # review client milestones (#507, #506): the value is the whole merged tree
 # re-measured after the merge.
+# +2 parallel subtitle ranges (#517), both test-only in
+# indexed_late_window_matches_full_scan_with_nonzero_source_start: one FFmpeg
+# mux creates a finite 600 s 64x64/1fps synthetic MKV, and one direct full
+# subtitle extraction supplies the timestamp oracle. Each .output() is
+# awaited and its exit status checked before the temporary fixture drops.
+# Neither creates a playback owner. Production window extraction retains
+# the existing command construction but now routes its pipe through
+# BoundedDiagnosticChild, which owns cancellation kill/reap and bounded I/O.
 # 173 -> 176 with P-02 M3 (measured). Test-only: the priority tests' re-exec
 # sleeper and the refused-priority `/bin/sh` child (process/priority.rs), and
 # the Activity HTTP test's `sleep 300` child (http/mod.rs). Each starts
 # through `spawn_job_owned` or `output_job_owned`, is `kill_on_drop` or
 # awaited, and its job is dropped by the test.
-expected_occurrences = 176
+# Merged with main at `3c89ad2ee` (#517 parallel subtitle ranges and the
+# rolling publication-trap change): the value is the whole merged tree,
+# measured by zeroing this row after the merge: main's 175 plus this branch's three test-only
+# children reviewed above.
+expected_occurrences = 178
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3474,6 +3513,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Merged with main's VOD successor encoder-permit handoff (#513) at
 # `8251d14f7`: the value is the whole merged tree, measured by zeroing this
 # row after the merge.
+# +3 parallel subtitle ranges (#517): the two awaited, finite test-only
+# FFmpeg .output() calls inventoried above, plus Response::builder().status()
+# in internal_media::subtitle_range. That third occurrence builds an HTTP
+# response status and starts no process. No new rolling-producer owner.
 # 387 -> 381 with P-02 M3, the one child launcher (measured). -7: the
 # `.spawn()` / `.output()` calls that started children outside the launcher
 # (scan/probe.rs 1, decode_facts.rs 1, live_tv/caption_audit_tests.rs 2,
@@ -3481,7 +3524,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `spawn_job_owned` / `output_job_owned` / `output_job_owned_blocking`.
 # +1: the blocking launcher's own `.spawn()` in process/mod.rs (see
 # method-spawn above).
-expected_occurrences = 381
+# Merged with main at `3c89ad2ee` (#517 parallel subtitle ranges and the
+# rolling publication-trap change): the value is the whole merged tree,
+# measured by zeroing this row after the merge: main's 390 less this branch's net six launcher
+# migrations reviewed above.
+expected_occurrences = 384
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

@@ -425,6 +425,8 @@ const WATCH_METHODS: &[&str] = &[
     "watch_rollups",
     "continue_watching",
     "next_up",
+    "watch_summary",
+    "progress_rails",
     "apply_remote_watch",
 ];
 const READING_METHODS: &[&str] = &[
@@ -16741,7 +16743,14 @@ fn contract_inventory_matches_every_store_method() {
     // expiry. Named in `USER_METHODS` above; no new trait or supertrait.
     // 385 -> 388: acquired-caption publication, its fenced form, and the
     // bounded candidate cursor. The downloaded-subtitle contract covers all three.
-    assert_eq!(declared.len(), 388, "review the Store method count");
+    //
+    // 388 -> 390 for K-04 M3's two `WatchStore` reads, `watch_summary` and
+    // `progress_rails`: each answers two existing reads from one read of the
+    // same state. Named in `WATCH_METHODS` above and pinned against the
+    // separate reads on both backends by
+    // `watch_summary_and_progress_rails_match_the_separate_reads_on_every_backend`;
+    // no new trait or supertrait.
+    assert_eq!(declared.len(), 390, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -30640,6 +30649,959 @@ async fn fragment_index_builders_held_by_names_the_builder_on_every_backend() {
         assert!(
             held_by("builder-node", 10_001).await.is_empty(),
             "backend {backend}: another source"
+        );
+    })
+    .await;
+}
+
+/// The show/season/episode and movie shapes K-04's watch-state reads
+/// exercise, with every rail ordering key distinct so the combined and the
+/// separate reads have exactly one correct order to agree on.
+struct WatchFenceFixture {
+    user: i64,
+    movie: i64,
+    other_movie: i64,
+    show: i64,
+    season: i64,
+    episodes: Vec<i64>,
+    second_show_episodes: Vec<i64>,
+}
+
+async fn seed_watch_fence_fixture(store: &Arc<dyn Store>, prefix: &str) -> WatchFenceFixture {
+    let user = store
+        .create_user(&format!("{prefix}-watcher"), "hash", false)
+        .await
+        .expect("seed watcher");
+    let movies = store
+        .create_library(&NewLibrary {
+            name: format!("{prefix} Movies"),
+            kind: LibraryKind::Movies,
+            paths: vec![PathBuf::from(format!("/{prefix}/movies"))],
+            anime: false,
+        })
+        .await
+        .expect("seed movie library");
+    let shows = store
+        .create_library(&NewLibrary {
+            name: format!("{prefix} Shows"),
+            kind: LibraryKind::Shows,
+            paths: vec![PathBuf::from(format!("/{prefix}/shows"))],
+            anime: false,
+        })
+        .await
+        .expect("seed show library");
+    let item = |library_id: i64,
+                kind: ItemKind,
+                parent_id: Option<i64>,
+                title: String,
+                season_number: Option<i32>,
+                episode_number: Option<i32>| NewItem {
+        library_id,
+        kind,
+        parent_id,
+        title,
+        year: None,
+        season_number,
+        episode_number,
+    };
+    let movie = store
+        .insert_item(&item(
+            movies.id,
+            ItemKind::Movie,
+            None,
+            format!("{prefix} Alpha"),
+            None,
+            None,
+        ))
+        .await
+        .expect("seed movie");
+    let other_movie = store
+        .insert_item(&item(
+            movies.id,
+            ItemKind::Movie,
+            None,
+            format!("{prefix} Beta"),
+            None,
+            None,
+        ))
+        .await
+        .expect("seed second movie");
+    let mut series = Vec::new();
+    for title in ["Arcadia", "Borealis"] {
+        let show = store
+            .insert_item(&item(
+                shows.id,
+                ItemKind::Show,
+                None,
+                format!("{prefix} {title}"),
+                None,
+                None,
+            ))
+            .await
+            .expect("seed show");
+        let season = store
+            .insert_item(&item(
+                shows.id,
+                ItemKind::Season,
+                Some(show),
+                "Season 1".to_owned(),
+                Some(1),
+                None,
+            ))
+            .await
+            .expect("seed season");
+        let mut episodes = Vec::new();
+        for number in 1..=3 {
+            episodes.push(
+                store
+                    .insert_item(&item(
+                        shows.id,
+                        ItemKind::Episode,
+                        Some(season),
+                        format!("Episode {number}"),
+                        Some(1),
+                        Some(number),
+                    ))
+                    .await
+                    .expect("seed episode"),
+            );
+        }
+        series.push((show, season, episodes));
+    }
+    let (second_show, _, second_show_episodes) = series.pop().expect("second show");
+    let _ = second_show;
+    let (show, season, episodes) = series.pop().expect("first show");
+    WatchFenceFixture {
+        user: user.id,
+        movie,
+        other_movie,
+        show,
+        season,
+        episodes,
+        second_show_episodes,
+    }
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+fn watch_fence_reader(store: &Arc<HiqliteAuthStore>, applied_index: u64) -> CatalogueReader {
+    use plurx_core::cluster::migration::status::PassiveRaftMetrics;
+
+    let authority: Arc<dyn Store> = store.clone();
+    CatalogueReader::validation_replicated(
+        authority,
+        Arc::clone(store),
+        PassiveRaftMetrics::validation_bounded_ready_applied(applied_index),
+        64,
+    )
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+fn assert_watch_read_path(store: &HiqliteAuthStore, local: bool, label: &str) {
+    let counts = store.validation_operation_counts();
+    assert_eq!(
+        (
+            counts.consistent_query_calls,
+            counts.non_consistent_query_calls
+        ),
+        if local { (0, 1) } else { (1, 0) },
+        "{label}: expected {} watch read",
+        if local { "one local" } else { "one Authority" }
+    );
+}
+
+/// K-04 M2. A watch write committed through the leader stream reports its
+/// Raft log index. No node serves the user's watch state locally without the
+/// client's `X-Plurx-Read-After`, not even the node that acknowledged the
+/// write; with it, a node serves locally only once it has applied the larger
+/// of the echoed index and its own latest write for the user.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_write() {
+    use plurx_core::store::{scope_http_watch_write_ack, HttpWatchWriteAck};
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let writer = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    writer
+        .validation_reset_contract_state()
+        .await
+        .expect("reset watch-fence state");
+    let dynamic: Arc<dyn Store> = writer.clone();
+    let fixture = seed_watch_fence_fixture(&dynamic, "fence").await;
+
+    // The contract client is a remote client, so both writes travel the API
+    // stream and the index comes back through the negotiated acked variant.
+    let progress_ack = HttpWatchWriteAck::default();
+    scope_http_watch_write_ack(
+        progress_ack.clone(),
+        dynamic.put_progress(fixture.user, fixture.movie, 10_000, Some(100_000)),
+    )
+    .await
+    .expect("record progress");
+    let progress_index = progress_ack
+        .commit_index()
+        .expect("the leader reports a streamed progress write's log index");
+    let watched_ack = HttpWatchWriteAck::default();
+    scope_http_watch_write_ack(
+        watched_ack.clone(),
+        dynamic.set_watched(fixture.user, fixture.episodes[0], true),
+    )
+    .await
+    .expect("mark watched");
+    let commit = watched_ack
+        .commit_index()
+        .expect("the leader reports a streamed watched write's log index");
+    assert!(
+        commit > progress_index,
+        "a later write commits at a later index"
+    );
+
+    let ids = vec![fixture.movie, fixture.episodes[0], fixture.episodes[1]];
+    let expected = serde_json::to_value(
+        dynamic
+            .watch_map(fixture.user, &ids)
+            .await
+            .expect("Authority watch map"),
+    )
+    .expect("serialize expected watch map");
+    assert!(
+        expected.as_array().is_some_and(|rows| rows.len() == 2),
+        "the fence must be exercised over the two rows just written"
+    );
+
+    // Node A, the writer, applied past its own write but asked without the
+    // header: Authority. Its record cannot prove the user wrote nothing
+    // through a peer since.
+    writer.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&writer, commit + 1_000)
+        .watch_map(fixture.user, &ids, None)
+        .await
+        .expect("writer without header");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&writer, false, "writer without X-Plurx-Read-After");
+
+    // Node A with a client floor older than its own write, one entry short
+    // of that write: its record raises the floor, so Authority, even though
+    // the bounded lag proof and the client's floor alone would allow a local
+    // read.
+    writer.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&writer, commit - 1)
+        .watch_map(fixture.user, &ids, Some(progress_index))
+        .await
+        .expect("writer below its fence");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&writer, false, "writer below its own write");
+
+    // Node A once it has applied the write, for the client that echoed it:
+    // local, and it sees the write.
+    writer.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&writer, commit)
+        .watch_map(fixture.user, &ids, Some(commit))
+        .await
+        .expect("writer at its fence");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&writer, true, "writer at its own write");
+
+    // Node B holds no write record for this user. Without the header it
+    // cannot tell "wrote nothing" from "wrote through a peer": Authority,
+    // however far ahead it is.
+    let peer = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    peer.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&peer, commit + 1_000)
+        .watch_map(fixture.user, &ids, None)
+        .await
+        .expect("peer without header");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&peer, false, "peer without X-Plurx-Read-After");
+
+    // With the writer's index echoed and applied past it: local.
+    peer.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&peer, commit)
+        .watch_map(fixture.user, &ids, Some(commit))
+        .await
+        .expect("peer with header, applied");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&peer, true, "peer applied past X-Plurx-Read-After");
+
+    // With the header but not yet applied: Authority.
+    peer.validation_reset_operation_counts();
+    watch_fence_reader(&peer, commit - 1)
+        .watch_map(fixture.user, &ids, Some(commit))
+        .await
+        .expect("peer with header, behind");
+    assert_watch_read_path(&peer, false, "peer behind X-Plurx-Read-After");
+
+    // Every reader method takes the same fence, not only the watch map.
+    let containers = vec![fixture.show, fixture.season];
+    peer.validation_reset_operation_counts();
+    watch_fence_reader(&peer, commit + 1_000)
+        .watch_summary(fixture.user, &ids, &containers, None)
+        .await
+        .expect("peer summary without header");
+    assert_watch_read_path(&peer, false, "summary without header");
+    peer.validation_reset_operation_counts();
+    watch_fence_reader(&peer, commit + 1_000)
+        .progress_rails(fixture.user, 20, None)
+        .await
+        .expect("peer rails without header");
+    assert_watch_read_path(&peer, false, "rails without header");
+    peer.validation_reset_operation_counts();
+    watch_fence_reader(&peer, commit + 1_000)
+        .watch_rollup(fixture.user, fixture.show, None)
+        .await
+        .expect("peer rollup without header");
+    assert_watch_read_path(&peer, false, "rollup without header");
+    peer.validation_reset_operation_counts();
+    watch_fence_reader(&peer, commit)
+        .watch_rollup(fixture.user, fixture.show, Some(commit))
+        .await
+        .expect("peer rollup with header");
+    assert_watch_read_path(&peer, true, "rollup with header");
+}
+
+/// Review of #504, finding 1. A node's own older write record is no proof
+/// of the user's latest watch write. The TV writes progress through node B,
+/// the phone then marks an episode watched through node A at a later index,
+/// and the TV loads Home on B — applied past B's own record, inside the lag
+/// budget, but short of A's write, and with no `X-Plurx-Read-After` because
+/// no client sends one yet. B must answer from Authority, whatever it has
+/// applied; only the client that echoes A's index gets a local read on B.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watch_fence_a_peers_older_record_does_not_prove_a_write_through_another_node() {
+    use plurx_core::store::{scope_http_watch_write_ack, HttpWatchWriteAck};
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let node_b = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    node_b
+        .validation_reset_contract_state()
+        .await
+        .expect("reset watch-fence state");
+    let node_a = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    let on_b: Arc<dyn Store> = node_b.clone();
+    let on_a: Arc<dyn Store> = node_a.clone();
+    let fixture = seed_watch_fence_fixture(&on_b, "peer-record").await;
+
+    // The TV, on B: progress. B records its index for the user.
+    let tv_ack = HttpWatchWriteAck::default();
+    scope_http_watch_write_ack(
+        tv_ack.clone(),
+        on_b.put_progress(fixture.user, fixture.movie, 10_000, Some(100_000)),
+    )
+    .await
+    .expect("progress through B");
+    let tv_index = tv_ack
+        .commit_index()
+        .expect("B's write reports its log index");
+    // The phone, on A: the next episode watched, at a later index B never
+    // sees.
+    let phone_ack = HttpWatchWriteAck::default();
+    scope_http_watch_write_ack(
+        phone_ack.clone(),
+        on_a.set_watched(fixture.user, fixture.episodes[0], true),
+    )
+    .await
+    .expect("watched through A");
+    let phone_index = phone_ack
+        .commit_index()
+        .expect("A's write reports its log index");
+    assert!(
+        phone_index > tv_index,
+        "the phone's write commits after the TV's"
+    );
+
+    let ids = vec![fixture.movie, fixture.episodes[0]];
+    let expected = serde_json::to_value(
+        on_b.watch_map(fixture.user, &ids)
+            .await
+            .expect("Authority watch map"),
+    )
+    .expect("serialize expected watch map");
+    assert!(
+        expected.as_array().is_some_and(|rows| rows.len() == 2),
+        "Authority sees both writes"
+    );
+
+    // The TV loads Home on B: applied past B's record, short of A's write,
+    // no header. Authority, for every watch read the reader offers.
+    let applied = phone_index - 1;
+    assert!(applied >= tv_index, "B has applied its own write");
+    node_b.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&node_b, applied)
+        .watch_map(fixture.user, &ids, None)
+        .await
+        .expect("B without header");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&node_b, false, "B's own older record, no header");
+    let containers = vec![fixture.show, fixture.season];
+    node_b.validation_reset_operation_counts();
+    watch_fence_reader(&node_b, applied)
+        .watch_summary(fixture.user, &ids, &containers, None)
+        .await
+        .expect("B summary without header");
+    assert_watch_read_path(&node_b, false, "B summary, no header");
+    node_b.validation_reset_operation_counts();
+    watch_fence_reader(&node_b, applied)
+        .progress_rails(fixture.user, 20, None)
+        .await
+        .expect("B rails without header");
+    assert_watch_read_path(&node_b, false, "B rails, no header");
+    node_b.validation_reset_operation_counts();
+    watch_fence_reader(&node_b, applied)
+        .watch_rollup(fixture.user, fixture.show, None)
+        .await
+        .expect("B rollup without header");
+    assert_watch_read_path(&node_b, false, "B rollup, no header");
+
+    // A client floor older than B's own write is raised by B's record.
+    node_b.validation_reset_operation_counts();
+    watch_fence_reader(&node_b, tv_index - 1)
+        .watch_map(fixture.user, &ids, Some(1))
+        .await
+        .expect("B below its own write");
+    assert_watch_read_path(&node_b, false, "B below its own record");
+
+    // The phone's index, echoed and applied on B: local, and it shows the
+    // episode watched.
+    node_b.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&node_b, phone_index)
+        .watch_map(fixture.user, &ids, Some(phone_index))
+        .await
+        .expect("B with the phone's index");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&node_b, true, "B applied past the echoed write");
+}
+
+/// K-04 M3. `watch_summary` and `progress_rails` are each one consistent
+/// read on the replicated store, and each returns exactly what the separate
+/// reads they replace return, on the Authority path and the local one.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watch_summary_and_progress_rails_are_one_read_matching_the_separate_reads() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset watch-summary state");
+    let dynamic: Arc<dyn Store> = store.clone();
+    let fixture = seed_watch_fence_fixture(&dynamic, "summary").await;
+
+    // Two in-progress movies with distinct recorded times, one finished
+    // episode per show (so each show has a next-up), and a watched episode
+    // under the first show's season so its rollups are non-trivial.
+    dynamic
+        .put_progress_at(
+            fixture.user,
+            fixture.movie,
+            10_000,
+            Some(100_000),
+            Some(1_000),
+        )
+        .await
+        .expect("first in-progress");
+    dynamic
+        .put_progress_at(
+            fixture.user,
+            fixture.other_movie,
+            20_000,
+            Some(100_000),
+            Some(2_000),
+        )
+        .await
+        .expect("second in-progress");
+    dynamic
+        .set_watched(fixture.user, fixture.episodes[0], true)
+        .await
+        .expect("watch first show's opener");
+    let ack = plurx_core::store::HttpWatchWriteAck::default();
+    plurx_core::store::scope_http_watch_write_ack(
+        ack.clone(),
+        dynamic.set_watched(fixture.user, fixture.second_show_episodes[0], true),
+    )
+    .await
+    .expect("watch second show's opener");
+    let commit = ack.commit_index().expect("last write's log index");
+
+    let item_ids = vec![
+        fixture.movie,
+        fixture.other_movie,
+        fixture.episodes[0],
+        fixture.episodes[1],
+        fixture.second_show_episodes[0],
+    ];
+    let container_ids = vec![fixture.show, fixture.season, fixture.movie];
+    let mut expected_watch = dynamic
+        .watch_map(fixture.user, &item_ids)
+        .await
+        .expect("separate watch map");
+    expected_watch.sort_by_key(|(id, _)| *id);
+    let expected_rollups = dynamic
+        .watch_rollups(fixture.user, &container_ids)
+        .await
+        .expect("separate rollups");
+    assert_eq!(expected_watch.len(), 4, "four rows were written");
+    assert_eq!(expected_rollups[&fixture.show].watched, 1);
+    let expected_rails = serde_json::json!({
+        "continue_watching": dynamic
+            .continue_watching(fixture.user, 20)
+            .await
+            .expect("separate continue watching"),
+        "next_up": dynamic.next_up(fixture.user, 20).await.expect("separate next up"),
+    });
+    assert_eq!(
+        expected_rails["continue_watching"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(expected_rails["next_up"].as_array().map(Vec::len), Some(2));
+
+    let check_summary = |mut summary: plurx_core::store::WatchSummary, label: &str| {
+        summary.watch.sort_by_key(|(id, _)| *id);
+        assert_eq!(summary.watch, expected_watch, "{label} watch half");
+        assert_eq!(summary.rollups, expected_rollups, "{label} rollup half");
+    };
+
+    // The per-request watch-read counter the HTTP layer asserts on counts
+    // exactly these statements: one each.
+    store.validation_reset_operation_counts();
+    let request = plurx_core::store::HttpStoreOperationCounts::default();
+    let summary = plurx_core::store::scope_http_store_operations(
+        request.clone(),
+        dynamic.watch_summary(fixture.user, &item_ids, &container_ids),
+    )
+    .await
+    .expect("Authority summary");
+    check_summary(summary, "Authority");
+    assert_watch_read_path(&store, false, "Authority summary is one consistent read");
+    assert_eq!(request.watch_reads(), 1, "summary: one counted watch read");
+
+    store.validation_reset_operation_counts();
+    let request = plurx_core::store::HttpStoreOperationCounts::default();
+    let rails = plurx_core::store::scope_http_store_operations(
+        request.clone(),
+        dynamic.progress_rails(fixture.user, 20),
+    )
+    .await
+    .expect("Authority rails");
+    assert_eq!(
+        serde_json::to_value(rails).expect("serialize rails"),
+        expected_rails,
+        "Authority rails"
+    );
+    assert_watch_read_path(&store, false, "Authority rails are one consistent read");
+    assert_eq!(request.watch_reads(), 1, "rails: one counted watch read");
+
+    store.validation_reset_operation_counts();
+    let summary = watch_fence_reader(&store, commit)
+        .watch_summary(fixture.user, &item_ids, &container_ids, Some(commit))
+        .await
+        .expect("local summary");
+    check_summary(summary, "local");
+    assert_watch_read_path(&store, true, "local summary is one local read");
+
+    store.validation_reset_operation_counts();
+    let rails = watch_fence_reader(&store, commit)
+        .progress_rails(fixture.user, 20, Some(commit))
+        .await
+        .expect("local rails");
+    assert_eq!(
+        serde_json::to_value(rails).expect("serialize rails"),
+        expected_rails,
+        "local rails"
+    );
+    assert_watch_read_path(&store, true, "local rails are one local read");
+
+    // Empty inputs issue no statement at all, exactly like the methods they
+    // replace.
+    store.validation_reset_operation_counts();
+    let empty = dynamic
+        .watch_summary(fixture.user, &[], &[])
+        .await
+        .expect("empty summary");
+    assert!(empty.watch.is_empty() && empty.rollups.is_empty());
+    let counts = store.validation_operation_counts();
+    assert_eq!(
+        counts.consistent_query_calls + counts.non_consistent_query_calls,
+        0
+    );
+}
+
+/// K-04 M3: the combined watch reads return exactly what the reads they
+/// replace return, on SQLite and on three voters.
+#[tokio::test]
+async fn watch_summary_and_progress_rails_match_the_separate_reads_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let fixture = seed_watch_fence_fixture(&store, &format!("combined-{backend}")).await;
+        store
+            .put_progress_at(
+                fixture.user,
+                fixture.movie,
+                10_000,
+                Some(100_000),
+                Some(1_000),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first in-progress: {error}"));
+        store
+            .put_progress_at(
+                fixture.user,
+                fixture.other_movie,
+                20_000,
+                Some(100_000),
+                Some(2_000),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second in-progress: {error}"));
+        store
+            .set_watched(fixture.user, fixture.episodes[0], true)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first opener: {error}"));
+        store
+            .set_watched(fixture.user, fixture.second_show_episodes[0], true)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second opener: {error}"));
+
+        let item_ids = vec![
+            fixture.movie,
+            fixture.other_movie,
+            fixture.episodes[0],
+            fixture.episodes[1],
+            fixture.second_show_episodes[0],
+        ];
+        let container_ids = vec![fixture.show, fixture.season, fixture.movie];
+        let mut separate = store
+            .watch_map(fixture.user, &item_ids)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: watch map: {error}"));
+        separate.sort_by_key(|(id, _)| *id);
+        let rollups = store
+            .watch_rollups(fixture.user, &container_ids)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: rollups: {error}"));
+        assert_eq!(separate.len(), 4, "{backend}: four watch rows");
+        assert_eq!(rollups[&fixture.show].leaves, 3, "{backend}: show leaves");
+        assert_eq!(rollups[&fixture.show].watched, 1, "{backend}: show watched");
+
+        let mut summary = store
+            .watch_summary(fixture.user, &item_ids, &container_ids)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: summary: {error}"));
+        summary.watch.sort_by_key(|(id, _)| *id);
+        assert_eq!(summary.watch, separate, "{backend}: summary watch half");
+        assert_eq!(summary.rollups, rollups, "{backend}: summary rollup half");
+        let containers_only = store
+            .watch_summary(fixture.user, &[], &container_ids)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: containers-only summary: {error}"));
+        assert!(
+            containers_only.watch.is_empty(),
+            "{backend}: no items asked"
+        );
+        assert_eq!(
+            containers_only.rollups, rollups,
+            "{backend}: containers only"
+        );
+
+        let continue_watching = store
+            .continue_watching(fixture.user, 20)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: continue watching: {error}"));
+        let next_up = store
+            .next_up(fixture.user, 20)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: next up: {error}"));
+        assert_eq!(
+            continue_watching
+                .iter()
+                .map(|row| row.item.id)
+                .collect::<Vec<_>>(),
+            vec![fixture.other_movie, fixture.movie],
+            "{backend}: most recent progress first"
+        );
+        assert_eq!(
+            next_up.iter().map(|row| row.item.id).collect::<Vec<_>>(),
+            vec![fixture.episodes[1], fixture.second_show_episodes[1]],
+            "{backend}: one next episode per show, by show title"
+        );
+        let rails = store
+            .progress_rails(fixture.user, 20)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: rails: {error}"));
+        assert_eq!(
+            serde_json::to_value(&rails.continue_watching).expect("serialize"),
+            serde_json::to_value(&continue_watching).expect("serialize"),
+            "{backend}: continue-watching rail"
+        );
+        assert_eq!(
+            serde_json::to_value(&rails.next_up).expect("serialize"),
+            serde_json::to_value(&next_up).expect("serialize"),
+            "{backend}: next-up rail"
+        );
+        // Each rail keeps its own limit.
+        let limited = store
+            .progress_rails(fixture.user, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: limited rails: {error}"));
+        assert_eq!(
+            limited
+                .continue_watching
+                .iter()
+                .map(|row| row.item.id)
+                .collect::<Vec<_>>(),
+            vec![fixture.other_movie],
+            "{backend}: limited continue-watching"
+        );
+        assert_eq!(
+            limited
+                .next_up
+                .iter()
+                .map(|row| row.item.id)
+                .collect::<Vec<_>>(),
+            vec![fixture.episodes[1]],
+            "{backend}: limited next-up"
+        );
+    })
+    .await;
+}
+
+/// The calls K-05's query-plan protocol measures, shared with the
+/// `query_plans` example so both backends are planned for the same requests.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "../examples/query_plans/calls.rs"]
+mod k05_query_plan_calls;
+
+/// K-05 M0 (plan section 3.4 step 5): capture the replicated statements the
+/// measured calls execute, and the state machine's schema as a bootstrapped
+/// three-voter cluster created it, for `query_plans build-hiqlite`/`measure`.
+/// A measurement tool, not a contract, so it is ignored by default:
+///
+/// `K05_HIQLITE_CAPTURE=hiqlite.json cargo test -p plurx-core --features
+/// cluster-read-cost-validation,hiqlite-contract-tests --test store_contract
+/// -- --ignored k05_capture_hiqlite_statements`
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+#[ignore = "K-05 measurement capture: writes the file named by K05_HIQLITE_CAPTURE"]
+async fn k05_capture_hiqlite_statements() {
+    let out = std::env::var_os("K05_HIQLITE_CAPTURE").expect("set K05_HIQLITE_CAPTURE");
+    let capture = k05_query_plan_calls::StatementCapture::default();
+    tracing::subscriber::set_global_default(capture.clone()).expect("capture subscriber");
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let statements = k05_query_plan_calls::drive(&store, "hiqlite", &capture).await;
+    assert!(!statements.is_empty(), "no replicated statement events");
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect schema client");
+    let schema = client
+        .query_raw(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master \
+             WHERE sql IS NOT NULL ORDER BY rowid",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read state-machine schema")
+        .into_iter()
+        .map(|mut row| {
+            serde_json::json!({
+                "kind": row.get::<String>("type"),
+                "name": row.get::<String>("name"),
+                "table": row.get::<String>("tbl_name"),
+                "sql": row.get::<String>("sql"),
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        out,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "backend": "hiqlite",
+            "schema": schema,
+            "statements": statements,
+        }))
+        .expect("encode capture"),
+    )
+    .expect("write capture");
+}
+
+/// The catalogue-wide Recently Added rail leaves out Recordings libraries on
+/// every backend, as the standalone store and the replicated local read
+/// always have; a Recordings library's own rail still lists its recordings.
+/// The replicated Authority read (the consistent path the bounded reader
+/// falls back to) used to include them, so the Home rail changed with the
+/// read path that served it.
+#[tokio::test]
+async fn catalogue_recently_added_leaves_out_recordings_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let mut ids = Vec::new();
+        for (kind, item_kind) in [
+            (LibraryKind::Movies, ItemKind::Movie),
+            (LibraryKind::Recordings, ItemKind::Video),
+        ] {
+            let library = store
+                .create_library(&NewLibrary {
+                    name: format!("{kind:?}"),
+                    kind,
+                    paths: vec![],
+                    anime: false,
+                })
+                .await
+                .expect("library");
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: item_kind,
+                    parent_id: None,
+                    title: format!("{kind:?} item"),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            ids.push((library.id, item));
+        }
+        let [(_, movie), (recordings, recording)] = ids[..] else {
+            unreachable!("two libraries")
+        };
+        let rail = |library_id: Option<i64>| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .recently_added(library_id, 20)
+                    .await
+                    .expect("recently added")
+                    .into_iter()
+                    .map(|card| card.item.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(rail(None).await, [movie], "{backend}: catalogue-wide rail");
+        assert_eq!(
+            rail(Some(recordings)).await,
+            [recording],
+            "{backend}: the Recordings library's own rail"
+        );
+    })
+    .await;
+}
+
+/// K-05 M3 (plan section 3.6): search hides an item's `items_fts` hit only
+/// while it has a *current* classification index entry, which is membership
+/// of `classification_fts`, never existence of a `media_classifications`
+/// row. A rename deletes the item's `classification_fts` row through
+/// `classification_source_changed` and keeps the classification for the
+/// classifier to regenerate, so the renamed title must be found by its new
+/// title (through `items_fts`), not by its old one, while the classification
+/// row survives. The withdrawn `NOT EXISTS (… media_classifications …)`
+/// predicate would hide the renamed title from both branches.
+#[tokio::test]
+async fn search_renamed_title_is_found_by_its_new_title_only() {
+    use plurx_core::metadata::classification::classify;
+    use plurx_core::store::classification::Record;
+
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let movie = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Harbor Lights".into(),
+                year: Some(1999),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("movie");
+        let entry = store
+            .classification_page(0, 10)
+            .await
+            .expect("classification inventory")
+            .into_iter()
+            .find(|entry| entry.input().expect("input").id == movie)
+            .expect("the movie is in the classification inventory");
+        let record = Record {
+            classification: classify(
+                &entry.input().expect("input").metadata(),
+                vec!["lighthouse keeper".into()],
+            ),
+            source_json: entry.source_json,
+            overrides: Default::default(),
+            revision: 0,
+        };
+        assert!(store
+            .write_classification(movie, &record)
+            .await
+            .expect("classify"));
+        let found = |query: &'static str| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .search_items(query, 10)
+                    .await
+                    .expect("search")
+                    .into_iter()
+                    .map(|hit| hit.item.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(
+            found("harbor lights").await,
+            [movie],
+            "{backend}: classified title"
+        );
+        assert_eq!(
+            found("lighthouse").await,
+            [movie],
+            "{backend}: classification terms"
+        );
+
+        store
+            .apply_metadata(
+                movie,
+                &MetadataPatch {
+                    title: Some("Night Tide".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("rename");
+        assert_eq!(found("night tide").await, [movie], "{backend}: new title");
+        assert!(
+            found("harbor lights").await.is_empty(),
+            "{backend}: the old title must not find the renamed item"
+        );
+        assert!(
+            found("lighthouse").await.is_empty(),
+            "{backend}: stale classification terms are not searchable"
+        );
+        let entry = store
+            .classification_page(0, 10)
+            .await
+            .expect("classification inventory")
+            .into_iter()
+            .find(|entry| entry.input().expect("input").id == movie)
+            .expect("renamed movie still inventoried");
+        assert!(
+            entry.record.is_some(),
+            "{backend}: the classification row survives the rename for regeneration"
         );
     })
     .await;

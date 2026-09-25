@@ -1111,7 +1111,9 @@ struct FlowEvaluation {
 #[derive(Clone, Copy)]
 struct FlowInputs<'a> {
     physical_ahead: Option<Ahead>,
-    published_end_ms: Option<i64>,
+    /// End of the media the writer has completed, relative to the media
+    /// origin -- produced, not necessarily published.
+    produced_end_ms: Option<i64>,
     /// Completed media not yet present in the actor-authorized served
     /// snapshot. `None` means the first snapshot has not opened yet.
     staged_publication_seconds: Option<i64>,
@@ -1121,6 +1123,9 @@ struct FlowInputs<'a> {
     media_origin_ms: i64,
     lease_mode: crate::playback_control::RollingLeaseMode,
     demand: Option<&'a crate::playback_control::PlaybackDemandSnapshot>,
+    /// How long ago `demand` was accepted, from the same lease snapshot; the
+    /// publication clock projects consumption by it.
+    demand_observation_age: Option<Duration>,
     global_live_bytes: i64,
     global_ahead_bytes: i64,
     limits: AheadLimits,
@@ -1204,11 +1209,12 @@ fn flow_event_extra(
 fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
     let FlowInputs {
         physical_ahead,
-        published_end_ms,
+        produced_end_ms,
         staged_publication_seconds,
         media_origin_ms,
         lease_mode,
         demand,
+        demand_observation_age,
         global_live_bytes,
         global_ahead_bytes,
         limits,
@@ -1287,9 +1293,9 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
                 release_value: 0,
             }),
             policy: "explicit_demand",
-            production_ahead_seconds: published_end_ms.map(|published_end_ms| {
+            production_ahead_seconds: produced_end_ms.map(|produced_end_ms| {
                 media_origin_ms
-                    .saturating_add(published_end_ms)
+                    .saturating_add(produced_end_ms)
                     .saturating_sub(demand.buffer_anchor_ms())
                     / 1_000
             }),
@@ -1297,9 +1303,9 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
         };
     }
 
-    let production_ahead_seconds = published_end_ms.map(|published_end_ms| {
+    let production_ahead_seconds = produced_end_ms.map(|produced_end_ms| {
         media_origin_ms
-            .saturating_add(published_end_ms)
+            .saturating_add(produced_end_ms)
             .saturating_sub(demand.buffer_anchor_ms())
             / 1_000
     });
@@ -1341,11 +1347,35 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
             )
         })
     });
+    // One staged batch is not by itself enough to hold on. Every scheduled
+    // publication must reach the clock's `desired_end_ms` (consumed + initial
+    // runway), which in steady state is exactly one batch past the previous
+    // snapshot: a producer held at `published + batch` is one segment short
+    // whenever the cycle is observed late, the clock then publishes a single
+    // segment, and the hold stops the producer one segment further on -- 2 s
+    // published per 16 s cycle, forever. So the producer is also kept running
+    // until it has produced what the next publication will ask for: the
+    // clock's own desired end plus the two-exchange guard for consumption
+    // between flow evaluations, never beyond the clock's `allowed_end_ms`.
+    let next_publication_produced = produced_end_ms.is_none_or(|produced_end_ms| {
+        let ends = rolling_explicit_publication_ends(
+            demand,
+            demand_observation_age.unwrap_or_default(),
+            media_origin_ms,
+        );
+        let guard_ms =
+            ((ROLLING_PUBLICATION_GUARD_MS as f64) * rolling_playback_rate(Some(demand))).ceil();
+        let target_ms = ends
+            .desired_end_ms
+            .saturating_add(guard_ms.min(i64::MAX as f64) as i64)
+            .min(ends.allowed_end_ms);
+        produced_end_ms >= target_ms
+    });
     let hold = hard_hold.or_else(|| {
         (!starting)
             .then_some(staged_publication_seconds)
             .flatten()
-            .filter(|staged| *staged >= publication_target_seconds)
+            .filter(|staged| *staged >= publication_target_seconds && next_publication_produced)
             .map(|_| AheadHold {
                 reason: AheadHoldReason::Time,
                 release_value: 0,
@@ -5917,18 +5947,14 @@ impl RollingPublicationClock {
             self.legacy_bootstrap_at = None;
             let demand = lease.demand.as_ref().expect("explicit demand checked");
             let observation_age = lease.demand_observation_age.unwrap_or_default();
-            let consumed_absolute_ms =
-                crate::playback_control::rolling_estimated_position_ms(demand, observation_age);
-            let consumed_end_ms = consumed_absolute_ms.saturating_sub(media_origin_ms).max(0);
-            let reserve_ms = rolling_initial_runway_ms(rolling_playback_rate(Some(demand)));
+            let ends = rolling_explicit_publication_ends(demand, observation_age, media_origin_ms);
             RollingPublicationBudget {
                 demand_sequence: lease.accepted_demand_sequence,
-                consumed_end_ms,
-                desired_end_ms: consumed_end_ms.saturating_add(reserve_ms),
-                allowed_end_ms: consumed_end_ms
-                    .saturating_add(reserve_ms)
-                    .saturating_add(ROLLING_SEGMENT_MAX_MS),
-                protected_position_ms: consumed_absolute_ms
+                consumed_end_ms: ends.consumed_end_ms,
+                desired_end_ms: ends.desired_end_ms,
+                allowed_end_ms: ends.allowed_end_ms,
+                protected_position_ms: ends
+                    .consumed_absolute_ms
                     .saturating_sub(ROLLING_PUBLICATION_GUARD_MS)
                     .saturating_sub(ROLLING_BACK_BUFFER_MS)
                     .max(media_origin_ms)
@@ -5965,6 +5991,36 @@ impl RollingPublicationClock {
             served.end_ms.saturating_sub(budget.desired_end_ms).max(0)
         });
         budget
+    }
+}
+
+/// The explicit publication allowance for one accepted demand observation,
+/// relative to the media origin. The publication clock and the flow
+/// controller both read it here so their frontiers cannot drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RollingExplicitPublicationEnds {
+    consumed_absolute_ms: i64,
+    consumed_end_ms: i64,
+    desired_end_ms: i64,
+    allowed_end_ms: i64,
+}
+
+fn rolling_explicit_publication_ends(
+    demand: &crate::playback_control::PlaybackDemandSnapshot,
+    observation_age: Duration,
+    media_origin_ms: i64,
+) -> RollingExplicitPublicationEnds {
+    let consumed_absolute_ms =
+        crate::playback_control::rolling_estimated_position_ms(demand, observation_age);
+    let consumed_end_ms = consumed_absolute_ms.saturating_sub(media_origin_ms).max(0);
+    let desired_end_ms = consumed_end_ms.saturating_add(rolling_initial_runway_ms(
+        rolling_playback_rate(Some(demand)),
+    ));
+    RollingExplicitPublicationEnds {
+        consumed_absolute_ms,
+        consumed_end_ms,
+        desired_end_ms,
+        allowed_end_ms: desired_end_ms.saturating_add(ROLLING_SEGMENT_MAX_MS),
     }
 }
 
@@ -6747,9 +6803,23 @@ impl Session {
                     && demand.runway_ms() <= ROLLING_PUBLICATION_GUARD_MS
             })
         });
+        // A producer the flow controller holds for scratch (the global cap or
+        // a refused ledger grant) is waiting on capacity, not stuck: the same
+        // hold the progress deadline already exempts. Its publication clock
+        // must not retire the session while the hold lasts.
+        let held_for_scratch = (*self.suspended_at.lock().await)
+            .is_some_and(|held| held.hold.reason == AheadHoldReason::Global);
         let (publish, expired, insufficient, retention_first_segment, budget) = {
             let mut clock = self.publication.lock().await;
             clock.reset_for_attempt(producer_attempt);
+            if held_for_scratch {
+                // Restart the hard deadline on every held cycle, so it runs
+                // its full length again from the moment the hold clears and
+                // a producer that stays stuck afterwards is still retired.
+                if let Some(deadline) = clock.hard_deadline.as_mut() {
+                    *deadline = (*deadline).max(now + ROLLING_PUBLICATION_HARD);
+                }
+            }
             if clock
                 .staged_last_segment
                 .is_none_or(|current| last_segment >= current)
@@ -6782,7 +6852,10 @@ impl Session {
             let insufficient = !end_list
                 && rolling_insufficient_capacity(playback_rate, producer_speed)
                 && match clock.served.as_ref() {
-                    None => end_ms >= initial_runway_ms,
+                    // Before the first snapshot there is no deadline to
+                    // restart, and a held producer's recent speed is the last
+                    // one it measured before the stop, not a capacity reading.
+                    None => !held_for_scratch && end_ms >= initial_runway_ms,
                     Some(served) => {
                         clock.hard_deadline.is_some_and(|deadline| now >= deadline)
                             && end_ms <= served.end_ms
@@ -8381,12 +8454,13 @@ async fn session_info(
     let flow = lease.as_ref().map(|lease| {
         evaluate_flow(FlowInputs {
             physical_ahead: ahead,
-            published_end_ms,
+            produced_end_ms,
             staged_publication_seconds,
             startup_protected: lease.startup.protects_from_time_hold(),
             media_origin_ms,
             lease_mode: lease.mode,
             demand: lease.demand.as_ref(),
+            demand_observation_age: lease.demand_observation_age,
             global_live_bytes,
             global_ahead_bytes,
             limits,
@@ -26998,7 +27072,7 @@ impl TranscodeManager {
         if lease.retired {
             return;
         }
-        let (ahead, published_end_ms) = {
+        let (ahead, produced_end_ms) = {
             let index = session.segments.lock().await;
             (
                 ahead_of(&index, session.fetched_end_ms.load(Relaxed).max(0)),
@@ -27011,12 +27085,13 @@ impl TranscodeManager {
             .await;
         let evaluation = evaluate_flow(FlowInputs {
             physical_ahead: ahead,
-            published_end_ms,
+            produced_end_ms,
             staged_publication_seconds,
             startup_protected: lease.startup.protects_from_time_hold(),
             media_origin_ms: (session.media_origin_seconds * 1_000.0).round() as i64,
             lease_mode: lease.mode,
             demand: lease.demand.as_ref(),
+            demand_observation_age: lease.demand_observation_age,
             global_live_bytes,
             global_ahead_bytes,
             limits,

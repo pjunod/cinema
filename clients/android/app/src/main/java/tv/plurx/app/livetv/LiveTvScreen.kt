@@ -2256,6 +2256,139 @@ private fun LiveTvPlayerSurface(controller: LiveTvPlayer) {
     )
 }
 
+internal data class LiveTvPictureInfo(
+    val sourceFrame: String,
+    val sourceNote: String,
+    val streamFrame: String,
+    val streamNote: String,
+    val streamPixelAspect: String,
+    val sourcePixelAspect: String,
+    val sourceDisplayAspect: String,
+    val frameComparison: String,
+    val aspectComparison: String,
+    val planConflict: String?,
+    val reason: String,
+    val streamFormat: String,
+)
+
+internal data class LiveTvEligibleVideoSample(
+    val width: Int,
+    val height: Int,
+    val pixelWidthHeightRatio: Float,
+)
+
+internal fun eligibleLiveTvVideoSample(
+    width: Int,
+    height: Int,
+    unappliedRotationDegrees: Int,
+    pixelWidthHeightRatio: Float,
+): LiveTvEligibleVideoSample? = if (width in 1..16_384 && height in 1..16_384 &&
+    unappliedRotationDegrees == 0) {
+    LiveTvEligibleVideoSample(width, height, pixelWidthHeightRatio)
+} else null
+
+internal fun liveTvPictureInfo(
+    plan: LiveTvDelivery?,
+    readAttachedSample: () -> androidx.media3.common.VideoSize?,
+    channel: LiveTvChannel?,
+    nowSeconds: Long = System.currentTimeMillis() / 1_000,
+    format: androidx.media3.common.Format? = null,
+    attachmentCurrent: Boolean = true,
+): LiveTvPictureInfo {
+    fun dimension(value: Int?): Int? = value?.takeIf { it in 1..16_384 }
+    fun frame(width: Int?, height: Int?): String = when {
+        dimension(width) != null && dimension(height) != null -> "$width×$height"
+        dimension(height) != null -> "Height $height"
+        else -> "Unavailable"
+    }
+    val source = plan?.source
+    val observation = channel?.measuredSource?.takeIf { it.observed_at + 1_200 > nowSeconds }
+    val sourceWidth = dimension(source?.width ?: if (source == null) observation?.validVideoWidth else null)
+    val sourceHeight = dimension(source?.height ?: if (source == null) observation?.validVideoHeight else null)
+    val sourceNote = if (source != null) "Source probe" else if (observation != null) "Last observed broadcast" else "Unavailable"
+    val eligible = (if (attachmentCurrent) readAttachedSample() else null)?.let {
+        eligibleLiveTvVideoSample(it.width, it.height, it.unappliedRotationDegrees, it.pixelWidthHeightRatio)
+    }
+    val streamWidth = dimension(eligible?.width ?: plan?.output?.width)
+    val streamHeight = dimension(eligible?.height ?: plan?.output?.height)
+    val streamNote = if (eligible != null) "Measured stream · decoded/cropped frame" else if (plan != null) "Planned output" else "Unavailable"
+    val ratio = source?.sample_aspect_ratio?.takeIf { Regex("^[1-9][0-9]*:[1-9][0-9]*$").matches(it) }
+        ?.split(':')?.let { pieces ->
+            val n = pieces[0].toLongOrNull()
+            val d = pieces[1].toLongOrNull()
+            if (n != null && d != null && n > 0 && d > 0) n to d else null
+        }
+    fun gcd(a: Long, b: Long): Long { var x = a; var y = b; while (y != 0L) { val next = x % y; x = y; y = next }; return x }
+    val sourceSar = ratio?.let { (n, d) -> val g = gcd(n, d); "${n / g}:${d / g}" } ?: "Unavailable"
+    val sourceDar = if (ratio != null && sourceWidth != null && sourceHeight != null) {
+        try {
+            val n = Math.multiplyExact(sourceWidth.toLong(), ratio.first)
+            val d = Math.multiplyExact(sourceHeight.toLong(), ratio.second)
+            val g = gcd(n, d)
+            "${n / g}:${d / g}"
+        } catch (_: ArithmeticException) { "Unavailable" }
+    } else "Unavailable"
+    val frameComparison = if (source != null && sourceWidth != null && sourceHeight != null && streamWidth != null && streamHeight != null) {
+        val dw = streamWidth - sourceWidth
+        val dh = streamHeight - sourceHeight
+        val planned = eligible == null
+        when {
+            dw == 0 && dh == 0 -> if (planned) "No resize planned" else "Frame dimensions unchanged"
+            dw <= 0 && dh <= 0 -> if (planned) "Resolution reduction planned" else "Stream resolution reduced"
+            dw >= 0 && dh >= 0 -> if (planned) "Larger frame dimensions planned" else "Stream frame dimensions increased"
+            else -> if (planned) "Frame dimensions change planned" else "Stream frame dimensions changed"
+        }
+    } else "Unavailable"
+    val sampleSar = eligible?.pixelWidthHeightRatio?.takeIf { it.isFinite() && it > 0f }
+    val streamSar = when {
+        sampleSar == null -> "Not measured"
+        sampleSar == 1f -> "1:1"
+        kotlin.math.abs(sampleSar - 40f / 33f) <= 0.0001f -> "≈40:33"
+        kotlin.math.abs(sampleSar - 10f / 11f) <= 0.0001f -> "≈10:11"
+        else -> String.format(java.util.Locale.US, "≈%.4f:1", sampleSar)
+    }
+    // Media3 videoSize is a decoded/cropped frame. Compare aspect only when
+    // the attached format establishes that no crop changed its frame basis.
+    val compatibleBasis = eligible != null && format?.let {
+        it.width == eligible.width && it.height == eligible.height
+    } == true
+    val aspectComparison = if (compatibleBasis && sampleSar != null && ratio != null &&
+        sourceWidth != null && sourceHeight != null) {
+        val expectedWidth = eligible!!.height.toDouble() * sourceWidth * ratio.first /
+            (sourceHeight.toDouble() * ratio.second)
+        val observedWidth = eligible.width.toDouble() * sampleSar
+        if (expectedWidth.isFinite() && observedWidth.isFinite()) {
+            if (observedWidth >= kotlin.math.floor(expectedWidth) && observedWidth <= kotlin.math.ceil(expectedWidth))
+                "Stream aspect agrees with source"
+            else "Stream aspect differs from source"
+        } else "Not verified"
+    } else "Not verified"
+    val reasons = LinkedHashMap<String, String>()
+    plan?.reasons?.forEach { item ->
+        val explanation = item.explanation?.trim().orEmpty()
+        if (explanation.isNotEmpty()) reasons["${item.code.orEmpty()}\u0000$explanation"] = explanation
+    }
+    val scan = when {
+        plan?.deinterlace == true -> "Progressive planned"
+        plan?.video_action == "copy" && source?.field_order in listOf("tt", "bb", "tb", "bt") -> "Interlaced"
+        else -> null
+    }
+    val cadence = plan?.output?.frame_rate?.takeIf { it.num > 0 && it.den > 0 }
+        ?.let { String.format(java.util.Locale.US, "%.2f frames/s (planned)", it.num.toDouble() / it.den) }
+    return LiveTvPictureInfo(
+        sourceFrame = frame(sourceWidth, sourceHeight), sourceNote = sourceNote,
+        streamFrame = frame(streamWidth, streamHeight), streamNote = streamNote,
+        streamPixelAspect = streamSar, sourcePixelAspect = sourceSar, sourceDisplayAspect = sourceDar,
+        frameComparison = frameComparison,
+        aspectComparison = aspectComparison,
+        planConflict = plan?.let { planned -> eligible?.takeIf {
+            it.width != planned.output.width || it.height != planned.output.height
+        }?.let { "Stream differs from the delivery plan · planned ${planned.output.width}×${planned.output.height}" } },
+        reason = reasons.values.joinToString(" · ").ifEmpty { "The server did not provide a conversion reason." },
+        streamFormat = listOfNotNull(plan?.output?.video_codec?.uppercase(), scan, cadence).joinToString(" · ").ifEmpty { "Not reported" },
+    )
+}
+
 @Composable
 private fun LiveTvPlaybackInformation(
     channel: LiveTvChannel,
@@ -2272,8 +2405,10 @@ private fun LiveTvPlaybackInformation(
     // The sample only exists while the panel is composed; it never polls or
     // renews a tuner lease. A replaced player creates a fresh observation set.
     val facts = remember(player, channel, status, sample) {
-        val size = player?.videoSize
         val plan = status?.delivery
+        val picture = liveTvPictureInfo(plan, { player?.videoSize }, channel,
+            format = player?.videoFormat,
+            attachmentCurrent = player?.currentMediaItem != null)
         fun seconds(value: Long?) = value?.takeIf { it >= 0 }?.let { String.format(java.util.Locale.US, "%.1f s", it / 1_000.0) } ?: "Not reported"
         val buffered = player?.takeIf { it.currentMediaItem != null }?.let { (it.bufferedPosition - it.currentPosition).coerceAtLeast(0) }
         val edge = player?.takeIf { it.isCurrentMediaItemLive && it.duration != androidx.media3.common.C.TIME_UNSET && it.duration >= 0 }
@@ -2291,13 +2426,20 @@ private fun LiveTvPlaybackInformation(
             }
         } ?: "Not reported"
         buildList {
-            add(PlaybackInfoFact("decode_resolution", "Playing resolution", size?.takeIf { it.width > 0 && it.height > 0 }?.let { "${it.width}×${it.height}" } ?: "Not reported", playbackInfoExplanation("decode_resolution")))
-            add(PlaybackInfoFact("source_resolution", "Broadcast source", channel.sourceFormatDescription ?: "Not reported", channel.measuredSource?.observed_at?.let { "Source observed ${liveTvObservedTime(it)}" }))
-            add(PlaybackInfoFact("stream_format", "Stream format", plan?.output?.let { "${it.width}×${it.height} · ${it.video_codec.uppercase()}" } ?: "Not reported", "Server delivery metadata; not a player picture measurement."))
+            add(PlaybackInfoFact("decode_resolution", "Player display size", "Unavailable", "Not reported by this player"))
+            add(PlaybackInfoFact("source_resolution", "Source frame", picture.sourceFrame, picture.sourceNote))
+            add(PlaybackInfoFact("source_pixel_aspect", "Source pixel aspect", picture.sourcePixelAspect))
+            add(PlaybackInfoFact("source_display_aspect", "Source display aspect", picture.sourceDisplayAspect, "Derived from source frame and pixel aspect"))
+            add(PlaybackInfoFact("stream_frame", "Stream frame", picture.streamFrame, picture.streamNote))
+            add(PlaybackInfoFact("stream_pixel_aspect", "Stream pixel aspect", picture.streamPixelAspect))
+            add(PlaybackInfoFact("frame_comparison", "Frame comparison", picture.frameComparison))
+            add(PlaybackInfoFact("aspect_comparison", "Aspect comparison", picture.aspectComparison, "Output aspect and compatible crop basis are not verified."))
+            add(PlaybackInfoFact("stream_format", "Stream format", picture.streamFormat, "Codec, scan and cadence; dimensions are in Stream frame."))
+            add(PlaybackInfoFact("reason", "Reason", picture.reason, group = "Server work"))
             add(PlaybackInfoFact("decode_audio", "Stream audio track", player?.audioFormat?.let { "${it.sampleMimeType ?: "Codec not reported"} · ${it.channelCount.takeIf { count -> count > 0 }?.let { count -> "$count channels" } ?: "Channels not reported"}" } ?: "Not reported", playbackInfoExplanation("decode_audio")))
             add(PlaybackInfoFact("device_audio", "Device audio output", "Not reported"))
-            add(PlaybackInfoFact("method", "Delivery method", method, group = "Server work"))
-            add(PlaybackInfoFact("player_state", "Playback", player?.let(::playerStateLabel) ?: "Not reported"))
+            add(PlaybackInfoFact("method", "Method", method, group = "Server work"))
+            add(PlaybackInfoFact("player_state", "Player state", player?.let(::playerStateLabel) ?: "Not reported"))
             add(PlaybackInfoFact("subtitles", "Subtitles", player?.let { p -> if (p.currentTracks.groups.any { it.type == androidx.media3.common.C.TRACK_TYPE_TEXT && it.isSelected }) "Selected · rendered by player" else "Off" } ?: "Not reported"))
             add(PlaybackInfoFact("client_loaded", "Buffered on device", seconds(buffered), playbackInfoExplanation("client_loaded"), "Buffer & delivery"))
             add(PlaybackInfoFact("live_edge", "Behind stream live edge", seconds(edge), "Behind latest available media; not broadcast delay.", "Live stream & reception"))
@@ -2307,6 +2449,10 @@ private fun LiveTvPlaybackInformation(
             status?.encoder?.let { add(PlaybackInfoFact("encoder", "Encoder", it, group = "Server work")) }
             status?.owner_node_id?.let { add(PlaybackInfoFact("owner", "Server owner", it, group = "Session & history", diagnosticOnly = true)) }
             add(PlaybackInfoFact("sample", "Player sampled", java.text.DateFormat.getTimeInstance().format(java.util.Date()), group = "Session & history"))
+            picture.planConflict?.let { add(PlaybackInfoFact("plan_conflict", "Delivery plan conflict", it, group = "Session & history", diagnosticOnly = true)) }
+            plan?.reasons?.takeIf { it.isNotEmpty() }?.let { reasons ->
+                add(PlaybackInfoFact("delivery_reasons", "Delivery reasons", reasons.joinToString(" · ") { "${it.code ?: "unknown"}: ${it.explanation.orEmpty()}" }, group = "Session & history", diagnosticOnly = true))
+            }
         }
     }
     PlaybackInfoPanel(title = channel.title, facts = facts, mode = mode, onMode = { mode = it }, onClose = onClose, modifier = modifier, isLive = true)
