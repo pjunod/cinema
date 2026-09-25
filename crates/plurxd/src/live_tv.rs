@@ -8084,15 +8084,6 @@ fn viewer_stream_error(
         .unwrap_or_else(|| LiveTvError::StreamFailed("the tuner stream ended unexpectedly".into()))
 }
 
-/// Whether the input a viewer's FFmpeg opened contradicts the facts its plan
-/// was made from (plan L-03 §2.4 D5). A joiner plans from its transport's
-/// probe but is fed the live edge, so this is the check that the two agree.
-///
-/// Only facts the plan is sized from, and only where both sides state them:
-/// frame size (output height, scaling and encode admission) and audio channel
-/// count. Scan is left out: FFmpeg's banner omits field order where FFprobe
-/// reports `unknown`, and the session maps `unknown` to progressive, so
-/// comparing it would refuse starts whose plan is right.
 /// The quality policy a start plans under: the configured ceiling for a
 /// client that sent its capabilities, and the exact old H.264/AAC height
 /// profile for a mixed-version start that did not.
@@ -8202,6 +8193,15 @@ fn warm_plan_agrees(
     (argv(running).ok()? == argv(&probed_plan).ok()?).then_some(delivery)
 }
 
+/// Whether the input a viewer's FFmpeg opened contradicts the facts its plan
+/// was made from (plan L-03 §2.4 D5). A joiner plans from its transport's
+/// probe but is fed the live edge, so this is the check that the two agree.
+///
+/// Only facts the plan is sized from, and only where both sides state them:
+/// frame size (output height, scaling and encode admission) and audio channel
+/// count. Scan is left out: FFmpeg's banner omits field order where FFprobe
+/// reports `unknown`, and the session maps `unknown` to progressive, so
+/// comparing it would refuse starts whose plan is right.
 fn input_contradicts_plan(planned: &LiveSourceFacts, input: &LiveTvSourceFormat) -> bool {
     fn differs<T: PartialEq>(planned: Option<T>, input: Option<T>) -> bool {
         matches!((planned, input), (Some(planned), Some(input)) if planned != input)
