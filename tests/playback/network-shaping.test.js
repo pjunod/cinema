@@ -1599,7 +1599,7 @@ test("a cliff that was never applied fails as a shaping fault, not a player faul
     shaping: { cliff_applied_at_ms: null, stages: observation().shaping.stages },
   }));
   assert.equal(score.outcome, "shaping");
-  assert.match(score.errors[0], /never applied the cliff/);
+  assert.match(score.errors[0], /never applied cliff 1/);
 });
 
 test("a shaper that leaked more than its cap fails as a shaping fault", () => {
