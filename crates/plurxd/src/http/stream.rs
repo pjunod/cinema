@@ -2473,6 +2473,11 @@ pub async fn set_audio_offset(
 /// the file itself, to a temp name renamed into place once whole — two
 /// racing misses write identical bytes, and the loser's rename is a no-op
 /// worth nothing to fight over.
+/// A viewer turned this text track on and the player is waiting for it
+/// (plan P-02 §3.2.2).
+pub(crate) const SUBTITLE_TRACK_FOR_A_VIEWER: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::realtime("subtitle track a viewer turned on");
+
 pub async fn subtitles_vtt(
     _user: AuthUser,
     State(state): State<AppState>,
@@ -2501,6 +2506,7 @@ pub async fn subtitles_vtt(
         &file,
         index,
         &state.subtitle_source_access(),
+        SUBTITLE_TRACK_FOR_A_VIEWER,
     )
     .await
     .map_err(|why| {

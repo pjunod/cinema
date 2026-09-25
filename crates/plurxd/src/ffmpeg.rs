@@ -405,13 +405,20 @@ pub async fn ffmpeg_build() -> String {
 /// this document with the scanner's document prevents a same-size,
 /// same-second pathname replacement from pairing fresh bytes with stale
 /// geometry, tracks, cadence, or color facts.
-pub(crate) async fn held_source_probe_json(source: &std::fs::File) -> Result<String, String> {
+///
+/// `work` is the caller's: a session start that is waiting on this probe
+/// passes a realtime class, since the probe runs under a five-second bound
+/// whose miss the viewer sees as a refusal.
+pub(crate) async fn held_source_probe_json(
+    source: &std::fs::File,
+    work: crate::process_control::ChildWork,
+) -> Result<String, String> {
     let document = held_source_probe_json_with_limits(
         source,
         ENGINE_PROBE_TIMEOUT,
         ENGINE_PROBE_MAX_BYTES,
         "engine probe",
-        crate::process_control::ChildWork::background("held source probe"),
+        work,
     )
     .await?;
     Ok(stamped_with_this_reporter(document).await)
@@ -3148,7 +3155,11 @@ pub async fn has_dovi_passthrough_with(encoder: Encoder) -> bool {
         .await
 }
 
-async fn dovi_probe_output(file: &MediaFile, apply: bool) -> Result<Vec<String>, String> {
+async fn dovi_probe_output(
+    file: &MediaFile,
+    apply: bool,
+    class: crate::process_control::ChildClass,
+) -> Result<Vec<String>, String> {
     let seek = file
         .duration_ms
         .map(|duration| (duration / 5).saturating_sub(1_000) as f64 / 1_000.0)
@@ -3173,7 +3184,7 @@ async fn dovi_probe_output(file: &MediaFile, apply: bool) -> Result<Vec<String>,
         Duration::from_secs(30),
         crate::process_control::output_job_owned(
             &mut command,
-            crate::process_control::ChildWork::background("Dolby Vision pixel probe"),
+            crate::process_control::ChildWork::new(class, "Dolby Vision pixel probe"),
         ),
     )
     .await
@@ -3200,9 +3211,15 @@ async fn dovi_probe_output(file: &MediaFile, apply: bool) -> Result<Vec<String>,
 /// data through the production graph and that tonemapx changes pixels when
 /// Dolby Vision application is enabled. A mere option probe cannot make that
 /// claim because a frame with no DOVI metadata makes the option a no-op.
-pub async fn dovi_reshape_changes_pixels(file: &MediaFile) -> bool {
-    let enabled = dovi_probe_output(file, true).await;
-    let disabled = dovi_probe_output(file, false).await;
+///
+/// `class` is the caller's: a session start waiting on the proof passes
+/// realtime, a background pass background.
+pub async fn dovi_reshape_changes_pixels(
+    file: &MediaFile,
+    class: crate::process_control::ChildClass,
+) -> bool {
+    let enabled = dovi_probe_output(file, true, class).await;
+    let disabled = dovi_probe_output(file, false, class).await;
     match (enabled, disabled) {
         (Ok(enabled), Ok(disabled)) if enabled != disabled => true,
         (Ok(_), Ok(_)) => {
@@ -4679,9 +4696,12 @@ mod tests {
             let stored: serde_json::Value = serde_json::from_str(&scanned).expect("stored probe");
             assert!(stored.get("chapters").is_none());
             let source = std::fs::File::open(path).expect("hold source");
-            let held = held_source_probe_json(&source)
-                .await
-                .expect("descriptor-bound probe");
+            let held = held_source_probe_json(
+                &source,
+                crate::process_control::ChildWork::background("test fixture probe"),
+            )
+            .await
+            .expect("descriptor-bound probe");
             let current: serde_json::Value = serde_json::from_str(&held).expect("held probe");
             assert_eq!(
                 current["chapters"].as_array().expect("chapter array").len(),

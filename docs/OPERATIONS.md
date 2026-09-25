@@ -4959,6 +4959,7 @@ reports them and a **Stop**; the same list is `processes` in
 |---|---|
 | `plurx_child_processes{class="realtime|background"}` | Children this node is running now. A background count that never falls back to zero is a probe or extraction that is not finishing. |
 | `plurx_child_spawns_total{class="realtime|background"}` | Children started since the process started. |
+| `plurx_child_spawns_by_purpose_total{class, purpose}` | The same, by class and purpose (`purpose` is the fixed text the Activity page shows, such as `held source probe for a session start`). The class is the caller's: a probe or extraction a session start or a viewer's request waits on is `realtime`, the same work started by a warm-up, a backfill or the pre-transcode pass is `background`. A start-path purpose counting under `background` is a caller that picked the wrong class. |
 | `plurx_child_priority_unapplied_total{class="realtime|background"}` | Children whose kernel-reported `nice`, I/O class and level or `oom_score_adj` read back above their class's policy right after the start. Expected to stay `0` on Linux; a rising value means something between the daemon and the kernel (a container runtime, a seccomp profile) refuses the adjustment, and the child ran at the daemon's priority instead. A refused adjustment never stops the child from starting. |
 
 The compact Prometheus alert shape is: membership sample valid · leader known ·

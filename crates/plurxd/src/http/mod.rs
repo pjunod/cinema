@@ -14273,9 +14273,12 @@ mod tests {
             .expect("fixture after Unix epoch")
             .as_secs() as i64;
         let held = std::fs::File::open(&path).expect("held fixture source");
-        let raw_json = crate::ffmpeg::held_source_probe_json(&held)
-            .await
-            .expect("exact fixture probe");
+        let raw_json = crate::ffmpeg::held_source_probe_json(
+            &held,
+            crate::process_control::ChildWork::background("test fixture probe"),
+        )
+        .await
+        .expect("exact fixture probe");
         let probe = plurx_core::domain::ProbeResult {
             duration_ms: Some(8_000),
             container: Some("mkv".into()),
@@ -17322,9 +17325,12 @@ mod tests {
             .expect("file");
         write_real_av_fixture(&file.path, seconds);
         let held = std::fs::File::open(&file.path).expect("held fixture source");
-        let raw_json = crate::ffmpeg::held_source_probe_json(&held)
-            .await
-            .expect("exact fixture probe");
+        let raw_json = crate::ffmpeg::held_source_probe_json(
+            &held,
+            crate::process_control::ChildWork::background("test fixture probe"),
+        )
+        .await
+        .expect("exact fixture probe");
         let metadata = std::fs::metadata(&file.path).expect("fixture metadata");
         let size = i64::try_from(metadata.len()).expect("fixture size");
         let mtime = metadata
@@ -17477,6 +17483,11 @@ mod tests {
             .await
             .expect("file");
 
+        // The player is waiting on this extraction, so it starts at the
+        // realtime class (plan P-02 §3.2.2, review of #518 finding 1).
+        let viewer = super::stream::SUBTITLE_TRACK_FOR_A_VIEWER;
+        assert_eq!(viewer.class, crate::process_control::ChildClass::Realtime);
+        let realtime_before = crate::process_control::priority::spawns_of(viewer);
         let (status, body) = body_of(
             &app,
             get_q(&format!("/api/v1/files/{file}/subs/0.vtt?token={admin}")),
@@ -17486,6 +17497,10 @@ mod tests {
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("WEBVTT"), "{text}");
         assert!(text.contains("hello plurx"), "{text}");
+        assert!(
+            crate::process_control::priority::spawns_of(viewer) > realtime_before,
+            "the /subs extraction a viewer waits on must start at the realtime class"
+        );
 
         // Exactly one entry, keyed by (file, stream, size, mtime).
         let cached = state.subs_dir.join(format!("f{file}-s0-4242-7.vtt"));

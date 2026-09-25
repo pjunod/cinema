@@ -634,6 +634,9 @@ enum LinuxBootstrapPhase {
 pub(crate) struct DecodeFactSource {
     handle: Arc<std::fs::File>,
     offset_gate: Arc<tokio::sync::Semaphore>,
+    /// The class and purpose of every probe run for this source: the
+    /// caller's, since only it knows whether a viewer is waiting.
+    work: crate::process_control::ChildWork,
     #[cfg(test)]
     initial_identity_delay: Duration,
     #[cfg(test)]
@@ -644,10 +647,12 @@ impl DecodeFactSource {
     pub(crate) fn new(
         handle: Arc<std::fs::File>,
         offset_gate: Arc<tokio::sync::Semaphore>,
+        work: crate::process_control::ChildWork,
     ) -> Self {
         Self {
             handle,
             offset_gate,
+            work,
             #[cfg(test)]
             initial_identity_delay: Duration::ZERO,
             #[cfg(test)]
@@ -657,7 +662,11 @@ impl DecodeFactSource {
 
     #[cfg(test)]
     fn isolated(handle: Arc<std::fs::File>) -> Self {
-        Self::new(handle, Arc::new(tokio::sync::Semaphore::new(1)))
+        Self::new(
+            handle,
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            TEST_FACT_WORK,
+        )
     }
 
     #[cfg(test)]
@@ -2310,14 +2319,20 @@ impl ProbeExecutionSupervisor {
     }
 }
 
-/// Every held decode-fact probe: a capability probe nobody is waiting on.
-const DECODE_FACT_PROBE: crate::process_control::ChildWork =
-    crate::process_control::ChildWork::background("decode-fact probe");
+/// The probe binary's `-version` check at discovery: nobody is waiting on it.
+/// A source's probes take their class from [`DecodeFactSource`] instead.
+const DECODE_FACT_VERSION_PROBE: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::background("decode-fact probe version check");
+
+#[cfg(test)]
+const TEST_FACT_WORK: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::background("decode-fact test probe");
 
 #[cfg(unix)]
 async fn spawn_configured_probe(
     mut command: tokio::process::Command,
     mut supervisor: ProbeExecutionSupervisor,
+    work: crate::process_control::ChildWork,
 ) -> Result<
     (
         tokio::process::Child,
@@ -2330,7 +2345,7 @@ async fn spawn_configured_probe(
         // `configure_probe_execution` already registered the priority ahead
         // of its own exec-from-`pre_exec`; the launcher's second registration
         // lands after that closure and never runs.
-        let spawned = crate::process_control::spawn_job_owned(&mut command, DECODE_FACT_PROBE);
+        let spawned = crate::process_control::spawn_job_owned(&mut command, work);
         supervisor.parent_after_spawn();
         match spawned {
             Ok((child, job)) => Ok((child, job, supervisor)),
@@ -2425,6 +2440,7 @@ impl LinuxExecveArguments {
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn configure_probe_execution(
     command: &mut tokio::process::Command,
     launch_mode: ProbeLaunchMode,
@@ -2433,6 +2449,7 @@ fn configure_probe_execution(
     source_fd: Option<std::os::fd::RawFd>,
     arg0: &Path,
     arguments: &[OsString],
+    class: crate::process_control::ChildClass,
 ) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
     #[cfg(not(target_os = "linux"))]
     let _ = launch_deadline;
@@ -2484,7 +2501,7 @@ fn configure_probe_execution(
         .map(LinuxProbeExecSupervisor::child_receiver_fd);
     // Before the closure below: it execs the probe from inside itself, so a
     // `pre_exec` registered after it (the launcher's) never runs.
-    crate::process_control::priority::apply(command, DECODE_FACT_PROBE.class);
+    crate::process_control::priority::apply(command, class);
     unsafe {
         command.pre_exec(move || {
             start_probe_session()?;
@@ -3125,9 +3142,10 @@ async fn probe_version_with_deadline_on(
             None,
             &configured_path,
             &arguments,
+            DECODE_FACT_VERSION_PROBE.class,
         )?;
         let (mut child, _child_job, mut supervisor) =
-            spawn_configured_probe(command, supervisor).await?;
+            spawn_configured_probe(command, supervisor, DECODE_FACT_VERSION_PROBE).await?;
         let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
         let session = ProbeSessionGuard::new(process_group);
         #[cfg(target_os = "linux")]
@@ -3244,7 +3262,7 @@ async fn probe_version(
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     let (mut child, _child_job) =
-        crate::process_control::spawn_job_owned(&mut command, DECODE_FACT_PROBE)
+        crate::process_control::spawn_job_owned(&mut command, DECODE_FACT_VERSION_PROBE)
             .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
     let stdout = child.stdout.take().ok_or(DecodeFactError::MissingPipe)?;
     let outcome = tokio::time::timeout(VERSION_DEADLINE, async {
@@ -3441,6 +3459,7 @@ impl DecodeFactCache {
                     handle: Arc::clone(&source.handle),
                     observation: bound_source,
                     offset_permit: source_offset_permit,
+                    work: source.work,
                 },
                 owned_catalog.as_ref(),
                 selected_stream,
@@ -3640,6 +3659,7 @@ struct DecodeFactCollectionSource {
     handle: Arc<std::fs::File>,
     observation: DecodeSourceObservation,
     offset_permit: tokio::sync::OwnedSemaphorePermit,
+    work: crate::process_control::ChildWork,
 }
 
 #[cfg(unix)]
@@ -3844,6 +3864,7 @@ async fn collect_idet_verdict(
     input_video_stream: u32,
     launch_deadline: std::time::Instant,
     cancelled: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
 ) -> Result<InterlaceVerdict, DecodeFactError> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -3883,9 +3904,10 @@ async fn collect_idet_verdict(
         Some(source_fd),
         probe.executable(),
         &arguments,
+        work.class,
     )?;
     let (mut child, _child_job, mut supervisor) =
-        spawn_configured_probe(command, supervisor).await?;
+        spawn_configured_probe(command, supervisor, work).await?;
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
     let session = ProbeSessionGuard::new(process_group);
     #[cfg(target_os = "linux")]
@@ -3990,6 +4012,7 @@ async fn collect(
         handle,
         observation,
         offset_permit,
+        work,
     } = source;
     let started = std::time::Instant::now();
     let launch_deadline = started + budget.min(PROBE_DEADLINE);
@@ -4054,9 +4077,10 @@ async fn collect(
         Some(source_fd),
         probe.executable(),
         &arguments,
+        work.class,
     )?;
     let (mut child, _child_job, mut supervisor) =
-        spawn_configured_probe(command, supervisor).await?;
+        spawn_configured_probe(command, supervisor, work).await?;
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
     let session = ProbeSessionGuard::new(process_group);
     #[cfg(target_os = "linux")]
@@ -4177,6 +4201,7 @@ async fn collect(
             facts.input_video_stream(),
             launch_deadline,
             cancelled,
+            work,
         )
         .await
         {
@@ -4310,6 +4335,7 @@ async fn collect(
         handle,
         observation,
         offset_permit,
+        work,
     } = source;
     let launch_deadline = std::time::Instant::now() + budget.min(PROBE_DEADLINE);
     let source_path = plurx_core::fs_secure::std_file_path(&handle)
@@ -4335,9 +4361,8 @@ async fn collect(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, _child_job) =
-        crate::process_control::spawn_job_owned(&mut command, DECODE_FACT_PROBE)
-            .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command, work)
+        .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
     let stdout = child.stdout.take().ok_or(DecodeFactError::MissingPipe)?;
     let stderr = child.stderr.take().ok_or(DecodeFactError::MissingPipe)?;
     let remaining = launch_deadline.saturating_duration_since(std::time::Instant::now());
@@ -4567,7 +4592,7 @@ mod tests {
             .expect("configure_probe_execution");
         let body = &source[configure..];
         let apply = body
-            .find("priority::apply(command, DECODE_FACT_PROBE.class)")
+            .find("priority::apply(command, class)")
             .expect("configure_probe_execution registers the child priority");
         let exec = body
             .find("command.pre_exec(move ||")
@@ -5487,7 +5512,11 @@ void probe_main(unsigned long *stack) {
             cache
                 .get_or_probe(
                     &identity,
-                    DecodeFactSource::new(Arc::clone(&source), Arc::clone(&ownership)),
+                    DecodeFactSource::new(
+                        Arc::clone(&source),
+                        Arc::clone(&ownership),
+                        TEST_FACT_WORK,
+                    ),
                     None,
                     ProbeStreamSelection::Absolute(4),
                     Duration::from_millis(400),
@@ -5774,7 +5803,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
             DecodeFactCache::new()
                 .get_or_probe(
                     &identity,
-                    DecodeFactSource::new(source, child_gate),
+                    DecodeFactSource::new(source, child_gate, TEST_FACT_WORK),
                     None,
                     ProbeStreamSelection::Absolute(0),
                     PROBE_DEADLINE,
@@ -5967,6 +5996,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","
                     .acquire_owned()
                     .await
                     .expect("source offset permit"),
+                work: TEST_FACT_WORK,
             },
             None,
             ProbeStreamSelection::FirstPlayable,
@@ -6020,6 +6050,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
                     .acquire_owned()
                     .await
                     .expect("source offset permit"),
+                work: TEST_FACT_WORK,
             },
             None,
             ProbeStreamSelection::FirstPlayable,
@@ -6401,7 +6432,11 @@ wait
         let cache = DecodeFactCache::new();
         let collection = cache.get_or_probe(
             &identity,
-            DecodeFactSource::new(Arc::clone(&source), Arc::clone(&offset_gate)),
+            DecodeFactSource::new(
+                Arc::clone(&source),
+                Arc::clone(&offset_gate),
+                TEST_FACT_WORK,
+            ),
             None,
             ProbeStreamSelection::FirstPlayable,
             Duration::from_secs(8),
@@ -6505,7 +6540,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
         let started = std::time::Instant::now();
         let collection = cache.get_or_probe(
             &identity,
-            DecodeFactSource::new(source, offset_gate),
+            DecodeFactSource::new(source, offset_gate, TEST_FACT_WORK),
             None,
             ProbeStreamSelection::FirstPlayable,
             Duration::from_secs(2),

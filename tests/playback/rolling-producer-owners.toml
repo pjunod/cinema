@@ -2883,7 +2883,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # rolling publication-trap change): the value is the whole merged tree,
 # measured by zeroing this row after the merge: main's 977 plus this branch's three test-only
 # timers reviewed above.
-expected_occurrences = 980
+# +2 with the review round of P-02 M3 (#518, finding 1), both test-only in
+# subtitles::tests::a_whole_track_extraction_runs_at_the_class_its_caller_passes:
+# a 30 s `tokio::time::timeout` bounding the wait for the detached warm-up's
+# publication and the 20 ms `tokio::time::sleep` that polls it. The warm-up
+# is the production warmer, which owns its flight; the test only waits for
+# it. No production timer, no rolling-producer owner.
+expected_occurrences = 982
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3144,7 +3150,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # rolling publication-trap change): the value is the whole merged tree,
 # measured by zeroing this row after the merge: main's 175 plus this branch's three test-only
 # children reviewed above.
-expected_occurrences = 178
+# +1 with the review round of P-02 M3 (#518, finding 1), test-only: the
+# `true` child in process::priority::tests::every_spawn_is_counted_by_its_class_and_purpose,
+# started through `spawn_job_owned` and reaped by the test before its job drops.
+expected_occurrences = 179
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3686,7 +3695,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # attached, so a failed attach never strands a running process. +2
 # test-only: the stop test's and the Activity HTTP test's `child.wait()` for
 # the child they killed, each under a timeout.
-expected_occurrences = 403
+# +1 with the review round of P-02 M3 (#518, finding 1), test-only: the
+# `child.wait()` that reaps that same `true` child. No production lifecycle
+# call is added.
+expected_occurrences = 404
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

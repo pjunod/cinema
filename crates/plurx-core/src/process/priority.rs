@@ -9,7 +9,14 @@
 //! | class | who waits | nice | I/O | `oom_score_adj` |
 //! |---|---|---:|---|---:|
 //! | [`ChildClass::Realtime`] | a viewer, or a recording that cannot fall behind the wall clock | 5 | best-effort 4 | 500 |
-//! | [`ChildClass::Background`] | nobody: scan thumbnails, covers, capability probes, fragment indexing, subtitle extraction, cache producers, conversions | 15 | best-effort 7 | 800 |
+//! | [`ChildClass::Background`] | nobody: scan thumbnails, covers, capability probes, fragment indexing, subtitle warm-ups, cache producers, conversions | 15 | best-effort 7 | 800 |
+//!
+//! The class belongs to the caller, not to the kind of child: the same probe
+//! or extraction is realtime when a session start or a viewer's request is
+//! awaiting it and background when a warm-up, a backfill or the pre-transcode
+//! pass started it. Such helpers take the [`ChildWork`] (or the
+//! [`ChildClass`]) from their caller, and [`spawns_of`] counts every spawn by
+//! class and purpose so the choice each caller made can be read back.
 //!
 //! Both sit below the daemon (nice 0, `oom_score_adj` 0 as observed on the
 //! fleet), so the scheduler serves the process that answers every viewer
@@ -104,6 +111,12 @@ pub struct ChildWork {
 }
 
 impl ChildWork {
+    /// A class chosen by the caller and a purpose named by the helper that
+    /// starts the child.
+    pub const fn new(class: ChildClass, purpose: &'static str) -> Self {
+        Self { class, purpose }
+    }
+
     pub const fn realtime(purpose: &'static str) -> Self {
         Self {
             class: ChildClass::Realtime,
@@ -292,6 +305,10 @@ struct Registry {
 static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(Mutex::default);
 static SPAWNED: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 static UNAPPLIED: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+/// Every child started, by class and purpose. Purposes are string literals
+/// at the spawn sites, so the key set is bounded by the source.
+static SPAWNED_BY_WORK: LazyLock<Mutex<BTreeMap<(ChildClass, &'static str), u64>>> =
+    LazyLock::new(Mutex::default);
 
 fn registry() -> std::sync::MutexGuard<'static, Registry> {
     REGISTRY
@@ -321,6 +338,11 @@ pub(crate) fn register(
 ) -> Option<Registration> {
     let pid = pid?;
     SPAWNED[work.class.index()].fetch_add(1, Ordering::Relaxed);
+    *SPAWNED_BY_WORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry((work.class, work.purpose))
+        .or_default() += 1;
     if observe(pid).applied(work.class.policy()) == Some(false) {
         UNAPPLIED[work.class.index()].fetch_add(1, Ordering::Relaxed);
     }
@@ -423,6 +445,19 @@ pub fn stop(pid: u32) -> io::Result<bool> {
     }
 }
 
+/// How many children this process has started with exactly this class and
+/// purpose. It is how a caller's choice of class is read back: a session
+/// start that awaits a probe must show up here as `realtime`, a warm-up as
+/// `background`.
+pub fn spawns_of(work: ChildWork) -> u64 {
+    SPAWNED_BY_WORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&(work.class, work.purpose))
+        .copied()
+        .unwrap_or_default()
+}
+
 pub fn class_counters() -> Vec<ClassCounters> {
     let mut running = [0u64; 2];
     for entry in registry().entries.values() {
@@ -475,6 +510,21 @@ pub fn prometheus() -> String {
             "plurx_child_priority_unapplied_total{{class=\"{}\"}} {}\n",
             row.class.as_str(),
             row.unapplied
+        ));
+    }
+    out.push_str(
+        "# HELP plurx_child_spawns_by_purpose_total Child processes started through the launcher, by priority class and purpose.\n\
+         # TYPE plurx_child_spawns_by_purpose_total counter\n",
+    );
+    let by_work = SPAWNED_BY_WORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    for ((class, purpose), spawned) in by_work {
+        out.push_str(&format!(
+            "plurx_child_spawns_by_purpose_total{{class=\"{}\",purpose=\"{}\"}} {spawned}\n",
+            class.as_str(),
+            purpose.replace('\\', "\\\\").replace('"', "\\\""),
         ));
     }
     out
@@ -864,6 +914,34 @@ mod tests {
         assert_eq!(linux::OomBytes::new(800).as_bytes(), b"800\n");
         assert_eq!(linux::OomBytes::new(-1000).as_bytes(), b"-1000\n");
         assert_eq!(linux::ioprio_value(7), (2 << 13) | 7);
+    }
+
+    /// The read-back behind every caller's choice of class (review of #518,
+    /// finding 1): each spawn is counted under its own class and purpose, and
+    /// the same purpose at the other class is a different series.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_spawn_is_counted_by_its_class_and_purpose() {
+        let realtime = ChildWork::realtime("purpose counting test");
+        let background = ChildWork::new(ChildClass::Background, "purpose counting test");
+        let (realtime_before, background_before) = (spawns_of(realtime), spawns_of(background));
+        let mut command = tokio::process::Command::new("true");
+        let (mut child, _job) =
+            super::super::spawn_job_owned(&mut command, realtime).expect("spawn");
+        child.wait().await.expect("reap");
+        assert_eq!(spawns_of(realtime), realtime_before + 1);
+        assert_eq!(spawns_of(background), background_before);
+        let text = prometheus();
+        assert!(
+            text.contains("# TYPE plurx_child_spawns_by_purpose_total counter"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "plurx_child_spawns_by_purpose_total{class=\"realtime\",purpose=\"purpose counting test\"} "
+            ),
+            "{text}"
+        );
     }
 
     #[test]

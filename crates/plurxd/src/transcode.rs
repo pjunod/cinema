@@ -287,7 +287,40 @@ enum BoundPlanCaller {
     Vod,
 }
 
+/// The class of what `encoder_and_grade_for` starts: every caller of it is a
+/// session start (VOD or streamed) or a peer's media offer for one.
+const SESSION_START_CLASS: crate::process_control::ChildClass =
+    crate::process_control::ChildClass::Realtime;
+
+/// The held source probe a VOD start runs under `ENGINE_PROBE_TIMEOUT`. A
+/// viewer waits on it and a miss answers `vod_source_rescan_required`, so it
+/// is realtime (plan P-02 §3.2.2).
+const VOD_START_HELD_PROBE: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::realtime("held source probe for a session start");
+
 impl BoundPlanCaller {
+    /// The class and purpose of the decode-fact probes this caller waits on.
+    /// A VOD start waits up to `DECODE_PLAN_PROBE_BUDGET` with a viewer in
+    /// front of it; the pre-transcode pass has nobody waiting.
+    const fn decode_fact_work(self) -> crate::process_control::ChildWork {
+        match self {
+            Self::Pretranscode => crate::process_control::ChildWork::background(
+                "decode-fact probe for the pre-transcode pass",
+            ),
+            Self::Vod => {
+                crate::process_control::ChildWork::realtime("decode-fact probe for a session start")
+            }
+        }
+    }
+
+    fn decode_fact_source(
+        self,
+        handle: Arc<std::fs::File>,
+        offset_gate: Arc<tokio::sync::Semaphore>,
+    ) -> crate::decode_facts::DecodeFactSource {
+        crate::decode_facts::DecodeFactSource::new(handle, offset_gate, self.decode_fact_work())
+    }
+
     fn finish(
         self,
         result: Result<ResolvedTranscode, String>,
@@ -15012,12 +15045,35 @@ impl TranscodeManager {
                 file,
                 options,
                 encoder,
-                crate::decode_facts::DecodeFactSource::new(
+                BoundPlanCaller::Pretranscode.decode_fact_source(
                     Arc::clone(&source.handle),
                     Arc::clone(&source.offset_gate),
                 ),
                 deadline,
                 cancelled,
+            )
+            .await,
+        )
+    }
+
+    /// The VOD start's decoder plan, through the descriptor it holds, within
+    /// `DECODE_PLAN_PROBE_BUDGET` and with the viewer's class on its probes.
+    async fn resolve_vod_movie_plan(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        held_plan_handle: Arc<std::fs::File>,
+    ) -> Result<ResolvedTranscode, String> {
+        BoundPlanCaller::Vod.finish(
+            self.resolve_held_movie_plan(
+                file,
+                options,
+                encoder,
+                BoundPlanCaller::Vod
+                    .decode_fact_source(held_plan_handle, Arc::new(tokio::sync::Semaphore::new(1))),
+                Instant::now() + DECODE_PLAN_PROBE_BUDGET,
+                None,
             )
             .await,
         )
@@ -15318,9 +15374,13 @@ impl TranscodeManager {
         format!("{}:{}:{}", file.path.display(), file.size, file.mtime)
     }
 
+    /// `class` is the caller's: the per-source proof runs two 30-second
+    /// FFmpeg probes and memoizes its answer, so a session start that is
+    /// waiting on it must not run them at the background class.
     async fn require_dovi_renderer(
         &self,
         file: &plurx_core::domain::MediaFile,
+        class: crate::process_control::ChildClass,
     ) -> Result<bool, String> {
         let required = Self::needs_dovi_reshape(file)?;
         if required && !self.dovi_reshape {
@@ -15339,7 +15399,7 @@ impl TranscodeManager {
             let proved = match cached {
                 Some(proved) => proved,
                 None => {
-                    let proved = crate::ffmpeg::dovi_reshape_changes_pixels(file).await;
+                    let proved = crate::ffmpeg::dovi_reshape_changes_pixels(file, class).await;
                     self.dovi_proofs
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -15472,7 +15532,12 @@ impl TranscodeManager {
         // decoder really exports RPU side data for THIS file and that
         // applying it really changes pixels. A `hdr=dolby_vision` column is a
         // scan's opinion; this is a measurement.
-        if !self.require_dovi_renderer(file).await? {
+        // Only `encoder_and_grade_for` asks for a grade, and every one of its
+        // callers is a session start or a peer's offer for one.
+        if !self
+            .require_dovi_renderer(file, SESSION_START_CLASS)
+            .await?
+        {
             return Ok(OutputGrade::Sdr);
         }
         Ok(OutputGrade::Hdr10)
@@ -15539,7 +15604,7 @@ impl TranscodeManager {
                 Encoder::Software
             }
         } else {
-            self.encoder_for_file(file).await?
+            self.encoder_for_file(file, SESSION_START_CLASS).await?
         };
         let grade = self
             .hdr10_grade_for(file, requested, target_height, hdr_candidate, subtitle_burn)
@@ -15547,13 +15612,17 @@ impl TranscodeManager {
         if grade == OutputGrade::Hdr10 {
             Ok((hdr_candidate, grade))
         } else {
-            Ok((self.encoder_for_file(file).await?, grade))
+            Ok((
+                self.encoder_for_file(file, SESSION_START_CLASS).await?,
+                grade,
+            ))
         }
     }
 
     async fn encoder_for_file(
         &self,
         file: &plurx_core::domain::MediaFile,
+        class: crate::process_control::ChildClass,
     ) -> Result<Encoder, String> {
         let requested = self
             .store
@@ -15562,7 +15631,7 @@ impl TranscodeManager {
             .ok()
             .flatten()
             .unwrap_or_default();
-        self.encoder_for_file_with_preference(file, &requested)
+        self.encoder_for_file_with_preference(file, &requested, class)
             .await
     }
 
@@ -15570,8 +15639,9 @@ impl TranscodeManager {
         &self,
         file: &plurx_core::domain::MediaFile,
         requested: &str,
+        class: crate::process_control::ChildClass,
     ) -> Result<Encoder, String> {
-        if self.require_dovi_renderer(file).await? {
+        if self.require_dovi_renderer(file, class).await? {
             // Software decode is forced by the pipeline itself
             // (`requires_software_decode`) — that is what preserves the RPU
             // AVFrame side data the tonemapx graph consumes. The ENCODER is
@@ -15821,10 +15891,13 @@ impl TranscodeManager {
     /// Materialise a text subtitle before ffmpeg opens the video pipeline.
     /// libass reopening the MKV itself reads the entire movie before frame one;
     /// the small cached VTT opens immediately and is shared with `/subs`.
+    ///
+    /// `work` is the caller's: a session start waits on this extraction.
     async fn ensure_text_subtitle(
         &self,
         file: &plurx_core::domain::MediaFile,
         burn: Option<&plurx_core::transcode::SubtitleBurn>,
+        work: crate::process_control::ChildWork,
     ) -> Result<Option<std::fs::File>, String> {
         let Some(burn) = burn else {
             return Ok(None);
@@ -15838,6 +15911,7 @@ impl TranscodeManager {
             file,
             burn.subtitle_index,
             &stored,
+            work,
         )
         .await
         .map(Some)
@@ -16988,7 +17062,11 @@ impl TranscodeManager {
         playback_file.audio_offset_ms = 0;
         let file = &playback_file;
         let encoder = self
-            .encoder_for_file_with_preference(file, &policy.requested_encoder)
+            .encoder_for_file_with_preference(
+                file,
+                &policy.requested_encoder,
+                crate::process_control::ChildClass::Background,
+            )
             .await?;
         if !policy
             .acceptable_encoder_families()
@@ -17168,7 +17246,9 @@ impl TranscodeManager {
         if cancelled.is_cancelled() {
             return Ok(OfflineProduceOutcome::Yielded);
         }
-        let encoder = self.encoder_for_file(file).await?;
+        let encoder = self
+            .encoder_for_file(file, crate::process_control::ChildClass::Background)
+            .await?;
         let subtitle_burn = match spec.subtitle {
             OfflineSubtitle::Burn(index) => {
                 let stream = file
@@ -17405,8 +17485,16 @@ impl TranscodeManager {
                         .await,
                 );
                 let stored = self.subtitle_source_access();
-                crate::subtitles::ensure_vtt_with_store(&self.subtitle_cache, file, index, &stored)
-                    .await?;
+                crate::subtitles::ensure_vtt_with_store(
+                    &self.subtitle_cache,
+                    file,
+                    index,
+                    &stored,
+                    crate::process_control::ChildWork::background(
+                        "subtitle track for an offline package",
+                    ),
+                )
+                .await?;
             }
         }
         Ok(outcome)
@@ -17765,7 +17853,13 @@ impl TranscodeManager {
             return Ok(OfflineProduceOutcome::Yielded);
         }
         let subtitle_handle = self
-            .ensure_text_subtitle(file, opts.subtitle_burn.as_ref())
+            .ensure_text_subtitle(
+                file,
+                opts.subtitle_burn.as_ref(),
+                crate::process_control::ChildWork::background(
+                    "text subtitle for an offline package",
+                ),
+            )
             .await?;
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Ok(OfflineProduceOutcome::Yielded);
@@ -19475,14 +19569,15 @@ impl TranscodeManager {
             .map_err(|error| {
                 start_infrastructure_error(format!("reading the stored source probe: {error}"))
             })?;
-        let held_probe = crate::ffmpeg::held_source_probe_json(&source.handle)
-            .await
-            .map_err(|error| {
-                vod_refusal_error(
-                    "vod_source_rescan_required",
-                    format!("the held source could not be verified against its scan: {error}"),
-                )
-            })?;
+        let held_probe =
+            crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
+                .await
+                .map_err(|error| {
+                    vod_refusal_error(
+                        "vod_source_rescan_required",
+                        format!("the held source could not be verified against its scan: {error}"),
+                    )
+                })?;
         let comparison = probe
             .as_deref()
             .map(|stored| crate::ffmpeg::compare_probe_documents(stored, &held_probe))
@@ -19571,6 +19666,7 @@ impl TranscodeManager {
                     Some(&source_object_version),
                     crate::subtitles::SIDECAR_JOIN_BUDGET,
                     &stored,
+                    SESSION_START_CLASS,
                 )
                 .await?
                 {
@@ -19635,20 +19731,9 @@ impl TranscodeManager {
                 format!("the held source could not be retained for decoder planning: {error}"),
             )
         })?;
-        let plan = BoundPlanCaller::Vod.finish(
-            self.resolve_held_movie_plan(
-                file,
-                &options,
-                encoder,
-                crate::decode_facts::DecodeFactSource::new(
-                    held_plan_handle,
-                    Arc::new(tokio::sync::Semaphore::new(1)),
-                ),
-                Instant::now() + DECODE_PLAN_PROBE_BUDGET,
-                None,
-            )
-            .await,
-        )?;
+        let plan = self
+            .resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
+            .await?;
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
             return Err(vod_refusal_error(
@@ -20774,7 +20859,10 @@ impl TranscodeManager {
         &self,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<EffectiveRateControl, String> {
-        Ok(self.effective_rate_control(self.encoder_for_file(file).await?))
+        Ok(self.effective_rate_control(
+            self.encoder_for_file(file, crate::process_control::ChildClass::Background)
+                .await?,
+        ))
     }
 
     #[cfg(test)]
@@ -21255,7 +21343,7 @@ impl TranscodeManager {
         // otherwise — not unconditionally by the software rung.
         let encoder = match file {
             Some(file) if Self::needs_dovi_reshape(file) == Ok(true) => self
-                .encoder_for_file(file)
+                .encoder_for_file(file, crate::process_control::ChildClass::Background)
                 .await
                 .unwrap_or(Encoder::Software),
             _ => self.encoder().await,
@@ -21746,7 +21834,11 @@ impl TranscodeManager {
             }
         }
         let subtitle_handle = self
-            .ensure_text_subtitle(&file, subtitle_burn.as_ref())
+            .ensure_text_subtitle(
+                &file,
+                subtitle_burn.as_ref(),
+                crate::process_control::ChildWork::realtime("text subtitle for a session start"),
+            )
             .await?;
 
         // Claim a hardware slot before spawning anything. An iGPU has one
