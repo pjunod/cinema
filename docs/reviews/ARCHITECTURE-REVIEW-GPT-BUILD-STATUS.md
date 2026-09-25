@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — draft PR #524; three voters on exact current main, nuc3 forensic hold restored, device acceptance open · **Updated:** 2026-09-25 17:11 UTC · **Main:** `60f3803d1`
+**Status:** open — draft PR #524; three voters on exact current main, nuc3 forensic hold restored, device acceptance open · **Updated:** 2026-09-25 17:15 UTC · **Main:** `60f3803d1`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -57,6 +57,8 @@ A separate detached Ansible controller from `nuc3` subsequently deployed `60f380
 The old b47 learner container on `nuc3` was unexpectedly found running from original `/srv/plurx`, starting at 14:12:58 UTC. It was stopped at 17:07:33 UTC without deleting original or forensic data. The reason it started is unknown; this does not replace the authenticated clean learner rejoin. Hold receipt SHA-256 `c0d9da2a16260390097651c7a0d19b043a59ed43d9884279d04abed2889864a1`. [The dated fleet readout](ARCHITECTURE-REVIEW-FLEET-READOUT-2026-09-25.md) carries the timeline and evidence limits.
 
 A bounded 17:10–17:11 UTC passive sample on exact `60f3803d1` recorded K-02/C-05/C-08/P-02/K-06/S-11 point values without restarting or activating workloads; receipt SHA-256 `e79d0a8c213777c6ec4efdd068fc7c4d972b80709dd2238dad217dfa853414d0`. The [dated fleet readout](ARCHITECTURE-REVIEW-FLEET-READOUT-2026-09-25.md) states the values and remaining active/duration requirements.
+
+At 17:12 UTC, another detached SSH-launched Ansible one-shot explicitly targeted `nuc3` with `force=true`. It reset that checkout to `60f3803d1` and entered `docker compose up -d --build` against the still-quarantined original data mount. The exact controller and Compose process tree was paused and terminated before a container start; the old learner stayed exited at its 17:07:33 finish time, and original/forensic data directories remained present. The launcher was a one-shot SSH session from `192.168.4.143`, not a resident cron/systemd unit; its initiating task is unresolved. Sanitized receipt SHA-256 `bf5e4d3b2cc9def1390cf10cbf3eda90e1ee2243ccdcdb8be80ae6f04a1ddea1`. The clean learner rejoin remains owed.
 
 ## Current impediments
 

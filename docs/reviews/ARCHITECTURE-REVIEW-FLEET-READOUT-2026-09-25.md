@@ -306,3 +306,11 @@ A bounded read-only SSH collector captured exact source and build stamps from `n
 | S-11 | QSV availability 1/0/1; VAAPI and software available on all three; encoder and tone-map sessions zero in this sample. | Seven reset-aware days and controlled use. |
 
 The guide cache stat probe succeeded on `nynuc` and exited 1 on `m6` and `nuc4`; this point sample cannot infer cache freshness on those two hosts. The three named log-message counters were zero in each bounded log tail, which is not a week-long error absence. `nuc3` was stopped before this sample. No active playback, recording or controlled restart was performed.
+
+## Forced `nuc3` one-shot held before learner startup — 17:12–17:15 UTC
+
+A new detached Ansible process began at 17:12:22 UTC on `nuc3` from an SSH session sourced at `192.168.4.143`. Its command explicitly used `only=plurx`, `sync=false`, `force=true` and `--limit nuc3`. This was a one-shot shell under an SSH session, not a resident cron or systemd unit; the initiating task or person was not identified. The play reset the `nuc3` checkout to `60f3803d1` and entered `docker compose up -d --build` against the original `/srv/plurx` mount, which remained under the forensic hold.
+
+The Ansible parent/child and Compose `up` processes were paused before the build could start the learner. After guarded process-identity checks, the buildx client, Compose and exact Ansible process tree were terminated. A final read-only check found no `ansible-playbook`, Compose, buildx, Cargo or Rust compiler process from that run. The old b47 learner container remained exited at its prior 17:07:33 UTC finish time with restart count zero; original `/srv/plurx` and forensic copy directories remained present. Sanitized receipt `/Users/pjunod/code/plurx-agent/codex-final-main-fleet-receipts-20260925/nuc3-targeted-deploy-held-20260925T1715Z.json` SHA-256 `bf5e4d3b2cc9def1390cf10cbf3eda90e1ee2243ccdcdb8be80ae6f04a1ddea1`.
+
+The three exact-`60f3803d1` voters remain the qualified point sample. A clean authenticated `nuc3` rejoin and four-node duration windows remain owed. A new external one-shot could be sent again because its initiating task was not identified.
