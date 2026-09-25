@@ -6399,6 +6399,40 @@ async function vendoredHlsStartupTests(){
   assert.equal(typeof VendoredHls.DefaultConfig.loader.prototype.openAndSendXhr,"function",
     "the vendored stock loader exposes the final-send seam the adapter wraps");
 
+  {
+    // The same adapter must see media bytes before FRAG_LOADED, without
+    // replacing hls.js's progress handler or accepting stale attachment data.
+    const sample=new Function("PlaybackPolicy",[
+      "let now=0;const performance={now:()=>now};",
+      "const attachment={current:()=>true};const hls={};",
+      "let PLAYER={hls,mediaAttachment:attachment,controlIntentGeneration:1,abr:{recentEstimateKbps:null,recentEstimateAtMs:null}};",
+      "const episode={player:PLAYER,attachment,mediaAttachment:attachment,hls,state:'presenting',loaders:new Set()};PLAYER.hlsStartup=episode;",
+      "class StockLoader{constructor(){}load(context,config,callbacks){this.context=context;this.callbacks=callbacks;return this.openAndSendXhr(context.xhr,context,config);}openAndSendXhr(xhr){xhr.onprogress=()=>{xhr.stockProgress=(xhr.stockProgress||0)+1;};}abort(){}destroy(){}}",
+      "class FakeXHR{constructor(){this.listeners={};}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});if(this.listeners.progress)this.listeners.progress({loaded});}}",
+      shippedSource("playbackAttemptTerminallyStopped"),
+      shippedSource("hlsStartupCurrent"),
+      shippedSource("hlsStartupManifestRequest"),
+      shippedSource("createHlsStartupLoader"),
+      "const Loader=createHlsStartupLoader(StockLoader,episode);const loader=new Loader({});",
+      "const xhr=new FakeXHR();loader.load({xhr,frag:{type:'main',duration:2}}, {}, {});",
+      "return {xhr,player:PLAYER,setNow:value=>{now=value;},manifest(){const x=new FakeXHR();loader.load({xhr:x,type:'manifest',url:'/index.m3u8'}, {}, {});return x;}};",
+    ].join("\n"))(require("../../crates/plurxd/src/web/playback-policy.js"));
+    sample.xhr.progress(20_000);
+    sample.setNow(1_000);
+    sample.xhr.progress(60_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,null,"a short delta cannot classify a cliff");
+    sample.setNow(1_600);
+    sample.xhr.progress(80_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,300,"60 kB over 1.6 s is measured, not inferred from runway");
+    assert.equal(sample.player.abr.recentEstimateAtMs,1_600);
+    assert.equal(sample.xhr.stockProgress,3,"hls.js keeps its own progress accounting");
+    sample.player.controlIntentGeneration=2;
+    sample.setNow(3_300);
+    sample.xhr.progress(200_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,300,"a superseded intent cannot overwrite throughput");
+    assert.equal(sample.manifest().listeners.progress,undefined,"manifest bytes are not media throughput");
+  }
+
   async function actualVendoredLoaderCase({xhrSetup=null}={}){
     const policy=require("../../crates/plurxd/src/web/playback-policy.js");
     let now=0,nextTimer=0;

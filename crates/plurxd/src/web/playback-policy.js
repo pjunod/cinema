@@ -404,7 +404,7 @@
     if (severe && currentIndex > 0) {
       // hls.js's EWMA intentionally carries history. At a sharp cliff that
       // history can briefly make the next rung look safe, even though the
-      // fragment that just completed already measured the lower link. During
+      // fragment transfer measured the lower link. During
       // severe pressure only, bound the stable EWMA by that fresh transfer so
       // one restart lands below the cliff instead of teaching a replacement
       // instance the same lesson and walking the ladder.
@@ -418,7 +418,7 @@
         ? closestRungIndex(available, safe.height)
         : currentIndex - 1;
       // Empty runway establishes urgency, not cause. The target comes from a
-      // fresh completed transfer, so a server refusal or stopped loader can
+      // fresh measured transfer, so a server refusal or stopped loader can
       // never be translated into the ladder floor.
       const target = available[Math.min(currentIndex - 1, safeIndex)];
       return {
