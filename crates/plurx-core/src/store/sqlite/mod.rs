@@ -16,6 +16,7 @@ mod dv_conversion;
 mod dvr;
 mod fragindex;
 mod fragment_index_cluster;
+mod housekeeping;
 mod library;
 mod library_channels;
 mod media;
@@ -32,7 +33,7 @@ mod trakt;
 mod users;
 mod watch;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -1312,7 +1313,12 @@ pub struct SqliteStore {
     /// this process, so a burst of requests from one due session queues one
     /// write on the writer instead of one each (K-05 section 3.2).
     token_activity: Arc<users::TokenActivityGate>,
+    /// The database file, so a connection a panic left unusable can be
+    /// replaced (`housekeeping::lock_or_recover`). `None` in memory.
+    path: Option<Arc<PathBuf>>,
 }
+
+pub use housekeeping::prometheus_sqlite_health;
 
 /// A few read-only connections picked round-robin. Opened READ_ONLY so a
 /// routing mistake is a loud error instead of a write sneaking around the
@@ -1340,20 +1346,21 @@ pub(crate) fn trace_statement(statement: &'static str, sql: &str) {
 
 impl SqliteStore {
     /// Open (creating if necessary) the database at `path` and migrate it.
+    ///
+    /// The file is checked with `quick_check(1)` before anything else touches
+    /// it (K-05 section 3.9): a corrupt database refuses to open with its
+    /// recovery named, and a check that outlives its budget lets startup
+    /// continue and runs the full check in the background.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let mut store = Self::init(Connection::open(path)?)?;
+        let conn = Connection::open(path)?;
+        housekeeping::boot_integrity_check(&conn, path, housekeeping::BOOT_CHECK_BUDGET)?;
+        let mut store = Self::init(conn)?;
+        store.path = Some(Arc::new(path.to_owned()));
         // After init: the writer has migrated, so the schema the readers see
         // is the one this binary expects.
         let mut conns = Vec::with_capacity(READ_CONNS);
         for _ in 0..READ_CONNS {
-            let conn = Connection::open_with_flags(
-                path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                    | rusqlite::OpenFlags::SQLITE_OPEN_URI
-                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )?;
-            conn.pragma_update(None, "busy_timeout", 5000)?;
-            conns.push(Mutex::new(conn));
+            conns.push(Mutex::new(housekeeping::open_reader(path)?));
         }
         store.reads = Some(Arc::new(ReadPool {
             conns,
@@ -1386,18 +1393,14 @@ impl SqliteStore {
     }
 
     fn init(conn: Connection) -> Result<Self, StoreError> {
-        // WAL for concurrent-reader friendliness on real files; in-memory
-        // databases report their own journal mode, which is fine.
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.pragma_update(None, "busy_timeout", 5000)?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        housekeeping::configure_writer(&conn)?;
         Self::migrate(&conn)?;
         Self::backfill_hdr_format(&conn)?;
         Ok(SqliteStore {
             conn: Arc::new(Mutex::new(conn)),
             reads: None,
             token_activity: Arc::default(),
+            path: None,
         })
     }
 
@@ -1618,10 +1621,13 @@ impl SqliteStore {
         T: Send + 'static,
     {
         let conn = Arc::clone(&self.conn);
+        let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let guard = conn
-                .lock()
-                .map_err(|_| StoreError::Task("sqlite connection mutex poisoned".to_owned()))?;
+            let guard = housekeeping::lock_or_recover(
+                &conn,
+                housekeeping::Pool::Writer,
+                path.as_deref().map(PathBuf::as_path),
+            )?;
             f(&guard)
         })
         .await
@@ -1737,11 +1743,14 @@ impl SqliteStore {
         let Some(pool) = self.reads.clone() else {
             return self.with_conn(f).await;
         };
+        let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let idx = pool.next.fetch_add(1, Ordering::Relaxed) % pool.conns.len();
-            let guard = pool.conns[idx]
-                .lock()
-                .map_err(|_| StoreError::Task("sqlite read mutex poisoned".to_owned()))?;
+            let guard = housekeeping::lock_or_recover(
+                &pool.conns[idx],
+                housekeeping::Pool::Read,
+                path.as_deref().map(PathBuf::as_path),
+            )?;
             f(&guard)
         })
         .await

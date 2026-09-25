@@ -457,6 +457,9 @@ paths = [
   "crates/plurx-core/src/cluster/migration.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/sqlite/mod.rs",
+  # K-05 section 3.9: poisoned-connection recovery and the boot integrity
+  # check that refuses a corrupt database before migration touches it.
+  "crates/plurx-core/src/store/sqlite/housekeeping.rs",
   "crates/plurxd/tests/cluster_activation.rs",
 ]
 checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth"]

@@ -375,6 +375,46 @@ rollback still means rolling forward with a binary that supports the active
 replicated schema, against the retained Hiqlite target. The SQLite commands
 below are only for the pre-activation case.
 
+### Standalone SQLite: connection recovery and the boot integrity check
+
+Applies to a server on the standalone SQLite store (`plurx.db`); an activated
+cluster node keeps its catalogue in Hiqlite and is covered by
+[cluster/CLUSTER-BACKUP-AND-RESTORE.md](cluster/CLUSTER-BACKUP-AND-RESTORE.md).
+
+**At open**, before migration touches the file, plurx runs
+`PRAGMA quick_check(1)` with a 30-second budget:
+
+- `ok`: startup continues.
+- A finding, or a file SQLite reports as corrupt or not a database: startup is
+  refused with
+
+  ```text
+  SQLite database <path> failed its integrity check: <first finding>. plurx will
+  not start on it. On a node that was activated into a cluster, restore the
+  newest backup artefact (docs/cluster/CLUSTER-BACKUP-AND-RESTORE.md); on a
+  standalone server, stop plurx and salvage it with
+  `sqlite3 <path> .recover | sqlite3 <new file>`, then put the new file in its place.
+  ```
+
+  Keep the original file until the salvaged one has started cleanly.
+- Over budget: the check is interrupted, startup continues with a warning, and
+  the full `PRAGMA integrity_check` runs on its own read-only connection at the
+  top of the next hour, logging its result.
+
+**While running**, a store call whose code panics while it holds a SQLite
+connection no longer leaves that connection unusable until restart. The next
+call rolls back any transaction the panic left open and checks the connection
+(`SELECT 1`, `quick_check(1)`, and foreign keys still on for the writer); a
+connection that fails is replaced by a freshly opened one. Recovery of an
+in-memory database (tests only) cannot reopen and reports failure instead.
+
+Both are counted on `/metrics`:
+
+| Series | Labels | Meaning |
+|---|---|---|
+| `plurx_sqlite_connection_recoveries_total` | `pool` = `writer` \| `read`; `outcome` = `validated` \| `reopened` \| `failed` | A connection taken back after a panic. Anything above zero means a store call panicked; find it in the log (`recovered a sqlite connection poisoned by a panic`). `failed` means the slot is still unusable. |
+| `plurx_sqlite_integrity_checks_total` | `phase` = `boot` \| `background`; `outcome` = `ok` \| `corrupt` \| `deferred` (boot) \| `error` (background) | Integrity checks and their results. `deferred` means the boot check ran out of time and a background check is scheduled. |
+
 ### Backing up and restoring an activated cluster
 
 Set `backup.destination`, `backup.schedule_utc` (UTC `HH:MM`, default `02:30`),

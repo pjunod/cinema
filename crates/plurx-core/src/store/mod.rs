@@ -890,7 +890,7 @@ pub use fragment_index_cluster::{
     MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
 };
 pub use publication::{PublicationFence, PublicationStore};
-pub use sqlite::{SqliteStore, SQLITE_SCHEMA_VERSION};
+pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};
 
 use async_trait::async_trait;
 
