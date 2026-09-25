@@ -675,6 +675,7 @@ contract = "Catalogue text and explicit channel rules work without an inference 
 paths = [
   "crates/plurx-core/src/metadata/classification.rs",
   "crates/plurx-core/src/store/classification.rs",
+  "crates/plurx-core/src/store/classification_schedule.rs",
   "crates/plurx-core/src/store/hiqlite_classification.rs",
   "crates/plurx-core/src/store/sqlite/classification.rs",
   "crates/plurxd/src/library_search.rs",
@@ -880,6 +881,7 @@ id = "offline.viewing"
 title = "App-managed offline viewing"
 contract = "Authenticated users can prepare one portable VOD package, transfer it through a stable scoped lease, and play only app-owned local bytes while disconnected."
 paths = [
+  "crates/plurx-core/src/store/offline_claim.rs",
   "crates/plurx-core/src/store/sqlite/offline.rs",
   "crates/plurxd/src/offline.rs",
   "crates/plurxd/src/http/offline.rs",

@@ -438,6 +438,9 @@ pub async fn create(
     {
         OfflineCreateOutcome::Created(package) => {
             state.offline.record_request(package.target_height);
+            if package.node_id == state.node_id {
+                state.offline.wake();
+            }
             Ok((StatusCode::ACCEPTED, Json(status(package))))
         }
         OfflineCreateOutcome::Existing(package) => {

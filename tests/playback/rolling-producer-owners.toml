@@ -2064,7 +2064,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # Merged with main at `b47c5ff88` (K-03 branch): the value is the whole
 # merged tree, measured by zeroing this row after the merge: 626, which is
 # main's 622 plus exactly the four K-03 test-only spawns reviewed above.
-expected_occurrences = 626
+# 626 -> 634 with K-10 (replicated write-rate hygiene II), all test-only and
+# measured by zeroing this row. In `library_search::tests`: the classification
+# worker under test in the one-pass, idle-library and dead-peer tests (one
+# each) and the two workers of the walk-once test; each is stopped by its
+# cancellation token and joined before its test returns. In
+# `offline::tests`: the offline worker loop under test in the three `claim_`
+# tests, each aborted before its test returns. The production spawns of both
+# workers in `main.rs` are unchanged. None owns a producer, a process or a
+# recipe decision.
+expected_occurrences = 634
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2864,7 +2873,20 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Merged with main at `b47c5ff88` (K-03 branch): the value is the whole
 # merged tree, measured by zeroing this row after the merge: 984, which is
 # main's 969 plus exactly the fifteen K-03 shapes reviewed above.
-expected_occurrences = 984
+# 984 -> 991 with K-10, measured by zeroing this row. Shipped, net -3: the
+# offline worker's five fixed `tokio::time::sleep(IDLE_POLL)` exits became one
+# `tokio::time::sleep(delay)` whose length its claim policy chooses (2 s
+# working, backing off to 10 s idle, never past the 30 s forced claim or the
+# next expiry sweep, cut short by a local package creation); the
+# classification worker's one fixed between-page sleep became a
+# `tokio::time::sleep(delay)` chosen by its pass schedule plus the unchanged
+# 1 s `tokio::time::sleep(schedule::PAGE_TICK)` between pages inside a pass.
+# Neither decides anything about playback; both only pace a background poll.
+# Test-only, +10: in `offline::tests` the 600 s, 60 s and 61 s idle waits and
+# the 50 ms claim poll (virtual clock); in `library_search::tests` the 100 ms
+# pass poll, the 600 s idle and walk-once waits, the 250 ms classification
+# poll, and the dead-peer test's 1.2 s observation window and 50 ms poll.
+expected_occurrences = 991
 
 [[module_structures]]
 id = "bare-time-constructor"

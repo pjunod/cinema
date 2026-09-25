@@ -3212,6 +3212,24 @@ impl JobManager {
         acquire_cluster_job(&self.coordinator, self.job_authority.as_ref(), resource).await
     }
 
+    /// [`Self::acquire_job`] with an explicit TTL and heartbeat: the same gate
+    /// and the same lease, for a job whose failover test shortens them.
+    pub(crate) async fn acquire_job_with_policy(
+        &self,
+        resource: String,
+        ttl: std::time::Duration,
+        heartbeat: std::time::Duration,
+    ) -> Result<Option<ActiveJobLease>, StoreError> {
+        crate::job_lease::acquire_cluster_job_with_policy(
+            &self.coordinator,
+            self.job_authority.as_ref(),
+            resource,
+            ttl,
+            heartbeat,
+        )
+        .await
+    }
+
     pub(crate) async fn apply_identity_repair(
         &self,
         snapshot: &plurx_core::store::IdentityRepairSnapshot,
@@ -12623,6 +12641,7 @@ mod tests {
         "repair:probe",
         "candidate:pretranscode",
         "watched:outbox",
+        "metadata-classification",
     ];
 
     /// Leases that are singletons but not *cluster* singletons, named so this
