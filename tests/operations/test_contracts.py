@@ -2183,7 +2183,7 @@ assert.equal(context.ACT_TIMER, null);
             "membership_added_between_begin_passes_is_fenced_before_store_admission",
             "replicated_membership_exclusion_spans_final_roster_read_and_peer_end",
             "replicated_exclusion_projection_outlives_remote_ttl_and_clock_skew",
-            "cache_admin_revocation_operation_gate_fails_fast_and_is_raii_released",
+            "cache_admin_revocation_operation_queue_is_bounded_and_raii_released",
             "local_apply_ack_wire_version_rejects_pre_barrier_receivers",
             "begin_ack_installs_memory_fence_before_waiting_for_exact_local_apply",
             "cancelled_local_apply_wait_leaves_peer_memory_fence_closed",
