@@ -5,9 +5,3 @@ commits = ["8d128e14"]
 points = ["live-tv.integration"]
 checks = ["operations-contract"]
 reason = "The caption audit script changed from relying on Cargo's exit code to rejecting a zero-test success after module selectors moved. The operations regression test test_live_tv_caption_audit.py runs both analyze and route modes with a stub Cargo and requires zero or multiple matching tests and a nonzero Cargo exit to fail, while exactly one passing test succeeds. The earlier selector correction and this explicit assertion are both required to prevent an empty hardware audit from appearing green."
-
-[[coverage]]
-commits = ["a32c30dd"]
-points = ["validation.framework"]
-checks = ["history-regressions"]
-reason = "This commit added the explicit history ledger for the caption audit correction. The history-regressions check verifies that the correction remains bound to a valid point and check rather than disappearing from the audit. The behavior regression itself is exercised by test_live_tv_caption_audit.py under operations-contract."
