@@ -10,7 +10,7 @@ the acceptance evidence named by its plan.
 
 | Lane | Current state | Next action | Evidence |
 |---|---|---|---|
-| D-02 · Android lifecycle | M7 builder and M5 audio-sink classification are on [draft PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506). M2-M4 and M8-M9 are pushed on `codex/d02-remaining` through `e57608208`; Android manifest and Kotlin compile passed | Integrate this branch; finish M1, then one review, fast lane and device checks | Plan execution log and workboard row |
+| D-02 · Android lifecycle | M7 builder and M5 audio-sink classification are on [draft PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506). M2-M4 and M8-M9 are pushed on `codex/d02-remaining` through `8d50b08a3`; M1 owner pause compiles on `codex/d02-m1-20260924` | Integrate both branches; then one review, fast lane and device checks | Plan execution log and workboard row |
 | D-03 · Android credentials and release | Reconnaissance; M2, M7 and M8 repo half are on main | Finish capability, release and device milestones | Plan execution log and workboard row |
 | A-02 · Apple controller | Seek-fence `da5c6050a`, locked credential-pair `f30ef466b`, finite item observer `89d3c3672` on [draft PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506); iOS/tvOS and iOS test-target compilation green | Finish 5.2 prepared successor and 5.3-5.6; review and fast lane when ready | Plan execution log and workboard row |
 | A-03 · Native library paging | 5.2-5.5 code integrated into draft #506 at `34e4f4364`; Apple iOS/tvOS and Android app/test-source compilation passed | One review and fast lane when full PR is ready; Apple TV/Lenovo evidence | Plan execution log and workboard row |
