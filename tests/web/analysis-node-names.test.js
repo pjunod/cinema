@@ -361,6 +361,23 @@ test("a live index row names the PGS tracks its pass is also keeping", () => {
   assert.doesNotMatch(older, /PGS/, "a peer that predates the fields says nothing either");
 });
 
+test("a subtitle_source progress row names text and PGS tracks and bytes read", () => {
+  const live = new Function(
+    "return (function(){" +
+      ["esc", "fmtBytes", "fmtDur", "nodeLabel", "analysisNodeCell", "analysisRideAlong", "analysisLiveProgress"]
+        .map(shippedSource).join("\n") +
+      "\nreturn analysisLiveProgress;})()",
+  )();
+  const html = live({ progress: [{
+    file_id: 5208, item_id: 7, title: "Bad Boys", component: "subtitle_source",
+    stage: "reading", bytes_read: 31200000000, total_bytes: 79500000000,
+    text_tracks: 4, pgs_tracks: 1, node_id: OWNER, elapsed_ms: 1000,
+  }] }, {});
+  assert.match(html, /for 4 text \+ 1 PGS tracks/);
+  assert.match(html, /31\.2 of 79\.5 GB/);
+  assert.doesNotMatch(html, /0 fragments/);
+});
+
 main().catch((error) => {
   failures += 1;
   process.stdout.write(`FAIL the suite itself threw\n${error && error.stack}\n`);

@@ -1,13 +1,13 @@
 # PGS subtitles on the start path — why a 79.5 GB read blocks playback, and the three fixes
 
-**Status:** the fixes below are deployed through `99d4abf8c` on the four server
-nodes; §5.5 physical acceptance **failed** on Android and remains open ·
+**Status:** the fixes below are deployed on the four server nodes; §5.5's
+two-device physical bar passed on 2026-09-24 with the overlay gate on ·
 §3 #437 · §4 #445 · §5: B1 and most of B5 in #447, B2 built and deliberately
 reverted, B3 and B4 in #453 · §6 (Fix C, the subtitle ride-along on the index
 pass) in #456 (the store's readers), #466 (the producer; first merged as #460,
 which the forge did not keep — see `STATUS.md`) and #463 (attribution) · the
-overlay gate `subtitles.pgs_overlay` was enabled for the 2026-09-24 check;
-it is not qualified for release · reviewed — see
+overlay gate `subtitles.pgs_overlay` remains on; a separate Google TV Streamer
+stall remains open · reviewed — see
 [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
 **Reviewer:** Fable, adversarial · **Written:** 2026-09-22, revised 2026-09-23 ·
 **Reported by:** Paul, 2026-09-21 ~18:50 ET, Android on the TCL tablet
@@ -530,14 +530,54 @@ unproven because no post-seek cue was captured.
 
 The browser check passed its narrower contract: *Casino* opened with
 subtitles Off; manually selecting PGS displayed “That subtitle requires an
-SDR burn-in. HDR playback was kept unchanged.” The two-device HDR proof bar
-below has not been met. The overlay gate is on for qualification and is not
-release-qualified. The streaming normalizer change is a candidate repair;
-code tests and an SDR cue are not substitutes for the HDR hardware retest.
+SDR burn-in. HDR playback was kept unchanged.” At that point the two-device
+HDR proof bar below had not been met. The overlay gate remained on for
+qualification. The streaming normalizer change required the HDR hardware
+retest recorded below.
 After those failed trials, current-main Apple build `181` was installed and
 confirmed on the six reachable physical Apple devices, and current-main
 Android versionCode `121` was installed and confirmed on the TCL tablet. The
 newer client versions have not yet passed the HDR PGS retest.
+
+#### 2026-09-24 recheck: the two-device HDR bar passed
+
+| Device and selected track | Start and cues | Forward seek | Backward seek | Grade and method | Playback cost |
+|---|---|---|---|---|---|
+| iPhone 18 Pro, Apple build 182, *Bad Boys: Ride or Die* (5208), Dolby Vision P8, English Full PGS index 0 | Video started while PGS prepared for 413,519 ms; dialogue cues appeared centered and timed to speech | New cue appeared at the destination | New cue appeared at the earlier destination | 3840×2160 Dolby Vision rendering; remux | No buffering interruptions or visible stutter in the observed run |
+| Pixel 11 Pro XL, Android versionCode 124, *Casino* (5226), HDR10, English SDH PGS index 0 | Video started before PGS preparation finished (489,545 ms); cues appeared centered and timed to speech | 10:11 to 57:36: new dialogue cue, continuous picture | Return to 10:11: new dialogue cue, continuous picture | 3840×2160 HDR10 rendering; remux | No observed stall after the seek fix; the earlier eight-minute run recorded zero buffering interruptions |
+
+The first Pixel 11 run exposed a client seek timeout even with subtitles Off:
+the remux rendered a frame 282 ms before the requested position, outside the
+client's 250 ms first-frame window. Android versionCode 124 waits for later
+rendered video to cross that target before settling a progressive-remux seek.
+The versionCode 124 package passed both PGS seek directions before the
+subsequent foreground guard review fix. The final package with that guard was
+installed on six physical Android devices, each reporting versionCode 124.
+On the unlocked Pixel 11 Pro XL, the final package played *Casino* with English
+SDH PGS overlay through a backward seek from about 1:06 to about 10 minutes
+and a forward seek to 58:16. Each destination showed continuous video and a
+new timed PGS cue. Its playback panel reported 3840×2160, HDR10 rendering,
+remux, Playing, and zero buffering interruptions after both seeks. No seek
+timeout appeared in the observed run. Six reachable physical Apple devices
+reported build 182. These installations
+used local development builds; they are not evidence of store-signed release
+packages.
+
+The web check remained safe with the gate on: *Casino* defaulted to subtitles
+Off, and a manual PGS selection showed the HDR-preserving SDR burn-in refusal.
+The gate remains on. A separate Google TV Streamer trial reached an initial
+cue but later stalled on a `503 Service Unavailable` stream response; it is
+not the Android device used for the two-device bar and needs its own playback
+follow-up. This result does not claim that every fleet device passed playback.
+
+Stored-track readiness was met on all four nodes in the 2026-09-24 snapshot:
+
+| Node | Startup self-test | Cache filesystem | Free / required margin | Stored tracks | Ride |
+|---|---|---|---|---|---|
+| m6 | 78 ms, met | ext4 | 189.1 / 8.8 GiB | 472 MB, one file | None |
+| nynuc | 74 ms, met | ext4 | 72.3 / 10.3 GiB | 13 MB, one file | None |
+| nuc4 | 101 ms, met | ext4 | 65.1 / 9.3 GiB | 4.0 GB, 39 files | *Life* running |
+| nuc3 | 77 ms, met | ext4 | 28.7 / 6.4 GiB | Zero directories | None |
 
 The plan's M4/M5 acceptance asks for an "executed compatibility matrix" and a
 "complete physical validation matrix". Those are ceremony for this feature. A
@@ -557,7 +597,8 @@ the local override still works — and the HDR path is where an overlay can fail
 in a way a 4K SDR title will never show, so leaving the grade unspecified is
 how a check passes without testing anything.
 
-The gate was enabled for the physical check, but §5.5 remains open.
+The first check failed; the 2026-09-24 recheck above closes §5.5's two-device
+proof bar. The Google TV Streamer stall remains a separate playback finding.
 `overlay_for_caller` removes the reason
 the switch was unsafe to flip — no client **that sends a capabilities
 document** is now offered a track it cannot draw, and none is told a delivery

@@ -7,6 +7,10 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import androidx.media3.exoplayer.offline.DownloadService
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /** Legacy boot catch-up; API 34+ recovery is owned by persisted UIDT jobs. */
 class OfflineBootReceiver : BroadcastReceiver() {
@@ -14,11 +18,19 @@ class OfflineBootReceiver : BroadcastReceiver() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
         if (intent.action != Intent.ACTION_BOOT_COMPLETED && intent.action != MEDIA3_RESTART) return
         OfflineDownloads.initialize(context)
-        DownloadService.sendResumeDownloads(
-            context,
-            PlurxDownloadService::class.java,
-            true,
-        )
+        val pending = goAsync()
+        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate).launch {
+            try {
+                OfflineDownloads.recovered.await()
+                DownloadService.sendResumeDownloads(
+                    context,
+                    PlurxDownloadService::class.java,
+                    true,
+                )
+            } finally {
+                pending.finish()
+            }
+        }
     }
 
     companion object {

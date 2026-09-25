@@ -91,6 +91,7 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
     ),
     ("coordination.rs", include_str!("sqlite/coordination.rs")),
     ("dv_conversion.rs", include_str!("sqlite/dv_conversion.rs")),
+    ("file_grants.rs", include_str!("sqlite/file_grants.rs")),
     ("dvr.rs", include_str!("sqlite/dvr.rs")),
     ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
     (
@@ -847,7 +848,10 @@ fn is_sqlite_candidate(text: &str) -> bool {
 /// placeholders themselves are still covered by this census. The two entries
 /// main contributed (field order, luminance) and this one are the whole
 /// difference between the pre-merge sets; no other literal changed shape.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 93;
+// Subtitle-source discovery prepares its shared candidate query before the
+// `query_map` binding, and ready retirement composes its shared
+// uncovered-ordinal predicate before binding in the next statement.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 95;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

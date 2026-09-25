@@ -687,7 +687,7 @@ read, and that bound is part of the result.
 | Source | Value |
 |---|---|
 | `plurx_http_route_seconds_count`, all six roles, for `auth`, `home`, `library`, `item`, `search`, `playback` and `other` | **0**, every cell, over the 14 h 07 m since the process started at 2026-09-22T20:22:15Z. Only `settings` (7,670) and `cluster` (66,551) moved. |
-| `plurx_ttff_ms_count{method}` | **0** for `direct_play`, `remux`, `transcode` and `unknown`. |
+| `plurx_ttff_ms_count{method}` | **0** for `direct_play`, `remux`, `transcode` and `unknown`. (Read before the family gained its `client` label in C-08 M5; the same reading on a current build is `sum by (method) (plurx_ttff_ms_count)`, since each method is now seven series.) |
 | `playback_events` in the node-local sidecar, 2026-08-25T01:48Z → 2026-09-23T11:12Z (29 days), 41,048 rows | Every row that carries a client class names a first-party plurx client: `Chrome` 196 (last 2026-09-04), `Android Media3` 62 (last 2026-09-11), `Apple AVPlayer` 38 (last 2026-09-14), `Safari` 4 (last 2026-09-02). 40,748 rows carry no class. **No Plex-family client appears at all.** |
 | `X-Plex-Container` anywhere in the tree | Absent outside the review documents — the plan's own correction 2, re-verified. |
 | `fn files_for_items` anywhere in the tree | Absent — the plan's correction 1, re-verified. |

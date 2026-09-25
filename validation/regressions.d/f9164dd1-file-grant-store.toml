@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f9164dd1", "c5fe8b6b"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The Rust gates compile the typed file-grant store API, both SQLite and Hiqlite implementations, the import schema, and the HTTP caller together. No focused grant lifecycle or source-login revocation regression exists yet; these checks establish type and build compatibility only."

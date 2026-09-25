@@ -796,12 +796,19 @@ final class PreparedReplacementCoordinatorTests: XCTestCase {
         let coordinator = PreparedReplacementCoordinator(host: host, now: { clock })
         coordinator.offer(preparedAction(), filmPositionMs: 1_000)
         XCTAssertFalse(coordinator.readinessBoundElapsed())
+        XCTAssertEqual(coordinator.readinessRemainingMs(), PreparedReplacementBounds.metadataMs)
         clock += PreparedReplacementBounds.metadataMs
         XCTAssertTrue(coordinator.readinessBoundElapsed())
+        XCTAssertEqual(coordinator.readinessRemainingMs(), 0)
         coordinator.successorIsMetadataReady()
         XCTAssertFalse(
             coordinator.readinessBoundElapsed(),
             "metadata arriving buys the longer readiness bound"
+        )
+        XCTAssertEqual(
+            coordinator.readinessRemainingMs(),
+            PreparedReplacementBounds.readinessMs - PreparedReplacementBounds.metadataMs,
+            "the readiness stage keeps the original open time"
         )
         clock += PreparedReplacementBounds.readinessMs
         XCTAssertTrue(coordinator.readinessBoundElapsed())

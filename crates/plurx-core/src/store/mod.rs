@@ -19,9 +19,11 @@ pub mod classification;
 pub use classification::ClassificationStore;
 mod downloaded_subtitles;
 mod dv_conversion;
+mod file_grants;
 pub use downloaded_subtitles::{
     valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
 };
+pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEMA};
 mod fragindex;
 mod fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
@@ -888,13 +890,15 @@ pub use fragment_index_cluster::{
     AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
     ClusterFragmentIndexArtifact, ClusterFragmentIndexFailure, ClusterFragmentIndexJob,
     ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, CONTENT_ANALYSIS_REPAIR_HEADROOM,
-    CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES, CONTENT_ANALYSIS_REPAIR_REVISION,
-    DEFAULT_ANALYSIS_BACKOFF_BASE_SECS, DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
-    DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS, DEFAULT_SUBTITLE_WINDOW_SECS,
-    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
-    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
-    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, SubtitleBackfillCandidate,
+    SubtitleBackfillDiagnostics, SubtitleSourcePublication, SubtitleSourceStamp,
+    CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
+    CONTENT_ANALYSIS_REPAIR_REVISION, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
+    DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
+    DEFAULT_SUBTITLE_WINDOW_SECS, MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS,
+    MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS,
+    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
+    SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -1061,7 +1065,8 @@ pub struct PrometheusStoreSnapshot {
     pub analysis: AnalysisStoreMetrics,
 }
 
-pub const ANALYSIS_METRIC_COMPONENTS: [&str; 2] = ["fragment_index", "skip_markers"];
+pub const ANALYSIS_METRIC_COMPONENTS: [&str; 3] =
+    ["fragment_index", "skip_markers", "subtitle_source"];
 pub const ANALYSIS_METRIC_STATES: [&str; 8] = [
     "queued",
     "claimed",
@@ -1073,7 +1078,7 @@ pub const ANALYSIS_METRIC_STATES: [&str; 8] = [
     "stale",
 ];
 pub const ANALYSIS_METRIC_PRIORITIES: [&str; 3] = ["normal", "forced", "foreground"];
-pub const ANALYSIS_METRIC_TRIGGERS: [&str; 3] = ["admin", "background", "foreground"];
+pub const ANALYSIS_METRIC_TRIGGERS: [&str; 4] = ["admin", "background", "foreground", "playback"];
 pub const ANALYSIS_MARKER_KINDS: [&str; 4] = ["intro", "recap", "credits", "preview"];
 pub const ANALYSIS_MARKER_PROVENANCE: [&str; 4] = ["estimated", "detected", "authored", "manual"];
 pub const ANALYSIS_MARKER_CONFIDENCE: [&str; 3] = ["low", "medium", "high"];
@@ -1865,6 +1870,8 @@ pub mod keys {
     /// so a wrong artifact a producer published is taken out of service with
     /// one switch and no redeploy.
     pub const SUBTITLE_STORED_SOURCES: &str = "subtitles.stored_sources";
+    pub const SUBTITLE_CLUSTER_SOURCES: &str = "subtitles.cluster_sources";
+    pub const SUBTITLE_BACKFILL: &str = "subtitles.backfill";
     /// Make a chapter thumbnail on request and keep it in the runtime
     /// cache. On by default; off answers the route 404 and extracts nothing.
     pub const CHAPTER_THUMBNAILS: &str = "playback.chapter_thumbnails";
@@ -5246,6 +5253,7 @@ pub trait Store:
     + SharedCacheStore
     + PretranscodeJobStore
     + OfflinePackageStore
+    + FileGrantStore
     + PlaybackTelemetryStore
     + NetworkPriorStore
     + FragmentIndexStore
@@ -5281,6 +5289,7 @@ impl<T> Store for T where
         + SharedCacheStore
         + PretranscodeJobStore
         + OfflinePackageStore
+        + FileGrantStore
         + PlaybackTelemetryStore
         + NetworkPriorStore
         + FragmentIndexStore

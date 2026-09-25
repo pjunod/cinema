@@ -14,8 +14,44 @@ use plurx_core::store::{keys, Store};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-const TTFF_BUCKETS: [i64; 8] = [100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000];
+/// Two buckets above 30 s (C-08 M5 row 1): a p99 that lands in `+Inf` is not
+/// a p99, and a cold transcode start on a slow node does reach a minute.
+const TTFF_BUCKETS: [i64; 10] = [
+    100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000, 60_000, 120_000,
+];
 const METHODS: [&str; 4] = ["direct_play", "remux", "transcode", "unknown"];
+/// The closed vocabulary `http::network::client_class` maps a `User-Agent`
+/// onto. The classifier returns only these literals, and `other` is the last
+/// entry so [`label_index`] folds anything unexpected into it: the label can
+/// never carry a raw User-Agent.
+pub(crate) const CLIENT_CLASSES: [&str; 7] = [
+    "chrome", "safari", "firefox", "edge", "apple", "android", "other",
+];
+/// Seek command to first presented frame, in ms (C-08 M5 row 2).
+const SEEK_BUCKETS: [i64; 8] = [100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000];
+/// The bounded pools whose admission wait is timed (C-08 M5 row 6). The probe
+/// gate is deliberately absent: `plurx_decode_facts_phase_seconds
+/// {phase="gate_wait"}` already times exactly that wait.
+const ADMISSION_POOLS: [&str; 3] = ["vod_blocked_get", "encode_permit", "image_materialize"];
+const ADMISSION_WAIT_BUCKETS_US: [u64; 12] = [
+    1_000,
+    10_000,
+    50_000,
+    100_000,
+    250_000,
+    500_000,
+    1_000_000,
+    2_500_000,
+    5_000_000,
+    10_000_000,
+    30_000_000,
+    u64::MAX,
+];
+/// Watched-time ledger bounds (C-08 M5 row 3). One entry per viewer and item
+/// on this node, forgotten once its last beat is older than the gap.
+const WATCH_LEDGER_CAP: usize = 4_096;
+const WATCH_BEAT_MAX_GAP: Duration = Duration::from_secs(120);
+const WATCH_BEAT_SLACK_MS: u64 = 2_000;
 const STALL_KINDS: [&str; 4] = ["supply", "decode", "network", "other"];
 const STALL_RECOVERY_OUTCOMES: [&str; 4] = ["attempt", "recovered", "failed", "other"];
 const HOLD_REASONS: [&str; 4] = ["time", "bytes", "global", "unknown"];
@@ -222,11 +258,152 @@ fn render_histogram<const N: usize>(
 
 static QUEUE_METRICS: QueueMetrics = QueueMetrics::new();
 
+/// Bounded labels for the subtitle cluster path. No file, title, node or
+/// source-derived value can enter a Prometheus label.
+#[allow(dead_code)]
+pub(crate) enum SubtitleSourceMetric {
+    LookupHit,
+    LookupHydrated,
+    LookupMiss,
+    RequestForeground,
+    RequestBackground,
+    VerdictKept,
+    VerdictEmpty,
+    VerdictMalformed,
+    VerdictTransient,
+    JobBytes(u64),
+    HydrationServedBytes(u64),
+    HydrationFetchedBytes(u64),
+    ForegroundSelfClaim,
+    Repair,
+}
+
+struct SubtitleSourceMetrics {
+    lookups: [AtomicU64; 3],
+    requests: [AtomicU64; 2],
+    verdicts: [AtomicU64; 4],
+    job_bytes: AtomicU64,
+    hydration_bytes: [AtomicU64; 2],
+    foreground_self_claims: AtomicU64,
+    repairs: AtomicU64,
+}
+
+impl SubtitleSourceMetrics {
+    const fn new() -> Self {
+        Self {
+            lookups: [const { AtomicU64::new(0) }; 3],
+            requests: [const { AtomicU64::new(0) }; 2],
+            verdicts: [const { AtomicU64::new(0) }; 4],
+            job_bytes: AtomicU64::new(0),
+            hydration_bytes: [const { AtomicU64::new(0) }; 2],
+            foreground_self_claims: AtomicU64::new(0),
+            repairs: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, event: SubtitleSourceMetric) {
+        let one = |counter: &AtomicU64| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        };
+        match event {
+            SubtitleSourceMetric::LookupHit => one(&self.lookups[0]),
+            SubtitleSourceMetric::LookupHydrated => one(&self.lookups[1]),
+            SubtitleSourceMetric::LookupMiss => one(&self.lookups[2]),
+            SubtitleSourceMetric::RequestForeground => one(&self.requests[0]),
+            SubtitleSourceMetric::RequestBackground => one(&self.requests[1]),
+            SubtitleSourceMetric::VerdictKept => one(&self.verdicts[0]),
+            SubtitleSourceMetric::VerdictEmpty => one(&self.verdicts[1]),
+            SubtitleSourceMetric::VerdictMalformed => one(&self.verdicts[2]),
+            SubtitleSourceMetric::VerdictTransient => one(&self.verdicts[3]),
+            SubtitleSourceMetric::JobBytes(bytes) => {
+                self.job_bytes.fetch_add(bytes, Ordering::Relaxed);
+            }
+            SubtitleSourceMetric::HydrationServedBytes(bytes) => {
+                self.hydration_bytes[0].fetch_add(bytes, Ordering::Relaxed);
+            }
+            SubtitleSourceMetric::HydrationFetchedBytes(bytes) => {
+                self.hydration_bytes[1].fetch_add(bytes, Ordering::Relaxed);
+            }
+            SubtitleSourceMetric::ForegroundSelfClaim => one(&self.foreground_self_claims),
+            SubtitleSourceMetric::Repair => one(&self.repairs),
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut out = String::from(
+            "# HELP plurx_subtitle_source_lookups_total Stored subtitle source lookups by result.\n\
+             # TYPE plurx_subtitle_source_lookups_total counter\n",
+        );
+        for (index, label) in ["hit", "hydrated", "miss"].iter().enumerate() {
+            out.push_str(&format!(
+                "plurx_subtitle_source_lookups_total{{outcome=\"{label}\"}} {}\n",
+                self.lookups[index].load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str("# HELP plurx_subtitle_source_requests_total Subtitle extraction requests by trigger.\n# TYPE plurx_subtitle_source_requests_total counter\n");
+        for (index, label) in ["foreground", "background"].iter().enumerate() {
+            out.push_str(&format!(
+                "plurx_subtitle_source_requests_total{{trigger=\"{label}\"}} {}\n",
+                self.requests[index].load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str("# HELP plurx_subtitle_source_verdicts_total Subtitle representation extraction verdicts.\n# TYPE plurx_subtitle_source_verdicts_total counter\n");
+        for (index, label) in ["kept", "empty", "malformed", "transient"]
+            .iter()
+            .enumerate()
+        {
+            out.push_str(&format!(
+                "plurx_subtitle_source_verdicts_total{{verdict=\"{label}\"}} {}\n",
+                self.verdicts[index].load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str(&format!(
+            "# HELP plurx_subtitle_source_job_bytes_total Source bytes read by subtitle extraction jobs.\n\
+             # TYPE plurx_subtitle_source_job_bytes_total counter\n\
+             plurx_subtitle_source_job_bytes_total {}\n",
+            self.job_bytes.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP plurx_subtitle_source_hydration_bytes_total Subtitle artefact bytes transferred over media peers.\n# TYPE plurx_subtitle_source_hydration_bytes_total counter\n");
+        for (index, label) in ["served", "fetched"].iter().enumerate() {
+            out.push_str(&format!(
+                "plurx_subtitle_source_hydration_bytes_total{{direction=\"{label}\"}} {}\n",
+                self.hydration_bytes[index].load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str(&format!(
+            "# HELP plurx_subtitle_source_foreground_self_claims_total Foreground requests claimed by their waiting node.\n\
+             # TYPE plurx_subtitle_source_foreground_self_claims_total counter\n\
+             plurx_subtitle_source_foreground_self_claims_total {}\n\
+             # HELP plurx_subtitle_source_repairs_total Lost-publication repairs requested.\n\
+             # TYPE plurx_subtitle_source_repairs_total counter\n\
+             plurx_subtitle_source_repairs_total {}\n",
+            self.foreground_self_claims.load(Ordering::Relaxed),
+            self.repairs.load(Ordering::Relaxed)
+        ));
+        out
+    }
+}
+
+static SUBTITLE_SOURCE_METRICS: SubtitleSourceMetrics = SubtitleSourceMetrics::new();
+
+#[allow(dead_code)]
+pub(crate) fn record_subtitle_source(event: SubtitleSourceMetric) {
+    SUBTITLE_SOURCE_METRICS.record(event);
+}
+
 struct PlaybackMetrics {
-    ttff_buckets: [[AtomicU64; TTFF_BUCKETS.len() + 1]; METHODS.len()],
-    ttff_count: [AtomicU64; METHODS.len()],
-    ttff_sum: [AtomicU64; METHODS.len()],
+    ttff_buckets: [[[AtomicU64; TTFF_BUCKETS.len() + 1]; CLIENT_CLASSES.len()]; METHODS.len()],
+    ttff_count: [[AtomicU64; CLIENT_CLASSES.len()]; METHODS.len()],
+    ttff_sum: [[AtomicU64; CLIENT_CLASSES.len()]; METHODS.len()],
+    seek_buckets: [[AtomicU64; SEEK_BUCKETS.len() + 1]; METHODS.len()],
+    seek_sum: [AtomicU64; METHODS.len()],
+    seeks: [AtomicU64; METHODS.len()],
     stalls: [AtomicU64; STALL_KINDS.len()],
+    stalled_ms: [AtomicU64; STALL_KINDS.len()],
+    watched_ms: [AtomicU64; METHODS.len()],
+    delivered_bytes: [AtomicU64; METHODS.len()],
+    admission_wait: [[AtomicU64; ADMISSION_WAIT_BUCKETS_US.len()]; ADMISSION_POOLS.len()],
+    admission_wait_sum_us: [AtomicU64; ADMISSION_POOLS.len()],
     stall_recoveries: [AtomicU64; STALL_RECOVERY_OUTCOMES.len()],
     suspends: [AtomicU64; HOLD_REASONS.len()],
     suspended_ms: AtomicU64,
@@ -240,11 +417,25 @@ struct PlaybackMetrics {
 impl PlaybackMetrics {
     const fn new() -> Self {
         Self {
-            ttff_buckets: [const { [const { AtomicU64::new(0) }; TTFF_BUCKETS.len() + 1] };
+            ttff_buckets: [const {
+                [const { [const { AtomicU64::new(0) }; TTFF_BUCKETS.len() + 1] };
+                    CLIENT_CLASSES.len()]
+            }; METHODS.len()],
+            ttff_count: [const { [const { AtomicU64::new(0) }; CLIENT_CLASSES.len()] };
                 METHODS.len()],
-            ttff_count: [const { AtomicU64::new(0) }; METHODS.len()],
-            ttff_sum: [const { AtomicU64::new(0) }; METHODS.len()],
+            ttff_sum: [const { [const { AtomicU64::new(0) }; CLIENT_CLASSES.len()] };
+                METHODS.len()],
+            seek_buckets: [const { [const { AtomicU64::new(0) }; SEEK_BUCKETS.len() + 1] };
+                METHODS.len()],
+            seek_sum: [const { AtomicU64::new(0) }; METHODS.len()],
+            seeks: [const { AtomicU64::new(0) }; METHODS.len()],
             stalls: [const { AtomicU64::new(0) }; STALL_KINDS.len()],
+            stalled_ms: [const { AtomicU64::new(0) }; STALL_KINDS.len()],
+            watched_ms: [const { AtomicU64::new(0) }; METHODS.len()],
+            delivered_bytes: [const { AtomicU64::new(0) }; METHODS.len()],
+            admission_wait: [const { [const { AtomicU64::new(0) }; ADMISSION_WAIT_BUCKETS_US.len()] };
+                ADMISSION_POOLS.len()],
+            admission_wait_sum_us: [const { AtomicU64::new(0) }; ADMISSION_POOLS.len()],
             stall_recoveries: [const { AtomicU64::new(0) }; STALL_RECOVERY_OUTCOMES.len()],
             suspends: [const { AtomicU64::new(0) }; HOLD_REASONS.len()],
             suspended_ms: AtomicU64::new(0),
@@ -256,33 +447,84 @@ impl PlaybackMetrics {
         }
     }
 
+    #[cfg(test)]
     fn record(&self, event: &PlaybackEvent) {
+        self.record_from(event, None);
+    }
+
+    /// `client` is the requester's class from `http::network::client_class`,
+    /// derived from the request that carried the event; `None` for events the
+    /// server raises itself, which folds into `other`.
+    fn record_from(&self, event: &PlaybackEvent, client: Option<&str>) {
         match event.event.as_str() {
             "ttff" => {
                 let Some(ms) = event.ms.filter(|value| *value >= 0) else {
                     return;
                 };
                 let method = label_index(event.method.as_deref(), &METHODS);
+                let client = label_index(client, &CLIENT_CLASSES);
                 let bucket = TTFF_BUCKETS
                     .iter()
                     .position(|upper| ms <= *upper)
                     .unwrap_or(TTFF_BUCKETS.len());
-                self.ttff_buckets[method][bucket].fetch_add(1, Ordering::Relaxed);
-                self.ttff_count[method].fetch_add(1, Ordering::Relaxed);
-                self.ttff_sum[method].fetch_add(ms as u64, Ordering::Relaxed);
+                self.ttff_buckets[method][client][bucket].fetch_add(1, Ordering::Relaxed);
+                self.ttff_count[method][client].fetch_add(1, Ordering::Relaxed);
+                self.ttff_sum[method][client].fetch_add(ms as u64, Ordering::Relaxed);
+            }
+            // The client's report that a seek reached a presented frame, with
+            // `ms` from the seek command to that frame. Counted in `seeks`
+            // too, so `_count / seeks_total` is the share of seeks that got
+            // a picture at all.
+            "seek_resumed" => {
+                let method = label_index(event.method.as_deref(), &METHODS);
+                self.seeks[method].fetch_add(1, Ordering::Relaxed);
+                let Some(ms) = event.ms.filter(|value| *value >= 0) else {
+                    return;
+                };
+                let bucket = SEEK_BUCKETS
+                    .iter()
+                    .position(|upper| ms <= *upper)
+                    .unwrap_or(SEEK_BUCKETS.len());
+                self.seek_buckets[method][bucket].fetch_add(1, Ordering::Relaxed);
+                self.seek_sum[method].fetch_add(ms as u64, Ordering::Relaxed);
+            }
+            // A seek that ended without a picture: superseded by another seek,
+            // or the player stopped first. The denominator's other half.
+            "seek_abandoned" => {
+                let method = label_index(event.method.as_deref(), &METHODS);
+                self.seeks[method].fetch_add(1, Ordering::Relaxed);
             }
             "stall" => {
-                let detail = event.detail.as_deref().unwrap_or_default();
-                let kind = if detail.contains("supply") {
-                    "supply"
-                } else if detail.contains("decode") || detail.contains("frame") {
-                    "decode"
-                } else if detail.contains("network") || detail.contains("blocked") {
-                    "network"
-                } else {
-                    "other"
-                };
-                self.stalls[label_index(Some(kind), &STALL_KINDS)].fetch_add(1, Ordering::Relaxed);
+                let kind = label_index(
+                    Some(stall_kind(event.detail.as_deref().unwrap_or_default())),
+                    &STALL_KINDS,
+                );
+                self.stalls[kind].fetch_add(1, Ordering::Relaxed);
+                // Every first-party client sends the stall's duration in `ms`
+                // (web `recordWaitStall`, Android `sampleStall`, Apple
+                // `ApplePlaybackStallLog`); the web's diagnosis beacon has
+                // none and adds a count without seconds, which is honest.
+                // Android and Apple report once, when the stall ends. The web
+                // reports a long wait while it is still frozen, at
+                // `PERSISTENT_STALL_MS`, with the time so far; the rest of it
+                // arrives as `stall_end` below.
+                if let Some(ms) = event.ms.filter(|value| *value > 0) {
+                    self.stalled_ms[kind].fetch_add(ms as u64, Ordering::Relaxed);
+                }
+            }
+            // The close of a stall that was already reported while it was
+            // still going (the web's persistent wait). `ms` is only the time
+            // after that report, so crediting it adds the remainder: the two
+            // reports together are the stall's whole length, and it is one
+            // stall, so the count does not move.
+            "stall_end" => {
+                let kind = label_index(
+                    Some(stall_kind(event.detail.as_deref().unwrap_or_default())),
+                    &STALL_KINDS,
+                );
+                if let Some(ms) = event.ms.filter(|value| *value > 0) {
+                    self.stalled_ms[kind].fetch_add(ms as u64, Ordering::Relaxed);
+                }
             }
             "stall_recovery" => {
                 let outcome = event
@@ -357,23 +599,26 @@ impl PlaybackMetrics {
              # TYPE plurx_ttff_ms histogram\n",
         );
         for (method_index, method) in METHODS.iter().enumerate() {
-            let mut cumulative = 0;
-            for (bucket_index, upper) in TTFF_BUCKETS.iter().enumerate() {
-                cumulative += self.ttff_buckets[method_index][bucket_index].load(Ordering::Relaxed);
+            for (client_index, client) in CLIENT_CLASSES.iter().enumerate() {
+                let buckets = &self.ttff_buckets[method_index][client_index];
+                let mut cumulative = 0;
+                for (bucket_index, upper) in TTFF_BUCKETS.iter().enumerate() {
+                    cumulative += buckets[bucket_index].load(Ordering::Relaxed);
+                    out.push_str(&format!(
+                        "plurx_ttff_ms_bucket{{method=\"{method}\",client=\"{client}\",le=\"{upper}\"}} {cumulative}\n"
+                    ));
+                }
+                cumulative += buckets[TTFF_BUCKETS.len()].load(Ordering::Relaxed);
                 out.push_str(&format!(
-                    "plurx_ttff_ms_bucket{{method=\"{method}\",le=\"{upper}\"}} {cumulative}\n"
+                    "plurx_ttff_ms_bucket{{method=\"{method}\",client=\"{client}\",le=\"+Inf\"}} {cumulative}\n\
+                     plurx_ttff_ms_sum{{method=\"{method}\",client=\"{client}\"}} {}\n\
+                     plurx_ttff_ms_count{{method=\"{method}\",client=\"{client}\"}} {}\n",
+                    self.ttff_sum[method_index][client_index].load(Ordering::Relaxed),
+                    self.ttff_count[method_index][client_index].load(Ordering::Relaxed)
                 ));
             }
-            cumulative +=
-                self.ttff_buckets[method_index][TTFF_BUCKETS.len()].load(Ordering::Relaxed);
-            out.push_str(&format!(
-                "plurx_ttff_ms_bucket{{method=\"{method}\",le=\"+Inf\"}} {cumulative}\n\
-                 plurx_ttff_ms_sum{{method=\"{method}\"}} {}\n\
-                 plurx_ttff_ms_count{{method=\"{method}\"}} {}\n",
-                self.ttff_sum[method_index].load(Ordering::Relaxed),
-                self.ttff_count[method_index].load(Ordering::Relaxed)
-            ));
         }
+        self.render_release_evidence(&mut out);
         render_counters(
             &mut out,
             "plurx_stalls_total",
@@ -483,6 +728,463 @@ impl PlaybackMetrics {
         }
         out
     }
+}
+
+impl PlaybackMetrics {
+    /// The C-08 M5 release-evidence families that live beside the playback
+    /// counters. Every label value is from a fixed array above.
+    fn render_release_evidence(&self, out: &mut String) {
+        out.push_str(
+            "# HELP plurx_seek_to_picture_ms Client-reported time from a seek command to the first presented frame.\n\
+             # TYPE plurx_seek_to_picture_ms histogram\n",
+        );
+        for (method_index, method) in METHODS.iter().enumerate() {
+            let mut cumulative = 0;
+            for (bucket_index, upper) in SEEK_BUCKETS.iter().enumerate() {
+                cumulative += self.seek_buckets[method_index][bucket_index].load(Ordering::Relaxed);
+                out.push_str(&format!(
+                    "plurx_seek_to_picture_ms_bucket{{method=\"{method}\",le=\"{upper}\"}} {cumulative}\n"
+                ));
+            }
+            cumulative +=
+                self.seek_buckets[method_index][SEEK_BUCKETS.len()].load(Ordering::Relaxed);
+            out.push_str(&format!(
+                "plurx_seek_to_picture_ms_bucket{{method=\"{method}\",le=\"+Inf\"}} {cumulative}\n\
+                 plurx_seek_to_picture_ms_sum{{method=\"{method}\"}} {}\n\
+                 plurx_seek_to_picture_ms_count{{method=\"{method}\"}} {cumulative}\n",
+                self.seek_sum[method_index].load(Ordering::Relaxed),
+            ));
+        }
+        render_counters(
+            out,
+            "plurx_seeks_total",
+            "Client-reported seeks that ended, with a picture (seek_resumed) or without one (seek_abandoned).",
+            "method",
+            &METHODS,
+            &self.seeks,
+        );
+        render_seconds(
+            out,
+            "plurx_stalled_seconds_total",
+            "Seconds of viewer-visible stall reported by clients. Not encoder suspension; see plurx_suspended_seconds_total.",
+            "kind",
+            &STALL_KINDS,
+            &self.stalled_ms,
+        );
+        render_seconds(
+            out,
+            "plurx_watched_seconds_total",
+            "Seconds this node saw a player's position advance between progress beats, never more than the wall time between them.",
+            "method",
+            &METHODS,
+            &self.watched_ms,
+        );
+        render_counters(
+            out,
+            "plurx_delivered_bytes_total",
+            "Media bytes handed to viewers' connections, by delivery method.",
+            "method",
+            &METHODS,
+            &self.delivered_bytes,
+        );
+        out.push_str(
+            "# HELP plurx_admission_wait_seconds Time spent waiting for admission to a bounded pool.\n\
+             # TYPE plurx_admission_wait_seconds histogram\n",
+        );
+        for (pool_index, pool) in ADMISSION_POOLS.iter().enumerate() {
+            let mut cumulative = 0;
+            for (upper, count) in ADMISSION_WAIT_BUCKETS_US
+                .iter()
+                .zip(&self.admission_wait[pool_index])
+            {
+                cumulative += count.load(Ordering::Relaxed);
+                let upper = if *upper == u64::MAX {
+                    "+Inf".to_owned()
+                } else {
+                    format!("{}", *upper as f64 / 1_000_000.0)
+                };
+                out.push_str(&format!(
+                    "plurx_admission_wait_seconds_bucket{{pool=\"{pool}\",le=\"{upper}\"}} {cumulative}\n"
+                ));
+            }
+            out.push_str(&format!(
+                "plurx_admission_wait_seconds_sum{{pool=\"{pool}\"}} {:.6}\n\
+                 plurx_admission_wait_seconds_count{{pool=\"{pool}\"}} {cumulative}\n",
+                self.admission_wait_sum_us[pool_index].load(Ordering::Relaxed) as f64 / 1_000_000.0,
+            ));
+        }
+    }
+
+    fn record_admission_wait(&self, pool: AdmissionPool, waited: Duration) {
+        let pool = pool as usize;
+        let micros = u64::try_from(waited.as_micros()).unwrap_or(u64::MAX);
+        let bucket = ADMISSION_WAIT_BUCKETS_US
+            .iter()
+            .position(|upper| micros <= *upper)
+            .unwrap_or(ADMISSION_WAIT_BUCKETS_US.len() - 1);
+        self.admission_wait[pool][bucket].fetch_add(1, Ordering::Relaxed);
+        self.admission_wait_sum_us[pool].fetch_add(micros, Ordering::Relaxed);
+    }
+}
+
+/// One stall report's kind, from the free-text detail every client sends.
+fn stall_kind(detail: &str) -> &'static str {
+    if detail.contains("supply") {
+        "supply"
+    } else if detail.contains("decode") || detail.contains("frame") {
+        "decode"
+    } else if detail.contains("network") || detail.contains("blocked") {
+        "network"
+    } else {
+        "other"
+    }
+}
+
+fn render_seconds<const N: usize>(
+    out: &mut String,
+    name: &str,
+    help: &str,
+    label_name: &str,
+    labels: &[&str; N],
+    millis: &[AtomicU64; N],
+) {
+    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
+    for (label, value) in labels.iter().zip(millis) {
+        out.push_str(&format!(
+            "{name}{{{label_name}=\"{label}\"}} {:.3}\n",
+            value.load(Ordering::Relaxed) as f64 / 1_000.0
+        ));
+    }
+}
+
+/// The pools `plurx_admission_wait_seconds` times. The discriminant is the
+/// index into [`ADMISSION_POOLS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AdmissionPool {
+    /// A blocked VOD segment GET, from admission to the pool until its wait
+    /// ends (`waitpool::RegisteredWait::wait`).
+    VodBlockedGet = 0,
+    /// A live start's queue for an encoder slot or software permit, for as
+    /// long as its `admission::LiveWait` guard lives.
+    EncodePermit = 1,
+    /// An artwork derivative waiting for a derive permit.
+    ImageMaterialize = 2,
+}
+
+/// Record how long one admission waited. Called once per wait, whatever it
+/// ended in: a wait that timed out is still a wait, and is the long tail.
+pub(crate) fn record_admission_wait(pool: AdmissionPool, waited: Duration) {
+    METRICS.record_admission_wait(pool, waited);
+    #[cfg(test)]
+    THREAD_ADMISSION_WAITS.with(|cells| cells.borrow_mut()[pool as usize] += 1);
+}
+
+/// Times one admission wait from its creation until it is dropped, and
+/// records it then. A wait is created where the request starts waiting, so
+/// every way it can end records exactly once: granted, timed out, refused
+/// after the fact, or abandoned because the request's future was dropped (a
+/// player that seeks again aborts the GET it had parked). Those abandoned
+/// waits are the seek-storm tail row 6 exists to show; a recording placed
+/// after the `await` never runs for them.
+pub(crate) struct AdmissionWaitTimer {
+    pool: AdmissionPool,
+    started: Instant,
+}
+
+impl AdmissionWaitTimer {
+    pub(crate) fn start(pool: AdmissionPool) -> Self {
+        Self {
+            pool,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for AdmissionWaitTimer {
+    fn drop(&mut self) {
+        record_admission_wait(self.pool, self.started.elapsed());
+    }
+}
+
+// Per-thread copies of the node-wide cells, for tests that must count exactly
+// what their own code path recorded while the rest of the suite runs in
+// parallel. A `#[tokio::test]` runs its handler, its response body and its
+// drops on its own thread, so these see that test's records and no other's.
+#[cfg(test)]
+thread_local! {
+    static THREAD_DELIVERED: std::cell::RefCell<[u64; METHODS.len()]> =
+        const { std::cell::RefCell::new([0; METHODS.len()]) };
+    static THREAD_WATCHED: std::cell::RefCell<[u64; METHODS.len()]> =
+        const { std::cell::RefCell::new([0; METHODS.len()]) };
+    static THREAD_ADMISSION_WAITS: std::cell::RefCell<[u64; ADMISSION_POOLS.len()]> =
+        const { std::cell::RefCell::new([0; ADMISSION_POOLS.len()]) };
+}
+
+#[cfg(test)]
+pub(crate) fn delivered_bytes_on_this_thread(method: &str) -> u64 {
+    THREAD_DELIVERED.with(|cells| cells.borrow()[label_index(Some(method), &METHODS)])
+}
+
+#[cfg(test)]
+pub(crate) fn watched_ms_on_this_thread(method: &str) -> u64 {
+    THREAD_WATCHED.with(|cells| cells.borrow()[label_index(Some(method), &METHODS)])
+}
+
+#[cfg(test)]
+pub(crate) fn admission_waits_on_this_thread(pool: AdmissionPool) -> u64 {
+    THREAD_ADMISSION_WAITS.with(|cells| cells.borrow()[pool as usize])
+}
+
+/// Credit media bytes as they are handed to a viewer's connection.
+/// `method` is one of the playback vocabulary's values; anything else is
+/// `unknown`.
+pub(crate) fn record_delivered_bytes(method: &str, bytes: u64) {
+    METRICS.delivered_bytes[label_index(Some(method), &METHODS)]
+        .fetch_add(bytes, Ordering::Relaxed);
+    #[cfg(test)]
+    THREAD_DELIVERED.with(|cells| cells.borrow_mut()[label_index(Some(method), &METHODS)] += bytes);
+}
+
+/// Watched time from progress beats (C-08 M5 row 3's denominator).
+///
+/// The progress beat is the one signal every first-party player sends every
+/// few seconds while it is open, playing or paused, and each beat reaches
+/// exactly one node. A beat credits the smaller of the position's advance and
+/// the wall time since the viewer's previous beat for that item. So: a paused
+/// player (position unchanged) credits nothing; a stall (position stuck)
+/// credits nothing; a seek (an advance more than twice the wall time, plus
+/// slack) credits nothing; a gap longer than [`WATCH_BEAT_MAX_GAP`] credits
+/// nothing. The credit is never more than the wall time between two beats.
+///
+/// "The previous beat" is cluster-wide. A viewer's beats are not held to one
+/// node (the routing contract lets any non-HLS request go anywhere, and the
+/// Android client keeps no cookie), so a node's own last beat for the viewer
+/// may be older than one another node has already credited. Each beat
+/// therefore also looks at the durable progress row the handler read before
+/// writing: when another writer moved that row after this node's last beat,
+/// the row is the baseline and this node credits only the time since it.
+/// Beats alternating between N nodes are then credited once, not N times.
+/// With only one node in play the row is this node's own write and the
+/// monotonic local baseline is used, which is exact.
+#[derive(Default)]
+pub(crate) struct WatchLedger {
+    beats: Mutex<HashMap<(i64, i64), LedgerBeat>>,
+}
+
+/// This node's last beat for one viewer and item.
+#[derive(Clone, Copy)]
+struct LedgerBeat {
+    position_ms: i64,
+    /// The position of the beat before this one. A beat that arrives less
+    /// than a second after another can find the durable row still holding
+    /// that earlier beat of this node's own.
+    prior_position_ms: Option<i64>,
+    at: Instant,
+    /// The same moment on the wall clock, to compare with the durable row's
+    /// `updated_at` (whole seconds, written by whichever node committed it).
+    wall_ms: i64,
+}
+
+impl WatchLedger {
+    #[cfg(test)]
+    fn beat(&self, user_id: i64, item_id: i64, position_ms: i64, now: Instant) -> u64 {
+        self.beat_after(user_id, item_id, position_ms, now, 0, None)
+    }
+
+    /// `durable` is the viewer's progress row as it stood before this beat
+    /// was written, or `None` when there is none (or the caller has none).
+    fn beat_after(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        position_ms: i64,
+        now: Instant,
+        now_wall_ms: i64,
+        durable: Option<&plurx_core::domain::WatchState>,
+    ) -> u64 {
+        let Ok(mut beats) = self.beats.lock() else {
+            return 0;
+        };
+        let key = (user_id, item_id);
+        let previous = beats.get(&key).copied();
+        if previous.is_none() && beats.len() >= WATCH_LEDGER_CAP {
+            beats.retain(|_, beat| now.saturating_duration_since(beat.at) <= WATCH_BEAT_MAX_GAP);
+            if beats.len() >= WATCH_LEDGER_CAP {
+                // Full of live viewers: this one is not tracked, and is not
+                // credited, rather than evicting someone mid-film.
+                return 0;
+            }
+        }
+        beats.insert(
+            key,
+            LedgerBeat {
+                position_ms,
+                prior_position_ms: previous.map(|previous| previous.position_ms),
+                at: now,
+                wall_ms: now_wall_ms,
+            },
+        );
+        if let Some(row) = durable.filter(|row| moved_by_another_writer(row, previous)) {
+            let since_ms = now_wall_ms.saturating_sub(row.updated_at.saturating_mul(1_000));
+            let elapsed = Duration::from_millis(u64::try_from(since_ms).unwrap_or(0));
+            return watched_credit_ms(row.position_ms, elapsed, position_ms);
+        }
+        previous.map_or(0, |previous| {
+            watched_credit_ms(
+                previous.position_ms,
+                now.saturating_duration_since(previous.at),
+                position_ms,
+            )
+        })
+    }
+}
+
+/// True when the durable row is a newer beat than this node's own last one:
+/// its position is neither of the two this node last saw (this node's own
+/// commits and coalesced flushes write one of those), and it was written no
+/// earlier than the last of them. `updated_at` is whole seconds, so "no earlier"
+/// allows the second it was truncated from. With no local beat at all, the
+/// row is the only baseline there is; the gap rule still ignores a stale one.
+fn moved_by_another_writer(
+    row: &plurx_core::domain::WatchState,
+    previous: Option<LedgerBeat>,
+) -> bool {
+    previous.is_none_or(|previous| {
+        row.position_ms != previous.position_ms
+            && Some(row.position_ms) != previous.prior_position_ms
+            && row.updated_at.saturating_mul(1_000).saturating_add(1_000) > previous.wall_ms
+    })
+}
+
+fn watched_credit_ms(previous_ms: i64, elapsed: Duration, position_ms: i64) -> u64 {
+    if elapsed > WATCH_BEAT_MAX_GAP {
+        return 0;
+    }
+    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let Some(advance) = position_ms
+        .checked_sub(previous_ms)
+        .filter(|advance| *advance > 0)
+        .and_then(|advance| u64::try_from(advance).ok())
+    else {
+        return 0;
+    };
+    if advance
+        > elapsed_ms
+            .saturating_mul(2)
+            .saturating_add(WATCH_BEAT_SLACK_MS)
+    {
+        return 0;
+    }
+    advance.min(elapsed_ms)
+}
+
+/// Read one node-wide release-evidence cell. Tests elsewhere in the crate use
+/// these to prove their call site feeds the family, without parsing text.
+#[cfg(test)]
+pub(crate) fn delivered_bytes_for_test(method: &str) -> u64 {
+    METRICS.delivered_bytes[label_index(Some(method), &METHODS)].load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(crate) fn admission_waits_for_test(pool: AdmissionPool) -> u64 {
+    METRICS.admission_wait[pool as usize]
+        .iter()
+        .map(|count| count.load(Ordering::Relaxed))
+        .sum()
+}
+
+#[cfg(test)]
+pub(crate) fn watched_ms_for_test(method: &str) -> u64 {
+    METRICS.watched_ms[label_index(Some(method), &METHODS)].load(Ordering::Relaxed)
+}
+
+/// One live progress beat (never an offline replay, which carries its own
+/// clock). `method` is what the client says it is playing through; a value
+/// outside the playback vocabulary, or none, is `unknown`.
+///
+/// `durable` is the viewer's progress row as the handler read it before
+/// writing this beat; see [`WatchLedger`] for why the credit needs it.
+pub(crate) fn record_progress_beat(
+    ledger: &WatchLedger,
+    user_id: i64,
+    item_id: i64,
+    position_ms: i64,
+    method: Option<&str>,
+    durable: Option<&plurx_core::domain::WatchState>,
+) {
+    let wall_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        });
+    let credited = record_progress_beat_at(
+        ledger,
+        &METRICS,
+        BeatAt {
+            user_id,
+            item_id,
+            position_ms,
+            method,
+            now: Instant::now(),
+            wall_ms,
+            durable,
+        },
+    );
+    #[cfg(test)]
+    THREAD_WATCHED.with(|cells| cells.borrow_mut()[label_index(method, &METHODS)] += credited);
+    #[cfg(not(test))]
+    let _ = credited;
+}
+
+struct BeatAt<'a> {
+    user_id: i64,
+    item_id: i64,
+    position_ms: i64,
+    method: Option<&'a str>,
+    now: Instant,
+    wall_ms: i64,
+    durable: Option<&'a plurx_core::domain::WatchState>,
+}
+
+fn record_progress_beat_at(ledger: &WatchLedger, metrics: &PlaybackMetrics, beat: BeatAt) -> u64 {
+    let credited = ledger.beat_after(
+        beat.user_id,
+        beat.item_id,
+        beat.position_ms,
+        beat.now,
+        beat.wall_ms,
+        beat.durable,
+    );
+    if credited > 0 {
+        metrics.watched_ms[label_index(beat.method, &METHODS)]
+            .fetch_add(credited, Ordering::Relaxed);
+    }
+    credited
+}
+
+#[cfg(test)]
+fn record_progress_beat_into(
+    ledger: &WatchLedger,
+    metrics: &PlaybackMetrics,
+    user_id: i64,
+    item_id: i64,
+    position_ms: i64,
+    method: Option<&str>,
+    now: Instant,
+) {
+    record_progress_beat_at(
+        ledger,
+        metrics,
+        BeatAt {
+            user_id,
+            item_id,
+            position_ms,
+            method,
+            now,
+            wall_ms: 0,
+            durable: None,
+        },
+    );
 }
 
 fn label_index<const N: usize>(value: Option<&str>, labels: &[&str; N]) -> usize {
@@ -1113,9 +1815,8 @@ fn classify(event: &PlaybackEvent) -> EventClass {
         | "control_retry_resource"
         | "control_hold_withheld"
         | "control_action_suppressed" => EventClass::Terminal,
-        "ttff" | "session_start" | "stall" | "stall_recovery" | "suspend" | "resume" => {
-            EventClass::Lifecycle
-        }
+        "ttff" | "session_start" | "stall" | "stall_end" | "stall_recovery" | "suspend"
+        | "resume" => EventClass::Lifecycle,
         _ => EventClass::Sample,
     }
 }
@@ -1124,7 +1825,7 @@ fn classify(event: &PlaybackEvent) -> EventClass {
 /// retention setting is read inside the task so setting `0` makes this a true
 /// no-op while HTTP ingest can still return its existing 204 immediately.
 pub fn emit(store: Arc<dyn Store>, event: PlaybackEvent) {
-    emit_with_network(store, event, None);
+    emit_with_network(store, event, None, None);
 }
 
 /// Persist the N0 event and, independently when opted in, fold its bounded
@@ -1135,10 +1836,11 @@ pub(crate) fn emit_with_network(
     store: Arc<dyn Store>,
     event: PlaybackEvent,
     network: Option<NetworkIdentity>,
+    client: Option<&'static str>,
 ) {
     // Metrics describe what this node observed, independently of whether raw
     // retention, queue admission, or the node-local sidecar succeeds.
-    METRICS.record(&event);
+    METRICS.record_from(&event, client);
     let sink = sink_for(store);
     let class = classify(&event);
     if sink.draining.load(Ordering::Acquire) && class == EventClass::Sample {
@@ -1229,12 +1931,36 @@ fn prior_observation(
 pub fn prometheus() -> String {
     let mut metrics = METRICS.render();
     metrics.push_str(&QUEUE_METRICS.render());
+    metrics.push_str(&SUBTITLE_SOURCE_METRICS.render());
     metrics
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtitle_source_metrics_render_bounded_labels_and_bytes() {
+        let metrics = SubtitleSourceMetrics::new();
+        metrics.record(SubtitleSourceMetric::LookupHydrated);
+        metrics.record(SubtitleSourceMetric::RequestBackground);
+        metrics.record(SubtitleSourceMetric::VerdictMalformed);
+        metrics.record(SubtitleSourceMetric::JobBytes(123));
+        metrics.record(SubtitleSourceMetric::HydrationFetchedBytes(17));
+        metrics.record(SubtitleSourceMetric::ForegroundSelfClaim);
+        metrics.record(SubtitleSourceMetric::Repair);
+        let rendered = metrics.render();
+        assert!(rendered.contains("plurx_subtitle_source_lookups_total{outcome=\"hydrated\"} 1"));
+        assert!(rendered.contains("plurx_subtitle_source_requests_total{trigger=\"background\"} 1"));
+        assert!(rendered.contains("plurx_subtitle_source_verdicts_total{verdict=\"malformed\"} 1"));
+        assert!(rendered.contains("plurx_subtitle_source_job_bytes_total 123"));
+        assert!(rendered
+            .contains("plurx_subtitle_source_hydration_bytes_total{direction=\"fetched\"} 17"));
+        assert!(rendered.contains("plurx_subtitle_source_foreground_self_claims_total 1"));
+        assert!(rendered.contains("plurx_subtitle_source_repairs_total 1"));
+        assert!(!rendered.contains("node_id="));
+        assert!(!rendered.contains("file_id="));
+    }
 
     fn metric_value(rendered: &str, prefix: &str) -> u64 {
         rendered
@@ -1255,7 +1981,7 @@ mod tests {
             .await
             .expect("disable retention");
         initialize(Arc::clone(&store)).await.expect("seed settings");
-        let prefix = "plurx_ttff_ms_count{method=\"remux\"} ";
+        let prefix = "plurx_ttff_ms_count{method=\"remux\",client=\"other\"} ";
         let before = metric_value(&prometheus(), prefix);
 
         emit(
@@ -1614,8 +2340,10 @@ mod tests {
             ..PlaybackEvent::default()
         });
         let text = metrics.render();
-        assert!(text.contains("plurx_ttff_ms_count{method=\"remux\"} 1"));
-        assert!(text.contains("plurx_ttff_ms_bucket{method=\"remux\",le=\"1000\"} 1"));
+        assert!(text.contains("plurx_ttff_ms_count{method=\"remux\",client=\"other\"} 1"));
+        assert!(
+            text.contains("plurx_ttff_ms_bucket{method=\"remux\",client=\"other\",le=\"1000\"} 1")
+        );
         assert!(text.contains("plurx_stalls_total{kind=\"supply\"} 1"));
         assert!(text.contains("plurx_stall_recoveries_total{outcome=\"attempt\"} 1"));
         assert!(text.contains("plurx_stall_recoveries_total{outcome=\"recovered\"} 1"));
@@ -1631,6 +2359,408 @@ mod tests {
         assert!(!text.contains("title="));
         assert!(!text.contains("user="));
         assert!(!text.contains("path="));
+    }
+
+    /// Row 1: the client class is a label, it cannot carry anything outside
+    /// the fixed vocabulary, and a start between 30 s and two minutes lands
+    /// in a real bucket instead of `+Inf`.
+    #[test]
+    fn ttff_is_labelled_by_client_class_and_has_buckets_above_thirty_seconds() {
+        let metrics = PlaybackMetrics::new();
+        let ttff = |ms| PlaybackEvent {
+            event: "ttff".into(),
+            method: Some("transcode".into()),
+            ms: Some(ms),
+            ..PlaybackEvent::default()
+        };
+        metrics.record_from(&ttff(45_000), Some("safari"));
+        metrics.record_from(&ttff(110_000), Some("safari"));
+        metrics.record_from(&ttff(700), Some("Mozilla/5.0 (X11) <script>"));
+        let text = metrics.render();
+        let line = |labels: &str| {
+            text.lines()
+                .find(|line| line.starts_with(&format!("plurx_ttff_ms_bucket{{{labels}}} ")))
+                .unwrap_or_else(|| panic!("no bucket {labels}"))
+                .rsplit(' ')
+                .next()
+                .expect("value")
+                .to_owned()
+        };
+        assert_eq!(
+            line(r#"method="transcode",client="safari",le="30000""#),
+            "0"
+        );
+        assert_eq!(
+            line(r#"method="transcode",client="safari",le="60000""#),
+            "1"
+        );
+        assert_eq!(
+            line(r#"method="transcode",client="safari",le="120000""#),
+            "2"
+        );
+        assert_eq!(line(r#"method="transcode",client="safari",le="+Inf""#), "2");
+        assert!(text.contains(r#"plurx_ttff_ms_count{method="transcode",client="other"} 1"#));
+        assert!(!text.contains("script"));
+        assert!(!text.contains("Mozilla"));
+    }
+
+    fn label_values(text: &str, family: &str, label: &str) -> std::collections::BTreeSet<String> {
+        text.lines()
+            .filter(|line| !line.starts_with('#'))
+            .filter(|line| {
+                line.split(['{', ' ']).next().is_some_and(|name| {
+                    name == family
+                        || name
+                            .strip_prefix(family)
+                            .is_some_and(|rest| ["_bucket", "_sum", "_count"].contains(&rest))
+                })
+            })
+            .map(|line| {
+                let labels = line
+                    .split_once('{')
+                    .and_then(|(_, rest)| rest.split_once('}'))
+                    .map(|(labels, _)| labels)
+                    .unwrap_or_else(|| panic!("{family} rendered without labels: {line}"));
+                labels
+                    .split(',')
+                    .find_map(|pair| pair.strip_prefix(&format!("{label}=\"")))
+                    .and_then(|value| value.strip_suffix('"'))
+                    .unwrap_or_else(|| panic!("{family} line without {label}: {line}"))
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The release-evidence families render with exactly their enumerated
+    /// label values, and no others, even after events carrying values outside
+    /// every vocabulary.
+    #[test]
+    fn release_evidence_families_render_exactly_their_enumerated_labels() {
+        let metrics = PlaybackMetrics::new();
+        for event in ["seek_resumed", "seek_abandoned", "stall"] {
+            metrics.record_from(
+                &PlaybackEvent {
+                    event: event.into(),
+                    method: Some("/mnt/media/Some Title (2024).mkv".into()),
+                    detail: Some("session=abc123".into()),
+                    ms: Some(900),
+                    ..PlaybackEvent::default()
+                },
+                Some("user-agent-string"),
+            );
+        }
+        let ledger = WatchLedger::default();
+        let start = Instant::now();
+        record_progress_beat_into(&ledger, &metrics, 1, 2, 0, Some("file_id=9"), start);
+        record_progress_beat_into(
+            &ledger,
+            &metrics,
+            1,
+            2,
+            5_000,
+            Some("file_id=9"),
+            start + Duration::from_secs(5),
+        );
+        metrics.record_admission_wait(AdmissionPool::EncodePermit, Duration::from_millis(40));
+        metrics.delivered_bytes[label_index(Some("token=secret"), &METHODS)]
+            .fetch_add(1, Ordering::Relaxed);
+        let text = metrics.render();
+        let set = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        for family in [
+            "plurx_seek_to_picture_ms",
+            "plurx_seeks_total",
+            "plurx_watched_seconds_total",
+            "plurx_delivered_bytes_total",
+        ] {
+            assert_eq!(
+                label_values(&text, family, "method"),
+                set(&METHODS),
+                "{family}"
+            );
+        }
+        assert_eq!(
+            label_values(&text, "plurx_stalled_seconds_total", "kind"),
+            set(&STALL_KINDS)
+        );
+        assert_eq!(
+            label_values(&text, "plurx_admission_wait_seconds", "pool"),
+            set(&ADMISSION_POOLS)
+        );
+        assert_eq!(
+            label_values(&text, "plurx_ttff_ms", "client"),
+            set(&CLIENT_CLASSES)
+        );
+        for forbidden in [
+            "/mnt",
+            "session=",
+            "file_id",
+            "token",
+            "user-agent",
+            "abc123",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{forbidden} leaked into the exposition"
+            );
+        }
+        // The hostile values folded into the fixed fallbacks.
+        assert!(text.contains(r#"plurx_seeks_total{method="unknown"} 2"#));
+        assert!(text.contains(r#"plurx_seek_to_picture_ms_count{method="unknown"} 1"#));
+        assert!(text.contains(r#"plurx_seek_to_picture_ms_bucket{method="unknown",le="1000"} 1"#));
+        assert!(text.contains(r#"plurx_stalled_seconds_total{kind="other"} 0.900"#));
+        assert!(text.contains(r#"plurx_watched_seconds_total{method="unknown"} 5.000"#));
+        assert!(text.contains(r#"plurx_delivered_bytes_total{method="unknown"} 1"#));
+        assert!(text
+            .contains(r#"plurx_admission_wait_seconds_bucket{pool="encode_permit",le="0.05"} 1"#));
+        assert!(text.contains(r#"plurx_admission_wait_seconds_count{pool="encode_permit"} 1"#));
+    }
+
+    /// Row 3's numerator and denominator move together on one synthetic
+    /// session: ten minutes of five-second beats and three stalls, one of
+    /// which the stall kind vocabulary does not know.
+    #[test]
+    fn stalled_and_watched_seconds_move_together_on_a_synthetic_session() {
+        let metrics = PlaybackMetrics::new();
+        let ledger = WatchLedger::default();
+        let start = Instant::now();
+        for beat in 0..=120u64 {
+            record_progress_beat_into(
+                &ledger,
+                &metrics,
+                7,
+                70,
+                i64::try_from(beat * 5_000).expect("position"),
+                Some("remux"),
+                start + Duration::from_secs(beat * 5),
+            );
+        }
+        for (detail, ms) in [
+            ("supply", 1_200),
+            ("decode", 800),
+            ("state=recovered", 3_000),
+        ] {
+            metrics.record_from(
+                &PlaybackEvent {
+                    event: "stall".into(),
+                    method: Some("remux".into()),
+                    detail: Some(detail.into()),
+                    ms: Some(ms),
+                    ..PlaybackEvent::default()
+                },
+                None,
+            );
+        }
+        let text = metrics.render();
+        assert!(text.contains(r#"plurx_watched_seconds_total{method="remux"} 600.000"#));
+        assert!(text.contains(r#"plurx_stalled_seconds_total{kind="supply"} 1.200"#));
+        assert!(text.contains(r#"plurx_stalled_seconds_total{kind="decode"} 0.800"#));
+        assert!(text.contains(r#"plurx_stalled_seconds_total{kind="other"} 3.000"#));
+        assert!(text.contains(r#"plurx_stalls_total{kind="supply"} 1"#));
+        // Row 8's numerator is pinned where it is fed: the direct-play
+        // handler (`http::tests::a_direct_play_get_credits_exactly_its_body_to_delivered_bytes`),
+        // `meter::tests` and one assertion per meter construction site.
+    }
+
+    /// The web reports a long wait while the picture is still frozen, at its
+    /// eight-second mark, and the rest when the wait ends (`stall_end`, `ms`
+    /// being only the time after the first report). Row 3 credits both, so a
+    /// 90 s stall is 90 s, not 8; and it is still one stall.
+    #[test]
+    fn a_stall_reported_while_frozen_is_credited_its_whole_length_once() {
+        let metrics = PlaybackMetrics::new();
+        for (event, ms) in [("stall", Some(8_000)), ("stall_end", Some(82_000))] {
+            metrics.record_from(
+                &PlaybackEvent {
+                    event: event.into(),
+                    method: Some("remux".into()),
+                    detail: Some("supply-persistent".into()),
+                    ms,
+                    ..PlaybackEvent::default()
+                },
+                None,
+            );
+        }
+        // A close with nothing after the report adds nothing.
+        metrics.record_from(
+            &PlaybackEvent {
+                event: "stall_end".into(),
+                detail: Some("decode-persistent".into()),
+                ..PlaybackEvent::default()
+            },
+            None,
+        );
+        let text = metrics.render();
+        assert!(
+            text.contains(r#"plurx_stalled_seconds_total{kind="supply"} 90.000"#),
+            "{text}"
+        );
+        assert!(text.contains(r#"plurx_stalls_total{kind="supply"} 1"#));
+        assert!(text.contains(r#"plurx_stalls_total{kind="decode"} 0"#));
+        assert!(text.contains(r#"plurx_stalled_seconds_total{kind="decode"} 0.000"#));
+        assert_eq!(
+            classify(&PlaybackEvent {
+                event: "stall_end".into(),
+                ..PlaybackEvent::default()
+            }),
+            EventClass::Lifecycle,
+            "the close of a stall is kept like the stall, never sampled away"
+        );
+    }
+
+    /// A viewer whose beats alternate between two nodes (no cookie holds them
+    /// to one) is credited wall time once, not once per node: each node
+    /// takes the durable row another node wrote as the previous beat. And a
+    /// node alone, with its own coalesced writes in the row, still uses its
+    /// own exact baseline.
+    #[test]
+    fn beats_alternating_between_nodes_are_credited_once_cluster_wide() {
+        use plurx_core::domain::WatchState;
+        let base = Instant::now();
+        // Half a second past a whole second, so the row's truncated
+        // `updated_at` is exercised.
+        let wall0: i64 = 1_790_000_000_500;
+        let nodes = [WatchLedger::default(), WatchLedger::default()];
+        let mut row: Option<WatchState> = None;
+        let mut credited = 0;
+        for beat in 0..=60i64 {
+            let seconds = beat * 10;
+            let position = 100_000 + seconds * 1_000;
+            let wall = wall0 + seconds * 1_000;
+            let node = &nodes[usize::try_from(beat % 2).expect("node")];
+            credited += node.beat_after(
+                1,
+                2,
+                position,
+                base + Duration::from_secs(u64::try_from(seconds).expect("secs")),
+                wall,
+                row.as_ref(),
+            );
+            // Every beat commits: each node last wrote twenty seconds ago.
+            row = Some(WatchState {
+                position_ms: position,
+                duration_ms: Some(7_200_000),
+                watched: false,
+                updated_at: wall / 1_000,
+            });
+        }
+        assert_eq!(credited, 600_000, "ten minutes on two nodes is ten minutes");
+
+        // Paused, alternating: nothing.
+        let mut paused = 0;
+        for beat in 61..=70i64 {
+            let seconds = beat * 10;
+            let wall = wall0 + seconds * 1_000;
+            paused += nodes[usize::try_from(beat % 2).expect("node")].beat_after(
+                1,
+                2,
+                700_000,
+                base + Duration::from_secs(u64::try_from(seconds).expect("secs")),
+                wall,
+                row.as_ref(),
+            );
+            row = Some(WatchState {
+                position_ms: 700_000,
+                duration_ms: Some(7_200_000),
+                watched: false,
+                updated_at: wall / 1_000,
+            });
+        }
+        assert_eq!(paused, 0);
+
+        // One node, five-second beats, a ten-second commit window: the row
+        // holds this node's own earlier beats, never a newer one, and the
+        // credit is the local, exact one.
+        let alone = WatchLedger::default();
+        let mut own_row: Option<WatchState> = None;
+        let mut credited = 0;
+        for beat in 0..=24i64 {
+            let seconds = beat * 5;
+            let position = seconds * 1_000;
+            let wall = wall0 + seconds * 1_000;
+            credited += alone.beat_after(
+                3,
+                4,
+                position,
+                base + Duration::from_secs(u64::try_from(seconds).expect("secs")),
+                wall,
+                own_row.as_ref(),
+            );
+            if beat % 2 == 0 {
+                own_row = Some(WatchState {
+                    position_ms: position,
+                    duration_ms: None,
+                    watched: false,
+                    updated_at: wall / 1_000,
+                });
+            }
+        }
+        assert_eq!(credited, 120_000, "two minutes alone is two minutes");
+    }
+
+    /// Everything the ledger must not count: a paused player, a seek, a
+    /// rewind, a beat after a long silence, and a viewer arriving when the
+    /// ledger is full of live ones. And the one thing it must bound: a
+    /// player at 2x is credited wall time, not media time.
+    #[test]
+    fn watched_time_credits_only_plausible_forward_play_and_never_more_than_wall_time() {
+        let base = Instant::now();
+        let t = |seconds: u64| base + Duration::from_secs(seconds);
+        let ledger = WatchLedger::default();
+        assert_eq!(
+            ledger.beat(1, 1, 10_000, t(0)),
+            0,
+            "a first beat has no baseline"
+        );
+        assert_eq!(ledger.beat(1, 1, 15_000, t(5)), 5_000, "ordinary play");
+        assert_eq!(ledger.beat(1, 1, 15_000, t(10)), 0, "paused");
+        assert_eq!(ledger.beat(1, 1, 615_000, t(15)), 0, "a ten-minute seek");
+        assert_eq!(ledger.beat(1, 1, 600_000, t(20)), 0, "a rewind");
+        assert_eq!(
+            ledger.beat(1, 1, 610_000, t(25)),
+            5_000,
+            "2x speed earns wall time"
+        );
+        assert_eq!(
+            ledger.beat(1, 1, 612_000, t(30)),
+            2_000,
+            "part stalled earns the advance"
+        );
+        assert_eq!(
+            ledger.beat(1, 1, 750_000, t(160)),
+            0,
+            "after a silence longer than the gap"
+        );
+        assert_eq!(
+            ledger.beat(1, 1, 755_000, t(165)),
+            5_000,
+            "and the baseline restarts"
+        );
+        assert_eq!(
+            ledger.beat(2, 1, 0, t(165)),
+            0,
+            "another viewer is another key"
+        );
+
+        let full = WatchLedger::default();
+        for key in 0..WATCH_LEDGER_CAP {
+            full.beat(i64::try_from(key).expect("key"), 1, 0, t(0));
+        }
+        assert_eq!(full.beat(-1, 1, 0, t(1)), 0);
+        assert_eq!(
+            full.beat(-1, 1, 5_000, t(6)),
+            0,
+            "a viewer past the cap is not tracked"
+        );
+        assert_eq!(full.beats.lock().expect("ledger").len(), WATCH_LEDGER_CAP);
+        // Once the tracked viewers go quiet past the gap, room is made.
+        assert_eq!(full.beat(-1, 1, 0, t(200)), 0);
+        assert_eq!(full.beat(-1, 1, 5_000, t(205)), 5_000);
+        assert_eq!(full.beats.lock().expect("ledger").len(), 1);
     }
 
     #[test]

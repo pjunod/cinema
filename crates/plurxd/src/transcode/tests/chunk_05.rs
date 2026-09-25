@@ -2220,7 +2220,7 @@
             prepared,
             &alternate,
             Pacing::unpaced(),
-            &dir,
+            &dir.to_string_lossy(),
             "presentation-m5c2b",
             mgr.admissions.software_pool(),
             mgr.software_budget().await,
@@ -2382,7 +2382,7 @@
             prepared,
             &software,
             Pacing::unpaced(),
-            &dir,
+            &dir.to_string_lossy(),
             "presentation-m7b-pair",
             paired.admissions.software_pool(),
             paired.software_budget().await,
@@ -2488,7 +2488,7 @@
             .expect("an alternate exists"),
             &alternate_plan,
             Pacing::unpaced(),
-            &dir,
+            &dir.to_string_lossy(),
             "presentation-m5c2d-exec",
             mgr.admissions.software_pool(),
             mgr.software_budget().await,
@@ -2603,4 +2603,95 @@
             .is_none(),
             "a software encoder is not a mixed transition"
         );
+    }
+
+    /// The last producer that had to reserve its whole per-session ceiling
+    /// was the transcode, because FFmpeg wrote its own HLS objects and no
+    /// Rust code saw a write before it landed. Now its muxer uploads every
+    /// object through the session's scratch endpoint, so a real transcode
+    /// is admitted on its startup allowance -- a fraction of the ceiling --
+    /// and every object its own playlist names is already in place.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scratch_charge_a_transcode_starts_small_and_writes_through_the_grant() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let source = plurx_core::testfixtures::source("h264");
+        let file_id = seed_file_with_probe_at(
+            &store,
+            source.to_str().expect("utf-8 fixture path"),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(12_000),
+                container: Some("mkv".into()),
+                video_codec: Some("h264".into()),
+                width: Some(640),
+                height: Some(360),
+                ..Default::default()
+            },
+        )
+        .await;
+        let work = crate::test_tempdir().expect("work");
+        let mgr = Arc::new(TranscodeManager::new(
+            Arc::clone(&store),
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let info = mgr
+            .start(file_id, 360, 0.0, None, None, "paul", "pb-scratch-upload")
+            .await
+            .expect("start");
+        let ceiling = RollingScratchSizing::SessionCeiling.grant_bytes(mgr.ahead_limits().await);
+        let session = mgr
+            .sessions
+            .lock()
+            .await
+            .get(&info.session_id)
+            .cloned()
+            .expect("the session is registered");
+        assert!(
+            session.upload.is_some(),
+            "a transcode's muxer writes through the upload endpoint"
+        );
+        let key = session.scratch.as_ref().expect("scratch permit").key();
+        let admitted = mgr.scratch_ledger.charge_of(key).expect("charged");
+        assert!(
+            admitted < ceiling / 4,
+            "admitted {admitted} bytes against a {ceiling}-byte ceiling"
+        );
+
+        // The whole twelve-second title, so the last playlist -- the one
+        // FFmpeg writes as it exits -- is part of what is checked.
+        let mut named = Vec::new();
+        let mut complete = false;
+        for _ in 0..240 {
+            if let Ok(text) = tokio::fs::read_to_string(session.dir.join("index.m3u8")).await {
+                named = text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                complete = text.contains("#EXT-X-ENDLIST");
+                if complete {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        assert!(complete, "FFmpeg finished the title: {named:?}");
+        assert!(named.len() >= 5, "twelve seconds in two-second segments: {named:?}");
+        for name in &named {
+            let metadata = tokio::fs::metadata(session.dir.join(name))
+                .await
+                .unwrap_or_else(|error| panic!("{name} is named but missing: {error}"));
+            assert!(metadata.len() > 0, "{name} is empty");
+        }
+        let mut entries = tokio::fs::read_dir(&session.dir).await.expect("list");
+        while let Some(entry) = entries.next_entry().await.expect("entry") {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(!name.ends_with(".tmp"), "a temporary was left behind: {name}");
+        }
+        drop(session);
+        assert!(mgr.stop_session(&info.session_id, "test").await);
     }

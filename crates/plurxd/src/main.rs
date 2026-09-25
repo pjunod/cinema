@@ -42,6 +42,7 @@ mod redact;
 mod renditiondir;
 mod schedule;
 mod scratch_ledger;
+mod scratch_put;
 mod serving_fence;
 mod shared_cache;
 mod state;
@@ -1655,6 +1656,7 @@ async fn boot(
     // production rate-control arguments against this boot's real drivers and
     // publish only the effective result before any session can start.
     state.transcode.initialize_rate_control().await?;
+    state.live_tv.start_caption_probe();
     // Which artifact identity this node plans into, before anything can plan,
     // and the only time it is decided. It is part of every cache key the node
     // computes, so moving it on a live node would move the key space under
@@ -2557,6 +2559,10 @@ fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
+    tokio::spawn(http::file_grants::prune_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(http::subtitle_downloads::automatic_loop(
         state.clone(),
         background_shutdown.clone(),

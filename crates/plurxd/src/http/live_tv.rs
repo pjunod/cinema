@@ -17,8 +17,8 @@ use super::peer_transport::{
 };
 use crate::live_tv::{
     capability_owner, guide, GuideWindow, LiveTvActivateRequest, LiveTvActivated, LiveTvConfig,
-    LiveTvDrainAck, LiveTvError, LiveTvGuide, LiveTvResourceRequest, LiveTvSnapshot,
-    LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStopRequest, SnapshotFreshness,
+    LiveTvDrainAck, LiveTvError, LiveTvGuide, LiveTvResourceRequest, LiveTvSessionStatus,
+    LiveTvSnapshot, LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStopRequest, SnapshotFreshness,
     SnapshotRequest, ACTIVATE_PATH, GUIDE_PATH, MAX_SNAPSHOT_BYTES, RESOURCE_PATH, RESUME_PATH,
     RETIRE_PATH, SNAPSHOT_PATH, START_PATH, START_STATE_PATH, START_V2_PATH, STOP_PATH,
 };
@@ -624,6 +624,50 @@ async fn live_tv_enabled_config(state: &AppState) -> Result<LiveTvConfig, ApiErr
     Ok(config)
 }
 
+/// HLS master for one activated viewer. The signed owner status already
+/// contains the graph-specific proof reason, so the relay changes no internal
+/// resource wire shape. Missing or malformed proof yields an honest NONE.
+pub(crate) async fn master(
+    Path(capability): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Response<Body>, ApiError> {
+    let response = owner_resource(&state, LiveTvResourceRequest::Status { capability }).await?;
+    let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let status: LiveTvSessionStatus =
+        serde_json::from_slice(&bytes).map_err(|error| ApiError::Internal(error.to_string()))?;
+    let delivery = status.delivery;
+    let services = delivery.as_ref().and_then(|plan| {
+        plan.reasons
+            .iter()
+            .find(|reason| reason.code == "captions_advertised")
+            .map(|reason| reason.explanation.as_str())
+    });
+    let mut body = String::from("#EXTM3U\n#EXT-X-VERSION:3\n");
+    let advertised = services == Some("CC1,SERVICE1");
+    if advertised {
+        body.push_str("#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID=\"cc\",NAME=\"English CC1\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,INSTREAM-ID=\"CC1\"\n");
+        body.push_str("#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID=\"cc\",NAME=\"English 708\",LANGUAGE=\"en\",DEFAULT=NO,AUTOSELECT=YES,INSTREAM-ID=\"SERVICE1\"\n");
+    }
+    let bandwidth = delivery
+        .and_then(|plan| plan.max_bitrate_bps)
+        .unwrap_or(8_000_000)
+        .saturating_add(192_000);
+    body.push_str(&format!(
+        "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},CLOSED-CAPTIONS={}\nindex.m3u8\n",
+        if advertised { "\"cc\"" } else { "NONE" },
+    ));
+    Ok(Response::builder()
+        .header(
+            axum::http::header::CONTENT_TYPE,
+            "application/vnd.apple.mpegurl",
+        )
+        .header(axum::http::header::CACHE_CONTROL, "no-store")
+        .body(Body::from(body))
+        .expect("static master response headers"))
+}
+
 pub(crate) async fn playlist(
     Path(capability): Path<String>,
     State(state): State<AppState>,
@@ -1049,8 +1093,10 @@ async fn owner_activate_within(
                         serde_json::json!({"retry": "now", "owner_decided": false}),
                     ));
                 }
-                activated.playlist_url =
-                    format!("/api/v1/live-tv/sessions/{}/index.m3u8", request.capability);
+                activated.playlist_url = format!(
+                    "/api/v1/live-tv/sessions/{}/master.m3u8",
+                    request.capability
+                );
                 return Ok(activated);
             }
             Ok(response) => return Err(wire_api_error(response.status, &response.body)),

@@ -150,18 +150,44 @@ function toggleStats(){
 // The top button row wraps to two or three lines on a phone, so the panel's
 // ceiling isn't a constant — measure it, or the readout parks itself over the
 // player's own Close button. Desktop keeps the stylesheet's fixed offset.
+//
+// In the watch slot the picture is a fraction of the page, and the panel is
+// not clipped to it: it may hang below the picture, over the page, as far as
+// the viewport (minus the page's own bottom chrome) allows, then its body
+// scrolls. A picture scrolled up takes the panel with it, and the watch
+// layout re-runs this on every scroll frame. The stylesheet's own bound is
+// against the viewport height, which is the wrong reference for a picture
+// that starts halfway down it.
+// The clamp covers a picture whose top is within a hand's width of the
+// viewport's bottom; the readout then runs past it until the next scroll
+// frame re-bounds it.
+const STATS_MIN_HEIGHT=160;
 function positionStats(){
   const ov=document.getElementById("statsov"); if(!ov||!ov.classList.contains("on")) return;
-  if(!matchMedia("(pointer:coarse)").matches){ ov.style.top=""; ov.style.maxHeight=""; return; }
+  const player=document.getElementById("player");
+  const pr=player? player.getBoundingClientRect() : {top:0};
+  const bounds=(typeof watchPopoverBounds==="function")? watchPopoverBounds() : null;
+  const slotted=!!bounds && typeof WATCH!=="undefined" && !!WATCH && WATCH.mode!=="full";
+  const edge=16;
+  if(!matchMedia("(pointer:coarse)").matches){
+    ov.style.top="";
+    // 64 is the stylesheet's `top` for the panel inside the picture.
+    ov.style.maxHeight = slotted? Math.max(STATS_MIN_HEIGHT, Math.floor(bounds.bottom-edge-(pr.top+64)))+"px" : "";
+    return;
+  }
   const bar=document.getElementById("pbar");
   const y=bar? Math.round(bar.getBoundingClientRect().bottom)+8 : 0;
-  ov.style.top = y>0? y+"px" : "";
+  // `top` is relative to the player, the bar's rectangle to the viewport; in a
+  // full presentation those agree, in the slot they differ by the picture's
+  // own offset.
+  ov.style.top = y>0? Math.round(y-pr.top)+"px" : "";
   // Cap the height against the transport's real top rather than pinning the
   // panel's bottom edge there: a short readout should be a short panel, which
-  // on a tablet is the difference between a card and a wall.
+  // on a tablet is the difference between a card and a wall. In the slot the
+  // floor is the viewport's, as on a mouse.
   const tr=document.getElementById("ptimeline")||document.getElementById("ptransport");
-  const floor=tr? Math.round(tr.getBoundingClientRect().top)-10 : 0;
-  ov.style.maxHeight = (y>0&&floor>y)? (floor-y)+"px" : "";
+  const floor=slotted? bounds.bottom-edge : (tr? Math.round(tr.getBoundingClientRect().top)-10 : 0);
+  ov.style.maxHeight = (y>0&&floor>y)? Math.max(slotted?STATS_MIN_HEIGHT:0, Math.floor(floor-y))+"px" : (slotted? STATS_MIN_HEIGHT+"px" : "");
 }
 window.addEventListener("resize",positionStats,{passive:true});
 window.addEventListener("orientationchange",()=>setTimeout(positionStats,150));
@@ -571,7 +597,9 @@ async function reportProgress(fileId, ended, attachedOwner){
   // suppress the next one, or a close that follows a failed beat would take the
   // resume point down with it.
   p.lastBeatMs=posMs; p.lastBeatAt=beatAt; p.lastBeatAttachment=attachment;
-  try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs}}); }
+  // `method` labels the server's watched-seconds denominator (C-08 M5); the
+  // server takes only the playback vocabulary and stores none of it.
+  try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs,method:p.method}}); }
   catch(e){ p.lastBeatMs=null; p.lastBeatAt=null; }
 }
 function closePlayer(options={}){
@@ -859,6 +887,15 @@ document.getElementById("player").addEventListener("pointerdown",e=>{
   const menu=document.getElementById("pmenu"),opener=PLAYER&&PLAYER._menuOpener;
   if(!menu.classList.contains("on")||menu.contains(e.target)||(opener&&(opener===e.target||opener.contains(e.target)))) return;
   if(e.target===document.getElementById("video")&&PLAYER) PLAYER._menuDismissedByPointer=true;
+  closeMenu();
+});
+// In the watch slot the menu hangs over the page beside the picture; a tap on
+// that page closes it the way a tap on the picture does (the player's own
+// listener above decides for taps inside the picture).
+document.addEventListener("pointerdown",e=>{
+  const menu=document.getElementById("pmenu");
+  if(!menu||!menu.classList.contains("on")) return;
+  if(document.getElementById("player").contains(e.target)) return;
   closeMenu();
 });
 document.getElementById("player").addEventListener("focusin",e=>{

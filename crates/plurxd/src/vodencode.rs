@@ -10,7 +10,7 @@ use plurx_core::transcode::{
 use sha2::{Digest, Sha256};
 
 use crate::admission::{
-    Admissions, HwSlot, LiveWait, Priority, SwPermit, TranscodeResourceEstimate,
+    Admissions, HwSlot, LiveWait, PoolSnapshot, Priority, SwPermit, TranscodeResourceEstimate,
 };
 
 /// Resolved once before attachment. A restart cannot silently change encoder,
@@ -34,6 +34,17 @@ pub(crate) struct Encoding {
     pub speculative: std::sync::atomic::AtomicBool,
     pub queued: Mutex<Option<LiveWait>>,
     pub policy_retry: std::sync::atomic::AtomicBool,
+    /// Set while a refused prepared successor has asked its own viewer's
+    /// predecessor to give back an encoder permit. A speculative rendition
+    /// registers no pool waiter, so without this its driver would not retry
+    /// until the next GET arrived — after the permit it asked for had been
+    /// released, and possibly after the client's request budget had expired.
+    pub handoff_wait: std::sync::atomic::AtomicBool,
+    /// Why the most recent admission attempt was refused, for attribution.
+    pub last_refusal: Mutex<Option<PermitRefusal>>,
+    /// The pool reservation a yielding predecessor made for this successor.
+    /// Only this rendition's admission can claim it.
+    pub handoff_claim: Mutex<Option<u64>>,
     #[cfg(test)]
     pub admission_pause: Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
@@ -49,6 +60,18 @@ impl std::fmt::Debug for Encoding {
             .field("grid", &self.grid)
             .finish_non_exhaustive()
     }
+}
+
+/// One refused encoder admission, with the pool state that refused it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PermitRefusal {
+    pub priority: Priority,
+    pub hardware_limit: usize,
+    pub software_budget: usize,
+    /// The frozen plan needs more threads than the whole software budget; no
+    /// release anywhere can admit it.
+    pub over_budget: bool,
+    pub pool: PoolSnapshot,
 }
 
 /// Kept by the pipe owner until the exact process has been reaped. The permit
@@ -85,6 +108,9 @@ impl Encoding {
             ),
             queued: Mutex::new(None),
             policy_retry: std::sync::atomic::AtomicBool::new(false),
+            handoff_wait: std::sync::atomic::AtomicBool::new(false),
+            last_refusal: Mutex::new(None),
+            handoff_claim: Mutex::new(None),
             admission_pause: Mutex::new(None),
         })
     }
@@ -97,6 +123,10 @@ impl Encoding {
     pub(crate) fn promote(&self) {
         self.speculative
             .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn is_speculative(&self) -> bool {
+        self.speculative.load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn priority(&self) -> Priority {
@@ -141,6 +171,10 @@ impl Encoding {
             tokio::time::timeout(std::time::Duration::from_secs(1), policy).await
         else {
             self.cancel_wait();
+            self.last_refusal
+                .lock()
+                .expect("VOD encoder refusal")
+                .take();
             self.policy_retry
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             return None;
@@ -158,25 +192,46 @@ impl Encoding {
         if priority == Priority::Live {
             queued.get_or_insert_with(|| self.admissions.wait_for_slot());
         }
+        let refuse = |over_budget: bool| {
+            *self.last_refusal.lock().expect("VOD encoder refusal") = Some(PermitRefusal {
+                priority,
+                hardware_limit,
+                software_budget,
+                over_budget,
+                pool: self.admissions.snapshot(),
+            });
+            None
+        };
         // The shared pool deliberately admits one oversize job when otherwise
         // idle. A frozen VOD recipe cannot shrink its thread demand on retry,
         // so an operator lowering the budget below that exact plan is an
         // explicit refusal rather than an oversize exception.
         if self.resources.cpu_threads > software_budget {
-            return None;
+            return refuse(true);
         }
-        let bundle = self.admissions.try_admit_bundle(
+        let claim = *self.handoff_claim.lock().expect("VOD handoff claim");
+        let Some(bundle) = self.admissions.try_admit_bundle_claiming(
             hardware_limit,
             software_budget,
             &self.resources,
             priority,
-        )?;
+            claim,
+        ) else {
+            return refuse(false);
+        };
         let (hardware, software) = bundle.into_parts();
         let permit = EncodePermit {
             _hardware: hardware,
             _software: software,
         };
         queued.take();
+        self.handoff_claim.lock().expect("VOD handoff claim").take();
+        self.handoff_wait
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.last_refusal
+            .lock()
+            .expect("VOD encoder refusal")
+            .take();
         Some(permit)
     }
 
@@ -184,10 +239,49 @@ impl Encoding {
         self.queued.lock().expect("VOD encoder admission").take();
         self.policy_retry
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.handoff_wait
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(token) = self.handoff_claim.lock().expect("VOD handoff claim").take() {
+            self.admissions.release_reservation(token);
+        }
+    }
+
+    /// Install the reservation a yielding predecessor made for this rendition,
+    /// releasing any earlier one it replaces.
+    pub(crate) fn accept_handoff_claim(&self, token: u64) {
+        if let Some(earlier) = self
+            .handoff_claim
+            .lock()
+            .expect("VOD handoff claim")
+            .replace(token)
+        {
+            self.admissions.release_reservation(earlier);
+        }
     }
 
     pub fn is_waiting(&self) -> bool {
-        self.policy_retry.load(std::sync::atomic::Ordering::Relaxed) || self.has_live_wait()
+        self.policy_retry.load(std::sync::atomic::Ordering::Relaxed)
+            || self.handoff_wait.load(std::sync::atomic::Ordering::Relaxed)
+            || self.has_live_wait()
+    }
+
+    pub(crate) fn last_refusal(&self) -> Option<PermitRefusal> {
+        *self.last_refusal.lock().expect("VOD encoder refusal")
+    }
+
+    /// Whether returning a permit of `released`'s size would let this exact
+    /// speculative plan start, under the limits its last refusal read.
+    pub(crate) fn fits_after_release(&self, released: &TranscodeResourceEstimate) -> bool {
+        let Some(refusal) = self.last_refusal() else {
+            return false;
+        };
+        !refusal.over_budget
+            && self.admissions.speculative_fits_after_release(
+                refusal.hardware_limit,
+                refusal.software_budget,
+                &self.resources,
+                released,
+            )
     }
 
     /// Whether this exact rendition has registered a foreground pool waiter.
