@@ -1,3 +1,34 @@
+# plurx UI structural golden — the portable tier of scripts/ui-baseline.
+#
+#   regenerate   scripts/ui-baseline --self-host --update
+#   verify       make ui-check
+#
+# COMMITTED ON PURPOSE, and pixel-free on purpose. A PNG hash depends on the
+# Chromium build, the rasteriser and the path the fixture library sits at, so a
+# committed pixel manifest is red on every machine but the one that wrote it.
+# Everything below is a fact about the DOM the app builds, and is therefore the
+# same on a Mac, in the sandbox and on a CI runner. Pixel hashes stay in
+# target/ui-baseline/pixels.txt and are compared with --baseline, never here.
+#
+# Format, one fact per line:
+#
+#   <layout>|<route>@<w>x<h>|<kind>|<key>|<value>
+#
+#   layout   dark|light etc. are NOT dimensions here — one theme, every layout.
+#            `*` marks a fact about the registry rather than about a capture.
+#   kind     layout   a registered layout and the surfaces it declares
+#            surface  which surfaceClass() a viewport resolves to
+#            dom      a structural signature `parent > self`, and how many of
+#                     them the route rendered. Tags, ids, sorted classes, role,
+#                     tabindex, ARIA state and a bare `text` flag — never text
+#                     content, inline style, href, src or value.
+#            focus    the Nth tab stop, zero-padded so the order sorts
+#            req      an API call the route made, method + path, and how often
+#
+# Regeneration must be a deliberate act with a diff, never a side effect of a
+# normal run — that is why `--update` exists and why a plain run writes only
+# into target/. If this file changed and you did not mean it to, the app
+# changed.
 *|*|layout|catalog|desktop mobile tv
 *|*|layout|classic|desktop mobile tv
 *|*|layout|theater|desktop mobile tv
