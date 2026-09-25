@@ -23,7 +23,7 @@ All four had Docker restart count zero at 23:36:14–16 UTC. Both `plurxd` and `
 
 At 01:48 UTC `origin/main` was still exact `f600d28230222005441cfc62301c306785c852ce`. From this agent's own clone, `scripts/ship-physical --apple` built signed iOS and tvOS Release artifacts with the configured development team, verified both signatures, and installed plurx 0.3.0, Apple build 182, on every reachable physical Apple device in CoreDevice's inventory: `17air`, `17promax`, `Bedroom` Apple TV 4K, `iPad Mini`, `iPad Pro`, and `iPhone`. The first run also attempted shutdown simulators because CoreDevice reported their tunnel as `disconnected`; the script now filters on `reality=physical` (`df62a015b`), and the clean rerun installed all six with exit 0. `16pro` was unavailable and received no install. The local clean-run log is `/Users/pjunod/code/plurx-agent/codex-apple-deploy-20260925-clean.log`, SHA-256 `ab5f5ebab63560a7ed666aa626eb856d568f40977762837ee5f4283900240b4c`.
 
-This proves installation of current `main`, not any plan's playback/device acceptance. Android release remains uninstalled: the current session has none of the four release-signing inputs, a filename search in the likely local signing locations found only `~/.android/debug.keystore`, and ADB currently sees only the TCL 9445X online (one prior wireless endpoint is offline). A debug build is not substituted for the required signed release.
+This proves installation of current `main`, not any plan's playback/device acceptance. Android release remains uninstalled: the current session has none of the four release-signing inputs, a filename search in the likely local signing locations found only `~/.android/debug.keystore`, and ADB at 02:01:42 UTC found four attached Android devices: TCL 9445X, Pixel 10 Pro Fold, Pixel 11 Pro XL, and Motorola razr ultra 2025. Each runs Cinema 0.3.0, versionCode 124, with `DEBUGGABLE` set. A debug build is not substituted for the required signed release; Xiaomi and Lenovo remained absent.
 
 ## 2. Read-only measurements — useful baselines, not acceptance
 
@@ -38,7 +38,7 @@ All reads used the running `f600d2823` image and local `/metrics`. They establis
 | `K-06` | `timedatectl show -p NTPSynchronized` reported `yes` on all four at 23:31:28–29 UTC. | `chronyc` is absent on `nuc3` and no `plurx_cluster_clock_` metric exists in this build. NTP status is not the plan's offset and uncertainty measurement. |
 | `C-05` | `plurx_index_validation_backfill_total` was zero for `validated`, `refused`, and `gone` on all four at 23:38:57–58 UTC. | A counter snapshot does not establish backfill convergence on an active library. |
 | `P-02` | `/proc/1/limits` in `plurxd` showed 524288 soft and hard open-file limits on every node at 23:38:37–38 UTC; no EMFILE appeared in the preceding five minutes. | Busy-evening sample and a week without EMFILE remain. |
-| `D-03` | Physical inventory showed connected Apple TV 4K, iPhones and iPad, plus Pixel 11 Pro XL, Motorola razr ultra 2025, TCL 9445X, Google TV Streamer and Pixel 10 Pro Fold through `adb`. | Required Xiaomi 25019PNF3C was absent. The current control environment lacked `PLURX_DEVELOPMENT_TEAM` and all four Android release-signing inputs, and the `plurx-agent` mobile role still names `app-debug.apk`. No release APK or Android client was installed; six reachable physical Apple devices received exact main on 2026-09-25 (§1.1). |
+| `D-03` | Physical inventory showed connected Apple TV 4K, iPhones and iPad, plus Pixel 11 Pro XL, Motorola razr ultra 2025, TCL 9445X, Google TV Streamer and Pixel 10 Pro Fold through `adb`. | Required Xiaomi 25019PNF3C was absent. The Apple team was found and six reachable physical Apple devices received exact main on 2026-09-25 (§1.1). The four Android release-signing inputs remained absent, so no release APK was installed. The separate mobile-release role change is on draft [PR #23](https://github.com/pjunod/ansible/pull/23); the four attached Android devices still carry debuggable versionCode 124. |
 
 Three client-side updates were reported by the coordinating session on
 2026-09-24. They are branch work and trace evidence, not merged fleet or device
@@ -48,7 +48,7 @@ acceptance:
 |---|---|---|
 | `A-02` | Commit `f30ef466b` implements the §5.5 `Session` credential lock. `make apple-build` passed on iOS and tvOS. | `make apple-test` has not run for this commit; other A-02 milestones and device evidence remain. |
 | `W-02` | Commit `2a6fbc855` repairs playback-lab readiness, allowing a Chrome shaped-network trace to reach playback. | The §5.4–5.5 splits, type baseline, browser checks and physical input observations remain. |
-| `A-04` | The Chrome `8mbps-to-1.5mbps` D3 trace failed recovery acceptance: one automatic restart/downshift from 720p to 360p, 21.113 s to the first downshift, a 4.2665 s maximum video gap, three transition waits, four hitches and zero seconds of downshift runway. The shaper measured 7,999.4 kb/s before and 1,500 kb/s after the cliff. The raw and normalized controller artifacts were produced under `/private/tmp/plurx-a04-d3-evidence-2026-09-24/` on the observing host. | Safari WebDriver failed to establish a session; Firefox, Apple, Android, the two-cliff profile and HDR pass remain. D3 is incomplete and the failed Chrome run is not an acceptance pass. |
+| `A-04` | Exact-main Chrome 8→1.5 Mb/s rerun failed recovery: 24.974 s, one 720p→360p restart/downshift at 21.198 s, 1.883 s maximum video gap, three waits, one stall, five hitches. Measured post-cliff media throughput was 1,499.2 kb/s. Two-cliff Chrome attempts timed out before first frame. Raw reports are preserved under `/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/`. | Safari remote automation unavailable; Firefox WebDriver profile creation failed. Apple TV asleep and iPhone locked refused native launches. Android and HDR runs, and the full six-metric matrix, remain. |
 
 The Chrome raw report (`web-chrome-after-readiness.json`) has SHA-256
 `8e01fdc99ec54f2d0a2a9a8be86dc0fe77afade3d3727b1cd09b1361a7f3a7cf`;
@@ -56,6 +56,28 @@ the normalized report has SHA-256
 `7ce160648a2f9e450fd260ec82abb246af695eac22eaf678768aa8ffa38eee49`.
 These artifacts are local to the observing host and are not part of this
 documentation commit.
+
+### 2.1 L-03 broadcast caption service capture — 2026-09-25
+
+At about 02:08 UTC, `nynuc` reached the HDHomeRun FLEX 4K at
+`192.168.5.191`. The exact deployed `f600d2823` checkout ran
+`scripts/live-tv-caption-audit --image plurx/plurxd:latest analyze` on
+three 30-second broadcast captures. `/tuners.html` showed all four tuners
+idle before and after. All temporary capture directories were deleted.
+
+| Channel | Capture bytes | Frames with CC | 608 CC1 chars | 608 CC3 chars | 708 SERVICE1 chars |
+|---|---:|---:|---:|---:|---:|
+| 6.1 WTVR-HD | 22,641,928 | 887 | 373 | 757 | 394 |
+| 6.2 CBS6XTR | 8,885,968 | 841 | 373 | 18 | 402 |
+| 12.2 12 MeTV | 5,459,664 | 875 | 229 | 0 | 254 |
+
+Each capture probed as `mpeg2video,tt,30000/1001,`; CC1 and 708 SERVICE1
+carried actual dialogue on all three. SERVICE2–6 had zero text. Seven other
+five-second subchannel samples (23.4, 28.1, 30.1, 45.1, 48.1, 53.1 and
+65.6) were MPEG-2; no H.264 broadcast was found in that bounded sample.
+This establishes service IDs for M4 on the sampled channels. The plan's
+pre-advertising client baseline (prompt C) and post-advertising playback
+remain separate evidence.
 
 The Raft size-gauge values at 23:36 UTC, in bytes, are kept here so later readings have a comparison point:
 
@@ -116,17 +138,17 @@ docker exec plurxd grep 'Max open files' /proc/1/limits
 | `C-08` | Preliminary snapshot in §2; acceptance open | One-hour normal-use scrape series; literal label regex has metric-name false positives; JSON mode restart, browser RED sanity and media-body flow remain. |
 | `L-01` | No acceptance run | media1 336-hour guide vs 2 MiB clip; mixed NAS/local sink interruption and metrics. |
 | `L-02` | No acceptance run | Three §6.3 fleet prompts: settings failover budget, peer resolution, and start/cleanup observations; M3/M4 implementation also pending. |
-| `L-03` | No acceptance run | Shared-transport physical pass, M3 caption prompts A-C; M2 client device pass and M4 post-advertising caption pass after service capture and per-build probe. #482 already merged. |
+| `L-03` | Prompt A captured three real channels with CC1 and 708 SERVICE1 dialogue (§2.1); acceptance open | Shared-transport physical pass, M3 prompts B-C, M2 client device pass and M4 post-advertising caption pass after the per-build probe. #482 already merged. |
 | `W-01` | No acceptance run | Progressive-remux browser/device matrix, post-deploy event rate and journal. |
 | `W-02` | Readiness repair; no §5.4–5.5 acceptance | Browser, lock-screen, headset and LG/Fire TV input evidence; 5.4/5.5 also await 5.1-5.3 type baseline and Playwright. |
 | `A-01` | No acceptance run | Apple TV HDMI mode matrix; iPhone interruption/route matrix. |
 | `A-02` | §5.5 branch build passed; tests unrun | Controller device evidence per plan §6 after remaining 5.1-5.6. |
 | `A-03` | No acceptance run | Deployed `sort_title` curl; Apple/Android paging/filter traces after 5.2-5.5. |
-| `A-04` | Chrome D3 trace failed; D3 incomplete | D3 shaped-network baseline: Safari/Firefox, Apple TV/iPhone, four Android types, two cliff profiles, six metrics and HDR second pass. |
+| `A-04` | Chrome exact-main trace failed; two-cliff timed out before first frame; Apple TV asleep and iPhone locked refused trace launch | D3 shaped-network baseline: Safari/Firefox, Apple TV/iPhone, four Android types, two cliff profiles, six metrics and HDR second pass. |
 | `A-05` | Blocked by A-04 D3 | Platform's shaped trace on an unmerged milestone build before Auto controller merges. |
 | `D-01` | No acceptance run | Three-TV ADB memory/display baseline and physical HDMI pass. |
 | `D-02` | No acceptance run | §5.6 Android lifecycle/player device acceptance after M1-M5/M7-M9. |
-| `D-03` | Preliminary snapshot in §2; acceptance open | Lenovo trace; signed release build/install, release-role switch, device M9/M10. Current control env lacks four Android signing inputs; copied role still builds debug; required Xiaomi absent. |
+| `D-03` | Four attached Android devices have debuggable versionCode 124; acceptance open | Lenovo trace; signed release build/install, device M9/M10. Signing inputs absent; release-role change is on draft PR #23; Xiaomi and Lenovo absent. |
 | `P-02` | Preliminary snapshot in §2; acceptance open | Busy-evening sample and one week without EMFILE. |
 
 `P-03` explicitly names no fleet or device evidence. The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the status authority; this page is a dated observation and owed-work inventory.

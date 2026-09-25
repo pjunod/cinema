@@ -674,12 +674,30 @@ Acceptance: a reviewer can point at every field in §3.1's `AutoSample` and
 find the API that fills it on all three platforms, or find a written
 statement that it is unavailable there and what the policy does about it.
 
-### 5.3 D3 — one shaped-network trace per platform, on today's build — NOT RUN
+### 5.3 D3 — shaped-network baseline — INCOMPLETE, 2026-09-25
 
-**No trace has been taken on any platform and no metric in this section has a
-value.** The prompts in §6 are the work; it needs a deployed build, three
-browsers and five physical devices, none of which the executing session has.
-Recorded as `needs:` in the execution log under the work board's rule 9.
+Exact `main` `f600d2823` produced one Chrome 8→1.5 Mb/s trace. It failed
+recovery acceptance. A second Chrome profile never reached a first frame in
+two attempts. Firefox WebDriver could not create a profile; Safari remote
+automation was unavailable. Physical Apple TV and iPhone launches were
+refused because the TV was asleep and the phone locked. Android and HDR runs
+remain owed. Keep these as failed or unavailable observations, not a D3 pass.
+The [dated fleet evidence](../reviews/ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md)
+records device state; the raw reports remain in the observing agent's own
+`/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/` directory.
+
+| Platform/profile | Measured result | Missing D3 fields |
+|---|---|---|
+| Chrome · 8→1.5 Mb/s | 24.974 s cliff-to-recovery versus 10 s limit; one automatic 720p→360p restart/downshift at 21.198 s; maximum video gap 1.883 s; three transition waits, one stall, five hitches; delivered post-cliff media 1,499.2 kb/s against 360p's advertised 1,360 kb/s. Result: failed. | Presentation-clock stalled seconds were not fully integrated by this report. SDR source makes HDR→SDR count inapplicable. |
+| Chrome · 8→1.1→0.35 Mb/s | Two attempts timed out before the first presented frame. Neither reached a shaped cliff. | All six post-cliff metrics. |
+| Firefox · 8→1.5 Mb/s | WebDriver process closed before a browser session; `Could not find profile folder` in the retained log. | All six metrics. |
+| Safari; Apple TV; iPhone; Android | No valid trace. Safari required local remote-automation enablement; Apple TV was asleep, iPhone locked, Android release signing absent. | Both profiles, physical HDR and all six metrics. |
+
+Chrome raw and normalized reports have SHA-256
+`07da0de627ac695dbfc637d1ef7edb7922bdc267ab4255693fa51a3e34237f05`
+and `b5de25e4962d9f2d928b29f21f6538b3a0bf57c19c665a2a1ac45918ee1fabf1`.
+The two-cliff raw report has SHA-256
+`24489f4d442d37302b4a2ab404f2b2a18e010e28c49d88194bb577b5e6c6e8ad`.
 
 This is the measurement §3.8 requires, and it runs **before** any
 controller exists, so the "after" has a "before".
