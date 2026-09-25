@@ -35,6 +35,14 @@ internal IDs `stream_format` and `device_audio`. Keep persisted modes
 two rows; Overview and Compact keep their existing essentials. This is a
 data-and-explanation repair, not another panel redesign.
 
+**2026-09-25 visible-field ruling:** the later dimensions repair gives
+`stream_frame` sole ownership of displayed stream dimensions in all four
+modes. `stream_format` remains the internal server descriptor name, but its
+visible row contains codec, scan and cadence only. Planned or sampled
+dimensions from that descriptor feed `stream_frame`, with their evidence
+basis shown next to the value. This ruling supersedes dimension strings in
+the visible formatting examples below; it does not rename the wire object.
+
 ## 2. Establish the base, ownership and compiler loop first
 
 ### 2.1 Build from fresh main in an isolated checkout
@@ -182,11 +190,11 @@ playback or activate a recovery action.
 
 | Normalized observation | Visible value / note |
 |---|---|
-| Eligible codec and pair | `1920×1080 · H.264`; provenance note |
-| Codec plus height only | `H.264 · height 1080`; `Stream width unavailable` |
-| Codec only | `HEVC`; `Stream dimensions unavailable` |
-| Pair only | `1920×1080`; `Stream codec unavailable` |
-| Planned server dimensions | Same value formatting; `Server delivery metadata (planned)` |
+| Eligible codec and pair | Stream frame `1920×1080`; Stream format `H.264`; each keeps its own provenance note. |
+| Codec plus height only | Stream frame `Height 1080`; Stream format `H.264`; width stays unknown. |
+| Codec only | Stream frame `Unavailable`; Stream format `HEVC`. |
+| Pair only | Stream frame `1920×1080`; Stream format `Not reported`. |
+| Planned server dimensions | Stream frame uses the same value formatting with `Planned output`. |
 | Attach or bounded collection outstanding | `Waiting for stream` or `Refreshing output information` |
 | Only source-shaped dimensions on a transcode | `Output metadata unavailable`; `The available dimensions describe the original file` |
 | Collector not built | `Not available in this version`; collector-specific explanation |
@@ -463,7 +471,7 @@ Extract coded dimensions and codec from a valid format description. Check
 the deployment target's supported loading API; do not synchronously block
 the UI. If several descriptions cannot be bound to the current selected
 format, use the server descriptor rather than picking the first blindly.
-Keep `presentationSize` as the separate Playing resolution measurement.
+Keep `presentationSize` as the separate Player display size measurement.
 
 For device audio, read the existing `AVAudioSession` route and supported
 session-output properties. Observe route changes while the collector is
@@ -492,7 +500,8 @@ Keep their existing architecture and pinned Media3 version.
 
 **Work:** decode the descriptor defensively, connect existing start/status
 responses and lifecycle identity, and implement the §4 formatter. Preserve
-`videoSize` for Playing resolution. Trace `videoFormat` from the real
+eligible `videoSize` for measured Stream frame. Player display size remains
+unavailable where the platform does not report it. Trace `videoFormat` from the real
 input-format callback: a selected track-group declaration is not automatically
 the same object or provenance. Test 4K source→1080p output with a source-sized
 master, then retain sample-derived dimensions or fence manifest-derived

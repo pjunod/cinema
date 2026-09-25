@@ -44,6 +44,37 @@ function memoryStorage() {
 }
 
 async function main() {
+  await test("picture facts keep broadcast, planned frame and browser display distinct", () => {
+    const delivery = {
+      source: {width: 704, height: 480, sample_aspect_ratio: "40:33", video_codec: "mpeg2video"},
+      output: {width: 704, height: 480, video_codec: "h264"},
+      video_action: "encode",
+      reasons: [{code: "new_code", explanation: "<img onerror=bad>"}],
+    };
+    const facts = liveTv.normalizeLiveTvPictureFacts({delivery,
+      presentation: {width: 853, height: 480}, attachmentCurrent: true, nowSeconds: 1000});
+    const formatted = liveTv.formatLiveTvPictureFacts(facts);
+    assert.equal(formatted.source_resolution, "704×480");
+    assert.equal(formatted.stream_frame, "704×480");
+    assert.equal(formatted.stream_frame_note, "Planned output");
+    assert.equal(formatted.decode_resolution, "853×480");
+    assert.equal(formatted.source_display_aspect, "16:9");
+    assert.equal(formatted.frame_comparison, "No resize planned");
+    assert.equal(formatted.aspect_comparison, "Not verified");
+    assert.equal(liveTv.liveTvReasonText(delivery.reasons), "<img onerror=bad>");
+    assert.equal(liveTv.parsePictureRatio("0:1"), null);
+    assert.equal(liveTv.parsePictureRatio("N/A"), null);
+    const reduced = liveTv.formatLiveTvPictureFacts(liveTv.normalizeLiveTvPictureFacts({
+      delivery: {...delivery, source: {...delivery.source, width: 1920, height: 1080, sample_aspect_ratio: "1:1"},
+        output: {...delivery.output, width: 1280, height: 720}},
+      presentation: {width: 1920, height: 1080}, attachmentCurrent: true, nowSeconds: 1000}));
+    assert.equal(reduced.frame_comparison, "Resolution reduction planned");
+    const old = liveTv.formatLiveTvPictureFacts(liveTv.normalizeLiveTvPictureFacts({
+      delivery: null, presentation: {width: 853, height: 480}, attachmentCurrent: false, nowSeconds: 1000}));
+    assert.equal(old.stream_frame, "Unavailable");
+    assert.equal(old.decode_resolution, "Unavailable");
+  });
+
   await test("held channel keys are owned by keyup rather than repeat cadence", () => {
     assert.match(shipped("liveTvChangeChannel"), /LIVE_TV_CHANNEL_GESTURE\.press\(key,LIVE_TV\)/);
     assert.match(shipped("liveTvWireKeys"), /keyup[\s\S]*LIVE_TV_CHANNEL_GESTURE\.release\(event\.key,LIVE_TV\)/);

@@ -2858,13 +2858,19 @@ let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
     .init("file_id", "File ID", "PLAYBACK", [.debug]),
     .init("session", "Session", "PLAYBACK", [.debug], placement: .notes),
     .init("source_video", "Original video", "SOURCE", [.standard, .details, .debug], placement: .notes),
-    .init("source_resolution", "Original resolution", "SOURCE", [.standard, .details, .debug]),
+    .init("source_resolution", "Source frame", "SOURCE", [.standard, .details, .debug]),
+    .init("source_pixel_aspect", "Source pixel aspect", "SOURCE", [.details, .debug]),
+    .init("source_display_aspect", "Source display aspect", "SOURCE", [.details, .debug]),
     .init("source_bitrate", "Source bitrate", "SOURCE", [.standard, .details, .debug]),
     .init("container", "Container", "SOURCE", [.standard, .details, .debug]),
     .init("source_audio", "Source audio track", "SOURCE", [.standard, .details, .debug], placement: .notes),
     .init("source_file", "File", "SOURCE", [.debug], placement: .notes),
     .init("av_offset", "AV offset", "SOURCE", [.debug], always: true),
-    .init("decode_resolution", "Playing resolution", "NOW DECODING", [.mini, .standard, .details, .debug], always: true),
+    .init("decode_resolution", "Player display size", "NOW DECODING", [.mini, .standard, .details, .debug], always: true),
+    .init("stream_frame", "Stream frame", "NOW DECODING", [.mini, .standard, .details, .debug], always: true),
+    .init("stream_pixel_aspect", "Stream pixel aspect", "NOW DECODING", [.details, .debug]),
+    .init("frame_comparison", "Frame comparison", "NOW DECODING", [.details, .debug]),
+    .init("aspect_comparison", "Aspect comparison", "NOW DECODING", [.details, .debug]),
     .init("stream_format", "Stream format", "NOW DECODING", [.standard, .details, .debug], always: true),
     .init("device_audio", "Device audio output", "NOW DECODING", [.standard, .details, .debug], always: true),
     .init("dynamic_range", "Dynamic range", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
@@ -3047,6 +3053,9 @@ struct PlaybackStatsView: View {
             return ContractFieldValue(value: "\(applied) ms", note: note)
         case "decode_resolution":
             return ContractFieldValue(value: playbackInfoResolution(controller.presentationSize))
+        case "stream_frame":
+            return ContractFieldValue(value: "Unavailable", tone: .muted,
+                note: "No verified encoded output dimensions")
         case "stream_format", "device_audio":
             return ContractFieldValue(value: "Not reported", tone: .muted)
         case "dynamic_range":

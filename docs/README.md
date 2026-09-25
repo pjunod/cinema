@@ -343,6 +343,8 @@ player obeys, subtitles and overlays, layouts and themes.
 | [ANDROID-DOUBLE-BACK-IMPLEMENTATION-HANDOFF.md](clients/ANDROID-DOUBLE-BACK-IMPLEMENTATION-HANDOFF.md) | Sol's build and delivery contract: recover the rebased candidate, finish the Media3 lint opt-in, preserve six regressions, validate, and prepare review and landing evidence. | open |
 | [ANDROID-DOUBLE-BACK-STATUS.md](clients/ANDROID-DOUBLE-BACK-STATUS.md) | Current branch, milestones, validation, review, PR, and physical acceptance for the Android double-Back fix. | open |
 | [PLAYBACK-INFO-REDESIGN.md](clients/PLAYBACK-INFO-REDESIGN.md) | Playback info hierarchy, measurement semantics and qualification. | open |
+| [PLAYBACK-INFO-DIMENSIONS-STATUS.md](clients/PLAYBACK-INFO-DIMENSIONS-STATUS.md) | Live build ledger for frame, aspect and provenance repairs across web, Apple and Android. | live |
+| [PLAYBACK-INFO-DIMENSIONS.md](clients/PLAYBACK-INFO-DIMENSIONS.md) | Source handoff for the playback dimension and aspect repair, with evidence rules and acceptance cases. | open |
 | [PLAYBACK-INFO-MISSING-FIELDS-RCA.md](clients/PLAYBACK-INFO-MISSING-FIELDS-RCA.md) | Why clients omit output facts or display source dimensions for a converted stream, with reviewed provenance rules. | open |
 | [PLAYBACK-INFO-IMPLEMENTATION-HANDOFF.md](clients/PLAYBACK-INFO-IMPLEMENTATION-HANDOFF.md) | Build sequence for output metadata, safe client collectors, attachment fencing, package ownership, and acceptance. | open |
 | [330-calm-library-pages.md](apple-builds/330-calm-library-pages.md) | Apple build 162 quiet Home and open media details. | built |

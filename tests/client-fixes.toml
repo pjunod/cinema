@@ -1,6 +1,30 @@
 version = 1
 enforce_after = "e8a910f"
 
+[[fixes]]
+id = "web.live-tv-picture-evidence"
+commits = ["148829768"]
+source = "crates/plurxd/src/web/live-tv.js"
+source_anchor = "function normalizeLiveTvPictureFacts("
+test = "tests/web/live-tv.test.js"
+test_anchor = "picture facts keep broadcast, planned frame and browser display distinct"
+
+[[fixes]]
+id = "apple.playback-info-compact-field-parity"
+commits = ["8252fe99d"]
+source = "clients/apple/Sources/PlaybackInfoPanel.swift"
+source_anchor = "static let compactFields:"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPlaybackInfoRowsMatchTheSharedFieldList"
+
+[[fixes]]
+id = "android.live-tv-eligible-video-sample"
+commits = ["bf6edae2f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "internal fun eligibleLiveTvVideoSample("
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
+test_anchor = "playbackPictureSeparatesPlanSampleAndPlayerDisplay"
+
 # The unmerged counter-fallback proposals were superseded by callback
 # lifecycle repair; retain their history mappings against the current proof.
 # The capacity 503 this player's previous start produced was codeless, so
