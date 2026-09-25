@@ -1784,6 +1784,9 @@ valid URL, the only way forward is to release and start over.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/api/v1/files/{id}/content` | bearer | Original book bytes, with range support |
+| POST | `/api/v1/files/{id}/grants` | bearer | Mint a fixed-lifetime `open_in` capability for one book; body `{purpose:"open_in",ttl_secs:900}`; returns 201 with `{url,expires_at,grant_id}` |
+| GET, HEAD | `/api/v1/grants/{token}/content` | **capability** | Original book bytes with Range and repeat-open support until expiry; unknown 404, expired or revoked 410 `grant_gone` |
+| DELETE | `/api/v1/grants/{grant_id}` | bearer, owner-scoped | Revoke a grant early; 204 on success |
 | POST | `/api/v1/files/{id}/publication` | bearer | Parses an EPUB, returns a manifest, mints a session |
 | GET | `/api/v1/publication/{session}/{*resource}` | **capability** | One bounded EPUB archive entry |
 | DELETE | `/api/v1/publication/{session}` | bearer, owner-scoped | Closes a session early |

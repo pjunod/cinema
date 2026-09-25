@@ -2558,6 +2558,10 @@ fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
+    tokio::spawn(http::file_grants::prune_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(http::subtitle_downloads::automatic_loop(
         state.clone(),
         background_shutdown.clone(),
