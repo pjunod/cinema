@@ -62,7 +62,10 @@ final class LiveTvPlayerController: ObservableObject {
     private var heartbeat: Task<Void, Never>?
     private var guideRefresh: Task<Void, Never>?
     private var channelChange: Task<Void, Never>?
-    private var timeControlObservation: NSKeyValueObservation?
+    private var itemObserver: AVPlayerItemObserver?
+    private var itemEventTask: Task<Void, Never>?
+    private var itemFailure: NSError?
+    private var itemDidFail = false
     #if os(tvOS)
     private var displayCriteriaObservation: NSKeyValueObservation?
     #endif
@@ -193,15 +196,27 @@ final class LiveTvPlayerController: ObservableObject {
         player.play()
         surfaceMessage = nil
         message = "Playing live"
-        timeControlObservation = player.observe(
-            \.timeControlStatus,
-            options: [.initial, .new]
-        ) { [weak self] player, _ in
-            let status = player.timeControlStatus
-            let reason = player.reasonForWaitingToPlay
-            Task { @MainActor [weak self] in
-                guard let self, self.serial == expected else { return }
-                self.applyTimeControl(status: status, reason: reason)
+        let observer = AVPlayerItemObserver(item: item, player: player)
+        itemObserver = observer
+        itemEventTask = Task { @MainActor [weak self, weak observer] in
+            guard let observer else { return }
+            for await event in observer.events {
+                guard let self, self.serial == expected,
+                      self.itemObserver === observer, self.player.currentItem === item
+                else { return }
+                switch event {
+                case .timeControl(let status, let reason):
+                    self.applyTimeControl(status: status, reason: reason)
+                case .status(.failed):
+                    self.itemDidFail = true
+                    self.itemFailure = item.error as NSError?
+                case .failedToPlayToEnd(let error):
+                    self.itemDidFail = true
+                    self.itemFailure = error ?? (item.error as NSError?)
+                case .playbackStalled, .newErrorLogEntry, .playedToEnd,
+                     .interruption, .routeLost, .status:
+                    break
+                }
             }
         }
         heartbeat = Task { @MainActor [weak self] in
@@ -210,7 +225,9 @@ final class LiveTvPlayerController: ObservableObject {
                 do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
                 guard let self, self.serial == expected else { return }
                 do {
-                    if item.status == .failed { throw Self.playerFailure(item.error) }
+                    if self.itemDidFail || item.status == .failed {
+                        throw Self.playerFailure(self.itemFailure ?? (item.error as NSError?))
+                    }
                     let position = self.player.currentTime().seconds
                     self.sampleLiveEdge(item: item, position: position)
                     if !self.paused && !self.systemPaused && progress.observe(position: position) {
@@ -557,8 +574,12 @@ final class LiveTvPlayerController: ObservableObject {
         heartbeat = nil
         channelChange?.cancel()
         channelChange = nil
-        timeControlObservation?.invalidate()
-        timeControlObservation = nil
+        itemObserver?.cancel()
+        itemObserver = nil
+        itemEventTask?.cancel()
+        itemEventTask = nil
+        itemFailure = nil
+        itemDidFail = false
         #if os(tvOS)
         displayCriteriaObservation?.invalidate()
         displayCriteriaObservation = nil
