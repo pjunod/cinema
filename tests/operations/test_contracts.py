@@ -1776,7 +1776,7 @@ assert.equal(context.ACT_TIMER, null);
         effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
-        self.assertIn("timeout-minutes: 5", fast_jobs["preflight"])
+        self.assertIn("timeout-minutes: 10", fast_jobs["preflight"])
         fast_rust_steps = workflow_step_blocks(fast_jobs["rust_compile"])
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")
@@ -2178,7 +2178,7 @@ assert.equal(context.ACT_TIMER, null);
             "membership_added_between_begin_passes_is_fenced_before_store_admission",
             "replicated_membership_exclusion_spans_final_roster_read_and_peer_end",
             "replicated_exclusion_projection_outlives_remote_ttl_and_clock_skew",
-            "cache_admin_revocation_operation_gate_fails_fast_and_is_raii_released",
+            "cache_admin_revocation_operation_queue_is_bounded_and_raii_released",
             "local_apply_ack_wire_version_rejects_pre_barrier_receivers",
             "begin_ack_installs_memory_fence_before_waiting_for_exact_local_apply",
             "cancelled_local_apply_wait_leaves_peer_memory_fence_closed",

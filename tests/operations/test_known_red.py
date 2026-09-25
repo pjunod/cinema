@@ -48,7 +48,12 @@ class KnownRedContractTest(unittest.TestCase):
         # audit and the broadcast-capture summary, each driven by
         # scripts/live-tv-caption-audit with the hardware or capture its
         # ignore reason names.
-        self.assertEqual(len(ignored), 17)
+        # K-05 M0 adds the operator-run Hiqlite statement capture,
+        # k05_capture_hiqlite_statements, which writes the file named by
+        # K05_HIQLITE_CAPTURE for the query-plan evidence.
+        # K-08 M4 adds the tokenizer regex-backend equivalence check, which
+        # needs the pinned model files its ignore reason names.
+        self.assertEqual(len(ignored), 19)
         self.assertTrue(all(item.reason for item in ignored))
         self.assertTrue(all(item.path in item.identity for item in ignored))
         self.assertTrue(all(item.cargo_name in item.identity for item in ignored))

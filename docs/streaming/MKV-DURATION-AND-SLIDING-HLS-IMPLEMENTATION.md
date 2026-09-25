@@ -553,6 +553,12 @@ bounded batch/lead is ready even when its speed is unknown. The publication
 timer can expose staged media without resuming FFmpeg. Thus unknown speed
 does not require unbounded production.
 
+The explicit time hold therefore requires both conditions: one whole batch
+staged past the published end, and produced media reaching what the next
+publication will ask for -- the clock's desired end plus a rate-scaled
+two-exchange guard, capped at its `allowed_end_ms` -- so the hold cannot stop
+the producer just short of the next snapshot's floor.
+
 ### 9.3 Initial runway and window length
 
 The first response starts at the oldest advertised segment because of the

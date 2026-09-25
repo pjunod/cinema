@@ -412,6 +412,10 @@ paths = [
   # adds a newly-required column breaks it, so it belongs with the model whose
   # persistence it reproduces.
   "crates/plurx-core/examples/catalogue_fixture.rs",
+  # K-05's query-plan tool over that fixture: it drives the real stores'
+  # hot catalogue reads, captures the statements they trace, and records
+  # each plan and its cold and warm timings on both backends' schemas.
+  "crates/plurx-core/examples/query_plans/{main,calls,bench}.rs",
   "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,testfixtures}.rs",
   "crates/plurx-core/src/content_analysis.rs",
   "crates/plurx-core/src/store/mod.rs",
@@ -453,6 +457,9 @@ paths = [
   "crates/plurx-core/src/cluster/migration.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/sqlite/mod.rs",
+  # K-05 section 3.9: poisoned-connection recovery and the boot integrity
+  # check that refuses a corrupt database before migration touches it.
+  "crates/plurx-core/src/store/sqlite/housekeeping.rs",
   "crates/plurxd/tests/cluster_activation.rs",
 ]
 checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth"]
@@ -509,6 +516,7 @@ paths = [
   "crates/plurx-core/src/store/sql_source.rs",
   "crates/plurx-core/src/transcode/{encoder,manifest}.rs",
   "crates/plurx-core/tests/hiqlite_tls_provider.rs",
+  "crates/plurx-core/tests/rustls_single_provider.rs",
   "crates/plurx-core/tests/store_contract.rs",
   "tests/validation/test_store_shard.py",
   "validation/store_shard.py",
@@ -589,7 +597,7 @@ depends_on = ["cluster.membership", "cluster.auth", "identity.access"]
 [[points]]
 id = "cluster.page-reads"
 title = "Clustered page reads and page-outcome evidence"
-contract = "The settings_snapshot and cache_bytes Store primitives consumed by GET /settings keep authoritative semantics while using one replicated settings snapshot plus one cache aggregate when configured; the offline_activity_packages primitive joins Activity display fields in one store query whose call count is independent of package cardinality; Home preserves the established ordering of its two progress-derived reads while overlapping independent recently-added work, and home_preview_pages returns every populated library's fixed-size preview in one authority-consistent query independent of library cardinality. Clustered Activity overlaps local work with one bounded authenticated peer round, shares one process-wide physical fanout across concurrent summary/detail callers, enforces a one-second start floor and successful-result reuse window, refreshes the wire-start floor after delayed directory resolution so owner cancellation cannot release it, attributes every answered delivery to its node, preserves the exact native sessions array, keeps the admin hostname projection per request, and exposes typed missing-node state instead of silently shortening the result; SQLite and peerless responses retain their exact legacy shape. Its process-only fanout, reuse, directory-error, and peer-outcome counters use fixed labels and a metrics scrape acquires neither the Activity gate nor the Store. The three-voter gate measures the Settings, Activity, and Home Store primitives as attempted Hiqlite client-call families, not complete HTTP pages or network RTTs, and its counters compile out of production builds. Home, Activity, and Settings expose generation-fenced shell, content, and settled phases; the credential-safe named runner records raw phase and normalized body-complete API timings against an attributable deployed build, explicitly classifies /api/v1/home/previews, brackets every sample with target role, voter membership, Raft-stability, and bounded fault-scenario checks, and enforces the reviewed named-runner budgets without retaining browser credentials, network identity, or dynamic response text. Browser request concurrency, failure isolation, and overlapping-timer behavior remain separate web-static contracts."
+contract = "The settings_snapshot and cache_bytes Store primitives consumed by GET /settings keep authoritative semantics while using one replicated settings snapshot plus one cache aggregate when configured; the offline_activity_packages primitive joins Activity display fields in one store query whose call count is independent of package cardinality; Home reads its two progress-derived rails from one read of the same watch state, each rail in its established order and limit, while overlapping independent recently-added work; library grids, item pages and Home previews read watch rows and container rollups as one watch_summary; every browse watch-state read goes through CatalogueReader, which serves it from the local replica only when the bounded permit holds and the node has applied the client-echoed X-Plurx-Read-After index, raised to the latest watch write this process acknowledged for the user, and otherwise answers from Authority; a request without that header is always Authority, because a node's own older write record cannot prove a later write through a peer; a request whose watch writes all reported a Raft log index returns the highest as X-Plurx-Commit-Index, and one with a watch write of unknown position returns X-Plurx-Commit-Index: unknown so the client drops its echo; the Store counts every watch-state read per request on both backends, and Home previews, library grids and item pages each perform one; a source census pins the consistent-read call sites per replicated slice, counting each call that passes a consistent read kind to a shared dispatch helper as a site, and refuses growth without a stated authority reason; and home_preview_pages returns every populated library's fixed-size preview in one authority-consistent query independent of library cardinality. Clustered Activity overlaps local work with one bounded authenticated peer round, shares one process-wide physical fanout across concurrent summary/detail callers, enforces a one-second start floor and successful-result reuse window, refreshes the wire-start floor after delayed directory resolution so owner cancellation cannot release it, attributes every answered delivery to its node, preserves the exact native sessions array, keeps the admin hostname projection per request, and exposes typed missing-node state instead of silently shortening the result; SQLite and peerless responses retain their exact legacy shape. Its process-only fanout, reuse, directory-error, and peer-outcome counters use fixed labels and a metrics scrape acquires neither the Activity gate nor the Store. The three-voter gate measures the Settings, Activity, and Home Store primitives as attempted Hiqlite client-call families, not complete HTTP pages or network RTTs, and its counters compile out of production builds. Home, Activity, and Settings expose generation-fenced shell, content, and settled phases; the credential-safe named runner records raw phase and normalized body-complete API timings against an attributable deployed build, explicitly classifies /api/v1/home/previews, brackets every sample with target role, voter membership, Raft-stability, and bounded fault-scenario checks, and enforces the reviewed named-runner budgets without retaining browser credentials, network identity, or dynamic response text. Browser request concurrency, failure isolation, and overlapping-timer behavior remain separate web-static contracts."
 paths = [
   "benchmarks/cluster-page-latency.schema.json",
   "crates/plurx-core/Cargo.toml",
@@ -598,6 +606,12 @@ paths = [
   "crates/plurx-core/src/store/hiqlite.rs",
   "crates/plurx-core/src/store/hiqlite_durable.rs",
   "crates/plurx-core/src/store/hiqlite_media.rs",
+  "crates/plurx-core/src/store/watch_fence.rs",
+  "crates/plurx-core/src/store/consistent_read_census.rs",
+  "crates/plurx-core/src/store/placeholder_census.rs",
+  "crates/plurx-core/src/store/sql_source.rs",
+  "crates/plurx-core/src/store/sqlite/watch.rs",
+  "crates/plurx-core/src/cluster/migration.rs",
   "crates/plurx-core/src/store/sqlite/mod.rs",
   "crates/plurx-core/src/store/sqlite/media.rs",
   "crates/plurx-core/src/store/sqlite/offline.rs",
@@ -605,6 +619,7 @@ paths = [
   "crates/plurx-cluster-check/tests/page_latency_schema.rs",
   "crates/plurxd/tests/cluster_activity.rs",
   "crates/plurxd/src/http/browse.rs",
+  "crates/plurxd/src/http/extract.rs",
   "crates/plurxd/src/http/mod.rs",
   "crates/plurxd/src/http/system.rs",
   "scripts/cluster-page-latency",
@@ -717,7 +732,7 @@ depends_on = ["core.media", "server.api"]
 [[points]]
 id = "playback.pipeline"
 title = "Playback decision, delivery, and presentation"
-contract = "Every supported source reaches a client through the intended direct, remux, copy, or transcode path, follows its durable cluster owner through a streamed relay, and keeps presenting media; a rolling writer advertises only cumulative playback consumption plus its bounded reserve, preserves the segment covering the viewer's protected back buffer, and cannot turn a faster producer into a forward position discontinuity; a seek storm leaves one playback with at most one live subtitle-window extraction, carrying the destination the client settled on, with abandoned windows publishing nothing and remembering nothing."
+contract = "Every supported source reaches a client through the intended direct, remux, copy, or transcode path, follows its durable cluster owner through a streamed relay, and keeps presenting media; a rolling writer advertises only cumulative playback consumption plus its bounded reserve, preserves the segment covering the viewer's protected back buffer, and cannot turn a faster producer into a forward position discontinuity; a seek storm leaves one playback with one local subtitle-window owner carrying the settled destination and at most two bounded speculative peer ranges, with abandoned requester futures publishing nothing and remembering nothing."
 paths = [
   "crates/plurx-core/src/fmp4.rs",
   "crates/plurx-core/src/mediafacts.rs",
@@ -733,7 +748,7 @@ paths = [
   "scripts/fuzz-seeds",
   "vendor/dolby_vision/**",
   "vendor/bitvec_helpers/**",
-  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,scratch_ledger,scratch_put,subtitle_ride_along,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
+  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,scratch_ledger,scratch_put,subtitle_ride_along,subtitle_ranges,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
   "crates/plurxd/src/transcode/**",
   "crates/plurxd/src/vod/**",
   "crates/plurxd/src/online_subtitles.rs",

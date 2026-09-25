@@ -533,6 +533,18 @@ An older client never reads the field; a newer one treats an absent field as
 
 ## Subtitles — three independent delivery questions
 
+While an HLS text sidecar is cold, indexed Matroska playback windows use a
+bounded input seek. The serving node starts the current window immediately;
+up to two peers prepare the next windows concurrently. Each completed window
+is published independently, so a slow peer does not delay current subtitles.
+Late-file seeks use this same path. The session owns the bounded fan-out;
+source attestation and replacement checks fence peer results. The complete
+subtitle job continues to populate the durable store. PGS and styled burns
+retain their complete-track producers. See the
+[range implementation status](clients/PARALLEL-SUBTITLE-RANGES-STATUS.md) for
+bounds, preroll boundary semantics and verification evidence.
+
+
 Downloaded OpenSubtitles captions join the same selectable list after the
 embedded ordinals. The catalog retains normalized WebVTT, provider identity,
 language and accessibility flags against the file's size and modification

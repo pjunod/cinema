@@ -117,6 +117,11 @@ pub enum TransactionShape {
     /// here rather than left to be rediscovered.
     WriteReadBack,
     WriteUntilStable,
+    /// Reads only, held in one transaction so that several statements see
+    /// one WAL snapshot (`with_read_txn`, K-05 section 3.1): a count and the
+    /// page it describes cannot straddle a commit. It writes nothing, so it
+    /// has no replicated write shape to port.
+    ReadSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -271,6 +276,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "mod.rs",
+        method: "with_read_txn",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadSnapshot,
     },
     // The Live TV configuration is generation-fenced, so its write is a
     // compare-and-set: read the stored generation, branch on whether it still
@@ -1024,6 +1036,7 @@ mod tests {
             include_str!("sqlite/fragment_index_cluster.rs"),
         ),
         ("dvr.rs", include_str!("sqlite/dvr.rs")),
+        ("housekeeping.rs", include_str!("sqlite/housekeeping.rs")),
         ("library.rs", include_str!("sqlite/library.rs")),
         (
             "library_channels.rs",
@@ -1196,11 +1209,16 @@ mod tests {
         // joins or promotes before inserting; the claim writes its attempt
         // row only when it wins the conditional request update.
         //
+        // 101 with K-05's `with_read_txn`: a read-pool helper that holds one
+        // `BEGIN DEFERRED` across a closure's statements so a library page
+        // and its count come from one snapshot. It reads only; M1 added the
+        // boundary and this registers it.
+        //
         // The number is written out rather than derived so that adding a
         // transaction boundary has to be a deliberate edit here. That is the
         // point of the assertion: two of the sites above reached main without
         // one, and ten more did before this correction.
-        assert_eq!(methods.len(), 100);
+        assert_eq!(methods.len(), 101);
     }
 
     #[test]

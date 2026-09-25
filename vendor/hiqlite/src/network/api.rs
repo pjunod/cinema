@@ -284,6 +284,98 @@ mod tests {
     use openraft::{Membership, ServerState, StoredMembership};
     use std::collections::{BTreeMap, BTreeSet};
 
+    fn variant_tag(payload: ApiStreamResponsePayload) -> u32 {
+        let bytes = crate::helpers::serialize(&payload).expect("serialize stream payload");
+        u32::from_le_bytes(bytes[..4].try_into().expect("legacy bincode variant tag"))
+    }
+
+    /// The write-ack variants are appended, so every ordinal an older peer
+    /// can decode keeps its position, and they sort after every deployed
+    /// variant compiled into this build.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn write_ack_variants_are_appended_after_every_deployed_response_ordinal() {
+        let deployed = [
+            variant_tag(ApiStreamResponsePayload::Execute(Ok(1))),
+            variant_tag(ApiStreamResponsePayload::ExecuteReturning(Ok(Vec::new()))),
+            variant_tag(ApiStreamResponsePayload::Transaction(Ok(Vec::new()))),
+            variant_tag(ApiStreamResponsePayload::Query(Ok(Vec::new()))),
+            variant_tag(ApiStreamResponsePayload::QueryConsistent(Ok(Vec::new()))),
+            variant_tag(ApiStreamResponsePayload::Batch(Ok(Vec::new()))),
+            variant_tag(ApiStreamResponsePayload::Migrate(Ok(()))),
+        ];
+        assert_eq!(deployed, [0, 1, 2, 3, 4, 5, 6]);
+        #[allow(unused_mut)]
+        let mut last_deployed = 6;
+        #[cfg(feature = "cache")]
+        {
+            last_deployed = last_deployed.max(variant_tag(ApiStreamResponsePayload::KV(Ok(
+                crate::store::state_machine::memory::state_machine::CacheResponse::Ok,
+            ))));
+        }
+        #[cfg(feature = "listen_notify_local")]
+        {
+            last_deployed =
+                last_deployed.max(variant_tag(ApiStreamResponsePayload::Notify(Ok(()))));
+        }
+        let acked = variant_tag(ApiStreamResponsePayload::ExecuteAcked(Ok((1, 9))));
+        let returning_acked = variant_tag(ApiStreamResponsePayload::ExecuteReturningAcked(Ok((
+            Vec::new(),
+            9,
+        ))));
+        assert_eq!(acked, last_deployed + 1);
+        assert_eq!(returning_acked, last_deployed + 2);
+    }
+
+    /// Only the exact v1 header value negotiates acked responses; a leader
+    /// answering a connection without it sends the original variants, which
+    /// is what an older client can decode.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn write_ack_log_index_is_sent_only_on_a_negotiated_connection() {
+        use super::{
+            WRITE_ACK_LOG_INDEX_HEADER, WRITE_ACK_LOG_INDEX_V1, execute_returning_stream_payload,
+            execute_stream_payload, write_ack_log_index_requested,
+        };
+        use axum::http::{HeaderMap, HeaderValue};
+
+        let mut headers = HeaderMap::new();
+        assert!(!write_ack_log_index_requested(&headers));
+        headers.insert(
+            WRITE_ACK_LOG_INDEX_HEADER,
+            HeaderValue::from_static("raft-log-index-v2"),
+        );
+        assert!(!write_ack_log_index_requested(&headers));
+        headers.insert(
+            WRITE_ACK_LOG_INDEX_HEADER,
+            HeaderValue::from_static(WRITE_ACK_LOG_INDEX_V1),
+        );
+        assert!(write_ack_log_index_requested(&headers));
+
+        assert!(matches!(
+            execute_stream_payload(Ok(3), 41, true),
+            ApiStreamResponsePayload::ExecuteAcked(Ok((3, 41)))
+        ));
+        assert!(matches!(
+            execute_stream_payload(Ok(3), 41, false),
+            ApiStreamResponsePayload::Execute(Ok(3))
+        ));
+        assert!(matches!(
+            execute_returning_stream_payload(Ok(Vec::new()), 42, true),
+            ApiStreamResponsePayload::ExecuteReturningAcked(Ok((rows, 42))) if rows.is_empty()
+        ));
+        assert!(matches!(
+            execute_returning_stream_payload(Ok(Vec::new()), 42, false),
+            ApiStreamResponsePayload::ExecuteReturning(Ok(rows)) if rows.is_empty()
+        ));
+        // A statement error is still an error on either shape; no index is
+        // reported for a write that changed nothing.
+        assert!(matches!(
+            execute_stream_payload(Err(crate::Error::Sqlite("boom".into())), 43, true),
+            ApiStreamResponsePayload::ExecuteAcked(Err(_))
+        ));
+    }
+
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn production_api_response_writer_flushes_serialized_response_through_tls() {
@@ -417,12 +509,60 @@ pub async fn listen(state: AppStateExt, headers: HeaderMap) -> Result<(), Error>
     ))
 }
 
+/// Upgrade-request header by which a client stream asks its leader to report
+/// the Raft log index of every committed `Execute`/`ExecuteReturning` it
+/// answers (Plurx patch).
+///
+/// Negotiated per connection rather than per request so the request encoding
+/// never changes: an older leader ignores an unknown header and keeps sending
+/// the original variants, which the client still accepts, while an older
+/// client never sends the header and therefore never receives a variant it
+/// cannot decode. Neither direction of a rolling upgrade can tear down a
+/// shared stream over it.
+pub(crate) const WRITE_ACK_LOG_INDEX_HEADER: &str = "x-hiqlite-write-ack";
+/// The only value of [`WRITE_ACK_LOG_INDEX_HEADER`] this build understands.
+pub(crate) const WRITE_ACK_LOG_INDEX_V1: &str = "raft-log-index-v1";
+
+pub(crate) fn write_ack_log_index_requested(headers: &HeaderMap) -> bool {
+    headers
+        .get(WRITE_ACK_LOG_INDEX_HEADER)
+        .is_some_and(|value| value.as_bytes() == WRITE_ACK_LOG_INDEX_V1.as_bytes())
+}
+
+#[cfg(feature = "sqlite")]
+fn execute_stream_payload(
+    result: Result<usize, Error>,
+    log_index: u64,
+    write_ack_log_index: bool,
+) -> ApiStreamResponsePayload {
+    if write_ack_log_index {
+        ApiStreamResponsePayload::ExecuteAcked(result.map(|rows| (rows, log_index)))
+    } else {
+        ApiStreamResponsePayload::Execute(result)
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn execute_returning_stream_payload(
+    result: Result<Vec<Result<RowOwned, Error>>, Error>,
+    log_index: u64,
+    write_ack_log_index: bool,
+) -> ApiStreamResponsePayload {
+    if write_ack_log_index {
+        ApiStreamResponsePayload::ExecuteReturningAcked(result.map(|rows| (rows, log_index)))
+    } else {
+        ApiStreamResponsePayload::ExecuteReturning(result)
+    }
+}
+
 /// This is the WebSocket stream a Raft client (Followers) connects to.
 pub async fn stream(
     state: AppStateExt,
     Path(raft_type): Path<RaftType>,
+    headers: HeaderMap,
     ws: upgrade::IncomingUpgrade,
 ) -> Result<impl IntoResponse, Error> {
+    let write_ack_log_index = write_ack_log_index_requested(&headers);
     let (response, socket) = ws.upgrade()?;
     debug!("New Raft Stream for {:?}", raft_type);
 
@@ -452,7 +592,7 @@ pub async fn stream(
     let task_status = state.snapshot_transport.clone();
     tokio::task::spawn(async move {
         let _task_guard = task_status.owned_async_task();
-        if let Err(err) = handle_socket_concurrent(state, socket).await {
+        if let Err(err) = handle_socket_concurrent(state, socket, write_ack_log_index).await {
             error!("Error in websocket connection: {}", err);
         }
     });
@@ -532,6 +672,15 @@ pub(crate) enum ApiStreamResponsePayload {
 
     #[cfg(feature = "listen_notify_local")]
     Notify(Result<(), Error>),
+
+    // Plurx patch: appended after every deployed variant so no existing
+    // ordinal moves, and sent only on a connection that negotiated
+    // `WRITE_ACK_LOG_INDEX_HEADER` — a client that cannot decode these never
+    // receives them.
+    #[cfg(feature = "sqlite")]
+    ExecuteAcked(Result<(usize, u64), Error>),
+    #[cfg(feature = "sqlite")]
+    ExecuteReturningAcked(Result<(Vec<Result<RowOwned, Error>>, u64), Error>),
 }
 
 #[derive(Debug)]
@@ -543,6 +692,7 @@ pub(crate) enum WsWriteMsg {
 async fn handle_socket_concurrent(
     state: AppStateExt,
     socket: upgrade::UpgradeFut,
+    #[cfg_attr(not(feature = "sqlite"), allow(unused_variables))] write_ack_log_index: bool,
 ) -> Result<(), fastwebsockets::WebSocketError> {
     let mut ws = socket.await?;
     ws.set_auto_close(true);
@@ -686,6 +836,7 @@ async fn handle_socket_concurrent(
                         .await
                     {
                         Ok(resp) => {
+                            let log_index = resp.log_id.index;
                             let resp: crate::Response = resp.data;
                             let res = match resp {
                                 crate::Response::Execute(res) => res.result,
@@ -693,7 +844,11 @@ async fn handle_socket_concurrent(
                             };
                             ApiStreamResponse {
                                 request_id,
-                                result: ApiStreamResponsePayload::Execute(res),
+                                result: execute_stream_payload(
+                                    res,
+                                    log_index,
+                                    write_ack_log_index,
+                                ),
                             }
                         }
                         Err(err) => ApiStreamResponse {
@@ -712,6 +867,7 @@ async fn handle_socket_concurrent(
                         .await
                     {
                         Ok(resp) => {
+                            let log_index = resp.log_id.index;
                             let resp: crate::Response = resp.data;
                             let res = match resp {
                                 crate::Response::ExecuteReturning(res) => res.result,
@@ -719,7 +875,11 @@ async fn handle_socket_concurrent(
                             };
                             ApiStreamResponse {
                                 request_id,
-                                result: ApiStreamResponsePayload::ExecuteReturning(res),
+                                result: execute_returning_stream_payload(
+                                    res,
+                                    log_index,
+                                    write_ack_log_index,
+                                ),
                             }
                         }
                         Err(err) => ApiStreamResponse {

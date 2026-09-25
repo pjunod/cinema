@@ -5345,10 +5345,11 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
         crate::watched::prometheus(),
         plurx_core::store::prometheus_store_operations(),
+        plurx_core::store::prometheus_sqlite_health(),
         crate::store_result::prometheus(),
         plurx_core::scan::prometheus_scan_walk(),
         plurx_core::metadata::prometheus_provider_requests(),
