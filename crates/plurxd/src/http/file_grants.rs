@@ -8,6 +8,7 @@ use axum::response::Response;
 use axum::Json;
 use plurx_core::auth;
 use plurx_core::domain::ItemKind;
+use plurx_core::store::NewFileGrant;
 use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
@@ -74,15 +75,15 @@ pub async fn mint(
     let expires_at = now + ttl;
     state
         .store
-        .create_file_grant(
-            &id,
-            &auth::hash_token(&token),
+        .create_file_grant(NewFileGrant {
+            id: id.clone(),
+            token_hash: auth::hash_token(&token),
             file_id,
-            user.id,
-            &auth::hash_token(&source_token),
-            now,
+            user_id: user.id,
+            source_token_hash: auth::hash_token(&source_token),
+            created_at: now,
             expires_at,
-        )
+        })
         .await?;
     Ok((
         StatusCode::CREATED,

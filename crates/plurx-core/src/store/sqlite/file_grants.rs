@@ -3,29 +3,17 @@ use rusqlite::{params, OptionalExtension};
 
 use super::SqliteStore;
 use crate::error::StoreError;
-use crate::store::{FileGrant, FileGrantStore};
+use crate::store::{FileGrant, FileGrantStore, NewFileGrant};
 
 #[async_trait]
 impl FileGrantStore for SqliteStore {
-    async fn create_file_grant(
-        &self,
-        id: &str,
-        token_hash: &str,
-        file_id: i64,
-        user_id: i64,
-        source_token_hash: &str,
-        created_at: i64,
-        expires_at: i64,
-    ) -> Result<(), StoreError> {
-        let id = id.to_owned();
-        let token_hash = token_hash.to_owned();
-        let source_token_hash = source_token_hash.to_owned();
+    async fn create_file_grant(&self, grant: NewFileGrant) -> Result<(), StoreError> {
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO file_grants
                  (id, token_hash, file_id, user_id, source_token_hash, purpose, created_at, expires_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, 'open_in', ?6, ?7)",
-                params![id, token_hash, file_id, user_id, source_token_hash, created_at, expires_at],
+                params![grant.id, grant.token_hash, grant.file_id, grant.user_id, grant.source_token_hash, grant.created_at, grant.expires_at],
             )?;
             Ok(())
         })

@@ -29,18 +29,20 @@ pub struct FileGrant {
     pub source_active: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct NewFileGrant {
+    pub id: String,
+    pub token_hash: String,
+    pub file_id: i64,
+    pub user_id: i64,
+    pub source_token_hash: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
 #[async_trait]
 pub trait FileGrantStore: Send + Sync {
-    async fn create_file_grant(
-        &self,
-        id: &str,
-        token_hash: &str,
-        file_id: i64,
-        user_id: i64,
-        source_token_hash: &str,
-        created_at: i64,
-        expires_at: i64,
-    ) -> Result<(), StoreError>;
+    async fn create_file_grant(&self, grant: NewFileGrant) -> Result<(), StoreError>;
     async fn file_grant_by_hash(&self, token_hash: &str) -> Result<Option<FileGrant>, StoreError>;
     async fn revoke_file_grant(&self, id: &str, user_id: i64, now: i64)
         -> Result<bool, StoreError>;

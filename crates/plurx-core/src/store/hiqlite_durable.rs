@@ -14,8 +14,8 @@ use super::hiqlite::{
     database_error, timeout_store, validate_sql, CacheTouchKey, HiqliteAuthStore, TimedClient,
 };
 use super::{
-    FileGrant, FileGrantStore, OfflinePackageStore, OutboxEntry, TraktStore, TranscodeCacheStore,
-    WatchedOutboxStore,
+    FileGrant, FileGrantStore, NewFileGrant, OfflinePackageStore, OutboxEntry, TraktStore,
+    TranscodeCacheStore, WatchedOutboxStore,
 };
 use crate::domain::{
     CacheManifestCheck, CachedTranscode, NewOfflinePackage, OfflineActivityPackage,
@@ -287,28 +287,19 @@ impl From<&mut Row<'_>> for FileGrantRow {
 
 #[async_trait]
 impl FileGrantStore for HiqliteAuthStore {
-    async fn create_file_grant(
-        &self,
-        id: &str,
-        token_hash: &str,
-        file_id: i64,
-        user_id: i64,
-        source_token_hash: &str,
-        created_at: i64,
-        expires_at: i64,
-    ) -> Result<(), StoreError> {
+    async fn create_file_grant(&self, grant: NewFileGrant) -> Result<(), StoreError> {
         self.execute(
             "INSERT INTO file_grants
              (id, token_hash, file_id, user_id, source_token_hash, purpose, created_at, expires_at)
              VALUES ($1, $2, $3, $4, $5, 'open_in', $6, $7)",
             params!(
-                id,
-                token_hash,
-                file_id,
-                user_id,
-                source_token_hash,
-                created_at,
-                expires_at
+                grant.id,
+                grant.token_hash,
+                grant.file_id,
+                grant.user_id,
+                grant.source_token_hash,
+                grant.created_at,
+                grant.expires_at
             ),
         )
         .await?;

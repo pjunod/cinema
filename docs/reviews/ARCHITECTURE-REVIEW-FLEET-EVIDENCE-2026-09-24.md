@@ -112,6 +112,11 @@ curl -fsS http://127.0.0.1:32400/metrics
 docker exec plurxd grep 'Max open files' /proc/1/limits
 ```
 
+The 2026-09-25 [fleet/client baselines appendix](ARCHITECTURE-REVIEW-FLEET-CLIENT-BASELINES-2026-09-25.md)
+records bounded read-only observations for L-01, L-02, C-03, S-04, S-05
+and K-06. Its 401 responses and idle counters do not satisfy the plans'
+active or authenticated acceptance checks.
+
 ## 3. Remaining fleet and device evidence — one row per workboard plan
 
 `No acceptance run` means the plan's named evidence is still owed. `Preliminary snapshot` refers only to §2; it does not change a plan's `merged` or `blocked` status. Long-duration collection, physical playback, NAS failure injection, follower restarts, and log-mode restarts were not performed in this pass.
