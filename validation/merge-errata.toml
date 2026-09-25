@@ -49,3 +49,11 @@ enforce_after = "448e803daba8ec7706350aedbe0562fd99454644"
 [[errata]]
 commit = "e2dfc6b77aa965e039b111038bb15a6ca352aab1"
 reason = "PR #512 landed corrective commit 1831ee898 (refuse empty caption audit results) without a Regression-Test trailer in its immutable merge message. The existing regression is tests/operations/test_live_tv_caption_audit.py::test_audit_requires_one_completed_test; fast lane #2976 passed on the reviewed head. PR #516 records this omission after fast lane #3000 found it. Future landing messages must carry the checked trailer."
+
+[[errata]]
+commit = "3ca348a77b769a9a0b72a402a7b6adadc8c966ec"
+reason = "PR #519's description named the scratch-hold regressions, including crates/plurxd/src/transcode/tests/chunk_03.rs::scratch_hold_publication_deadline_waits_out_a_global_scratch_hold and scratch_hold_publication_deadline_prepublication_capacity_waits_out_a_global_scratch_hold, but its immutable landing message omitted the Regression-Test trailers. Both tests resolve in this landing tree."
+
+[[errata]]
+commit = "60f3803d1d5dc431a919235fab328ae6ea86d394"
+reason = "PR #522's description named the rolling-publication regressions, including crates/plurxd/src/transcode/tests/chunk_03.rs::rolling_publication_budget_late_cycle_does_not_trap_a_held_producer and rolling_flow_release_target_is_capped_by_the_publication_allowance, but its immutable landing message omitted the Regression-Test trailers. Both tests resolve in this landing tree."

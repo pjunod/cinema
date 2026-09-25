@@ -18,6 +18,7 @@ targets `main`. Package boundaries are commits in one PR under the user's
 | Apple delivery facts and presentation | Local checks passed | `148829768`; iOS and tvOS simulator builds passed; 83 selected tests passed on each. |
 | Android delivery facts and presentation | Local checks passed | `148829768`; `:app:assembleDebug` and 35 selected unit tests passed. |
 | Adversarial implementation review | Findings addressed | One review found Apple Compact label drift, Android aspect basis, unattached web plan facts, and stale handoff ledger. Follow-up code and tests passed their focused checks. |
+| History evidence | Passed locally | `make history-check`: 2,303 corrective commits, 281 client-fix anchors, eight post-boundary landing commits. One anchor per branch corrective client commit; immutable trailer omissions for earlier main PRs #519 and #522 recorded in `validation/merge-errata.toml`. |
 | Fast lane | Pending | Mark PR #526 ready after pushing the final candidate; require current-head `Main promotion gate` success. |
 | PR merge | Pending | Merge only after the current-head `Main promotion gate` passes. |
 | Production and physical session evidence | Unavailable | No real Live TV Cozi session or physical phone/TV capture was available in this isolated checkout. The stream frame is planned on web/Apple and measured only from an eligible Android player sample. |
@@ -45,6 +46,13 @@ exposed an obsolete `observeFailure` call in a pre-existing test; it now
 exercises the controller's current notification-error handler. Both affected
 suites passed on rerun. The tracked hook passed on the reviewed commits; the
 remaining fixes and status update still need a final hooked commit.
+
+The history audit initially found three branch anchor errors and two earlier
+`main` merges whose messages lacked the regression trailers already present
+in their PR descriptions. The branch anchors now map each corrective client
+commit once. The permanent errata names PRs #519 and #522, their landing
+commits, and tests verified in those landing trees. The audit passed on this
+corrected worktree; the fast lane must still validate the pushed candidate.
 
 ## Scope decisions
 
