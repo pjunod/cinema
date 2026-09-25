@@ -1119,10 +1119,13 @@ private fun PlayerContent(
     // value instead of being rebuilt for it.
     val autoplayNext by rememberUpdatedState(preferences.autoplayNext)
     val playNext by rememberUpdatedState(onPlayNext)
-    DisposableEffect(controller, playbackLifecycleOwner) {
+    DisposableEffect(controller, playbackLifecycleOwner, componentActivity) {
         val lifecycle = playbackLifecycleOwner.lifecycle
         fun updateForeground() {
-            controller.setPresentationForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+            controller.setPresentationForeground(
+                lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
+                inPictureInPicture = componentActivity?.let(::isInPictureInPicture) == true,
+            )
         }
         val observer = LifecycleEventObserver { _, _ -> updateForeground() }
         lifecycle.addObserver(observer)
@@ -1207,6 +1210,10 @@ private fun PlayerContent(
         } else {
             val pipModeListener = Consumer<PictureInPictureModeChangedInfo> { info ->
                 isInPip = info.isInPictureInPictureMode
+                controller.setPresentationForeground(
+                    playbackLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
+                    inPictureInPicture = info.isInPictureInPictureMode,
+                )
                 panel = null
                 if (info.isInPictureInPictureMode) {
                     controlsVisible = false
