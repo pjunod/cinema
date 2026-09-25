@@ -4,6 +4,33 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## P-02 M8: four parser fuzz targets, and the first one found a way to abort plurxd
+
+**Branch `plan/P-02-2`, draft [PR #510](http://192.168.4.7:3000/noirr/plurx/pulls/510); not merged, nothing deployed.**
+The second pass of
+[SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md](docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md)
+takes the buildable remainder that needs no lab host and no decision of
+Paul's: **M8**, the four fuzz targets of §3.6 (`fmp4_reader`, `rpu_rewrite`,
+`nfo_parse`, `epub_facts`), each with a generated seed corpus
+(`scripts/fuzz-seeds`), a nightly `parser-fuzz` matrix job on the PGS
+campaign's budget, and `scripts/fuzz-campaign` writing executions and corpus
+growth into the run summary so all five campaigns read from one page.
+
+`rpu_rewrite` found three ways for a Dolby Vision RPU to take the daemon
+down within its first ten thousand executions, all in `dolby_vision` 3.4.0:
+an allocation sized from an unbounded ue(v) count (a ~26 GB
+`Vec::with_capacity` from eight changed bytes of the real Profile 7 fixture,
+which aborts the process), an `unimplemented!()` two bits from any valid
+RPU, and an `unreachable!()` on any level 8/9/10 block with an unlisted
+length. The parser runs inside `plurxd` on every sample of a converted disc
+remux. The crate is now vendored under `vendor/dolby_vision` with three
+refusals in place of those ([PLURX-PATCH.md](vendor/dolby_vision/PLURX-PATCH.md)),
+each input is a fixture with a test in `dvconvert`, and refusals now report
+the parse error's whole chain rather than "CM v4.0". M3 stays blocked on
+Paul's spawn-seam decision, M4 on the lab1 matrix; M7's release-profile PR 1
+measurement is in progress on the same branch. Board row P-02 is
+`in-progress`.
+
 ## Live TV: direct play first, 5.1 stays 5.1
 
 **Branch `fix/live-tv-direct-play`, draft pull request; not merged, nothing

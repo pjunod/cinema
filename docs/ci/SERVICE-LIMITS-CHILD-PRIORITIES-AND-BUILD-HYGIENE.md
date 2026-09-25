@@ -680,6 +680,59 @@ Ten minutes per target is a budget, not coverage evidence — the nightly
 summary prints executions and corpus growth so a target that stops finding
 new edges is visible.
 
+**As built, 2026-09-24/25 (`plan/P-02-2`, claude-fable-5-1).** The four
+targets, `scripts/fuzz-seeds`, `scripts/fuzz-campaign`, the nightly
+`parser-fuzz` matrix job and the operations-test extension landed. Where the
+table above and the code differ, the code is right and the reason is here:
+
+- **`rpu_rewrite`'s seam.** `Converter::for_init` / `convert` do not exist;
+  the module header of `transcode/dvconvert.rs` explains why the
+  between-two-ffmpegs form was withdrawn. The seam is
+  `convert_length_prefixed(sample, nal_length_size, &mut out)`, and the
+  target drives it directly over a length-prefixed sample, with the first
+  input byte choosing the `hvcC` width (the three legal widths get seven
+  slots in eight, an illegal width one). Its seeds are the repository's own
+  Profile 7 RPU (`tests/playback/dv-p7-rpu.hex`) framed as samples, not
+  `dv-evidence` output, which needs a server and a real title.
+- **Bounds.** Input caps are 4 MiB (`fmp4_reader`) and 1 MiB (the other
+  three). The reader target's unit cap is a termination guard at 2²⁰, not
+  1 000: a well-formed 4 MiB input cannot reach it, so it fires only for a
+  reader that yields without consuming. `-rss_limit_mb` stays at libFuzzer's
+  2048 default rather than the 1024 written above: `epub_facts` peaks at
+  991 MiB under AddressSanitizer with the reader's own 12 MiB cover cap in
+  force, so 1024 would report the sanitizer's overhead as a finding.
+- **Tempfile.** `epub_facts` reuses one `NamedTempFile` per thread, truncated
+  and rewritten per input, exactly as `inspect_sup` does; the reader is
+  handed that path and nothing else. Deleting and recreating per iteration
+  bought nothing the reuse does not.
+- **`parse_epub`.** No such function; `read_epub_facts` is the catalogue
+  seam and the only one a scan reaches. No second EPUB target.
+- **Seeds are generated, committed and reproducible.** `scripts/fuzz-seeds`
+  writes 13 / 14 / 20 / 17 seeds (≈ 140 / 60 / 80 / 550 KiB); the fMP4 ones
+  come from a one-second 64×64 lavfi pattern through libx264, so an x264
+  build change can move bytes in them, which is why regeneration is a PR
+  that names its build and not a nightly step. `scripts/fuzz-seeds --check`
+  runs in the job so an emptied corpus fails before the campaign.
+- **The fuzz workspace patches its own `dolby_vision`.** `fuzz/Cargo.toml`
+  is a separate workspace and does not inherit the root `[patch]` table; the
+  first campaign after the fix below was still fuzzing the registry crate
+  until the row was added there too. Keep the two rows in step.
+
+**Findings, first hour.** `fmp4_reader`, `nfo_parse` and `epub_facts` ran
+60 s, then 450–300 s, clean (1.1 M / 1.0 M / 21 K executions in the first
+minute; 3.2 M / 76 K in the longer runs). `rpu_rewrite` found three ways for
+an RPU to take the process down inside its first ten thousand executions,
+all in the `dolby_vision` 3.4.0 dependency: an allocation sized from an
+unbounded ue(v) count (`num_ext_blocks` ≈ 4×10⁹ → a ~26 GB
+`Vec::with_capacity` → abort), an `unimplemented!()` two bits away from any
+valid RPU, and an `unreachable!()` reached by any level 8/9/10 block with an
+unlisted length. The crate is now vendored under `vendor/dolby_vision` with
+three refusals in place of those (its `PLURX-PATCH.md` has the table), and
+each input is a fixture under `tests/playback/dv-p7-rpu-hostile-*.hex` with
+a test in `dvconvert`'s own `mod tests`, per the rule above. The vendoring
+follows `vendor/rust_decimal`: workspace exclude, `[patch.crates-io]`,
+`scripts/vendor-audit-lock`, THIRD-PARTY-NOTICES §3.
+
 ---
 
 ## 4. Guardrails (non-goals)
@@ -830,6 +883,14 @@ Acceptance: `cargo +nightly-2026-08-01 fuzz run <target> -- -max_total_time=60`
 runs each target locally without a crash; the next nightly's summary lists
 five campaigns with executions and corpus sizes; `python3 -m unittest
 tests.operations.test_evidence_workflows` green.
+
+**Status (2026-09-25):** built on `plan/P-02-2`. Local 60 s runs: three
+targets clean; `rpu_rewrite` crashed until the three `dolby_vision` refusals
+in §3.6 landed, then ran clean (its run against the vendored crate is in the
+execution log). `tests.operations.test_evidence_workflows` green (15 tests).
+The five-campaign nightly summary is **post-merge** evidence: the job has not
+run on a runner yet, and its first night's summary belongs in the execution
+log through the evidence-only docs PR.
 
 ---
 
