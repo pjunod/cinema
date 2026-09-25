@@ -17,8 +17,8 @@ use super::peer_transport::{
 };
 use crate::live_tv::{
     capability_owner, guide, GuideWindow, LiveTvActivateRequest, LiveTvActivated, LiveTvConfig,
-    LiveTvDrainAck, LiveTvError, LiveTvGuide, LiveTvResourceRequest, LiveTvSessionStatus,
-    LiveTvSnapshot, LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStopRequest, SnapshotFreshness,
+    LiveTvError, LiveTvGuide, LiveTvResourceRequest, LiveTvSessionStatus, LiveTvSnapshot,
+    LiveTvStartRequest, LiveTvStartRequestV2, LiveTvStopRequest, SnapshotFreshness,
     SnapshotRequest, ACTIVATE_PATH, GUIDE_PATH, MAX_SNAPSHOT_BYTES, RESOURCE_PATH, RESUME_PATH,
     RETIRE_PATH, SNAPSHOT_PATH, START_PATH, START_STATE_PATH, START_V2_PATH, STOP_PATH,
 };
@@ -41,7 +41,6 @@ const CONTROL_EXCHANGE_DEADLINE: Duration = Duration::from_secs(5);
 /// The owner's own lifecycle constants are untouched — this bounds the
 /// ingress's exchanges, not how long a tuner is given to feed.
 const PUBLIC_START_DEADLINE: Duration = Duration::from_secs(35);
-const DRAIN_EXCHANGE_DEADLINE: Duration = Duration::from_secs(20);
 const RESOURCE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(12);
 const MAX_START_RESPONSE_BYTES: usize = 32 * 1024;
 const GUIDE_EXCHANGE_DEADLINE: Duration = Duration::from_secs(25);
@@ -442,7 +441,7 @@ fn parse_public_request_id(value: &str) -> Result<&str, ApiError> {
 /// What *this binary's public surface* accepts: body fields and recovery
 /// routes. An owner advertising 3 says nothing about the ingress a client is
 /// talking to, so what the client reads is the intersection.
-const INGRESS_START_PROTOCOLS: &[u8] = &[1, 2, 3];
+const INGRESS_START_PROTOCOLS: &[u8] = &[1, 2, 3, 4];
 
 fn negotiated_protocols(owner: &[u8]) -> Vec<u8> {
     INGRESS_START_PROTOCOLS
@@ -450,6 +449,51 @@ fn negotiated_protocols(owner: &[u8]) -> Vec<u8> {
         .copied()
         .filter(|protocol| owner.contains(protocol))
         .collect()
+}
+
+/// Persist the server-issued namespace before returning it. An unknown v4 ID
+/// never falls back to legacy admission, even after terminal-history GC.
+pub(crate) async fn issue_start(
+    Path(channel): Path<String>,
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    body: Option<Json<PublicLiveTvStart>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let deadline = deadline_after(PUBLIC_START_DEADLINE);
+    let generation = state.serving.authority().admit().ok_or_else(|| {
+        api_error(LiveTvError::OwnerUnavailable(
+            crate::serving_fence::SERVING_FENCED_MESSAGE.into(),
+        ))
+    })?;
+    let config = live_tv_enabled_config(&state).await?;
+    let request_id = format!("v4_{}", uuid::Uuid::new_v4().simple());
+    let config =
+        select_start_worker(&state, config, user.id, &request_id, &channel, deadline).await?;
+    let snapshot = owner_snapshot_within(&state, &config, false, false, deadline)
+        .await
+        .map_err(api_error)?;
+    let playback = body.and_then(|Json(b)| b.playback);
+    if let Some(p) = &playback {
+        p.validate().map_err(ApiError::BadRequest)?;
+    }
+    let request = LiveTvStartRequest {
+        expected_owner_node_id: config.owner_node_id,
+        source_node_id: state.node_id,
+        user_id: user.id,
+        user_name: user.username,
+        request_id,
+        channel_id: channel,
+        config_generation: config.generation,
+        source_serving_generation: generation,
+        playback,
+    };
+    let ticket = state
+        .live_tv
+        .resource_issue(&request, &snapshot.device.device_id)
+        .await
+        .map_err(api_error)?;
+    Ok(Json(serde_json::json!({"request_id":ticket.request_id,
+        "admission_expires_at_ms":ticket.admission_until_ms,"config_generation":ticket.generation})))
 }
 
 pub(crate) async fn start_session(
@@ -471,7 +515,7 @@ pub(crate) async fn start_session(
             serde_json::json!({"retry": "now", "owner_decided": false}),
         )
     })?;
-    let config = state.live_tv.config().await.map_err(api_error)?;
+    let mut config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
         return Err(api_error(LiveTvError::Disabled(
             "Live TV is disabled; an administrator can enable it in Settings → Live TV".into(),
@@ -481,7 +525,7 @@ pub(crate) async fn start_session(
         playback: None,
         request_id: None,
     }));
-    let mut playback = body.playback;
+    let playback = body.playback;
     if let Some(request) = &playback {
         request.validate().map_err(|message| {
             ApiError::typed(StatusCode::BAD_REQUEST, "invalid_request", message)
@@ -491,21 +535,11 @@ pub(crate) async fn start_session(
         Some(value) => Some(parse_public_request_id(value)?.to_owned()),
         None => None,
     };
-    let owner_protocols = owner_snapshot_within(&state, &config, false, false, deadline)
-        .await
-        .map(|snapshot| snapshot.start_protocols)
-        .unwrap_or_default();
-    if !owner_protocols.contains(&2) {
-        playback = None;
-    }
-    // The same shape as `playback` above: a client that read the protocol list
-    // before an owner downgrade must not take the whole start down with a
-    // field the owner's registry would key differently than it expects.
-    if !owner_protocols.contains(&3) {
-        client_request_id = None;
-    }
-    let request_id = client_request_id.unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
-    let request = LiveTvStartRequest {
+    let request_id = client_request_id
+        .take()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+    config = select_start_worker(&state, config, user.id, &request_id, &channel, deadline).await?;
+    let mut request = LiveTvStartRequest {
         expected_owner_node_id: config.owner_node_id.clone(),
         source_node_id: state.node_id.clone(),
         user_id: user.id,
@@ -523,7 +557,22 @@ pub(crate) async fn start_session(
     // Fencing the id here turned that replay into a 409 — it removed the
     // recovery it was meant to provide. The client retires the hint itself on
     // its next press, and the owner reaps an unheld session at 45 s.
-    let provisional = owner_start_within(&state, &config, &request, deadline).await?;
+    let provisional = match owner_start_within(&state, &config, &request, deadline).await {
+        Ok(response) => response,
+        Err(error) => {
+            // Concurrent admissions can select different candidates. The CAS
+            // winner is the only assignment; dispatch there only when the
+            // durable answer proves that this candidate never owned the start.
+            let assigned = assigned_start_worker(&state, user.id, &request_id).await?;
+            if let Some(worker) = assigned.filter(|worker| *worker != config.owner_node_id) {
+                config.owner_node_id = worker;
+                request.expected_owner_node_id = config.owner_node_id.clone();
+                owner_start_within(&state, &config, &request, deadline).await?
+            } else {
+                return Err(error);
+            }
+        }
+    };
     let activation = LiveTvActivateRequest {
         expected_owner_node_id: config.owner_node_id.clone(),
         capability: provisional.capability.clone(),
@@ -542,7 +591,10 @@ pub(crate) async fn start_session(
         }
     };
     let current = state.live_tv.config().await.map_err(api_error)?;
-    if current != config || !state.serving.authority().is_current(ingress_generation) {
+    if current.generation != config.generation
+        || !current.enabled
+        || !state.serving.authority().is_current(ingress_generation)
+    {
         let _ = owner_stop(&state, &config.owner_node_id, &provisional.capability).await;
         return Err(ApiError::typed_detail(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -562,8 +614,21 @@ pub(crate) async fn retire_start(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let request_id = parse_public_request_id(&request_id)?.to_owned();
-    let config = live_tv_enabled_config(&state).await?;
-    let outcome = owner_retire(&state, &config, user.id, &request_id).await?;
+    let mut config = state.live_tv.config().await.map_err(api_error)?;
+    let assigned = assigned_start_worker(&state, user.id, &request_id).await?;
+    state
+        .live_tv
+        .resource_retire(user.id, &request_id)
+        .await
+        .map_err(api_error)?;
+    let outcome = if let Some(worker) = assigned {
+        config.owner_node_id = worker;
+        owner_retire(&state, &config, user.id, &request_id)
+            .await
+            .unwrap_or(crate::live_tv::LiveTvRetireOutcome::Retired)
+    } else {
+        crate::live_tv::LiveTvRetireOutcome::Retired
+    };
     Ok(Json(serde_json::json!({ "outcome": outcome })))
 }
 
@@ -575,7 +640,10 @@ pub(crate) async fn resume_start(
     State(state): State<AppState>,
 ) -> Result<Json<crate::live_tv::LiveTvResumeAnswer>, ApiError> {
     let request_id = parse_public_request_id(&request_id)?.to_owned();
-    let config = live_tv_enabled_config(&state).await?;
+    let mut config = live_tv_enabled_config(&state).await?;
+    if let Some(worker) = assigned_start_worker(&state, user.id, &request_id).await? {
+        config.owner_node_id = worker;
+    }
     Ok(Json(
         owner_resume(&state, &config, user.id, &request_id).await?,
     ))
@@ -589,7 +657,10 @@ pub(crate) async fn start_state(
     State(state): State<AppState>,
 ) -> Result<Json<crate::live_tv::LiveTvStartState>, ApiError> {
     let request_id = parse_public_request_id(&request_id)?.to_owned();
-    let config = live_tv_enabled_config(&state).await?;
+    let mut config = live_tv_enabled_config(&state).await?;
+    if let Some(worker) = assigned_start_worker(&state, user.id, &request_id).await? {
+        config.owner_node_id = worker;
+    }
     if config.owner_node_id == state.node_id {
         return Ok(Json(state.live_tv.start_state_local(user.id, &request_id)));
     }
@@ -612,6 +683,94 @@ pub(crate) async fn start_state(
         )
         .await?,
     ))
+}
+
+async fn assigned_start_worker(
+    state: &AppState,
+    user: i64,
+    id: &str,
+) -> Result<Option<String>, ApiError> {
+    let snapshot = state
+        .live_tv
+        .resource_snapshot(user, id)
+        .await
+        .map_err(api_error)?;
+    Ok(snapshot.records.into_iter().find_map(|r| match r {
+        plurx_core::live_tv_resource::Record::Start(start)
+            if start.user_id == user && start.request_id == id =>
+        {
+            start.worker.map(|w| w.node_id)
+        }
+        _ => None,
+    }))
+}
+
+async fn select_start_worker(
+    state: &AppState,
+    mut config: LiveTvConfig,
+    user: i64,
+    id: &str,
+    channel: &str,
+    deadline: tokio::time::Instant,
+) -> Result<LiveTvConfig, ApiError> {
+    if let Some(worker) = assigned_start_worker(state, user, id).await? {
+        config.owner_node_id = worker;
+        return Ok(config);
+    }
+    let snapshot = state
+        .live_tv
+        .resource_snapshot(user, id)
+        .await
+        .map_err(api_error)?;
+    if let Some(worker) = snapshot.records.iter().find_map(|r| match r {
+        plurx_core::live_tv_resource::Record::Ingest(i)
+            if i.channel_id == channel
+                && i.generation == config.generation
+                && i.expires_at_ms > crate::live_tv::resource_now_ms() =>
+        {
+            Some(&i.worker.node_id)
+        }
+        _ => None,
+    }) {
+        config.owner_node_id = worker.clone();
+        return Ok(config);
+    }
+    let mut candidates = vec![state.node_id.clone()];
+    if state.membership.is_replicated() {
+        let mut peers = state
+            .membership
+            .activity_peers()
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .into_iter()
+            .filter(|p| p.reachable && p.http_base.is_some() && p.node_id != state.node_id)
+            .map(|p| p.node_id)
+            .collect::<Vec<_>>();
+        peers.sort();
+        candidates.extend(peers);
+    }
+    let mut last = LiveTvError::OwnerUnavailable("no reachable channel worker".into());
+    for candidate in candidates.into_iter().take(3) {
+        config.owner_node_id = candidate;
+        match owner_snapshot_within(
+            state,
+            &config,
+            false,
+            false,
+            deadline.min(deadline_after(std::time::Duration::from_secs(5))),
+        )
+        .await
+        {
+            Ok(snapshot) if snapshot.start_protocols.contains(&4) => return Ok(config),
+            Ok(_) => {
+                last = LiveTvError::OwnerUnavailable(
+                    "the candidate needs the cluster resource protocol".into(),
+                )
+            }
+            Err(error) => last = error,
+        }
+    }
+    Err(api_error(last))
 }
 
 async fn live_tv_enabled_config(state: &AppState) -> Result<LiveTvConfig, ApiError> {
@@ -785,7 +944,7 @@ pub(crate) async fn readiness_for_config(
         ready: static_result.is_ok(),
         message: static_result
             .as_ref()
-            .map(|()| "The saved address, owner, session limit, and output height are valid".into())
+            .map(|()| "The saved address, channel limit, and output height are valid".into())
             .unwrap_or_else(|error| error.to_string()),
     });
 
@@ -844,22 +1003,20 @@ pub(crate) async fn readiness_for_config(
         },
     });
 
-    let transition_ready = config.admission_ready();
     checks.push(LiveTvReadinessCheck {
-        id: "owner_transition",
-        ready: transition_ready,
-        message: if transition_ready {
-            "There is no unresolved tuner-owner cleanup"
-                .to_owned()
+        id: "cluster_resource",
+        ready: negotiated.contains(&4),
+        message: if negotiated.contains(&4) {
+            "A reachable worker supports durable channel assignment and server-issued start intents"
+                .into()
         } else {
-            format!(
-                "Prior owner {} must acknowledge cleanup, or an administrator must stop it and confirm recovery in Live TV settings",
-                config.transition_from_owner_node_id
-            )
+            "No reachable worker has reported the cluster resource protocol; upgrade the servers"
+                .into()
         },
     });
-
-    if static_result.is_err() || !serving_ready || !transition_ready {
+    checks.push(LiveTvReadinessCheck { id: "clock_sync", ready: false,
+        message: "Clock synchronization and shared DVR mount identity require operator verification; matching path strings are not proof".into() });
+    if static_result.is_err() || !serving_ready {
         return LiveTvReadiness {
             ready: false,
             enabled: config.enabled,
@@ -879,7 +1036,7 @@ pub(crate) async fn readiness_for_config(
             .as_ref()
             .map(|_| {
                 format!(
-                    "Owner {} reached the configured HDHomeRun without redirects or proxies",
+                    "A cluster worker reached the configured HDHomeRun without redirects or proxies (ingress {})",
                     config.owner_node_id
                 )
             })
@@ -920,15 +1077,20 @@ pub(crate) async fn readiness_for_config(
                 .to_owned(),
         });
     }
-    let ready = protocol_ready
-        && owner_ready
+    let ready = owner_ready
         && checks
             .iter()
             // `start_recovery` is advisory in the strong sense: a fleet
             // without it plays perfectly well and simply does not resume, so
             // it must never turn the overall verdict red and pressure anyone
             // into treating Live TV as broken.
-            .all(|check| check.ready || matches!(check.id, "drm_boundary" | "start_recovery"));
+            .all(|check| {
+                check.ready
+                    || matches!(
+                        check.id,
+                        "drm_boundary" | "start_recovery" | "clock_sync" | "cluster_protocol"
+                    )
+            });
     LiveTvReadiness {
         ready,
         enabled: config.enabled,
@@ -1333,83 +1495,6 @@ async fn owner_recovery_exchange<T: serde::de::DeserializeOwned>(
     })
 }
 
-pub(crate) async fn drain_owner(
-    state: &AppState,
-    owner: &str,
-    drain_before_generation: i64,
-) -> Result<(), LiveTvError> {
-    if owner == state.node_id {
-        return state
-            .live_tv
-            .drain_before(drain_before_generation)
-            .await
-            .map(|_| ());
-    }
-    let (node_id, base) = owner_peer(state, owner).await.map_err(|_| {
-        LiveTvError::OwnerUnavailable("the prior tuner owner is unreachable".into())
-    })?;
-    let request_nonce = uuid::Uuid::new_v4().to_string();
-    let body = serde_json::to_vec(&crate::live_tv::LiveTvDrainRequest {
-        expected_owner_node_id: owner.to_owned(),
-        target_node_id: state.node_id.clone(),
-        request_nonce: request_nonce.clone(),
-        drain_before_generation,
-    })
-    .map_err(|error| LiveTvError::InvalidResponse(error.to_string()))?;
-    let response = state
-        .live_tv_peers
-        .request(
-            &node_id,
-            &base,
-            reqwest::Method::POST,
-            crate::live_tv::DRAIN_PATH,
-            body,
-            deadline_after(DRAIN_EXCHANGE_DEADLINE),
-            4 * 1024,
-            PeerAuthMode::ExactRequest,
-        )
-        .await
-        .map_err(peer_error)?;
-    if !response.status.is_success() {
-        return Err(LiveTvError::OwnerUnavailable(
-            "the prior tuner owner refused the drain request".into(),
-        ));
-    }
-    let ack = serde_json::from_slice::<LiveTvDrainAck>(&response.body).map_err(|_| {
-        LiveTvError::OwnerUnavailable(
-            "the prior tuner owner returned an invalid drain proof".into(),
-        )
-    })?;
-    if ack.owner_node_id != owner
-        || ack.target_node_id != state.node_id
-        || ack.request_nonce != request_nonce
-        || ack.drained_before_generation != drain_before_generation
-    {
-        return Err(LiveTvError::OwnerUnavailable(
-            "the prior tuner owner returned a mismatched drain proof".into(),
-        ));
-    }
-    let payload = ack.signing_payload()?;
-    let authorized = state
-        .membership
-        .authorize_internal_peer_response(
-            owner,
-            &state.node_id,
-            &request_nonce,
-            crate::live_tv::DRAIN_PATH,
-            &payload,
-            &ack.signature,
-        )
-        .await
-        .unwrap_or(false);
-    if !authorized {
-        return Err(LiveTvError::OwnerUnavailable(
-            "the prior tuner owner's drain proof could not be authenticated".into(),
-        ));
-    }
-    Ok(())
-}
-
 /// Same order as `PEER_STATUS_CACHE_TTL` in `cluster_operations`, and one sixth
 /// of the roster's own 30 s `NODE_REACHABLE_WINDOW_MS`.
 ///
@@ -1745,14 +1830,36 @@ async fn owner_snapshot(
     force: bool,
     probe_graph: bool,
 ) -> Result<LiveTvSnapshot, LiveTvError> {
-    owner_snapshot_within(
-        state,
-        config,
-        force,
-        probe_graph,
-        deadline_after(SNAPSHOT_DEADLINE),
-    )
-    .await
+    let deadline = deadline_after(PUBLIC_START_DEADLINE);
+    let mut candidate = config.clone();
+    let mut nodes = vec![state.node_id.clone()];
+    if state.membership.is_replicated() {
+        if let Ok(peers) = state.membership.activity_peers().await {
+            nodes.extend(
+                peers
+                    .into_iter()
+                    .filter(|p| p.reachable && p.http_base.is_some() && p.node_id != state.node_id)
+                    .map(|p| p.node_id),
+            );
+        }
+    }
+    let mut last = LiveTvError::OwnerUnavailable("no eligible tuner worker".into());
+    for node in nodes.into_iter().take(3) {
+        candidate.owner_node_id = node;
+        match owner_snapshot_within(
+            state,
+            &candidate,
+            force,
+            probe_graph,
+            deadline.min(deadline_after(Duration::from_secs(10))),
+        )
+        .await
+        {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(error) => last = error,
+        }
+    }
+    Err(last)
 }
 
 async fn owner_snapshot_within(

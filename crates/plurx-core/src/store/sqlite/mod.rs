@@ -20,6 +20,7 @@ mod fragment_index_cluster;
 mod housekeeping;
 mod library;
 mod library_channels;
+mod live_tv_resource;
 mod media;
 mod offline;
 mod outbox;
@@ -1147,6 +1148,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::FILE_GRANTS_SCHEMA,
     // v69: cluster subtitle-source queue constraints and publication metadata.
     crate::store::fragment_index_cluster::SUBTITLE_SOURCE_SCHEMA,
+    // Distributed Live TV intents, ingest claims, and capture authority.
+    crate::live_tv_resource::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

@@ -1676,6 +1676,13 @@ impl LiveTvManager {
         let live = self.live_recording_ids();
         let rows = self.dvr_rows(&[DvrState::Recording]).await?;
         for row in rows {
+            if self
+                .resource_capture(&row.id)
+                .await?
+                .is_some_and(|c| c.expires_at_ms > super::resource::now_ms())
+            {
+                continue;
+            }
             if live.contains(&row.id) {
                 continue;
             }
@@ -1734,19 +1741,7 @@ impl LiveTvManager {
                     .await
                 {
                     Ok(()) => {
-                        self.transition(
-                            &row.id,
-                            &[DvrState::Recording],
-                            DvrState::Recording,
-                            Some("resumed after the capture lost its worker"),
-                            DvrStatePatch::Reattempt {
-                                attempt,
-                                gap_s: row.gap_s + gap,
-                            },
-                            Some(generation),
-                        )
-                        .await?;
-                        continue;
+                        tracing::info!(recording = %row.id, attempt, "recording capture reclaimed");
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -2170,30 +2165,13 @@ impl LiveTvManager {
                 );
                 continue;
             }
-            let late = (now - row.capture_start).max(0);
             // If the row moved under us — a viewer cancelled it, or the
             // configuration generation changed — the capture that is already
             // opened has no row to belong to. Close it rather than letting a
             // file grow for a recording nobody asked for.
-            let claimed = self
-                .transition(
-                    &row.id,
-                    &[DvrState::Scheduled],
-                    DvrState::Recording,
-                    (late > 0).then_some("started late"),
-                    DvrStatePatch::Started {
-                        attempt: 1,
-                        tuner_owner_node_id: self.node_id.clone(),
-                        started_at_ms: now.saturating_mul(1000),
-                        late_start_s: late,
-                        path: self
-                            .recording_final_path(dvr, &row)
-                            .to_string_lossy()
-                            .into_owned(),
-                    },
-                    Some(generation),
-                )
-                .await?;
+            let claimed = self.resource_capture(&row.id).await?.is_some_and(|c| {
+                c.worker == self.resource_worker() && c.epoch == 1 && !c.stopped && !c.deleted
+            });
             if !claimed {
                 tracing::info!(
                     recording = %row.id,
@@ -2411,6 +2389,14 @@ impl LiveTvManager {
         })?;
 
         let device_id = self.cached_device_id(live_tv).await.unwrap_or_default();
+        let claim = self
+            .resource_capture_claim(live_tv, dvr, row, &device_id, &base)
+            .await?;
+        if claim.epoch != attempt {
+            return Err(LiveTvError::Conflict(
+                "the recording attempt changed; retry the current claim".into(),
+            ));
+        }
 
         // Decide about the tuner before touching the disk. The attempt file is
         // created with `O_EXCL`, so a file left behind by a refusal makes this
@@ -2618,13 +2604,41 @@ impl LiveTvManager {
         let worker_transport = Arc::clone(transport);
         let serving = self.serving.clone();
         let worker = tokio::spawn(async move {
-            let result = run_transport(
+            let stream = run_transport(
                 client,
                 manager.clone(),
                 serving,
                 Arc::clone(&worker_transport),
-            )
-            .await;
+            );
+            let result = if let Some(authority) = manager.upgrade() {
+                match authority.resource_transport_admit(&worker_transport).await {
+                    Ok((valid_until, ingest)) => {
+                        let result = tokio::select! {
+                            result = stream => result,
+                            result = authority.resource_transport_lease(&worker_transport, valid_until, ingest.clone()) => result,
+                        };
+                        // The exact claim used to open this body, never a new
+                        // channel lookup that could now name a successor.
+                        if !matches!(
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(2),
+                                authority.resource_transport_release(&ingest)
+                            )
+                            .await,
+                            Ok(Ok(()))
+                        ) {
+                            tracing::warn!("closed tuner transport awaits lease expiry");
+                        }
+                        result
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                Err(LiveTvError::OwnerUnavailable(
+                    "Live TV worker stopped".into(),
+                ))
+            };
+            worker_transport.cancel.cancel();
             worker_transport.finish(&result);
             if let Some(manager) = manager.upgrade() {
                 // Cleanup must not await the JoinHandle of the task that is
@@ -2687,6 +2701,10 @@ impl LiveTvManager {
         if settling {
             SinkStopResult::Settling
         } else {
+            if let Err(error) = self.resource_capture_detach(recording_id, attempt).await {
+                tracing::warn!(%error, "recording writer closed but durable detach is pending");
+                return SinkStopResult::Settling;
+            }
             SinkStopResult::Settled
         }
     }
@@ -2990,10 +3008,6 @@ impl LiveTvManager {
             ))
     }
 
-    fn recording_final_path(&self, dvr: &DvrConfig, row: &DvrRecording) -> PathBuf {
-        final_path(&self.recording_base_path(dvr, row))
-    }
-
     /// Close a capture out: join its attempts into one file, write the
     /// sidecar, and record honestly what it managed to get.
     #[allow(clippy::too_many_arguments)]
@@ -3024,12 +3038,30 @@ impl LiveTvManager {
         extra_gap: i64,
         stopped_by: Option<i64>,
         reason: &str,
-        generation: i64,
+        _generation: i64,
     ) -> Result<(), LiveTvError> {
         let (_, dvr) = self.dvr_configs().await?;
-        let base = self.recording_base_path(&dvr, row);
+        let input_base = self.recording_base_path(&dvr, row);
+        let finalizer_deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(plurx_core::live_tv_resource::LEASE_MS as u64);
+        let claim = tokio::time::timeout_at(
+            finalizer_deadline,
+            self.resource_finalize(&row.id, &dvr.root),
+        )
+        .await
+        .map_err(|_| {
+            LiveTvError::OwnerUnavailable("recording finalization authority timed out".into())
+        })??;
+        let base = sibling(&input_base, &format!(".f{}", claim.finalizer_epoch));
         let gap = row.gap_s + extra_gap;
-        let bytes = match concatenate_attempts(&base, row.attempt).await {
+        let assembled = tokio::select! {
+            result = concatenate_sealed_attempts(&input_base, &base, row.attempt) => result,
+            result = self.resource_finalize_lease(&claim, finalizer_deadline) => {
+                let _ = tokio::fs::remove_file(final_path(&base)).await;
+                return result;
+            }
+        };
+        let bytes = match assembled {
             Ok(bytes) => bytes,
             Err(error) => {
                 tracing::warn!(
@@ -3055,19 +3087,12 @@ impl LiveTvManager {
         if bytes > 0 {
             write_sidecar(&base, row, &facts, state, bytes, gap, now).await;
         }
-        self.transition(
-            &row.id,
-            &[DvrState::Recording],
-            state,
-            Some(&reason),
-            DvrStatePatch::Finished {
-                finished_at_ms: now.saturating_mul(1000),
-                bytes: i64::try_from(bytes).unwrap_or(i64::MAX),
-                gap_s: gap,
-                path: final_path(&base).to_str().map(str::to_owned),
-                stopped_by_user_id: stopped_by,
-            },
-            Some(generation),
+        self.resource_publish(
+            &claim,
+            &final_path(&base),
+            i64::try_from(bytes).unwrap_or(i64::MAX),
+            gap,
+            stopped_by,
         )
         .await?;
         tracing::info!(
@@ -3493,10 +3518,41 @@ async fn prior_attempt_bytes(base: &std::path::Path, attempt: i64) -> Option<u64
     Some(total)
 }
 
+/// Copy a stable prefix of each append-only attempt into an exclusive output.
+/// Expired writers may still append; they cannot alter bytes already copied or
+/// extend this finalizer's captured length. Publication is a separate epoch CAS.
+async fn concatenate_sealed_attempts(
+    input_base: &std::path::Path,
+    output_base: &std::path::Path,
+    attempts: i64,
+) -> std::io::Result<u64> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut output = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(final_path(output_base))
+        .await?;
+    let mut written = 0;
+    for attempt in 1..=attempts.max(1) {
+        let input = match tokio::fs::File::open(attempt_path(input_base, attempt)).await {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        let length = input.metadata().await?.len();
+        let mut sealed = input.take(length);
+        written += tokio::io::copy(&mut sealed, &mut output).await?;
+    }
+    output.flush().await?;
+    output.sync_all().await?;
+    Ok(written)
+}
+
 /// Join `<base>.a1.part`, `<base>.a2.part`, … into `<base>.ts` and remove the
 /// parts. MPEG-TS packets concatenate, so the join is a byte copy; the
 /// discontinuity between attempts is a gap, which the row and the sidecar name
 /// rather than paper over.
+#[cfg(test)]
 async fn concatenate_attempts(base: &std::path::Path, attempts: i64) -> std::io::Result<u64> {
     use tokio::io::AsyncWriteExt as _;
 
@@ -3608,11 +3664,19 @@ pub(crate) async fn dvr_progress_loop(manager: Arc<LiveTvManager>, shutdown: Can
                 continue;
             }
             last.insert(activity.recording_id.clone(), activity.bytes);
+            let epoch = match manager.resource_capture(&activity.recording_id).await {
+                Ok(Some(c)) if c.worker == manager.resource_worker() => c.epoch,
+                _ => continue,
+            };
             if let Err(error) = manager
                 .store
-                .progress_dvr_recording(
-                    &activity.recording_id,
-                    i64::try_from(activity.bytes).unwrap_or(i64::MAX),
+                .live_tv_resource_command(
+                    plurx_core::live_tv_resource::Command::ProgressCapture {
+                        recording_id: activity.recording_id.clone(),
+                        worker: manager.resource_worker(),
+                        epoch,
+                        bytes: i64::try_from(activity.bytes).unwrap_or(i64::MAX),
+                    },
                     now_ms,
                 )
                 .await

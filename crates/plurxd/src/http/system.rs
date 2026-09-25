@@ -2379,7 +2379,7 @@ pub struct UpdateSettings {
     pub backup_schedule_utc: Option<String>,
     pub backup_keep: Option<i64>,
     /// Explicit admin attestation, never an automatic timeout override.
-    pub live_tv_fenced_owner: Option<LiveTvFencedOwner>,
+    pub live_tv_fenced_owner: Option<serde_json::Value>,
     /// Set the TMDB API key. Empty string clears it. Absent leaves it as-is.
     pub tmdb_api_key: Option<String>,
     /// Set the OMDb API key. Empty string clears it. Absent leaves it as-is.
@@ -2490,14 +2490,6 @@ pub struct UpdateSettings {
 struct PreparedLiveTvUpdate {
     expected_generation: i64,
     candidate: crate::live_tv::LiveTvConfig,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LiveTvFencedOwner {
-    pub owner_node_id: String,
-    pub drain_before_generation: i64,
-    pub stopped_and_restart_prevented: bool,
 }
 
 fn live_tv_setting_values(config: &crate::live_tv::LiveTvConfig) -> Vec<(&'static str, String)> {
@@ -2693,29 +2685,14 @@ pub async fn update_settings(
                 "Live TV settings changed on another node; reload and try again".into(),
             ));
         }
-        let non_enable_change = req.live_tv_device_ipv4.is_some()
-            || req.live_tv_owner_node_id.is_some()
-            || req.live_tv_max_sessions.is_some()
-            || req.live_tv_output_height.is_some()
-            || req.live_tv_max_output_height.is_some();
-        if non_enable_change && (current.enabled || req.live_tv_enabled == Some(true)) {
-            return Err(ApiError::Conflict(
-                "disable Live TV before changing its device, owner, limit, or output; save and test the new configuration before enabling"
-                    .into(),
-            ));
-        }
         let device_ipv4 = match req.live_tv_device_ipv4.as_deref() {
             Some(value) => {
                 crate::live_tv::parse_device_ipv4(value).map_err(super::live_tv::api_error)?
             }
             None => current.device_ipv4,
         };
-        let owner_node_id = req
-            .live_tv_owner_node_id
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or(&current.owner_node_id)
-            .to_owned();
+        // Kept in the response shape for older clients; never placement policy.
+        let owner_node_id = state.node_id.clone();
         let guide_source = match req.live_tv_guide_source.as_deref() {
             Some(value) => crate::live_tv::GuideSource::parse(value).ok_or_else(|| {
                 ApiError::BadRequest("guide source must be off, hdhomerun, or xmltv".into())
@@ -2728,60 +2705,12 @@ pub async fn update_settings(
             .map(str::trim)
             .unwrap_or(&current.xmltv_url)
             .to_owned();
-        let mut transition_from_owner_node_id = current.transition_from_owner_node_id.clone();
-        let mut transition_drain_before = current.transition_drain_before;
+        let transition_from_owner_node_id = String::new();
+        let transition_drain_before = 0;
         let next_generation = current
             .generation
             .checked_add(1)
             .ok_or_else(|| ApiError::Conflict("Live TV settings generation is exhausted".into()))?;
-
-        if let Some(proof) = req.live_tv_fenced_owner.as_ref() {
-            if current.enabled
-                || req.live_tv_enabled.is_some()
-                || non_enable_change
-                || !proof.stopped_and_restart_prevented
-                || transition_from_owner_node_id.is_empty()
-                || proof.owner_node_id != transition_from_owner_node_id
-                || proof.drain_before_generation != transition_drain_before
-            {
-                return Err(ApiError::Conflict(
-                    "Owner recovery requires a separate request while disabled, the exact current barrier, and confirmation that the old process is stopped and cannot restart before synchronizing".into(),
-                ));
-            }
-            transition_from_owner_node_id.clear();
-            transition_drain_before = 0;
-        }
-
-        // A disabled tuple cannot mint a current-generation session.  If it
-        // carries an earlier unresolved transition, use this save attempt to
-        // obtain a fresh authenticated drain proof before readiness is
-        // evaluated. Failure preserves the original unresolved barrier.
-        if !current.enabled
-            && !transition_from_owner_node_id.is_empty()
-            && super::live_tv::drain_owner(
-                &state,
-                &transition_from_owner_node_id,
-                transition_drain_before,
-            )
-            .await
-            .is_ok()
-        {
-            transition_from_owner_node_id.clear();
-            transition_drain_before = 0;
-        }
-        if current.enabled && req.live_tv_enabled == Some(false) {
-            // Never overwrite a barrier that is still standing. The drain
-            // above clears it on success; if it is still here, an *earlier*
-            // owner was never drained and may still be holding the tuner.
-            // Replacing that record with the current owner erases the only
-            // evidence of it, and the recovery proof then names the wrong
-            // node. Keep the older, unresolved one — it is the one that
-            // matters.
-            if transition_from_owner_node_id.is_empty() {
-                transition_from_owner_node_id = current.owner_node_id.clone();
-                transition_drain_before = next_generation;
-            }
-        }
 
         let candidate = crate::live_tv::LiveTvConfig {
             enabled: req.live_tv_enabled.unwrap_or(current.enabled),
@@ -2805,27 +2734,8 @@ pub async fn update_settings(
         candidate
             .validate_static()
             .map_err(super::live_tv::api_error)?;
-        // The one enable-time refusal that is structural rather than
-        // advisory. `validate_static` checks the barrier is *well-formed*,
-        // never that it is *resolved* — so with readiness demoted to advice,
-        // nothing else stood between an operator and enabling a tuner a
-        // previous owner may still be holding. Two nodes ingesting the same
-        // physical tuner is not "the feature does not work"; it is the system
-        // being wrong, which is exactly the line advisory readiness draws.
-        if candidate.enabled && !candidate.transition_from_owner_node_id.is_empty() {
-            return Err(ApiError::Conflict(format!(
-                "Live TV cannot be enabled while node {} is still fenced: it was never confirmed drained and may still hold the tuner. Recover it first (a separate request while disabled, carrying the current barrier and confirmation that the old process is stopped).",
-                candidate.transition_from_owner_node_id
-            )));
-        }
-        // Readiness is advisory, not a gate (2026-09-07). A structural
-        // invariant — an address that is not private, a barrier that is not
-        // resolved, a generation that lost its CAS — still refuses above and
-        // below this point, because those make the *system* wrong. Whether the
-        // tuner answers right now does not: it makes the feature not work, and
-        // an operator who cannot turn a feature on cannot find out why it does
-        // not work. So the checks still run and their result is carried back
-        // for the Developer card to show; enabling proceeds either way.
+        // Readiness is advisory. The replicated generation CAS fences old
+        // operations; there is no permanent owner or physical power-off gate.
         let readiness_advisory = if req.live_tv_enabled == Some(true) {
             Some(super::live_tv::readiness_for_config(&state, &candidate, true).await)
         } else {
@@ -3308,54 +3218,20 @@ pub async fn update_settings(
             .iter()
             .map(|(key, value)| (*key, value.as_str()))
             .collect::<Vec<_>>();
-        let updated = if candidate.enabled && state.membership.is_replicated() {
-            state
-                .membership
-                .activate_live_tv_settings_if_ready(
-                    keys::LIVE_TV_CONFIG_GENERATION,
-                    update.expected_generation,
-                    &candidate.owner_node_id,
-                    &borrowed,
-                )
-                .await
-                .map_err(super::cluster::api_error)?
-        } else {
-            state
-                .store
-                .put_settings_if_generation(
-                    keys::LIVE_TV_CONFIG_GENERATION,
-                    update.expected_generation,
-                    &borrowed,
-                )
-                .await?
-        };
+        let updated = state
+            .store
+            .put_settings_if_generation(
+                keys::LIVE_TV_CONFIG_GENERATION,
+                update.expected_generation,
+                &borrowed,
+            )
+            .await?;
         if !updated {
             return Err(ApiError::Conflict(
-                "Live TV activation lost its generation, compatible-and-present-fleet, join, or owner-voter fence; reload readiness and try again"
-                .into(),
+                "Live TV settings changed concurrently; reload and try again".into(),
             ));
         }
         state.live_tv.observe_config(candidate);
-        if let Some(proof) = req.live_tv_fenced_owner.as_ref() {
-            tracing::warn!(
-                admin_user_id = admin.0.id,
-                prior_owner = %proof.owner_node_id,
-                drain_before_generation = proof.drain_before_generation,
-                generation = candidate.generation,
-                "Administrator attested physical fencing of the previous Live TV owner; feature remains disabled"
-            );
-        }
-        // Disabled is authoritative even if the former owner is unreachable.
-        // The same transaction retained its admission barrier; a later enable
-        // cannot bypass that barrier merely because this request succeeded.
-        if !candidate.transition_from_owner_node_id.is_empty() {
-            let _ = super::live_tv::drain_owner(
-                &state,
-                &candidate.transition_from_owner_node_id,
-                candidate.transition_drain_before,
-            )
-            .await;
-        }
     }
     if let Some(seconds) = req.subtitle_window_secs {
         state

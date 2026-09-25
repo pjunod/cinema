@@ -1564,6 +1564,12 @@ pub fn router(state: AppState) -> Router {
     // playlists, and session creates own their deadlines at the subsystem.
     let media = Router::new()
         .route(
+            "/live-tv/channels/{channel}/intents",
+            post(live_tv::issue_start).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
             "/live-tv/channels/{channel}/sessions",
             post(live_tv::start_session).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,

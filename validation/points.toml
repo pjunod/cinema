@@ -806,6 +806,10 @@ title = "HDHomeRun live television"
 contract = "The always-compiled Live TV runtime accepts only an explicit private or link-local IPv4 device, ignores advertised hostnames, refuses proxies and redirects, bounds device and peer documents, publishes one generation-fenced settings tuple, and obtains readiness plus a sanitized non-DRM channel lineup from one committed voter owner. Programme-guide data is a read-only owner-side feed the tuner contract never depends on: it is off until an administrator selects a source, bounds every document and string from an untrusted guide host, uses the device credential in flight without ever storing, logging, relaying or returning it, and degrades to an unavailable rendering rather than failing a channel list or a session start. Live HLS sessions preserve capability, cleanup, and finite-file-state boundaries through every ingress and first-party client."
 paths = [
   "crates/plurxd/src/live_tv.rs",
+  "crates/plurxd/src/live_tv/resource.rs",
+  "crates/plurx-core/src/live_tv_resource.rs",
+  "crates/plurx-core/src/store/hiqlite_live_tv_resource.rs",
+  "crates/plurx-core/src/store/sqlite/live_tv_resource.rs",
   "crates/plurxd/src/live_tv_delivery.rs",
   "crates/plurxd/src/live_tv/guide.rs",
   "crates/plurxd/src/live_tv/videotoolbox_tests.rs",

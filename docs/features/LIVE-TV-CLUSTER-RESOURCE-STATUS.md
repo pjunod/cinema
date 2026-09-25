@@ -14,9 +14,9 @@ The user's existing checkouts are not build or edit workspaces for this work.
 | Milestone | State | Evidence / next action |
 |---|---|---|
 | Isolated workspace and pinned compiler | Complete | Fresh Forgejo clone; Rust 1.97.1; offline cargo check -p plurxd --all-targets passed in 95 s. |
-| Replicated admission and request recovery | Pending | Reconcile current Store and session contracts with reviewed design. |
-| Worker placement and lifecycle | Pending | Remove permanent device ownership from ingest. |
-| DVR claims, storage and finalization | Pending | Implement review F2/F3 with durable authority. |
+| Replicated admission and request recovery | Building | Shared SQLite/Hiqlite transition engine compiles; global request identity and routing are being integrated. |
+| Worker placement and lifecycle | Building | Candidate placement and shared-channel assignment replace configured-owner routing; lease fencing is being connected. |
+| DVR claims, storage and finalization | Building | Atomic pre-I/O capture claims, storage identities and fenced publication are being integrated. |
 | Guide, Activity and reminders | Pending | Remove owner routing dependencies. |
 | Developer enablement and clients | Pending | Advisory readiness; no prerequisite-gated enable toggle. |
 | One adversarial code review | Deferred | Only when the complete main-bound PR is ready. |
@@ -28,7 +28,9 @@ The user's existing checkouts are not build or edit workspaces for this work.
   adversarial code review only at merge readiness, followed by the fast lane.
   The current development pipeline's opening correction already specifies
   that review/CI sequence. Clarification was requested for remaining older
-  per-task test and full-promotion requirements; no tests have been run.
+  per-task test and full-promotion requirements. The user confirmed: one unit
+  test run on the completed PR before merging. This overrides older per-task
+  test requirements for this effort; no tests have been run.
 - 2026-09-25: Compiler, formatting and lint checks establish build correctness
   while test execution is deferred. The default Homebrew compiler is 1.98.0;
   commands explicitly use the installed 1.97.1 toolchain instead.
@@ -39,7 +41,15 @@ The user's existing checkouts are not build or edit workspaces for this work.
 - 2026-09-25: Credentials remain outside the clone. No token or deployment key
   is copied into source, commits, status, PR bodies or compiler archives.
 
+- 2026-09-25: Current main already shares channel transports between viewers
+  and recordings. Preserve this behavior: the cluster counts channel ingests,
+  and viewer/recording consumers join the same durable assignment.
+- 2026-09-25: The persistence implementation uses typed, indexed records and
+  one revision CAS shared by both backends. Only changed records enter Raft;
+  terminal request history is counted without downloading it on renewals.
+
 ## Commits and release evidence
 
-No implementation commit or PR yet. No runtime tests, hardware acceptance,
+Plan/status commit: `02b173d8f`. The durable resource layer is being built.
+No PR yet. No runtime tests, hardware acceptance,
 code review, fast-lane result, merge or deployment is claimed.

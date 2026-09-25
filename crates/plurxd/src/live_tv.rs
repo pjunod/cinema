@@ -28,6 +28,8 @@ use crate::live_tv_delivery::{
 use crate::state::SystemInfo;
 
 pub(crate) mod dvr;
+mod resource;
+pub(crate) use resource::now_ms as resource_now_ms;
 pub(crate) mod guide;
 
 pub(crate) mod schedule;
@@ -316,10 +318,7 @@ impl LiveTvConfig {
             device_ipv4: setting(keys::LIVE_TV_DEVICE_IPV4)
                 .filter(|value| !value.is_empty())
                 .and_then(|value| value.parse().ok()),
-            owner_node_id: setting(keys::LIVE_TV_OWNER_NODE_ID)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(local_node_id)
-                .to_owned(),
+            owner_node_id: local_node_id.to_owned(),
             max_sessions: setting(keys::LIVE_TV_MAX_SESSIONS)
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(2),
@@ -335,12 +334,8 @@ impl LiveTvConfig {
             generation: setting(keys::LIVE_TV_CONFIG_GENERATION)
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0),
-            transition_from_owner_node_id: setting(keys::LIVE_TV_TRANSITION_FROM_OWNER_NODE_ID)
-                .unwrap_or_default()
-                .to_owned(),
-            transition_drain_before: setting(keys::LIVE_TV_TRANSITION_DRAIN_BEFORE)
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0),
+            transition_from_owner_node_id: String::new(),
+            transition_drain_before: 0,
             guide_source: setting(keys::LIVE_TV_GUIDE_SOURCE)
                 .and_then(GuideSource::parse)
                 .unwrap_or_default(),
@@ -391,10 +386,6 @@ impl LiveTvConfig {
         }
         if let Some(address) = self.device_ipv4 {
             validate_device_ipv4(address)?;
-        } else if self.enabled {
-            return Err(LiveTvError::InvalidConfig(
-                "an HDHomeRun private IPv4 address is required before enabling".to_owned(),
-            ));
         }
         self.validate_guide()?;
         Ok(())
@@ -426,10 +417,6 @@ impl LiveTvConfig {
     /// The guide refresh loop runs only for a source that fetches something.
     pub(crate) fn guide_fetches(&self) -> bool {
         self.enabled && self.guide_source != GuideSource::Off
-    }
-
-    pub(crate) fn admission_ready(&self) -> bool {
-        self.transition_from_owner_node_id.is_empty()
     }
 }
 
@@ -1319,12 +1306,20 @@ struct LiveTvRequestKey {
 impl From<&LiveTvStartRequest> for LiveTvRequestKey {
     fn from(request: &LiveTvStartRequest) -> Self {
         Self {
-            source_node_id: request.source_node_id.clone(),
-            source_serving_generation: request.source_serving_generation,
+            source_node_id: String::new(),
+            source_serving_generation: 0,
             user_id: request.user_id,
             request_id: request.request_id.clone(),
         }
     }
+}
+
+fn same_start(a: &LiveTvStartRequest, b: &LiveTvStartRequest) -> bool {
+    a.user_id == b.user_id
+        && a.request_id == b.request_id
+        && a.channel_id == b.channel_id
+        && a.config_generation == b.config_generation
+        && a.playback == b.playback
 }
 
 struct LiveTvSessionState {
@@ -2041,7 +2036,7 @@ impl LiveTvRegistry {
             .values()
             .find(|entry| LiveTvRequestKey::from(&entry.request) == key)
         {
-            if tombstone.request != *request {
+            if !same_start(&tombstone.request, request) {
                 return Err(LiveTvError::Conflict(
                     "the live-TV request id was replayed with different fields".into(),
                 ));
@@ -2054,7 +2049,7 @@ impl LiveTvRegistry {
         let session = self.sessions.get(capability).cloned().ok_or_else(|| {
             LiveTvError::Conflict("live-TV request recovery state is inconsistent".into())
         })?;
-        if session.request != *request {
+        if !same_start(&session.request, request) {
             return Err(LiveTvError::Conflict(
                 "the live-TV request id was replayed with different fields".into(),
             ));
@@ -3922,7 +3917,7 @@ impl LiveTvManager {
                 "Run the Live TV readiness check to test the live-TV FFmpeg graph".to_owned(),
             // 3 = client-supplied request ids and the /live-tv/starts/*
             // recovery routes. An ingress intersects this with its own list.
-            start_protocols: vec![1, 2, 3],
+            start_protocols: vec![1, 2, 3, 4],
         })
     }
 
@@ -4007,7 +4002,23 @@ impl LiveTvManager {
         self: &Arc<Self>,
         request: LiveTvStartRequest,
     ) -> Result<LiveTvProvisional, LiveTvError> {
-        let result = self.start_local_inner(request).await;
+        let result = self.start_local_inner(request.clone()).await;
+        if let Ok(response) = &result {
+            self.resource_advance(
+                &request,
+                plurx_core::live_tv_resource::StartPhase::Active,
+                serde_json::to_string(response).ok(),
+            )
+            .await?;
+        } else {
+            let _ = self
+                .resource_advance(
+                    &request,
+                    plurx_core::live_tv_resource::StartPhase::Failed,
+                    None,
+                )
+                .await;
+        }
         if result.is_err() {
             self.metrics.starts_failed.fetch_add(1, Ordering::Relaxed);
         }
@@ -4033,6 +4044,7 @@ impl LiveTvManager {
 
         let key = LiveTvRequestKey::from(&request);
         if let Some(session) = self.session_for_request(&key, &request)? {
+            self.resource_session_fence(&session).await?;
             self.metrics
                 .starts_recovered
                 .fetch_add(1, Ordering::Relaxed);
@@ -4058,6 +4070,12 @@ impl LiveTvManager {
             ));
         }
         let device_id = snapshot.device.device_id.clone();
+        self.resource_start(
+            &request,
+            &device_id,
+            config.max_sessions.min(snapshot.device.tuner_count),
+        )
+        .await?;
         let channel = snapshot
             .channels
             .into_iter()
@@ -4272,7 +4290,7 @@ impl LiveTvManager {
             let _ = tokio::time::timeout_at(budget, leaving.closed()).await;
         };
         if let Some(existing) = raced_session {
-            if existing.request != request {
+            if !same_start(&existing.request, &request) {
                 return Err(LiveTvError::Conflict(
                     "the live-TV request id was replayed with different fields".into(),
                 ));
@@ -4318,7 +4336,7 @@ impl LiveTvManager {
     pub(crate) async fn activate_local(
         &self,
         request: &LiveTvActivateRequest,
-        source_node_id: &str,
+        _source_node_id: &str,
     ) -> Result<LiveTvActivated, LiveTvError> {
         if request.expected_owner_node_id != self.node_id {
             return Err(LiveTvError::OwnerUnavailable(
@@ -4327,11 +4345,6 @@ impl LiveTvManager {
         }
         validate_capability_owner(&request.capability, &self.node_id)?;
         let session = self.session(&request.capability)?;
-        if session.request.source_node_id != source_node_id {
-            return Err(LiveTvError::Conflict(
-                "the activation signer does not own this live-TV start".into(),
-            ));
-        }
         if session.activation_token != request.activation_token {
             return Err(LiveTvError::Conflict(
                 "the live-TV activation token does not match".into(),
@@ -4342,11 +4355,7 @@ impl LiveTvManager {
                 "the live-TV activation generation does not match".into(),
             ));
         }
-        if session.request.source_serving_generation != request.source_serving_generation {
-            return Err(LiveTvError::Conflict(
-                "the live-TV source serving generation changed before activation".into(),
-            ));
-        }
+        self.resource_session_fence(&session).await?;
         let config = self.config().await?;
         validate_start_config(&config, &session.request, &self.node_id)?;
         if !self.serving.is_current(session.owner_serving_generation) {
@@ -4399,6 +4408,7 @@ impl LiveTvManager {
     ) -> Result<Response<Body>, LiveTvError> {
         validate_capability_owner(request.capability(), &self.node_id)?;
         let session = self.session(request.capability())?;
+        self.resource_session_fence(&session).await?;
         {
             let mut state = session
                 .state
@@ -5053,6 +5063,9 @@ impl LiveTvManager {
             let _ = self.cancel_and_wait(strays, OrphanScope::Sessions).await;
         }
         if let Some(session) = resumed {
+            if self.resource_session_fence(&session).await.is_err() {
+                return LiveTvResumeAnswer::outcome(LiveTvResumeOutcome::Pending);
+            }
             session
                 .state
                 .lock()
@@ -5081,6 +5094,9 @@ impl LiveTvManager {
         }
         if ended {
             return LiveTvResumeAnswer::outcome(LiveTvResumeOutcome::Ended);
+        }
+        if self.resource_retire(user_id, request_id).await.is_err() {
+            return LiveTvResumeAnswer::outcome(LiveTvResumeOutcome::Pending);
         }
         self.registry
             .lock()
@@ -6347,10 +6363,8 @@ fn startup_waiter_verdict(
 /// whose thirteenth hex digit was not a `4`. The public surface and the owner
 /// share one function so the two can never drift apart again.
 pub(crate) fn valid_request_id(value: &str) -> bool {
-    value.len() == 32
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    plurx_core::live_tv_resource::valid_request_id(value)
+        && value.bytes().all(|b| !b.is_ascii_uppercase())
 }
 
 fn validate_start_request(request: &LiveTvStartRequest) -> Result<(), LiveTvError> {
@@ -6397,12 +6411,6 @@ fn validate_start_config(
     if config.generation != request.config_generation {
         return Err(LiveTvError::Conflict(
             "the live-TV configuration changed; reload channels".into(),
-        ));
-    }
-    if !config.admission_ready() {
-        return Err(LiveTvError::OwnerUnavailable(
-            "the prior tuner owner has not acknowledged cleanup; use Live TV recovery only after physically stopping it"
-                .into(),
         ));
     }
     Ok(())
@@ -6471,6 +6479,13 @@ async fn run_live_session(
         .cleanup = Some(cleanup);
     session.changed.notify_waiters();
     if let Some(manager) = manager {
+        let _ = manager
+            .resource_advance(
+                &session.request,
+                plurx_core::live_tv_resource::StartPhase::Closed,
+                None,
+            )
+            .await;
         manager.retire_session(&session);
     }
 }
@@ -7238,6 +7253,7 @@ async fn ensure_session_fence_from_observation(
             crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
         ));
     }
+    manager.resource_session_fence(session).await?;
     let observation = manager.fence.validated()?;
     validate_start_config(&observation.config, &session.request, &manager.node_id)
 }
@@ -13581,7 +13597,7 @@ Output #0, hls, to 'index.m3u8':
             refresh_error: None,
             ffmpeg_graph_ready: false,
             ffmpeg_graph_message: "not probed".to_owned(),
-            start_protocols: vec![1, 2, 3],
+            start_protocols: vec![1, 2, 3, 4],
         }
     }
 

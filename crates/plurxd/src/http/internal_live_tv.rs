@@ -35,7 +35,7 @@ pub(crate) async fn snapshot(
         .config()
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    if config.generation != request.generation || config.owner_node_id != state.node_id {
+    if config.generation != request.generation {
         return Err(StatusCode::CONFLICT);
     }
     let snapshot = state
@@ -70,7 +70,7 @@ pub(crate) async fn guide(
         .config()
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    if config.generation != request.generation || config.owner_node_id != state.node_id {
+    if config.generation != request.generation {
         return Err(StatusCode::CONFLICT);
     }
     // The owner's own full window: the ingress clips it to whatever its caller
@@ -263,6 +263,13 @@ pub(crate) async fn retire(
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     if request.expected_owner_node_id != state.node_id {
         return Err(StatusCode::CONFLICT);
+    }
+    if let Err(error) = state
+        .live_tv
+        .resource_retire(request.user_id, &request.request_id)
+        .await
+    {
+        return Ok(signed_wire_error(&state, &headers, RETIRE_PATH, error));
     }
     let outcome = state
         .live_tv

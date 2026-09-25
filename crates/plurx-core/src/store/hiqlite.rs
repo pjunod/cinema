@@ -111,7 +111,8 @@ const FILE_GRANTS_SCHEMA_VERSION: i64 = 46;
 const FILE_GRANTS_SCHEMA_MIGRATION_SOURCE: i64 = DOWNLOADED_SUBTITLES_SCHEMA_VERSION;
 const SUBTITLE_SOURCE_SCHEMA_VERSION: i64 = 47;
 const SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE: i64 = FILE_GRANTS_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = SUBTITLE_SOURCE_SCHEMA_VERSION;
+const LIVE_TV_RESOURCE_SCHEMA_VERSION: i64 = 48;
+pub const AUTH_SCHEMA_VERSION: i64 = LIVE_TV_RESOURCE_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -1535,6 +1536,13 @@ impl HiqliteAuthStore {
         super::hiqlite_library_channels::install_schema(&client).await?;
         super::hiqlite_dvr::install_schema(&client).await?;
         client
+            .txn(super::hiqlite_live_tv_resource::schema_statements())
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        client
             .txn(super::hiqlite_classification::migration_statements()?)
             .await
             .map_err(database_error)?
@@ -2712,6 +2720,17 @@ impl HiqliteAuthStore {
                     ));
                     let attempt = self.client().txn(statements).await;
                     self.settle_migration_attempt(SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(SUBTITLE_SOURCE_SCHEMA_VERSION) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_live_tv_resource::schema_statements();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(),
+                        params!(LIVE_TV_RESOURCE_SCHEMA_VERSION,now,SUBTITLE_SOURCE_SCHEMA_VERSION),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(SUBTITLE_SOURCE_SCHEMA_VERSION, attempt)
                         .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
@@ -4673,7 +4692,8 @@ fn schema_migration_action(
         | LUMINANCE_SCHEMA_MIGRATION_SOURCE
         | DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE
         | FILE_GRANTS_SCHEMA_MIGRATION_SOURCE
-        | SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE => {
+        | SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE
+        | SUBTITLE_SOURCE_SCHEMA_VERSION => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
