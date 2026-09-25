@@ -181,6 +181,8 @@ async function main() {
     assert.equal(select.value,"off");
     assert.match(shellSource().html,/id="live-tv-captions"[^>]*aria-label="Live TV captions"/);
     assert.match(shell,/\.lth-captions\{position:absolute/);
+    // Fullscreen idle controls may fade, but keyboard users must still reach captions.
+    assert.doesNotMatch(shell,/\.lth\[data-mode="full"\]\.idle \.lth-captions/);
     assert.match(shipped("liveTvStatsTelemetry"),/selectedCaption\?liveTvCaptionTrackLabel/);
   });
 

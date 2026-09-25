@@ -349,7 +349,6 @@
     color-scheme:dark}
   .lth-captions select:focus-visible{outline:2px solid #fff;outline-offset:2px}
   .lth[data-mode="full"] .lth-captions{top:76px;right:24px}
-  .lth[data-mode="full"].idle .lth-captions:not(:focus-within){opacity:0;visibility:hidden;pointer-events:none}
 
   .lth-overlay{position:absolute;inset:0;pointer-events:none;transition:opacity .2s ease-out}
   .lth-overlay > *{pointer-events:auto}
