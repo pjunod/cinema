@@ -40,6 +40,10 @@ pub struct Meter {
     window_bytes: AtomicI64,
     /// Bytes per second over the last closed window; `-1` until one closes.
     recent_bps: AtomicI64,
+    /// The delivery method every byte noted here is credited to in
+    /// `plurx_delivered_bytes_total{method}`. Fixed at construction because a
+    /// meter belongs to one delivery.
+    method: &'static str,
 }
 
 impl Default for Meter {
@@ -50,17 +54,32 @@ impl Default for Meter {
 
 impl Meter {
     pub fn new() -> Meter {
+        Meter::for_method("unknown")
+    }
+
+    /// A meter whose bytes are credited to one delivery method (one of the
+    /// playback vocabulary's values; anything else renders as `unknown`).
+    pub fn for_method(method: &'static str) -> Meter {
         Meter {
             started: Instant::now(),
             total: AtomicI64::new(0),
             window_at_ms: AtomicI64::new(0),
             window_bytes: AtomicI64::new(0),
             recent_bps: AtomicI64::new(-1),
+            method,
         }
+    }
+
+    /// The method this meter credits. Tests pin each construction site's
+    /// choice with it, since the `{method}` split is only as right as those.
+    #[cfg(test)]
+    pub fn method(&self) -> &'static str {
+        self.method
     }
 
     /// Record bytes on their way out. Cheap enough to call per chunk.
     pub fn note(&self, bytes: u64) {
+        crate::telemetry::record_delivered_bytes(self.method, bytes);
         let total = self.total.fetch_add(bytes as i64, Relaxed) + bytes as i64;
         let now = self.started.elapsed().as_millis() as i64;
         let opened = self.window_at_ms.load(Relaxed);
@@ -160,6 +179,7 @@ mod tests {
             window_at_ms: AtomicI64::new(m.window_at_ms.load(Relaxed)),
             window_bytes: AtomicI64::new(m.window_bytes.load(Relaxed)),
             recent_bps: AtomicI64::new(m.recent_bps.load(Relaxed)),
+            method: "unknown",
         };
         idle.note(4_000);
         assert_eq!(
@@ -168,5 +188,19 @@ mod tests {
             "kept the last real rate"
         );
         assert_eq!(idle.idle_for_ms(), 0, "but the window restarted here");
+    }
+
+    /// `plurx_delivered_bytes_total{method}` is fed by the same call that
+    /// feeds a session's rate, so the two can never disagree about what left.
+    #[test]
+    fn a_meter_credits_its_method_in_the_delivered_bytes_family() {
+        let before = crate::telemetry::delivered_bytes_for_test("transcode");
+        let meter = Meter::for_method("transcode");
+        meter.note(7_777_777_777);
+        let after = crate::telemetry::delivered_bytes_for_test("transcode");
+        assert!(
+            after - before >= 7_777_777_777,
+            "noted bytes did not reach the family: {before} -> {after}"
+        );
     }
 }

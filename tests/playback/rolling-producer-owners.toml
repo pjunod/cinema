@@ -2741,9 +2741,32 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 921 -> 937: K-09 adds 15 bounded worker, consumer and test waits for one
 # leased source publication. `file_grants::prune_loop` adds one daily interval
 # with a shutdown-token exit. None chooses a playback recipe or retry.
+# 921 -> 923 (measured after merging main's 921; was 901 -> 903 on the
+# branch's older base) with C-08 M5: two test-only `tokio::time::sleep`s in
+# `http::tests` -- a 5 ms poll while `a_ttff_beacon_is_labelled_by_the_requesters_client_class`
+# waits for the handler's spawned recorder, and the 1.1 s gap between the two
+# progress beats in `live_progress_beats_credit_watched_seconds_to_the_named_method`,
+# which is the wall time the watched-seconds ledger credits. Neither bounds a
+# producer, a process or a response. The `tokio::time::timeout` in
+# `ArtworkCoordinator::derive_permit` and in `RegisteredWait::wait` were
+# re-bound to a local, not added.
+# 923 -> 924 (measured) with the #500 review round: one test-only
+# `tokio::time::sleep` of 1.2 s in
+# `http::tests::a_beat_after_another_nodes_write_credits_only_the_time_since_it`,
+# the wall time between a peer's simulated progress commit and this node's
+# next beat, which is what the watched-seconds credit is measured against.
+# `ArtworkCoordinator::derive_permit`'s `tokio::time::timeout` is unchanged
+# in count (it lost its `let permit =` binding, nothing else). Bounds no
+# producer, process or response.
+# 940 (measured by zeroing this row) after merging `origin/main` at
+# `68c29657b`: main's 937 (K-09 and `file_grants::prune_loop`, reviewed
+# above) plus this branch's three test-only sleeps reviewed above.
 # +8 VOD successor handoff: the 2 s handoff/reservation deadlines, the 250 ms
 # successor poll, the expiry wake instant, and test deadlines.
-expected_occurrences = 945
+# Merged with main's VOD successor encoder-permit handoff (#513) at
+# `8251d14f7`: the value is the whole merged tree, measured by zeroing this
+# row after the merge.
+expected_occurrences = 948
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3328,8 +3351,24 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # calls and one HLS fixture `Response::status()` assertion. The book-content
 # handler adds one `Response::status()` read for inline range headers; neither
 # response-status read launches a process.
+# 374 -> 375 (measured after merging main's 374; was 370 -> 371 on the
+# branch's older base) with C-08 M5: one `Response::status()` read in
+# `http::stream::count_direct_play_bytes`, which leaves a non-success direct
+# play response unwrapped. An HTTP status code on the handler's own response;
+# no child process, no producer, nothing to own.
+# 375 -> 380 (measured) with the #500 review round: five test-only
+# `Response::status()` reads in
+# `http::tests::a_direct_play_get_credits_exactly_its_body_to_delivered_bytes`
+# (the ranged GET, the whole GET, the HEAD twice, and the 416). HTTP status
+# codes of in-process router responses; no process is launched.
+# 386 (measured by zeroing this row) after merging `origin/main` at
+# `68c29657b`: main's 380 (reviewed above) plus this branch's six reviewed
+# above.
 # +1 the same VOD successor handoff test child.
-expected_occurrences = 381
+# Merged with main's VOD successor encoder-permit handoff (#513) at
+# `8251d14f7`: the value is the whole merged tree, measured by zeroing this
+# row after the merge.
+expected_occurrences = 387
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3449,8 +3488,24 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # path awaits the child; cancellation, deadline, and foreground preemption
 # each kill and then reap that same child before releasing the claim. These
 # seven calls add no second process owner or rolling recovery decision.
+# 381 -> 383 (measured) with C-08 M5: two test-only `RegisteredWait::wait`
+# calls in `waitpool::tests::an_admitted_wait_is_timed_into_the_vod_blocked_get_pool`
+# (one satisfied, one run to its 5 ms deadline). `RegisteredWait` is the
+# in-process blocked-GET pool's oneshot; neither call addresses or reaps an
+# operating-system process.
+# 383 -> 385 (measured) with the #500 review round: two test-only
+# `RegisteredWait::wait` calls in
+# `waitpool::tests::an_abandoned_or_unawaited_wait_is_still_timed_once` (one
+# polled once and then dropped mid-wait, one satisfied). The in-process
+# blocked-GET pool's oneshot again; neither addresses or reaps a process.
+# 392 (measured by zeroing this row) after merging `origin/main` at
+# `68c29657b`: main's 388 (K-09's source worker, reviewed above) plus this
+# branch's four reviewed above.
 # +3 the same test child is killed and waited on at teardown.
-expected_occurrences = 391
+# Merged with main's VOD successor encoder-permit handoff (#513) at
+# `8251d14f7`: the value is the whole merged tree, measured by zeroing this
+# row after the merge.
+expected_occurrences = 395
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

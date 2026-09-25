@@ -4931,6 +4931,76 @@ client that puts a bearer token in that header does not get it written into the
 journal. The id is on the `http_request` span, so every log line inside a
 request carries it, and it is deliberately not a metric label.
 
+### Release evidence: the measurements a release is compared on
+
+These are the series a release comparison reads (review §4.9; plan
+[OBSERVABILITY-BASELINE](server/OBSERVABILITY-BASELINE.md) §3.5). Prometheus
+carries the **bounded** series, at most two labels each, every value from a
+fixed list. The fine segmentation — client × transport × codec × grade ×
+hardware — is a query against the node-local `playback_events` rows through
+`GET /api/v1/system/playback-events`, never more labels here. All of these are
+node-local and reset on restart; compare `rate()`s, not raw values.
+
+| # | Measurement | How to compute it |
+|---|---|---|
+| 1 | First frame p50/95/99 | `histogram_quantile(0.95, sum by (le, method) (rate(plurx_ttff_ms_bucket[1h])))`. `plurx_ttff_ms{method,client}` has buckets to 120 s so a slow start's p99 is a number, not `+Inf`. |
+| 2 | Seek to moving picture | `histogram_quantile(0.95, sum by (le) (rate(plurx_seek_to_picture_ms_bucket[1h])))`, and the share of seeks that reached a picture: `sum(rate(plurx_seek_to_picture_ms_count[1h])) / sum(rate(plurx_seeks_total[1h]))`. **Zero until clients emit `seek_resumed` / `seek_abandoned`** — no first-party client does yet. |
+| 3 | Stalled seconds per playback hour | `3600 * sum(rate(plurx_stalled_seconds_total[1d])) / sum(rate(plurx_watched_seconds_total[1d]))`. |
+| 4 | Failed starts per attempt | **Not built.** `plurx_start_outcomes_total{method,outcome}` is reserved; see the plan's §7.7. Live TV has its own: `plurx_live_tv_starts_total{outcome}`. |
+| 5 | Replacement failure rate | `sum(rate(plurx_playback_preparation_staged_total{outcome="refused"}[1d])) / sum(rate(plurx_playback_preparation_decisions_total{outcome="prepare"}[1d]))` — the share of decisions to prepare a replacement that never reached the staging ledger. No new series. `plurx_playback_preparation_cancelled_total{reason}` is a separate question (a staged successor torn down before anyone watched it, mostly because the viewer moved on) and is not in this ratio. |
+| 6 | Admission wait | `histogram_quantile(0.95, sum by (le, pool) (rate(plurx_admission_wait_seconds_bucket[1h])))`. The decode-facts probe gate is timed by `plurx_decode_facts_phase_seconds{phase="gate_wait"}` and is not repeated here. |
+| 7 | Actual vs reserved scratch | **Reserved name only:** `plurx_scratch_bytes{kind="reserved\|actual"}`, built by the seek-scratch reservation effort. |
+| 8 | Bytes per watched minute | `60 * sum by (method) (rate(plurx_delivered_bytes_total[1d])) / sum by (method) (rate(plurx_watched_seconds_total[1d]))`. Read it per `method` only where `plurx_watched_seconds_total{method="unknown"}` is small — see below. |
+
+| Metric | How to read it |
+|---|---|
+| `plurx_ttff_ms{method,client}` | Client-reported click-to-first-frame. `client` is the class of the requester's own `User-Agent` header (`chrome`, `safari`, `firefox`, `edge`, `apple`, `android`, `other`) — never the free-text `ua` field the beacon carries. `method` is the delivery the client named, `unknown` otherwise. **Queries written before the `client` label changed meaning without an error:** `plurx_ttff_ms_count{method="remux"}` now returns seven series, one per client class — write `sum by (method) (plurx_ttff_ms_count)` for the old answer; and `histogram_quantile(…, rate(plurx_ttff_ms_bucket{method="remux"}[…]))` without an aggregation is now seven per-client quantiles — write `sum by (le, method) (rate(plurx_ttff_ms_bucket[…]))` inside it, as row 1 does. |
+| `plurx_seek_to_picture_ms{method}` | Client-reported time from a seek command to the first presented frame after it (`seek_resumed` beacon, `ms`). |
+| `plurx_seeks_total{method}` | Seeks that ended: `seek_resumed` plus `seek_abandoned` (superseded by another seek, or the player stopped first). The histogram's `_count` is the resumed half. |
+| `plurx_stalled_seconds_total{kind}` | The summed duration (`ms`) of client stall beacons, by the same four kinds as `plurx_stalls_total`. Android and Apple report a stall once, when it ends, with its whole length. The web reports a long wait while the picture is still frozen, at its 8-second mark, with the time so far, and sends the rest as a `stall_end` beacon when the wait ends — resumed, handed to a recovery, or left by the viewer; the two add up to the whole wait and count as one stall. A wait the web hands to a recovery (a reconnect or a switch to transcode) ends there: the reload after it is in the `stall_recovery` outcome's `ms`, not here. A wait still frozen when the tab closes has only its first report. Viewer-visible stall only: **not** `plurx_suspended_seconds_total`, which is encoder ahead-window suspension — a healthy pacing decision, not a defect. A stall beacon without a duration (the web's diagnosis report) adds a count and no seconds. |
+| `plurx_watched_seconds_total{method}` | Seconds this node saw a player's position advance between two consecutive live progress beats (`POST /api/v1/items/{id}/progress`) for the same viewer and item. Each beat credits the smaller of the position's advance and the wall time since the previous beat; a paused or stalled player credits nothing, an advance of more than twice the wall time plus two seconds is a seek and credits nothing, and a gap over two minutes restarts the baseline. "The previous beat" is cluster-wide: beats are not held to one node (Android keeps no cookie, and any non-HLS request may be routed anywhere), so a node that finds the viewer's durable progress row written by another node since its own last beat credits only the time since that row. Beats alternating between N nodes are therefore credited once, not N times, and `sum(rate(plurx_watched_seconds_total[…]))` across nodes is the cluster's watched time. That comparison uses the row's `updated_at` (whole seconds, the writing node's clock), so it assumes the nodes' clocks agree to within a second or two, as NTP gives; two nodes committing the same viewer within the same instant can still overlap by one beat interval. Offline replays (`recorded_at`) and Plex-compatible `/:/timeline` clients are not counted. `method` is what the beat names (`direct_play`, `remux`, `transcode`); the web player names it, the native clients do not yet, so their seconds are `unknown` — the row-3 sum is complete, the per-method split of row 8 is not until they do. |
+| `plurx_delivered_bytes_total{method}` | Media bytes handed to viewers' connections. HLS (rolling and VOD) and progressive remux count at the delivery meter, after the downstream has taken each piece; direct play counts each chunk as its body yields it. Peer relay, offline downloads and artwork are not viewer playback and are not counted. |
+| `plurx_admission_wait_seconds{pool}` | One observation per admission wait, however it ended — a wait that timed out is the long tail, not a missing sample, and so is a request abandoned while it waited (a player that seeks again aborts the GET it had parked): each pool times its wait from a guard that records when it is dropped. `vod_blocked_get`: a VOD segment GET admitted to the pool for a segment not yet materialized, from admission to the end of its wait — including one whose recheck found the segment before it parked, and one aborted mid-wait (refusals are `plurx_vod_blocked_get_refusals_total`, not here). `encode_permit`: a live start queued for an encoder slot or software permit, for as long as it queued. `image_materialize`: an artwork derivative waiting for a derive permit, granted, timed out or abandoned. |
+
+#### Defining an effort's exit counter
+
+Every effort whose exit criterion is "a counter read off `/metrics` on the
+fleet" (review §5.3) writes this block into its own plan **before** the
+observation starts:
+
+```text
+Exit counter
+  Event       what increments it, in one sentence, naming the code path
+  Series      plurx_<name>{<label>="<values>"}   — every value enumerated
+  Denominator the series that says how much demand there was; "none" is
+              only legal for a gauge whose absolute value is the claim
+  Interval    how long the fleet must be observed before the number counts
+  Threshold   the value that means the effort worked, decided BEFORE the
+              observation
+  Owner       the person who is paged, or who checks, when it moves
+```
+
+A worked example, for the Dolby Vision renderer proof (review §2.1) — the
+defect a counter would have caught the day it shipped. **The series is
+illustrative: it does not exist in this tree**; an effort that wanted this
+exit criterion would add it.
+
+```text
+Exit counter
+  Event       every `require_dovi_renderer` decision (transcode.rs)
+  Series      plurx_dovi_proofs_total{result="proved|refused|error"}
+  Denominator the same series' sum — the decision is its own demand
+  Interval    7 days on media1, which sees Profile 5 material weekly
+  Threshold   result="refused" is under 5 % of the total. Before the fix it
+              was 100 %, and nothing anywhere said so for eight days
+  Owner       Paul; checked at the weekly review against the pinned status
+              page
+```
+
+"The number looks fine" is not a threshold. The figure that mattered was on
+the fleet from the day of the deploy; what was missing was a series and
+somebody expecting a value.
+
 
 ### Reading the index queue's verdict
 
