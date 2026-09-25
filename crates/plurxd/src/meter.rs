@@ -70,6 +70,13 @@ impl Meter {
         }
     }
 
+    /// The method this meter credits. Tests pin each construction site's
+    /// choice with it, since the `{method}` split is only as right as those.
+    #[cfg(test)]
+    pub fn method(&self) -> &'static str {
+        self.method
+    }
+
     /// Record bytes on their way out. Cheap enough to call per chunk.
     pub fn note(&self, bytes: u64) {
         crate::telemetry::record_delivered_bytes(self.method, bytes);

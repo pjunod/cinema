@@ -750,6 +750,13 @@
         let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
         create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        assert_eq!(
+            serve.shared.sessions.lock().await["sess-a"]
+                .delivery
+                .method(),
+            "remux",
+            "an unencoded VOD session's bytes are remux bytes"
+        );
         let first = serve
             .shared
             .sessions

@@ -16383,6 +16383,90 @@ mod tests {
         );
     }
 
+    /// Row 8's direct-play numerator is the body the real handler hands the
+    /// connection: a GET adds exactly the bytes its body carried, whole or
+    /// ranged, under `direct_play`; a HEAD and a 416 carry no media and add
+    /// nothing. Counted on this test's thread, so the rest of the suite
+    /// cannot make it pass.
+    #[tokio::test]
+    async fn a_direct_play_get_credits_exactly_its_body_to_delivered_bytes() {
+        use crate::telemetry::delivered_bytes_on_this_thread;
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let s = seed_content(&state).await;
+        let uri = format!("/api/v1/files/{}/direct?token={admin}", s.file);
+        let body_of = |response: axum::response::Response| async move {
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body")
+                .len() as u64
+        };
+
+        let before = delivered_bytes_on_this_thread("direct_play");
+        let ranged_response = app.clone().oneshot(ranged(&uri, 0, 9)).await.expect("r");
+        assert_eq!(ranged_response.status(), StatusCode::PARTIAL_CONTENT);
+        let ranged_len = body_of(ranged_response).await;
+        assert_eq!(ranged_len, 10);
+        assert_eq!(
+            delivered_bytes_on_this_thread("direct_play") - before,
+            ranged_len,
+            "a ranged GET credits the bytes its body carried"
+        );
+
+        let whole = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("r");
+        assert_eq!(whole.status(), StatusCode::OK);
+        let whole_len = body_of(whole).await;
+        assert!(whole_len > ranged_len, "the whole file is longer than the range");
+        assert_eq!(
+            delivered_bytes_on_this_thread("direct_play") - before,
+            ranged_len + whole_len,
+            "a whole GET credits the file"
+        );
+
+        let counted = delivered_bytes_on_this_thread("direct_play");
+        let head = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("r");
+        assert!(head.status().is_success(), "{}", head.status());
+        body_of(head).await;
+        let unsatisfiable = app
+            .clone()
+            .oneshot(ranged(&uri, 10_000, 20_000))
+            .await
+            .expect("r");
+        assert_eq!(unsatisfiable.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        body_of(unsatisfiable).await;
+        assert_eq!(
+            delivered_bytes_on_this_thread("direct_play"),
+            counted,
+            "neither a HEAD nor a 416 is media delivered"
+        );
+        for other in ["remux", "transcode", "unknown"] {
+            assert_eq!(
+                delivered_bytes_on_this_thread(other),
+                0,
+                "direct play credited {other}"
+            );
+        }
+    }
+
     /// Direct play is a *storm* of ranged 206s, not a connection: a seeking
     /// browser makes dozens of short requests against one file. One row per
     /// request would put a dozen phantom viewers on the activity page for one

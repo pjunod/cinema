@@ -362,6 +362,11 @@ mod tests {
     fn a_stream_is_visible_to_its_owner_and_gone_when_dropped() {
         let streams = Streams::new();
         let (stream, guard) = streams.register("pb-1", 7, "paul", 42, 5, 4.0);
+        assert_eq!(
+            stream.delivery.method(),
+            "remux",
+            "a progressive stream's bytes are remux bytes"
+        );
         stream.delivery.note(2_000_000);
 
         let info = streams.status("pb-1", 7).expect("owner sees it");

@@ -3326,7 +3326,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `http::stream::count_direct_play_bytes`, which leaves a non-success direct
 # play response unwrapped. An HTTP status code on the handler's own response;
 # no child process, no producer, nothing to own.
-expected_occurrences = 375
+# 375 -> 380 (measured) with the #500 review round: five test-only
+# `Response::status()` reads in
+# `http::tests::a_direct_play_get_credits_exactly_its_body_to_delivered_bytes`
+# (the ranged GET, the whole GET, the HEAD twice, and the 416). HTTP status
+# codes of in-process router responses; no process is launched.
+expected_occurrences = 380
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
