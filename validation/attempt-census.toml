@@ -76,7 +76,6 @@ version = 1
 "startResumePresentationMonitor::attempt.attachmentGeneration == self.openGeneration" = 1
 "startResumePresentationMonitor::self.lifecycleGeneration == attempt.lifecycleGeneration" = 1
 "startResumePresentationMonitor::self.viewerActionEpoch == attempt.viewerActionEpoch" = 1
-"startStatusPolling::self.openGeneration == generation" = 1
 "updatePGSOverlaySelection::self.pgsOverlaySelectionGeneration == selectionGeneration" = 3
 
 [fences]
@@ -85,4 +84,7 @@ blackFrameDecodeFailure = { function = "makePeriodicPlaybackObservation", scopes
 stallRecovery = { function = "retrySameDeliveryAfterStall", scopes = ["open", "viewerAction"] }
 itemFailureLadder = { function = "handleItemFailure", scopes = ["open", "viewerAction"] }
 seekIntent = { function = "issueSeek", scopes = ["viewerAction", "seek"] }
+seekIntentAfterControl = { function = "issueSeek", scopes = ["viewerAction", "seek"] }
 nativeSeekCompletion = { function = "issueSeek", scopes = ["open", "viewerAction", "seek"] }
+nativeSeekAfterSelection = { function = "issueSeek", scopes = ["open", "viewerAction", "seek"] }
+recoveryEvidencePoll = { function = "startRecoveryEvidencePoll", scopes = ["open"] }

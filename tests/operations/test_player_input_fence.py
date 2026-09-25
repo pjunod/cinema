@@ -99,9 +99,21 @@ class PlayerInputFenceTest(unittest.TestCase):
         self.assertEqual(self.fence.scan_lines(relative, lines, everything), [])
 
     def test_scan_lines_honours_the_token_file_allowlist(self):
-        token, relative = next(iter(self.fence.TOKEN_FILE_ALLOWLIST))
-        self.assertEqual(token, "MPRemoteCommandCenter")
-        self.assertEqual(self.fence.scan_lines(relative, ["let c = MPRemoteCommandCenter.shared()"], set()), [])
+        allowed = self.fence.TOKEN_FILE_ALLOWLIST
+        self.assertEqual(
+            {relative for token, relative in allowed if token == "MPRemoteCommandCenter"},
+            {
+                Path("clients/apple/Sources/PlayerController.swift"),
+                Path("clients/apple/Sources/RemoteCommandOwner.swift"),
+            },
+        )
+        for token, relative in allowed:
+            with self.subTest(token=token, relative=relative):
+                self.assertEqual(token, "MPRemoteCommandCenter")
+                self.assertEqual(
+                    self.fence.scan_lines(relative, ["let c = MPRemoteCommandCenter.shared()"], set()),
+                    [],
+                )
         other = Path("clients/apple/Sources/PlayerView.swift")
         self.assertEqual(len(self.fence.scan_lines(other, ["let c = MPRemoteCommandCenter.shared()"], set())), 1)
 

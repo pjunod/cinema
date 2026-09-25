@@ -155,10 +155,17 @@ enum AttemptFence: String, CaseIterable, Sendable {
     case stallRecovery = "stall_recovery"
     /// `handleItemFailure`: the failure ladder after its control ask.
     case itemFailureLadder = "item_failure_ladder"
-    /// `issueSeek`: coalesced intent and control publication before routing.
+    /// `issueSeek`: coalesced intent before reporting to control.
     case seekIntent = "seek_intent"
-    /// `issueSeek`: native seek completion and subtitle reconciliation.
+    /// `issueSeek`: the intent after the awaited control report.
+    case seekIntentAfterControl = "seek_intent_after_control"
+    /// `issueSeek`: the awaited native seek completion.
     case nativeSeekCompletion = "native_seek_completion"
+    /// `issueSeek`: the native seek after awaited subtitle reconciliation.
+    case nativeSeekAfterSelection = "native_seek_after_selection"
+    /// `startRecoveryEvidencePoll`: one attachment's status stream. A viewer
+    /// Pause does not end the poll; session identity is checked beside it.
+    case recoveryEvidencePoll = "recovery_evidence_poll"
 
     /// The epochs this fence depends on — exactly the fields its old
     /// conjunction compared.
@@ -169,7 +176,10 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .stallRecovery: return [.open, .viewerAction]
         case .itemFailureLadder: return [.open, .viewerAction]
         case .seekIntent: return [.viewerAction, .seek]
+        case .seekIntentAfterControl: return [.viewerAction, .seek]
         case .nativeSeekCompletion: return [.open, .viewerAction, .seek]
+        case .nativeSeekAfterSelection: return [.open, .viewerAction, .seek]
+        case .recoveryEvidencePoll: return [.open]
         }
     }
 }
