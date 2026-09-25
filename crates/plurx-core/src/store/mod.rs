@@ -5391,7 +5391,9 @@ pub struct ProgressRails {
 /// Only a request whose every watch write reported its Raft log index has a
 /// position to offer: echoing the index of one write while another in the
 /// same request is unknown would let a peer serve a read that misses the
-/// unknown one.
+/// unknown one. Such a request says so instead ([`CommitIndexOffer::Unknown`]),
+/// because silence would leave the client echoing the index of its previous
+/// write, which is older than the one it was just told succeeded.
 #[derive(Clone, Default)]
 pub struct HttpWatchWriteAck {
     state: std::sync::Arc<HttpWatchWriteAckState>,
@@ -5403,17 +5405,41 @@ struct HttpWatchWriteAckState {
     unprovable: std::sync::atomic::AtomicBool,
 }
 
+/// What one response says about the watch writes its request made, as
+/// `X-Plurx-Commit-Index` (K-04 M2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitIndexOffer {
+    /// Every watch write in the request reported its Raft log index; this is
+    /// the highest. The client echoes it as `X-Plurx-Read-After`.
+    Index(u64),
+    /// At least one watch write's index is unknown: an older leader or a
+    /// proxy answered it, or it failed and may still commit. The client must
+    /// drop the index it holds, so its next reads go to Authority.
+    Unknown,
+}
+
 impl HttpWatchWriteAck {
     /// The index to offer, if every watch write in the request reported one.
     #[must_use]
     pub fn commit_index(&self) -> Option<u64> {
+        match self.offer() {
+            Some(CommitIndexOffer::Index(index)) => Some(index),
+            Some(CommitIndexOffer::Unknown) | None => None,
+        }
+    }
+
+    /// What the response says: nothing when the request made no watch
+    /// write, the highest index when every one reported it, and
+    /// [`CommitIndexOffer::Unknown`] otherwise.
+    #[must_use]
+    pub fn offer(&self) -> Option<CommitIndexOffer> {
         use std::sync::atomic::Ordering;
 
         if self.state.unprovable.load(Ordering::Acquire) {
-            return None;
+            return Some(CommitIndexOffer::Unknown);
         }
         let index = self.state.max_index.load(Ordering::Acquire);
-        (index > 0).then_some(index)
+        (index > 0).then_some(CommitIndexOffer::Index(index))
     }
 
     /// Record one acknowledged watch write. Exposed so HTTP-layer tests can

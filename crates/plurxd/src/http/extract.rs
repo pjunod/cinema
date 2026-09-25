@@ -744,17 +744,27 @@ pub(crate) fn session_expired(idle_days: i64) -> ApiError {
     )
 }
 
-/// Response header carrying the Raft log index of the watch writes a request
-/// acknowledged (K-04 M2). Present only when every such write reported one.
+/// Response header on every request that made a watch write (K-04 M2): the
+/// highest Raft log index of those writes when every one reported it, or
+/// [`COMMIT_INDEX_UNKNOWN`] when any did not. Absent when the request made
+/// no watch write.
 pub const COMMIT_INDEX_HEADER: &str = "x-plurx-commit-index";
-/// Request header by which a client echoes the newest
-/// [`COMMIT_INDEX_HEADER`] it has seen, for 60 seconds after seeing it.
+/// [`COMMIT_INDEX_HEADER`]'s value for a request with a watch write whose
+/// position is unknown. A client that sees it drops the index it echoes:
+/// keeping an older one would name a floor below a write it was just told
+/// succeeded.
+pub const COMMIT_INDEX_UNKNOWN: &str = "unknown";
+/// Request header by which a client echoes the newest numeric
+/// [`COMMIT_INDEX_HEADER`] it has seen, for 60 seconds after seeing it, and
+/// stops echoing on [`COMMIT_INDEX_UNKNOWN`].
 pub const READ_AFTER_HEADER: &str = "x-plurx-read-after";
 
 /// The client's `X-Plurx-Read-After` fence, if it sent exactly one
-/// well-formed positive index. Anything else is `None`, which makes a peer
-/// answer watch reads from Authority: a malformed fence can only cost
-/// latency, never serve a read that skips a write.
+/// well-formed positive index. Anything else is `None`, which makes watch
+/// reads go to Authority: a malformed fence can only cost latency. A
+/// well-formed but stale index could skip a write, which is why a response
+/// whose watch write has no known position says [`COMMIT_INDEX_UNKNOWN`]
+/// and the client drops its echo.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReadAfter(pub Option<u64>);
 
@@ -931,6 +941,9 @@ mod tests {
             "4.1",
             "0x29",
             "18446744073709551616",
+            // A client that echoed the invalidation verbatim instead of
+            // dropping its echo still reaches Authority.
+            super::COMMIT_INDEX_UNKNOWN,
         ] {
             assert_eq!(parse(&[bad]), None, "{bad:?}");
         }

@@ -522,12 +522,20 @@ async fn http_store_attribution(
     .await;
     HTTP_ROUTE_METRICS.record(group, role, counts.snapshot(), started_at.elapsed());
     // K-04 M2: offer the acknowledged watch-write position so a client can
-    // echo it as `X-Plurx-Read-After` to whichever node serves its next read.
-    if let Some(index) = watch_ack.commit_index() {
-        response.headers_mut().insert(
-            extract::COMMIT_INDEX_HEADER,
-            axum::http::HeaderValue::from(index),
-        );
+    // echo it as `X-Plurx-Read-After` to whichever node serves its next read,
+    // or say that a watch write's position is unknown so it drops its echo.
+    if let Some(offer) = watch_ack.offer() {
+        let value = match offer {
+            plurx_core::store::CommitIndexOffer::Index(index) => {
+                axum::http::HeaderValue::from(index)
+            }
+            plurx_core::store::CommitIndexOffer::Unknown => {
+                axum::http::HeaderValue::from_static(extract::COMMIT_INDEX_UNKNOWN)
+            }
+        };
+        response
+            .headers_mut()
+            .insert(extract::COMMIT_INDEX_HEADER, value);
     }
     response
 }
@@ -3356,10 +3364,12 @@ mod tests {
     }
 
     /// K-04 M2: a request whose watch writes all reported a log index offers
-    /// the highest as `X-Plurx-Commit-Index`; one unknown index, or no watch
-    /// write at all, offers nothing.
+    /// the highest as `X-Plurx-Commit-Index`; one unknown index offers
+    /// `unknown`, which tells the client to drop the index it echoes (review
+    /// of #504, finding 2); no watch write at all offers nothing, and the
+    /// client keeps its echo.
     #[tokio::test]
-    async fn commit_index_header_offers_only_a_fully_acknowledged_watch_write_position() {
+    async fn commit_index_header_offers_the_acknowledged_position_or_unknown() {
         let (_, state) = test_app_with_state();
         let app = Router::new()
             .route(
@@ -3391,7 +3401,7 @@ mod tests {
             .oneshot(post("unprovable"))
             .await
             .expect("unprovable write");
-        assert_eq!(header(&response), None);
+        assert_eq!(header(&response).as_deref(), Some("unknown"));
         let response = app.oneshot(post("none")).await.expect("no write");
         assert_eq!(header(&response), None);
     }
