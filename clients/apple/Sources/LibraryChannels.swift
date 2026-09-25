@@ -713,7 +713,7 @@ final class LibraryChannelPlayerController: ObservableObject {
     /// progress or the server keeps budgeting production from the join point.
     func makeProgressObservation(
         _ item: AVPlayerItem, sequence: UInt64, notify: @escaping @MainActor () -> Void
-    ) -> @MainActor () -> Void {
+    ) -> @MainActor @Sendable () -> Void {
         { [weak self] in
             guard let self, self.tuneSequence == sequence, self.player.currentItem === item else { return }
             notify()

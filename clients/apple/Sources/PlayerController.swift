@@ -1790,8 +1790,8 @@ final class PlayerController: ObservableObject {
     /// sessions inside that contract while leaving direct and completed-VOD
     /// items under AVPlayer's normal policy.
     static let growingHLSForwardBufferSeconds: TimeInterval = 60
-    static let repeatedEndToleranceMs = 250
-    static let naturalEndToleranceMs = 15_000
+    nonisolated static let repeatedEndToleranceMs = 250
+    nonisolated static let naturalEndToleranceMs = 15_000
     /// How long an attached item may sit at `.unknown` before the wait is
     /// spent. A resume has always been bounded by this because it had to seek;
     /// a fresh start was not bounded at all, which is what let a title AVPlayer
@@ -1806,7 +1806,7 @@ final class PlayerController: ObservableObject {
     /// The observer runs twice a second, so anything past this is a seek or an
     /// item replacement, not playback — and must not be counted as black.
     static let blackFrameSampleCeilingMs = 2_000
-    static let gracefulRepeatedEndFraction = 0.95
+    nonisolated static let gracefulRepeatedEndFraction = 0.95
     static let playbackStartFailureTitle = "Couldn't start playback."
     static let playbackStoppedFailureTitle = "Playback stopped."
     /// The web's sentence for the same row, moved rather than rewritten (§7:
@@ -5996,7 +5996,7 @@ final class PlayerController: ObservableObject {
     }
 
     /// The wire value for a typed stall recovery. The server accepts no other.
-    static let stallReopenReason = "stall"
+    nonisolated static let stallReopenReason = "stall"
 
     /// The document says whether HDR10 output is allowed; this echo says the
     /// session create actually requests an HDR10 transcode. Manual quality
@@ -7032,7 +7032,7 @@ final class PlayerController: ObservableObject {
     /// The actual timer callback owns a title, and only samples an attached
     /// item outside preparation. A no-item clock is not a resume position;
     /// removing an observer does not revoke a callback already queued by AVF.
-    func makePeriodicPlaybackObservation() -> @MainActor () -> Void {
+    func makePeriodicPlaybackObservation() -> @MainActor @Sendable () -> Void {
         let lifecycle = lifecycleGeneration
         return { [weak self] in
                 guard let self, self.isCurrentLifecycle(lifecycle),
