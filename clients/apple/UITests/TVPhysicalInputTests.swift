@@ -54,6 +54,7 @@ final class TVPhysicalInputTests: XCTestCase {
     func testLibraryPagingWithRemote() throws {
         let collectionID = try requiredEnvironment("PLURX_TVOS_LIBRARY_ID")
         let app = XCUIApplication()
+        wakeDevice()
         app.launch()
         let libraries = app.tabBars.buttons["Libraries"]
         XCTAssertTrue(libraries.waitForExistence(timeout: 30),
@@ -107,8 +108,16 @@ final class TVPhysicalInputTests: XCTestCase {
             "-plurx.acceptance.fileId", fileID,
             "-plurx.acceptance.title", "Physical remote acceptance",
         ]
+        wakeDevice()
         app.launch()
         return app
+    }
+
+    private func wakeDevice() {
+        // CoreDevice can start the test runner while tvOS still forbids a
+        // foreground app launch. The physical remote's Menu key wakes it.
+        remote.press(.menu)
+        Thread.sleep(forTimeInterval: 1)
     }
 
     private func requiredEnvironment(_ name: String) throws -> String {
