@@ -19612,6 +19612,9 @@ impl TranscodeManager {
             speculative: std::sync::atomic::AtomicBool::new(false),
             queued: std::sync::Mutex::new(None),
             policy_retry: std::sync::atomic::AtomicBool::new(false),
+            handoff_wait: std::sync::atomic::AtomicBool::new(false),
+            last_refusal: std::sync::Mutex::new(None),
+            handoff_claim: std::sync::Mutex::new(None),
             #[cfg(test)]
             admission_pause: std::sync::Mutex::new(None),
         })))
@@ -20059,6 +20062,11 @@ impl TranscodeManager {
                 .await
             {
                 Ok(_) => {
+                    if speculative {
+                        self.vod
+                            .mark_prepared_incarnation(session_id, &remote.incarnation_id)
+                            .await;
+                    }
                     tracing::info!(
                         session = %session_log_id(session_id),
                         "resurrected a vod session from its durable route"

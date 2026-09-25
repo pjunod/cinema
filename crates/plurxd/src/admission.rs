@@ -104,6 +104,20 @@ struct PermitState {
     software_background_permits: usize,
     software_live_used: usize,
     software_background_used: usize,
+    /// Capacity a predecessor handed to its own viewer's prepared successor.
+    /// Created before the predecessor's permit is released, so between that
+    /// reap and the successor's retry no other start can take it; only the
+    /// holder of the token can claim it, and it lapses on its own.
+    reservations: Vec<Reservation>,
+    next_reservation: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Reservation {
+    token: u64,
+    hardware: bool,
+    cpu_threads: usize,
+    expires: std::time::Instant,
 }
 
 impl PermitState {
@@ -115,13 +129,72 @@ impl PermitState {
         self.hardware_background > 0 || self.software_background_permits > 0
     }
 
+    fn live_reservations(&self, except: Option<u64>) -> impl Iterator<Item = &Reservation> {
+        let now = std::time::Instant::now();
+        self.reservations.iter().filter(move |reservation| {
+            reservation.expires > now && Some(reservation.token) != except
+        })
+    }
+
+    fn has_reservation(&self) -> bool {
+        self.live_reservations(None).next().is_some()
+    }
+
+    fn holds_reservation(&self, token: u64) -> bool {
+        self.live_reservations(None)
+            .any(|reservation| reservation.token == token)
+    }
+
+    fn prune(&mut self) {
+        let now = std::time::Instant::now();
+        self.reservations
+            .retain(|reservation| reservation.expires > now);
+    }
+
     fn hardware_used(&self) -> usize {
-        self.hardware_live + self.hardware_background
+        self.hardware_used_except(None)
+    }
+
+    /// Held hardware slots plus every live reservation but `except`'s.
+    fn hardware_used_except(&self, except: Option<u64>) -> usize {
+        self.hardware_live
+            + self.hardware_background
+            + self
+                .live_reservations(except)
+                .filter(|reservation| reservation.hardware)
+                .count()
     }
 
     fn software_used(&self) -> usize {
-        self.software_live_used + self.software_background_used
+        self.software_used_except(None)
     }
+
+    fn software_used_except(&self, except: Option<u64>) -> usize {
+        self.software_live_used
+            + self.software_background_used
+            + self
+                .live_reservations(except)
+                .map(|reservation| reservation.cpu_threads)
+                .sum::<usize>()
+    }
+
+    /// Background work stays parked while any live permit, live waiter or
+    /// handoff reservation exists.
+    fn background_blocked(&self) -> bool {
+        self.live_waiting > 0 || self.live_active() || self.has_reservation()
+    }
+}
+
+/// What the shared pools looked like at one instant, for a log line that has
+/// to explain why an encoder could not start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolSnapshot {
+    pub hardware_used: usize,
+    pub software_used: usize,
+    pub live_waiting: usize,
+    pub background_active: bool,
+    /// Unclaimed handoff reservations (counted in the used figures above).
+    pub reservations: usize,
 }
 
 /// A held hardware slot. Releases on drop — which is what keeps the count
@@ -214,7 +287,7 @@ impl SwPool {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match priority {
             Priority::Live if permits.background_active() => return None,
-            Priority::Background if permits.live_waiting > 0 || permits.live_active() => {
+            Priority::Background if permits.background_blocked() => {
                 return None;
             }
             Priority::Speculative if permits.live_waiting > 0 || permits.background_active() => {
@@ -510,28 +583,55 @@ impl Admissions {
         estimate: &TranscodeResourceEstimate,
         priority: Priority,
     ) -> Option<TranscodePermit> {
+        self.try_admit_bundle_claiming(hardware_max, software_budget, estimate, priority, None)
+    }
+
+    /// [`Self::try_admit_bundle`] for a caller that may hold a handoff
+    /// reservation. A live claim is capacity its own viewer's predecessor
+    /// already owned and gave up for exactly this start, so the claimant sees
+    /// the pool without it and is not held behind a waiter who arrived after
+    /// the transfer began (that waiter could never have had the predecessor's
+    /// permit: a running producer does not yield to it). Everyone else sees
+    /// the reservation as capacity in use until it is claimed or lapses.
+    pub fn try_admit_bundle_claiming(
+        &self,
+        hardware_max: usize,
+        software_budget: usize,
+        estimate: &TranscodeResourceEstimate,
+        priority: Priority,
+        claim: Option<u64>,
+    ) -> Option<TranscodePermit> {
         let mut permits = self
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        permits.prune();
+        let claim = claim.filter(|token| permits.holds_reservation(*token));
         match priority {
             Priority::Live if permits.background_active() => return None,
-            Priority::Background if permits.live_waiting > 0 || permits.live_active() => {
+            Priority::Background if permits.background_blocked() => {
                 return None;
             }
-            Priority::Speculative if permits.live_waiting > 0 || permits.background_active() => {
+            Priority::Speculative
+                if (permits.live_waiting > 0 && claim.is_none()) || permits.background_active() =>
+            {
                 return None;
             }
             _ => {}
         }
-        if estimate.hardware_slot && permits.hardware_used() >= hardware_max {
+        if estimate.hardware_slot && permits.hardware_used_except(claim) >= hardware_max {
             return None;
         }
         if estimate.cpu_threads > 0 {
-            let used = permits.software_used();
+            let used = permits.software_used_except(claim);
             if used > 0 && used + estimate.cpu_threads > software_budget {
                 return None;
             }
+        }
+        if let Some(token) = claim {
+            permits
+                .reservations
+                .retain(|reservation| reservation.token != token);
         }
         // Past every refusal: from here the whole bundle is granted, so no
         // caller can observe one half without the other.
@@ -607,6 +707,91 @@ impl Admissions {
             .background_active()
     }
 
+    /// Hold `estimate` of capacity for one handoff claimant for `ttl`. Taken
+    /// while the yielding predecessor still owns its permit, so the pool is
+    /// briefly over-counted rather than ever briefly open.
+    pub fn reserve_for_handoff(
+        &self,
+        estimate: &TranscodeResourceEstimate,
+        ttl: std::time::Duration,
+    ) -> u64 {
+        let mut permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        permits.prune();
+        permits.next_reservation += 1;
+        let token = permits.next_reservation;
+        permits.reservations.push(Reservation {
+            token,
+            hardware: estimate.hardware_slot,
+            cpu_threads: estimate.cpu_threads,
+            expires: std::time::Instant::now() + ttl,
+        });
+        token
+    }
+
+    /// Give up an unclaimed reservation early (its claimant went away).
+    pub fn release_reservation(&self, token: u64) {
+        self.permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reservations
+            .retain(|reservation| reservation.token != token);
+    }
+
+    /// One consistent view of the shared pools, for attributing a refusal.
+    pub fn snapshot(&self) -> PoolSnapshot {
+        let permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        PoolSnapshot {
+            hardware_used: permits.hardware_used(),
+            software_used: permits.software_used(),
+            live_waiting: permits.live_waiting,
+            background_active: permits.background_active(),
+            reservations: permits.live_reservations(None).count(),
+        }
+    }
+
+    /// Would a speculative request for `wanted` be granted if a permit sized
+    /// `released` were returned first?
+    ///
+    /// Asked before a prepared successor asks its own viewer's predecessor to
+    /// give its permit back, so that a predecessor is never terminated for a
+    /// successor that still could not start: the same speculative rules as
+    /// [`Self::try_admit_bundle`], including never crossing a live waiter or
+    /// background ownership, evaluated under the same single lock.
+    pub fn speculative_fits_after_release(
+        &self,
+        hardware_max: usize,
+        software_budget: usize,
+        wanted: &TranscodeResourceEstimate,
+        released: &TranscodeResourceEstimate,
+    ) -> bool {
+        let permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if permits.live_waiting > 0 || permits.background_active() {
+            return false;
+        }
+        let hardware_used = permits
+            .hardware_used()
+            .saturating_sub(usize::from(released.hardware_slot));
+        if wanted.hardware_slot && hardware_used >= hardware_max {
+            return false;
+        }
+        if wanted.cpu_threads > 0 {
+            let used = permits.software_used().saturating_sub(released.cpu_threads);
+            if used > 0 && used + wanted.cpu_threads > software_budget {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Take a slot if one is free. Capacity and owner change under the same
     /// mutex, which makes two racing starts unable to both succeed on the last
     /// slot and closes the waiter-registration/background-acquisition race.
@@ -621,7 +806,7 @@ impl Admissions {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match priority {
             Priority::Live if permits.background_active() => return None,
-            Priority::Background if permits.live_waiting > 0 || permits.live_active() => {
+            Priority::Background if permits.background_blocked() => {
                 return None;
             }
             Priority::Speculative if permits.live_waiting > 0 || permits.background_active() => {
@@ -838,6 +1023,101 @@ pub fn software_budget() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_handoff_reservation_is_claimable_only_by_its_token() {
+        let pool = Admissions::new();
+        let software = TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: 4,
+            decoder_threads: None,
+        };
+        let token = pool.reserve_for_handoff(&software, std::time::Duration::from_secs(60));
+        assert_eq!(pool.snapshot().software_used, 4);
+        for priority in [Priority::Live, Priority::Speculative, Priority::Background] {
+            assert!(
+                pool.try_admit_bundle(1, 4, &software, priority).is_none(),
+                "{priority:?} cannot take reserved capacity"
+            );
+        }
+        assert!(pool
+            .try_admit_bundle_claiming(1, 4, &software, Priority::Speculative, Some(token + 1))
+            .is_none());
+        let waiter = pool.wait_for_slot();
+        let claimed = pool
+            .try_admit_bundle_claiming(1, 4, &software, Priority::Speculative, Some(token))
+            .expect("the claimant takes the capacity its predecessor handed over");
+        drop(waiter);
+        assert_eq!(pool.snapshot().reservations, 0);
+        assert!(
+            pool.try_admit_bundle_claiming(1, 4, &software, Priority::Speculative, Some(token))
+                .is_none(),
+            "a claim is spent once"
+        );
+        drop(claimed);
+
+        let lapsing = pool.reserve_for_handoff(&software, std::time::Duration::ZERO);
+        assert!(
+            pool.try_admit_bundle(1, 4, &software, Priority::Live)
+                .is_some(),
+            "a lapsed reservation holds nothing"
+        );
+        pool.release_reservation(lapsing);
+        let released = pool.reserve_for_handoff(&software, std::time::Duration::from_secs(60));
+        pool.release_reservation(released);
+        assert!(pool
+            .try_admit_bundle(1, 4, &software, Priority::Background)
+            .is_some());
+    }
+
+    #[test]
+    fn a_speculative_fit_after_release_keeps_every_priority_rule() {
+        let pool = Admissions::new();
+        let software = TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: 4,
+            decoder_threads: None,
+        };
+        let hardware = TranscodeResourceEstimate {
+            hardware_slot: true,
+            cpu_threads: 0,
+            decoder_threads: None,
+        };
+        let held = pool
+            .try_admit_bundle(1, 4, &software, Priority::Live)
+            .expect("the only software share");
+        assert!(pool
+            .try_admit_bundle(1, 4, &software, Priority::Speculative)
+            .is_none());
+        assert!(pool.speculative_fits_after_release(1, 4, &software, &software));
+        assert!(
+            !pool.speculative_fits_after_release(1, 4, &software, &hardware),
+            "returning a permit of the wrong kind admits nothing"
+        );
+        let waiter = pool.wait_for_slot();
+        assert!(
+            !pool.speculative_fits_after_release(1, 4, &software, &software),
+            "speculative work never jumps a waiting viewer"
+        );
+        drop(waiter);
+        let background = pool.try_admit_bundle(1, 4, &hardware, Priority::Background);
+        assert!(background.is_none(), "live ownership parks background work");
+        drop(held);
+        let background = pool
+            .try_admit_bundle(1, 4, &hardware, Priority::Background)
+            .expect("idle pool admits background");
+        assert!(
+            !pool.speculative_fits_after_release(1, 4, &software, &hardware),
+            "background ownership is never crossed by speculative work"
+        );
+        drop(background);
+        let snapshot = pool.snapshot();
+        assert_eq!(snapshot.reservations, 0);
+        assert_eq!(snapshot.hardware_used, 0);
+        assert_eq!(snapshot.software_used, 0);
+        assert_eq!(snapshot.live_waiting, 0);
+        assert!(!snapshot.background_active);
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn work(
