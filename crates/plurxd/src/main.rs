@@ -241,6 +241,16 @@ enum Command {
         #[command(subcommand)]
         command: crate::wal_cli::WalCommand,
     },
+    /// Panic on purpose and exit, so a release binary's backtrace can be read.
+    ///
+    /// Hidden: it exists to prove the release profile's line tables
+    /// symbolicate (docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md
+    /// §3.5 and §5.6, which name it `--diagnostic-panic`; a subcommand is the
+    /// shape this CLI gives every other action), and for an operator to check
+    /// the same on a deployed image with `RUST_BACKTRACE=1 plurxd
+    /// diagnostic-panic`. It touches no storage and no network.
+    #[command(hide = true)]
+    DiagnosticPanic,
 }
 
 #[cfg(windows)]
@@ -354,6 +364,15 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The deliberate panic behind `plurxd diagnostic-panic`. Its own function, and
+/// `#[inline(never)]`, so the frame a reader looks for in the backtrace has
+/// this name and this file's line number rather than being folded into
+/// `dispatch`.
+#[inline(never)]
+fn diagnostic_panic() -> ! {
+    panic!("deliberate panic requested by `plurxd diagnostic-panic`");
+}
+
 /// Route a parsed command, separated from `main` so every subcommand but the
 /// server itself is reachable without a process launch.
 async fn dispatch(
@@ -377,7 +396,8 @@ async fn dispatch(
         | Command::Advertise { .. }
         | Command::Cluster { .. }
         | Command::Restore { .. }
-        | Command::Wal { .. } => {}
+        | Command::Wal { .. }
+        | Command::DiagnosticPanic => {}
     }
     match command {
         Command::Run => run(config).await,
@@ -391,6 +411,7 @@ async fn dispatch(
                 windows_service::dispatch_service(config).map_err(Into::into)
             }
         },
+        Command::DiagnosticPanic => diagnostic_panic(),
         Command::Healthcheck => {
             // One terse line either way — this output lands in `docker inspect`.
             if let Err(error) = healthcheck(&config) {

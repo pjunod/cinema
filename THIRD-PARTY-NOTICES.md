@@ -15,7 +15,7 @@ and never reaches a shipped artifact (§5).
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
 fields, so an audit claiming to read licenses "from Cargo.lock" has not done
-the work. 501 source-bearing crates in the root workspace · license fields
+the work. 499 source-bearing crates in the root workspace · license fields
 verified 2026-09-17; the graph itself re-checked against `Cargo.lock`
 on 2026-09-22, when the vendored Hiqlite `backup` feature stopped
 enabling S3 and fourteen crates reached only through it left the
@@ -109,7 +109,7 @@ changed — only which file to open.
 
 ## 3. Vendored Rust crates — upstream sources, locally modified
 
-Four crates are vendored under `vendor/` rather than pulled from crates.io.
+Six crates are vendored under `vendor/` rather than pulled from crates.io.
 Each carries a `PLURX-PATCH.md` recording what plurx changed and why.
 
 | Crate | Version | License | Upstream | Changes |
@@ -118,6 +118,8 @@ Each carries a `PLURX-PATCH.md` recording what plurx changed and why.
 | `hiqlite-wal` | 0.14.0 | Apache-2.0 | Sebastian Dobe · [sebadob/hiqlite](https://github.com/sebadob/hiqlite) | [3 restart-recovery patches](vendor/hiqlite-wal/PLURX-PATCH.md) |
 | `s3-simple` | 0.8.0 | Apache-2.0 | Sebastian Dobe · [sebadob/s3-simple](https://github.com/sebadob/s3-simple) | [quick-xml bump for RUSTSEC-2026-0194/0195 and four unreferenced edges dropped](vendor/s3-simple/PLURX-PATCH.md) |
 | `rust_decimal` | 1.42.1 | MIT | Paul Mason · [paupino/rust-decimal](https://github.com/paupino/rust-decimal) | [rkyv 0.7 removal for RUSTSEC-2026-0235](vendor/rust_decimal/PLURX-PATCH.md) |
+| `dolby_vision` | 3.4.0 | MIT | quietvoid · [quietvoid/dovi_tool](https://github.com/quietvoid/dovi_tool/tree/main/dolby_vision) | [five refusals where a malformed RPU allocated or panicked](vendor/dolby_vision/PLURX-PATCH.md) |
+| `bitvec_helpers` | 4.0.2 | MIT | quietvoid · [quietvoid/bitvec_helpers](https://github.com/quietvoid/bitvec_helpers) | [two Exp-Golomb overflows refused](vendor/bitvec_helpers/PLURX-PATCH.md) |
 
 Each directory carries its upstream license at `vendor/<crate>/LICENSE`.
 
@@ -137,8 +139,8 @@ such requirement applies.
 
 ## 4. Rust dependencies
 
-515 source-bearing crates resolve into a plurx build, excluding the five
-first-party crates and the four vendored above. Every one is permissive:
+513 source-bearing crates resolve into a plurx build, excluding the five
+first-party crates and the six vendored above. Every one is permissive:
 
 | `MIT OR Apache-2.0` | 268 |
 | `MIT` | 117 |
@@ -188,14 +190,15 @@ stores) are permissive with attribution requirements, satisfied by this file.
 Two limits worth stating rather than hiding. This table reproduces each
 crate's declared SPDX expression only: `aws-lc-sys`, `onig_sys` and `lz4-sys`
 statically link bundled C whose own upstream notices are not carried here.
-And the repo has three lockfiles — `fuzz/Cargo.lock` and
-`spikes/hiqlite-m0/Cargo.lock` resolve 37 packages the root lock does not
-(`libfuzzer-sys`, `arbitrary`, `rkyv`, and others). All are permissive and
-neither workspace ships in any artifact, so they are out of scope for
-distribution, but they are not covered by the table above.
+And the repo has four lockfiles — `fuzz/Cargo.lock`,
+`fuzz/parsers/Cargo.lock` and `spikes/hiqlite-m0/Cargo.lock` resolve
+packages the root lock does not (`libfuzzer-sys`, `arbitrary`, `rkyv`, and
+others). All are permissive and none of those workspaces ships in any
+artifact, so they are out of scope for distribution, but they are not
+covered by the table above.
 
 <details>
-<summary>Full crate list (515)</summary>
+<summary>Full crate list (513)</summary>
 
 | Crate | Version | License |
 |---|---|---|
@@ -240,7 +243,6 @@ distribution, but they are not covered by the table above.
 | `bitflags` | 2.13.1 | MIT OR Apache-2.0 |
 | `bitstream-io` | 4.10.0 | MIT/Apache-2.0 |
 | `bitvec` | 1.1.1 | MIT |
-| `bitvec_helpers` | 4.0.2 | MIT |
 | `blake2` | 0.10.6 | MIT OR Apache-2.0 |
 | `block-buffer` | 0.10.4 | MIT OR Apache-2.0 |
 | `block-buffer` | 0.12.1 | MIT OR Apache-2.0 |
@@ -311,7 +313,6 @@ distribution, but they are not covered by the table above.
 | `digest` | 0.10.7 | MIT OR Apache-2.0 |
 | `digest` | 0.11.3 | MIT OR Apache-2.0 |
 | `displaydoc` | 0.2.7 | MIT OR Apache-2.0 |
-| `dolby_vision` | 3.4.0 | MIT |
 | `dotenvy` | 0.15.7 | MIT |
 | `dunce` | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 |
 | `dyn-clone` | 1.0.20 | MIT OR Apache-2.0 |
