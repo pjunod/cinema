@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** reviewed head compiled; fast lane pending · **Updated:** 2026-09-25 03:00 UTC · **Base:** `f600d2823`
+**Status:** ready PR, fast lane pending · **Updated:** 2026-09-25 03:01 UTC · **Base:** `f600d2823`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -31,9 +31,9 @@ resume now returns the caption master at `676b62393`; Android fixes are
 integrated at `dc26817db` and `22e9bf667`. The combined `bc5fee5d2` head passed pinned Rust check, pinned Clippy with
 `-D warnings`, iOS/tvOS simulator build, Android app/test-source compilation,
 Rust formatting, JavaScript syntax, and a clean merge-tree against current
-`main`. The fast lane has not run. The D-03 milestone remains open
+`main`. PR #506 is ready after the sole review. The fast lane has not run yet. The D-03 milestone remains open
 until the external-reader call sites use scoped grants. No second adversarial
-review will be requested for this PR. The fast lane has not run.
+review will be requested for this PR. PR #506 is ready after the sole review. The fast lane has not run yet.
 
 ## Current impediments
 
