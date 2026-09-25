@@ -214,14 +214,14 @@ Two more, specific to the sequence:
 ## 4a. Follow-ups
 
 - **F-1 — put `playback_auto_abr` in Settings → Developer with advisory
-  readiness.** Today it is a Playback-panel toggle with no readiness entry
+  readiness (implemented 2026-09-25 on `codex/adaptive-developer-advisory`).** Today it is a Playback-panel toggle with no readiness entry
   (see the top of this plan). The project rule places optional functionality in Developer
-  with readiness information that informs and never gates. Proposed
-  readiness rows: which clients run a controller at this build, and whether
-  each platform's shaped trace has been recorded. Moving a viewer-visible
-  Playback setting is Paul's call, so it is recorded here rather than done
-  under A-04; it should be settled before M3 merges, since M3 is the first
-  change that makes the switch mean something on a native client.
+  with readiness information that informs and never gates. The Developer
+  card now reports the browser controller and dated native/trace evidence;
+  the same server setting remains the one enable path. The dated rows must be
+  refreshed when new platform traces or native controllers ship. This is
+  Paul's requested location and does not add a code gate. It remains
+  unmerged and awaits the consolidated PR's review and fast lane.
 
 ## 5. Verification
 
