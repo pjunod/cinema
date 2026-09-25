@@ -2512,3 +2512,17 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.k
 source_anchor = "fun presentedVideoProgress(positionMs: Long, sequence: Long): Boolean"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
 test_anchor = "remuxPrerollSettlesOnlyAfterRenderedVideoCrossesTheTarget"
+
+[[fixes]]
+# 2026-09-24: the watch slot's player host outranked the sticky header and
+# clipped every popover to the picture; the menus and the Playback info
+# readout are now bounded to the viewport minus the stuck chrome instead, and
+# the host sits under that chrome. The anchor is the bounds function both
+# popovers read; the test reaches the top of a thirty-track menu outside the
+# picture.
+id = "web.watch-popovers-escape-the-picture"
+commits = ["6d93c13f8"]
+source = "crates/plurxd/src/web/player/watch-presentation.js"
+source_anchor = "function watchPopoverBounds(){"
+test = "tests/web/watch-and-browse.browser.cjs"
+test_anchor = "the top of the menu, outside the picture, is reachable"

@@ -53,7 +53,7 @@ function pbSyncSubIcon(){ const cc=document.getElementById("pbsubs");
 function closeMenu(restoreFocus=true){
   const m=document.getElementById("pmenu"); if(!m) return;
   m.classList.remove("on","low");
-  m.style.left=""; m.style.top=""; m.style.bottom="";
+  m.style.left=""; m.style.top=""; m.style.bottom=""; m.style.maxHeight="";
   const opener=PLAYER&&PLAYER._menuOpener;
   if(opener&&opener.setAttribute) opener.setAttribute("aria-expanded","false");
   if(restoreFocus&&opener&&opener.focus) opener.focus({preventScroll:true});
@@ -141,7 +141,15 @@ function toggleMenu(kind,low){
   m.classList.add("on");
   positionMenu(kind,low);
   const initial=m.querySelector(".sel")||m.querySelector("button");
-  if(initial) initial.focus({preventScroll:true});
+  if(initial){
+    initial.focus({preventScroll:true});
+    // The menu scrolls now; the entry that took focus (the ✓ one) has to be
+    // in the part that shows. Menu-local — scrollIntoView could move the
+    // page under a fixed host.
+    const above=initial.offsetTop, below=above+initial.offsetHeight;
+    if(above<m.scrollTop) m.scrollTop=above;
+    else if(below>m.scrollTop+m.clientHeight) m.scrollTop=below-m.clientHeight;
+  }
   playerActivity();
 }
 
@@ -162,6 +170,22 @@ const MENU_ANCHORS={audio:[null,"pbaudio"],subs:[null,"pbsubs"],
 // above it for the transport — measured, because the top row wraps to two
 // lines on a narrow window and a fixed offset then lands on top of the row it
 // was supposed to sit under.
+//
+// Height: a menu is as tall as its entries until the room runs out, and then
+// it scrolls. The room is measured from the button to the edge of what the
+// viewer can see — the viewport in a full presentation, the viewport minus
+// the page's own chrome when the player sits in the watch slot (see
+// watchPopoverBounds) — never from the picture, which a subtitle menu with
+// thirty tracks was taller than, so its top was cut off and half of it could
+// not be chosen.
+// The clamp is for a button within a hand's width of the ceiling — a picture
+// scrolled almost under the header — where the menu is moot anyway; it
+// corrects itself on the next scroll frame.
+const MENU_MIN_HEIGHT=120;
+function popoverBounds(){
+  if(typeof watchPopoverBounds==="function") return watchPopoverBounds();
+  return {top:0,bottom:window.innerHeight};
+}
 function positionMenu(kind,low){
   const m=document.getElementById("pmenu"), player=document.getElementById("player");
   if(!m||!player) return;
@@ -169,9 +193,19 @@ function positionMenu(kind,low){
   const btn=anchor?document.getElementById(anchor):null;
   // No anchor (or a hidden one): leave the stylesheet's corner placement,
   // which is still a sane place for a menu to be.
-  if(!btn||!btn.offsetParent){ m.style.left=m.style.right=m.style.top=m.style.bottom=""; return; }
-  const pr=player.getBoundingClientRect(), br=btn.getBoundingClientRect();
+  if(!btn||!btn.offsetParent){ m.style.left=m.style.right=m.style.top=m.style.bottom=m.style.maxHeight=""; return; }
+  const pr=player.getBoundingClientRect(), br=btn.getBoundingClientRect(), bounds=popoverBounds();
   const gap=8, edge=12;
+  // A full presentation on a touch screen keeps the top bar clear of a menu
+  // grown upward — the stylesheet's coarse band promises Close stays
+  // reachable with a panel open. In the slot the bar is at the picture's
+  // top and the menu may pass it (raised above it there), so the room above
+  // the picture is not wasted on a tablet.
+  const slotted=typeof WATCH!=="undefined"&&!!WATCH&&WATCH.mode!=="full";
+  if(low&&!slotted&&coarsePointer()){
+    const bar=document.getElementById("pbar");
+    if(bar) bounds.top=Math.max(bounds.top, bar.getBoundingClientRect().bottom+gap);
+  }
   // Left edges aligned, flipping to right edges only when that would hang off
   // the player. Consistency is the point: choosing per-button by which half of
   // the screen it sits in made two ADJACENT buttons open their menus opposite
@@ -185,9 +219,11 @@ function positionMenu(kind,low){
   if(low){
     m.style.top="auto";
     m.style.bottom=Math.max(edge, pr.bottom-br.top+gap)+"px";
+    m.style.maxHeight=Math.max(MENU_MIN_HEIGHT, Math.floor(br.top-gap-bounds.top-edge))+"px";
   } else {
     m.style.bottom="auto";
     m.style.top=Math.max(edge, br.bottom-pr.top+gap)+"px";
+    m.style.maxHeight=Math.max(MENU_MIN_HEIGHT, Math.floor(bounds.bottom-edge-br.bottom-gap))+"px";
   }
   dodgeStats(m, pr, edge);
 }

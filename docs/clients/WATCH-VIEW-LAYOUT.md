@@ -64,6 +64,51 @@ Episodes keep the episode browser (`#watch-lower`, cards or rows, season
 picker) under everything; the rail is hidden for them because episode files
 rarely carry chapters worth a strip.
 
+## The picture under the page; the menus and the readout over it
+
+The slot player is the ordinary modal player's `#modal` element, made
+`position:fixed` and placed on the slot's rectangle by `watchLayout()` on every
+scroll and resize frame. Two rules govern what it may cover (fixed
+2026-09-24; before this the host sat at z-index 90 with a clip-path to its
+own box, so the picture scrolled *over* the sticky header and every popover
+was cut at the picture's edge):
+
+- **The picture sits under the page's chrome.** The host's z-index (10) is
+  below the classic header (20), the theater bar (30) and chips (25) and the
+  phone tab bars (45). Scrolling the picture up takes it behind the header
+  the way the rest of the page goes; nothing special-cases the header.
+- **The host clips nothing.** The subtitle and audio menus (`#pmenu`) and the
+  Playback info readout (`#statsov`) are taller than a compact picture, so
+  they hang outside it, over the page. Their height is bounded to what the
+  viewer can see: `positionMenu()` and `positionStats()` measure from the
+  button (or the readout's top) to the edge of `watchPopoverBounds()` — the
+  viewport minus whichever of that chrome is stuck at its edge — and the
+  entries or the readout body scroll inside that. `watchLayout()` re-runs
+  both, so an open popover follows a scrolling picture and shrinks as it
+  nears the header. In a full presentation (fullscreen, or the page-filling
+  player) the bounds are the whole viewport, and so are they in the ordinary
+  modal player, which has no page around it.
+- Inside the host, an open menu and the readout are raised above the bar and
+  the Larger / fullscreen buttons (those are raised for Close during a
+  prepare); a fault's notice and the in-chrome spinner stay above the readout.
+  Escape, the readout's ✕, or a tap anywhere else — on the picture or on the
+  page beside it — is the way out.
+- The chrome that counts is whichever of `header.top`, `.th-top`,
+  `.th-chips`, `.th-pills`, `.px-tabs` and the catalog's `.px-side` (its
+  header under 900 px; a full-height column wider, skipped by its geometry)
+  is stuck at the viewport's edge and overlaps the picture horizontally. In a
+  full presentation on a touch screen a menu grown upward also stops under
+  the player's own bar, so Close stays reachable.
+- The picture's rounded corners are on its parts (`.player`, the video, the
+  bar and the transport gradients) now that no overflow clip draws them.
+
+The browser acceptance (`tests/web/watch-and-browse.browser.cjs`) opens a
+thirty-track subtitle menu and the Diagnostics readout on a compact picture
+at 1440×1000 and checks, with `elementFromPoint`, that the menu's top above
+the picture and the readout's bottom below it are reachable, that the menu
+stops under the header, and that once the page is scrolled the header — not
+the picture — is what paints at their overlap.
+
 ## The chapter rail (`#watch-rail`)
 
 **What it shows:** a header line — `Chapters · <current chapter title> ·
@@ -184,7 +229,8 @@ back. The card's rows are advisory and never turn the switch:
 
 | Piece | File |
 |---|---|
-| Page markup and state (mount, layout, folds host) | `crates/plurxd/src/web/player/watch-presentation.js` |
+| Page markup and state (mount, layout, folds host, popover bounds) | `crates/plurxd/src/web/player/watch-presentation.js` |
+| Menu and readout placement against those bounds | `crates/plurxd/src/web/player/menus.js` (`positionMenu`) · `player/stats.js` (`positionStats`) |
 | Title panel, ledger, chip wiring, rail, chapter marking | `crates/plurxd/src/web/detail/watch-browser.js` |
 | Styles (`.watch-*`) | `crates/plurxd/src/web/app.css` |
 | Thumbnail route, extraction, cache, counters | `crates/plurxd/src/http/chapter_thumbs.rs` |
