@@ -256,3 +256,9 @@ This establishes signing material only. The follow-up code branch has not passed
 On current main `415eb047f3b66afd1bf21bd3ea829766080c0e27`, three sequential duration-bounded direct HDHomeRun MPEG-TS captures checked channels 6.1, 6.2 and 12.2. FFprobe 9.0.1 decoded 338, 336 and 328 video frames respectively; none had `A/53 Closed Captions` frame side data. The capture hashes and byte counts are in `/Users/pjunod/code/plurx-agent/codex-final-main-l03-captures-20260925/receipt.json`, SHA-256 `afc174bd8f4a40c54f5516cbf7c93fa092bc699b50940aaa5056f7d18b2d739c`.
 
 Each tuner request completed; temporary TS samples were removed. No browser or server run followed because no caption-positive source interval was available. This does not change the earlier caption-positive captures or establish whether the merged web selector renders captions when the broadcast carries them. L-03 M4 visual acceptance remains open.
+
+## Concurrent rollout observed — 16:54 UTC
+
+The serial `415eb047f` play exited zero, but an independent post-run sample immediately found another rollout already changing the three voters. `nynuc` had checkout and running OCI `60f3803d1` and was healthy; `m6` had checkout `60f3803d1` while its prior OCI remained `415eb047f` and its container was unhealthy, with localhost `:32400` refusing connections; `nuc4` was healthy on `3ca348a77`. The mixed sample receipt SHA-256 is `72dc64d095ce109017e6576b941dbd63f5abfc2c9976f42752821e996502b601`. A separate compose build for `60f3803d1` was observed active on m6.
+
+The GPT rollout stopped new mutations and is identifying that controller while checking quorum. This is a transient observation, not a completed deployment or acceptance receipt. No new four-node duration collector starts from this mixed interval.
