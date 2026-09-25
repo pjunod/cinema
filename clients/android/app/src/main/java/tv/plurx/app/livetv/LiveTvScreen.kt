@@ -13,6 +13,7 @@ import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Rational
+import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
 import androidx.activity.ComponentActivity
@@ -2256,12 +2257,18 @@ private fun LiveTvPlayerSurface(controller: LiveTvPlayer) {
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     LaunchedEffect(hostSize, playerView) {
         val view = playerView ?: return@LaunchedEffect
+        if (hostSize == IntSize.Zero) return@LaunchedEffect
+        if (laidOutFor == IntSize.Zero) {
+            // The first placement is the box the View was measured in.
+            laidOutFor = hostSize
+            return@LaunchedEffect
+        }
         val resized = LiveTvSurfaceRelayout.hostResized(
             laidOutFor.width, laidOutFor.height, hostSize.width, hostSize.height,
         )
         if (!resized) return@LaunchedEffect
         laidOutFor = hostSize
-        view.relayoutSubtree()
+        view.relayoutSubtree { view.rebindVideoSurface() }
     }
     AndroidView(
         factory = { context ->
@@ -2285,14 +2292,37 @@ private fun LiveTvPlayerSurface(controller: LiveTvPlayer) {
     )
 }
 
-/** `forceLayout` every View under this one, then ask for the pass. */
-internal fun View.relayoutSubtree() {
+/**
+ * `forceLayout` every View under this one, ask for the pass, and run
+ * `afterPass` once the next frame has laid the subtree out at its new bounds.
+ */
+internal fun View.relayoutSubtree(afterPass: () -> Unit = {}) {
     forceLayoutTree(this)
     requestLayout()
     // A SurfaceView repositions its window surface from the next layout
     // pass; post one more request so a pass that already ran this frame
-    // cannot leave the surface at the old bounds.
-    post { forceLayoutTree(this); requestLayout() }
+    // cannot leave the surface at the old bounds, then let the caller act
+    // on the laid-out bounds.
+    post {
+        forceLayoutTree(this)
+        requestLayout()
+        post(afterPass)
+    }
+}
+
+/**
+ * Hand the decoder its SurfaceView again. A moved SurfaceView can keep its
+ * window surface at the geometry it was created with on some tablet SoCs
+ * even after its View bounds change; clearing and re-setting the output
+ * makes the player and the compositor re-read the surface at the bounds
+ * the layout pass just produced. Media3 swaps the codec output surface in
+ * place, so there is no decoder restart.
+ */
+internal fun PlayerView.rebindVideoSurface() {
+    val surface = videoSurfaceView as? SurfaceView ?: return
+    val output = player ?: return
+    output.clearVideoSurfaceView(surface)
+    output.setVideoSurfaceView(surface)
 }
 
 private fun forceLayoutTree(view: View) {
