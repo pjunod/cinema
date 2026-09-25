@@ -2519,7 +2519,7 @@ test_anchor = "remuxPrerollSettlesOnlyAfterRenderedVideoCrossesTheTarget"
 # on tablets the fullscreen picture stayed the inline strip in the top-left
 # corner. The surface forces a layout pass whenever its host box resizes.
 id = "android.live-tv-surface-relayout-on-host-resize"
-commits = ["a825be23"]
+commits = ["a825be23", "b7c72861"]
 source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvSurfaceRelayout.kt"
 source_anchor = "fun hostResized(previousWidth: Int, previousHeight: Int, width: Int, height: Int): Boolean"
 test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvSurfaceRelayoutTest.kt"
