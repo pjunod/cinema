@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+# Regenerate the seed corpora for the four parser fuzz targets that
+# docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md §3.6 names:
+# fmp4_reader, rpu_rewrite, nfo_parse and epub_facts. inspect_sup's corpus is
+# hand-built and is not touched.
+#
+# The seeds are committed under fuzz/corpus/<target>/ so a campaign starts
+# from real structure instead of discovering `ftyp` one byte at a time. They
+# are generated, never library media: the fMP4 stream is a one-second lavfi
+# test pattern through libx264, the RPU is the repository's own Profile 7
+# fixture (tests/playback/dv-p7-rpu.hex), the NFO sidecars are the parser's
+# own test fixtures, and the EPUBs are built here from a handful of strings.
+#
+# Deterministic where the tools allow it (fixed lavfi input, fixed encoder
+# settings, fixed zip timestamps); an x264 build change can move a few bytes
+# in the fMP4 seeds, which is why regeneration is a PR that says which build
+# it used, not a step of the nightly.
+#
+#   scripts/fuzz-seeds            # writes fuzz/corpus/{fmp4_reader,rpu_rewrite,nfo_parse,epub_facts}
+#   scripts/fuzz-seeds --check    # exits 1 if any seed directory is empty
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CORPUS="$ROOT/fuzz/corpus"
+TARGETS=(fmp4_reader rpu_rewrite nfo_parse epub_facts)
+
+if [[ "${1:-}" == "--check" ]]; then
+  status=0
+  for target in "${TARGETS[@]}"; do
+    if [[ -z "$(ls -A "$CORPUS/$target" 2>/dev/null)" ]]; then
+      echo "fuzz/corpus/$target is empty; run scripts/fuzz-seeds" >&2
+      status=1
+    fi
+  done
+  exit "$status"
+fi
+
+FFMPEG="${FFMPEG:-ffmpeg}"
+command -v "$FFMPEG" >/dev/null || { echo "ffmpeg is required" >&2; exit 2; }
+
+for target in "${TARGETS[@]}"; do
+  mkdir -p "$CORPUS/$target"
+  find "$CORPUS/$target" -type f -delete
+done
+
+# One second of a 64x64 test pattern, fragmented at every keyframe with a
+# 12-frame GOP, so the stream is ftyp, moov and then two (moof, mdat) pairs.
+STREAM="$(mktemp)"
+trap 'rm -f "$STREAM"' EXIT
+"$FFMPEG" -hide_banner -loglevel error -nostdin \
+  -f lavfi -i "testsrc2=size=64x64:rate=24" -t 1 \
+  -c:v libx264 -preset ultrafast -tune zerolatency -g 12 -keyint_min 12 \
+  -sc_threshold 0 -bf 0 -pix_fmt yuv420p \
+  -movflags frag_keyframe+empty_moov+default_base_moof \
+  -f mp4 pipe:1 > "$STREAM"
+
+python3 - "$ROOT" "$CORPUS" "$STREAM" <<'PY'
+import io
+import re
+import struct
+import sys
+import zipfile
+from pathlib import Path
+
+root, corpus, stream_path = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+
+
+def write(target: str, name: str, data: bytes) -> None:
+    (corpus / target / name).write_bytes(data)
+
+
+# --- fmp4_reader -----------------------------------------------------------
+# The target reads its first byte as the push size selector: 0 is one push of
+# the whole stream, n is pushes of 1 << (n % 17) bytes.
+stream = stream_path.read_bytes()
+
+
+def boxes(data: bytes):
+    at = 0
+    while at + 8 <= len(data):
+        size, kind = struct.unpack(">I4s", data[at:at + 8])
+        if size == 1:
+            size = struct.unpack(">Q", data[at + 8:at + 16])[0]
+        elif size == 0:
+            size = len(data) - at
+        if size < 8 or at + size > len(data):
+            break
+        yield kind, data[at:at + size]
+        at += size
+
+
+parsed = list(boxes(stream))
+kinds = [kind for kind, _ in parsed]
+assert kinds[:2] == [b"ftyp", b"moov"], kinds
+init = b"".join(body for _, body in parsed[:2])
+pairs = []
+rest = parsed[2:]
+while len(rest) >= 2 and rest[0][0] == b"moof" and rest[1][0] == b"mdat":
+    pairs.append(rest[0][1] + rest[1][1])
+    rest = rest[2:]
+assert len(pairs) >= 2, f"expected two fragments, got {len(pairs)} from {kinds}"
+
+write("fmp4_reader", "stream-one-push", b"\x00" + stream)
+write("fmp4_reader", "stream-drip-fed", b"\x07" + stream)
+write("fmp4_reader", "init-only", b"\x00" + init)
+write("fmp4_reader", "init-and-first-fragment", b"\x00" + init + pairs[0])
+write("fmp4_reader", "init-and-two-fragments", b"\x0b" + init + pairs[0] + pairs[1])
+write("fmp4_reader", "fragment-without-init", b"\x00" + pairs[0])
+half = len(pairs[0]) // 2
+write("fmp4_reader", "truncated-mid-fragment", b"\x00" + init + pairs[0][:half])
+write("fmp4_reader", "truncated-mid-header", b"\x00" + init[:5])
+flipped = bytearray(init + pairs[0])
+for at in range(16, len(flipped), 97):
+    flipped[at] ^= 0x5A
+write("fmp4_reader", "bit-flipped", b"\x00" + bytes(flipped))
+oversized = bytearray(init + pairs[0])
+oversized[len(init):len(init) + 4] = struct.pack(">I", 0x7FFFFFF0)
+write("fmp4_reader", "moof-claims-two-gigabytes", b"\x00" + bytes(oversized))
+write("fmp4_reader", "zero-size-box", b"\x00" + init + struct.pack(">I4s", 0, b"moof"))
+write("fmp4_reader", "largesize-header", b"\x00" + init + struct.pack(">I4sQ", 1, b"mdat", 24) + b"\0" * 8)
+write("fmp4_reader", "empty", b"\x00")
+
+# --- rpu_rewrite -----------------------------------------------------------
+# First byte: selector % 8 in 0..=2 → 4-byte prefixes, 3..=4 → 2-byte,
+# 5..=6 → 1-byte, 7 → the selector itself is used as the (illegal) width.
+rpu_hex = (root / "tests/playback/dv-p7-rpu.hex").read_text().strip()
+rpu = bytes.fromhex(rpu_hex)
+assert rpu[0] == 0x7C, "the RPU fixture should start with a type-62 NAL header"
+vcl = bytes([0x02, 0x01]) + bytes(range(32))  # a type-1 slice with a fake payload
+sei = bytes([0x4E, 0x01]) + b"\x05\x04abcd\x80"  # a prefix SEI
+
+
+def prefixed(width: int, *nals: bytes) -> bytes:
+    return b"".join(len(n).to_bytes(width, "big") + n for n in nals)
+
+
+write("rpu_rewrite", "one-rpu-4byte", b"\x00" + prefixed(4, rpu))
+write("rpu_rewrite", "vcl-then-rpu-4byte", b"\x01" + prefixed(4, vcl, rpu))
+write("rpu_rewrite", "sei-vcl-rpu-4byte", b"\x02" + prefixed(4, sei, vcl, rpu))
+write("rpu_rewrite", "one-rpu-2byte", b"\x03" + prefixed(2, vcl, rpu))
+write("rpu_rewrite", "one-rpu-1byte", b"\x05" + prefixed(1, vcl[:40]))
+write("rpu_rewrite", "no-rpu", b"\x00" + prefixed(4, vcl, sei))
+write("rpu_rewrite", "rpu-short-three-bytes", b"\x00" + prefixed(4, rpu[:-3]))
+write("rpu_rewrite", "rpu-crc-wrong", b"\x00" + prefixed(4, rpu[:-1] + bytes([rpu[-1] ^ 0xFF])))
+flipped = bytearray(rpu)
+for at in range(4, len(flipped), 23):
+    flipped[at] ^= 0x81
+write("rpu_rewrite", "rpu-bit-flipped", b"\x00" + prefixed(4, bytes(flipped)))
+write("rpu_rewrite", "prefix-overruns-sample", b"\x00" + (len(rpu) + 100).to_bytes(4, "big") + rpu)
+write("rpu_rewrite", "zero-length-nal", b"\x00" + prefixed(4, b"", rpu))
+write("rpu_rewrite", "illegal-width", b"\x07" + prefixed(4, rpu))
+write("rpu_rewrite", "two-rpus", b"\x00" + prefixed(4, vcl, rpu, rpu))
+write("rpu_rewrite", "empty-sample", b"\x00")
+
+# --- nfo_parse -------------------------------------------------------------
+# The parser's own test fixtures, lifted from the raw strings in its tests,
+# plus the shapes the parser documents as "not a sidecar".
+nfo_src = (root / "crates/plurx-core/src/scan/nfo.rs").read_text()
+tests = nfo_src.split("mod tests", 1)[1]
+# The one raw-string fixture and every ordinary string literal passed to
+# `parse(` in the parser's tests.
+fixtures = re.findall(r'r#"(.*?)"#', tests, flags=re.S)
+fixtures += [
+    bytes(literal, "utf-8").decode("unicode_escape")
+    for literal in re.findall(r'parse\(\s*"((?:[^"\\]|\\.)*)"', tests, flags=re.S)
+]
+seen = set()
+count = 0
+for text in fixtures:
+    body = text.strip()
+    if not body or body in seen:
+        continue
+    seen.add(body)
+    count += 1
+    write("nfo_parse", f"fixture-{count:02d}", body.encode())
+assert count >= 3, f"expected at least three NFO fixtures, found {count}"
+write("nfo_parse", "empty", b"")
+write("nfo_parse", "not-xml", b"Just a text file that ends up named like a sidecar.")
+write("nfo_parse", "other-root", b"<tvshow><title>Not a movie</title></tvshow>")
+write("nfo_parse", "unclosed", b"<movie><title>Never closed")
+write("nfo_parse", "nested-title", b"<movie><actor><title>Inner</title></actor><title>Outer</title></movie>")
+write("nfo_parse", "deeply-nested", b"<movie>" + b"<a>" * 512 + b"x" + b"</a>" * 512 + b"</movie>")
+write("nfo_parse", "entities", b"<movie><title>&amp;&lt;&gt;&#x1F3AC;&unknown;</title><year>19x4</year></movie>")
+write("nfo_parse", "bom-and-declaration", "﻿<?xml version=\"1.0\"?><movie><title>BOM</title><premiered>2001-02-03</premiered></movie>".encode())
+write("nfo_parse", "url-trailer", b"<movie><title>URL</title></movie>\nhttps://www.themoviedb.org/movie/1")
+
+# --- epub_facts ------------------------------------------------------------
+MIMETYPE = b"application/epub+zip"
+CONTAINER = b'<container><rootfiles><rootfile full-path="OEBPS/book.opf"/></rootfiles></container>'
+PACKAGE2 = (
+    b'<?xml version="1.0"?><package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="id">'
+    b'<metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">'
+    b'<dc:title>A Generated Book</dc:title><dc:creator opf:role="aut">Seed Author</dc:creator>'
+    b'<dc:identifier id="id">urn:uuid:00000000-0000-4000-8000-000000000001</dc:identifier>'
+    b'<meta name="cover" content="cover-image"/></metadata>'
+    b'<manifest><item id="cover-image" href="Images/cover.png" media-type="image/png"/>'
+    b'<item id="text" href="text.xhtml" media-type="application/xhtml+xml"/></manifest>'
+    b'<spine><itemref idref="text"/></spine></package>'
+)
+PACKAGE3 = (
+    b'<?xml version="1.0"?><package version="3.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="id">'
+    b'<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+    b'<dc:title>Another Generated Book</dc:title><dc:creator>Seed Author</dc:creator>'
+    b'<dc:identifier id="id">urn:isbn:9780000000002</dc:identifier></metadata>'
+    b'<manifest><item id="cover" href="Images/cover.jpg" media-type="image/jpeg" properties="cover-image"/>'
+    b'<item id="text" href="text.xhtml" media-type="application/xhtml+xml"/></manifest>'
+    b'<spine><itemref idref="text"/></spine></package>'
+)
+# The smallest PNG and JPEG that carry the signature the cover cache keys on.
+PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000a49444154789c6300010000050001"
+    "0d0a2db40000000049454e44ae426082"
+)
+JPEG = bytes.fromhex("ffd8ffe000104a46494600010100000100010000ffd9")
+FIXED = (1980, 1, 1, 0, 0, 0)
+
+
+def epub(entries, mimetype_first=True, mimetype_stored=True):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        def add(name, data, stored=False):
+            info = zipfile.ZipInfo(name, date_time=FIXED)
+            info.compress_type = zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED
+            archive.writestr(info, data)
+        if mimetype_first:
+            add("mimetype", MIMETYPE, stored=mimetype_stored)
+        for name, data in entries:
+            add(name, data)
+        if not mimetype_first:
+            add("mimetype", MIMETYPE, stored=mimetype_stored)
+    return buffer.getvalue()
+
+
+text = b"<html><body><p>Generated.</p></body></html>"
+write("epub_facts", "epub2-with-png-cover", epub([
+    ("META-INF/container.xml", CONTAINER),
+    ("OEBPS/book.opf", PACKAGE2),
+    ("OEBPS/Images/cover.png", PNG),
+    ("OEBPS/text.xhtml", text),
+]))
+write("epub_facts", "epub3-with-jpeg-cover", epub([
+    ("META-INF/container.xml", CONTAINER),
+    ("OEBPS/book.opf", PACKAGE3),
+    ("OEBPS/Images/cover.jpg", JPEG),
+    ("OEBPS/text.xhtml", text),
+]))
+write("epub_facts", "no-cover", epub([
+    ("META-INF/container.xml", CONTAINER),
+    ("OEBPS/book.opf", PACKAGE3.replace(b' properties="cover-image"', b"")),
+]))
+write("epub_facts", "missing-mimetype", epub([
+    ("META-INF/container.xml", CONTAINER),
+    ("OEBPS/book.opf", PACKAGE2),
+], mimetype_first=False).replace(b"mimetype", b"mimetypo"))
+write("epub_facts", "mimetype-deflated-and-last", epub([
+    ("META-INF/container.xml", CONTAINER),
+    ("OEBPS/book.opf", PACKAGE2),
+], mimetype_first=False, mimetype_stored=False))
+write("epub_facts", "missing-container", epub([("OEBPS/book.opf", PACKAGE2)]))
+write("epub_facts", "container-points-nowhere", epub([
+    ("META-INF/container.xml", CONTAINER.replace(b"OEBPS/book.opf", b"OEBPS/missing.opf")),
+    ("OEBPS/book.opf", PACKAGE2),
+]))
+write("epub_facts", "traversing-cover-href", epub([
+    ("META-INF/container.xml", CONTAINER),
+    ("OEBPS/book.opf", PACKAGE3.replace(b"Images/cover.jpg", b"../../secret.jpg")),
+]))
+write("epub_facts", "traversing-entry-name", epub([
+    ("META-INF/container.xml", CONTAINER),
+    ("../escape.opf", PACKAGE2),
+    ("OEBPS/book.opf", PACKAGE2),
+]))
+write("epub_facts", "absolute-entry-name", epub([
+    ("META-INF/container.xml", CONTAINER),
+    ("/etc/passwd", b"root:x:0:0"),
+    ("OEBPS/book.opf", PACKAGE2),
+]))
+# A cover that inflates to sixteen megabytes of zeros from a few kilobytes:
+# the reader's cover cap has to stop the inflate, not the input size.
+write("epub_facts", "cover-zip-bomb", epub([
+    ("META-INF/container.xml", CONTAINER),
+    ("OEBPS/book.opf", PACKAGE3),
+    ("OEBPS/Images/cover.jpg", JPEG + b"\0" * (16 * 1024 * 1024)),
+]))
+# Too many entries for the reader's archive bound.
+write("epub_facts", "too-many-entries", epub(
+    [("META-INF/container.xml", CONTAINER), ("OEBPS/book.opf", PACKAGE2)]
+    + [(f"OEBPS/pad/{n:05d}.txt", b"x") for n in range(4096)]
+))
+write("epub_facts", "unbounded-package-fields", epub([
+    ("META-INF/container.xml", CONTAINER),
+    ("OEBPS/book.opf", PACKAGE2.replace(b"A Generated Book", b"T" * 70000)),
+]))
+write("epub_facts", "package-not-xml", epub([
+    ("META-INF/container.xml", CONTAINER),
+    ("OEBPS/book.opf", b"\xff\xfe not xml at all <<<"),
+]))
+valid = epub([("META-INF/container.xml", CONTAINER), ("OEBPS/book.opf", PACKAGE2)])
+write("epub_facts", "truncated-archive", valid[: len(valid) * 2 // 3])
+write("epub_facts", "not-a-zip", b"PK\x03\x04 but nothing that follows is a zip")
+write("epub_facts", "empty", b"")
+PY
+
+for target in "${TARGETS[@]}"; do
+  printf '%s: %s seeds\n' "$target" "$(find "$CORPUS/$target" -type f | wc -l)"
+done

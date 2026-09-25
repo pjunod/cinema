@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Run one bounded libFuzzer campaign and record what it did.
+#
+#   scripts/fuzz-campaign <target> [seconds]       # run, then summarise
+#   scripts/fuzz-campaign --summarize <target> <log>  # summarise an existing log
+#
+# A campaign's budget is time, not coverage, so the summary is what makes a
+# target that has stopped finding new edges visible: it prints the number of
+# executed inputs, the corpus size before and after (libFuzzer writes every
+# input that reached new coverage back into the first corpus directory), and
+# the outcome. With $GITHUB_STEP_SUMMARY set the same line is appended as a
+# Markdown table row, so the nightly's summary page lists every campaign.
+#
+# The exit status is the fuzzer's: a crash, a timeout, a leak or an
+# out-of-memory finding is non-zero and its artefact is under
+# fuzz/artifacts/<target>/. The workflow keeps that status behind
+# `continue-on-error` so the log and artefact upload always run, then fails the
+# job from the recorded outcome.
+set -uo pipefail
+
+TOOLCHAIN="${PLURX_FUZZ_TOOLCHAIN:-nightly-2026-08-01}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+summarize() {
+  local target="$1" log="$2" status="$3" before="$4"
+  local corpus="$ROOT/fuzz/corpus/$target"
+  local after executions size outcome
+  after="$(find "$corpus" -type f 2>/dev/null | wc -l | tr -d ' ')"
+  size="$(du -sk "$corpus" 2>/dev/null | cut -f1)"
+  # `Done N runs in S second(s)` is libFuzzer's line for a budget that ran
+  # out; a campaign that stopped on a finding has only its last `#N` status
+  # line.
+  executions="$(grep -Eo 'Done [0-9]+ runs' "$log" 2>/dev/null | tail -1 | grep -Eo '[0-9]+')"
+  if [[ -z "$executions" ]]; then
+    executions="$(grep -Eo '^#[0-9]+' "$log" 2>/dev/null | tail -1 | tr -d '#')"
+  fi
+  executions="${executions:-0}"
+  if [[ "$status" == "0" ]]; then
+    outcome="budget spent, no finding"
+  else
+    outcome="finding (exit $status); see fuzz/artifacts/$target"
+  fi
+  local row="| \`$target\` | $executions | $before → $after files (${size:-?} KiB) | $outcome |"
+  echo "fuzz-campaign: $row"
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    if ! grep -q '^| Target | Executions |' "$GITHUB_STEP_SUMMARY" 2>/dev/null; then
+      {
+        echo "| Target | Executions | Corpus before → after | Outcome |"
+        echo "|---|---|---|---|"
+      } >> "$GITHUB_STEP_SUMMARY"
+    fi
+    echo "$row" >> "$GITHUB_STEP_SUMMARY"
+  fi
+}
+
+if [[ "${1:-}" == "--summarize" ]]; then
+  [[ $# -eq 3 ]] || { echo "usage: $0 --summarize <target> <log>" >&2; exit 2; }
+  summarize "$2" "$3" 0 "?"
+  exit 0
+fi
+
+TARGET="${1:-}"
+SECONDS_BUDGET="${2:-900}"
+[[ -n "$TARGET" ]] || { echo "usage: $0 <target> [seconds]" >&2; exit 2; }
+CORPUS="$ROOT/fuzz/corpus/$TARGET"
+[[ -d "$CORPUS" ]] || { echo "no seed corpus at fuzz/corpus/$TARGET" >&2; exit 2; }
+
+mkdir -p "$ROOT/target/validation"
+LOG="$ROOT/target/validation/fuzz-$TARGET.log"
+BEFORE="$(find "$CORPUS" -type f | wc -l | tr -d ' ')"
+
+cd "$ROOT"
+cargo "+$TOOLCHAIN" fuzz run "$TARGET" "fuzz/corpus/$TARGET" \
+  -- -max_total_time="$SECONDS_BUDGET" -print_final_stats=1 2>&1 | tee "$LOG"
+STATUS="${PIPESTATUS[0]}"
+
+summarize "$TARGET" "$LOG" "$STATUS" "$BEFORE"
+exit "$STATUS"

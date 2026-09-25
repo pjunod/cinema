@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+plurx-core = { path = "../crates/plurx-core" }
 plurx-pgs = { path = "../crates/plurx-pgs" }
 tempfile = "3"
 
@@ -19,7 +20,47 @@ test = false
 doc = false
 bench = false
 
+# The four parser seams of docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md
+# §3.6. Each is a bounded, callable, filesystem-free seam (or a tempfile
+# harness that never reads outside its own file), fed by a seed corpus under
+# fuzz/corpus/<target>/ and run nightly on the same budget as inspect_sup.
+
+[[bin]]
+name = "fmp4_reader"
+path = "fuzz_targets/fmp4_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rpu_rewrite"
+path = "fuzz_targets/rpu_rewrite.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nfo_parse"
+path = "fuzz_targets/nfo_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "epub_facts"
+path = "fuzz_targets/epub_facts.rs"
+test = false
+doc = false
+bench = false
+
 # Keep sanitizer-only dependencies out of the shipped workspace and its
 # ordinary stable-toolchain gate.
 [workspace]
 members = ["."]
+
+# A separate workspace does not inherit the root manifest's `[patch]` table,
+# so the fuzz build has to name the same vendored crate itself or it fuzzes
+# the registry copy the shipped binary no longer uses. Keep this row in step
+# with the root Cargo.toml.
+[patch.crates-io]
+dolby_vision = { path = "../vendor/dolby_vision" }
