@@ -14084,6 +14084,7 @@ Output #0, hls, to 'index.m3u8':
     /// Plan L-02 §5.4 / correction 13: the scan moved into one blocking walk
     /// and kept every predicate. Each case starts from a valid published
     /// window and breaks exactly one rule.
+    #[cfg(unix)]
     #[tokio::test]
     async fn inspect_scratch_keeps_every_check_in_one_blocking_scan() {
         async fn valid_window(directory: &Path) {
