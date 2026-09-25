@@ -1408,9 +1408,16 @@ struct OrphanSession {
     directory: PathBuf,
     /// Present while the child's exit is unconfirmed.
     process: Option<LiveTvProcess>,
+    /// The removal of `directory` in flight, if any: at most one, on its own
+    /// task, and never awaited under the `orphans` lock. A removal stalled on
+    /// a hung mount is kept rather than replaced, so it pins one blocking
+    /// thread and holds up nothing else.
+    removal: Option<OrphanRemoval>,
     since: tokio::time::Instant,
     attempts: u32,
 }
+
+type OrphanRemoval = tokio::task::JoinHandle<io::Result<()>>;
 
 /// Which orphans a drain must see gone before it may acknowledge.
 enum OrphanScope {
@@ -3488,8 +3495,10 @@ pub(crate) struct LiveTvManager {
     /// against, refreshed by `settings_observer_loop`.
     fence: FenceObserver,
     /// Sessions that left the registry with a child or a directory still to
-    /// confirm gone (plan L-02 §3.4). A tokio mutex: the retry pass awaits
-    /// directory removal while holding it, and nothing synchronous reads it.
+    /// confirm gone (plan L-02 §3.4). Held only for bookkeeping: no holder
+    /// waits on the filesystem, because each orphan's directory removal runs
+    /// on its own task (`OrphanSession::removal`). A tokio mutex so a drain
+    /// can bound its wait for it by the drain deadline.
     orphans: tokio::sync::Mutex<Vec<OrphanSession>>,
     incarnation: OwnerIncarnation,
     #[cfg(test)]
@@ -3505,6 +3514,10 @@ pub(crate) struct LiveTvManager {
     hang_scratch_scans: AtomicBool,
     #[cfg(test)]
     scratch_scans_started: AtomicU64,
+    /// Test seam: every orphan directory removal started from now on hangs,
+    /// as `remove_dir_all` on a stalled mount does.
+    #[cfg(test)]
+    hang_orphan_removals: AtomicBool,
     metrics: Arc<LiveTvMetrics>,
 }
 
@@ -3558,6 +3571,8 @@ impl LiveTvManager {
             hang_scratch_scans: AtomicBool::new(false),
             #[cfg(test)]
             scratch_scans_started: AtomicU64::new(0),
+            #[cfg(test)]
+            hang_orphan_removals: AtomicBool::new(false),
             metrics,
         });
         manager.adopt_persisted_guide();
@@ -4705,6 +4720,7 @@ impl LiveTvManager {
             generation: session.request.config_generation,
             directory: session.directory.clone(),
             process,
+            removal: None,
             since: tokio::time::Instant::now(),
             attempts: 0,
         });
@@ -4713,7 +4729,12 @@ impl LiveTvManager {
     }
 
     /// One retry of one orphan. True when nothing is left to confirm.
-    async fn retry_orphan(&self, orphan: &mut OrphanSession) -> bool {
+    ///
+    /// Never waits on the filesystem: the directory is removed on its own
+    /// task, and a later retry reads the result. The caller holds the orphan
+    /// list, and every drain, stop, shutdown and cleanup handoff needs that
+    /// list, so one stalled removal must not hold it (PR #496 review 2).
+    fn retry_orphan(&self, orphan: &mut OrphanSession) -> bool {
         orphan.attempts = orphan.attempts.saturating_add(1);
         if let Some(process) = orphan.process.as_mut() {
             if !self.reap_withheld() {
@@ -4736,21 +4757,45 @@ impl LiveTvManager {
         if orphan.process.is_some() {
             return false;
         }
-        match tokio::fs::remove_dir_all(&orphan.directory).await {
-            Ok(()) => true,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
-            Err(error) => {
-                if orphan.attempts.is_power_of_two() {
-                    tracing::warn!(
-                        kind = %error.kind(),
-                        attempts = orphan.attempts,
-                        age_s = orphan.since.elapsed().as_secs(),
-                        "an orphaned Live TV scratch directory still cannot be removed"
-                    );
+        if let Some(removal) = orphan.removal.as_ref() {
+            if !removal.is_finished() {
+                return false;
+            }
+            let finished = orphan
+                .removal
+                .take()
+                .and_then(futures_util::FutureExt::now_or_never);
+            match finished {
+                Some(Ok(Ok(()))) => return true,
+                Some(Ok(Err(error))) if error.kind() == io::ErrorKind::NotFound => return true,
+                Some(Ok(Err(error))) => {
+                    if orphan.attempts.is_power_of_two() {
+                        tracing::warn!(
+                            kind = %error.kind(),
+                            attempts = orphan.attempts,
+                            age_s = orphan.since.elapsed().as_secs(),
+                            "an orphaned Live TV scratch directory still cannot be removed"
+                        );
+                    }
                 }
-                false
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "an orphaned Live TV scratch removal task failed");
+                }
+                None => {}
             }
         }
+        orphan.removal = Some(self.spawn_orphan_removal(&orphan.directory));
+        false
+    }
+
+    /// Start one removal of an orphan's directory on its own task.
+    fn spawn_orphan_removal(&self, directory: &Path) -> OrphanRemoval {
+        #[cfg(test)]
+        if self.hang_orphan_removals.load(Ordering::Acquire) {
+            return tokio::spawn(std::future::pending());
+        }
+        let directory = directory.to_owned();
+        tokio::spawn(async move { tokio::fs::remove_dir_all(&directory).await })
     }
 
     /// Release the sweeper claim of every orphan that is finished with.
@@ -4793,7 +4838,7 @@ impl LiveTvManager {
         }
         let mut kept = Vec::with_capacity(orphans.len());
         for mut orphan in orphans.drain(..) {
-            if self.retry_orphan(&mut orphan).await {
+            if self.retry_orphan(&mut orphan) {
                 self.release_orphan_claims([&orphan]);
             } else {
                 kept.push(orphan);
@@ -4805,21 +4850,31 @@ impl LiveTvManager {
     }
 
     /// Retry the orphans `wanted` selects until none is left or `deadline`
-    /// passes. Other orphans are left to the retry loop.
+    /// passes. Other orphans are left to the retry loop. Bounded by
+    /// `deadline` throughout, including the wait for the orphan list: a
+    /// removal stalled on a hung mount keeps its orphan here until the
+    /// deadline, and holds up nothing else.
     async fn drain_orphans(
         &self,
         wanted: impl Fn(&OrphanSession) -> bool,
         deadline: tokio::time::Instant,
     ) -> Result<(), LiveTvError> {
+        let overdue = || {
+            LiveTvError::StreamFailed(
+                "live-TV cleanup was not confirmed before the drain deadline".into(),
+            )
+        };
         loop {
             {
-                let mut orphans = self.orphans.lock().await;
+                let mut orphans = tokio::time::timeout_at(deadline, self.orphans.lock())
+                    .await
+                    .map_err(|_| overdue())?;
                 let mut kept = Vec::with_capacity(orphans.len());
                 let mut remaining = 0usize;
                 for mut orphan in orphans.drain(..) {
                     if !wanted(&orphan) {
                         kept.push(orphan);
-                    } else if self.retry_orphan(&mut orphan).await {
+                    } else if self.retry_orphan(&mut orphan) {
                         self.release_orphan_claims([&orphan]);
                     } else {
                         remaining += 1;
@@ -4833,9 +4888,7 @@ impl LiveTvManager {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(LiveTvError::StreamFailed(
-                    "live-TV cleanup was not confirmed before the drain deadline".into(),
-                ));
+                return Err(overdue());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -12628,6 +12681,91 @@ Output #0, hls, to 'index.m3u8':
                 .is_err(),
             "a replay finds the tombstone, never a session to start again"
         );
+    }
+
+    /// PR #496 review finding 2. An orphan's directory removal that never
+    /// returns — `remove_dir_all` on a stalled mount — was awaited while the
+    /// retry pass held the orphan list. The owner's next pass then held it
+    /// for as long as the mount stalled, so the next failed cleanup could not
+    /// hand over (its session stayed registered) and every drain waited for
+    /// the list far past `SESSION_DRAIN_TIMEOUT`. The removal now runs on its
+    /// own task: the owner's pass returns, a failed cleanup still retires its
+    /// session, and a drain that wants the stuck orphan answers at its
+    /// deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_orphan_removal_holds_up_no_handoff_and_no_drain_past_its_deadline() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        manager.hang_orphan_removals.store(true, Ordering::Release);
+        let first_path = root.path().join("stuck-first");
+        tokio::fs::write(&first_path, b"not a directory")
+            .await
+            .expect("cleanup obstruction");
+        let first = test_session(first_path, 1);
+        run_session_to_its_end(&manager, &first).await;
+        assert_eq!(orphan_gauges(&manager), (0, 1));
+
+        // The owner's retry loop, as `scratch_sweep_loop` runs it.
+        let owner = {
+            let manager = Arc::clone(&manager);
+            tokio::spawn(async move {
+                loop {
+                    manager.retry_orphans().await;
+                    tokio::time::sleep(ORPHAN_RETRY).await;
+                }
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), manager.retry_orphans())
+            .await
+            .expect("a retry pass does not wait on the filesystem");
+
+        let second_path = root.path().join("stuck-second");
+        tokio::fs::write(&second_path, b"not a directory")
+            .await
+            .expect("cleanup obstruction");
+        let second = test_session(second_path, 1);
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            run_session_to_its_end(&manager, &second),
+        )
+        .await
+        .expect("a failed cleanup hands over while another removal hangs");
+        assert!(
+            !manager
+                .registry
+                .lock()
+                .expect("registry")
+                .sessions
+                .contains_key(&second.capability),
+            "the second session is retired"
+        );
+        assert_eq!(orphan_gauges(&manager), (0, 2));
+
+        let asked = tokio::time::Instant::now();
+        let drained = tokio::time::timeout(
+            SESSION_DRAIN_TIMEOUT + Duration::from_secs(1),
+            manager.drain_before(2),
+        )
+        .await
+        .expect("a drain answers by its own deadline");
+        assert!(
+            drained.is_err(),
+            "the stuck orphans are not confirmed gone, so the drain does not acknowledge"
+        );
+        assert!(
+            asked.elapsed() <= SESSION_DRAIN_TIMEOUT + Duration::from_millis(100),
+            "the drain overran its deadline: {:?}",
+            asked.elapsed()
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), manager.drain_before(1))
+                .await
+                .expect("a drain that wants no orphan is not held by one")
+                .expect("nothing to drain"),
+            0
+        );
+        owner.abort();
     }
 
     /// §5.4: failed cleanups used to stay in the registry for ever, counted in
