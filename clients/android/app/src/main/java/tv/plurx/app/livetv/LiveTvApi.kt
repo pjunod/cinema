@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -359,6 +360,10 @@ data class LiveTvGuideReadiness(
  * a refusal minted outside the Live TV module, which is itself the fact that
  * matters.
  */
+data class LiveTvWatchable(val channelId: String, val guideNumber: String) {
+    val offer: String get() = "Watch $guideNumber instead"
+}
+
 class LiveTvFailure(
     val code: String,
     val retry: String? = null,
@@ -370,7 +375,10 @@ class LiveTvFailure(
      * is a server that got as far as trying.
      */
     val status: Int? = null,
-) : Exception(liveTvMessage(code))
+    val watchable: List<LiveTvWatchable> = emptyList(),
+) : Exception(liveTvMessage(code) + if (code == "tuner_capacity" && watchable.isNotEmpty()) {
+    " " + watchable.joinToString(" · ") { it.offer } + "."
+} else "")
 
 /**
  * The copy this client has of its own, or null. Null is a real answer: it is
@@ -427,6 +435,15 @@ internal fun liveTvTypedFailure(body: String, status: Int, starting: Boolean): L
         retry = if (code == null) null else field("retry")?.contentOrNull,
         ownerDecided = if (code == null) null else field("owner_decided")?.booleanOrNull,
         status = status,
+        watchable = if (code == "tuner_capacity") {
+            runCatching { envelope?.get("watchable")?.jsonArray }.getOrNull()
+                ?.mapNotNull { entry ->
+                    val row = entry as? JsonObject ?: return@mapNotNull null
+                    val id = runCatching { row["channel_id"]?.jsonPrimitive?.contentOrNull }.getOrNull()
+                    val number = runCatching { row["guide_number"]?.jsonPrimitive?.contentOrNull }.getOrNull()
+                    if (id.isNullOrBlank() || number.isNullOrBlank()) null else LiveTvWatchable(id, number)
+                }?.distinctBy { it.channelId } ?: emptyList()
+        } else emptyList(),
     )
 }
 

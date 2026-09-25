@@ -557,18 +557,24 @@ struct LiveTvFailure: Error, LocalizedError, Sendable {
     /// Empty for every refusal but a capacity one, and for a capacity refusal
     /// from a server that has no recordings running.
     var holders: [LiveTvTunerHolder] = []
+    var watchable: [LiveTvTunerHolder] = []
 
     var errorDescription: String? {
         switch code {
         case "live_tv_disabled": return "Live TV is off. An administrator can enable it in Settings → Developer."
         case "live_tv_protocol_unready": return "Live TV is waiting for every serving node to run a compatible version."
         case "tuner_capacity":
-            guard !holders.isEmpty else {
-                return "All Live TV slots are busy. Close another session and try again."
+            var copy = "All Live TV slots are busy."
+            if !holders.isEmpty {
+                copy += " " + holders.map(\.summary).joined(separator: " · ")
+                    + ". Stop one in Recordings, or try again later."
+            } else {
+                copy += " Close another session and try again."
             }
-            return "All Live TV slots are busy. "
-                + holders.map(\.summary).joined(separator: " · ")
-                + ". Stop one in Recordings, or try again later."
+            if !watchable.isEmpty {
+                copy += " " + watchable.map { "Watch \($0.guideNumber) instead" }.joined(separator: " · ") + "."
+            }
+            return copy
         case "tuner_unavailable": return "The tuner cannot start this channel. Check reception and other tuner clients."
         case "channel_not_found": return "This channel is no longer available. Refresh the lineup."
         case "drm_unsupported": return "DRM-protected television is not supported."
@@ -705,6 +711,7 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
                 let retry: String?
                 let ownerDecided: Bool?
                 let holders: [LiveTvTunerHolder]?
+                let watchable: [LiveTvTunerHolder]?
             }
             let failures = JSONDecoder()
             failures.keyDecodingStrategy = .convertFromSnakeCase
@@ -712,7 +719,8 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
                 throw LiveTvFailure(code: failure.code, retry: failure.retry,
                                     ownerDecided: failure.ownerDecided ?? false,
                                     status: response.statusCode,
-                                    holders: failure.holders ?? [])
+                                    holders: failure.holders ?? [],
+                                    watchable: failure.watchable ?? [])
             }
             if method == "DELETE", response.statusCode == 404 || response.statusCode == 410 { return Data() }
             if response.statusCode == 401 || response.statusCode == 403 {

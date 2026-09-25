@@ -80,6 +80,11 @@ class LiveTvStartCasesTest {
                 row["replay"]?.jsonPrimitive?.booleanOrNull ?: false,
                 decision.replay,
             )
+            row["offer_watchable"]?.jsonArray?.let { offered ->
+                val failure = failureFor(row)
+                assertEquals(name, offered.map { it.jsonPrimitive.content }, failure.watchable.map { it.guideNumber })
+                assertTrue(name, failure.message.orEmpty().contains("Watch 2.1 instead"))
+            }
         }
     }
 

@@ -325,6 +325,7 @@ final class LiveTvTests: XCTestCase {
             let code: String?
             let retry: String?
             let ownerDecided: Bool?
+            let watchable: [LiveTvTunerHolder]?
         }
         struct Answer: Decodable {
             let `case`: String
@@ -335,6 +336,7 @@ final class LiveTvTests: XCTestCase {
             let offerRetry: Bool
             let keepHint: Bool
             let replay: Bool?
+            let offerWatchable: [String]?
         }
         struct ResumeBody: Decodable {
             let outcome: String?
@@ -393,6 +395,11 @@ final class LiveTvTests: XCTestCase {
             XCTAssertEqual(verdict.offerRetry, row.offerRetry, row.`case`)
             XCTAssertEqual(verdict.keepHint, row.keepHint, row.`case`)
             XCTAssertEqual(verdict.replay, row.replay ?? false, row.`case`)
+            if let offered = row.offerWatchable {
+                let failure = LiveTvFailure(code: row.body?.code ?? "", watchable: row.body?.watchable ?? [])
+                XCTAssertEqual(failure.watchable.map(\.guideNumber), offered, row.`case`)
+                XCTAssertTrue(failure.errorDescription?.contains("Watch 2.1 instead") == true)
+            }
         }
         // The fixture is the contract, but these two are the point of it: a
         // code nobody has ever heard of is not a verdict, and no answer at all

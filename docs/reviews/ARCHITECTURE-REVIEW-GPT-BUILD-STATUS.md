@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-24 23:53 UTC · **Base:** `f600d2823`
+**Status:** open · **Updated:** 2026-09-25 00:28 UTC · **Base:** `f600d2823`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -15,8 +15,8 @@ the acceptance evidence named by its plan.
 | A-02 · Apple controller | Seek-fence `da5c6050a`, locked credential-pair `f30ef466b`, finite item observer `89d3c3672` on [draft PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506); iOS/tvOS and iOS test-target compilation green | Finish 5.2 prepared successor and 5.3-5.6; review and fast lane when ready | Plan execution log and workboard row |
 | A-03 · Native library paging | Reconnaissance; 5.1 is on main | Finish 5.2-5.5 | Plan execution log and workboard row |
 | W-02 · Web player decomposition | 5.4 `8907b9cf5` and 5.5 `cb7042ea2`/`858c8bc01` splits on draft #506; playback-lab startup fix `2a6fbc855`; JS syntax green | Finish type baseline/browser acceptance, then review and fast lane | Plan execution log and workboard row |
-| L-03 · Shared Live TV transport | Reconnaissance; #482 is on main | Finish M2 and M4 | Plan execution log and workboard row |
-| A-04 · Adaptive quality traces | Chrome 8→1.5 Mb/s trace now reaches the cliff but fails recovery: one restart and downshift, 4.27 s maximum frame gap; Safari WebDriver timed out; Firefox absent | Finish both profiles and platform matrix, measure all six D3 fields, diagnose Chrome recovery | Raw reports under `/private/tmp/plurx-a04-d3-evidence-2026-09-24/` |
+| L-03 · Shared Live TV transport | M2 web, Apple and Android capacity offers and shared fixture implemented in the integration clone; #482 is on main | Compile client changes; collect M2 device pass; capture M3 broadcast services before M4 | Plan execution log and workboard row |
+| A-04 · Adaptive quality traces | Chrome 8→1.5 Mb/s trace now reaches the cliff but fails recovery: one restart and downshift, 4.27 s maximum frame gap; Safari WebDriver timed out; Firefox absent | Finish both profiles and platform matrix, measure all six D3 fields, diagnose Chrome recovery | Raw reports were lost when the temporary workspace was removed; measurements and hashes remain in the dated fleet evidence page |
 | Main deployment and fleet evidence | All four nodes run exact `f600d28230222005441cfc62301c306785c852ce`, healthy with `/readyz` 200, zero restarts and deployment markers; 42 owed rows updated at `dfa7e26f9` | Collect required device and long-window acceptance; signed client release inputs remain absent | [Dated fleet evidence](ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md) and deployment logs |
 
 ## Current impediments

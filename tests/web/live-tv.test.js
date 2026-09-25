@@ -222,6 +222,7 @@ async function main() {
       title: "Live session expired",
       detail: "The player was idle or disconnected. Start the channel again.",
       retryable: true,
+      offers: [],
     });
     assert.equal(liveTv.errorView({ code: "stream_failed" }).title, "Live stream stopped");
     assert.equal(liveTv.errorView({ code: "owner_unavailable" }).retryable, true);
@@ -683,6 +684,17 @@ async function main() {
       assert.ok(view.title && view.detail, `${rule.case}: ${outcome.render} has no copy`);
       assert.equal(view.retryable, rule.offer_retry, `${rule.case}: the view's retry control`);
     }
+  });
+
+  await test("capacity offers the shared fixture's watchable channels", () => {
+    const rule = START_CASES.answers.find(row => row.offer_watchable);
+    assert.ok(rule, "the shared fixture needs a watchable capacity case");
+    const error = { code: rule.body.code, status: 503, retry: rule.body.retry,
+      owner_decided: rule.body.owner_decided, answer: { body: rule.body } };
+    assert.deepEqual(liveTv.errorView(error).offers.map(offer => offer.channelId), rule.offer_watchable);
+    assert.deepEqual(liveTv.errorView(error).offers.map(offer => offer.label),
+      ["Watch 2.1 instead", "Watch 4.1 instead"]);
+    assert.deepEqual(liveTv.errorView({ code: "tuner_unavailable", answer: { body: rule.body } }).offers, []);
   });
 
   await test("an ingress code is only the ingress's verdict when the status is a 4xx", async () => {

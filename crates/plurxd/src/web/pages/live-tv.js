@@ -204,6 +204,17 @@ function liveTvMessage(message){
 function liveTvFailure(error){
   const view=PlurxLiveTv.errorView(error);
   liveTvMessage(`${view.title}. ${view.detail}`);
+  const mount=document.getElementById("live-tv-message");
+  if(!mount||!view.offers.length) return;
+  for(const offer of view.offers){
+    // Use the current lineup as the final authority: a stale capacity answer
+    // must not create a button for a channel this client cannot play.
+    if(!LIVE_TV.channels.some(channel=>channel.id===offer.channelId&&PlurxLiveTv.channelView(channel).disabled===false)) continue;
+    const button=document.createElement("button");
+    button.type="button"; button.textContent=offer.label;
+    button.addEventListener("click",()=>liveTvSelect(offer.channelId));
+    mount.append(" ",button);
+  }
 }
 async function viewLiveTv(generation=PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION) return;

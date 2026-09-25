@@ -71,6 +71,17 @@
     };
   }
 
+  function watchableOffers(error) {
+    const rows = error && error.code === "tuner_capacity" && error.answer && error.answer.body
+      ? error.answer.body.watchable : null;
+    if (!Array.isArray(rows)) return [];
+    const seen = new Set();
+    return rows.filter(row => row && typeof row.channel_id === "string"
+        && typeof row.guide_number === "string" && row.guide_number.trim()
+        && !seen.has(row.channel_id) && (seen.add(row.channel_id), true))
+      .map(row => ({ channelId: row.channel_id, label: `Watch ${row.guide_number} instead` }));
+  }
+
   function errorView(error) {
     const code = String((error && error.code) || "owner_unavailable");
     const outcome = startOutcome({
@@ -78,7 +89,7 @@
       body: { code, retry: error && error.retry, owner_decided: error && error.owner_decided },
     });
     const selected = ERROR_COPY[outcome.render] || ERROR_COPY.owner_unavailable;
-    return { code, title: selected[0], detail: selected[1], retryable: outcome.offerRetry };
+    return { code, title: selected[0], detail: selected[1], retryable: outcome.offerRetry, offers: watchableOffers(error) };
   }
 
   function channelView(channel) {

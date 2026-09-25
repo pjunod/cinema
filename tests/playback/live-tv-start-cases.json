@@ -25,6 +25,35 @@
       "keep_hint": false
     },
     {
+      "case": "the owner has no free tuner but a shared channel can take another viewer",
+      "body": {
+        "code": "tuner_capacity",
+        "retry": "later",
+        "owner_decided": true,
+        "watchable": [
+          {
+            "channel_id": "2.1",
+            "guide_number": "2.1",
+            "channel_name": "Harbor Lights",
+            "sinks": []
+          },
+          {
+            "channel_id": "4.1",
+            "guide_number": "4.1",
+            "channel_name": "Night Tide",
+            "sinks": []
+          }
+        ]
+      },
+      "render": "tuner_capacity",
+      "offer_retry": true,
+      "keep_hint": false,
+      "offer_watchable": [
+        "2.1",
+        "4.1"
+      ]
+    },
+    {
       "case": "the ingress could not reach the owner at all",
       "body": {
         "code": "owner_unavailable",
