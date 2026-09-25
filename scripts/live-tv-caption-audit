@@ -34,8 +34,8 @@
 # Set PLURX_CAPTION_FIXTURE_OUT=path to keep a copy of the fixture.
 #
 # The test binary comes from cargo, and a CARGO_TARGET_DIR shared between
-# checkouts can hand back another checkout's binary: if the run says
-# "running 0 tests", touch this checkout's sources and run it again.
+# checkouts can hand back another checkout's binary. Refuse a zero-test run
+# instead of reporting an audit that did not execute.
 set -eu
 
 usage() {
@@ -88,7 +88,7 @@ if [ "$1" = analyze ]; then
     [ $# -eq 2 ] || usage
     PLURX_CAPTION_ANALYZE=$(cd "$(dirname "$2")" && pwd -P)/$(basename "$2")
     export PLURX_CAPTION_ANALYZE
-    test=live_tv::caption_audit_tests::summarise_the_captions_in_a_capture
+    test=live_tv::caption_probe::summarise_the_captions_in_a_capture
 else
     routes=
     for route in "$@"; do
@@ -104,6 +104,16 @@ else
         PLURX_CAPTION_AUDIT_A53CC=$a53cc
         export PLURX_CAPTION_AUDIT_A53CC
     fi
-    test=live_tv::caption_audit_tests::live_caption_audit_on_this_node
+    test=live_tv::caption_probe::live_caption_audit_on_this_node
 fi
-exec cargo test --locked -p plurxd --bin plurxd "$test" -- --ignored --exact --nocapture
+{
+    cargo test --locked -p plurxd --bin plurxd "$test" -- --ignored --exact --nocapture \
+        || echo "$?" > "$work/cargo-exit"
+} 2>&1 | tee "$work/test-output"
+if [ -f "$work/cargo-exit" ]; then
+    exit "$(cat "$work/cargo-exit")"
+fi
+if ! grep -Eq '^test result: ok\. 1 passed; 0 failed;' "$work/test-output"; then
+    echo "caption-audit: expected exactly one passing test for $test" >&2
+    exit 1
+fi
