@@ -16,14 +16,13 @@ struct LiveTvDeveloperView: View {
     @State private var owner = ""
     @State private var sessions = 2
     @State private var height = 0
-    @State private var attested = false
     @State private var busy = false
     @State private var message = "Administrator access is required."
     @State private var revision = UUID()
 
     private var dirty: Bool {
         guard let saved else { return false }
-        return ipv4 != saved.liveTvDeviceIpv4 || owner != saved.liveTvOwnerNodeId
+        return ipv4 != saved.liveTvDeviceIpv4
             || sessions != saved.liveTvMaxSessions || height != saved.liveTvMaxOutputHeight
     }
 
@@ -114,55 +113,36 @@ struct LiveTvDeveloperView: View {
             }
             Section("HDHomeRun Live TV · runtime enablement") {
                 Text("Watch unprotected antenna channels from one network tuner. No special build is needed.")
-                Text("Before enabling: finish the HDHomeRun channel scan, reserve a stable private IPv4 address, and choose one reachable, committed tuner-owner node. Keep all serving nodes on a compatible plurx version.")
-                Text("The owner needs network access to the tuner and writable scratch space. Compatible broadcasts are copied without an encoder; conversion routes additionally need a working FFmpeg encoder and tone mapping when HDR must become SDR.")
+                Text("Before enabling: finish the HDHomeRun channel scan and reserve a stable private IPv4 address. Keep cluster servers upgraded and their clocks synchronized.")
+                Text("At least one eligible server needs network access to the tuner and writable scratch space. Viewers and recordings share channel transports. Compatible broadcasts are copied without an encoder; conversion routes additionally need a working FFmpeg encoder and tone mapping when HDR must become SDR.")
                 Text("ATSC 3.0 can require HEVC and AC-4 decoders your FFmpeg lacks. DRM, rewind, and captions are not supported. Unprotected channels can be scheduled or recorded manually. Readiness tests the output graph, not every broadcast codec, and never gates either switch.")
             }
             if let saved {
                 Section(saved.liveTvEnabled ? "Live TV is enabled" : "Live TV is disabled") {
                     TextField("Tuner private IPv4", text: $ipv4)
-                        .disabled(saved.liveTvEnabled || busy)
-                    TextField("Tuner-owner node ID", text: $owner)
-                        .disabled(saved.liveTvEnabled || busy)
-                    Text("Copy the node ID from the server's Settings → Cluster page.").font(.caption)
-                    Picker("Maximum sessions", selection: $sessions) {
+                        .disabled(busy)
+                    Picker("Maximum channel streams", selection: $sessions) {
                         ForEach(1...4, id: \.self) { Text(String($0)).tag($0) }
-                    }.disabled(saved.liveTvEnabled || busy)
+                    }.disabled(busy)
                     Picker("Maximum quality", selection: $height) {
                         Text("Original / Auto").tag(0)
                         Text("480p ceiling").tag(480)
                         Text("720p ceiling").tag(720)
                         Text("1080p ceiling").tag(1080)
                         Text("2160p ceiling").tag(2160)
-                    }.disabled(saved.liveTvEnabled || busy)
-                    Button("Save configuration while disabled") {
+                    }.disabled(busy)
+                    Button("Save configuration") {
                         write(.configure(ipv4: ipv4.trimmingCharacters(in: .whitespacesAndNewlines),
                                          owner: owner.trimmingCharacters(in: .whitespacesAndNewlines),
                                          sessions: sessions, height: 720, maxHeight: height))
-                    }.disabled(saved.liveTvEnabled || busy || !dirty)
+                    }.disabled(busy || !dirty)
                     Button("Check saved configuration") { checkReadiness() }.disabled(busy || dirty)
                     Button(saved.liveTvEnabled ? "Disable Live TV and drain sessions" : "Enable Live TV") {
                         write(.enabled(!saved.liveTvEnabled))
-                    }.disabled(busy || dirty)
-                    Text("Saving never enables playback. Enable rechecks readiness on the server. Disable before changing owner or tuner.").font(.caption)
+                    }.disabled(busy)
+                    Text("Saving preserves enablement and ends streams using the previous configuration. Readiness is advisory; unmet checks do not prevent enabling.").font(.caption)
                 }
-                if !saved.liveTvTransitionFromOwnerNodeId.isEmpty {
-                    Section("Previous owner cleanup is unconfirmed") {
-                        Text("Previous owner: \(saved.liveTvTransitionFromOwnerNodeId) · generations before \(saved.liveTvTransitionDrainBefore). An unreachable node is not proof that its tuner process stopped.")
-                        Text("First restore the old node's connection, then save the disabled configuration to retry authenticated cleanup. Only use physical recovery after actually stopping that node and preventing its restart.")
-                        Toggle("I have stopped or powered off the previous owner and prevented it from restarting until it can synchronize the current configuration.", isOn: $attested)
-                            .disabled(saved.liveTvEnabled || busy)
-                        Button("Record physical fencing of this exact previous owner") {
-                            write(.fencedOwner(owner: saved.liveTvTransitionFromOwnerNodeId,
-                                               cutoff: saved.liveTvTransitionDrainBefore))
-                        }.disabled(saved.liveTvEnabled || busy || !attested || dirty)
-                        Button("Retry authenticated cleanup while disabled") {
-                            write(.configure(ipv4: saved.liveTvDeviceIpv4, owner: saved.liveTvOwnerNodeId,
-                                             sessions: saved.liveTvMaxSessions, height: saved.liveTvOutputHeight,
-                                             maxHeight: saved.liveTvMaxOutputHeight))
-                        }.disabled(saved.liveTvEnabled || busy || dirty)
-                    }
-                }
+
             }
             if let readiness {
                 // Every row the server sends, drawn the same way — including
@@ -212,7 +192,6 @@ struct LiveTvDeveloperView: View {
         // A save can change the guide source, so the card that described the
         // previous one is cleared rather than left to look current.
         guideReadiness = nil
-        attested = false
     }
 
     @MainActor private func load() async {

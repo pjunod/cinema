@@ -273,6 +273,19 @@ impl Command {
             | Self::RenewFinalizer { recording_id, .. } => format!("capture:{recording_id}"),
         }
     }
+    fn admitting_worker(&self) -> Option<&Worker> {
+        match self {
+            Self::Reserve(r) => Some(&r.worker),
+            Self::ClaimCapture { capture, .. } => Some(&capture.worker),
+            Self::Advance { worker, phase, .. } if !phase.terminal() => Some(worker),
+            Self::Renew { worker, .. }
+            | Self::ClaimFinalizer { worker, .. }
+            | Self::RenewFinalizer { worker, .. }
+            | Self::ProgressCapture { worker, .. }
+            | Self::PublishCapture { worker, .. } => Some(worker),
+            _ => None,
+        }
+    }
     pub(crate) fn user_id(&self) -> i64 {
         match self {
             Self::Issue(s) => s.user_id,
@@ -307,6 +320,8 @@ pub struct Snapshot {
     pub user_history_count: usize,
     #[serde(default)]
     pub recordings: Vec<CaptureInput>,
+    #[serde(default)]
+    pub removed_workers: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -393,6 +408,12 @@ pub(crate) fn transition(
         return Err(error("invalid Live TV resource clock"));
     }
     let mut changes = Changes::default();
+    if command
+        .admitting_worker()
+        .is_some_and(|w| s.removed_workers.contains(&w.node_id))
+    {
+        return Ok((Outcome::Fenced, changes));
+    }
     let current = existing(s, &command.lookup_key());
     let outcome = match command {
         Command::Issue(start) => {
@@ -976,6 +997,7 @@ SELECT json_object(
  'revision', revision,
  'generation', COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='live_tv.config_generation'),0),
  'enabled', json(CASE WHEN (SELECT value FROM settings WHERE key='live_tv.enabled')='1' THEN 'true' ELSE 'false' END),
+ 'removed_workers', json((SELECT COALESCE(json_group_array(substr(key,length('internal.cluster_job_owner_removed.')+1)),'[]') FROM settings WHERE key GLOB 'internal.cluster_job_owner_removed.*')),
  'records', json((SELECT COALESCE(json_group_array(json(body)),'[]') FROM live_tv_resource_records, input
     WHERE live=1 OR (id=input.request_key AND expires_at_ms>input.now_ms))),
  'history_count', (SELECT COUNT(*) FROM live_tv_resource_records,input WHERE kind='start' AND live=0 AND expires_at_ms>input.now_ms),
@@ -1049,7 +1071,7 @@ impl<T: Backend> LiveTvResourceStore for T {
             {
                 return Ok(outcome);
             }
-            let statements = statements(&snapshot, changes, now_ms)?;
+            let statements = statements(&snapshot, changes, now_ms, command.admitting_worker())?;
             if self.commit_ledger(statements).await? {
                 return Ok(outcome);
             }
@@ -1119,6 +1141,7 @@ fn statements(
     snapshot: &Snapshot,
     changes: Changes,
     now: i64,
+    worker: Option<&Worker>,
 ) -> Result<Vec<Statement>, StoreError> {
     use Value::{Integer as I, Text as T};
     let next = snapshot
@@ -1129,8 +1152,9 @@ fn statements(
     let mut out=vec![Statement {sql:"UPDATE live_tv_resource_revision SET nonce=$1,revision=revision+1
         WHERE singleton=1 AND revision=$2
         AND COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='live_tv.config_generation'),0)=$3
-        AND COALESCE((SELECT value FROM settings WHERE key='live_tv.enabled'),'0')=$4".into(),
-        values:vec![T(nonce.clone()),I(snapshot.revision),I(snapshot.generation),T(if snapshot.enabled{"1"}else{"0"}.into())]}];
+        AND COALESCE((SELECT value FROM settings WHERE key='live_tv.enabled'),'0')=$4
+        AND NOT EXISTS (SELECT 1 FROM settings WHERE key=$5)".into(),
+        values:vec![T(nonce.clone()),I(snapshot.revision),I(snapshot.generation),T(if snapshot.enabled{"1"}else{"0"}.into()),T(worker.map(|w|format!("internal.cluster_job_owner_removed.{}",w.node_id)).unwrap_or_default())]}];
     for record in changes.upsert {
         let (kind, user, live, expiry) = record.columns(now);
         out.push(Statement {sql:"INSERT INTO live_tv_resource_records(id,kind,user_id,live,expires_at_ms,body)

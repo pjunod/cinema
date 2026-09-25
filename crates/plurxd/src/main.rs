@@ -2697,6 +2697,10 @@ fn spawn_background_loops(
         dvr_events,
         background_shutdown.clone(),
     ));
+    tokio::spawn(crate::http::live_tv::guide_replica_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(crate::live_tv::dvr::dvr_library_loop(
         state.clone(),
         background_shutdown.clone(),

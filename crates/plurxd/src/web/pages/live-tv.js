@@ -128,16 +128,19 @@ const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
     // An ingress older than protocol 3 has no id to be told and no route to
     // retire one on, so it is sent none; hints already stored are kept for an
     // ingress that is upgraded later.
-    const requestId=recovery?liveTvRequestId():null;
-    if(requestId){
-      LIVE_TV_HINTS.remember(requestId); // durable before the POST can leave
-      // Claimed from this instant, so a sibling document probing during the
-      // start window finds this one holding it rather than an orphan.
-      LIVE_TV.hint=requestId;
-    }
     const compatibility=LIVE_TV.compatibility; LIVE_TV.compatibility=null;
     const body={playback:liveTvPlaybackEnvelope(compatibility)};
-    if(requestId) body.request_id=requestId;
+    let requestId=recovery?liveTvRequestId():null;
+    if(Array.isArray(LIVE_TV.protocols)&&LIVE_TV.protocols.includes(4)){
+      const intent=await liveTvRequest(`/live-tv/channels/${encodeURIComponent(channel)}/intents`,"POST",45000,true,false,body);
+      if(!intent||typeof intent.request_id!=="string"||!/^v4_[0-9a-f]{32}$/.test(intent.request_id)) throw new Error("The server returned an invalid Live TV intent");
+      requestId=intent.request_id;
+    }
+    if(requestId){
+      LIVE_TV_HINTS.remember(requestId);
+      LIVE_TV.hint=requestId;
+      body.request_id=requestId;
+    }
     // A start that got no answer is replayed once with the SAME id, which the
     // owner joins to the same session. A start with no id is never replayed —
     // that is exactly how a second tuner gets opened.

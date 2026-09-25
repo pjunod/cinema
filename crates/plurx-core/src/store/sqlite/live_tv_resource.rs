@@ -280,4 +280,130 @@ mod tests {
             Outcome::Fenced
         );
     }
+    #[tokio::test]
+    async fn capture_claim_precedes_io_and_stop_keeps_only_fenced_finalization() {
+        use crate::live_tv_resource::Capture;
+        let store = store().await;
+        store.with_conn(|conn| {
+            conn.execute("INSERT INTO dvr_recordings(id,origin,channel_id,guide_number,channel_name,
+                airing_start,airing_end,capture_start,capture_end,title,state,created_at_ms,updated_at_ms)
+                VALUES('recording','manual','2.1','2.1','Fixture',1,600,1,600,'News','scheduled',1000,1000)", [])?;
+            Ok(())
+        }).await.expect("recording fixture");
+        let capture = Capture {
+            recording_id: "recording".into(),
+            epoch: 0,
+            worker: worker("a"),
+            ingest_id: String::new(),
+            ingest_epoch: 0,
+            storage_id: "storage-a".into(),
+            base_path: "/recordings/news".into(),
+            generation: 1,
+            expires_at_ms: 0,
+            stopped: false,
+            deleted: false,
+            finalizer: None,
+            finalizer_epoch: 0,
+            published_path: None,
+        };
+        let claim = Command::ClaimCapture {
+            capture: capture.clone(),
+            ingest_id: "capture-ingest".into(),
+            limit: 1,
+            reserve: 0,
+            device_id: "device".into(),
+            channel_id: "2.1".into(),
+        };
+        let claimed = match store
+            .live_tv_resource_command(claim.clone(), 1000)
+            .await
+            .expect("claim")
+        {
+            Outcome::Record(Record::Capture(c)) => c,
+            other => panic!("claim refused: {other:?}"),
+        };
+        use crate::store::DvrStore;
+        let row = store
+            .get_dvr_recording("recording")
+            .await
+            .expect("row")
+            .expect("exists");
+        assert_eq!(row.state, crate::dvr::DvrState::Recording);
+        assert_eq!(row.attempt, claimed.epoch);
+        store
+            .request_dvr_stop("recording", 1001, 1)
+            .await
+            .expect("stop intent");
+        assert_eq!(
+            store
+                .live_tv_resource_command(claim, 1002)
+                .await
+                .expect("cannot restart stopped capture"),
+            Outcome::Retired
+        );
+        store
+            .live_tv_resource_command(
+                Command::DetachCapture {
+                    recording_id: "recording".into(),
+                    epoch: claimed.epoch,
+                    worker: worker("a"),
+                },
+                1002,
+            )
+            .await
+            .expect("writer closed");
+        let finalizer = match store
+            .live_tv_resource_command(
+                Command::ClaimFinalizer {
+                    recording_id: "recording".into(),
+                    worker: worker("b"),
+                    storage_id: "storage-a".into(),
+                },
+                1003,
+            )
+            .await
+            .expect("finalizer")
+        {
+            Outcome::Record(Record::Capture(c)) => c,
+            other => panic!("finalization refused: {other:?}"),
+        };
+        assert_eq!(
+            store
+                .live_tv_resource_command(
+                    Command::ProgressCapture {
+                        recording_id: "recording".into(),
+                        worker: worker("a"),
+                        epoch: claimed.epoch,
+                        bytes: 200
+                    },
+                    1004
+                )
+                .await
+                .expect("stale progress"),
+            Outcome::Fenced
+        );
+        let publish = Command::PublishCapture {
+            recording_id: "recording".into(),
+            worker: worker("b"),
+            epoch: finalizer.finalizer_epoch,
+            path: "/recordings/news.f1.ts".into(),
+            bytes: 188,
+            gap_s: 1,
+            stopped_by: None,
+        };
+        assert_eq!(
+            store
+                .live_tv_resource_command(publish, 1004)
+                .await
+                .expect("publish useful stopped bytes"),
+            Outcome::Applied
+        );
+        let row = store
+            .get_dvr_recording("recording")
+            .await
+            .expect("row")
+            .expect("exists");
+        assert_eq!(row.state, crate::dvr::DvrState::Partial);
+        assert_eq!(row.path.as_deref(), Some("/recordings/news.f1.ts"));
+    }
 }

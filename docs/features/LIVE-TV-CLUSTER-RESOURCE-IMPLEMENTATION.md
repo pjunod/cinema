@@ -1,6 +1,6 @@
 # Live TV cluster resource — remove the device's permanent node owner
 
-**Status:** ready to implement; adversarial design review complete ·
+**Status:** implementation in progress; adversarial design review complete ·
 **Written:** 2026-09-25 · **Source inspected:** `bafeb08766ce057634f3fab0850cdd9e03507a98`
 plus the working tree · **Requested by:** Paul
 
@@ -8,13 +8,57 @@ This document explains why an independent network tuner became tied to one
 plurx node and specifies the replacement, including recording safety. Read
 [the original tuner plan](HDHOMERUN-LIVE-TV-PLAN.md) for the existing protocol
 and [the DVR implementation](LIVE-TV-DVR-IMPLEMENTATION.md) for recording
-semantics. Work through §10 on one effort branch. This is a plan, not a claim
-that the behavior has changed. No Rust, deployment, or hardware test is part
-of this documentation task.
+semantics. The implementation is tracked on the
+[status page](LIVE-TV-CLUSTER-RESOURCE-STATUS.md). The delivery instructions
+now call for one batched main-bound PR, one adversarial code review when ready,
+and one final unit/fast-lane run after review fixes.
 
 The [adversarial review](LIVE-TV-CLUSTER-RESOURCE-REVIEW.md) records independent
 findings and their disposition. File anchors below describe the inspected
 source; re-verify symbols against the implementation base before editing.
+
+## Implementation amendments — 2026-09-25
+
+These decisions supersede the corresponding proposed mechanics below. The
+original problem analysis and review remain as the design history.
+
+- **Current base shares transports.** Main `8ae8cab1e` already allows viewers
+  and recordings to share a channel. The implementation preserves that and
+  serializes pending consumer attachment, final detach and socket closure in
+  the cluster ledger. A viewer does not necessarily consume another tuner.
+- **One indexed record store, one CAS revision.** The typed state machine is in
+  [live_tv_resource.rs](../../crates/plurx-core/src/live_tv_resource.rs), with
+  SQLite v70 and replicated v48 adapters. Individually indexed records carry
+  starts, ingests, capture/finalization claims, and compact legacy retire
+  barriers. Only changed records enter transactions. Terminal-history counts
+  do not require downloading response history on every renewal. DVR row
+  changes invalidate the shared revision through database triggers.
+- **No feature-mode switch or physical-fencing gate.** The existing Live TV
+  enable setting is exposed in Developer settings on web, Apple and Android.
+  Prerequisite observations are advisory. Authentication, committed serving
+  authority, per-attempt assignment, generation checks and expired-lease
+  rejection still govern actual operations. Legacy owner fields remain wire
+  compatibility fields; they do not place work.
+- **Protocol 4 intents.** The server persists a `v4_` intent before returning
+  its ID. All first-party clients preserve its exact playback envelope on
+  replay. Legacy 32-hex IDs retain the bounded 24-hour retire contract. Unknown
+  protocol 4 IDs cannot use legacy admission after history collection.
+- **DVR publication.** Capture admission and the scheduled-to-recording row
+  change commit before local tuner or file work. A stable storage marker
+  distinguishes recording namespaces. Capture attempts are append-only;
+  finalization copies bounded prefixes into exclusive `.f<epoch>.ts` outputs.
+  A fenced manifest and recording-row update commit together. Scanners reject
+  uncommitted epoch outputs and reuse the recording's existing item identity.
+  Stop retains useful output; Delete prevents publication. Finalization does
+  not require a tuner slot or the capture worker to survive.
+- **Guide copies.** A separate source-refresh lease limits fetches, while
+  serving nodes retain sanitized guide copies on disk and can relay them.
+  Guide role changes do not change tuner ingest placement.
+- **Delivery evidence.** Compiler and lint checks run during implementation.
+  Unit execution is deferred until the complete PR has its adversarial review
+  and corrections, as explicitly requested. Status records evidence that
+  actually exists; hardware or predecessor-binary acceptance is not implied
+  by a compiler result.
 
 ## 1. The failure — a reachable device becomes unavailable with one server
 

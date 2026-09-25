@@ -1526,9 +1526,9 @@ impl OwnerIncarnation {
             now_unix.saturating_sub(seen) <= INCARNATION_RESTART_WINDOW.as_secs() as i64
         });
         if restarted {
-            "the tuner owner restarted; press Watch to start again"
+            "the session server restarted; press Watch to start again"
         } else {
-            "this live-TV session is not available on the tuner owner; press Watch to start again"
+            "this live-TV session is not available on the session server; press Watch to start again"
         }
     }
 }
@@ -3716,7 +3716,7 @@ impl LiveTvManager {
         config.validate_static()?;
         if config.owner_node_id != self.node_id {
             return Err(LiveTvError::OwnerUnavailable(
-                "this node is not the configured HDHomeRun owner".to_owned(),
+                "this node is not the configured HDHomeRun worker".to_owned(),
             ));
         }
         let address = config.device_ipv4.ok_or_else(|| {
@@ -3885,12 +3885,6 @@ impl LiveTvManager {
         let discover_url = pinned_url(address, 80, "/discover.json")?;
         let discover: DiscoverDocument = fetch_json(client, discover_url).await?;
         let device = discover.validated()?;
-        if config.max_sessions > device.tuner_count.min(4) {
-            return Err(LiveTvError::InvalidConfig(format!(
-                "maximum sessions {} exceeds this device's reported tuner count {}",
-                config.max_sessions, device.tuner_count
-            )));
-        }
         let lineup_url = lineup_url(address, discover.lineup_url.as_deref())?;
         let rows: Vec<serde_json::Value> = fetch_json(client, lineup_url).await?;
         let channels = validate_lineup(rows)?;
@@ -3967,7 +3961,7 @@ impl LiveTvManager {
         if self.system.ffmpeg.trim().is_empty() {
             return (
                 false,
-                "FFmpeg is not configured on the tuner owner".to_owned(),
+                "FFmpeg is not configured on the session server".to_owned(),
             );
         }
         let probe_dir = self
@@ -4033,7 +4027,7 @@ impl LiveTvManager {
         validate_start_request(&request)?;
         if request.expected_owner_node_id != self.node_id {
             return Err(LiveTvError::OwnerUnavailable(
-                "the start request names a different tuner owner".to_owned(),
+                "the start request names a different session server".to_owned(),
             ));
         }
         let serving_generation = self.serving.admit().ok_or_else(|| {
@@ -4070,12 +4064,6 @@ impl LiveTvManager {
             ));
         }
         let device_id = snapshot.device.device_id.clone();
-        self.resource_start(
-            &request,
-            &device_id,
-            config.max_sessions.min(snapshot.device.tuner_count),
-        )
-        .await?;
         let channel = snapshot
             .channels
             .into_iter()
@@ -4095,6 +4083,13 @@ impl LiveTvManager {
         // keeps that refusal ahead of any tuner reservation.
         let path = format!("/auto/v{}", channel.guide_number);
         pinned_url(address, 5004, &path)?;
+        self.resource_start(
+            &request,
+            &device_id,
+            config.max_sessions.min(snapshot.device.tuner_count),
+        )
+        .await?;
+
         let random = uuid::Uuid::new_v4().to_string();
         let capability = format!(
             "ltv1.{}.{}",
@@ -4340,7 +4335,7 @@ impl LiveTvManager {
     ) -> Result<LiveTvActivated, LiveTvError> {
         if request.expected_owner_node_id != self.node_id {
             return Err(LiveTvError::OwnerUnavailable(
-                "the activation request names a different tuner owner".into(),
+                "the activation request names a different session server".into(),
             ));
         }
         validate_capability_owner(&request.capability, &self.node_id)?;
@@ -5376,7 +5371,7 @@ impl LiveTvManager {
     ) -> Result<LiveTvGuide, LiveTvError> {
         if config.owner_node_id != self.node_id {
             return Err(LiveTvError::OwnerUnavailable(
-                "this node is not the configured HDHomeRun owner".to_owned(),
+                "this node is not the configured HDHomeRun worker".to_owned(),
             ));
         }
         if !config.guide_fetches() {
@@ -5419,6 +5414,23 @@ impl LiveTvManager {
                     .to_owned(),
             ));
         }
+        let clock = resource::now_ms();
+        let guide_lease = match self
+            .store
+            .acquire_lease(
+                &format!("live-tv-guide:{}", config.generation),
+                &self.node_id,
+                clock,
+                clock.saturating_add(300_000),
+            )
+            .await
+            .map_err(|e| LiveTvError::DeviceUnavailable(e.to_string()))?
+        {
+            plurx_core::cluster::coordination::LeaseClaim::Acquired(lease) => lease,
+            plurx_core::cluster::coordination::LeaseClaim::Held { owner_node_id, .. } => {
+                return Err(LiveTvError::DeviceUnavailable(format!("guide source refresh is assigned to {owner_node_id}; cached guides remain available")));
+            }
+        };
         let deadline = tokio::time::Instant::now() + guide::GUIDE_REFRESH_TIMEOUT;
         let fetch = self.fetch_guide(
             config,
@@ -5476,6 +5488,20 @@ impl LiveTvManager {
                 "programme guide settings changed while the refresh was running".to_owned(),
             ));
         }
+        let clock = resource::now_ms();
+        if !matches!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                self.store
+                    .renew_lease(&guide_lease, clock, clock.saturating_add(300_000))
+            )
+            .await,
+            Ok(Ok(Some(_)))
+        ) {
+            return Err(LiveTvError::DeviceUnavailable(
+                "guide refresh authority expired before publication".into(),
+            ));
+        }
         let outcome = if result.is_ok() { "ok" } else { "error" };
         self.metrics
             .observe_guide_refresh(config.guide_source, outcome);
@@ -5523,18 +5549,6 @@ impl LiveTvManager {
             .into_iter()
             .find(|channel| channel.id == channel_id)
             .map(|channel| channel.guide_number)
-    }
-
-    /// The device id of the cached lineup for this generation, so a
-    /// recording's transport records which device it tuned and a viewer can
-    /// check it before joining.
-    async fn cached_device_id(&self, config: &LiveTvConfig) -> Option<String> {
-        let state = self.cache.state.lock().await;
-        state
-            .snapshot
-            .as_ref()
-            .filter(|cached| cached.generation == config.generation)
-            .map(|cached| cached.snapshot.device.device_id.clone())
     }
 
     /// A probe folder of its own for each transport: two transports on one
@@ -5857,6 +5871,27 @@ impl LiveTvManager {
     }
 
     pub(crate) async fn remember_relayed_guide(&self, generation: i64, guide: LiveTvGuide) {
+        if guide.freshness != GuideFreshness::Unavailable {
+            let cached = CachedGuide {
+                generation,
+                observed: tokio::time::Instant::now(),
+                age_offset: Duration::from_secs(guide.age_seconds),
+                fetched_at: guide.fetched_at.unwrap_or(unix_seconds()),
+                guide: Arc::new(guide.clone()),
+            };
+            let mut state = self.guide_cache.state.lock().await;
+            let newer = state.cached.as_ref().is_none_or(|old| {
+                old.generation != generation || old.fetched_at < cached.fetched_at
+            });
+            if newer {
+                state.cached = Some(cached.clone());
+            }
+            drop(state);
+            if newer {
+                self.publish_guide_titles(&guide);
+                self.guide_cache.persist_guide(&cached).await;
+            }
+        }
         *self.relayed_guide.lock().await = Some((generation, tokio::time::Instant::now(), guide));
     }
 
@@ -5993,7 +6028,7 @@ impl LiveTvManager {
                             tracing::warn!(
                                 source = config.guide_source.as_str(),
                                 code = error.code(),
-                                "programme guide refresh failed on the tuner owner"
+                                "programme guide refresh failed on the session server"
                             );
                         }
                     }
@@ -6405,7 +6440,7 @@ fn validate_start_config(
         || config.owner_node_id != request.expected_owner_node_id
     {
         return Err(LiveTvError::OwnerUnavailable(
-            "this node is not the current HDHomeRun owner".into(),
+            "this node is not the current HDHomeRun worker".into(),
         ));
     }
     if config.generation != request.config_generation {
@@ -6501,7 +6536,7 @@ fn classify_live_source_error(
             Err(LiveTvError::StreamFailed(_) | LiveTvError::StartupTimeout(_))
         )
     {
-        Err(LiveTvError::CodecUnsupported("The tuner owner's FFmpeg could not detect or decode the required video and audio. ATSC 3.0 may require HEVC and AC-4 support; try an ATSC 1.0 channel or a decoder-capable FFmpeg build.".into()))
+        Err(LiveTvError::CodecUnsupported("The session server's FFmpeg could not detect or decode the required video and audio. ATSC 3.0 may require HEVC and AC-4 support; try an ATSC 1.0 channel or a decoder-capable FFmpeg build.".into()))
     } else {
         match (result, encoder_diagnostic) {
             (Err(LiveTvError::StreamFailed(message)), Some(cause)) => {
@@ -7269,7 +7304,7 @@ async fn open_tuner_stream(
         .map_err(|error| {
             tracing::warn!(
                 kind = reqwest_error_kind(&error),
-                "HDHomeRun stream request failed on the tuner owner"
+                "HDHomeRun stream request failed on the session server"
             );
             LiveTvError::DeviceUnavailable("the HDHomeRun stream request failed".into())
         })?;
@@ -7516,7 +7551,7 @@ async fn probe_live_source(
 ) -> Result<LiveSourceFacts, LiveTvError> {
     if system.ffprobe.trim().is_empty() {
         return Err(LiveTvError::CodecUnsupported(
-            "source_probe_incomplete: FFprobe is not configured on the tuner owner".into(),
+            "source_probe_incomplete: FFprobe is not configured on the session server".into(),
         ));
     }
     let sample = directory.join("source-probe.ts");
@@ -7620,7 +7655,7 @@ impl LiveTvTranscodePlan {
     ) -> Result<Self, LiveTvError> {
         if system.ffmpeg.trim().is_empty() {
             return Err(LiveTvError::CodecUnsupported(
-                "FFmpeg is not configured on the tuner owner".into(),
+                "FFmpeg is not configured on the session server".into(),
             ));
         }
         if delivery.output.height == 0
@@ -9342,7 +9377,7 @@ pub(crate) async fn fetch_bounded(
         .map_err(|error| {
             tracing::warn!(
                 kind = reqwest_error_kind(&error),
-                "HDHomeRun document request failed on the tuner owner"
+                "HDHomeRun document request failed on the session server"
             );
             LiveTvError::DeviceUnavailable("HDHomeRun device request failed".to_owned())
         })?;
@@ -9368,7 +9403,7 @@ pub(crate) async fn fetch_bounded(
             .map_err(|error| {
                 tracing::warn!(
                     kind = reqwest_error_kind(&error),
-                    "HDHomeRun response body failed on the tuner owner"
+                    "HDHomeRun response body failed on the session server"
                 );
                 LiveTvError::DeviceUnavailable("HDHomeRun response body failed".to_owned())
             })?;
@@ -10527,7 +10562,7 @@ mod tests {
             "the sentence must name the settings store: {message}"
         );
         assert!(
-            !message.contains("HDHomeRun") && !message.contains("tuner owner"),
+            !message.contains("HDHomeRun") && !message.contains("session server"),
             "and must not read as a tuner problem, which is what the old \
              device_unavailable did: {message}"
         );

@@ -202,7 +202,7 @@ struct LiveTvLineup: Decodable, Sendable {
     let channels: [LiveTvChannel]
     let freshness: String
     let ageSeconds: Int
-    /// The start protocols this ingress negotiated with the tuner owner — the
+    /// The start protocols this ingress negotiated with the session server — the
     /// intersection of what its own public surface accepts and what the owner
     /// supports. Protocol `3` is client request ids plus the
     /// `/api/v1/live-tv/starts/*` recovery routes. Absent from an ingress
@@ -683,7 +683,7 @@ struct LiveTvFailure: Error, LocalizedError, Sendable {
         case "tuner_unavailable": return "The tuner cannot start this channel. Check reception and other tuner clients."
         case "channel_not_found": return "This channel is no longer available. Refresh the lineup."
         case "drm_unsupported": return "DRM-protected television is not supported."
-        case "codec_unsupported": return "The tuner owner or this device cannot decode this channel. ATSC 3.0 may require HEVC and AC-4 support."
+        case "codec_unsupported": return "The session server or this device cannot decode this channel. ATSC 3.0 may require HEVC and AC-4 support."
         case "startup_timeout": return "The channel did not produce a live segment before the startup deadline."
         case "source_format_changed": return "The broadcast changed format. plurx will select a fresh compatible route."
         case "stream_failed": return "The live stream stopped. Select a channel to try again."
@@ -696,7 +696,7 @@ struct LiveTvFailure: Error, LocalizedError, Sendable {
         case "invalid_request": return "This device sent a live-TV request the server could not read. Update the app."
         case "invalid_settings": return "Live TV settings are incomplete. An administrator can finish them in Settings → Developer."
         case "admin_required": return "Only an administrator can change Live TV settings."
-        default: return "The tuner owner is unavailable. Check the server and its network connection."
+        default: return "The session server is unavailable. Check the server and its network connection."
         }
     }
 }
@@ -731,6 +731,7 @@ struct LiveTvResumeAnswer: Decodable, Sendable {
 }
 
 protocol LiveTvRequests {
+    func issueIntent(_ channel: String, fallback: String) async throws -> String
     /// `requestId` is `nil` exactly when the ingress did not negotiate
     /// protocol 3: an older one rejects the field outright.
     func start(_ channel: String, requestId: String?) async throws -> LiveTvStarted
@@ -748,6 +749,10 @@ protocol LiveTvRequests {
     func recoveryRoutesAvailable() async -> Bool
 }
 
+extension LiveTvRequests {
+    func issueIntent(_ channel: String, fallback: String) async throws -> String { fallback }
+}
+
 /// Captures one authenticated profile. Narrow media/control capabilities never
 /// carry the account token, and HTTP redirects cannot carry either elsewhere.
 final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
@@ -761,6 +766,22 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
     private var nextCompatibility: LiveTvCompatibility?
     private let protocolLock = NSLock()
     private var negotiatedProtocols: [Int]?
+    private var intentEnvelopes: [String: LiveTvPlaybackEnvelope] = [:]
+    private var intentOrder: [String] = []
+    private func intentProtocol() -> Bool {
+        protocolLock.lock(); defer { protocolLock.unlock() }
+        return negotiatedProtocols?.contains(4) == true
+    }
+    private func rememberEnvelope(_ envelope: LiveTvPlaybackEnvelope, id: String) {
+        protocolLock.lock(); defer { protocolLock.unlock() }
+        if intentEnvelopes[id] == nil { intentOrder.append(id) }
+        intentEnvelopes[id] = envelope
+        while intentOrder.count > 64 { intentEnvelopes.removeValue(forKey: intentOrder.removeFirst()) }
+    }
+    private func envelopeFor(_ id: String?) -> LiveTvPlaybackEnvelope? {
+        protocolLock.lock(); defer { protocolLock.unlock() }
+        return id.flatMap { intentEnvelopes[$0] }
+    }
 
     init(origin: String, token: String?, session: URLSession? = nil) {
         self.origin = origin
@@ -896,11 +917,26 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
         let requestId: String?
     }
 
+    func issueIntent(_ channel: String, fallback: String) async throws -> String {
+        guard intentProtocol() else { return fallback }
+        let envelope = LiveTvPlaybackEnvelope.current(compatibility: takeCompatibility())
+        let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
+        let body = try encoder.encode(StartBody(playback: envelope, requestId: nil))
+        struct Intent: Decodable { let requestId: String }
+        let intent = try decode(Intent.self, data: await request("live-tv/channels/\(Self.pathComponent(channel))/intents",
+            method: "POST", authenticated: true, body: body, session: transport))
+        guard intent.requestId.hasPrefix("v4_"), LiveTvStartReducer.isRequestId(intent.requestId) else {
+            throw LiveTvFailure(code: "no_answer")
+        }
+        rememberEnvelope(envelope, id: intent.requestId)
+        return intent.requestId
+    }
+
     func start(_ channel: String, requestId: String?) async throws -> LiveTvStarted {
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         let body = try encoder.encode(StartBody(
-            playback: LiveTvPlaybackEnvelope.current(compatibility: takeCompatibility()),
+            playback: envelopeFor(requestId) ?? LiveTvPlaybackEnvelope.current(compatibility: takeCompatibility()),
             requestId: requestId
         ))
         return try decode(LiveTvStarted.self, data: await request("live-tv/channels/\(Self.pathComponent(channel))/sessions",
@@ -1169,7 +1205,8 @@ enum LiveTvStartReducer {
     /// 32 lower-case hex characters — the shape the ingress validates with
     /// `^[0-9a-f]{32}$`.
     static func isRequestId(_ value: String) -> Bool {
-        value.count == 32 && value.allSatisfy { "0123456789abcdef".contains($0) }
+        { let raw = value.hasPrefix("v4_") ? String(value.dropFirst(3)) : value
+            return raw.count == 32 && raw.allSatisfy { "0123456789abcdef".contains($0) } }()
     }
 
     /// 128 bits of it. A handle, not a secret: replaying it joins the same
@@ -1252,7 +1289,7 @@ final class LiveTvLease {
             if recovery { retireOrphanedHint() }
             guard generation == expected else { return nil }
 
-            let requestId = recovery ? LiveTvStartReducer.newRequestId() : nil
+            let requestId = recovery ? try await requests.issueIntent(channel, fallback: LiveTvStartReducer.newRequestId()) : nil
             // Persisted before the POST leaves the device, including a process
             // killed mid-POST: the id is the only handle on a start the server
             // may already have made.

@@ -136,22 +136,52 @@ pub(crate) async fn owner_guide(
     config: &LiveTvConfig,
     window: GuideWindow,
 ) -> LiveTvGuide {
-    if config.owner_node_id == state.node_id {
-        return state.live_tv.local_guide(config, window).await;
+    let local = state.live_tv.local_guide(config, window.clone()).await;
+    if local.freshness == crate::live_tv::guide::GuideFreshness::Fresh {
+        return local;
     }
     if let Some(cached) = state.live_tv.relayed_guide(config.generation).await {
         return cached.clipped(&window);
     }
-    let relayed = relay_guide(state, config).await;
-    match relayed {
-        Ok(guide) => {
-            state
-                .live_tv
-                .remember_relayed_guide(config.generation, guide.clone())
-                .await;
-            guide.clipped(&window)
+    if state.membership.is_replicated() {
+        if let Ok(peers) = state.membership.activity_peers().await {
+            for peer in peers
+                .into_iter()
+                .filter(|p| p.reachable && p.node_id != state.node_id)
+                .take(3)
+            {
+                let mut candidate = config.clone();
+                candidate.owner_node_id = peer.node_id;
+                if let Ok(guide) = relay_guide(state, &candidate).await {
+                    if guide.freshness != crate::live_tv::guide::GuideFreshness::Unavailable {
+                        state
+                            .live_tv
+                            .remember_relayed_guide(config.generation, guide.clone())
+                            .await;
+                        return guide.clipped(&window);
+                    }
+                }
+            }
         }
-        Err(message) => LiveTvGuide::unavailable(config.guide_source, window, Some(message)),
+    }
+    local
+}
+
+/// Keep a sanitized durable guide copy on every serving node, including nodes
+/// with no tuner network path. Source fetches have a separate cluster lease.
+pub(crate) async fn guide_replica_loop(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    loop {
+        if let Ok(config) = state.live_tv.config().await {
+            if config.guide_fetches() && state.serving.is_ready() {
+                let _ =
+                    owner_guide(&state, &config, guide::refresh_window(config.guide_hours)).await;
+            }
+        }
+        tokio::select! { _ = shutdown.cancelled() => return,
+        _ = tokio::time::sleep(Duration::from_secs(60)) => {} }
     }
 }
 
@@ -168,7 +198,7 @@ async fn relay_guide(state: &AppState, config: &LiveTvConfig) -> Result<LiveTvGu
         .find(|peer| peer.node_id == config.owner_node_id)
         .filter(|peer| peer.reachable)
         .and_then(|peer| peer.http_base.map(|base| (peer.node_id, base)))
-        .ok_or_else(|| "the tuner owner is not a reachable committed voter".to_owned())?;
+        .ok_or_else(|| "the session server is not a reachable committed voter".to_owned())?;
     let body = serde_json::to_vec(&SnapshotRequest {
         generation: config.generation,
         force: false,
@@ -190,16 +220,16 @@ async fn relay_guide(state: &AppState, config: &LiveTvConfig) -> Result<LiveTvGu
         .await
         .map_err(|error| sanitize_public_error(&peer_error(error).to_string()))?;
     if response.status == StatusCode::NOT_FOUND {
-        return Err("the tuner owner does not serve a programme guide yet".to_owned());
+        return Err("the session server does not serve a programme guide yet".to_owned());
     }
     if !response.status.is_success() {
         return Err(format!(
-            "the tuner owner returned HTTP {}",
+            "the session server returned HTTP {}",
             response.status.as_u16()
         ));
     }
     serde_json::from_slice::<LiveTvGuide>(&response.body)
-        .map_err(|_| "the tuner owner returned an invalid guide".to_owned())
+        .map_err(|_| "the session server returned an invalid guide".to_owned())
 }
 
 /// Admin: force a refresh now rather than waiting for the loop. Bounded by the
@@ -213,7 +243,7 @@ pub(crate) async fn refresh_guide(
         return Err(ApiError::typed(
             StatusCode::SERVICE_UNAVAILABLE,
             "owner_unavailable",
-            "a guide refresh runs on the tuner owner; ask that node",
+            "a guide refresh runs on the session server; ask that node",
         ));
     }
     let guide = state
@@ -349,7 +379,7 @@ pub(crate) async fn guide_readiness(
                 "No copy is on disk yet. The first successful refresh writes one, and a restart before then starts the grid empty."
                     .to_owned()
             } else {
-                "Only the tuner owner keeps a copy on disk; this node relays the owner's answer."
+                "Only the session server keeps a copy on disk; this node relays the owner's answer."
                     .to_owned()
             },
         },
@@ -657,6 +687,28 @@ pub(crate) async fn start_state(
     State(state): State<AppState>,
 ) -> Result<Json<crate::live_tv::LiveTvStartState>, ApiError> {
     let request_id = parse_public_request_id(&request_id)?.to_owned();
+    let ledger = state
+        .live_tv
+        .resource_snapshot(user.id, &request_id)
+        .await
+        .map_err(api_error)?;
+    if let Some(start) = ledger.records.iter().find_map(|r| match r {
+        plurx_core::live_tv_resource::Record::Start(s)
+            if s.user_id == user.id && s.request_id == request_id =>
+        {
+            Some(s)
+        }
+        _ => None,
+    }) {
+        let lease_ended = start.ingest_id.as_ref().is_some_and(|id| !ledger.records.iter().any(|r|
+            matches!(r, plurx_core::live_tv_resource::Record::Ingest(i) if i.id == *id && i.expires_at_ms > crate::live_tv::resource_now_ms())));
+        if start.phase.terminal() || lease_ended {
+            return Ok(Json(crate::live_tv::LiveTvStartState {
+                state: "ended".into(),
+                code: Some("capability_expired".into()),
+            }));
+        }
+    }
     let mut config = live_tv_enabled_config(&state).await?;
     if let Some(worker) = assigned_start_worker(&state, user.id, &request_id).await? {
         config.owner_node_id = worker;
@@ -964,11 +1016,11 @@ pub(crate) async fn readiness_for_config(
         id: "start_recovery",
         ready: recovery_ready,
         message: if recovery_ready {
-            "This node and the tuner owner both accept client start ids, so a client that is killed mid-stream gets its picture back on reopen instead of the channel list."
+            "This node and the session server both accept client start ids, so a client that is killed mid-stream gets its picture back on reopen instead of the channel list."
                 .to_owned()
         } else {
             format!(
-                "Start recovery needs protocol 3 on this node and on the tuner owner; the negotiated set is {negotiated:?}. Until both sides have it, clients start normally and simply do not resume — restart or upgrade the older node. Advisory: nothing is blocked."
+                "Start recovery needs protocol 3 on this node and on the session server; the negotiated set is {negotiated:?}. Until both sides have it, clients start normally and simply do not resume — restart or upgrade the older node. Advisory: nothing is blocked."
             )
         },
     });
@@ -1173,7 +1225,7 @@ async fn owner_start_within(
                             ApiError::typed(
                                 StatusCode::SERVICE_UNAVAILABLE,
                                 "owner_unavailable",
-                                "The tuner owner returned an invalid start response",
+                                "The session server returned an invalid start response",
                             )
                         })?;
                 if capability_owner(&provisional.capability).ok().as_deref()
@@ -1184,7 +1236,7 @@ async fn owner_start_within(
                     return Err(ApiError::typed_detail(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "owner_unavailable",
-                        "The tuner owner returned a mismatched start response",
+                        "The session server returned a mismatched start response",
                         serde_json::json!({"retry": "now", "owner_decided": false}),
                     ));
                 }
@@ -1243,7 +1295,7 @@ async fn owner_activate_within(
                         ApiError::typed_detail(
                             StatusCode::SERVICE_UNAVAILABLE,
                             "owner_unavailable",
-                            "The tuner owner returned an invalid activation response",
+                            "The session server returned an invalid activation response",
                             serde_json::json!({"retry": "now", "owner_decided": false}),
                         )
                     })?;
@@ -1251,7 +1303,7 @@ async fn owner_activate_within(
                     return Err(ApiError::typed_detail(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "owner_unavailable",
-                        "The tuner owner returned a mismatched activation response",
+                        "The session server returned a mismatched activation response",
                         serde_json::json!({"retry": "now", "owner_decided": false}),
                     ));
                 }
@@ -1360,7 +1412,7 @@ async fn owner_resource(
             } else {
                 "owner_unavailable"
             },
-            "The tuner owner could not serve this live resource",
+            "The session server could not serve this live resource",
         ));
     }
     crate::media_sessions::relay_response_with_limits_counted_bounded(
@@ -1407,7 +1459,7 @@ async fn owner_stop(state: &AppState, owner: &str, capability: &str) -> Result<(
         Err(ApiError::typed(
             StatusCode::SERVICE_UNAVAILABLE,
             "owner_unavailable",
-            "The tuner owner could not stop this live session",
+            "The session server could not stop this live session",
         ))
     }
 }
@@ -1478,7 +1530,7 @@ async fn owner_recovery_exchange<T: serde::de::DeserializeOwned>(
         return Err(ApiError::typed_detail(
             StatusCode::SERVICE_UNAVAILABLE,
             "owner_unavailable",
-            format!("the tuner owner does not {missing}"),
+            format!("the session server does not {missing}"),
             serde_json::json!({"retry": "now", "owner_decided": false}),
         ));
     }
@@ -1489,7 +1541,7 @@ async fn owner_recovery_exchange<T: serde::de::DeserializeOwned>(
         ApiError::typed_detail(
             StatusCode::SERVICE_UNAVAILABLE,
             "owner_unavailable",
-            "The tuner owner returned an invalid recovery response",
+            "The session server returned an invalid recovery response",
             serde_json::json!({"retry": "now", "owner_decided": false}),
         )
     })
@@ -1749,7 +1801,7 @@ async fn resolve_owner_peer(
         .ok_or_else(|| {
             api_error_from(
                 LiveTvError::OwnerUnavailable(
-                    "the selected tuner owner is not a reachable committed voter".into(),
+                    "the selected session server is not a reachable committed voter".into(),
                 ),
                 Decided::Ingress,
             )
@@ -1772,7 +1824,7 @@ fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
     let message = wire
         .as_ref()
         .map(|error| sanitize_public_error(&error.message))
-        .unwrap_or_else(|| "The tuner owner could not complete the request".into());
+        .unwrap_or_else(|| "The session server could not complete the request".into());
     let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
     // The owner is the only node that knows what holds its tuners, so an
     // ingress that dropped this field would make the "stop a recording and
@@ -1907,7 +1959,7 @@ async fn owner_snapshot_within(
         .and_then(|peer| peer.http_base.map(|base| (peer.node_id, base)))
         .ok_or_else(|| {
             LiveTvError::OwnerUnavailable(
-                "the selected tuner owner is not a reachable committed voter".to_owned(),
+                "the selected session server is not a reachable committed voter".to_owned(),
             )
         })?;
     let body = serde_json::to_vec(&SnapshotRequest {
@@ -1932,16 +1984,16 @@ async fn owner_snapshot_within(
         .map_err(peer_error)?;
     if !response.status.is_success() {
         return Err(LiveTvError::OwnerUnavailable(format!(
-            "tuner owner returned HTTP {}",
+            "session server returned HTTP {}",
             response.status.as_u16()
         )));
     }
     let snapshot = serde_json::from_slice::<LiveTvSnapshot>(&response.body).map_err(|_| {
-        LiveTvError::InvalidResponse("tuner owner returned an invalid snapshot".to_owned())
+        LiveTvError::InvalidResponse("session server returned an invalid snapshot".to_owned())
     })?;
     if snapshot.generation != config.generation {
         return Err(LiveTvError::OwnerUnavailable(
-            "tuner owner returned a stale configuration generation".to_owned(),
+            "session server returned a stale configuration generation".to_owned(),
         ));
     }
     Ok(snapshot)
@@ -1949,16 +2001,16 @@ async fn owner_snapshot_within(
 
 fn peer_error(error: PeerTransportError) -> LiveTvError {
     let message = match error {
-        PeerTransportError::Unreachable => "the tuner owner is unreachable",
-        PeerTransportError::TimedOut => "the tuner owner timed out",
-        PeerTransportError::InvalidResponse => "the tuner owner returned an invalid response",
+        PeerTransportError::Unreachable => "the session server is unreachable",
+        PeerTransportError::TimedOut => "the session server timed out",
+        PeerTransportError::InvalidResponse => "the session server returned an invalid response",
     };
     LiveTvError::OwnerUnavailable(message.to_owned())
 }
 
 /// Who decided the answer a client is about to read.
 ///
-/// `Owner` means the tuner owner looked at the request and refused it: the
+/// `Owner` means the session server looked at the request and refused it: the
 /// client learns something about the tuner, and its hint is spent. `Ingress`
 /// means this node refused before an owner ever saw it, or could not tell
 /// whether one had — in which case a session may exist and the hint is the
@@ -2089,7 +2141,7 @@ pub(crate) fn capacity_error(
 
 fn sanitize_public_error(message: &str) -> String {
     if message.contains("http://") || message.contains("https://") {
-        "The HDHomeRun owner could not complete the request; see owner logs for details".to_owned()
+        "The HDHomeRun worker could not complete the request; see owner logs for details".to_owned()
     } else {
         message
             .chars()
@@ -2205,7 +2257,7 @@ mod tests {
         );
 
         let ingress = body_of(api_error_from(
-            LiveTvError::OwnerUnavailable("the tuner owner timed out".into()),
+            LiveTvError::OwnerUnavailable("the session server timed out".into()),
             Decided::Ingress,
         ))
         .await;
@@ -2481,7 +2533,7 @@ mod tests {
     fn peer_transport_errors_have_stable_operator_messages() {
         assert_eq!(
             peer_error(PeerTransportError::TimedOut).to_string(),
-            "the tuner owner timed out"
+            "the session server timed out"
         );
     }
 

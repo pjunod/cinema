@@ -49,7 +49,7 @@ internal fun newLiveTvRequestId(random: SecureRandom = SecureRandom()): String {
 }
 
 internal fun isLiveTvRequestId(value: String): Boolean =
-    value.length == 32 && value.all { it in '0'..'9' || it in 'a'..'f' }
+    value.removePrefix("v4_").let { raw -> raw.length == 32 && raw.all { it in '0'..'9' || it in 'a'..'f' } }
 
 /** How often a touched hint is actually committed to disk. See [LiveTvHintStore.touch]. */
 internal const val LIVE_TV_HINT_WRITE_INTERVAL_MS: Long = 60_000L
@@ -230,7 +230,7 @@ internal sealed interface LiveTvResumeResult {
 internal enum class LiveTvResumeAction { Reattach, ClearHintWait, KeepHintWait }
 
 /** Which halves of protocol 3 the last channels answer said both ends carry. */
-internal data class LiveTvProtocolSupport(val requestId: Boolean, val recoveryRoutes: Boolean) {
+internal data class LiveTvProtocolSupport(val requestId: Boolean, val recoveryRoutes: Boolean, val intents: Boolean = false) {
     companion object {
         /**
          * An ingress older than this contract omits the field entirely. It gets
@@ -241,7 +241,7 @@ internal data class LiveTvProtocolSupport(val requestId: Boolean, val recoveryRo
 
         fun from(protocols: List<Int>?): LiveTvProtocolSupport =
             if (protocols != null && 3 in protocols) {
-                LiveTvProtocolSupport(requestId = true, recoveryRoutes = true)
+                LiveTvProtocolSupport(requestId = true, recoveryRoutes = true, intents = 4 in protocols)
             } else {
                 legacy
             }
@@ -333,7 +333,7 @@ internal class LiveTvLease(
                 releaseCurrent()
                 if (mine != generation) return@withLock null
                 retireStaleHint()
-                val id = newLiveTvRequestId()
+                val id = requests.issueIntent(channel, newLiveTvRequestId())
                 hints.remember(LiveTvStartHint(id, now()))
                 val info = attemptStart(channel, id)
                 current = info

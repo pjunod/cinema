@@ -1371,6 +1371,15 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "live_tv_resource_records",
+        columns: &["id", "kind", "user_id", "live", "expires_at_ms", "body"],
+        order_by: "id",
+        minimum_schema: 70,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "dvr_recordings",
         columns: &[
             "id",
@@ -1660,6 +1669,17 @@ impl HiqliteAuthStore {
         for table in TABLES {
             self.import_table(&source, schema_version, *table).await?;
         }
+
+        // This CAS counter is derived coordination state, not application
+        // data. Rebuild it above every imported attempt epoch before serving.
+        self.client()
+            .execute(
+                "UPDATE live_tv_resource_revision SET revision=MAX(revision,
+            COALESCE((SELECT MAX(CAST(json_extract(body,'$.value.epoch') AS INTEGER))
+                FROM live_tv_resource_records),0)),nonce='' WHERE singleton=1",
+                params!(),
+            )
+            .await?;
 
         let search_rows = self.rebuild_search_index().await?;
         let item_count = self.target_count("items", None).await?;

@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.buildJsonObject
@@ -401,7 +402,7 @@ internal fun liveTvKnownMessage(code: String): String? = when (code) {
     "live_tv_disabled" -> "Live TV is disabled. An administrator can enable it in Settings → Developer."
     "tuner_capacity" -> "All Live TV slots are busy. Stop another session and try again."
     "tuner_unavailable" -> "Every tuner is busy. Stop another session and try again."
-    "owner_unavailable" -> "The tuner owner is unavailable. Check its network and cluster health."
+    "owner_unavailable" -> "The session server is unavailable. Check its network and cluster health."
     "no_answer" -> "The server did not answer. Press the channel again."
     "drm_unsupported" -> "DRM-protected channels are unsupported. Select an unprotected channel."
     "codec_unsupported" -> "This stream's audio or video cannot be decoded by the server or this device. Try an ATSC 1.0 channel."
@@ -500,6 +501,7 @@ sealed interface LiveTvSettingsChange {
 }
 
 interface LiveTvRequests {
+    suspend fun issueIntent(channel: String, fallback: String): String = fallback
     /**
      * [requestId] is sent only when the last channels answer listed protocol 3;
      * the implementation drops it otherwise, so the lease always mints one and
@@ -636,8 +638,9 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
         nextCompatibility = compatibility
     }
 
-    override suspend fun start(channel: String, requestId: String): LiveTvStarted = try {
-        val playback = capabilityContext?.let { current ->
+    private val intentBodies = java.util.Collections.synchronizedMap(linkedMapOf<String, kotlinx.serialization.json.JsonObject>())
+    private suspend fun playbackEnvelope(): kotlinx.serialization.json.JsonElement? {
+        return capabilityContext?.let { current ->
             val compatibility = nextCompatibility
             nextCompatibility = null
             Net.json.encodeToJsonElement(
@@ -648,6 +651,23 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
                 )
             )
         }
+    }
+    override suspend fun issueIntent(channel: String, fallback: String): String {
+        if (!protocols.intents) return fallback
+        val playback = playbackEnvelope()
+        val body = buildJsonObject { playback?.let { put("playback", it) } }
+        val response = Net.json.parseToJsonElement(request(url("live-tv", "channels", channel, "intents"), "POST",
+            authenticated = true, body = body, starting = true)).jsonObject
+        val id = response["request_id"]?.jsonPrimitive?.content ?: throw LiveTvFailure("no_answer")
+        if (!id.startsWith("v4_") || !isLiveTvRequestId(id)) throw LiveTvFailure("no_answer")
+        synchronized(intentBodies) {
+            intentBodies[id] = body
+            while (intentBodies.size > 64) intentBodies.remove(intentBodies.keys.first())
+        }
+        return id
+    }
+    override suspend fun start(channel: String, requestId: String): LiveTvStarted = try {
+        val playback = intentBodies[requestId]?.get("playback") ?: playbackEnvelope()
         val body = buildJsonObject {
             playback?.let { put("playback", it) }
             // Guardrail §4.2 in the client's direction: an ingress that did not

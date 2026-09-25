@@ -17,8 +17,8 @@ The user's existing checkouts are not build or edit workspaces for this work.
 | Replicated admission and request recovery | Building | Shared SQLite/Hiqlite transition engine compiles; global request identity and routing are being integrated. |
 | Worker placement and lifecycle | Building | Candidate placement and shared-channel assignment replace configured-owner routing; lease fencing is being connected. |
 | DVR claims, storage and finalization | Building | Atomic pre-I/O capture claims, storage identities and fenced publication are being integrated. |
-| Guide, Activity and reminders | Pending | Remove owner routing dependencies. |
-| Developer enablement and clients | Pending | Advisory readiness; no prerequisite-gated enable toggle. |
+| Guide, Activity and reminders | Building | Source-refresh lease, persistent guide copies and local worker Activity are integrated; validation pending. |
+| Developer enablement and clients | Building | Advisory Developer control and protocol 4 intents wired on web, Apple and Android. iOS/tvOS and Android compilation passed. |
 | One adversarial code review | Deferred | Only when the complete main-bound PR is ready. |
 | Fast lane and merge | Deferred | After review fixes; no repeated unit-suite runs during implementation. |
 
@@ -50,6 +50,11 @@ The user's existing checkouts are not build or edit workspaces for this work.
 
 ## Commits and release evidence
 
-Plan/status commit: `02b173d8f`. The durable resource layer is being built.
+Commits: `02b173d8f` (reviewed contract/status), `1f5ba9c81` (replicated
+claims and worker integration). Follow-up lifecycle, client and guide changes
+are being completed. Pinned Rust checks pass; the normal hook also passed
+catalog lint, formatting, workspace Clippy and served JavaScript syntax.
+Apple iOS/tvOS builds and Android application/test-source compilation pass.
+No test methods were executed by these compiler checks.
 No PR yet. No runtime tests, hardware acceptance,
 code review, fast-lane result, merge or deployment is claimed.

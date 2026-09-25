@@ -53,10 +53,9 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
     var owner by remember { mutableStateOf("") }
     var sessions by remember { mutableStateOf(2) }
     var height by remember { mutableStateOf(0) }
-    var attested by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("Administrator access is required.") }
-    val dirty = saved?.let { ipv4 != it.live_tv_device_ipv4 || owner != it.live_tv_owner_node_id ||
+    val dirty = saved?.let { ipv4 != it.live_tv_device_ipv4 ||
         sessions != it.live_tv_max_sessions || height != it.live_tv_max_output_height } ?: false
 
     fun apply(settings: LiveTvSettings) {
@@ -66,7 +65,6 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
         owner = settings.live_tv_owner_node_id
         sessions = settings.live_tv_max_sessions
         height = settings.live_tv_max_output_height
-        attested = false
         readiness = null
     }
     fun failure(error: Exception): String = (error as? LiveTvFailure)?.message ?: liveTvMessage("stream_failed")
@@ -180,22 +178,21 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
             }) { Text("Refresh recording readiness") }
         }
         Text("HDHomeRun Live TV · runtime enablement", style = MaterialTheme.typography.titleLarge)
-        Text("No special build is needed. Finish the tuner channel scan and reserve a stable private IPv4 address. Choose one reachable, committed voter as tuner owner; keep every serving node on a compatible plurx version.")
-        Text("The owner needs tuner network access and writable scratch space. Compatible broadcasts are copied without an encoder; conversion routes additionally need a working FFmpeg encoder and tone mapping when HDR must become SDR.")
+        Text("No special build is needed. Finish the tuner channel scan and reserve a stable private IPv4 address. Keep cluster servers upgraded and clocks synchronized. The tuner is shared by eligible servers.")
+        Text("At least one eligible server needs tuner network access and writable scratch space. Viewers and recordings share channel transports. Compatible broadcasts are copied without an encoder; conversion routes additionally need a working FFmpeg encoder and tone mapping when HDR must become SDR.")
         Text("ATSC 3.0 may need HEVC and AC-4 decoders your FFmpeg lacks. DRM, rewind and captions are unsupported. Unprotected channels can be scheduled or recorded manually. Readiness tests the output graph, not every broadcast codec, and never gates either switch.")
         saved?.let { settings ->
             Text(if (settings.live_tv_enabled) "Live TV is enabled" else "Live TV is disabled", style = MaterialTheme.typography.titleMedium)
-            val editable = !settings.live_tv_enabled && !busy
+            val editable = !busy
             OutlinedTextField(ipv4, { ipv4 = it }, label = { Text("Tuner private IPv4") }, enabled = editable, singleLine = true, modifier = Modifier.fillMaxWidth().tvFocusRing())
-            OutlinedTextField(owner, { owner = it }, label = { Text("Tuner-owner node ID") }, enabled = editable, singleLine = true, modifier = Modifier.fillMaxWidth().tvFocusRing())
             Text("Copy the node ID from the server's Settings → Cluster page.")
             if (editable) {
-                ChoicePicker("Maximum sessions", sessions, listOf(1, 2, 3, 4), { it.toString() }, { sessions = it })
+                ChoicePicker("Maximum channel streams", sessions, listOf(1, 2, 3, 4), { it.toString() }, { sessions = it })
                 ChoicePicker("Maximum quality", height, listOf(0, 480, 720, 1080, 2160),
                     { if (it == 0) "Original / Auto" else "${it}p ceiling" }, { height = it })
-            } else Text("Maximum sessions: $sessions · quality: ${if (height == 0) "Original / Auto" else "${height}p ceiling"}")
+            } else Text("Maximum channel streams: $sessions · quality: ${if (height == 0) "Original / Auto" else "${height}p ceiling"}")
             Button(enabled = editable && dirty, onClick = { write(LiveTvSettingsChange.Configure(ipv4.trim(), owner.trim(), sessions, 720, height)) }) {
-                Text("Save configuration while disabled")
+                Text("Save configuration")
             }
             Button(enabled = !busy && !dirty, onClick = {
                 busy = true
@@ -209,26 +206,11 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
                     finally { busy = false }
                 }
             }) { Text("Check saved configuration") }
-            Button(enabled = !busy && !dirty, onClick = { write(LiveTvSettingsChange.Enabled(!settings.live_tv_enabled)) }) {
+            Button(enabled = !busy, onClick = { write(LiveTvSettingsChange.Enabled(!settings.live_tv_enabled)) }) {
                 Text(if (settings.live_tv_enabled) "Disable Live TV and drain sessions" else "Enable Live TV")
             }
-            Text("Saving never enables playback. Enable rechecks readiness on the server. Disable before changing owner or tuner.")
-            if (settings.live_tv_transition_from_owner_node_id.isNotEmpty()) {
-                Text("Previous owner cleanup is unconfirmed", style = MaterialTheme.typography.titleMedium)
-                Text("Previous owner: ${settings.live_tv_transition_from_owner_node_id} · generations before ${settings.live_tv_transition_drain_before}. An unreachable node is not proof that its tuner process stopped.")
-                Text("Restore the old node's connection and retry authenticated cleanup first. Physical recovery is only safe after actually stopping that node and preventing its restart until it synchronizes current settings.")
-                Row {
-                    Checkbox(attested, onCheckedChange = { attested = it }, enabled = editable, modifier = Modifier.tvFocusRing())
-                    Text("I have stopped or powered off this previous owner and prevented it from restarting until it can synchronize the current configuration.")
-                }
-                Button(enabled = editable && attested && !dirty, onClick = {
-                    write(LiveTvSettingsChange.FencedOwner(settings.live_tv_transition_from_owner_node_id, settings.live_tv_transition_drain_before))
-                }) { Text("Record physical fencing of this exact previous owner") }
-                Button(enabled = editable && !dirty, onClick = {
-                    write(LiveTvSettingsChange.Configure(settings.live_tv_device_ipv4, settings.live_tv_owner_node_id,
-                        settings.live_tv_max_sessions, settings.live_tv_output_height, settings.live_tv_max_output_height))
-                }) { Text("Retry authenticated cleanup while disabled") }
-            }
+            Text("Saving preserves enablement and ends streams using the previous configuration. Readiness is advisory; unmet checks do not prevent enabling.")
+
         }
         // Every row the server sends, in the order it sent them — never a
         // hand-written subset. `start_recovery` arrived this way without this

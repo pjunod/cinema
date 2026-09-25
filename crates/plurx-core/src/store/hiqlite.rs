@@ -2978,6 +2978,7 @@ impl HiqliteAuthStore {
             ("DELETE FROM files".to_owned(), params!()),
             // `dvr_recordings` keeps its row when its requester is deleted
             // (ON DELETE SET NULL), so a users-delete does not reach it.
+            ("DELETE FROM live_tv_resource_records".to_owned(), params!()),
             ("DELETE FROM dvr_recordings".to_owned(), params!()),
             ("DELETE FROM items".to_owned(), params!()),
             ("DELETE FROM libraries".to_owned(), params!()),

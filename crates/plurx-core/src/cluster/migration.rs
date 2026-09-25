@@ -2326,6 +2326,48 @@ fn apply_restore_image_changes(
                 })?;
         }
     }
+    // Published DVR paths and their manifest must move together. An unchanged
+    // old absolute manifest path would hide a valid restored recording.
+    let has_tuner_authority: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='live_tv_resource_records'", (), |r| r.get(0))
+        .map_err(|e| StoreError::Migration(format!("reading restored tuner schema: {e}")))?;
+    if has_tuner_authority != 0 {
+        let mut statement = transaction
+            .prepare("SELECT id,body FROM live_tv_resource_records WHERE kind='capture'")
+            .map_err(|e| {
+                StoreError::Migration(format!("reading restored capture manifests: {e}"))
+            })?;
+        let rows = statement
+            .query_map((), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| StoreError::Migration(format!("reading restored capture manifests: {e}")))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| {
+                StoreError::Migration(format!("reading restored capture manifests: {e}"))
+            })?;
+        drop(statement);
+        for (id, body) in rows {
+            let mut record: crate::live_tv_resource::Record = serde_json::from_str(&body)
+                .map_err(|e| StoreError::Migration(format!("decoding capture manifest: {e}")))?;
+            if let crate::live_tv_resource::Record::Capture(capture) = &mut record {
+                capture.base_path = remap_path(&capture.base_path, remaps)?;
+                capture.published_path = capture
+                    .published_path
+                    .as_ref()
+                    .map(|p| remap_path(p, remaps))
+                    .transpose()?;
+            }
+            transaction
+                .execute(
+                    "UPDATE live_tv_resource_records SET body=?1 WHERE id=?2",
+                    rusqlite::params![
+                        serde_json::to_string(&record)
+                            .map_err(|e| StoreError::Migration(e.to_string()))?,
+                        id
+                    ],
+                )
+                .map_err(|e| StoreError::Migration(format!("remapping capture manifest: {e}")))?;
+        }
+    }
     transaction
         .execute(
             "INSERT INTO settings(key,value,updated_at) VALUES(?1,?2,?3)

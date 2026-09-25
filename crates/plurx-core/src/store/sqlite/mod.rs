@@ -1149,6 +1149,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v69: cluster subtitle-source queue constraints and publication metadata.
     crate::store::fragment_index_cluster::SUBTITLE_SOURCE_SCHEMA,
     // Distributed Live TV intents, ingest claims, and capture authority.
+    // v70: durable cluster tuner admission, capture claims and fenced output.
     crate::live_tv_resource::SCHEMA,
 ];
 
@@ -2831,7 +2832,7 @@ mod tests {
         // downloaded captions to files. v68 adds external-reader file grants;
         // v69 adds the cluster subtitle-source queue and publication metadata.
         assert_eq!(
-            version, 69,
+            version, 70,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

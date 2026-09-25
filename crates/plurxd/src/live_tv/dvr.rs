@@ -2358,9 +2358,12 @@ impl LiveTvManager {
                 "no DVR root is configured, so a recording has nowhere to go".to_owned(),
             ));
         }
-        let channel = self
-            .cached_lineup(live_tv)
-            .await
+        let snapshot = self.local_snapshot(live_tv, true, false).await?;
+        let device_id = snapshot.device.device_id.clone();
+        let mut effective = live_tv.clone();
+        effective.max_sessions = live_tv.max_sessions.min(snapshot.device.tuner_count);
+        let channel = snapshot
+            .channels
             .into_iter()
             .find(|channel| channel.id == row.channel_id)
             .ok_or_else(|| {
@@ -2388,9 +2391,8 @@ impl LiveTvManager {
             LiveTvError::OwnerUnavailable(crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned())
         })?;
 
-        let device_id = self.cached_device_id(live_tv).await.unwrap_or_default();
         let claim = self
-            .resource_capture_claim(live_tv, dvr, row, &device_id, &base)
+            .resource_capture_claim(&effective, dvr, row, &device_id, &base)
             .await?;
         if claim.epoch != attempt {
             return Err(LiveTvError::Conflict(
@@ -3095,6 +3097,9 @@ impl LiveTvManager {
             stopped_by,
         )
         .await?;
+        for attempt in 1..=row.attempt {
+            let _ = tokio::fs::remove_file(attempt_path(&input_base, attempt)).await;
+        }
         tracing::info!(
             recording = %row.id,
             title = %row.title,
@@ -3147,6 +3152,37 @@ impl LiveTvManager {
     }
 
     async fn delete_recording_files(&self, row: &DvrRecording) {
+        match self.resource_capture(&row.id).await {
+            Ok(Some(claim)) => {
+                let Ok((_, dvr)) = self.dvr_configs().await else {
+                    return;
+                };
+                if super::resource::storage_identity(&dvr.root)
+                    .await
+                    .ok()
+                    .as_deref()
+                    != Some(claim.storage_id.as_str())
+                {
+                    return;
+                }
+                if self
+                    .store
+                    .live_tv_resource_command(
+                        plurx_core::live_tv_resource::Command::StopCapture {
+                            recording_id: row.id.clone(),
+                            delete: true,
+                        },
+                        super::resource::now_ms(),
+                    )
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(None) if row.tuner_owner_node_id.as_deref() == Some(self.node_id.as_str()) => {}
+            _ => return,
+        }
         let Some(path) = row.path.as_deref() else {
             return;
         };
@@ -3180,6 +3216,11 @@ async fn run_transport(
     serving: crate::serving_fence::ServingAuthority,
     transport: Arc<DvrTransport>,
 ) -> Result<(), LiveTvError> {
+    if !serving.is_current(transport.owner_serving_generation) {
+        return Err(LiveTvError::OwnerUnavailable(
+            crate::serving_fence::SERVING_FENCED_MESSAGE.into(),
+        ));
+    }
     let guide_number = transport.channel.guide_number.clone();
     let url = pinned_url(transport.address, 5004, &format!("/auto/v{guide_number}"))?;
     let deadline = tokio::time::Instant::now() + super::STARTUP_TIMEOUT;
