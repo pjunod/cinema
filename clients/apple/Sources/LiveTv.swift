@@ -347,6 +347,7 @@ struct LiveTvDelivery: Decodable, Sendable {
 
 struct LiveTvStarted: Decodable, Sendable {
     let sessionId: String
+    let playlistUrl: String
     let channel: LiveTvChannel
     let live: Bool
     var delivery: LiveTvDelivery? = nil
@@ -681,10 +682,18 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
         value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
     }
 
-    func playlistURL(_ capability: String) throws -> URL {
-        guard !capability.isEmpty, capability.utf8.count <= 1024,
-              let base = Session.canonicalOrigin(origin),
-              let url = URL(string: base + "/api/v1/live-tv/sessions/" + Self.pathComponent(capability) + "/index.m3u8")
+    func playlistURL(_ playlistUrl: String, sessionId: String) throws -> URL {
+        guard !sessionId.isEmpty, sessionId.utf8.count <= 1024,
+              playlistUrl.utf8.count <= 2048,
+              let base = Session.canonicalOrigin(origin)
+        else { throw LiveTvFailure(code: "capability_expired") }
+        let sessionPath = "/api/v1/live-tv/sessions/" + Self.pathComponent(sessionId)
+        // The start response supplies master.m3u8; recovery currently supplies
+        // index.m3u8. Accept only those exact node-relative capabilities for
+        // this session, never an authority, query, fragment or another path.
+        guard playlistUrl == sessionPath + "/master.m3u8" ||
+              playlistUrl == sessionPath + "/index.m3u8",
+              let url = URL(string: base + playlistUrl)
         else { throw LiveTvFailure(code: "capability_expired") }
         return url
     }

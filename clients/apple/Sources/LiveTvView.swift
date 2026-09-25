@@ -178,7 +178,7 @@ final class LiveTvPlayerController: ObservableObject {
         expected: Int,
         compatibilityRetry: Bool
     ) throws {
-        let item = AVPlayerItem(url: try api.playlistURL(info.sessionId))
+        let item = AVPlayerItem(url: try api.playlistURL(info.playlistUrl, sessionId: info.sessionId))
         item.preferredForwardBufferDuration = 12
         player.replaceCurrentItem(with: item)
         #if os(tvOS)
