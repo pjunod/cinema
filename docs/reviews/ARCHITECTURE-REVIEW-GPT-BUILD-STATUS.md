@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — PR #516 in draft; three voters on current main, learner rejoin outstanding · **Updated:** 2026-09-25 13:45 UTC · **Main:** `b47c5ff88`
+**Status:** open — PR #516 in draft; current-main voter rollout in progress, learner rejoin outstanding · **Updated:** 2026-09-25 13:45 UTC · **Main:** `b47c5ff88`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
