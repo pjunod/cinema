@@ -1074,6 +1074,187 @@
         assert!(reason.contains("hard deadline"), "{reason}");
     }
 
+    async fn scratch_hold_write_playlist(session: &Session, durations: &[f64]) {
+        tokio::fs::write(
+            session.dir.join("index.m3u8"),
+            rolling_playlist(durations, false),
+        )
+        .await
+        .expect("writer playlist");
+    }
+
+    async fn scratch_hold_set(session: &Session, reason: Option<AheadHoldReason>, since: Instant) {
+        *session.suspended_at.lock().await = reason.map(|reason| SuspendedAt {
+            since,
+            hold: AheadHold {
+                reason,
+                release_value: 1,
+            },
+        });
+        session.suspended.store(reason.is_some(), Relaxed);
+    }
+
+    /// Publish once, then hold the producer for `reason` starting a second
+    /// later. Returns the served snapshot's publication instant.
+    async fn scratch_hold_published_and_held(session: &Session, reason: AheadHoldReason) -> Instant {
+        scratch_hold_write_playlist(session, &[16.0, 16.0, 16.0]).await;
+        session
+            .publication_cycle("scratch-hold-deadline")
+            .await
+            .expect("initial publication");
+        let published = session
+            .publication
+            .lock()
+            .await
+            .served
+            .as_ref()
+            .expect("served snapshot")
+            .available_at;
+        scratch_hold_set(session, Some(reason), published + Duration::from_secs(1)).await;
+        published
+    }
+
+    /// A producer held because global scratch is exhausted is waiting on
+    /// capacity, and scratch_put lets its starved writer wait as long as the
+    /// session lives. The 24 s publication deadline used to retire it anyway,
+    /// with the client still rendering from its buffer. Once the hold clears
+    /// the deadline runs its full length again, so a producer that stays
+    /// stuck is still retired.
+    ///
+    /// Run twice: with a slow speed frozen by the stop the capacity arm fires
+    /// first on the deadline; with no measured speed only the hard-deadline
+    /// arm can retire the session. Both must wait out the hold.
+    #[tokio::test]
+    async fn scratch_hold_publication_deadline_waits_out_a_global_scratch_hold() {
+        for (recent_milli, retired_by) in [
+            (Some(500), "rolling_insufficient_capacity"),
+            (None, "hard deadline"),
+        ] {
+            let directory = crate::test_tempdir().expect("publication deadline");
+            let session = test_session(directory.path().to_path_buf());
+            let published =
+                scratch_hold_published_and_held(&session, AheadHoldReason::Global).await;
+            if let Some(recent_milli) = recent_milli {
+                session.progress.recent_milli.store(recent_milli, Relaxed);
+            }
+            let held_until = published + ROLLING_PUBLICATION_HARD * 3;
+            let mut now = published;
+            while now < held_until {
+                now += Duration::from_secs(1);
+                session
+                    .publication_cycle_at("scratch-hold-deadline", now)
+                    .await
+                    .unwrap_or_else(|reason| {
+                        panic!("a producer held for scratch is waiting, not stuck: {reason}")
+                    });
+            }
+
+            scratch_hold_set(&session, None, held_until).await;
+            session
+                .publication_cycle_at(
+                    "scratch-hold-deadline",
+                    held_until + ROLLING_PUBLICATION_HARD - Duration::from_secs(1),
+                )
+                .await
+                .expect("the deadline restarts from the end of the hold");
+            let reason = session
+                .publication_cycle_at(
+                    "scratch-hold-deadline",
+                    held_until + ROLLING_PUBLICATION_HARD + Duration::from_secs(1),
+                )
+                .await
+                .expect_err("a producer still stuck after the hold clears is retired");
+            assert!(reason.contains(retired_by), "{retired_by}: {reason}");
+        }
+    }
+
+    /// Before the first snapshot the capacity check has no deadline: a
+    /// session that has staged its initial runway at a measured speed below
+    /// the playback rate is retired at once. A writer starved for global
+    /// scratch stops FFmpeg with its last measured speed frozen, so that
+    /// check must wait out the hold too, and apply as before once it clears.
+    #[tokio::test]
+    async fn scratch_hold_publication_deadline_prepublication_capacity_waits_out_a_global_scratch_hold(
+    ) {
+        let directory = crate::test_tempdir().expect("publication deadline");
+        let session = test_session(directory.path().to_path_buf());
+        let started = Instant::now();
+        // Anchor the legacy publication budget below the initial runway.
+        scratch_hold_write_playlist(&session, &[16.0, 16.0]).await;
+        session
+            .publication_cycle_at("scratch-hold-prepublication", started)
+            .await
+            .expect("below the initial runway nothing is judged");
+        // Exactly the initial runway, measured at half speed, staged ten
+        // seconds later: the legacy budget now wants 58 s, so nothing
+        // publishes and the session stays in its pre-publication state.
+        session.progress.recent_milli.store(500, Relaxed);
+        scratch_hold_write_playlist(&session, &[16.0, 16.0, 16.0]).await;
+        scratch_hold_set(&session, Some(AheadHoldReason::Global), started).await;
+        let held_until = started + ROLLING_PUBLICATION_HARD * 3;
+        let mut now = started + Duration::from_secs(10);
+        while now < held_until {
+            session
+                .publication_cycle_at("scratch-hold-prepublication", now)
+                .await
+                .unwrap_or_else(|reason| {
+                    panic!("a producer held for scratch is waiting, not slow: {reason}")
+                });
+            now += Duration::from_secs(1);
+        }
+        assert!(
+            session.publication.lock().await.served.is_none(),
+            "the hold is observed before the first snapshot"
+        );
+
+        scratch_hold_set(&session, None, held_until).await;
+        let reason = session
+            .publication_cycle_at("scratch-hold-prepublication", held_until)
+            .await
+            .expect_err("a slow producer is judged as before once the hold clears");
+        assert!(
+            reason.starts_with("rolling_insufficient_capacity:"),
+            "{reason}"
+        );
+    }
+
+    async fn scratch_hold_keeps_the_deadline(reason: AheadHoldReason) {
+        let directory = crate::test_tempdir().expect("publication deadline");
+        let session = test_session(directory.path().to_path_buf());
+        let published = scratch_hold_published_and_held(&session, reason).await;
+        session
+            .publication_cycle_at(
+                "scratch-hold-deadline",
+                published + ROLLING_PUBLICATION_HARD - Duration::from_secs(1),
+            )
+            .await
+            .expect("inside the deadline");
+        let error = session
+            .publication_cycle_at(
+                "scratch-hold-deadline",
+                published + ROLLING_PUBLICATION_HARD + Duration::from_secs(1),
+            )
+            .await
+            .expect_err("only a scratch hold extends the publication deadline");
+        assert!(error.contains("hard deadline"), "{reason:?}: {error}");
+    }
+
+    /// Only a scratch hold suspends the deadline. A producer held because it
+    /// ran ahead of demand has nothing to wait for from the budget, and keeps
+    /// the ordinary deadline.
+    #[tokio::test]
+    async fn scratch_hold_publication_deadline_still_applies_to_a_demand_hold() {
+        scratch_hold_keeps_the_deadline(AheadHoldReason::Demand).await;
+    }
+
+    /// The per-session byte bound is the closest neighbour to the global one,
+    /// but it holds a producer for running ahead of its own client, not for
+    /// shared capacity. It keeps the ordinary deadline.
+    #[tokio::test]
+    async fn scratch_hold_publication_deadline_still_applies_to_a_bytes_hold() {
+        scratch_hold_keeps_the_deadline(AheadHoldReason::Bytes).await;
+    }
+
     #[tokio::test]
     async fn rolling_publication_budget_retention_cannot_pass_the_protected_prefix() {
         let directory = crate::test_tempdir().expect("retention snapshot");
