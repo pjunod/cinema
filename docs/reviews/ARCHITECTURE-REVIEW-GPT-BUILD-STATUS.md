@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** review fixes in progress · **Updated:** 2026-09-25 02:48 UTC · **Base:** `f600d2823`
+**Status:** review fixes integrated; final compile pending · **Updated:** 2026-09-25 02:56 UTC · **Base:** `f600d2823`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -26,7 +26,10 @@ The one review of draft PR #506 was performed against `e0164d784`. It found thre
 cross-client caption-master bypasses, Android text-track suppression, Android
 pager account isolation, web capacity-offer loss, an Apple paging race, and the
 pre-existing D-03 bearer handoff. Web playback and capacity fixes are committed
-at `b20982f60`; native fixes are in progress. The D-03 milestone remains open
+at `b20982f60`; Apple fixes are integrated at `dafb4bb5e` and `12331fb35`;
+resume now returns the caption master at `676b62393`; Android fixes are
+integrated at `dc26817db` and `22e9bf667`. The final combined compile is
+pending. The D-03 milestone remains open
 until the external-reader call sites use scoped grants. No second adversarial
 review will be requested for this PR. The fast lane has not run.
 
@@ -40,8 +43,13 @@ review will be requested for this PR. The fast lane has not run.
   draft PR, exactly one adversarial review at merge readiness, then the fast
   lane. This differs from the repository's per-task focused-regression and
   task-PR convention; compile checks continue before integration.
-- Automatic approval review paused D-03 external-app book sharing pending the
-  user's explicit authorization. Android release signing inputs are absent.
+- Automatic approval review rejected editing either D-03 external-reader
+  call site because it would hand a private book capability URL to an
+  unspecified app. Explicit authorization was requested; both call sites stay
+  unchanged. Release-signing values are unset on the Mac and all four nodes;
+  only debug keystores were found, so no signed Android release can be made.
+- The seven-day read-only fleet collector restarted after an observed gap near
+  02:44–02:50 UTC. Preserve that gap when assessing long-window evidence.
 
 ## Update rule
 
