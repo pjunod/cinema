@@ -269,6 +269,7 @@ struct FileGrantRow {
     user_id: i64,
     expires_at: i64,
     revoked_at: Option<i64>,
+    source_active: i64,
 }
 
 impl From<&mut Row<'_>> for FileGrantRow {
@@ -279,6 +280,7 @@ impl From<&mut Row<'_>> for FileGrantRow {
             user_id: row.get("user_id"),
             expires_at: row.get("expires_at"),
             revoked_at: row.get("revoked_at"),
+            source_active: row.get("source_active"),
         }
     }
 }
@@ -291,22 +293,33 @@ impl FileGrantStore for HiqliteAuthStore {
         token_hash: &str,
         file_id: i64,
         user_id: i64,
+        source_token_hash: &str,
         created_at: i64,
         expires_at: i64,
     ) -> Result<(), StoreError> {
         self.execute(
             "INSERT INTO file_grants
-             (id, token_hash, file_id, user_id, purpose, created_at, expires_at)
-             VALUES ($1, $2, $3, $4, 'open_in', $5, $6)",
-            params!(id, token_hash, file_id, user_id, created_at, expires_at),
+             (id, token_hash, file_id, user_id, source_token_hash, purpose, created_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, 'open_in', $6, $7)",
+            params!(
+                id,
+                token_hash,
+                file_id,
+                user_id,
+                source_token_hash,
+                created_at,
+                expires_at
+            ),
         )
         .await?;
         Ok(())
     }
 
     async fn file_grant_by_hash(&self, token_hash: &str) -> Result<Option<FileGrant>, StoreError> {
-        let sql = "SELECT id, file_id, user_id, expires_at, revoked_at
-                   FROM file_grants WHERE token_hash = $1 AND purpose = 'open_in'";
+        let sql = "SELECT g.id, g.file_id, g.user_id, g.expires_at, g.revoked_at,
+                          EXISTS (SELECT 1 FROM tokens t WHERE t.token_hash = g.source_token_hash
+                                    AND t.user_id = g.user_id) AS source_active
+                   FROM file_grants g WHERE g.token_hash = $1 AND g.purpose = 'open_in'";
         validate_sql(sql)?;
         Ok(self
             .client()
@@ -320,6 +333,7 @@ impl FileGrantStore for HiqliteAuthStore {
                 user_id: row.user_id,
                 expires_at: row.expires_at,
                 revoked_at: row.revoked_at,
+                source_active: row.source_active != 0,
             }))
     }
 
@@ -473,7 +487,7 @@ pub(super) async fn local_durable_digest(client: &TimedClient) -> Result<String,
         .await?,
         file_grants: rows(
             client,
-            "SELECT json_array(id, token_hash, file_id, user_id, purpose, created_at, \
+            "SELECT json_array(id, token_hash, file_id, user_id, source_token_hash, purpose, created_at, \
                     expires_at, revoked_at) AS value FROM file_grants ORDER BY id",
         )
         .await?,

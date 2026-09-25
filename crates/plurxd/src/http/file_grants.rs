@@ -11,7 +11,7 @@ use plurx_core::domain::ItemKind;
 use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
-use super::extract::AuthUser;
+use super::extract::{AuthUser, RawToken};
 use crate::state::AppState;
 
 const DEFAULT_TTL_SECS: i64 = 900;
@@ -39,6 +39,7 @@ pub struct MintResponse {
 
 pub async fn mint(
     AuthUser(user): AuthUser,
+    RawToken(source_token): RawToken,
     State(state): State<AppState>,
     AxPath(file_id): AxPath<i64>,
     Json(request): Json<MintRequest>,
@@ -78,6 +79,7 @@ pub async fn mint(
             &auth::hash_token(&token),
             file_id,
             user.id,
+            &auth::hash_token(&source_token),
             now,
             expires_at,
         )
@@ -110,7 +112,7 @@ pub async fn content(
         .file_grant_by_hash(&auth::hash_token(&token))
         .await?
         .ok_or(ApiError::NotFound("grant"))?;
-    if grant.revoked_at.is_some() || grant.expires_at <= now_unix() {
+    if grant.revoked_at.is_some() || !grant.source_active || grant.expires_at <= now_unix() {
         return Err(ApiError::typed(
             StatusCode::GONE,
             "grant_gone",
