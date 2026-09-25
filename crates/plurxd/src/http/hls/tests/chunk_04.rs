@@ -1482,23 +1482,7 @@
         // Split rather than written out, so this test's own source does not
         // match the scan it performs.
         let marker = concat!("_cancelled", "_preparation(");
-        let source = concat!(
-            include_str!("../../hls.rs"),
-            include_str!("../session_guard.rs"),
-            include_str!("../create.rs"),
-            include_str!("../relay.rs"),
-            include_str!("../release.rs"),
-            include_str!("../control.rs"),
-            include_str!("../preparation.rs"),
-            include_str!("../status.rs"),
-            include_str!("../response.rs"),
-            include_str!("../playlist.rs"),
-            include_str!("../subtitle_playlist.rs"),
-            include_str!("../context.rs"),
-            include_str!("../subtitle_names.rs"),
-            include_str!("../playlist_text.rs"),
-            include_str!("../segment.rs"),
-        );
+        let source = hls_product_source();
 
         /// The argument list of a call whose opening parenthesis has just been
         /// consumed: balanced, and blind to parentheses inside string literals,
