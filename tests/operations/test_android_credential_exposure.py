@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import runpy
 import stat
 import subprocess
 import tempfile
@@ -42,6 +43,12 @@ SIGNING_VARIABLES = (
     "PLURX_ANDROID_KEYSTORE_PASSWORD",
     "PLURX_ANDROID_KEY_ALIAS",
     "PLURX_ANDROID_KEY_PASSWORD",
+    "PLURX_ANDROID_OLD_KEYSTORE",
+    "PLURX_ANDROID_OLD_KEYSTORE_PASSWORD",
+    "PLURX_ANDROID_OLD_KEY_ALIAS",
+    "PLURX_ANDROID_OLD_KEY_PASSWORD",
+    "PLURX_ANDROID_LINEAGE",
+    "PLURX_ANDROID_RELEASE_CERT_SHA256",
 )
 SETTINGS_STORE = ANDROID / "app/src/main/java/tv/plurx/app/data/SettingsStore.kt"
 
@@ -367,12 +374,7 @@ class AndroidShippingVariantCase(unittest.TestCase):
             recipe,
             "android-release must run the release assemble task",
         )
-        for variable in (
-            "PLURX_ANDROID_KEYSTORE",
-            "PLURX_ANDROID_KEYSTORE_PASSWORD",
-            "PLURX_ANDROID_KEY_ALIAS",
-            "PLURX_ANDROID_KEY_PASSWORD",
-        ):
+        for variable in SIGNING_VARIABLES:
             self.assertIn(
                 variable,
                 recipe,
@@ -435,10 +437,14 @@ class AndroidReleaseMakeTargetCase(unittest.TestCase):
             DOCKER_LOG=str(self.docker_log),
             PLURX_ANDROID_IMAGE_READY="1",
             PLURX_ANDROID_KEYSTORE="plurx-upload.jks",
+            PLURX_ANDROID_OLD_KEYSTORE="old-debug.jks",
+            PLURX_ANDROID_LINEAGE="lineage.bin",
         )
         # PUBLISHING.md's `keytool` line leaves the keystore in the cwd under
         # this bare name; that is the case Docker mistakes for a volume name.
         (self.tmp / "plurx-upload.jks").write_bytes(b"not really a keystore")
+        (self.tmp / "old-debug.jks").write_bytes(b"old signer fixture")
+        (self.tmp / "lineage.bin").write_bytes(b"lineage fixture")
         self.outputs = self.tmp / "outputs"
         self.data = self.tmp / "data"
         self.data.mkdir()
@@ -614,11 +620,21 @@ class ShipPhysicalReleaseVariantCase(unittest.TestCase):
             tmp = Path(raw)
             keystore = tmp / "upload.jks"
             keystore.write_bytes(b"x")
+            old_keystore = tmp / "old.jks"
+            old_keystore.write_bytes(b"x")
+            lineage = tmp / "lineage.bin"
+            lineage.write_bytes(b"x")
             full = {
                 "PLURX_ANDROID_KEYSTORE": str(keystore),
                 "PLURX_ANDROID_KEYSTORE_PASSWORD": "p",
                 "PLURX_ANDROID_KEY_ALIAS": "a",
                 "PLURX_ANDROID_KEY_PASSWORD": "k",
+                "PLURX_ANDROID_OLD_KEYSTORE": str(old_keystore),
+                "PLURX_ANDROID_OLD_KEYSTORE_PASSWORD": "p",
+                "PLURX_ANDROID_OLD_KEY_ALIAS": "a",
+                "PLURX_ANDROID_OLD_KEY_PASSWORD": "k",
+                "PLURX_ANDROID_LINEAGE": str(lineage),
+                "PLURX_ANDROID_RELEASE_CERT_SHA256": "0" * 64,
             }
             for missing in SIGNING_VARIABLES:
                 env = {k: v for k, v in full.items() if k != missing}
@@ -632,12 +648,20 @@ class ShipPhysicalReleaseVariantCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             (tmp / "plurx-upload.jks").write_bytes(b"x")
+            (tmp / "old.jks").write_bytes(b"x")
+            (tmp / "lineage.bin").write_bytes(b"x")
             result = self._run(
                 tmp,
                 PLURX_ANDROID_KEYSTORE="plurx-upload.jks",
                 PLURX_ANDROID_KEYSTORE_PASSWORD="p",
                 PLURX_ANDROID_KEY_ALIAS="a",
                 PLURX_ANDROID_KEY_PASSWORD="k",
+                PLURX_ANDROID_OLD_KEYSTORE="old.jks",
+                PLURX_ANDROID_OLD_KEYSTORE_PASSWORD="p",
+                PLURX_ANDROID_OLD_KEY_ALIAS="a",
+                PLURX_ANDROID_OLD_KEY_PASSWORD="k",
+                PLURX_ANDROID_LINEAGE="lineage.bin",
+                PLURX_ANDROID_RELEASE_CERT_SHA256="0" * 64,
             )
             self.assertIn(
                 "Android release signing keystore: "
@@ -645,37 +669,51 @@ class ShipPhysicalReleaseVariantCase(unittest.TestCase):
                 result.stdout,
             )
 
-    def test_the_debug_signer_is_refused_before_any_device(self) -> None:
-        self.assertIn('"$APKSIGNER" verify --print-certs "$APK"', self.script)
-        self.assertIn('*"CN=Android Debug"*', self.script)
+    def test_the_lineage_and_exact_signers_are_checked_before_any_device(self) -> None:
+        helper = (ROOT / "scripts/sign-android-release").read_text(encoding="utf-8")
+        self.assertIn('python3 "$WORKTREE/scripts/sign-android-release"', self.script)
+        self.assertIn('if hashlib.sha256(old_der).hexdigest() != OLD_CERT_SHA256:', helper)
+        self.assertIn('if cert_digest(apksigner, APK, 28) != expected_new:', helper)
+        self.assertIn('if cert_digest(apksigner, signed, api) != expected_new:', helper)
+        self.assertNotIn('CN=Android Debug', self.script)
 
-    def test_a_debuggable_install_of_the_same_version_code_is_not_skipped(self) -> None:
-        """Equal versionCode is not "already installed" when it is the debug build.
+    def test_an_equal_version_code_still_installs_the_exact_main_artifact(self) -> None:
+        """A version number does not identify the source tree or signer."""
+        self.assertNotIn('already on versionCode $ANDROID_CODE', self.script)
+        self.assertIn('install --no-streaming -r "$APK"', self.script)
+        self.assertIn('if [[ $debuggable -eq 1 ]]', self.script)
 
-        A device on debug build 120 would otherwise be reported as already on
-        120 and left debuggable, with the run counted a success.
-        """
-        debuggable = self.script.index("*DEBUGGABLE*")
-        skipped = self.script.index('already on versionCode $ANDROID_CODE')
-        self.assertLess(debuggable, skipped)
-        self.assertRegex(
-            self.script,
-            r'"\$current" == "\$ANDROID_CODE" && \$debuggable -eq 1',
-        )
-
-    def test_the_signer_mismatch_message_leads_to_the_release_build(self) -> None:
-        """The old text blamed a changed *debug* keystore and said to uninstall.
-
-        Rerunning then put the device straight back on a debuggable build.
-        The message must now say the uninstall is followed by the release
-        build, and name what the uninstall costs.
-        """
+    def test_a_signer_mismatch_never_uninstalls_the_existing_app(self) -> None:
+        """A rejected rotation must preserve sign-in and offline downloads."""
         branch = self.script.split("*INSTALL_FAILED_UPDATE_INCOMPATIBLE*", 1)
         self.assertEqual(len(branch), 2, "the signer-mismatch branch is missing")
         message = branch[1].split("else", 1)[0]
         self.assertNotIn("debug keystore changed", message)
-        self.assertIn("signed release build", message)
-        self.assertIn("offline downloads", message)
+        self.assertIn("signing lineage was not accepted", message)
+        self.assertIn("keeping the existing install and app data", message)
+        self.assertNotIn(" uninstall ", message)
+
+
+class AndroidLineageCapabilityCase(unittest.TestCase):
+    """A rotated APK must keep the installed app's data capability."""
+
+    def test_old_signer_without_installed_data_is_rejected(self) -> None:
+        helper = runpy.run_path(str(ROOT / "scripts/sign-android-release"))
+        validate = helper["validate_lineage"]
+        old = helper["OLD_CERT_SHA256"]
+        new = "a" * 64
+        report = (
+            "Signer #1 in lineage certificate DN: Old\n"
+            f"Signer #1 in lineage certificate SHA-256 digest: {old}\n"
+            "Has installed data capability: false\n"
+            "Has rollback capability: false\n"
+            "Signer #2 in lineage certificate DN: New\n"
+            f"Signer #2 in lineage certificate SHA-256 digest: {new}\n"
+            "Has installed data capability: true\n"
+        )
+        validate.__globals__["run"] = lambda *args, **kwargs: report.encode()
+        with self.assertRaisesRegex(SystemExit, "cannot preserve installed data"):
+            validate("apksigner", Path("lineage.bin"), new)
 
 
 if __name__ == "__main__":
