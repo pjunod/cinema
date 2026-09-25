@@ -112,6 +112,11 @@ curl -fsS http://127.0.0.1:32400/metrics
 docker exec plurxd grep 'Max open files' /proc/1/limits
 ```
 
+The 2026-09-25 [fleet readout](ARCHITECTURE-REVIEW-FLEET-READOUT-2026-09-25.md)
+adds C-05 marker counts, P-02 idle process limits and starting K-02/C-08/S-11
+metric samples. Its bounded 24-hour and seven-day collectors are in progress;
+none of those windows is complete yet.
+
 The 2026-09-25 [fleet/client baselines appendix](ARCHITECTURE-REVIEW-FLEET-CLIENT-BASELINES-2026-09-25.md)
 records bounded read-only observations for L-01, L-02, C-03, S-04, S-05
 and K-06. Its 401 responses and idle counters do not satisfy the plans'

@@ -16,6 +16,8 @@ At 02:28:44 UTC, direct `/metrics` scrapes returned HTTP 200 from all four nodes
 
 The collector uses a seven-day wall-clock deadline, one file per UTC day, and a 256 MiB total-size stop. From measured selected-row sizes, the projected seven-day total is about 219 MiB; the cap wins if series grow. The collection source, `window.json`, and daily files stay outside the repository. A previous macOS LaunchAgent attempt could not route to the nodes and was removed with its error samples; the active approved shell session returned HTTP 200. Check for gaps, build changes, and uptime resets before computing any delta. A missing interval is incomplete evidence, never a zero.
 
+The initial selector needed a histogram-suffix correction. Complete K-02 histogram-family samples begin at 02:31:51 UTC; the 24-hour collection deadline was extended ten minutes so that window can fill. At 02:34:28 UTC, the first 48 stored node samples had HTTP 200 and zero request errors. This early clean segment does not imply the later window is gap-free.
+
 No 24-hour or seven-day result exists yet. No voter was restarted, so K-02's applied-index catch-up rate A remains owed. The session and its local files may not survive host shutdown; the final readout must verify the timestamps rather than assume continuity.
 
 ## C-05 — current marker population is converged

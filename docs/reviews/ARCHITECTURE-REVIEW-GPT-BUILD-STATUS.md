@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-25 02:31 UTC · **Base:** `f600d2823`
+**Status:** open · **Updated:** 2026-09-25 02:35 UTC · **Base:** `f600d2823`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -18,7 +18,7 @@ the acceptance evidence named by its plan.
 | L-03 · Shared Live TV transport | M2 capacity offers and M4 per-build caption proof integrated on [draft PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506) at `6710d15f4`; prompt A found CC1/SERVICE1 dialogue on three broadcasts and prompt C Chrome found an English hidden track without drawn text | Collect post-advertising native/device caption checks | Plan execution log, workboard and dated fleet evidence |
 | Developer adaptive Auto enablement | Existing `playback_auto_abr` switch moved to Settings → Developer on draft #506 at `4c82aeca0`; controller and dated trace/device evidence are advisory only | Refresh dated rows when traces change; one review and fast lane when the full PR is ready | F-1 in native adaptive quality build plan and A-05 workboard row |
 | A-04 · Adaptive quality traces | Exact-main Chrome 8→1.5 Mb/s trace failed recovery: 24.974 s, one restart/downshift and 1.883 s maximum video gap. Two-cliff Chrome attempts failed before first frame. Firefox could not create a profile; Safari automation unavailable. Apple TV asleep and iPhone/iPad locked refused native trace launch | Complete platform matrix when browser automation and devices are available; retain failed traces as baseline evidence | Raw and normalized reports in `/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/`; design §5.3 and dated fleet evidence |
-| Main deployment and fleet evidence | All four nodes run exact `f600d28230222005441cfc62301c306785c852ce`, healthy with `/readyz` 200; six physical Apple devices received that main build, with clean install exit 0; 42 owed rows updated at `dfa7e26f9` | Collect required device and long-window acceptance; Android release-signing inputs remain absent | [Dated fleet evidence](ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md), [fleet/client baselines](ARCHITECTURE-REVIEW-FLEET-CLIENT-BASELINES-2026-09-25.md) and deployment logs |
+| Main deployment and fleet evidence | All four nodes run exact `f600d28230222005441cfc62301c306785c852ce`, healthy with `/readyz` 200; six physical Apple devices received that main build, with clean install exit 0; 42 owed rows updated; selected C-08/K-02/S-11 long-window collection started at 02:28:44 UTC | Collect required device and long-window acceptance; Android release-signing inputs remain absent | [Dated fleet evidence](ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md), [fleet/client baselines](ARCHITECTURE-REVIEW-FLEET-CLIENT-BASELINES-2026-09-25.md), [fleet readout](ARCHITECTURE-REVIEW-FLEET-READOUT-2026-09-25.md) and deployment logs |
 
 ## Current impediments
 
