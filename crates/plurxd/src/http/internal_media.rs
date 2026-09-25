@@ -13,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::Stream;
 use serde::Deserialize;
+use tokio::io::AsyncReadExt;
 
 use super::error::ApiError;
 use super::extract::AdminUser;
@@ -33,12 +34,22 @@ static FRAGMENT_INDEX_PEER_READS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Semaphore>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+/// Subtitle-source responses have their own bounded read budget. A permit is
+/// held until the peer drains or drops the response, including after the
+/// handler has returned.
+static SUBTITLE_SOURCE_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)));
+static SUBTITLE_SOURCE_PEER_READS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Semaphore>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// The permits live in the response stream, not the request handler. A slow
 /// or non-reading peer therefore occupies both budgets until EOF or body drop.
 struct FragmentIndexStream<S> {
     inner: S,
     _global_permit: tokio::sync::OwnedSemaphorePermit,
     _peer_permit: tokio::sync::OwnedSemaphorePermit,
+    subtitle_bytes: bool,
 }
 
 impl<S, E> Stream for FragmentIndexStream<S>
@@ -48,7 +59,19 @@ where
     type Item = Result<Bytes, E>;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner).poll_next(context)
+        match Pin::new(&mut self.inner).poll_next(context) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                if self.subtitle_bytes {
+                    crate::telemetry::record_subtitle_source(
+                        crate::telemetry::SubtitleSourceMetric::HydrationServedBytes(
+                            bytes.len() as u64
+                        ),
+                    );
+                }
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            other => other,
+        }
     }
 }
 
@@ -117,6 +140,7 @@ pub(crate) async fn fragment_index(
                 inner: tokio_util::io::ReaderStream::with_capacity(file, MEDIA_BODY_READ_BUFFER),
                 _global_permit: read_permit,
                 _peer_permit: peer_permit,
+                subtitle_bytes: false,
             };
             let mut response = Body::from_stream(stream).into_response();
             response.headers_mut().insert(
@@ -167,6 +191,112 @@ pub(crate) async fn fragment_index(
             );
             Err(StatusCode::NOT_FOUND)
         }
+    }
+}
+
+const SUBTITLE_SOURCE_PATH_PREFIX: &str = "/internal/media/subtitle-source/";
+
+/// Serve only a representation named by this node's manifest. The source
+/// video is never opened on this route; a missing or corrupt stored object
+/// is a 404 so the requester can try another published holder.
+pub(crate) async fn subtitle_source(
+    State(state): State<AppState>,
+    AxumPath((file_id, ordinal, format)): AxumPath<(i64, i64, String)>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    if file_id <= 0 || ordinal < 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let format = parse_subtitle_format(&format).ok_or(StatusCode::NOT_FOUND)?;
+    let path = format!(
+        "{SUBTITLE_SOURCE_PATH_PREFIX}{file_id}/{ordinal}/{}",
+        format_name(format)
+    );
+    let peer_id = authorize(&state, &headers, "GET", &path, &[]).await?;
+    serve_subtitle_source(&state, file_id, ordinal, format, peer_id).await
+}
+
+async fn serve_subtitle_source(
+    state: &AppState,
+    file_id: i64,
+    ordinal: i64,
+    format: crate::subtitle_source::RepresentationFormat,
+    peer_id: String,
+) -> Result<Response, StatusCode> {
+    if !subtitle_cluster_source_enabled(state.store.as_ref()).await {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let read_permit = std::sync::Arc::clone(&SUBTITLE_SOURCE_READS)
+        .try_acquire_owned()
+        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+    let peer_reads = SUBTITLE_SOURCE_PEER_READS
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .entry(peer_id)
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Semaphore::new(2)))
+        .clone();
+    let peer_permit = peer_reads
+        .try_acquire_owned()
+        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+    let root = crate::subtitle_source::store_root(&state.runtime_cache_dir);
+    let (file, bytes) =
+        crate::subtitle_source::open_verified_for_peer(&root, file_id, ordinal, format)
+            .await
+            .ok_or(StatusCode::NOT_FOUND)?;
+    let stream = FragmentIndexStream {
+        inner: tokio_util::io::ReaderStream::with_capacity(
+            tokio::fs::File::from_std(file).take(bytes),
+            MEDIA_BODY_READ_BUFFER,
+        ),
+        _global_permit: read_permit,
+        _peer_permit: peer_permit,
+        subtitle_bytes: true,
+    };
+    let mut response = Body::from_stream(stream).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        "private, no-store".parse().expect("static cache control"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        "application/octet-stream"
+            .parse()
+            .expect("static content type"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        bytes
+            .to_string()
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    Ok(response)
+}
+
+async fn subtitle_cluster_source_enabled(store: &dyn plurx_core::store::Store) -> bool {
+    store
+        .get_setting(plurx_core::store::keys::SUBTITLE_CLUSTER_SOURCES)
+        .await
+        .ok()
+        .is_some_and(|value| plurx_core::store::stored_switch(value.as_deref(), false))
+}
+
+fn parse_subtitle_format(value: &str) -> Option<crate::subtitle_source::RepresentationFormat> {
+    use crate::subtitle_source::RepresentationFormat;
+    match value {
+        "sup" => Some(RepresentationFormat::Sup),
+        "webvtt" => Some(RepresentationFormat::Webvtt),
+        "matroska" => Some(RepresentationFormat::Matroska),
+        _ => None,
+    }
+}
+
+fn format_name(format: crate::subtitle_source::RepresentationFormat) -> &'static str {
+    use crate::subtitle_source::RepresentationFormat;
+    match format {
+        RepresentationFormat::Sup => "sup",
+        RepresentationFormat::Webvtt => "webvtt",
+        RepresentationFormat::Matroska => "matroska",
     }
 }
 
@@ -285,6 +415,22 @@ pub(crate) async fn diagnostic_offers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subtitle_source::{self as source, RepresentationFormat};
+
+    fn peer_fixture(bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let base = crate::test_tempdir().expect("store fixture");
+        let root = base.path().join(source::STORE_DIR);
+        let track = source::testing::kept(&source::file_dir(&root, 7), 2, bytes);
+        let artifact = source::file_dir(&root, 7).join(track.file.as_deref().expect("stored name"));
+        let stamp = source::SourceStamp {
+            size: 1,
+            mtime: 2,
+            dev: None,
+            ino: None,
+        };
+        source::testing::write_manifest(&root, 7, stamp, vec![track]);
+        (base, root, artifact)
+    }
 
     #[test]
     fn successful_snapshots_are_private_and_never_cacheable() {
@@ -306,6 +452,7 @@ mod tests {
             _peer_permit: std::sync::Arc::clone(&peer)
                 .try_acquire_owned()
                 .expect("peer permit"),
+            subtitle_bytes: false,
         };
         let body = Body::from_stream(stream);
         assert!(std::sync::Arc::clone(&global).try_acquire_owned().is_err());
@@ -336,6 +483,50 @@ mod tests {
                 .await
                 .expect_err("household bearer must not authorize a media offer"),
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_refuses_with_switch_off() {
+        let (_, state) = crate::http::tests::test_app_with_state();
+        assert_eq!(
+            serve_subtitle_source(&state, 7, 2, RepresentationFormat::Sup, "peer".into())
+                .await
+                .expect_err("off switch refuses the response"),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn subtitle_source_body_cap_enforced() {
+        let (_base, root, artifact) = peer_fixture(b"subtitle");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(artifact)
+            .expect("stored artifact");
+        file.set_len(source::MAX_TRACK_BYTES + 1)
+            .expect("sparse over-cap artifact");
+        assert!(
+            source::open_verified_for_peer(&root, 7, 2, RepresentationFormat::Sup)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_or_corrupt_artifact_is_not_served() {
+        let (_base, root, artifact) = peer_fixture(b"subtitle");
+        std::fs::write(&artifact, b"changed!").expect("corrupt artifact");
+        assert!(
+            source::open_verified_for_peer(&root, 7, 2, RepresentationFormat::Sup)
+                .await
+                .is_none()
+        );
+        std::fs::remove_file(artifact).expect("remove artifact");
+        assert!(
+            source::open_verified_for_peer(&root, 7, 2, RepresentationFormat::Sup)
+                .await
+                .is_none()
         );
     }
 }

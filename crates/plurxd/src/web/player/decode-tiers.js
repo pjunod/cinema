@@ -609,6 +609,34 @@ function qualityLabel(){
 }
 
 async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt, retryIntent){
+  const beginning=beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent);
+  const inputs=capturePlayInputs(fileId,meta,retryIntent);
+  const attempt=Object.freeze({...beginning,...inputs,fileId,title,resumeMs,knownDurMs,meta});
+  const {modal,playerWasOpen}=attempt;
+  document.getElementById("playTitle").textContent=title;
+  modal.classList.add("open");
+  if(!playerWasOpen){
+    const app=document.getElementById("app"); if(app) app.inert=!WATCH;
+    const initial=document.getElementById("pbplay"); if(initial) initial.focus({preventScroll:true});
+  }
+  raisePlaybackSurface("client_preparing",{context:"start",
+    title:"Reading media…",detail:"checking the file on the server"});
+  const decided=await decideForPlay(attempt);
+  if(!decided) return;
+  const prepared=preparePlayOutgoing(attempt,decided.decision);
+  const openedPlayer=PLAYER=buildPlayer(attempt,decided,prepared);
+  const openIsAttached=()=>attempt.openIsCurrent()&&PLAYER===openedPlayer
+    &&PLAYER.openToken===attempt.openAttempt.token;
+  const initialAudio=presentPlayerChrome(attempt,decided,prepared,openIsAttached);
+  const initialRoute=choosePlayRoute(attempt,decided,prepared,initialAudio);
+  if(initialRoute==null) return;
+  const attached=attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,initialAudio,initialRoute);
+  // Direct and progressive routes finish in this turn, as they did before
+  // extraction; only session and copy-HLS routes wait for a server response.
+  if(attached!==true && !await attached) return;
+  finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached);
+}
+function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent){
   WATCH_CLOSE_PROMISE=null;
   // Live TV holds a physical tuner and, since the dock, keeps holding it on
   // every other route. Starting a film used to be the moment it was released
@@ -624,7 +652,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   const predecessor=PLAYER?.mediaPredecessor||PLAYER;
   play.failedPreparation=null;
   const preparation=beginPlaybackPreparation(openIsCurrent);
-  const failPreparation=error=>{
+  const failPreparation=(error,attempt)=>{
     if(!openIsCurrent()) return;
     preparation.finish();
     const wanted=PLAYER;
@@ -632,8 +660,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     const retry={fileId,title,knownDurMs,meta,predecessor,
       resumeMs:latest&&wanted.controlSeek?Math.round(wanted.controlSeek.targetMs):resumeMs,
       wantsPlayback:fullIntent.wantsPlayback,
-      selection:latest?playbackSelection(wanted,fileId):selection,
-      audioOffsetMs:latest?(wanted.aoffset||0):sessionAudioOffset};
+      selection:latest?playbackSelection(wanted,fileId):attempt.selection,
+      audioOffsetMs:latest?(wanted.aoffset||0):attempt.sessionAudioOffset};
     play.failedPreparation=retry;
     if(play.pendingIntent===fullIntent)play.pendingIntent=null;
     if(predecessor){
@@ -691,6 +719,9 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   const fullIntent={attempt:openAttempt,fileId,predecessor,
     wantsPlayback:retryIntent?retryIntent.wantsPlayback:(inputPlayer?inputPlayer.wantsPlayback:true)};
   play.pendingIntent=fullIntent;
+  return {openAttempt,libraryChannel,openIsCurrent,predecessor,preparation,failPreparation,fullIntent};
+}
+function capturePlayInputs(fileId,meta,retryIntent){
   // Consume both one-shot inputs before the first await. An overlapping play
   // may set its own reason while this decision is in flight; reading the
   // shared slot afterwards would steal the newer attempt's attribution.
@@ -735,22 +766,21 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   // waiting actually experiences, and it includes every server round trip
   // this function is about to make.
   const clickedAt=performance.now();
-  document.getElementById("playTitle").textContent=title;
-  modal.classList.add("open");
-  if(!playerWasOpen){
-    const app=document.getElementById("app"); if(app) app.inert=!WATCH;
-    const initial=document.getElementById("pbplay"); if(initial) initial.focus({preventScroll:true});
-  }
-  raisePlaybackSurface("client_preparing",{context:"start",
-    title:"Reading media…",detail:"checking the file on the server"});
+  return Object.freeze({requestedAttemptReason,skipDefaultSub,sessionAudioOffset,replacementBandwidthSeed,
+    replacementControlSeek,replacementControlSequenceFloor,replacementControlIntentGeneration,
+    selection,modal,video,playerWasOpen,playerOpener,playerOpenerClick,playerLastFocused,
+    watchTicket,clickedAt});
+}
+async function decideForPlay(attempt){
+  const {fileId,preparation,selection,openIsCurrent,failPreparation}=attempt;
   // The selection travels WITH the decision, so `method`, `reasons`, `delivery`
   // and the marked default tracks all describe the tracks that are about to
   // play. Asking for the policy default and correcting afterwards is what used
   // to force a remux over a perfectly decodable audio choice.
   let decision;
   try{ decision=await preparation.run(signal=>askDecision(fileId, qualityForce(), selection,signal));}
-  catch(e){failPreparation(e);return;}
-  if(!openIsCurrent()) return;
+  catch(e){failPreparation(e,attempt);return null;}
+  if(!openIsCurrent()) return null;
   let retestDecodeLimit=false;
   let learnedLimitView=null;
   // A device that measured this exact media load as unstable routes straight
@@ -784,7 +814,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
         // silently discard the viewer's choice on exactly the devices that need
         // the transcode most.
         const d2=await preparation.run(signal=>askDecision(fileId,"transcode",selection,signal));
-        if(!openIsCurrent()) return;
+        if(!openIsCurrent()) return null;
         learnedLimitView=PlaybackPolicy.learnedDecodeLimitView({
           source:decision.source||{},limit:lim,ordinaryRange,
           deliveredRange:d2.delivered_dynamic_range
@@ -793,12 +823,16 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
           `(Quality → Original bypasses this measurement)`].concat(d2.reasons||[]);
         decision=d2;
       }catch(e){
-        if(!openIsCurrent()) return;
-        if(e.name==='TimeoutError'||e.name==='AbortError'){failPreparation(e);return;}
+        if(!openIsCurrent()) return null;
+        if(e.name==='TimeoutError'||e.name==='AbortError'){failPreparation(e,attempt);return null;}
         /* the limit is advice; the original decision still plays */
       }
     }
   }
+  return {decision,retestDecodeLimit,learnedLimitView};
+}
+function preparePlayOutgoing(attempt,decision){
+  const {resumeMs,video,predecessor,meta,selection}=attempt;
   const startSec=(resumeMs||0)/1000;
   const ladder=decision.ladder||[];
   const priorKbps=decision.prior_kbps||null;
@@ -835,7 +869,17 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   // `PLAYER.burnedSub`.
   const applied=prePlayApplication(decision, selection);
   const wantSub=applied.subtitle, preBurn=applied.burnedSub;
-  PLAYER={fileId, timer:null, offset:0, hls:null, knownDur:knownDurMs||0,
+  return {startSec,ladder,priorKbps,autoStartHeight,retireOutgoing,src,book,
+    applied,wantSub,preBurn,outgoing};
+}
+function buildPlayer(attempt,decided,prepared){
+  const {decision,retestDecodeLimit,learnedLimitView}=decided;
+  const {fileId,title,knownDurMs,meta,playerLastFocused,playerOpener,playerOpenerClick,
+    libraryChannel,sessionAudioOffset,replacementBandwidthSeed,replacementControlSeek,
+    replacementControlIntentGeneration,replacementControlSequenceFloor,clickedAt,
+    openAttempt,fullIntent,selection}=attempt;
+  const {src,book,preBurn,ladder,priorKbps,autoStartHeight,outgoing}=prepared;
+  return {fileId, timer:null, offset:0, hls:null, knownDur:knownDurMs||0,
     decodeRetest:retestDecodeLimit,
     durMs:(src.duration_ms||knownDurMs||0), method:decision.method, encoder:null,
     capsSnapshot:decision._capsSnapshot||currentCapsDocument(),
@@ -908,9 +952,12 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     mediaPredecessor:outgoing,
     internalMediaReset:true,pendingOpenAttempt:openAttempt,libraryChannel,
     terminalStop:null, };
-  const openedPlayer=PLAYER;
-  const openIsAttached=()=>openIsCurrent()&&PLAYER===openedPlayer
-    &&PLAYER.openToken===openAttempt.token;
+}
+function presentPlayerChrome(attempt,decided,prepared,openIsAttached){
+  const {decision}=decided;
+  const {requestedAttemptReason,skipDefaultSub,video,meta,libraryChannel,
+    playerWasOpen,openAttempt}=attempt;
+  const {startSec,applied,wantSub,book}=prepared;
   newAttempt(requestedAttemptReason || (startSec>0?"resume":"cold-start"));
   // §3.3 row 17: the picture the viewer is getting is not quite the one they
   // asked for, and that is a notice beside it. Raised here rather than where
@@ -946,7 +993,12 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
       if(openIsAttached()&&PLAYER.curSub<0&&PLAYER.preplay?.subtitle==null) setSub(defSub.index);
     }, 400);
   }
-
+  return initialAudio;
+}
+function choosePlayRoute(attempt,decided,prepared,initialAudio){
+  const {decision}=decided;
+  const {video,sessionAudioOffset,libraryChannel,failPreparation}=attempt;
+  const {preBurn}=prepared;
   const nativeHls=useNativeHls(video);
   const segmentedRemux=segmentedRemuxOk(decision,video);
   const hlsAvailable=!noSegments()&&(nativeHls||copyHlsMseOk(decision,video));
@@ -971,10 +1023,18 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   if(initialRoute==='unsupported_hevc_delivery'){
     failPreparation(Object.assign(
       new Error("This browser cannot execute the required HEVC HLS delivery. Disable one-stream mode or use a browser with HLS support."),
-      {code:"unsupported_hevc_delivery"}));
-    return;
+      {code:"unsupported_hevc_delivery"}),attempt);
+    return null;
   }
-  if(initialRoute==='transcode_hls'){
+  prepared.nativeHls=nativeHls;
+  return initialRoute;
+}
+function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,initialAudio,initialRoute){
+  const {decision}=decided;
+  const {fileId,video,openAttempt,preparation,failPreparation}=attempt;
+  const {startSec,retireOutgoing}=prepared;
+  const nativeHls=prepared.nativeHls;
+  if(initialRoute==='transcode_hls') return (async()=>{
     // Transcode: start an HLS session (server re-encodes + tone-maps).
     // Read from PLAYER, not the decision: they hold the same array on the
     // ordinary path, and on the forced-burn path above PLAYER is the one that
@@ -986,13 +1046,13 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     let info; try{info=await preparation.run(
       signal=>openSessionRetryingNotYet(fileId,options,signal,{context:retryContext,preparation}),
       late=>releaseSession(late&&late.session_id));}catch(e){
-      if(openIsAttached())failPreparation(e);
-      return;
+      if(openIsAttached())failPreparation(e,attempt);
+      return false;
     }
-    if(!PLAY_OPEN_GATE.acceptResource(openAttempt,info&&info.session_id,releaseSession)) return;
+    if(!PLAY_OPEN_GATE.acceptResource(openAttempt,info&&info.session_id,releaseSession)) return false;
     if(!openIsAttached()){
       releaseSession(info&&info.session_id);
-      return;
+      return false;
     }
     retireOutgoing();
     const from=attachSession(video, openedPlayer, info, startSec);
@@ -1000,7 +1060,9 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
       detail:(PLAYER.encoder?("encoder: "+PLAYER.encoder+" — "):"")+
         (PLAYER.vod?"already transcoded — playing from the cache":"buffering the first segments")});
     armStall(from);
-  } else if(initialRoute==='copy_hls'){
+    return true;
+  })();
+  if(initialRoute==='copy_hls') return (async()=>{
     // Two different reasons to land here, same destination.
     //
     // Safari can't play a progressive fragmented-MP4 remux at all, but it plays
@@ -1017,12 +1079,14 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     raisePlaybackSurface("client_preparing",{context:"start",title:"Preparing the stream…",
       detail:why? `${why} — sending it as HLS so the player can buffer ahead`
                 : "remuxing to HLS — keeping the original video"});
-    try{ if(!await startCopyHls(video,startSec,openIsAttached,openAttempt,preparation,retireOutgoing)) return; }
+    try{ if(!await startCopyHls(video,startSec,openIsAttached,openAttempt,preparation,retireOutgoing)) return false; }
     catch(e){
-      if(openIsAttached())failPreparation(e);
-      return;
+      if(openIsAttached())failPreparation(e,attempt);
+      return false;
     }
-  } else {
+    return true;
+  })();
+  {
     // Direct play, or remux for a browser that plays progressive fMP4 (Chrome).
     // A raw direct-play file gives the browser control of its mux defaults, not
     // the server's language choice. If the preferred track is not stream zero,
@@ -1063,7 +1127,11 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
         applyPlaybackAttachmentPosition(video,openedPlayer,attachment,startSec); };
     applyPlaybackTransportIntent(video,openedPlayer);
   }
-
+  return true;
+}
+function finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached){
+  const {watchTicket,preparation,fullIntent,video,fileId}=attempt;
+  const {applied}=prepared;
   if(!openIsAttached()) return;
   openedPlayer.pendingOpenAttempt=null;
   watchAccept(watchTicket,openedPlayer);

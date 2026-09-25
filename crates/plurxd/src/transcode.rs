@@ -13222,6 +13222,8 @@ pub struct TranscodeManager {
     runtime_cache: PathBuf,
     /// Extracted text subtitles shared with the WebVTT endpoint.
     subtitle_cache: PathBuf,
+    subtitle_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    subtitle_jobs: Option<Arc<crate::state::JobManager>>,
     caps: EncoderCaps,
     /// Portable decoder names inventoried from this exact ffmpeg at boot.
     decoders: Vec<String>,
@@ -13766,6 +13768,8 @@ impl TranscodeManager {
             work_dir,
             runtime_cache,
             subtitle_cache,
+            subtitle_membership: None,
+            subtitle_jobs: None,
             rate_control: std::sync::RwLock::new(RateControlSnapshot::bitrate(caps.quality_rc)),
             artifact_qualification: std::sync::RwLock::new(ArtifactQualificationReadiness {
                 requested: false,
@@ -14017,6 +14021,7 @@ impl TranscodeManager {
     ) -> Self {
         self.runtime_cache = runtime_cache;
         self.subtitle_cache = subtitle_cache;
+        self.subtitle_membership = cluster_membership.clone();
         // Renditions are durable state — admitted ones are the copy cache the
         // plan promises — so they live beside the persistent caches rather
         // than in scratch. Replaced before serving starts, like the caches.
@@ -14040,6 +14045,27 @@ impl TranscodeManager {
             node_id,
         });
         self
+    }
+
+    pub(crate) fn with_subtitle_jobs(mut self, jobs: Arc<crate::state::JobManager>) -> Self {
+        self.subtitle_jobs = Some(jobs);
+        self
+    }
+
+    fn subtitle_source_access(&self) -> crate::subtitle_source::StoreAccess {
+        let access = crate::subtitle_source::StoreAccess::from_setting(
+            Arc::clone(&self.store),
+            &self.runtime_cache,
+        )
+        .on_node(self.cache_location().map(|(_, node_id)| node_id));
+        let access = match &self.subtitle_membership {
+            Some(membership) => access.with_membership(membership.clone()),
+            None => access,
+        };
+        match &self.subtitle_jobs {
+            Some(jobs) => access.with_jobs(Arc::clone(jobs)),
+            None => access,
+        }
     }
 
     pub fn with_shared_cache(
@@ -15722,9 +15748,15 @@ impl TranscodeManager {
         if self.subtitle_file(file, Some(burn)).is_none() {
             return Ok(None);
         }
-        crate::subtitles::ensure_vtt_file(&self.subtitle_cache, file, burn.subtitle_index)
-            .await
-            .map(Some)
+        let stored = self.subtitle_source_access();
+        crate::subtitles::ensure_vtt_file_with_store(
+            &self.subtitle_cache,
+            file,
+            burn.subtitle_index,
+            &stored,
+        )
+        .await
+        .map(Some)
     }
 
     /// Prefer a currently verified shared generation, then preserve the
@@ -17288,7 +17320,9 @@ impl TranscodeManager {
                         )
                         .await,
                 );
-                crate::subtitles::ensure_vtt(&self.subtitle_cache, file, index).await?;
+                let stored = self.subtitle_source_access();
+                crate::subtitles::ensure_vtt_with_store(&self.subtitle_cache, file, index, &stored)
+                    .await?;
             }
         }
         Ok(outcome)
@@ -19249,10 +19283,7 @@ impl TranscodeManager {
         index: i64,
     ) -> bool {
         crate::subtitle_source::stored_as_empty(
-            &crate::subtitle_source::StoreAccess::from_setting(
-                Arc::clone(&self.store),
-                &self.runtime_cache,
-            ),
+            &self.subtitle_source_access(),
             file,
             index,
             crate::subtitle_source::Live::Path(&file.path),
@@ -19447,11 +19478,7 @@ impl TranscodeManager {
                 // prepared-successor path, which would otherwise hold a preparation
                 // slot for the length of a full-film demux.
                 // Read lazily: a warm sidecar never reads the setting.
-                let stored = crate::subtitle_source::StoreAccess::from_setting(
-                    Arc::clone(&self.store),
-                    &self.runtime_cache,
-                )
-                .on_node(self.cache_location().map(|(_, node_id)| node_id));
+                let stored = self.subtitle_source_access();
                 match crate::subtitles::ensure_burn_source(
                     &self.subtitle_cache,
                     file,
@@ -28593,12 +28620,18 @@ impl HlsDeliveryFixture {
             })
             .await
             .expect("item");
+        // Consumers of stored subtitles bind a live source inode. Give this
+        // shared HTTP fixture a real file instead of a synthetic /media path.
+        let source = session_dir.join(format!("fixture-source-{}.mkv", uuid::Uuid::new_v4()));
+        std::fs::write(&source, b"fixture source").expect("fixture source");
+        let metadata = std::fs::metadata(&source).expect("fixture source metadata");
+        let stamp = crate::fragment_index_cluster::source_stamp(&metadata);
         let file_id = store
             .upsert_file(
                 item,
-                "/media/Heat.mkv",
-                1,
-                1,
+                source.to_str().expect("fixture source path"),
+                stamp.size as i64,
+                stamp.mtime,
                 &ProbeResult {
                     duration_ms: Some(6_000_000),
                     ..ProbeResult::default()

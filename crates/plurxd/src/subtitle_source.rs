@@ -29,13 +29,18 @@
 //! - **Readers never write into the store**, apart from the best-effort
 //!   `.access` marker, so they cannot race the producer.
 
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::MediaFile;
+use plurx_core::store::SubtitleSourcePublication;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 
 pub(crate) use crate::fragment_index_cluster::SourceStamp;
 
@@ -76,13 +81,99 @@ pub(crate) fn file_dir(root: &Path, file_id: i64) -> PathBuf {
     root.join(format!("f{file_id}"))
 }
 
+/// A fixed, bounded table of locks shared by producers, hydrators and the
+/// sweeper. Hash collisions only serialize unrelated files; they cannot let
+/// two writers of one file swap its manifest concurrently.
+pub(crate) fn file_lock(root: &Path, file_id: i64) -> &'static tokio::sync::Mutex<()> {
+    const LOCKS: usize = 256;
+    static TABLE: std::sync::OnceLock<Vec<tokio::sync::Mutex<()>>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| (0..LOCKS).map(|_| tokio::sync::Mutex::new(())).collect());
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    root.hash(&mut hash);
+    file_id.hash(&mut hash);
+    &table[(hash.finish() as usize) % LOCKS]
+}
+
+/// Merge a pass or one hydrated representation into the manifest currently
+/// on disk. Only incoming `(ordinal, format)` pairs replace old pairs.
+/// Caller holds `file_lock`; a different local inode discards all old rows.
+pub(crate) fn merge_manifest(mut incoming: Manifest, previous: Option<&Manifest>) -> Manifest {
+    let Some(previous) = previous.filter(|old| {
+        old.version == MANIFEST_VERSION
+            && old.file_id == incoming.file_id
+            && old.source == incoming.source
+    }) else {
+        return incoming;
+    };
+    for ordinal in &previous.ordinals {
+        if !incoming.ordinals.contains(ordinal) {
+            incoming.ordinals.push(*ordinal);
+        }
+    }
+    for old_track in &previous.tracks {
+        if let Some(new_track) = incoming
+            .tracks
+            .iter_mut()
+            .find(|track| track.ordinal == old_track.ordinal)
+        {
+            let old_reps = if old_track.representations.is_empty() {
+                old_track
+                    .representation(RepresentationFormat::Sup)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            } else {
+                old_track.representations.clone()
+            };
+            for representation in old_reps {
+                if !new_track
+                    .representations
+                    .iter()
+                    .any(|new| new.format == representation.format)
+                {
+                    new_track.representations.push(representation);
+                }
+            }
+            if let Some(primary) = new_track.representations.first() {
+                new_track.verdict = primary.verdict;
+                new_track.attempts = primary.attempts;
+                new_track.file = primary.file.clone();
+                new_track.sha256 = primary.sha256.clone();
+            }
+        } else {
+            incoming.tracks.push(old_track.clone());
+        }
+    }
+    incoming.ordinals.sort_unstable();
+    incoming.ordinals.dedup();
+    incoming.tracks.sort_by_key(|track| track.ordinal);
+    incoming
+}
+
 /// The content-named file a kept track is stored under:
 /// `s<ordinal>-<sha256 prefix>.sup`. Content naming means no field has to be
 /// parsed back out of a name, and a republish never overwrites bytes a reader
 /// may have open.
+#[cfg(test)]
 pub(crate) fn sup_file_name(ordinal: i64, sha256: &str) -> Option<String> {
     (ordinal >= 0 && is_sha256(sha256))
         .then(|| format!("s{ordinal}-{}.sup", &sha256[..SHA_PREFIX_CHARS]))
+}
+
+/// Content-named artefact for one representation. The legacy `.sup` spelling
+/// is deliberately retained so manifests written before text support remain
+/// readable without moving their files.
+pub(crate) fn representation_file_name(
+    ordinal: i64,
+    format: RepresentationFormat,
+    sha256: &str,
+) -> Option<String> {
+    (ordinal >= 0 && is_sha256(sha256)).then(|| {
+        format!(
+            "s{ordinal}-{}.{}",
+            &sha256[..SHA_PREFIX_CHARS],
+            format.extension()
+        )
+    })
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -107,11 +198,90 @@ pub(crate) enum Verdict {
     Transient,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TrackKind {
+    #[default]
+    Pgs,
+    Text,
+    TextStyled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RepresentationFormat {
+    Sup,
+    Webvtt,
+    Matroska,
+}
+
+impl RepresentationFormat {
+    pub(crate) fn publication_name(self) -> &'static str {
+        match self {
+            Self::Sup => "sup",
+            Self::Webvtt => "webvtt",
+            Self::Matroska => "matroska",
+        }
+    }
+
+    pub(crate) fn from_publication_name(name: &str) -> Option<Self> {
+        match name {
+            "sup" => Some(Self::Sup),
+            "webvtt" => Some(Self::Webvtt),
+            "matroska" => Some(Self::Matroska),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RepresentationOrigin {
+    #[default]
+    Extracted,
+    Hydrated,
+}
+
+impl RepresentationFormat {
+    pub(crate) fn extension(self) -> &'static str {
+        match self {
+            Self::Sup => "sup",
+            Self::Webvtt => "vtt",
+            Self::Matroska => "mks",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RepresentationEntry {
+    pub(crate) format: RepresentationFormat,
+    #[serde(default)]
+    pub(crate) origin: RepresentationOrigin,
+    pub(crate) verdict: Verdict,
+    pub(crate) attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sha256: Option<String>,
+    #[serde(default)]
+    pub(crate) bytes: u64,
+}
+
+impl RepresentationEntry {
+    pub(crate) fn settled(&self) -> bool {
+        settled_verdict(self.verdict, self.attempts)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TrackEntry {
     /// The track's subtitle ordinal — the `N` in `-map 0:s:N`, the same index
     /// both consumers are asked for.
     pub(crate) ordinal: i64,
+    #[serde(default)]
+    pub(crate) kind: TrackKind,
+    #[serde(default)]
+    pub(crate) representations: Vec<RepresentationEntry>,
     pub(crate) verdict: Verdict,
     /// Passes that have tried this track for this source identity.
     pub(crate) attempts: u32,
@@ -150,15 +320,18 @@ pub(crate) enum Consumer {
     /// `subtitles::ensure_burn_file`: size + mtime + `(dev, ino)` of the file
     /// the session holds open. Never ctime.
     Burn,
+    /// The VTT-keyed whole-track sidecar, with the overlay's live stamp rule.
+    Vtt,
 }
 
 impl Consumer {
-    const ALL: [Self; 2] = [Self::Overlay, Self::Burn];
+    const ALL: [Self; 3] = [Self::Overlay, Self::Burn, Self::Vtt];
 
     fn label(self) -> &'static str {
         match self {
             Self::Overlay => "overlay",
             Self::Burn => "burn",
+            Self::Vtt => "vtt",
         }
     }
 
@@ -171,11 +344,61 @@ impl TrackEntry {
     /// Nothing more to do for this track: `kept`, `empty` or `malformed`, or
     /// `transient` with its attempts used.
     pub(crate) fn settled(&self) -> bool {
-        match self.verdict {
-            Verdict::Kept | Verdict::Empty | Verdict::Malformed => true,
-            Verdict::Transient => self.attempts >= TRANSIENT_ATTEMPTS,
+        if self.representations.is_empty() {
+            settled_verdict(self.verdict, self.attempts)
+        } else {
+            self.representations
+                .iter()
+                .all(RepresentationEntry::settled)
         }
     }
+
+    pub(crate) fn representation(
+        &self,
+        format: RepresentationFormat,
+    ) -> Option<RepresentationEntry> {
+        if let Some(representation) = self
+            .representations
+            .iter()
+            .find(|entry| entry.format == format)
+        {
+            return Some(representation.clone());
+        }
+        (self.kind == TrackKind::Pgs
+            && self.representations.is_empty()
+            && format == RepresentationFormat::Sup)
+            .then(|| RepresentationEntry {
+                format,
+                origin: RepresentationOrigin::Extracted,
+                verdict: self.verdict,
+                attempts: self.attempts,
+                file: self.file.clone(),
+                sha256: self.sha256.clone(),
+                bytes: 0,
+            })
+    }
+}
+
+fn settled_verdict(verdict: Verdict, attempts: u32) -> bool {
+    match verdict {
+        Verdict::Kept | Verdict::Empty | Verdict::Malformed => true,
+        Verdict::Transient => attempts >= TRANSIENT_ATTEMPTS,
+    }
+}
+
+/// Coverage is per eligible ordinal and comes only from a finished source
+/// extraction. A hydrated row can serve peers but cannot suppress a missing
+/// whole-track read for another ordinal.
+pub(crate) fn extracted_ordinal_covered(rows: &[SubtitleSourcePublication], ordinal: i64) -> bool {
+    rows.iter().any(|row| {
+        row.ordinal == ordinal
+            && row.origin == "extracted"
+            && match row.verdict.as_str() {
+                "kept" | "empty" | "malformed" => true,
+                "transient" => row.attempts >= i64::from(TRANSIENT_ATTEMPTS),
+                _ => false,
+            }
+    })
 }
 
 impl Manifest {
@@ -190,7 +413,7 @@ impl Manifest {
             return false;
         }
         match consumer {
-            Consumer::Overlay => true,
+            Consumer::Overlay | Consumer::Vtt => true,
             // A platform with no `(dev, ino)` (the Windows port) falls back to
             // size + mtime. Where the live file has one, the manifest must
             // carry the same one: a manifest without it cannot vouch for the
@@ -206,6 +429,7 @@ impl Manifest {
 
     /// Every probed track has a settled verdict: `kept`, `empty` or
     /// `malformed`, or `transient` that has used its attempts.
+    #[cfg(test)]
     pub(crate) fn latched(&self) -> bool {
         self.ordinals
             .iter()
@@ -215,6 +439,7 @@ impl Manifest {
     /// The design's *current*: this build's version, this file, a source
     /// that matches a live `fstat` by the consumer's rule, and a settled
     /// verdict for every probed track.
+    #[cfg(test)]
     pub(crate) fn is_current(&self, file_id: i64, live: &SourceStamp, consumer: Consumer) -> bool {
         self.version == MANIFEST_VERSION
             && self.file_id == file_id
@@ -250,6 +475,8 @@ pub(crate) struct StoreAccess {
     /// then classified (`never_indexed`, `hydrated_only`, `absent`) off the
     /// request path. Without it such a miss is `absent`.
     node_id: Option<String>,
+    membership: Option<MembershipManager>,
+    jobs: Option<std::sync::Arc<crate::state::JobManager>>,
 }
 
 #[derive(Clone)]
@@ -268,6 +495,8 @@ impl StoreAccess {
             root,
             switch: Switch::Fixed(enabled),
             node_id: None,
+            membership: None,
+            jobs: None,
         }
     }
 
@@ -292,6 +521,8 @@ impl StoreAccess {
             root: store_root(runtime_cache),
             switch: Switch::Setting(store),
             node_id: None,
+            membership: None,
+            jobs: None,
         }
     }
 
@@ -300,6 +531,57 @@ impl StoreAccess {
     pub(crate) fn on_node(mut self, node_id: Option<&str>) -> Self {
         self.node_id = node_id.map(str::to_owned);
         self
+    }
+
+    pub(crate) fn with_membership(mut self, membership: MembershipManager) -> Self {
+        self.membership = Some(membership);
+        self
+    }
+
+    pub(crate) fn with_jobs(mut self, jobs: std::sync::Arc<crate::state::JobManager>) -> Self {
+        self.jobs = Some(jobs);
+        self
+    }
+
+    pub(crate) fn jobs(&self) -> Option<&std::sync::Arc<crate::state::JobManager>> {
+        self.jobs.as_ref()
+    }
+
+    pub(crate) fn catalog(&self) -> Option<&dyn plurx_core::store::Store> {
+        match &self.switch {
+            Switch::Setting(store) => Some(store.as_ref()),
+            #[cfg(test)]
+            Switch::Fixed(_) => None,
+        }
+    }
+
+    pub(crate) fn store(&self) -> Option<std::sync::Arc<dyn plurx_core::store::Store>> {
+        match &self.switch {
+            Switch::Setting(store) => Some(std::sync::Arc::clone(store)),
+            #[cfg(test)]
+            Switch::Fixed(_) => None,
+        }
+    }
+
+    /// The operator's saved manual enable switch. Readiness probes are shown
+    /// in Developer settings but never consulted when this value is set.
+    pub(crate) async fn cluster_enabled(&self) -> bool {
+        let Some(store) = self.catalog() else {
+            return false;
+        };
+        store
+            .get_setting(plurx_core::store::keys::SUBTITLE_CLUSTER_SOURCES)
+            .await
+            .ok()
+            .is_some_and(|value| plurx_core::store::stored_switch(value.as_deref(), false))
+    }
+
+    pub(crate) fn node_id(&self) -> Option<&str> {
+        self.node_id.as_deref()
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     async fn is_enabled(&self) -> bool {
@@ -449,11 +731,16 @@ pub(crate) struct KeptTrack {
     dir: PathBuf,
     path: PathBuf,
     sha256: String,
+    format: RepresentationFormat,
 }
 
 impl KeptTrack {
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn format(&self) -> RepresentationFormat {
+        self.format
     }
 }
 
@@ -517,6 +804,308 @@ pub(crate) async fn lookup(
         Lookup::Miss(reason) => record_miss(consumer, *reason),
     }
     result
+}
+
+/// Fetch one representation from a reachable holder. Call this from a
+/// detached subtitle flight, never from a segment or session-start handler:
+/// the peer budget can be eight seconds. A false answer leaves the caller's
+/// existing miss path intact.
+pub(crate) async fn hydrate_from_peers(
+    access: &StoreAccess,
+    file: &MediaFile,
+    ordinal: i64,
+    format: RepresentationFormat,
+) -> bool {
+    let (Some(catalog), Some(node_id), Some(membership)) = (
+        access.catalog(),
+        access.node_id(),
+        access.membership.as_ref(),
+    ) else {
+        return false;
+    };
+    if !access.is_enabled().await || ordinal < 0 || file.size < 0 {
+        return false;
+    }
+    let rows = match catalog
+        .list_subtitle_source_publications(file.id, file.size, file.mtime)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::debug!(file_id = file.id, %error, "listing subtitle-source holders");
+            return false;
+        }
+    };
+    if !rows.iter().any(|row| {
+        row.ordinal == ordinal && row.format == format.publication_name() && row.verdict == "kept"
+    }) {
+        return false;
+    }
+
+    // A new held descriptor is attested on this node. `object_version` is
+    // intentionally not sent across hosts: its dev/ino values are local.
+    let attested =
+        match crate::fragment_index_cluster::attest_source(node_id, file, None, &|_| {}).await {
+            Ok(attested) => attested,
+            Err(error) => {
+                tracing::debug!(file_id = file.id, %error, "attesting hydration source");
+                return false;
+            }
+        };
+    let Ok(metadata) = attested.handle.metadata() else {
+        return false;
+    };
+    let bound = crate::fragment_index_cluster::source_stamp(&metadata);
+    if bound.size != file.size as u64 || bound.mtime != file.mtime {
+        return false;
+    }
+    let peers = match membership.media_peers().await {
+        Ok(peers) => peers,
+        Err(error) => {
+            tracing::debug!(file_id = file.id, %error, "listing subtitle-source peers");
+            return false;
+        }
+    };
+    let reachable: std::collections::HashMap<_, _> = peers
+        .into_iter()
+        .filter(|peer| peer.reachable && peer.node_id != node_id)
+        .filter_map(|peer| peer.http_base.map(|base| (peer.node_id, base)))
+        .collect();
+    let transport = PeerTransport::new(membership.clone());
+    for row in rows {
+        if row.ordinal != ordinal
+            || row.format != format.publication_name()
+            || row.verdict != "kept"
+            || row.source_attestation != attested.observation.source_sha256
+            || row.bytes <= 0
+            || row.bytes as u64 > MAX_TRACK_BYTES
+        {
+            continue;
+        }
+        let Some(base) = reachable.get(&row.node_id) else {
+            continue;
+        };
+        let path = format!(
+            "/internal/media/subtitle-source/{}/{}/{}",
+            file.id,
+            ordinal,
+            format.publication_name()
+        );
+        let response = transport
+            .request(
+                &row.node_id,
+                base,
+                reqwest::Method::GET,
+                &path,
+                Vec::new(),
+                tokio::time::Instant::now() + Duration::from_secs(8),
+                MAX_TRACK_BYTES as usize,
+                PeerAuthMode::ExactRequest,
+            )
+            .await;
+        let Ok(response) = response else { continue };
+        match peer_artifact_verdict(&row, &response) {
+            PeerArtifactVerdict::Forget => {
+                forget_stale_publication(catalog, &row).await;
+                continue;
+            }
+            PeerArtifactVerdict::Skip => continue,
+            PeerArtifactVerdict::Accept => {}
+        }
+        if install_hydrated(access, file, &attested.handle, bound, &row, &response.body).await {
+            crate::telemetry::record_subtitle_source(
+                crate::telemetry::SubtitleSourceMetric::HydrationFetchedBytes(
+                    response.body.len() as u64
+                ),
+            );
+            crate::telemetry::record_subtitle_source(
+                crate::telemetry::SubtitleSourceMetric::LookupHydrated,
+            );
+            return true;
+        }
+    }
+    false
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerArtifactVerdict {
+    Accept,
+    Skip,
+    Forget,
+}
+
+fn peer_artifact_verdict(
+    row: &SubtitleSourcePublication,
+    response: &crate::http::peer_transport::PeerResponse,
+) -> PeerArtifactVerdict {
+    if response.status == reqwest::StatusCode::NOT_FOUND {
+        return PeerArtifactVerdict::Forget;
+    }
+    if !response.status.is_success() {
+        return PeerArtifactVerdict::Skip;
+    }
+    if response.body.len() as i64 != row.bytes
+        || hex::encode(Sha256::digest(&response.body)) != row.sha256
+    {
+        return PeerArtifactVerdict::Forget;
+    }
+    PeerArtifactVerdict::Accept
+}
+
+async fn forget_stale_publication(
+    catalog: &dyn plurx_core::store::Store,
+    row: &SubtitleSourcePublication,
+) {
+    if let Err(error) = catalog
+        .delete_subtitle_source_publication(
+            row.file_id,
+            row.source_size,
+            row.source_mtime,
+            &row.node_id,
+            row.ordinal,
+            &row.format,
+        )
+        .await
+    {
+        tracing::debug!(file_id = row.file_id, ordinal = row.ordinal, %error, "forgetting stale subtitle-source holder");
+    }
+}
+
+async fn install_hydrated(
+    access: &StoreAccess,
+    file: &MediaFile,
+    held: &std::fs::File,
+    bound: SourceStamp,
+    row: &SubtitleSourcePublication,
+    bytes: &[u8],
+) -> bool {
+    use tokio::io::AsyncWriteExt;
+
+    let Some(format) = RepresentationFormat::from_publication_name(&row.format) else {
+        return false;
+    };
+    let Some(name) = representation_file_name(row.ordinal, format, &row.sha256) else {
+        return false;
+    };
+    let dir = file_dir(&access.root, file.id);
+    let _guard = file_lock(&access.root, file.id).lock().await;
+    if tokio::fs::create_dir_all(&dir).await.is_err() {
+        return false;
+    }
+    let old = read_manifest(&dir).await;
+    if old.as_ref().is_some_and(|manifest| {
+        manifest.version == MANIFEST_VERSION
+            && manifest.file_id == file.id
+            && manifest.source == bound
+            && manifest.track(row.ordinal).is_some_and(|track| {
+                track.representation(format).is_some_and(|representation| {
+                    representation.origin == RepresentationOrigin::Extracted
+                        && representation.verdict == Verdict::Kept
+                })
+            })
+    }) {
+        return true;
+    }
+    let temporary = dir.join(format!(".hydrate-{}.tmp", uuid::Uuid::new_v4().simple()));
+    let write = async {
+        let mut staged = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .await?;
+        staged.write_all(bytes).await?;
+        staged.sync_all().await?;
+        drop(staged);
+        tokio::fs::rename(&temporary, dir.join(&name)).await
+    }
+    .await;
+    if write.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return false;
+    }
+
+    // The original descriptor remains open from attestation through rename.
+    // Also compare the current pathname, since replacing the directory entry
+    // can leave a held inode's fstat unchanged.
+    if !hydration_source_still_bound(held, &file.path, bound).await {
+        if !old.as_ref().is_some_and(|manifest| {
+            manifest.tracks.iter().any(|track| {
+                track
+                    .representations
+                    .iter()
+                    .any(|representation| representation.file.as_deref() == Some(name.as_str()))
+            })
+        }) {
+            let _ = tokio::fs::remove_file(dir.join(&name)).await;
+        }
+        return false;
+    }
+
+    let kind = match row.kind.as_str() {
+        "pgs" => TrackKind::Pgs,
+        "text" => TrackKind::Text,
+        "text_styled" => TrackKind::TextStyled,
+        _ => return false,
+    };
+    let attempts = row.attempts.clamp(0, i64::from(u32::MAX)) as u32;
+    let representation = RepresentationEntry {
+        format,
+        origin: RepresentationOrigin::Hydrated,
+        verdict: Verdict::Kept,
+        attempts,
+        file: Some(name.clone()),
+        sha256: Some(row.sha256.clone()),
+        bytes: bytes.len() as u64,
+    };
+    let incoming = Manifest {
+        version: MANIFEST_VERSION,
+        file_id: file.id,
+        source: bound,
+        ordinals: vec![row.ordinal],
+        tracks: vec![TrackEntry {
+            ordinal: row.ordinal,
+            kind,
+            representations: vec![representation],
+            verdict: Verdict::Kept,
+            attempts,
+            file: Some(name.clone()),
+            sha256: Some(row.sha256.clone()),
+        }],
+    };
+    let manifest = merge_manifest(incoming, old.as_ref());
+    if write_manifest_atomic(&dir, &manifest).await.is_err() {
+        return false;
+    }
+    let mut publication = row.clone();
+    publication.node_id = access.node_id.clone().unwrap_or_default();
+    publication.origin = "hydrated".to_owned();
+    publication.published_at_ms = crate::fragment_index_cluster::unix_ms();
+    if let Some(catalog) = access.catalog() {
+        if let Err(error) = catalog
+            .upsert_subtitle_source_publication(&publication)
+            .await
+        {
+            tracing::debug!(file_id = file.id, ordinal = row.ordinal, %error, "publishing hydrated subtitle-source row");
+        }
+    }
+    record_access(&dir).await;
+    true
+}
+
+async fn hydration_source_still_bound(
+    held: &std::fs::File,
+    path: &Path,
+    bound: SourceStamp,
+) -> bool {
+    let held_after = held
+        .metadata()
+        .ok()
+        .map(|metadata| crate::fragment_index_cluster::source_stamp(&metadata));
+    let path_after = tokio::fs::metadata(path)
+        .await
+        .ok()
+        .map(|metadata| crate::fragment_index_cluster::source_stamp(&metadata));
+    held_after == Some(bound) && path_after == Some(bound)
 }
 
 /// Whether the store holds `ordinal` as a real track with no cues, for the
@@ -635,24 +1224,42 @@ async fn classify(
     let Some(live) = live.stamp().await else {
         return Lookup::Miss(MissReason::Stale);
     };
-    if !manifest.is_current(file.id, &live, consumer) {
+    // A partial manifest can answer one representation while another track
+    // or representation is still being produced or has failed. The old
+    // whole-file latch remains available to producer scheduling, but it must
+    // not hide a verified, current artefact from a consumer.
+    if manifest.version != MANIFEST_VERSION
+        || manifest.file_id != file.id
+        || !manifest.source_matches(&live, consumer)
+    {
         return Lookup::Miss(MissReason::Stale);
     }
     let Some(track) = manifest.track(ordinal) else {
         return Lookup::Miss(MissReason::Absent);
     };
-    match track.verdict {
+    let format = match consumer {
+        Consumer::Vtt => RepresentationFormat::Webvtt,
+        Consumer::Overlay => RepresentationFormat::Sup,
+        Consumer::Burn if track.kind == TrackKind::TextStyled => RepresentationFormat::Matroska,
+        Consumer::Burn => RepresentationFormat::Sup,
+    };
+    let Some(representation) = track.representation(format) else {
+        return Lookup::Miss(MissReason::Absent);
+    };
+    match representation.verdict {
         Verdict::Empty => Lookup::Empty(dir),
         Verdict::Malformed | Verdict::Transient => Lookup::Miss(MissReason::Absent),
         Verdict::Kept => {
             // The name is derived, not trusted: a manifest naming anything
             // other than this track's content name — a path, another track's
             // file — is not one this build wrote.
-            let (Some(name), Some(sha256)) = (track.file.as_deref(), track.sha256.as_deref())
-            else {
+            let (Some(name), Some(sha256)) = (
+                representation.file.as_deref(),
+                representation.sha256.as_deref(),
+            ) else {
                 return Lookup::Miss(MissReason::Stale);
             };
-            if sup_file_name(ordinal, sha256).as_deref() != Some(name) {
+            if representation_file_name(ordinal, format, sha256).as_deref() != Some(name) {
                 return Lookup::Miss(MissReason::Stale);
             }
             Lookup::Kept(KeptTrack {
@@ -660,6 +1267,7 @@ async fn classify(
                 path: dir.join(name),
                 dir,
                 sha256: sha256.to_owned(),
+                format,
             })
         }
     }
@@ -705,6 +1313,41 @@ pub(crate) async fn open_verified(kept: &KeptTrack) -> Option<std::fs::File> {
         .await
         .unwrap_or(Opened::Miss(MissReason::Absent));
     finish_open(kept, opened).await
+}
+
+/// Open only a representation named by this node's readable manifest for a
+/// peer request. The returned descriptor has already been hashed and rewound;
+/// callers can stream it without trusting a path or a publication row.
+pub(crate) async fn open_verified_for_peer(
+    root: &Path,
+    file_id: i64,
+    ordinal: i64,
+    format: RepresentationFormat,
+) -> Option<(std::fs::File, u64)> {
+    let dir = file_dir(root, file_id);
+    let manifest = read_manifest(&dir).await?;
+    if manifest.file_id != file_id {
+        return None;
+    }
+    let representation = manifest.track(ordinal)?.representation(format)?;
+    if representation.verdict != Verdict::Kept {
+        return None;
+    }
+    let name = representation.file.as_deref()?;
+    let sha256 = representation.sha256.as_deref()?;
+    if representation_file_name(ordinal, format, sha256).as_deref() != Some(name) {
+        return None;
+    }
+    let path = dir.join(name);
+    let expected = sha256.to_owned();
+    let opened = tokio::task::spawn_blocking(move || open_and_hash(&path, &expected, None))
+        .await
+        .ok()?;
+    let Opened::Verified(file) = opened else {
+        return None;
+    };
+    let bytes = file.metadata().ok()?.len();
+    Some((file, bytes))
 }
 
 /// Copy a kept track to `destination` while verifying it, in one read.
@@ -805,21 +1448,24 @@ fn open_and_hash(path: &Path, expected: &str, copy_to: Option<&Path>) -> Opened 
 // ---------------------------------------------------------------------------
 // Counters.
 
-static LOOKUP_HITS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
-static LOOKUP_EMPTY: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
-static LOOKUP_MISSES: [[AtomicU64; 8]; 2] = [const { [const { AtomicU64::new(0) }; 8] }; 2];
+static LOOKUP_HITS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+static LOOKUP_EMPTY: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+static LOOKUP_MISSES: [[AtomicU64; 8]; 3] = [const { [const { AtomicU64::new(0) }; 8] }; 3];
 static FALLBACKS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
 fn record_hit(consumer: Consumer) {
     LOOKUP_HITS[consumer.index()].fetch_add(1, Ordering::Relaxed);
+    crate::telemetry::record_subtitle_source(crate::telemetry::SubtitleSourceMetric::LookupHit);
 }
 
 fn record_empty(consumer: Consumer) {
     LOOKUP_EMPTY[consumer.index()].fetch_add(1, Ordering::Relaxed);
+    crate::telemetry::record_subtitle_source(crate::telemetry::SubtitleSourceMetric::LookupHit);
 }
 
 fn record_miss(consumer: Consumer, reason: MissReason) {
     LOOKUP_MISSES[consumer.index()][reason.index()].fetch_add(1, Ordering::Relaxed);
+    crate::telemetry::record_subtitle_source(crate::telemetry::SubtitleSourceMetric::LookupMiss);
 }
 
 /// Count a `kept` lookup whose bytes this caller did not open itself: it
@@ -838,7 +1484,7 @@ pub(crate) fn record_fallback(reason: Fallback) {
 /// Lookups answered since this process started, as `(hits, empty, misses)`
 /// summed over both consumers. For the Developer card.
 pub(crate) fn lookup_snapshot() -> (u64, u64, u64) {
-    let sum = |cells: &[AtomicU64; 2]| -> u64 {
+    let sum = |cells: &[AtomicU64; 3]| -> u64 {
         cells.iter().map(|cell| cell.load(Ordering::Relaxed)).sum()
     };
     let misses = LOOKUP_MISSES
@@ -978,27 +1624,51 @@ pub(crate) struct SweepOutcome {
 /// - at most `limit` directories are examined per call.
 pub(crate) async fn sweep(
     store: &dyn plurx_core::store::Store,
+    node_id: &str,
     root: &Path,
     cursor: Option<&str>,
     limit: usize,
     max_bytes: u64,
 ) -> Result<SweepOutcome, String> {
-    sweep_with(root, cursor, limit, max_bytes, |file_id| async move {
-        store
-            .get_file(file_id)
-            .await
-            .map(|row| row.map(|file| (file.size, file.mtime)))
-            .map_err(|error| error.to_string())
-    })
+    sweep_with_rows(
+        root,
+        cursor,
+        limit,
+        max_bytes,
+        Some((store, node_id)),
+        |file_id| async move {
+            store
+                .get_file(file_id)
+                .await
+                .map(|row| row.map(|file| (file.size, file.mtime)))
+                .map_err(|error| error.to_string())
+        },
+    )
     .await
 }
 
 /// The sweep with the catalog read injected, so a test can make it fail.
+#[cfg(test)]
 pub(crate) async fn sweep_with<F, Fut>(
     root: &Path,
     cursor: Option<&str>,
     limit: usize,
     max_bytes: u64,
+    row: F,
+) -> Result<SweepOutcome, String>
+where
+    F: Fn(i64) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<(i64, i64)>, String>>,
+{
+    sweep_with_rows(root, cursor, limit, max_bytes, None, row).await
+}
+
+async fn sweep_with_rows<F, Fut>(
+    root: &Path,
+    cursor: Option<&str>,
+    limit: usize,
+    max_bytes: u64,
+    publication_owner: Option<(&dyn plurx_core::store::Store, &str)>,
     row: F,
 ) -> Result<SweepOutcome, String>
 where
@@ -1011,7 +1681,7 @@ where
     let mut ids = match list_file_dirs(root).await {
         Ok(ids) => ids,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SweepOutcome::default())
+            return Ok(SweepOutcome::default());
         }
         Err(error) => return Err(format!("list {}: {error}", root.display())),
     };
@@ -1021,6 +1691,7 @@ where
     let mut outcome = SweepOutcome::default();
     let mut last = after;
     for file_id in ids.into_iter().take(page_len) {
+        let _guard = file_lock(root, file_id).lock().await;
         let dir = file_dir(root, file_id);
         let doomed = match read_manifest(&dir).await {
             Some(manifest) => match row(file_id).await? {
@@ -1042,7 +1713,10 @@ where
         last = Some(file_id);
         if doomed {
             match remove_dir(&dir).await {
-                Ok(()) => outcome.removed += 1,
+                Ok(()) => {
+                    outcome.removed += 1;
+                    delete_swept_publications(publication_owner, file_id).await;
+                }
                 Err(error) => {
                     tracing::debug!(dir = %dir.display(), %error, "stored subtitle directory is busy; retrying next pass");
                     outcome.deferred += 1;
@@ -1051,7 +1725,7 @@ where
         }
     }
     if exhausted {
-        let (evicted, deferred, footprint) = enforce_cap(root, max_bytes).await;
+        let (evicted, deferred, footprint) = enforce_cap(root, max_bytes, publication_owner).await;
         outcome.footprint = Some(footprint);
         outcome.evicted = evicted;
         outcome.deferred += deferred;
@@ -1060,6 +1734,20 @@ where
         outcome.next = last.map(|id| format!("f{id}")).unwrap_or_default();
     }
     Ok(outcome)
+}
+
+async fn delete_swept_publications(
+    publication_owner: Option<(&dyn plurx_core::store::Store, &str)>,
+    file_id: i64,
+) {
+    if let Some((catalog, node_id)) = publication_owner {
+        if let Err(error) = catalog
+            .delete_subtitle_source_publications(file_id, node_id)
+            .await
+        {
+            tracing::debug!(file_id, %error, "deleting swept subtitle-source publications");
+        }
+    }
 }
 
 async fn list_file_dirs(root: &Path) -> std::io::Result<Vec<i64>> {
@@ -1091,6 +1779,32 @@ pub(crate) async fn read_manifest(dir: &Path) -> Option<Manifest> {
     parse_manifest(&bytes).ok()
 }
 
+async fn write_manifest_atomic(dir: &Path, manifest: &Manifest) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let bytes = serde_json::to_vec(manifest).map_err(std::io::Error::other)?;
+    let temporary = dir.join(format!(
+        ".{MANIFEST_NAME}.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = async {
+        let mut staged = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .await?;
+        staged.write_all(&bytes).await?;
+        staged.sync_all().await?;
+        drop(staged);
+        tokio::fs::rename(&temporary, dir.join(MANIFEST_NAME)).await
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(temporary).await;
+    }
+    result
+}
+
 /// Remove `.sup` files the manifest does not name and that are older than
 /// the abandonment grace — never a young one, which may be a publish between
 /// its rename and its manifest swap. Returns how many went.
@@ -1104,11 +1818,16 @@ async fn remove_unnamed_tracks(dir: &Path, manifest: &Manifest) -> usize {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.ends_with(".sup")
-            || manifest
-                .tracks
-                .iter()
-                .any(|track| track.file.as_deref() == Some(name))
+        if ![".sup", ".vtt", ".mks"]
+            .iter()
+            .any(|extension| name.ends_with(extension))
+            || manifest.tracks.iter().any(|track| {
+                track.file.as_deref() == Some(name)
+                    || track
+                        .representations
+                        .iter()
+                        .any(|representation| representation.file.as_deref() == Some(name))
+            })
         {
             continue;
         }
@@ -1140,7 +1859,11 @@ async fn remove_dir(dir: &Path) -> std::io::Result<()> {
 /// at or under `max_bytes`. Returns `(evicted, deferred, footprint)`.
 /// Also measures the store as it walks, so the footprint the product shows
 /// costs no second walk.
-async fn enforce_cap(root: &Path, max_bytes: u64) -> (usize, usize, Footprint) {
+async fn enforce_cap(
+    root: &Path,
+    max_bytes: u64,
+    publication_owner: Option<(&dyn plurx_core::store::Store, &str)>,
+) -> (usize, usize, Footprint) {
     let Ok(ids) = list_file_dirs(root).await else {
         return (
             0,
@@ -1162,9 +1885,9 @@ async fn enforce_cap(root: &Path, max_bytes: u64) -> (usize, usize, Footprint) {
                 .unwrap_or(std::time::UNIX_EPOCH),
         };
         let size = directory_bytes(&dir).await;
-        dirs.push((accessed, size, dir));
+        dirs.push((accessed, size, file_id, dir));
     }
-    let mut total: u64 = dirs.iter().map(|(_, size, _)| *size).sum();
+    let mut total: u64 = dirs.iter().map(|(_, size, _, _)| *size).sum();
     let mut remaining = dirs.len() as u64;
     let footprint = |total: u64, remaining: u64| Footprint {
         bytes: total,
@@ -1174,17 +1897,19 @@ async fn enforce_cap(root: &Path, max_bytes: u64) -> (usize, usize, Footprint) {
     if total <= max_bytes {
         return (0, 0, footprint(total, remaining));
     }
-    dirs.sort_by_key(|(accessed, _, _)| *accessed);
+    dirs.sort_by_key(|(accessed, _, _, _)| *accessed);
     let (mut evicted, mut deferred) = (0, 0);
-    for (_, size, dir) in dirs {
+    for (_, size, file_id, dir) in dirs {
         if total <= max_bytes {
             break;
         }
+        let _guard = file_lock(root, file_id).lock().await;
         match remove_dir(&dir).await {
             Ok(()) => {
                 evicted += 1;
                 remaining = remaining.saturating_sub(1);
                 total = total.saturating_sub(size);
+                delete_swept_publications(publication_owner, file_id).await;
             }
             // Still counted against the cap, so the next-oldest goes instead
             // and this one is retried on the next pass.
@@ -1341,6 +2066,8 @@ pub(crate) mod testing {
         std::fs::write(dir.join(&name), bytes).expect("stored track");
         TrackEntry {
             ordinal,
+            kind: TrackKind::Pgs,
+            representations: Vec::new(),
             verdict: Verdict::Kept,
             attempts: 1,
             file: Some(name),
@@ -1351,6 +2078,8 @@ pub(crate) mod testing {
     pub(crate) fn settled(ordinal: i64, verdict: Verdict) -> TrackEntry {
         TrackEntry {
             ordinal,
+            kind: TrackKind::Pgs,
+            representations: Vec::new(),
             verdict,
             attempts: 1,
             file: None,
@@ -1391,6 +2120,372 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::*;
     use super::*;
+    use plurx_core::store::ClusterFragmentIndexStore;
+
+    fn publication(
+        ordinal: i64,
+        origin: &str,
+        verdict: &str,
+        attempts: i64,
+    ) -> SubtitleSourcePublication {
+        SubtitleSourcePublication {
+            file_id: 7,
+            source_size: 10,
+            source_mtime: 20,
+            source_attestation: "a".repeat(64),
+            node_id: "nuc4".into(),
+            ordinal,
+            kind: "text".into(),
+            format: "webvtt".into(),
+            verdict: verdict.into(),
+            attempts,
+            origin: origin.into(),
+            sha256: if verdict == "kept" {
+                "b".repeat(64)
+            } else {
+                String::new()
+            },
+            bytes: if verdict == "kept" { 12 } else { 0 },
+            published_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn old_pgs_only_manifest_does_not_count_as_text_coverage() {
+        let mut pgs = publication(0, "extracted", "kept", 1);
+        pgs.kind = "pgs".into();
+        pgs.format = "sup".into();
+        assert!(extracted_ordinal_covered(&[pgs.clone()], 0));
+        assert!(!extracted_ordinal_covered(&[pgs], 1));
+        assert!(!extracted_ordinal_covered(
+            &[publication(1, "hydrated", "kept", 1)],
+            1
+        ));
+    }
+
+    #[test]
+    fn malformed_empty_and_exhausted_transient_verdicts_take_their_documented_paths() {
+        for verdict in ["malformed", "empty"] {
+            assert!(extracted_ordinal_covered(
+                &[publication(2, "extracted", verdict, 1)],
+                2
+            ));
+        }
+        assert!(!extracted_ordinal_covered(
+            &[publication(2, "extracted", "transient", 2)],
+            2
+        ));
+        assert!(extracted_ordinal_covered(
+            &[publication(2, "extracted", "transient", 3)],
+            2
+        ));
+    }
+
+    #[tokio::test]
+    async fn hydrate_two_different_ordinals_concurrently_and_retain_both() {
+        let base = crate::test_tempdir().expect("store");
+        let root = base.path().join(STORE_DIR);
+        let dir = file_dir(&root, 7);
+        tokio::fs::create_dir_all(&dir).await.expect("directory");
+        let source = stamp(10, 20, Some(1), Some(2));
+        let publish = |ordinal| {
+            let root = root.clone();
+            let dir = dir.clone();
+            async move {
+                let _guard = file_lock(&root, 7).lock().await;
+                let previous = read_manifest(&dir).await;
+                let incoming = Manifest {
+                    version: MANIFEST_VERSION,
+                    file_id: 7,
+                    source,
+                    ordinals: vec![ordinal],
+                    tracks: vec![TrackEntry {
+                        ordinal,
+                        kind: TrackKind::Text,
+                        representations: vec![RepresentationEntry {
+                            format: RepresentationFormat::Webvtt,
+                            origin: RepresentationOrigin::Hydrated,
+                            verdict: Verdict::Empty,
+                            attempts: 1,
+                            file: None,
+                            sha256: None,
+                            bytes: 0,
+                        }],
+                        verdict: Verdict::Empty,
+                        attempts: 1,
+                        file: None,
+                        sha256: None,
+                    }],
+                };
+                write_manifest_atomic(&dir, &merge_manifest(incoming, previous.as_ref()))
+                    .await
+                    .expect("manifest");
+            }
+        };
+        tokio::join!(publish(0), publish(1));
+        let merged = read_manifest(&dir).await.expect("merged");
+        assert_eq!(merged.ordinals, vec![0, 1]);
+        assert!(merged.track(0).is_some());
+        assert!(merged.track(1).is_some());
+    }
+
+    #[tokio::test]
+    async fn replace_receiver_source_during_hydration_discards_the_entry() {
+        let base = crate::test_tempdir().expect("source");
+        let path = base.path().join("source.mkv");
+        std::fs::write(&path, b"first").expect("first");
+        let held = std::fs::File::open(&path).expect("held source");
+        let bound = crate::fragment_index_cluster::source_stamp(&held.metadata().expect("fstat"));
+        assert!(hydration_source_still_bound(&held, &path, bound).await);
+        let replacement = base.path().join("replacement.mkv");
+        std::fs::write(&replacement, b"first").expect("replacement");
+        std::fs::rename(&replacement, &path).expect("replace");
+        assert!(!hydration_source_still_bound(&held, &path, bound).await);
+    }
+
+    #[tokio::test]
+    async fn hydrate_between_different_inodes_binds_burn_to_the_receivers_inode() {
+        let base = crate::test_tempdir().expect("store");
+        let runtime = base.path().join("runtime");
+        let publisher = base.path().join("publisher.mkv");
+        let receiver = base.path().join("receiver.mkv");
+        std::fs::write(&publisher, b"same source bytes").expect("publisher");
+        std::fs::write(&receiver, b"same source bytes").expect("receiver");
+        let publisher_stamp = stamp_of(&publisher);
+        let receiver_stamp = stamp_of(&receiver);
+        assert_ne!(publisher_stamp.ino, receiver_stamp.ino);
+        let file = media_file(
+            72,
+            receiver.clone(),
+            receiver_stamp.size as i64,
+            receiver_stamp.mtime,
+        );
+        let catalog: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
+        let access = StoreAccess::from_setting(catalog.clone(), &runtime).on_node(Some("receiver"));
+        let held = std::fs::File::open(&receiver).expect("receiver fd");
+        let bytes = b"PG receiver bytes";
+        let mut row = publication(0, "extracted", "kept", 1);
+        row.file_id = file.id;
+        row.source_size = file.size;
+        row.source_mtime = file.mtime;
+        row.node_id = "publisher".into();
+        row.kind = "pgs".into();
+        row.format = "sup".into();
+        row.sha256 = hex::encode(Sha256::digest(bytes));
+        row.bytes = bytes.len() as i64;
+        assert!(install_hydrated(&access, &file, &held, receiver_stamp, &row, bytes).await);
+        assert!(matches!(
+            lookup(
+                &access,
+                Consumer::Burn,
+                &file,
+                0,
+                Live::Handle(&std::fs::File::open(&receiver).expect("receiver fd"))
+            )
+            .await,
+            Lookup::Kept(_)
+        ));
+        assert!(matches!(
+            lookup(
+                &access,
+                Consumer::Burn,
+                &file,
+                0,
+                Live::Handle(&std::fs::File::open(&publisher).expect("publisher fd"))
+            )
+            .await,
+            Lookup::Miss(MissReason::Stale)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_row_sha_mismatch_is_forgotten_and_the_next_holder_tried() {
+        let catalog = plurx_core::store::SqliteStore::open_in_memory().expect("catalog");
+        let mut stale = publication(0, "extracted", "kept", 1);
+        stale.node_id = "first".into();
+        let mut next = stale.clone();
+        next.node_id = "second".into();
+        next.sha256 = hex::encode(Sha256::digest(b"verified"));
+        next.bytes = 8;
+        catalog
+            .upsert_subtitle_source_publication(&stale)
+            .await
+            .expect("first");
+        catalog
+            .upsert_subtitle_source_publication(&next)
+            .await
+            .expect("second");
+        let bad = crate::http::peer_transport::PeerResponse {
+            status: reqwest::StatusCode::OK,
+            body: b"invalid!".to_vec(),
+        };
+        assert_eq!(
+            peer_artifact_verdict(&stale, &bad),
+            PeerArtifactVerdict::Forget
+        );
+        forget_stale_publication(&catalog, &stale).await;
+        let good = crate::http::peer_transport::PeerResponse {
+            status: reqwest::StatusCode::OK,
+            body: b"verified".to_vec(),
+        };
+        assert_eq!(
+            peer_artifact_verdict(&next, &good),
+            PeerArtifactVerdict::Accept
+        );
+        let rows = catalog
+            .list_subtitle_source_publications(7, 10, 20)
+            .await
+            .expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].node_id, "second");
+    }
+
+    #[test]
+    fn a_404_holder_is_skipped_and_forgotten() {
+        let holder = publication(0, "extracted", "kept", 1);
+        let missing = crate::http::peer_transport::PeerResponse {
+            status: reqwest::StatusCode::NOT_FOUND,
+            body: Vec::new(),
+        };
+        assert_eq!(
+            peer_artifact_verdict(&holder, &missing),
+            PeerArtifactVerdict::Forget
+        );
+        let unavailable = crate::http::peer_transport::PeerResponse {
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            body: Vec::new(),
+        };
+        assert_eq!(
+            peer_artifact_verdict(&holder, &unavailable),
+            PeerArtifactVerdict::Skip
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sweep_deletes_its_publication_rows_with_the_directory() {
+        let base = crate::test_tempdir().expect("store");
+        let root = base.path().join(STORE_DIR);
+        write_manifest(
+            &root,
+            7,
+            stamp(10, 20, None, None),
+            vec![settled(0, Verdict::Empty)],
+        );
+        let catalog = plurx_core::store::SqliteStore::open_in_memory().expect("catalog");
+        let row = publication(0, "extracted", "empty", 1);
+        catalog
+            .upsert_subtitle_source_publication(&row)
+            .await
+            .expect("row");
+        let outcome = sweep(&catalog, "nuc4", &root, None, 256, u64::MAX)
+            .await
+            .expect("sweep");
+        assert_eq!(outcome.removed, 1);
+        assert!(!file_dir(&root, 7).exists());
+        assert!(catalog
+            .list_subtitle_source_publications(7, 10, 20)
+            .await
+            .expect("rows")
+            .is_empty());
+    }
+
+    #[test]
+    fn legacy_pgs_manifest_reads_unchanged() {
+        let json = r#"{"version":1,"file_id":7,"source":{"size":10,"mtime":20,"dev":null,"ino":null},"ordinals":[0],"tracks":[{"ordinal":0,"verdict":"empty","attempts":1}]}"#;
+        let manifest = parse_manifest(json.as_bytes()).expect("legacy manifest");
+        let track = manifest.track(0).expect("PGS track");
+        assert_eq!(track.kind, TrackKind::Pgs);
+        assert!(track.representations.is_empty());
+        assert_eq!(
+            track
+                .representation(RepresentationFormat::Sup)
+                .expect("legacy sup")
+                .verdict,
+            Verdict::Empty
+        );
+    }
+
+    #[test]
+    fn text_entry_misses_for_legacy_reader() {
+        // A pre-M1 reader ignores the new fields and can only open the
+        // legacy `.sup` name. A text entry carries no such name.
+        let entry = TrackEntry {
+            ordinal: 1,
+            kind: TrackKind::Text,
+            representations: vec![RepresentationEntry {
+                format: RepresentationFormat::Webvtt,
+                origin: RepresentationOrigin::Extracted,
+                verdict: Verdict::Kept,
+                attempts: 1,
+                file: Some("s1-0123456789abcdef.vtt".into()),
+                sha256: Some("0".repeat(64)),
+                bytes: 8,
+            }],
+            verdict: Verdict::Kept,
+            attempts: 1,
+            file: None,
+            sha256: None,
+        };
+        let legacy: serde_json::Value = serde_json::to_value(&entry).expect("serialize");
+        assert!(legacy.get("file").is_none());
+        assert!(entry.representation(RepresentationFormat::Sup).is_none());
+    }
+
+    #[tokio::test]
+    async fn partial_styled_vtt_kept_mks_malformed_serves_vtt_not_burn() {
+        let base = crate::test_tempdir().expect("store");
+        let root = base.path().join(STORE_DIR);
+        let source = base.path().join("source.mkv");
+        std::fs::write(&source, b"source bytes").expect("source");
+        let live = stamp_of(&source);
+        let file = media_file(99, source, live.size as i64, live.mtime);
+        let dir = file_dir(&root, file.id);
+        std::fs::create_dir_all(&dir).expect("directory");
+        let bytes = b"WEBVTT\n\n";
+        let sha256 = hex::encode(Sha256::digest(bytes));
+        let name =
+            representation_file_name(0, RepresentationFormat::Webvtt, &sha256).expect("name");
+        std::fs::write(dir.join(&name), bytes).expect("VTT");
+        let entry = TrackEntry {
+            ordinal: 0,
+            kind: TrackKind::TextStyled,
+            representations: vec![
+                RepresentationEntry {
+                    format: RepresentationFormat::Webvtt,
+                    origin: RepresentationOrigin::Extracted,
+                    verdict: Verdict::Kept,
+                    attempts: 1,
+                    file: Some(name),
+                    sha256: Some(sha256),
+                    bytes: bytes.len() as u64,
+                },
+                RepresentationEntry {
+                    format: RepresentationFormat::Matroska,
+                    origin: RepresentationOrigin::Extracted,
+                    verdict: Verdict::Malformed,
+                    attempts: 1,
+                    file: None,
+                    sha256: None,
+                    bytes: 0,
+                },
+            ],
+            verdict: Verdict::Kept,
+            attempts: 1,
+            file: None,
+            sha256: None,
+        };
+        write_manifest(&root, file.id, live, vec![entry]);
+        let access = StoreAccess::new(root, true);
+        assert!(matches!(
+            lookup(&access, Consumer::Vtt, &file, 0, Live::Stamp(live)).await,
+            Lookup::Kept(_)
+        ));
+        assert!(matches!(
+            lookup(&access, Consumer::Burn, &file, 0, Live::Stamp(live)).await,
+            Lookup::Miss(MissReason::Absent)
+        ));
+    }
 
     fn media_file(id: i64, path: PathBuf, size: i64, mtime: i64) -> MediaFile {
         MediaFile {
@@ -1444,6 +2539,8 @@ mod tests {
             tracks: vec![
                 TrackEntry {
                     ordinal: 0,
+                    kind: TrackKind::Pgs,
+                    representations: Vec::new(),
                     verdict: Verdict::Kept,
                     attempts: 1,
                     file: Some(sup_file_name(0, &"a".repeat(64)).expect("name")),
@@ -1570,7 +2667,7 @@ mod tests {
         let entry = kept(&dir, 0, b"PGS bytes");
         write_manifest(&root, 7, live, vec![entry.clone()]);
 
-        for consumer in Consumer::ALL {
+        for consumer in [Consumer::Overlay, Consumer::Burn] {
             let Lookup::Kept(kept_track) =
                 lookup(&access, consumer, &file, 0, Live::Stamp(live)).await
             else {

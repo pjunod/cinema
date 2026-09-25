@@ -455,8 +455,7 @@ private struct DetailNavigationTestHost<Content: View>: View {
 final class AppleClientTests: XCTestCase {
     func testClusterMediaFailoverUsesEachValidatedNodeWithoutMovingAccountOrigin() {
         let session = Session()
-        session.origin = "http://primary.local:32400"
-        session.token = "bearer"
+        session.setCredentials(origin: "http://primary.local:32400", token: "bearer")
         session.configureNodeOrigins(
             [
                 "http://primary.local:32400",
@@ -466,7 +465,7 @@ final class AppleClientTests: XCTestCase {
                 "http://node-b.local:32400",
                 "https://node-c.local:443",
             ],
-            primary: session.origin
+            primary: session.credentials.origin
         )
 
         XCTAssertEqual(
@@ -478,7 +477,7 @@ final class AppleClientTests: XCTestCase {
             "token=bearer"
         )
         XCTAssertNil(session.nextMediaFailoverURL("/api/v1/hls/cap/index.m3u8", authenticated: false))
-        XCTAssertEqual(session.origin, "http://primary.local:32400")
+        XCTAssertEqual(session.credentials.origin, "http://primary.local:32400")
     }
 
     /// A candidate becomes a request authority the moment it is used, and a
@@ -509,8 +508,8 @@ final class AppleClientTests: XCTestCase {
     /// request, so neither may produce a candidate.
     func testOnlyAServerRelativePathIsRebound() {
         let session = Session()
-        session.origin = "http://primary.local:32400"
-        session.configureNodeOrigins(["http://node-b.local:32400"], primary: session.origin)
+        session.setCredentials(origin: "http://primary.local:32400", token: nil)
+        session.configureNodeOrigins(["http://node-b.local:32400"], primary: session.credentials.origin)
 
         XCTAssertNil(session.nextMediaFailoverURL("//evil.example/x", authenticated: false))
         XCTAssertNil(session.nextMediaFailoverURL("http://evil.example/x", authenticated: false))
@@ -526,11 +525,10 @@ final class AppleClientTests: XCTestCase {
     /// downgraded candidate would put it on the wire in cleartext.
     func testAnHTTPSSessionRefusesToFailOverToACleartextNode() {
         let session = Session()
-        session.origin = "https://primary.local"
-        session.token = "bearer"
+        session.setCredentials(origin: "https://primary.local", token: "bearer")
         session.configureNodeOrigins(
             ["http://node-b.local:32400", "https://node-c.local"],
-            primary: session.origin
+            primary: session.credentials.origin
         )
 
         XCTAssertEqual(
@@ -545,10 +543,10 @@ final class AppleClientTests: XCTestCase {
     /// in the same process, and the next one has no node left to try.
     func testAFreshStreamStartsAtTheHeadOfTheNodeList() {
         let session = Session()
-        session.origin = "http://primary.local:32400"
+        session.setCredentials(origin: "http://primary.local:32400", token: nil)
         session.configureNodeOrigins(
             ["http://node-b.local:32400", "http://node-c.local:32400"],
-            primary: session.origin
+            primary: session.credentials.origin
         )
 
         XCTAssertEqual(
@@ -911,8 +909,7 @@ final class AppleClientTests: XCTestCase {
     }
 
     override func tearDown() {
-        Session.shared.origin = ""
-        Session.shared.token = nil
+        Session.shared.setCredentials(origin: "", token: nil)
         super.tearDown()
     }
 
@@ -7617,8 +7614,7 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testRelativeMediaURLCarriesTokenAndPreservesExistingQuery() throws {
-        Session.shared.origin = "http://media-box:32400"
-        Session.shared.token = "secret token"
+        Session.shared.setCredentials(origin: "http://media-box:32400", token: "secret token")
 
         let url = try XCTUnwrap(Session.shared.mediaURL("/api/v1/files/42/direct?download=1"))
         let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
@@ -7632,12 +7628,34 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testAuthorizationHeaderUsesTheCurrentSessionToken() throws {
-        Session.shared.token = "bearer-token"
+        Session.shared.setCredentials(origin: Session.shared.credentials.origin, token: "bearer-token")
         var request = URLRequest(url: try XCTUnwrap(URL(string: "https://media.example.test/api/v1/me")))
 
         Session.shared.authorize(&request)
 
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer bearer-token")
+    }
+
+    func testConcurrentCredentialReadsNeverCombineTwoSessions() {
+        let first = (origin: "https://first.example.test", token: "first-token")
+        let second = (origin: "https://second.example.test", token: "second-token")
+        let mismatchLock = NSLock()
+        var mismatches = 0
+        DispatchQueue.concurrentPerform(iterations: 10_000) { iteration in
+            if iteration.isMultiple(of: 2) {
+                Session.shared.setCredentials(origin: first.origin, token: first.token)
+            } else {
+                Session.shared.setCredentials(origin: second.origin, token: second.token)
+            }
+            let pair = Session.shared.credentials
+            if !((pair.origin == first.origin && pair.token == first.token)
+                || (pair.origin == second.origin && pair.token == second.token)) {
+                mismatchLock.lock()
+                mismatches += 1
+                mismatchLock.unlock()
+            }
+        }
+        XCTAssertEqual(mismatches, 0)
     }
 
     func testAutoHlsRequestLeavesHeightUnsetAndCreatesAnIdempotencyKey() throws {

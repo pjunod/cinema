@@ -596,21 +596,51 @@ async fn stored_track_into_stage(
     index: i64,
     sup: &Path,
 ) -> bool {
+    let hydrate = async {
+        if !stored.cluster_enabled().await {
+            return false;
+        }
+        crate::subtitle_source::hydrate_from_peers(
+            stored,
+            file,
+            index,
+            crate::subtitle_source::RepresentationFormat::Sup,
+        )
+        .await
+    };
+    stored_track_into_stage_with_hydration(stored, file, index, sup, hydrate).await
+}
+
+async fn stored_track_into_stage_with_hydration(
+    stored: &crate::subtitle_source::StoreAccess,
+    file: &MediaFile,
+    index: i64,
+    sup: &Path,
+    hydrate: impl Future<Output = bool>,
+) -> bool {
     use crate::subtitle_source::{copy_verified, lookup, Consumer, Live, Lookup};
     // The switch and the manifest are asked before the media mount is
     // stated; the lookup takes the live `fstat` last.
-    match lookup(
-        stored,
-        Consumer::Overlay,
-        file,
-        index,
-        Live::Path(&file.path),
-    )
-    .await
-    {
-        Lookup::Kept(kept) => copy_verified(&kept, sup).await,
-        Lookup::Empty(_) | Lookup::Miss(_) => false,
+    let copy_local = || async {
+        match lookup(
+            stored,
+            Consumer::Overlay,
+            file,
+            index,
+            Live::Path(&file.path),
+        )
+        .await
+        {
+            Lookup::Kept(kept) => copy_verified(&kept, sup).await,
+            Lookup::Empty(_) | Lookup::Miss(_) => false,
+        }
+    };
+    if copy_local().await {
+        return true;
     }
+    // Peer I/O occurs only in prepare_once's detached flight. A segment or
+    // session-start handler observes Preparing and never waits on the fetch.
+    hydrate.await && copy_local().await
 }
 
 /// Today's overlay extraction: one full read of the source into `sup`.
@@ -1946,6 +1976,7 @@ mod stored_source_tests {
     use super::*;
     use crate::subtitle_source::testing::{kept, stamp_of, write_manifest};
     use crate::subtitle_source::{self as store, StoreAccess};
+    use plurx_core::store::SubtitleSourcePublication;
 
     fn run(command: &mut std::process::Command, what: &str) {
         let output = command
@@ -2153,6 +2184,66 @@ mod stored_source_tests {
         assert!(
             store::misses_for_test(store::Consumer::Overlay, store::MissReason::HashMismatch)
                 > before
+        );
+    }
+
+    /// The overlay's detached flight retries its local verified SUP after a
+    /// remote holder publishes and node B hydrates the representation. This
+    /// substitutes the peer transport at the boundary so the consumer test
+    /// isolates the choice between the fetched track and inline demux.
+    #[tokio::test]
+    async fn node_a_publication_hydrates_node_b_overlay_before_demux() {
+        crate::transcode::require_ffmpeg();
+        let base = crate::test_tempdir().expect("fixture");
+        let own = source(base.path(), "1");
+        let later = source(base.path(), "2");
+        let file = media(92_002, own.clone());
+        let runtime = base.path().join("node-b-runtime");
+        let root = runtime.join(store::STORE_DIR);
+        let catalog: Arc<dyn plurx_core::store::Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
+        let access =
+            StoreAccess::from_setting(Arc::clone(&catalog), &runtime).on_node(Some("node-b"));
+        let bytes = ride_along(base.path(), &later);
+        let publication = SubtitleSourcePublication {
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_attestation: hex::encode(Sha256::digest(std::fs::read(&own).expect("source"))),
+            node_id: "node-a".into(),
+            ordinal: 0,
+            kind: "pgs".into(),
+            format: "sup".into(),
+            verdict: "kept".into(),
+            attempts: 1,
+            origin: "extracted".into(),
+            sha256: hex::encode(Sha256::digest(&bytes)),
+            bytes: bytes.len() as i64,
+            published_at_ms: 1,
+        };
+        catalog
+            .upsert_subtitle_source_publication(&publication)
+            .await
+            .expect("node A publication");
+        let sup = base.path().join("node-b-track.sup");
+        assert!(!store::file_dir(&root, file.id).exists());
+        let hydrated = async {
+            let rows = catalog
+                .list_subtitle_source_publications(file.id, file.size, file.mtime)
+                .await
+                .expect("peer publication");
+            assert_eq!(rows, vec![publication]);
+            let dir = store::file_dir(&root, file.id);
+            let entry = kept(&dir, 0, &bytes);
+            write_manifest(&root, file.id, stamp_of(&own), vec![entry]);
+            true
+        };
+        assert!(stored_track_into_stage_with_hydration(&access, &file, 0, &sup, hydrated).await);
+        assert_eq!(tokio::fs::read(&sup).await.expect("hydrated SUP"), bytes);
+        assert_eq!(
+            cues(base.path(), "node-b-overlay", &file, &access).await,
+            vec![(2000, 8000), (10000, 16000)],
+            "the overlay compiled node A's hydrated track"
         );
     }
 }

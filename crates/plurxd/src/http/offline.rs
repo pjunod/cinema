@@ -1528,21 +1528,26 @@ pub async fn subtitle(
                         "The source for this offline subtitle has changed.",
                     ));
                 }
-                let recovered = crate::subtitles::ensure_vtt(&state.subs_dir, &file, index)
-                    .await
-                    .map_err(|message| {
-                        tracing::warn!(
-                            package_id = %package.id,
-                            subtitle_index = index,
-                            error = %message,
-                            "offline subtitle recovery failed"
-                        );
-                        typed(
-                            StatusCode::GONE,
-                            "subtitle_unavailable",
-                            "The offline subtitle could not be restored.",
-                        )
-                    })?;
+                let recovered = crate::subtitles::ensure_vtt_with_store(
+                    &state.subs_dir,
+                    &file,
+                    index,
+                    &state.subtitle_source_access(),
+                )
+                .await
+                .map_err(|message| {
+                    tracing::warn!(
+                        package_id = %package.id,
+                        subtitle_index = index,
+                        error = %message,
+                        "offline subtitle recovery failed"
+                    );
+                    typed(
+                        StatusCode::GONE,
+                        "subtitle_unavailable",
+                        "The offline subtitle could not be restored.",
+                    )
+                })?;
                 plurx_core::fs_secure::read_bounded_regular(&recovered, MAX_OFFLINE_VTT_BYTES)
                     .await
                     .map_err(|_| {
