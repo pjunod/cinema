@@ -210,3 +210,14 @@ evidence, explicitly without claiming a successful authenticated exchange.
 Durable stored-track controls remain separate; no new feature gate was added.
 The focused `process::tests::output_job_owned_call_sites_are_the_audited_set`
 regression passed with Rust 1.97.1 and `hiqlite-store` enabled.
+
+## 9. Current-main refresh
+
+The candidate at `2db3b668` passed all selected qualification jobs, but the
+promotion check rejected it because main advanced during that run. The
+branch now includes main `37baf6e0` (PR #516). Its playback-lab and review
+evidence changes do not alter subtitle runtime contracts. The sole merge
+conflict was the same permanent PR #512 erratum recorded independently on
+both branches; the merged ledger retains main's more detailed reason as one
+row for the same landing commit. Qualification must run again on this
+merged candidate. No additional adversarial review or deployment was done.
