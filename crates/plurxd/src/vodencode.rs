@@ -42,6 +42,9 @@ pub(crate) struct Encoding {
     pub handoff_wait: std::sync::atomic::AtomicBool,
     /// Why the most recent admission attempt was refused, for attribution.
     pub last_refusal: Mutex<Option<PermitRefusal>>,
+    /// The pool reservation a yielding predecessor made for this successor.
+    /// Only this rendition's admission can claim it.
+    pub handoff_claim: Mutex<Option<u64>>,
     #[cfg(test)]
     pub admission_pause: Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
@@ -107,6 +110,7 @@ impl Encoding {
             policy_retry: std::sync::atomic::AtomicBool::new(false),
             handoff_wait: std::sync::atomic::AtomicBool::new(false),
             last_refusal: Mutex::new(None),
+            handoff_claim: Mutex::new(None),
             admission_pause: Mutex::new(None),
         })
     }
@@ -205,11 +209,13 @@ impl Encoding {
         if self.resources.cpu_threads > software_budget {
             return refuse(true);
         }
-        let Some(bundle) = self.admissions.try_admit_bundle(
+        let claim = *self.handoff_claim.lock().expect("VOD handoff claim");
+        let Some(bundle) = self.admissions.try_admit_bundle_claiming(
             hardware_limit,
             software_budget,
             &self.resources,
             priority,
+            claim,
         ) else {
             return refuse(false);
         };
@@ -219,6 +225,7 @@ impl Encoding {
             _software: software,
         };
         queued.take();
+        self.handoff_claim.lock().expect("VOD handoff claim").take();
         self.handoff_wait
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.last_refusal
@@ -234,6 +241,22 @@ impl Encoding {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.handoff_wait
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(token) = self.handoff_claim.lock().expect("VOD handoff claim").take() {
+            self.admissions.release_reservation(token);
+        }
+    }
+
+    /// Install the reservation a yielding predecessor made for this rendition,
+    /// releasing any earlier one it replaces.
+    pub(crate) fn accept_handoff_claim(&self, token: u64) {
+        if let Some(earlier) = self
+            .handoff_claim
+            .lock()
+            .expect("VOD handoff claim")
+            .replace(token)
+        {
+            self.admissions.release_reservation(earlier);
+        }
     }
 
     pub fn is_waiting(&self) -> bool {

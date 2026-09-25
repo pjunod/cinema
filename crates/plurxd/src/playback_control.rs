@@ -4165,14 +4165,21 @@ impl ControlState {
         self.preparation.staged_incarnation_id()
     }
 
-    /// Whether a successor for this playback is staged or committing — that
-    /// is, being built right now to replace this session. An aborting slot is
-    /// not: that successor is being torn down and is owed nothing.
-    pub(crate) fn has_live_preparation(&self) -> bool {
-        matches!(
-            self.preparation,
-            PreparationSlot::Staged { .. } | PreparationSlot::Committing { .. }
-        )
+    /// The successor incarnation this session is being replaced by right now
+    /// (staged or committing). An aborting slot names nobody: that successor
+    /// is being torn down and is owed nothing.
+    pub(crate) fn live_preparation_incarnation(&self) -> Option<&str> {
+        match &self.preparation {
+            PreparationSlot::Staged {
+                staged_incarnation_id,
+                ..
+            }
+            | PreparationSlot::Committing {
+                staged_incarnation_id,
+                ..
+            } => Some(staged_incarnation_id),
+            _ => None,
+        }
     }
 
     /// Whether this exact successor may still be committed.

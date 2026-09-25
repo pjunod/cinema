@@ -82,6 +82,22 @@ const STOPPED_ENCODER_POLL: Duration = Duration::from_secs(1);
 /// predecessor is never parked by a successor that no longer exists.
 const HANDOFF_REQUEST_TTL: Duration = Duration::from_secs(2);
 
+/// How long capacity a predecessor yielded stays reserved for its successor.
+/// The successor is woken at the release and normally claims it within one
+/// driver pass; the bound only matters when it has gone away.
+const HANDOFF_RESERVATION_TTL: Duration = Duration::from_secs(2);
+
+/// A prepared successor's request that this rendition's producer give its
+/// encoder permit back. Bound to the exact staged successor incarnation the
+/// predecessor's preparation slot names.
+#[derive(Clone)]
+struct HandoffRequest {
+    until: Instant,
+    incarnation: String,
+    successor: Weak<Rendition>,
+    wanted: crate::admission::TranscodeResourceEstimate,
+}
+
 /// How long a rendition with no attached sessions is kept warm before an
 /// un-admitted one is purged. Admitted renditions are the completed cache and
 /// are never purged here — cache retention is `cachekeep`'s job, not a TTL's.
@@ -1442,9 +1458,11 @@ struct Rendition {
     /// One "waiting for an encoder permit" line per wait episode, not one per
     /// driver pass. Cleared when a permit is granted or demand goes away.
     permit_wait_logged: AtomicBool,
-    /// Until when this rendition's producer must give its encoder permit to a
-    /// prepared successor of the viewer reading it (and not take one back).
-    handoff_requested_until: StdMutex<Option<Instant>>,
+    /// While live, this rendition's producer must give its encoder permit to
+    /// the prepared successor named here (and not take one back).
+    handoff: StdMutex<Option<HandoffRequest>>,
+    /// One expiry wake-up task per parked episode.
+    handoff_expiry_armed: AtomicBool,
     /// First blocked demand per plan entry, retained across HTTP 503 retries.
     demand_since: StdMutex<HashMap<u32, MaterializeClock>>,
 }
@@ -1454,16 +1472,59 @@ impl Rendition {
         self.wake.notify_one();
     }
 
-    fn request_handoff(&self) {
-        *self.handoff_requested_until.lock().expect("handoff lock") =
-            Some(Instant::now() + HANDOFF_REQUEST_TTL);
+    /// Ask (or keep asking) this producer to hand its permit to `successor`.
+    /// `true` when this starts a new handoff rather than refreshing one.
+    fn request_handoff(
+        &self,
+        incarnation: &str,
+        successor: &Arc<Rendition>,
+        wanted: crate::admission::TranscodeResourceEstimate,
+    ) -> bool {
+        let now = Instant::now();
+        let mut slot = self.handoff.lock().expect("handoff lock");
+        let fresh = !slot
+            .as_ref()
+            .is_some_and(|request| request.until > now && request.incarnation == incarnation);
+        *slot = Some(HandoffRequest {
+            until: now + HANDOFF_REQUEST_TTL,
+            incarnation: incarnation.to_owned(),
+            successor: Arc::downgrade(successor),
+            wanted,
+        });
+        fresh
     }
 
-    fn handoff_requested(&self) -> bool {
-        self.handoff_requested_until
+    fn live_handoff(&self) -> Option<HandoffRequest> {
+        self.handoff
             .lock()
             .expect("handoff lock")
-            .is_some_and(|until| Instant::now() < until)
+            .as_ref()
+            .filter(|request| request.until > Instant::now())
+            .cloned()
+    }
+
+    #[cfg(test)]
+    fn handoff_requested(&self) -> bool {
+        self.live_handoff().is_some()
+    }
+
+    /// Drop a handoff request unless it names `live_incarnation`, and wake
+    /// the producer so a parked viewer is served at once rather than at the
+    /// request's expiry or its next GET.
+    fn release_handoff_unless(&self, live_incarnation: Option<&str>) {
+        let released = {
+            let mut slot = self.handoff.lock().expect("handoff lock");
+            match slot.as_ref() {
+                Some(request) if Some(request.incarnation.as_str()) != live_incarnation => {
+                    *slot = None;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if released {
+            self.kick();
+        }
     }
 
     fn failure(&self) -> Option<RenditionFailure> {
@@ -1843,9 +1904,28 @@ struct Session {
     /// replay/end/maintenance path.
     terminal_cleanup: Option<Arc<TerminalCleanup>>,
     tombstone: Option<Terminal>,
+    /// The durable incarnation this session was primed as, when it is a
+    /// prepared successor. A predecessor hands its encoder permit only to the
+    /// session whose incarnation its own preparation slot names.
+    prepared_incarnation: Option<String>,
 }
 
 impl Session {
+    /// Release this session's rendition from any handoff its preparation no
+    /// longer backs (abort, rejection, settlement, tombstone, or a newer
+    /// successor staged in its place).
+    fn release_stale_handoff(&self) {
+        let live = self
+            .control
+            .lock()
+            .expect("control lock")
+            .live_preparation_incarnation()
+            .map(str::to_owned);
+        if let Some(rendition) = self.rendition.as_ref() {
+            rendition.release_handoff_unless(live.as_deref());
+        }
+    }
+
     /// Move any staged M6 successor to aborting, because this session is over.
     ///
     /// Called wherever a tombstone is written, under the same registry lock
@@ -1861,10 +1941,13 @@ impl Session {
     /// holding a successor. What this does buy is that nothing afterwards
     /// believes the successor is still wanted.
     fn abort_staged_preparation(&self) {
-        let mut control = self.control.lock().expect("control lock");
-        if let Some(staged) = control.staged_incarnation_id().map(str::to_owned) {
-            control.abort_preparation(&staged);
+        {
+            let mut control = self.control.lock().expect("control lock");
+            if let Some(staged) = control.staged_incarnation_id().map(str::to_owned) {
+                control.abort_preparation(&staged);
+            }
         }
+        self.release_stale_handoff();
     }
 
     fn live_rendition(&self) -> Option<&Arc<Rendition>> {
@@ -1972,6 +2055,25 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                     expected_owner_epoch,
                     desired_digest,
                 );
+            if staged {
+                // A successor primed before its slot was staged may already
+                // have been refused with nothing to ask; let it ask now.
+                let live = session
+                    .control
+                    .lock()
+                    .expect("control lock")
+                    .live_preparation_incarnation()
+                    .map(str::to_owned);
+                for successor in sessions.values() {
+                    if successor.prepared_incarnation.is_some()
+                        && successor.prepared_incarnation == live
+                    {
+                        if let Some(rendition) = successor.live_rendition() {
+                            rendition.kick();
+                        }
+                    }
+                }
+            }
             staged
         })
     }
@@ -2018,6 +2120,7 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                 .lock()
                 .expect("control lock")
                 .begin_abort_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
+            session.release_stale_handoff();
             reserved
         })
     }
@@ -2037,6 +2140,7 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                 .lock()
                 .expect("control lock")
                 .reject_preparation_commit_for_owner(staged_incarnation_id, expected_owner_epoch);
+            session.release_stale_handoff();
             rejected
         })
     }
@@ -2063,6 +2167,7 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
             let settled =
                 control.settle_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
             drop(control);
+            session.release_stale_handoff();
             settled
         })
     }
@@ -2210,6 +2315,26 @@ fn repair_job_for_artifact(
 }
 
 impl VodServe {
+    /// Record the durable incarnation a speculative (prepared) session was
+    /// primed as, and wake its rendition so an earlier refusal can now look
+    /// for the predecessor that staged it.
+    pub(crate) async fn mark_prepared_incarnation(&self, session_id: &str, incarnation: &str) {
+        let rendition = {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = sessions
+                .get_mut(session_id)
+                .filter(|session| session.tombstone.is_none())
+            else {
+                return;
+            };
+            session.prepared_incarnation = Some(incarnation.to_owned());
+            session.rendition.clone()
+        };
+        if let Some(rendition) = rendition {
+            rendition.kick();
+        }
+    }
+
     /// Convert an attached prepared VOD rendition to ordinary foreground
     /// admission after its durable pointer commit. A copy rendition has no
     /// encoder and therefore needs no transition.
@@ -2367,7 +2492,8 @@ impl VodServe {
             closed: AtomicBool::new(false),
             warned_admission: AtomicBool::new(false),
             permit_wait_logged: AtomicBool::new(false),
-            handoff_requested_until: StdMutex::new(None),
+            handoff: StdMutex::new(None),
+            handoff_expiry_armed: AtomicBool::new(false),
             demand_since: StdMutex::new(HashMap::new()),
         });
 
@@ -2411,6 +2537,7 @@ impl VodServe {
                 last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
+                prepared_incarnation: None,
                 terminal_cleanup: None,
                 tombstone: None,
             },
@@ -3124,6 +3251,7 @@ impl VodServe {
             last_control_snapshot: None,
             control_end: None,
             control_end_snapshot: None,
+            prepared_incarnation: None,
             terminal_cleanup: None,
             tombstone: None,
         };
@@ -6084,7 +6212,8 @@ impl Shared {
             closed: AtomicBool::new(false),
             warned_admission: AtomicBool::new(false),
             permit_wait_logged: AtomicBool::new(false),
-            handoff_requested_until: StdMutex::new(None),
+            handoff: StdMutex::new(None),
+            handoff_expiry_armed: AtomicBool::new(false),
             demand_since: StdMutex::new(HashMap::new()),
         });
         Ok(rendition)
@@ -6449,8 +6578,8 @@ async fn perform_driver_step(
 /// A prepared successor (speculative priority) never registers a pool waiter,
 /// so nothing a running producer checks would ever make room for it, and on a
 /// full pool the viewer's switch could only fail. The one permit it may claim
-/// is its own viewer's: ask that viewer's predecessor to hand it over, and
-/// keep this driver polling so it takes the permit as soon as it is reaped.
+/// is its own viewer's: ask the predecessor that staged exactly this successor
+/// to hand it over, and keep this driver polling until it is claimed.
 async fn report_permit_wait(
     shared: &Arc<Shared>,
     rendition: &Arc<Rendition>,
@@ -6459,135 +6588,234 @@ async fn report_permit_wait(
     let handoff = if encoding.is_speculative() {
         request_predecessor_handoff(shared, rendition, encoding).await
     } else {
-        None
+        Err("not_prepared")
     };
-    encoding.handoff_wait.store(handoff.is_some(), Relaxed);
+    encoding.handoff_wait.store(handoff.is_ok(), Relaxed);
     let Some(refusal) = encoding.last_refusal() else {
         // A policy-read failure registered no capacity wait; it is retried
         // and reported by its own path.
         return;
     };
-    if rendition.permit_wait_logged.swap(true, Relaxed) {
-        return;
+    let first = !rendition.permit_wait_logged.swap(true, Relaxed);
+    if first {
+        tracing::info!(
+            rendition = %rendition.key,
+            priority = ?refusal.priority,
+            hardware_used = refusal.pool.hardware_used,
+            hardware_limit = refusal.hardware_limit,
+            software_used = refusal.pool.software_used,
+            software_budget = refusal.software_budget,
+            wants_hardware = encoding.resources.hardware_slot,
+            wants_threads = encoding.resources.cpu_threads,
+            live_waiters = refusal.pool.live_waiting,
+            background_holds_permit = refusal.pool.background_active,
+            reservations = refusal.pool.reservations,
+            over_budget = refusal.over_budget,
+            handoff_from = handoff.as_ref().map_or("none", |(key, _)| key.as_str()),
+            handoff_reason = handoff.as_ref().err().copied().unwrap_or("requested"),
+            "encoded vod rendition is waiting for an encoder permit"
+        );
+    } else if let Ok((predecessor, true)) = &handoff {
+        tracing::info!(
+            rendition = %rendition.key,
+            handoff_from = %predecessor,
+            "prepared successor asked its predecessor for its encoder permit"
+        );
     }
-    tracing::info!(
-        rendition = %rendition.key,
-        priority = ?refusal.priority,
-        hardware_used = refusal.pool.hardware_used,
-        hardware_limit = refusal.hardware_limit,
-        software_used = refusal.pool.software_used,
-        software_budget = refusal.software_budget,
-        wants_hardware = encoding.resources.hardware_slot,
-        wants_threads = encoding.resources.cpu_threads,
-        live_waiters = refusal.pool.live_waiting,
-        background_holds_permit = refusal.pool.background_active,
-        over_budget = refusal.over_budget,
-        handoff_from = handoff.as_deref().unwrap_or("none"),
-        "encoded vod rendition is waiting for an encoder permit"
-    );
 }
 
-/// Ask the one predecessor that belongs to this successor's own viewer to
-/// give back its encoder permit. Returns the predecessor's rendition key.
+/// Ask the predecessor whose preparation slot names this exact successor to
+/// give back its encoder permit. `Ok((predecessor key, newly started))`, or
+/// the reason no handoff was asked for, which the wait line reports.
 ///
-/// Every condition here is a reason *not* to preempt anybody:
-/// - the refusal is ordinary capacity, not an impossible plan, a live viewer
-///   already waiting (speculative work never jumps one), or background work
-///   (which yields to live, never to speculative);
-/// - the predecessor is read only by sessions of this same viewer that are
-///   currently being replaced (a staged or committing preparation), so no
-///   other viewer's stream is touched;
-/// - it actually holds a process, and returning its permit is enough for this
-///   exact plan to be admitted, so it is never killed for nothing.
+/// Every refusal here is a reason *not* to preempt anybody:
+/// - the refusal is ordinary capacity, not an impossible plan (`over_budget`),
+///   a live viewer already waiting (`live_waiter`: speculative work never
+///   jumps one), or background work (`background_owner`: it yields to live,
+///   never to speculative);
+/// - this session was primed as a prepared successor (`not_prepared`), and a
+///   session on this node is being replaced by exactly that incarnation right
+///   now (`no_local_predecessor`; a predecessor on another node is out of
+///   scope);
+/// - that predecessor's rendition is read by nobody else (`not_exclusive`),
+///   is encoded and holds a process (`predecessor_idle`), and returning its
+///   permit is enough for this exact plan (`would_not_fit`).
 async fn request_predecessor_handoff(
     shared: &Arc<Shared>,
     successor: &Arc<Rendition>,
     encoding: &crate::vodencode::Encoding,
-) -> Option<String> {
-    let refusal = encoding.last_refusal()?;
-    if refusal.over_budget || refusal.pool.live_waiting > 0 || refusal.pool.background_active {
-        return None;
+) -> Result<(String, bool), &'static str> {
+    let refusal = encoding.last_refusal().ok_or("policy_unavailable")?;
+    if refusal.over_budget {
+        return Err("over_budget");
     }
-    struct Attached {
-        viewer: (String, String),
-        replacing: bool,
-        rendition: Arc<Rendition>,
+    if refusal.pool.background_active {
+        return Err("background_owner");
     }
-    let attached: HashMap<String, Attached> = {
+    if refusal.pool.live_waiting > 0 {
+        return Err("live_waiter");
+    }
+    let (incarnation, bound, predecessor) = {
         let sessions = shared.sessions.lock().await;
-        sessions
-            .iter()
-            .filter_map(|(id, session)| {
-                let rendition = session.live_rendition()?;
-                let replacing = session
-                    .control
-                    .lock()
-                    .expect("control lock")
-                    .has_live_preparation();
-                Some((
-                    id.clone(),
-                    Attached {
-                        viewer: (session.playback_id.clone(), session.user_name.clone()),
-                        replacing,
-                        rendition: Arc::clone(rendition),
-                    },
-                ))
-            })
-            .collect()
-    };
-    let viewers: HashSet<(String, String)> = attached
-        .values()
-        .filter(|attached| Arc::ptr_eq(&attached.rendition, successor))
-        .map(|attached| attached.viewer.clone())
-        .collect();
-    if viewers.is_empty() {
-        return None;
-    }
-    let being_replaced =
-        |attached: &Attached| attached.replacing && viewers.contains(&attached.viewer);
-    let mut candidates: Vec<Arc<Rendition>> = Vec::new();
-    for attached in attached.values() {
-        if being_replaced(attached)
-            && !Arc::ptr_eq(&attached.rendition, successor)
-            && !candidates
-                .iter()
-                .any(|candidate| Arc::ptr_eq(candidate, &attached.rendition))
-        {
-            candidates.push(Arc::clone(&attached.rendition));
-        }
-    }
-    for predecessor in candidates {
-        let Some(released) = predecessor.recipe.encoding.as_ref() else {
-            continue;
+        let Some((incarnation, playback_id)) = sessions.values().find_map(|session| {
+            let incarnation = session.prepared_incarnation.as_ref()?;
+            session
+                .live_rendition()
+                .filter(|rendition| Arc::ptr_eq(rendition, successor))?;
+            Some((incarnation.clone(), session.playback_id.clone()))
+        }) else {
+            return Err("not_prepared");
         };
-        if predecessor.closed.load(Relaxed) {
-            continue;
-        }
-        let exclusive = predecessor
-            .readers
-            .lock()
-            .await
-            .keys()
-            .all(|id| attached.get(id).is_some_and(being_replaced));
-        if !exclusive {
-            continue;
-        }
-        if matches!(predecessor.slot.belief().await, Producer::Absent { .. }) {
-            // Already yielded and still parked for this handoff: keep this
-            // driver retrying without extending the predecessor's parking.
-            if predecessor.handoff_requested() {
-                return Some(predecessor.key.clone());
-            }
-            continue;
-        }
-        if !encoding.fits_after_release(&released.resources) {
-            continue;
-        }
-        predecessor.request_handoff();
-        predecessor.kick();
-        return Some(predecessor.key.clone());
+        // The sessions being replaced by exactly this incarnation. The store
+        // stages a preparation only for its predecessor's own user and
+        // playback, so this binding is the account scope as well.
+        let bound: HashMap<String, Arc<Rendition>> = sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.playback_id == playback_id
+                    && session
+                        .control
+                        .lock()
+                        .expect("control lock")
+                        .live_preparation_incarnation()
+                        == Some(incarnation.as_str())
+            })
+            .filter_map(|(id, session)| {
+                session
+                    .live_rendition()
+                    .map(|rendition| (id.clone(), Arc::clone(rendition)))
+            })
+            .collect();
+        let predecessor = bound
+            .values()
+            .find(|rendition| !Arc::ptr_eq(rendition, successor))
+            .cloned();
+        (incarnation, bound, predecessor)
+    };
+    let Some(predecessor) = predecessor else {
+        return Err("no_local_predecessor");
+    };
+    let Some(released) = predecessor.recipe.encoding.as_ref() else {
+        return Err("predecessor_idle");
+    };
+    if predecessor.closed.load(Relaxed) {
+        return Err("predecessor_idle");
     }
-    None
+    let exclusive = predecessor
+        .readers
+        .lock()
+        .await
+        .keys()
+        .all(|id| bound.contains_key(id));
+    if !exclusive {
+        return Err("not_exclusive");
+    }
+    if matches!(predecessor.slot.belief().await, Producer::Absent { .. }) {
+        // Already yielded and still parked for this handoff: keep this
+        // driver retrying without extending the predecessor's parking.
+        return match predecessor.live_handoff() {
+            Some(request) if request.incarnation == incarnation => {
+                Ok((predecessor.key.clone(), false))
+            }
+            _ => Err("predecessor_idle"),
+        };
+    }
+    if !encoding.fits_after_release(&released.resources) {
+        return Err("would_not_fit");
+    }
+    let fresh = predecessor.request_handoff(&incarnation, successor, encoding.resources);
+    predecessor.kick();
+    Ok((predecessor.key.clone(), fresh))
+}
+
+/// The handoff this rendition is still bound to, if any: the request is live,
+/// its successor still exists, and a session reading this rendition is still
+/// being replaced by exactly that incarnation. Anything else releases it.
+async fn bound_handoff(shared: &Shared, rendition: &Rendition) -> Option<HandoffRequest> {
+    rendition.recipe.encoding.as_ref()?;
+    let request = rendition.live_handoff()?;
+    let successor_live = request
+        .successor
+        .upgrade()
+        .is_some_and(|successor| !successor.closed.load(Relaxed));
+    let bound = successor_live && {
+        let readers: Vec<String> = rendition.readers.lock().await.keys().cloned().collect();
+        let sessions = shared.sessions.lock().await;
+        readers.iter().any(|id| {
+            sessions.get(id).is_some_and(|session| {
+                session.tombstone.is_none()
+                    && session
+                        .control
+                        .lock()
+                        .expect("control lock")
+                        .live_preparation_incarnation()
+                        == Some(request.incarnation.as_str())
+            })
+        })
+    };
+    if bound {
+        Some(request)
+    } else {
+        rendition.release_handoff_unless(None);
+        None
+    }
+}
+
+/// Reserve the successor's capacity before this producer's permit is
+/// released, so nothing else can start in the gap before it retries.
+fn reserve_for_successor(request: &HandoffRequest) -> Option<Arc<Rendition>> {
+    let successor = request.successor.upgrade()?;
+    if let Some(encoding) = successor.recipe.encoding.as_ref() {
+        let token = encoding
+            .admissions
+            .reserve_for_handoff(&request.wanted, HANDOFF_RESERVATION_TTL);
+        encoding.accept_handoff_claim(token);
+    }
+    Some(successor)
+}
+
+fn finish_handoff_yield(
+    shared: &Arc<Shared>,
+    rendition: &Rendition,
+    successor: Option<Arc<Rendition>>,
+) {
+    tracing::info!(
+        rendition = %rendition.key,
+        successor = successor.as_ref().map_or("gone", |successor| successor.key.as_str()),
+        "gave this viewer's encoder permit to its prepared successor"
+    );
+    if let Some(successor) = successor {
+        successor.kick();
+    }
+    shared.kick_all();
+}
+
+/// A parked predecessor wakes itself when its handoff lapses, so a viewer GET
+/// that arrived meanwhile is not left to its whole block budget.
+fn arm_handoff_expiry(rendition: &Arc<Rendition>) {
+    if rendition.handoff_expiry_armed.swap(true, AcqRel) {
+        return;
+    }
+    let weak = Arc::downgrade(rendition);
+    tokio::spawn(async move {
+        loop {
+            let Some(rendition) = weak.upgrade() else {
+                return;
+            };
+            let until = rendition.live_handoff().map(|request| request.until);
+            match until {
+                Some(until) => {
+                    drop(rendition);
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(until)).await;
+                }
+                None => {
+                    rendition.handoff_expiry_armed.store(false, Release);
+                    rendition.kick();
+                    return;
+                }
+            }
+        }
+    });
 }
 
 /// One pass: demand → decide → step → carry it out.
@@ -6610,6 +6838,7 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             return;
         }
         let belief = rendition.slot.belief().await;
+        let handoff = bound_handoff(shared, rendition).await;
         // Reader windows may require asynchronous state reads. Take that
         // snapshot before the manifest lock so cached GET publication never
         // waits behind policy or admission I/O.
@@ -6659,8 +6888,7 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             &decision,
             next_step(belief, decision.action),
         );
-        let handoff_requested =
-            rendition.recipe.encoding.is_some() && rendition.handoff_requested();
+        let handoff_requested = handoff.is_some();
         let contention = rendition.recipe.encoding.as_ref().map_or(
             Contention {
                 live_waiting: false,
@@ -6692,6 +6920,7 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
                 }
                 drop(manifest);
                 if matches!(step, Step::Restart { .. }) {
+                    let successor = handoff.as_ref().map(reserve_for_successor);
                     match perform_driver_step(shared, rendition, step).await {
                         Ok(_) => {}
                         Err(error) => {
@@ -6699,13 +6928,18 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
                             return;
                         }
                     }
+                    if let Some(successor) = successor {
+                        finish_handoff_yield(shared, rendition, successor);
+                    }
                 }
                 if handoff_requested {
                     // This viewer's own prepared successor is waiting for
                     // exactly this capacity. Competing for it as live work
                     // would register a waiter the speculative successor can
                     // never pass, and would take back what was just yielded.
+                    // The handoff's expiry wakes this driver again.
                     encoding.cancel_wait();
+                    arm_handoff_expiry(rendition);
                     return;
                 }
                 let was_waiting = encoding.has_live_wait();
@@ -6760,19 +6994,18 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             }
             Step::Terminate { .. } => {
                 rendition.gen_epoch.fetch_add(1, Relaxed);
+                let successor = handoff
+                    .as_ref()
+                    .filter(|_| yielding_for_handoff)
+                    .map(reserve_for_successor);
                 match perform_driver_step(shared, rendition, step).await {
                     Ok(_) => {}
                     Err(error) => {
                         tracing::debug!(rendition = %rendition.key, "performing {step:?}: {error}");
                     }
                 }
-                if yielding_for_handoff {
-                    tracing::info!(
-                        rendition = %rendition.key,
-                        "gave this viewer's encoder permit to its prepared successor"
-                    );
-                    // The successor also polls, but it need not wait for it.
-                    shared.kick_all();
+                if let Some(successor) = successor {
+                    finish_handoff_yield(shared, rendition, successor);
                 }
             }
             Step::Start { .. } | Step::Restart { .. } => {
