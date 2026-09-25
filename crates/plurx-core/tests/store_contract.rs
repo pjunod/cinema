@@ -14870,6 +14870,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP INDEX IF EXISTS analysis_requests_one_active_source;
              DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source;
              DROP TABLE IF EXISTS analysis_index_repairs;
+             DROP TABLE IF EXISTS file_grants;
              DROP TRIGGER IF EXISTS classification_source_changed;
              DROP TRIGGER IF EXISTS classification_au;
              DROP TRIGGER IF EXISTS classification_ad;

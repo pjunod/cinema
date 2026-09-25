@@ -108,6 +108,7 @@ const LUMINANCE_SCHEMA_VERSION: i64 = 44;
 const DOWNLOADED_SUBTITLES_SCHEMA_VERSION: i64 = 45;
 const DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE: i64 = LUMINANCE_SCHEMA_VERSION;
 const FILE_GRANTS_SCHEMA_VERSION: i64 = 46;
+const FILE_GRANTS_SCHEMA_MIGRATION_SOURCE: i64 = DOWNLOADED_SUBTITLES_SCHEMA_VERSION;
 pub const AUTH_SCHEMA_VERSION: i64 = FILE_GRANTS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
@@ -2635,7 +2636,7 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
-                SchemaMigrationAction::MigrateFrom(DOWNLOADED_SUBTITLES_SCHEMA_VERSION) => {
+                SchemaMigrationAction::MigrateFrom(FILE_GRANTS_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
                     let mut statements = super::hiqlite_durable::file_grants_migration_statements();
                     statements.push((
@@ -2645,11 +2646,11 @@ impl HiqliteAuthStore {
                         params!(
                             FILE_GRANTS_SCHEMA_VERSION,
                             now,
-                            DOWNLOADED_SUBTITLES_SCHEMA_VERSION
+                            FILE_GRANTS_SCHEMA_MIGRATION_SOURCE
                         ),
                     ));
                     let attempt = self.client().txn(statements).await;
-                    self.settle_migration_attempt(DOWNLOADED_SUBTITLES_SCHEMA_VERSION, attempt)
+                    self.settle_migration_attempt(FILE_GRANTS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
@@ -4583,7 +4584,8 @@ fn schema_migration_action(
         | CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE
         | FIELD_ORDER_SCHEMA_MIGRATION_SOURCE
         | LUMINANCE_SCHEMA_MIGRATION_SOURCE
-        | DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE => {
+        | DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE
+        | FILE_GRANTS_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6577,9 +6579,18 @@ mod tests {
             "v43 must advance exactly one step to the luminance schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 40,
+            FILE_GRANTS_SCHEMA_MIGRATION_SOURCE, DOWNLOADED_SUBTITLES_SCHEMA_VERSION,
+            "the file-grants migration must start from the exact v45 shape"
+        );
+        assert_eq!(
+            FILE_GRANTS_SCHEMA_MIGRATION_SOURCE + 1,
+            FILE_GRANTS_SCHEMA_VERSION,
+            "v45 must advance exactly one step to the file-grants schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 41,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v45 step"
+            "this implementation contains every additive v5→v46 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

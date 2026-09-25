@@ -3082,8 +3082,9 @@ mod tests {
         assert!(names.contains(&"dvr_rules"));
         assert!(names.contains(&"dvr_reminders"));
         assert!(names.contains(&"media_classifications"));
+        assert!(names.contains(&"file_grants"));
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 52, "review every imported durable table");
+        assert_eq!(names.len(), 53, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

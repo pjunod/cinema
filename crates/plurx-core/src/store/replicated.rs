@@ -1003,6 +1003,7 @@ mod tests {
         ),
         ("coordination.rs", include_str!("sqlite/coordination.rs")),
         ("dv_conversion.rs", include_str!("sqlite/dv_conversion.rs")),
+        ("file_grants.rs", include_str!("sqlite/file_grants.rs")),
         ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
         (
             "fragment_index_cluster.rs",
