@@ -87,8 +87,10 @@ All repository-relative links here target the current-main candidate.
 | [Docs index](../README.md) | Keep both Android double-Back documents indexed in the same commit that adds them. |
 
 Do not edit Rust, Cargo.lock, playback state machines, server APIs, web or
-Apple clients, navigation dependencies, app versions, signing, or workflows
-for this fix. No timing throttle, route-only guard, permanent consumed flag,
+Apple clients, navigation dependencies, signing, or workflows for this fix.
+The original scope excluded app versions, but the main fast lane requires a
+`versionCode` increase when Android release inputs change; the execution
+update in §9.1 records that bounded exception. No timing throttle, route-only guard, permanent consumed flag,
 or new global navigation state is needed. Preserve the existing targeted
 library-channel return and Play Next behavior.
 
@@ -450,7 +452,7 @@ so the next reader does not inherit the temporary uncommitted-candidate state.
 ### 9.1 Execution update — 2026-09-25
 
 The selected navigation patch and Media3 opt-in were committed to the
-separate agent branch on main `60f3803d1`. Ready [PR #523](http://192.168.4.7:3000/noirr/plurx/pulls/523)
+separate agent branch, rebased to main `196d2a43e`. Ready [PR #523](http://192.168.4.7:3000/noirr/plurx/pulls/523)
 received one adversarial agent review with no actionable findings. The
 reviewed Android source at `855e46cf8` built app and test APKs, passed
 `lintDebug`, and passed seven selected API 36 emulator tests with zero
@@ -462,3 +464,14 @@ to a later batch process and calls for one post-review fast lane run. Thus
 the M3 full-suite acceptance above is explicitly deferred, not claimed
 complete. Physical phone and Android TV acceptance is still pending. Merge
 and release are not yet claimed.
+
+The ready fast lane exposed two repository-wide delivery requirements absent
+from the initial scope: Android release inputs need `versionCode` 126, and
+`make history-check` needs a client regression anchor for the navigation
+commit plus errata for immutable missing trailers in earlier merged PRs
+#519 and #522. The errata were independently merged in #525, and the candidate
+was rebased to retain those upstream rows. The Media3-only lint commit was
+relabeled `chore` because it does not change user behavior. The Android
+version and navigation anchor repairs are in PR #523;
+the [PR](http://192.168.4.7:3000/noirr/plurx/pulls/523) remains the live
+record for the final run and merge outcome.

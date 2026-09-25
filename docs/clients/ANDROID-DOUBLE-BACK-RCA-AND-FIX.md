@@ -15,7 +15,8 @@ Live progress: [delivery status](ANDROID-DOUBLE-BACK-STATUS.md).
 The initial investigation used `bafeb08766ce057634f3fab0850cdd9e03507a98`.
 Following Fable's review on 2026-09-25, the candidate was reapplied to
 `38f61dfe6` for the historical validation below. Its selected files were
-then carried and rebased to `60f3803d1d5dc431a919235fab328ae6ea86d394`
+then carried to `60f3803d1d5dc431a919235fab328ae6ea86d394`
+and later rebased to `196d2a43e8015f142022d56f6c3a4b7c167e5bb1`
 on `codex/android-double-back-20260925` in a separate agent clone. Validation
 below describes the older tree until the final gate is recorded. Other workspace
 changes are outside this proposal. No server, Rust, Apple, or web changes
@@ -218,6 +219,13 @@ The [delivery status](ANDROID-DOUBLE-BACK-STATUS.md) has the exact command
 and scope. The full Android JVM suite is deferred to the requested batch
 process; the historical 763-test result above remains evidence for the
 older candidate, not this branch.
+
+The ready main fast lane required the Android source build counter to advance
+from 125 to 126 and a client regression anchor for the navigation fix. It
+also exposed missing `Regression-Test` trailers in the immutable landing
+messages of earlier PRs #519 and #522; the delivery branch records those
+specific omissions in `validation/merge-errata.toml`. These are CI policy
+repairs, not changes to the navigation or playback-service behavior.
 
 To repeat the historical proof, start a disposable emulator and substitute its serial
 below. Run from the repository root:

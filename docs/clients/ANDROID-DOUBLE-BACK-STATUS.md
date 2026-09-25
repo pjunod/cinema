@@ -14,10 +14,11 @@ the navigation contract.
 | Item | Value |
 |---|---|
 | Branch | `codex/android-double-back-20260925` |
-| Base | Forgejo `main` at `60f3803d1d5dc431a919235fab328ae6ea86d394` |
+| Base | Forgejo `main` at `196d2a43e8015f142022d56f6c3a4b7c167e5bb1` |
 | Worktree | Separate agent clone at `/private/tmp/plurx-agent-android-double-back-20260925` |
 | Change | Bind Back and Exit callbacks to their originating navigation entry at 16 destinations; preserve Home and intermediate pages after repeated taps. |
 | Lint repair | Opt in to Media3's existing `UnstableApi` usage in `PlaybackService.kt`. |
+| Gate repairs | Advance Android source build from 125 to 126 and add the navigation regression anchor. Main now carries the independently merged errata for earlier PRs #519 and #522. |
 | PR | [#523](http://192.168.4.7:3000/noirr/plurx/pulls/523) is the authoritative live record for CI and merge state. |
 
 ## Milestones
@@ -66,6 +67,8 @@ for this delivery. Physical touch and D-pad acceptance have not been run.
 ## Scope
 
 This fix changes Android navigation callbacks, adds their regressions, and
-acknowledges an existing Media3 API use. It introduces no optional feature or
-enable switch. It does not alter playback policy, server behavior, app
-versions, release signing, or CI workflows.
+acknowledges an existing Media3 API use. The main fast lane also required
+Android `versionCode` 126 and the navigation history anchor before it could pass.
+The unrelated history errata for PRs #519 and #522 were merged separately into main.
+It introduces no optional feature or enable switch. It does not alter
+playback policy, server behavior, release signing, or CI workflows.
