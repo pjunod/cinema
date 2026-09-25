@@ -432,20 +432,8 @@ mod tests {
         }
     }
 
-    /// Inputs a text fixture cannot carry: control characters the normalizer
-    /// strips, the empty and whitespace-only strings, and one input past the
-    /// 256-token truncation.
-    fn programmatic_inputs() -> Vec<String> {
-        vec![
-            String::new(),
-            " ".to_owned(),
-            "\t\r\n".to_owned(),
-            "bell\u{7}and\u{0}nul and\u{1b}[31mescape".to_owned(),
-            "line one\nline two\r\nline three".to_owned(),
-            "\u{fffd} replacement and \u{e000} private use".to_owned(),
-            "word ".repeat(400),
-        ]
-    }
+    // Shared with the two-backend harness in spikes/tokenizer-backends.
+    include!("testdata/tokenizer_programmatic_inputs.rs");
 
     fn corpus() -> Vec<String> {
         let fixture = include_str!("testdata/tokenizer_corpus.txt")
@@ -463,18 +451,26 @@ mod tests {
 
     /// K-08 M4 (`docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md` §3.7(a)):
     /// the embedding is a function of the token ids, so swapping the regex
-    /// backend is admissible only if ids are identical, not similar. Two halves.
-    /// Structurally, the pinned tokenizer uses no component that consults the
-    /// backend, so the choice cannot reach an id for any input. Empirically, the
-    /// fixture corpus encodes to exactly the ids recorded in
-    /// `testdata/tokenizer_corpus.ids`, which were written by the `onig` build;
-    /// running this under the `fancy-regex` build is the comparison.
+    /// backend is admissible only if ids are identical, not similar.
+    ///
+    /// This test cannot compare the two backends. `candle-core` 0.11.0 turns on
+    /// `tokenizers/onig` for every non-wasm target and tokenizers uses onig
+    /// whenever that feature is on, so plurxd only ever runs `onig`. What it
+    /// checks is two things. Structurally, the pinned tokenizer uses no
+    /// component that consults the regex backend, so the backend cannot reach
+    /// an id for any input. As a regression pin, the fixture corpus still
+    /// encodes on `onig` to exactly the ids recorded in
+    /// `testdata/tokenizer_corpus.ids`. The comparison itself is
+    /// `make tokenizer-backends` (spikes/tokenizer-backends): it builds
+    /// tokenizers alone once per backend, encodes this same corpus with each
+    /// build, checks both against the same recorded ids and `cmp`s the two
+    /// outputs.
     ///
     /// `PLURX_TEST_TOKENIZER_CORPUS` appends a further corpus (one input per
-    /// line, e.g. a library's titles and overviews) and
-    /// `PLURX_TEST_TOKENIZER_IDS_OUT` writes every input's ids, so two builds'
-    /// outputs can be diffed. `PLURX_TEST_TOKENIZER_RECORD=1` rewrites the
-    /// recorded ids instead of comparing them; only ever do that on `onig`.
+    /// line, e.g. a library's titles and overviews), here and in the harness.
+    /// `PLURX_TEST_TOKENIZER_IDS_OUT` writes every input's ids.
+    /// `PLURX_TEST_TOKENIZER_RECORD=1` rewrites the recorded ids instead of
+    /// comparing them.
     #[test]
     #[ignore = "needs the pinned tokenizer; set PLURX_TEST_MINILM_DIR to verified model files"]
     fn tokenizer_backends_agree() {
