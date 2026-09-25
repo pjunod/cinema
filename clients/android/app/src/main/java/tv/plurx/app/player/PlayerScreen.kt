@@ -192,6 +192,7 @@ private data class Plan(
     val progressOffsetMs: Long,
     val itemDurationMs: Long?,
     val nextAudiobookPartId: Long?,
+    val isAudioOnly: Boolean,
     /** Quality captured by the exact request that produced this plan. */
     override val requestedQuality: PlaybackQuality,
 ) : PlanLike {
@@ -279,6 +280,7 @@ private suspend fun loadPlan(
             nextAudiobookPartId = if (detail.item.isAudiobook) {
                 nextAudiobookPartId(detail.files, fileId)
             } else null,
+            isAudioOnly = detail.item.isAudiobook,
             requestedQuality = requestedQuality,
         )
     }
@@ -1115,13 +1117,21 @@ private fun PlayerContent(
         onDispose { lifecycle.removeObserver(observer) }
     }
     DisposableEffect(controller) {
+        fun updateScreenOn() {
+            val current = controller.player
+            playerView?.keepScreenOn = !plan.isAudioOnly &&
+                (current.isPlaying ||
+                    (current.playWhenReady && current.playbackState == Player.STATE_BUFFERING))
+        }
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
+                updateScreenOn()
                 isPlaying = playing
                 if (!playing) vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
             }
 
             override fun onPlaybackStateChanged(state: Int) {
+                updateScreenOn()
                 // No screen-held copy of "the player is buffering": that is the
                 // presenter's `media_waiting` now, and one of it is the point.
                 if (state == Player.STATE_ENDED) {
@@ -1138,6 +1148,10 @@ private fun PlayerContent(
                         }
                     }
                 }
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                updateScreenOn()
             }
 
             override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -1336,7 +1350,10 @@ private fun PlayerContent(
                     useController = false
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
-                    keepScreenOn = true
+                    keepScreenOn = !plan.isAudioOnly &&
+                        (controller.player.isPlaying ||
+                            (controller.player.playWhenReady &&
+                                controller.player.playbackState == Player.STATE_BUFFERING))
                     playerView = this
                 }
             },
@@ -1352,6 +1369,10 @@ private fun PlayerContent(
                     // parks the predecessor and waits to be told.
                     controller.collectRetiredPlayer()
                 }
+                val current = controller.player
+                view.keepScreenOn = !plan.isAudioOnly &&
+                    (current.isPlaying ||
+                        (current.playWhenReady && current.playbackState == Player.STATE_BUFFERING))
                 playerView = view
             },
             modifier = Modifier.fillMaxSize(),
