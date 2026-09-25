@@ -20,7 +20,7 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `128` — data-preserving signed release rotation and
+> Status: **v0.3.0**, build `129` — data-preserving signed release rotation and
 > exact-artifact reinstall. Build 127 separates playback source, stream, and
 > display dimensions; build 126 preserves Back navigation history; build 125
 > preserves native viewer parity across phone, foldable, and TV. Build 124

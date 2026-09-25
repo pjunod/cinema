@@ -1,6 +1,6 @@
 # Android credential exposure and the release build — implementation plan
 
-**Status:** ready for review · **Executes:** D5 / D6 (release half) /
+**Status:** in execution; external M3 remains open under §8 · **Executes:** D5 / D6 (release half) /
 F-android-6 / F-android-7 / F-android-8 / F-android-12 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -512,6 +512,27 @@ his Mac. M10 follows.
 5. **Play App Signing.** PUBLISHING.md recommends enrolling; sideload-only
    deployment does not need it, but the upload key generated in M7 should
    be the one enrolled later so the fleet and Play share a lineage.
+
+---
+
+## 8. 2026-09-25 external-reader approval ruling
+
+Automatic approval review rejected handing either the server's narrow grant
+URL or a private local copy of the book to an unspecified third-party reader.
+Both would move private content outside Plurx without an authorized recipient.
+The D-03 client branch therefore removes Android's `ACTION_VIEW` and Apple's
+`openURL` book handoffs. Android uses its EPUB reader and a private PDF renderer;
+Apple uses its EPUB reader and PDFKit. A failed or unsupported read stays inside
+the app with an error. No `Session.mediaUrl` or `Session.mediaURL` is handed to
+another process.
+
+The original M3 external-reader acceptance in §5.3 remains **open**, not
+relabelled as done. The internal-reader substitute can be accepted separately
+by compiling both clients, verifying on physical devices that PDF and EPUB
+open and reopen, and confirming the external intents are absent. The server
+grant route from M1 remains backward compatible, but neither mobile client
+uses it. Restoring third-party reading requires authorization for the book
+payload and recipient, plus a new review of its handoff contract.
 
 ---
 

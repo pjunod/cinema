@@ -1010,7 +1010,7 @@ final class AppleClientTests: XCTestCase {
             filename: "Legacy.pdf",
             size: 4_096,
             available: true,
-            reader: pdfRead
+            reader: serverHandoff
         )
 
         XCTAssertTrue(BookReaderPolicy.canRead(epub, onTelevision: false))
