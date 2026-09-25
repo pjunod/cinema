@@ -4501,9 +4501,27 @@ mod index_pipe_tests {
                     contains_run(&production, &video),
                     "production pipe lost the video arguments: {production:?}"
                 );
+                // Header tracing is observational and must precede the
+                // exact production filters. Compare after removing only
+                // that explicitly asserted prefix, not the filter itself.
+                let mut observed = index.clone();
+                let filter = observed
+                    .iter()
+                    .position(|arg| arg == "-bsf:v")
+                    .expect("HEVC analysis filter")
+                    + 1;
+                if observed[filter] == "trace_headers" {
+                    // Preserved DV may need no production bitstream filter.
+                    observed.drain(filter - 1..=filter);
+                } else {
+                    observed[filter] = observed[filter]
+                        .strip_prefix("trace_headers,")
+                        .expect("observe original headers before destructive filtering")
+                        .to_owned();
+                }
                 assert!(
-                    contains_run(&index, &video),
-                    "index pipe lost the video arguments: {index:?}"
+                    contains_run(&observed, &video),
+                    "index pipe changed production video arguments: {index:?}"
                 );
             }
         }
