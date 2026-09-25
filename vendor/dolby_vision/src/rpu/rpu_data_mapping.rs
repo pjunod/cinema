@@ -167,8 +167,19 @@ impl RpuDataMapping {
             let curve = &mut mapping.curves[cmp];
             let num_pieces = (curve.num_pivots_minus2 + 1) as usize;
 
-            for _ in 0..num_pieces {
+            for piece in 0..num_pieces {
                 let mapping_idc = DoviMappingMethod::try_from(reader.read_ue()?)?;
+                // PLURX-PATCH 5: the method is one per component (the struct
+                // says so, and the writer emits `curve.mapping_idc` for every
+                // piece), but the parser accepted a different method per
+                // piece and stored the last one. A curve with one polynomial
+                // piece and one MMR piece then indexed past the polynomial's
+                // coefficient vectors on the write side. Refuse the mix.
+                ensure!(
+                    piece == 0 || mapping_idc == curve.mapping_idc,
+                    "component {cmp} piece {piece} uses mapping method {mapping_idc:?} where piece 0 used {:?}",
+                    curve.mapping_idc
+                );
                 curve.mapping_idc = mapping_idc;
 
                 // MAPPING_POLYNOMIAL
@@ -403,8 +414,17 @@ impl RpuDataMapping {
     }
 }
 
+/// PLURX-PATCH 4: the largest pre-allocation a bitstream count may ask for.
+/// A capacity is a hint, so capping it changes nothing about what parses; it
+/// only stops a count that is large but still fits the bits left (the patch 1
+/// bound scales with the input) from reserving hundreds of bytes per input
+/// byte before the first piece is read. Real curves have at most nine
+/// pivots, so eight pieces.
+const MAX_PIECES_PREALLOCATED: usize = 16;
+
 impl DoviPolynomialCurve {
     fn new(num_pieces: usize) -> Self {
+        let num_pieces = num_pieces.min(MAX_PIECES_PREALLOCATED);
         DoviPolynomialCurve {
             poly_order_minus1: Vec::with_capacity(num_pieces),
             linear_interp_flag: Vec::with_capacity(num_pieces),
@@ -495,6 +515,8 @@ impl DoviPolynomialCurve {
 
 impl DoviMMRCurve {
     fn new(num_pieces: usize) -> Self {
+        // PLURX-PATCH 4: see `MAX_PIECES_PREALLOCATED`.
+        let num_pieces = num_pieces.min(MAX_PIECES_PREALLOCATED);
         DoviMMRCurve {
             mmr_order_minus1: Vec::with_capacity(num_pieces),
             mmr_constant_int: Vec::with_capacity(num_pieces),

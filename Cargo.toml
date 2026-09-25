@@ -8,6 +8,7 @@ members = [
     "crates/plurxd",
 ]
 exclude = [
+    "vendor/bitvec_helpers",
     "vendor/dolby_vision",
     "vendor/hiqlite",
     "vendor/hiqlite-wal",

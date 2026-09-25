@@ -85,6 +85,13 @@ use dolby_vision::rpu::ConversionMode;
 /// The NAL type an RPU travels in (`unspec62`).
 const RPU_NAL_TYPE: u8 = 62;
 
+/// The largest RPU NAL the conversion will parse. Real ones are 150-400
+/// bytes (the FEL fixture is 367); every level of extension metadata
+/// together stays under a few kilobytes. Above this the RPU is not a Dolby
+/// Vision RPU, whatever its header says, and it is refused before the parser
+/// sizes anything from it.
+pub const MAX_RPU_NAL_BYTES: usize = 64 * 1024;
+
 /// What kind of enhancement layer the source carried, read off its first RPU.
 ///
 /// The difference is what the viewer loses, and it is the honest half of the
@@ -267,6 +274,24 @@ fn convert_length_prefixed_into(
             out.extend_from_slice(&sample[at..end]);
             at = end;
             continue;
+        }
+
+        // The parser's own bounds are relative: a count is refused when it
+        // cannot fit in the bits left, so what it may allocate scales with
+        // the RPU it is handed, and a sample can carry a NAL of up to
+        // `fmp4::MAX_BOX_BYTES`. A real RPU is a few hundred bytes; the
+        // largest imaginable, with every extension level present, is a few
+        // kilobytes. Refusing above 64 KiB costs no title and puts an
+        // absolute ceiling on the parse.
+        if nal.len() > MAX_RPU_NAL_BYTES {
+            return Err(DvConvertError::Unreadable {
+                frame: report.rpus,
+                offset: at,
+                detail: format!(
+                    "an RPU of {} bytes is larger than any real one; the limit is {MAX_RPU_NAL_BYTES}",
+                    nal.len()
+                ),
+            });
         }
 
         // `{error:#}` is anyhow's whole chain. `dolby_vision` wraps each
@@ -560,9 +585,9 @@ mod tests {
     /// Found by the `rpu_rewrite` fuzz target on its first minute
     /// (P-02 M8, 2026-09-24): eight bytes of the real Profile 7 fixture
     /// changed so that `num_ext_blocks`, a ue(v) the parser trusted as a
-    /// `Vec::with_capacity` argument, read as about 4×10⁹. Upstream
-    /// `dolby_vision` 3.4.0 asked the allocator for ~26 GB and the process
-    /// aborted — a corrupted disc remux, or one made on purpose, would have
+    /// `Vec::with_capacity` argument, read in the hundreds of millions.
+    /// Upstream `dolby_vision` 3.4.0 asked the allocator for 0x603c2cfd0
+    /// bytes (~25.8 GB) and the process aborted — a corrupted disc remux, or one made on purpose, would have
     /// taken `plurxd` down with it on the far side of the muxer. The vendored
     /// copy refuses a count that cannot fit in the bits left
     /// (`vendor/dolby_vision/PLURX-PATCH.md`, patch 1), so this arrives as
@@ -656,6 +681,39 @@ mod tests {
             "the refusal names the length it did not know: {error}"
         );
         assert!(out.is_empty());
+    }
+
+    /// An RPU larger than any real one is refused before it is parsed.
+    ///
+    /// The parser's bounds are relative to the bits it is handed, so the
+    /// absolute ceiling has to be here: a 64 KiB RPU header followed by
+    /// padding is refused by size alone, and a real-sized one is not.
+    #[test]
+    fn an_rpu_larger_than_any_real_one_is_refused_by_size_before_parsing() {
+        let mut oversized = rpu_bytes();
+        oversized.resize(MAX_RPU_NAL_BYTES + 1, 0);
+        let input = sample(&[&oversized], 4);
+        let mut out = Vec::new();
+        let error = convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
+        assert!(
+            matches!(error, DvConvertError::Unreadable { frame: 0, .. })
+                && error.to_string().contains("larger than any real one"),
+            "{error}"
+        );
+        assert!(out.is_empty());
+
+        // Exactly at the limit the size check passes and the parser decides
+        // (it happens to accept the zero padding as trailing bytes); either
+        // way the refusal, if any, is the parser's and not the size check's.
+        let mut at_limit = rpu_bytes();
+        at_limit.resize(MAX_RPU_NAL_BYTES, 0);
+        let input = sample(&[&at_limit], 4);
+        if let Err(error) = convert_length_prefixed(&input, 4, &mut out) {
+            assert!(
+                !error.to_string().contains("larger than any real one"),
+                "{error}"
+            );
+        }
     }
 
     /// A refusal leaves nothing behind for a caller to forward by accident.

@@ -19,8 +19,14 @@ impl WithExtMetadataBlocks for CmV40DmData {
     const ALLOWED_BLOCK_LEVELS: &'static [u8] = &[3, 8, 9, 10, 11, 254];
 
     fn with_blocks_allocation(num_ext_blocks: u64) -> Self {
+        // PLURX-PATCH 4: a capacity hint, capped. Patch 1 already refuses a
+        // count that cannot fit in the bits left, but that bound scales with
+        // the input; the cap keeps a large-but-parseable count from
+        // reserving ~48 bytes per block up front. `validate` allows at most
+        // a handful of blocks per level, so no real RPU reaches the cap.
+        let capacity = num_ext_blocks.min(super::MAX_EXT_BLOCKS_PREALLOCATED) as usize;
         Self {
-            ext_metadata_blocks: Vec::with_capacity(num_ext_blocks as usize),
+            ext_metadata_blocks: Vec::with_capacity(capacity),
             ..Default::default()
         }
     }

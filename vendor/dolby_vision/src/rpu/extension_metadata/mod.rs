@@ -22,6 +22,10 @@ use blocks::ExtMetadataBlock;
 /// (one bit) followed by the 8-bit `ext_block_level`. PLURX-PATCH 1.
 const MIN_EXT_BLOCK_BITS: u64 = 9;
 
+/// The largest extension-block pre-allocation a bitstream count may ask
+/// for; a hint, so nothing parses differently. PLURX-PATCH 4.
+pub(crate) const MAX_EXT_BLOCKS_PREALLOCATED: u64 = 64;
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
