@@ -159,7 +159,7 @@ const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
       }
       if(outcome.replay&&attempt+1<attempts) continue;
       const typed=answer.body||{};
-      throw {code:outcome.render,retry:typed.retry,owner_decided:typed.owner_decided,status:answer.status};
+      throw {code:outcome.render,retry:typed.retry,owner_decided:typed.owner_decided,status:answer.status,answer};
     }
   },
   release:async id=>{
@@ -1142,4 +1142,3 @@ function scheduleLiveTvGuide(guide,generation,route){
     loadLiveTvGuide(generation,route);
   },delay);
 }
-

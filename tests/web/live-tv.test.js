@@ -408,6 +408,8 @@ async function main() {
       { now: () => clock }, fn => { poll = fn; return null; }, liveTv, routing);
 
     await run(0);
+    assert.equal(video.src, "/api/live-tv/sessions/cap/master.m3u8",
+      "the attached player reads caption declarations from the master playlist");
     clock += 10000; frames += 60; await poll();
     assert.equal(keepalives, 1, "the poll runs on the page");
 
@@ -735,6 +737,10 @@ async function main() {
       const lease = shippedLease({ request: answerRequest(rows, () => thrownFor(rule)) });
       await assert.rejects(lease.LIVE_TV_LEASE.start("7.1"), error => {
         assert.equal(error.code, rule.render, `${rule.case}: rendered code`);
+        if(rule.offer_watchable){
+          assert.deepEqual(liveTv.errorView(error).offers.map(offer => offer.channelId),
+            rule.offer_watchable, `${rule.case}: offers survive the shipped press`);
+        }
         return true;
       });
       const posts = rows.filter(row => row.method === "POST" && row.path.endsWith("/sessions"));
