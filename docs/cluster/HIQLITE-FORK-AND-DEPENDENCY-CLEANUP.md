@@ -1,6 +1,6 @@
 # The hiqlite fork and what it drags in — decide the ownership, then cut the graph
 
-**Status:** implementation in progress; lab/provider/upstream evidence pending · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
+**Status:** implementation in progress (M1, M2 merged; M3, M4 in [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503)); M0 lab timings, M5 and M6 upstream links pending · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
 F-build-ops-codehealth-5, -6, -7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -501,7 +501,7 @@ After §3.3, two edges remain (§2.4). Each is a separate question:
 
 | Option | `axum-server` | `rustls` in the fork | Effect |
 |---|---|---|---|
-| **A — ring only** | `["tls-rustls-no-provider"]` | drop `prefer-post-quantum` | `cargo tree -i aws-lc-sys` empty; no PQ hybrid key exchange available; two C builds gone |
+| **A — ring only** · *taken 2026-09-24 (M3)* | `["tls-rustls-no-provider"]` | drop `prefer-post-quantum` | `cargo tree -i aws-lc-sys` empty; no PQ hybrid key exchange available; two C builds gone |
 | **B — keep PQ, drop the duplicate** | `["tls-rustls-no-provider"]` | keep `prefer-post-quantum` | one `aws-lc-sys` (0.43.0) remains; PQ groups available to an aws-lc provider that is not installed |
 | **C — switch to aws-lc** | unchanged | unchanged | drop the `ring` provider install in `plurx-core`; one provider, one C build; a change to what the process negotiates |
 
@@ -522,6 +522,35 @@ than a dependency cut and belongs in a security plan, not this one.
 `tls-rustls-no-provider` alone exposes all four is the first thing M3 must
 compile, not assume.
 
+**Option A taken, 2026-09-24 (M3, [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503)).** Re-verified at build time,
+with two corrections. *There were three routes to `aws-lc-rs`, not two.* With
+`tls-rustls` and `prefer-post-quantum` gone, `cargo tree -e features -i
+aws-lc-rs` still reached it through `tokio-rustls` feature `default` — 0.26's
+defaults are `logging`, `tls12` and `aws_lc_rs`, and the fork declared the
+crate with `features = ["ring"]` alone. It is now `default-features = false`
+with `logging`, `ring` and `tls12`. *The duplicate count does not move.* M1's
+correction had already left a single `aws-lc-sys`, so A removes a crate, not
+a duplicate: `cargo tree -d --workspace` stays at 43 rows, while the
+workspace lock loses six packages (`aws-lc-rs`, `aws-lc-sys`, `cmake`,
+`dunce`, `fs_extra`, `jobserver`; 510 → 504 `[[package]]` entries and 419 →
+413 unique normal/build crate versions against `0e2c3fd47`) and with them the
+aws-lc CMake/C build. `tls-rustls-no-provider` alone compiles every
+`RustlsConfig`, `bind_rustls` and `from_tcp_rustls` call site.
+
+The provider premise held. Every TLS entry point already installs `ring`
+(`plurx-core`'s `install_default_crypto_provider`, hiqlite's `start_node`,
+its proxy and `http_client`), and `installed_provider_is_ring` pins that the
+installed provider has ring's cipher suites and key-exchange groups with no
+`X25519MLKEM768`. `prefer-post-quantum` only reorders the aws-lc provider's
+groups, so dropping it changes nothing the process negotiates. With `ring`
+the only compiled provider, rustls now also selects it unaided on any path
+that reaches TLS before an explicit install; `tests/rustls_single_provider.rs`
+requires exactly that in a fresh process and panics as soon as a second
+provider is compiled. The fork's optional `s3` and `full` configurations still
+resolve `aws-lc-rs` through the `reqwest` `rustls` feature cryptr and
+`s3-simple` select; plurx builds neither. The license allow-list lost
+`CC0-1.0`, which only `dunce` used.
+
 ### 3.7 `semantic-search` as a build-time feature, and the compile that must not drift
 
 Three parts, in dependency order:
@@ -535,6 +564,28 @@ both backends and assert identical token id sequences. Not "similar";
 identical, because the embedding is a function of the ids and a divergence
 would silently change search results. If they diverge on any input, (a) does
 not land and (b) and (c) still can.
+
+**Build-time correction, 2026-09-24 (M4, [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503)): (a) cannot land as
+written.** `candle-core` 0.11.0, the newest release, declares `tokenizers`
+with `features = ["onig"]` unconditionally on every non-wasm target, and
+`tokenizers` 0.22.2 uses `onig` whenever that feature is on (its
+`utils/mod.rs` compiles the `fancy-regex` backend only under
+`all(feature = "fancy-regex", not(feature = "onig"))`). Cargo unions
+features, so plurxd asking for `fancy-regex` would keep `onig`/`onig_sys` and
+their C build, add `fancy-regex` 0.14 as a *third* version of that name
+(§2.6's "without adding a crate name" holds only for the name — tokenizers
+0.22 requires `^0.14` while the graph has 0.18 and 0.19), and change nothing
+at runtime. `onig` leaves the graph only with (b), which compiles the whole
+candle stack out of the lean configuration, or with a candle release that
+stops forcing the backend. M4's evidence is the gate for that day, and it is
+stronger than a corpus: the pinned `tokenizer.json` (sha256 `be50c362…`) is
+`BertNormalizer` + `BertPreTokenizer` + `WordPiece` + `TemplateProcessing`,
+and none of those consults tokenizers' `SysRegex` — only `Split`,
+`ByteLevel` and `Replace` do — so the backend cannot reach an id for any
+input. Standalone builds of tokenizers 0.22.2 with each backend encode the
+fixture corpus to byte-identical ids; that comparison is committed as
+[`spikes/tokenizer-backends`](../../spikes/tokenizer-backends/Cargo.toml) and
+runs as `make tokenizer-backends` (§5.5).
 
 **(b) The feature.** `semantic-search = ["dep:candle-core", "dep:candle-nn",
 "dep:candle-transformers", "dep:tokenizers"]` in
@@ -766,6 +817,26 @@ Acceptance: `cargo test -p plurxd library_search::semantic::tokenizer_backends_a
 corpus and prints the corpus size; the PR body records pass or the first
 divergence. On divergence, M5 drops (a) and says so.
 
+**As built (2026-09-25, #503 review):** no plurxd test can compare the two
+backends, because `candle-core` 0.11.0 forces `tokenizers/onig` (§3.7(a)
+correction) and every plurxd build therefore runs `onig`. The acceptance is
+met by two parts instead:
+
+- `tokenizer_backends_agree` (ignored; `PLURX_TEST_MINILM_DIR`) is the
+  structural check (the pinned tokenizer has no `Split`, `ByteLevel` or
+  `Replace` component, the only users of the regex backend) plus an `onig`
+  regression pin against `testdata/tokenizer_corpus.ids`.
+- `make tokenizer-backends PLURX_TEST_MINILM_DIR=<dir>` is the comparison.
+  [`spikes/tokenizer-backends`](../../spikes/tokenizer-backends/Cargo.toml) is
+  a separate workspace that depends only on `tokenizers` =0.22.2, with its
+  lock aligned to the root lock except for `fancy-regex` 0.14.0. The target
+  builds it once per backend. Both builds encode the same corpus the plurxd
+  test does: the fixture file, the shared
+  `testdata/tokenizer_programmatic_inputs.rs` and any
+  `PLURX_TEST_TOKENIZER_CORPUS`. Each build must reproduce the recorded ids.
+  The target then checks that the `fancy-regex` graph holds no `onig_sys`
+  and `cmp`s the two outputs.
+
 ### 5.6 M5 — the feature, the lanes, and the pool
 
 §3.7(b), (c) and (d), only if M0's numbers justify (b) and M4 passed for
@@ -846,6 +917,9 @@ The remaining milestones are evidence-bound rather than safe assumptions:
 - **M5 needs:** M0's cost result and M4's equivalence result; no build feature,
   runtime gate, or Developer setting was added speculatively.
 
+*2026-09-24: the M3 and M4 bullets above are superseded — see §3.6, §3.7(a)
+and the Execution log.*
+
 ## 6. Verification and rollout
 
 Fast lane per PR. M1 and M3 additionally need `make cluster-check`, because
@@ -907,3 +981,29 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: M0 cost and M4 equivalence results. No speculative build/runtime gate was added. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M6 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: public upstream issue/PR coordination for nine generic bugs; the ledgers expose `pending M6` until real URLs exist. |
 | 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 review fix | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | Sole-review P1: the advertised `backup`/`s3` graph still resolved registry `s3-simple` 0.8.0, `quick-xml` 0.39.4 and `aws-lc-sys` 0.39.1. Retained `vendor/s3-simple` with the quick-xml 0.41 bump plus removal of its four unreferenced aws-lc/quinn edges, and moved the override into `vendor/hiqlite/Cargo.toml`'s own `[patch.crates-io]`. Fork lock now resolves `quick-xml` 0.41.0 through the path copy, one `aws-lc-sys` (0.42.0), no `quinn`. `ForkBackupGraphPolicyCase` pins it and fails on the pre-fix tree. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | claim | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | Second pass claimed from `0e2c3fd47` on `plan/K-08-2` for the server-side remainder (M3, M4, and what M5 the evidence licenses). |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 · `204af802c` | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | §3.6 option A taken. Three routes cut in `vendor/hiqlite/Cargo.toml` (the third, `tokio-rustls` defaults, found at build time); ledger patch 20. `cargo tree -i aws-lc-rs` and `-i aws-lc-sys` match nothing; duplicate rows stay 43 (M1 had already removed the second `aws-lc-sys`); lock 510 → 504 packages. `installed_provider_is_ring`, `rustls_single_provider` and `hiqlite_tls_provider` green; restoring the pre-M3 manifest makes `rustls_single_provider` panic ("rustls could not pick a provider on its own") and `RingOnlyProviderGraphCase` fail on both the lock and the manifest. THIRD-PARTY-NOTICES loses the six rows, `deny.toml` loses `CC0-1.0`. Gate exit codes are in the PR body. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 · `f0a3747bd` | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | `tokenizer_backends_agree` (ignored; `PLURX_TEST_MINILM_DIR`): pinned tokenizer has no regex-backed component; 143 fixture inputs / 2094 ids recorded on `onig` in `testdata/tokenizer_corpus.ids`, and a standalone tokenizers 0.22.2 build on `fancy-regex` (no `onig_sys` in its graph) produced byte-identical ids. A changed recorded id fails the test at the first divergence. (a) itself is blocked by `candle-core` 0.11.0's unconditional `tokenizers/onig` (§3.7(a) correction). Optional corroboration, not a gate: the lab-corpus run below. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | needs: M0. (a) cannot land (see M4); onig leaves only with (b). (b), (c) and (d) wait on M0's cost numbers per §3.7(c); no speculative feature, gate or setting was added. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | needs: the §5.1 GPT prompt run on a fast-lane runner (`gha-nynuc-general-01`…`04`, labels `self-hosted, Linux, X64, lab, general, high-cpu`) at the PR head; the nuc3 build host is not that runner and was under load from concurrent builds. M5 cites the numbers. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | unchanged: needs public upstream issues/PRs for the generic rows (owner). Patch 20 is `plurx policy` and has no upstream row. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review ([comment 4628](http://192.168.4.7:3000/noirr/plurx/pulls/503#issuecomment-4628)) | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | Three P2 findings, all taken. (1) The M4 two-backend run had used an uncommitted scratch crate, and the in-tree test's doc comment claimed a comparison it cannot make. The harness is now `spikes/tokenizer-backends` + `make tokenizer-backends` (§5.5 "As built"), and the programmatic inputs moved to a file both include. It reproduced the result: onig and fancy-regex identical over 143 inputs / 2094 ids, no `onig_sys` in the fancy-regex graph; one changed recorded id makes it exit non-zero. (2) THIRD-PARTY-NOTICES §4 summary and crate counts recomputed from `cargo metadata` (496 after merging main), and the `deny.toml` aws-lc comment rewritten. `LicenseNoticesCase` now holds the summary and every stated count to the full list. (3) `vendor/hiqlite/PLURX-PATCH.md`'s removal rule now separates the eight upstream-retirable rows from the twelve `plurx policy` rows, which only an owner decision retires. `test_the_removal_condition_can_be_met` pins it. The ARCHITECTURE §9 risk row's stale "Sixteen" count was corrected with it. |
+
+M4 lab-corpus corroboration (optional; the structural result already covers
+every input):
+
+```text
+GPT prompt (fleet): On media1, list every library section through the
+Plex-compatible API (GET /library/sections, then /library/sections/<id>/all
+with an admin X-Plex-Token), and write the non-empty `title`, `summary` and
+`tagline` attribute values of every item, one per line with embedded newlines
+replaced by spaces, to a UTF-8 file. Copy it to nuc3 as
+~/work/k08-library-corpus.txt and report its line count. Nothing else.
+```
+
+Then, from a checkout on nuc3:
+`make tokenizer-backends PLURX_TEST_MINILM_DIR=<dir holding the pinned tokenizer.json> PLURX_TEST_TOKENIZER_CORPUS=$HOME/work/k08-library-corpus.txt`.
+It runs both backends over the fixture plus that file and exits non-zero on
+any divergence. (The 2026-09-24 M4 run used an uncommitted scratch crate,
+`~/work/k08-tokcmp`, which no longer exists; the committed harness replaces
+it.)
