@@ -1352,14 +1352,24 @@ impl SqliteStore {
     /// recovery named, and a check that outlives its budget lets startup
     /// continue and runs the full check in the background.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
+        Self::open_with_read_connections(path, READ_CONNS)
+    }
+
+    /// [`open`](Self::open) with `read_connections` read connections instead
+    /// of the default, for the K-05 section 3.3 read-pool bench.
+    #[doc(hidden)]
+    pub fn open_with_read_connections(
+        path: &Path,
+        read_connections: usize,
+    ) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         housekeeping::boot_integrity_check(&conn, path, housekeeping::BOOT_CHECK_BUDGET)?;
         let mut store = Self::init(conn)?;
         store.path = Some(Arc::new(path.to_owned()));
         // After init: the writer has migrated, so the schema the readers see
         // is the one this binary expects.
-        let mut conns = Vec::with_capacity(READ_CONNS);
-        for _ in 0..READ_CONNS {
+        let mut conns = Vec::with_capacity(read_connections.max(1));
+        for _ in 0..read_connections.max(1) {
             conns.push(Mutex::new(housekeeping::open_reader(path)?));
         }
         store.reads = Some(Arc::new(ReadPool {

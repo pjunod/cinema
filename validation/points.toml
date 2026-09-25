@@ -415,7 +415,7 @@ paths = [
   # K-05's query-plan tool over that fixture: it drives the real stores'
   # hot catalogue reads, captures the statements they trace, and records
   # each plan and its cold and warm timings on both backends' schemas.
-  "crates/plurx-core/examples/query_plans/{main,calls}.rs",
+  "crates/plurx-core/examples/query_plans/{main,calls,bench}.rs",
   "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,testfixtures}.rs",
   "crates/plurx-core/src/content_analysis.rs",
   "crates/plurx-core/src/store/mod.rs",

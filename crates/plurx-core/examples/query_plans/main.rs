@@ -24,6 +24,7 @@
 //! the OS page cache) and five warm runs (one connection, after one untimed
 //! run).
 
+mod bench;
 #[path = "calls.rs"]
 mod calls;
 
@@ -71,10 +72,11 @@ fn main() -> Result<()> {
             build_hiqlite(Path::new(fixture), Path::new(capture), Path::new(out))
         }
         ["measure", database, capture] => measure(Path::new(database), Path::new(capture)),
+        ["bench", fixture, reads] => bench::run(Path::new(fixture), reads.parse()?),
         _ => Err(
             "usage: query_plans capture-sqlite <fixture.db> <out.json> | \
                   build-hiqlite <fixture.db> <hiqlite.json> <out.db> | \
-                  measure <db> <capture.json>"
+                  measure <db> <capture.json> | bench <fixture.db> <read-connections>"
                 .into(),
         ),
     }
