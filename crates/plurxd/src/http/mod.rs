@@ -452,6 +452,7 @@ fn http_route_group(path: &str) -> usize {
         internal_activity::PATH
         | cluster_operations::INTERNAL_PATH
         | internal_auth_revocation::PATH
+        | crate::subtitle_ranges::PATH
         | crate::media_pool::SNAPSHOT_PATH
         | crate::media_pool::OFFERS_PATH
         | crate::shared_cache::CANARY_PATH
@@ -1853,6 +1854,10 @@ pub fn router(state: AppState) -> Router {
             get(internal_media::fragment_index),
         )
         .route(
+            crate::subtitle_ranges::PATH,
+            post(internal_media::subtitle_range).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
             "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}",
             get(internal_media::subtitle_source),
         )
@@ -2116,7 +2121,8 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         || (method == Method::POST
             && matches!(
                 path,
-                crate::media_pool::OFFERS_PATH
+                crate::subtitle_ranges::PATH
+                    | crate::media_pool::OFFERS_PATH
                     | crate::shared_cache::CANARY_PATH
                     | crate::media_sessions::START_PATH
                     | crate::media_sessions::ACTIVATE_PATH
@@ -3858,6 +3864,7 @@ mod tests {
                 "/internal/media/fragment-index/abc123def456abc123def456abc123de",
             ),
             (Method::GET, "/internal/media/subtitle-source/7/2/webvtt"),
+            (Method::POST, crate::subtitle_ranges::PATH),
         ] {
             assert!(learner_route_eligible(&method, path), "{method} {path}");
         }

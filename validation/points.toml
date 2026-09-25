@@ -720,7 +720,7 @@ depends_on = ["core.media", "server.api"]
 [[points]]
 id = "playback.pipeline"
 title = "Playback decision, delivery, and presentation"
-contract = "Every supported source reaches a client through the intended direct, remux, copy, or transcode path, follows its durable cluster owner through a streamed relay, and keeps presenting media; a rolling writer advertises only cumulative playback consumption plus its bounded reserve, preserves the segment covering the viewer's protected back buffer, and cannot turn a faster producer into a forward position discontinuity; a seek storm leaves one playback with at most one live subtitle-window extraction, carrying the destination the client settled on, with abandoned windows publishing nothing and remembering nothing."
+contract = "Every supported source reaches a client through the intended direct, remux, copy, or transcode path, follows its durable cluster owner through a streamed relay, and keeps presenting media; a rolling writer advertises only cumulative playback consumption plus its bounded reserve, preserves the segment covering the viewer's protected back buffer, and cannot turn a faster producer into a forward position discontinuity; a seek storm leaves one playback with one local subtitle-window owner carrying the settled destination and at most two bounded speculative peer ranges, with abandoned requester futures publishing nothing and remembering nothing."
 paths = [
   "crates/plurx-core/src/fmp4.rs",
   "crates/plurx-core/src/mediafacts.rs",
@@ -736,7 +736,7 @@ paths = [
   "scripts/fuzz-seeds",
   "vendor/dolby_vision/**",
   "vendor/bitvec_helpers/**",
-  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,scratch_ledger,scratch_put,subtitle_ride_along,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
+  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,scratch_ledger,scratch_put,subtitle_ride_along,subtitle_ranges,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
   "crates/plurxd/src/transcode/**",
   "crates/plurxd/src/vod/**",
   "crates/plurxd/src/online_subtitles.rs",
