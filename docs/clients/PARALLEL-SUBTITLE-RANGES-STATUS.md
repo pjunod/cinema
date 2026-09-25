@@ -1,7 +1,8 @@
 # Parallel subtitle ranges — playback work shared across nodes
 
 **Status:** open · **Updated:** 2026-09-25 · **Model:** gpt-6-astra ·
-**Session:** none:openai:2026-09-25 · **Branch:** codex/parallel-subtitle-ranges
+**Session:** none:openai:2026-09-25 · **Branch:** codex/parallel-subtitle-ranges ·
+**PR:** [#517](http://192.168.4.7:3000/noirr/plurx/pulls/517)
 
 ## 1. Intended behavior
 
@@ -24,6 +25,10 @@ it does not claim distributed PGS extraction or styled burn startup.
 The client retry ladder is unchanged. No deployment is part of this work.
 
 ## 2. Evidence before implementation
+
+The first milestone is `ccb795c8`. Its normal commit hook passed catalog
+lint, pinned workspace/all-target Clippy, formatting and JavaScript syntax.
+Behavioral test execution remains after the single adversarial review.
 
 Pinned local Rust 1.97.1 was verified with `rustup run 1.97.1 rustc --version`;
 `rustup run 1.97.1 cargo check -p plurxd --all-targets --offline` passed on the
@@ -89,6 +94,7 @@ Named regression anchors (written, not yet executed):
 - `subtitle_ranges::tests::range_identity_rejects_stale_stamp_bad_grid_and_bitmap`
 - `subtitle_ranges::tests::peer_range_rejects_malformed_nonfinite_and_wrong_timeline`
 - `subtitle_ranges::tests::same_range_deduplicates_and_cancel_releases_claim`
+- `subtitle_ranges::tests::current_range_is_readable_before_slow_peer_and_cancel_drops_prefetch`
 - `subtitle_ranges::tests::indexed_late_window_matches_full_scan_with_nonzero_source_start`
 - `subtitle_ranges::tests::indexed_text_starts_window_after_midpoint_while_whole_track_is_healthy`
 - `http::internal_media::tests::subtitle_range_rejects_unsigned_work_before_reading_file`
@@ -99,3 +105,10 @@ subtitle start 8.500 s. Direct extraction returned cues at 1–4, 102–106 and
 -ss 100 -to 200` returned 102–106 and 132–136 s exactly, with no normalization
 shift. This verifies the nonzero-origin choice on that version; the named
 regression retains it for the pinned build environment.
+
+The time range bounds output cue starts, not the exact physical bytes read.
+A sparse subtitle stream can make FFmpeg read past the nominal endpoint
+until it encounters its next subtitle packet. The measured read ratios above
+are specific to a cue-every-ten-seconds fixture. Input seeking avoids the
+prefix scan; the 25-second peer deadline and bounded output remain the hard
+limits when sparse media cannot complete as quickly.

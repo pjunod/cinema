@@ -263,7 +263,7 @@ pub fn normalize_window_cues(bytes: &[u8], anchor_seconds: i64) -> Vec<u8> {
     out.into_bytes()
 }
 
-pub(crate) fn parse_window_timestamp(raw: &str) -> Option<f64> {
+fn parse_window_timestamp(raw: &str) -> Option<f64> {
     let fields: Vec<&str> = raw.trim().split(':').collect();
     let (hours, minutes, seconds) = match fields.as_slice() {
         [minutes, seconds] => (

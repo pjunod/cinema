@@ -120,18 +120,44 @@ pub(crate) async fn prepare(
     if !indexed_text(file, ordinal) {
         return crate::subtitles::extract_vtt_window(tmp, file, ordinal, anchor, span).await;
     }
+    run_ranges(
+        dir,
+        tmp,
+        file,
+        ordinal,
+        anchor,
+        span,
+        crate::subtitles::extract_vtt_window(tmp, file, ordinal, anchor, span),
+        prefetch(access, dir, file, ordinal, anchor, span),
+    )
+    .await
+}
+
+/// The production fan-out seam: publish current output while speculative
+/// work is still running, and keep both futures inside the session owner.
+#[allow(clippy::too_many_arguments)]
+async fn run_ranges<C, A>(
+    dir: &Path,
+    tmp: &Path,
+    file: &MediaFile,
+    ordinal: i64,
+    anchor: i64,
+    span: i64,
+    current: C,
+    ahead: A,
+) -> Result<(), String>
+where
+    C: std::future::Future<Output = Result<(), String>>,
+    A: std::future::Future<Output = Result<(), String>>,
+{
     let current = async {
-        crate::subtitles::extract_vtt_window(tmp, file, ordinal, anchor, span).await?;
+        current.await?;
         let bytes = plurx_core::fs_secure::read_bounded_regular(tmp, MAX_VTT)
             .await
             .map_err(|e| e.to_string())?;
         publish(dir, file, ordinal, anchor, span, &bytes).await
     };
-    let ahead = tokio::time::timeout(
-        PEER_BUDGET,
-        prefetch(access, dir, file, ordinal, anchor, span),
-    );
-    let (current, _) = tokio::join!(current, ahead);
+    let (current, _) = tokio::join!(current, tokio::time::timeout(PEER_BUDGET, ahead));
     current
 }
 
@@ -340,14 +366,10 @@ fn valid_vtt(text: &str, anchor: i64, span: i64) -> bool {
         let Some((start, stop)) = timing.split_once(" --> ") else {
             return false;
         };
-        let Some(start) = crate::subtitles::parse_window_timestamp(start) else {
+        let Some(start) = cue_timestamp(start) else {
             return false;
         };
-        let Some(stop) = stop
-            .split_whitespace()
-            .next()
-            .and_then(crate::subtitles::parse_window_timestamp)
-        else {
+        let Some(stop) = stop.split_whitespace().next().and_then(cue_timestamp) else {
             return false;
         };
         if !start.is_finite()
@@ -363,6 +385,21 @@ fn valid_vtt(text: &str, anchor: i64, span: i64) -> bool {
         }
     }
     true
+}
+
+fn cue_timestamp(raw: &str) -> Option<f64> {
+    let fields: Vec<_> = raw.trim().split(':').collect();
+    let (hours, minutes, seconds) = match fields.as_slice() {
+        [minutes, seconds] => (0, *minutes, *seconds),
+        [hours, minutes, seconds] => (hours.parse::<u64>().ok()?, *minutes, *seconds),
+        _ => return None,
+    };
+    let minutes = minutes.parse::<u64>().ok()?;
+    let seconds = seconds.parse::<f64>().ok()?;
+    if minutes >= 60 || !seconds.is_finite() || !(0.0..60.0).contains(&seconds) {
+        return None;
+    }
+    Some(hours as f64 * 3600.0 + minutes as f64 * 60.0 + seconds)
 }
 
 static CLAIMS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -469,6 +506,7 @@ mod tests {
         for text in [
             "WEBVTT\n\n00:00.000 --> 00:04.000\nwrong origin\n",
             "WEBVTT\n\n06:NaN --> 06:44.000\nnonfinite\n",
+            "WEBVTT\n\n00:400.000 --> 06:44.000\ninvalid seconds field\n",
             "WEBVTT\n\n06:44.000 --> 06:40.000\nnegative duration\n",
             "WEBVTT\n\nnot a cue\n",
         ] {
@@ -487,6 +525,60 @@ mod tests {
         let _next = RangeClaim::acquire(&next).expect("distinct range");
         drop(first);
         assert!(RangeClaim::acquire(&request).is_ok());
+    }
+
+    #[tokio::test]
+    async fn current_range_is_readable_before_slow_peer_and_cancel_drops_prefetch() {
+        let dir = crate::test_tempdir().expect("cache");
+        let root = dir.path().to_owned();
+        let file = file(root.join("unused.mkv"));
+        let observed_file = file.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        struct Dropped(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let flight = tokio::spawn(async move {
+            let tmp = root.join("current.tmp");
+            let current = async {
+                tokio::fs::write(&tmp, b"WEBVTT\n\n06:50.000 --> 06:54.000\ncurrent\n")
+                    .await
+                    .map_err(|e| e.to_string())
+            };
+            let ahead = async {
+                let _guard = Dropped(Some(dropped_tx));
+                let _ = started_tx.send(());
+                std::future::pending::<Result<(), String>>().await
+            };
+            run_ranges(&root, &tmp, &file, 0, 400, 200, current, ahead).await
+        });
+        started_rx.await.expect("peer starts concurrently");
+        let bytes = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(bytes) =
+                    crate::subtitles::read_cached_window(dir.path(), &observed_file, 0, 400, 200)
+                        .await
+                        .expect("cache read")
+                {
+                    break bytes;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("current publishes without waiting for peer");
+        assert!(String::from_utf8_lossy(&bytes).contains("current"));
+        assert!(!flight.is_finished(), "peer remains owned while pending");
+        flight.abort();
+        let _ = flight.await;
+        dropped_rx
+            .await
+            .expect("cancellation drops speculative future");
     }
 
     #[tokio::test]
