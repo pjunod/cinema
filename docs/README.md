@@ -339,6 +339,9 @@ player obeys, subtitles and overlays, layouts and themes.
 | [WATCH-VIEW-LAYOUT.md](clients/WATCH-VIEW-LAYOUT.md) | What the web watch view shows beside and below the picture: the collapsible chapter rail with on-request thumbnails, the media ledger whose chips pick tracks, one Close, and the Developer switch behind the thumbnails. | built |
 | [APPLE-CLIENT-PARITY.md](clients/APPLE-CLIENT-PARITY.md) | What the Apple client has, what it lacks, and which build proved it. | live |
 | [ANDROID-CLIENT-PARITY.md](clients/ANDROID-CLIENT-PARITY.md) | The same, for Android. | live |
+| [ANDROID-DOUBLE-BACK-RCA-AND-FIX.md](clients/ANDROID-DOUBLE-BACK-RCA-AND-FIX.md) | Why rapid Back taps can empty Android navigation, the proposed entry ownership guard, emulator regression evidence, and review and release acceptance. | open |
+| [ANDROID-DOUBLE-BACK-IMPLEMENTATION-HANDOFF.md](clients/ANDROID-DOUBLE-BACK-IMPLEMENTATION-HANDOFF.md) | Sol's build and delivery contract: recover the rebased candidate, finish the Media3 lint opt-in, preserve six regressions, validate, and prepare review and landing evidence. | open |
+| [ANDROID-DOUBLE-BACK-STATUS.md](clients/ANDROID-DOUBLE-BACK-STATUS.md) | Current branch, milestones, validation, review, PR, and physical acceptance for the Android double-Back fix. | open |
 | [PLAYBACK-INFO-REDESIGN.md](clients/PLAYBACK-INFO-REDESIGN.md) | Playback info hierarchy, measurement semantics and qualification. | open |
 | [PLAYBACK-INFO-DIMENSIONS-STATUS.md](clients/PLAYBACK-INFO-DIMENSIONS-STATUS.md) | Live build ledger for frame, aspect and provenance repairs across web, Apple and Android. | live |
 | [PLAYBACK-INFO-DIMENSIONS.md](clients/PLAYBACK-INFO-DIMENSIONS.md) | Source handoff for the playback dimension and aspect repair, with evidence rules and acceptance cases. | open |

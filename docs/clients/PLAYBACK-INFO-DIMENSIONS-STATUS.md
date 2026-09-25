@@ -1,6 +1,6 @@
 # Playback information dimensions — implementation status
 
-**Status:** built; promotion state is live on PR #526 · **Started:** 2026-09-25 · **Integrated main through:** `196d2a43e` (refreshed from initial `415eb047f3`)
+**Status:** built; promotion state is live on PR #526 · **Started:** 2026-09-25 · **Integrated main through:** `1d68af6eb` (refreshed from initial `415eb047f3`)
 
 This page tracks the playback information repair in one isolated clone. The
 implementation follows the supplied dimensions and aspect handoff. The
@@ -19,7 +19,7 @@ targets `main`. Package boundaries are commits in one PR under the user's
 | Android delivery facts and presentation | Local checks passed | `148829768`; `:app:assembleDebug` and 35 selected unit tests passed. |
 | Adversarial implementation review | Findings addressed | One review found Apple Compact label drift, Android aspect basis, unattached web plan facts, and stale handoff ledger. Follow-up code and tests passed their focused checks. |
 | History evidence | Passed locally | `make history-check` on the current merged base found 2,303 corrective commits, 281 client-fix anchors, ten post-boundary landing commits. One anchor per branch corrective client commit; current main carries errata for earlier PRs #519 and #522. |
-| Fast lane | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | Run 3062 passed scope, mobile version, policy, web, Apple, Android and Windows; Rust stopped at runner cache cleanup. Run 3076 found an index/header status contradiction in this page. Both were corrected; use the PR's current-head `Main promotion gate` for the final result. |
+| Fast lane | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | Run 3062 stopped at runner cache cleanup; run 3076 found an index/header status contradiction, both corrected. Run 3080 passed policy, web, Apple and Android before `main` moved; the next candidate includes that new base. Use the PR's current-head `Main promotion gate` for the final result. |
 | PR merge | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | The PR is the authoritative merge record. Merge requires a successful current-head `Main promotion gate`. |
 | Production and physical session evidence | Unavailable | No real Live TV Cozi session or physical phone/TV capture was available in this isolated checkout. The stream frame is planned on web/Apple and measured only from an eligible Android player sample. |
 
@@ -34,7 +34,7 @@ The tracked pre-commit hook was installed in the isolated clone after its
 initial absence. The first commit was amended through it; catalog lint, Rust
 formatting, Clippy and embedded JavaScript syntax passed before rebasing
 `3e970ec42` onto `60f3803d1`, then merged `main` at `c99a29090` and
-`196d2a43e`;
+`196d2a43e`, and `1d68af6eb`;
 the reviewed candidate passed the tracked hook on its final status commit.
 The post-review local pass included
 `node tests/web/player-dom.test.js`, `node tests/playback/web-policy.test.js`,
@@ -72,6 +72,12 @@ contradiction: the index marked this live progress page `open`, while its
 header said the implementation was `built`. The index now marks the ledger
 `live`, matching its purpose. The compile lanes were skipped after that
 preflight failure.
+
+Run 3080 passed scope, mobile version, policy preflight, web syntax, Apple,
+and Android. While its Rust and Windows lanes were running, `main` gained
+Android PR #523 at `1d68af6eb`. The candidate now integrates that change;
+Android source build advances from 126 to 127 so the merged source stays
+monotonic. The new exact tree needs a current-head promotion gate.
 
 ## Scope decisions
 
