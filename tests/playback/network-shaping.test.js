@@ -104,15 +104,18 @@ test("a physical-device profile can descend through three exact link stages", ()
   );
 });
 
-test("browser run refuses a multistage profile before creating misleading evidence", () => {
+test("browser run accepts two scored cliffs and rejects an unscored third", () => {
   assert.doesNotThrow(() => lab.requireSupportedRunProfile(
     lab.parseNetworkProfile("8mbps-to-1.5mbps"),
   ));
+  assert.doesNotThrow(() => lab.requireSupportedRunProfile(
+    lab.parseNetworkProfile("8mbps-to-1.1mbps-to-350kbps"),
+  ));
   assert.throws(
     () => lab.requireSupportedRunProfile(
-      lab.parseNetworkProfile("8mbps-to-1.1mbps-to-350kbps"),
+      lab.parseNetworkProfile("8mbps-to-1.1mbps-to-350kbps-to-100kbps"),
     ),
-    /observer applies and scores only the first cliff/,
+    /supports at most two independently scored cliffs/,
   );
 });
 
@@ -1293,6 +1296,84 @@ test("a clean recovery passes", () => {
   const score = lab.scoreRecovery(CRITERIA, observation());
   assert.deepEqual(score.errors, []);
   assert.equal(score.outcome, "passed");
+});
+
+test("each cliff is scored against its own rate and player window", () => {
+  const first = observation();
+  const second = observation({
+    shaping: {
+      ...first.shaping,
+      stages: [
+        ...first.shaping.stages,
+        { ...shapedStage("after-cliff-2", 350, {
+          spanMs: 45_000, rate: 340, mediaRate: 320,
+        }), entered_at_ms: 87_000 },
+      ],
+    },
+    timeline: healthyTimeline().map((row, index) => ({
+      ...row, absolute_time: Math.min(index, 5),
+    })),
+  });
+  assert.equal(lab.scoreRecovery(CRITERIA, first, 1).outcome, "passed");
+  const secondScore = lab.scoreRecovery(CRITERIA, second, 2);
+  assert.notEqual(secondScore.outcome, "passed");
+  assert.ok(secondScore.errors.some((error) => /never held/.test(error)));
+  assert.equal(secondScore.metrics.shaping.stages[2].kbps, 350);
+  const unapplied = lab.scoreRecovery(CRITERIA, {
+    ...second,
+    shaping: { ...second.shaping, stages: second.shaping.stages.map((stage, index) =>
+      index === 2 ? { ...stage, entered_at_ms: null } : stage) },
+  }, 2);
+  assert.equal(unapplied.outcome, "shaping");
+  assert.match(unapplied.errors[0], /never applied cliff 2/);
+});
+
+test("browser observer applies both cliffs after separate complete windows", async () => {
+  const profile = lab.parseNetworkProfile("8mbps-to-1.1mbps-to-350kbps@0.01");
+  const applied = [];
+  const shaper = {
+    profile,
+    stageIndex: 0,
+    beginEvidence() {},
+    applyCliff() {
+      this.stageIndex += 1;
+      applied.push(this.stageIndex);
+      return this.stageIndex * 10_000;
+    },
+    telemetrySnapshot() {
+      return {
+        ...observation().shaping,
+        stages: [
+          shapedStage("before-cliff", 8000, { spanMs: 12_000, rate: 4100, mediaRate: 4000 }),
+          shapedStage("after-cliff", 1100, { spanMs: 45_000, rate: 1000, mediaRate: 980 }),
+          { ...shapedStage("after-cliff-2", 350, { spanMs: 45_000, rate: 340, mediaRate: 320 }),
+            entered_at_ms: this.stageIndex >= 2 ? 20_000 : null },
+        ],
+      };
+    },
+    freezeTelemetry() { return this.telemetrySnapshot(); },
+  };
+  let absoluteTime = 0;
+  const driver = {
+    exec: async () => true,
+    eval: async () => ({
+      started: true,
+      video: { absolute_time: ++absoluteTime, current_time: absoluteTime,
+        runway: 0, ready_state: 4, paused: false, seeking: false },
+      frame_probe: { supported: false },
+      attempt_id: "a1", player_generation: 1,
+      auto_switches: [], media_events: [],
+    }),
+  };
+  const observed = await lab.observeShapedCliff(driver, shaper, {
+    recovery: { sample_interval_seconds: 0.01, recovery_observe_seconds: 0.02,
+      sustained_seconds: 0.01, recovery_deadline_seconds: 0.02 },
+  }, { video: { absolute_time: 0 } });
+  assert.deepEqual(applied, [1, 2]);
+  assert.deepEqual(observed.windows.map((window) => window.cliff_index), [1, 2]);
+  assert.deepEqual(observed.windows.map((window) => window.cliff_applied_at_ms), [10_000, 20_000]);
+  assert.ok(observed.windows.every((window) => window.observation.timeline[0].at_ms === 0));
+  assert.equal(observed.score.metrics.cliffs.length, 2);
 });
 
 test("Auto acceptance requires one seamless downshift inside ten seconds", () => {
@@ -2531,7 +2612,7 @@ function lifecycleDependencies(manifest, result, state, startError = null) {
   return {
     buildFixtures: async () => ({
       directory: "/tmp/playback-lab-contract-fixtures",
-      metadata: { [fixture.id]: { duration_ms: 120_000 } },
+      metadata: { [fixture.id]: { duration_seconds: 210 } },
     }),
     startServer: async () => server,
     createShaper: () => shaper,
