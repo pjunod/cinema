@@ -212,9 +212,11 @@ even if two nodes briefly both believed they held the lease across a leader
 change, the `UPDATE … RETURNING` still admits one claimant per row.
 
 The takeover loop gets the same treatment for its *reads*: one
-`get_setting_pair(CLUSTER_MEDIA_POOL_ENABLED, CLUSTER_SESSION_TAKEOVER_ENABLED)`
-cached for 60 s, `Notify`-refreshed on local writes, and the loop sleeps at
-`IDLE_TICK_MAX` while either is off. It does **not** become a singleton:
+`get_setting_pair(CLUSTER_MEDIA_POOL_ENABLED, CLUSTER_SESSION_TAKEOVER_ENABLED)`,
+an "off" answer cached for 60 s and dropped by a local switch write, and the
+loop sleeps at `IDLE_TICK_MAX` while either is off. An "on" answer is never
+cached (§4): with takeover on, each 2 s tick reads the pair again, so turning
+it off stops the scan and CAS on the next tick on every node. It does **not** become a singleton:
 every candidate must independently prove eligibility and the store CAS
 admits one successor (its doc comment at `:4348-4352`), and takeover latency
 when the feature is on stays at the 2 s tick.
@@ -384,8 +386,10 @@ records them here so review can overrule them:
    delivered by the owner within its idle ceiling (10 s) plus replication
    lag — the bound §3.3 already states for an event enqueued on another node.
 7. The takeover loop keeps §3.4's fail-closed read: an unreadable switch is
-   off for that tick and the next tick reads again; a stale cached "on" is
-   never trusted past its 60 s.
+   off for that tick and the next tick reads again. Only "off" is cached
+   (§4); an "on" is re-read every tick. (The first M3 build cached "on" for
+   60 s as well, which let a local disable go unheeded for up to a minute;
+   the PR #405 review caught it and it was changed to match §4.)
 
 ---
 
@@ -403,6 +407,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 | #405 | **Unblocked by Paul's 12-hour gate.** `5010892f3` puts the sampler (`scripts/replicated-write-capture-sampler`, 43,200 s, append-safe) and its evaluator (`scripts/replicated-write-capture`) in the repo with `tests/operations/test_replicated_write_capture.py`; the running Mac copy's `capture.sh` was replaced in place (new inode) with the same 12-hour, append-safe script and the sampler was not stopped. Replaying all 16,783 sample lines (2026-09-21T03:23:20Z – 2026-09-25T01:25:21Z) finds 57 idle windows, one qualifying: 2026-09-22T03:36:36Z – 19:39:03Z, 16.04 h. `52c03014c` records the readout: 902,512 proposals/day cluster-wide, ≈ 1.07 M authority reads and 91 snapshot builds/day per voter; the learner-WAL attribution puts the outbox claim at 28.9% of entries, a `metadata-classification` lease cycle at 41.6% and the idle offline-package claim at 14.0% (both flagged, out of scope). The sampler's last sample is 01:25:21Z and nothing was written by 09:15Z; its launchd state was not readable from the agent workspace. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1, M2 | #405 | `b12e18636`. Local outbox and lease-expiry hints on both backends; `plurx_core::store::watched_drain` (hint + 30 s forced claim + 60 s settings pair cache + 1→10 s backoff, woken by local enqueue and settings writes); the `watched:outbox` singleton lease with 15 s local-read retry; `plurx_watched_outbox_ticks_total{outcome}`. Three-voter `store_contract`: an idle configured minute proposes 2 claims (was 60), an unconfigured minute 0, a lease hint 0 against an acquire's 1. plurxd: 1 s local delivery, ≤ 30 s forced claim, 60 s settings refresh, 10 s backoff, two-drainer failover within TTL + retry with zero non-owner acquires. Ten production-hunk reverts each fail their test. Decisions 5–6 in §7 record how §3.2 and §3.3 were read. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 | #405 | `3763395d1`. Takeover switches read as one pair cached for 60 s; 10 s idle sleep while off, woken by a local switch write; 2 s cadence and CAS unchanged when on. Paused-clock tests: 10–11 reads in ten minutes off and no inventory tick; a local flip acted on within one tick; 2 s cadence with ≤ 2 reads in two minutes on. Reverting the cache or the wake fails them. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 (review) | #405 | Review P2: the first M3 gate cached "on" too and only listened for the local write while off, so a local disable took up to 60 s (the reviewer measured 29 more acting ticks over 68 s). Now only "off" is cached, keyed on a local write generation; "on" is re-read every tick, so a disable is seen on the next 2 s tick on every node, and a wake left over from a write made while on costs no read. New paused-clock tests: `takeover_loop_stops_acting_within_one_tick_of_a_local_disable`, `takeover_loop_sees_a_remote_disable_on_the_next_tick`, `takeover_loop_ignores_a_wake_left_over_from_a_write_made_while_on`; the cadence test now asserts one pair read per enabled tick. The Curator settings-route comment now states the 60 s bound for a write on a non-owner. Merged main at `b47c5ff88`. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 | #405 | **needs: fleet** — the after-measurement runs only on a deployed build; steps below. The CLUSTER-PERFORMANCE-PLAN §6.5 rows wait for its numbers. |
 
 ### needs: M4 fleet after-measurement (GPT)
