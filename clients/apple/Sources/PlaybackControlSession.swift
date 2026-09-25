@@ -157,6 +157,10 @@ final class PlaybackControlSession {
     /// to move, and takes whatever the exchange that moved it carried.
     private let answers = PlaybackControlAnswers()
 
+    /// A viewer action can supersede a prepared ask without a server reply.
+    /// Wake its stream waiter so it checks ownership immediately.
+    func viewerActionChanged() { answers.signal() }
+
     /// The last terminal verdict this session was given, if any.
     ///
     /// It deliberately outlives the reporter. A terminal verdict stops
@@ -424,6 +428,8 @@ final class PlaybackControlSession {
             return answer.action
         }
         while ProcessInfo.processInfo.systemUptime < deadline {
+            let (changes, listenerId) = answers.changes()
+            defer { answers.cancelChanges(listenerId) }
             // The adopted owner has a new sequence space and did not answer
             // this observation. Let it continue independently, but release the
             // current recovery owner instead of extending a frozen wait.
@@ -442,7 +448,7 @@ final class PlaybackControlSession {
                     deadline = min(ProcessInfo.processInfo.systemUptime + bound, hardDeadline)
                 }
             }
-            try? await Task.sleep(nanoseconds: PlaybackControlSession.askPollNanoseconds)
+            await Self.waitForAnswerChange(changes, until: deadline)
             // A reporter that went away or stopped mid-ask will never exchange
             // again, so waiting out the rest of the bound would add it to a
             // stall for nothing — but read the slot one more time first.
@@ -496,6 +502,8 @@ final class PlaybackControlSession {
         var wait = PreparedOfferWait(tappedAtMs: tappedAtMs, floorSequence: floor)
         var lastNudgeMs = tappedAtMs
         while true {
+            let (changes, listenerId) = answers.changes()
+            defer { answers.cancelChanges(listenerId) }
             // The adopted owner has a new sequence space and did not answer
             // this ask: the same bail-out, for the same reason, as the stall
             // ask makes on a 409.
@@ -509,6 +517,7 @@ final class PlaybackControlSession {
             // lands twelve seconds later.
             if isSuperseded() { return .reopen(reason: "superseded") }
             let step = wait.observe(answer: answers.newest(), nowMs: Self.monotonicMs())
+            var nextNudgeMs = tappedAtMs + PreparedOfferWait.boundMs
             switch step {
             case .offered, .reopen:
                 return step
@@ -538,8 +547,13 @@ final class PlaybackControlSession {
                         _ = await live.notifyUrgently(capture)
                     }
                 }
+                if wait.lastSaidStaging { nextNudgeMs = lastNudgeMs + nextExchangeMs }
             }
-            try? await Task.sleep(nanoseconds: Self.askPollNanoseconds)
+            let offerDeadlineMs = tappedAtMs + PreparedOfferWait.boundMs
+            await Self.waitForAnswerChange(
+                changes,
+                until: Double(min(offerDeadlineMs, nextNudgeMs)) / 1_000
+            )
             guard let current = self.reporter else { return .reopen(reason: "not_reporting") }
             if await current.stopped {
                 // Read the slot one more time first. A reporter can answer and
@@ -563,9 +577,23 @@ final class PlaybackControlSession {
         Int(ProcessInfo.processInfo.systemUptime * 1_000)
     }
 
-    /// How often the ask looks. Short enough that it costs a stalled viewer
-    /// nothing measurable, long enough that it is not a spin.
-    static let askPollNanoseconds: UInt64 = 25_000_000
+    /// Wake on an exchange or an absolute deadline. A cancelled loser exits
+    /// without extending the caller's original clock.
+    private static func waitForAnswerChange(
+        _ changes: AsyncStream<Void>, until deadline: TimeInterval
+    ) async {
+        let remaining = max(0, deadline - ProcessInfo.processInfo.systemUptime)
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                for await _ in changes { break }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            }
+            _ = await group.next()
+            group.cancelAll()
+        }
+    }
 
     /// A new title. The old verdict described a source that is no longer
     /// playing, so keeping it would show a confident sentence about the wrong
@@ -674,16 +702,50 @@ private final class PlaybackControlAnswers: @unchecked Sendable {
     private var answered = 0
     private var ownerChanges = 0
     private var generation = 0
+    private var listeners: [UUID: AsyncStream<Void>.Continuation] = [:]
+
+    func changes() -> (AsyncStream<Void>, UUID) {
+        let id = UUID()
+        let stream = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            lock.lock()
+            listeners[id] = continuation
+            lock.unlock()
+            continuation.onTermination = { [weak self] _ in self?.removeListener(id) }
+        }
+        return (stream, id)
+    }
+
+    func cancelChanges(_ id: UUID) {
+        lock.lock()
+        let listener = listeners.removeValue(forKey: id)
+        lock.unlock()
+        listener?.finish()
+    }
+
+    private func removeListener(_ id: UUID) {
+        lock.lock()
+        listeners.removeValue(forKey: id)
+        lock.unlock()
+    }
+
+    func signal() {
+        lock.lock()
+        let active = Array(listeners.values)
+        lock.unlock()
+        for listener in active { listener.yield(()) }
+    }
 
     /// Adopt the verdict slot's generation rather than keeping a second one.
     /// Two counters that must agree are a bug waiting for a reason.
     func begin(generation: Int) {
         lock.lock()
-        defer { lock.unlock() }
         self.generation = generation
         latest = nil
         answered = 0
         ownerChanges = 0
+        let active = Array(listeners.values)
+        lock.unlock()
+        for listener in active { listener.yield(()) }
     }
 
     func record(
@@ -694,13 +756,18 @@ private final class PlaybackControlAnswers: @unchecked Sendable {
         preparation: String? = nil
     ) {
         lock.lock()
-        defer { lock.unlock() }
-        guard generation == self.generation else { return }
+        guard generation == self.generation else {
+            lock.unlock()
+            return
+        }
         answered += 1
         if ownerChanged { ownerChanges += 1 }
         latest = Answer(
             requestSequence: requestSequence, action: action, preparation: preparation
         )
+        let active = Array(listeners.values)
+        lock.unlock()
+        for listener in active { listener.yield(()) }
     }
 
     /// How many exchanges have come back at all, ours or not.

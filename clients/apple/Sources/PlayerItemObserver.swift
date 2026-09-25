@@ -88,6 +88,46 @@ final class AVPlayerItemObserver {
     }
 }
 
+/// A video-output callback only wakes the existing seek evidence poll. It
+/// never counts as a presented frame; that still requires a pixel-buffer read.
+final class SeekOutputWakeup: NSObject, AVPlayerItemOutputPullDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var listeners: [UUID: AsyncStream<Void>.Continuation] = [:]
+
+    func outputMediaDataWillChange(_ sender: AVPlayerItemOutput) {
+        lock.lock()
+        let active = Array(listeners.values)
+        lock.unlock()
+        for listener in active { listener.yield(()) }
+    }
+
+    func waitOrPoll(afterNanoseconds nanoseconds: UInt64) async {
+        let id = UUID()
+        let changes = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            lock.lock()
+            listeners[id] = continuation
+            lock.unlock()
+            continuation.onTermination = { [weak self] _ in self?.remove(id) }
+        }
+        defer { remove(id) }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                for await _ in changes { break }
+            }
+            group.addTask { try? await Task.sleep(nanoseconds: nanoseconds) }
+            _ = await group.next()
+            group.cancelAll()
+        }
+    }
+
+    private func remove(_ id: UUID) {
+        lock.lock()
+        let listener = listeners.removeValue(forKey: id)
+        lock.unlock()
+        listener?.finish()
+    }
+}
+
 /// The error's own identity wins over an unrelated entry in the append-only
 /// AVFoundation log. A log entry is usable only for the named failed URL.
 enum PlayerItemFailure {

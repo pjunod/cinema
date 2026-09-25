@@ -2094,6 +2094,7 @@ final class PlayerController: ObservableObject {
     private var seekPresentationLifecycle: [AnyCancellable] = []
     private var seekPresentationBackgrounded = false
     private var seekVideoOutput: AVPlayerItemVideoOutput?
+    private var seekOutputWakeup: SeekOutputWakeup?
     // MARK: the second pipeline
     //
     //  player          -- authoritative, audible, on the layer --> viewer
@@ -2910,6 +2911,7 @@ final class PlayerController: ObservableObject {
         invalidateResumeAttempt(outcome: "viewer-action")
         let superseded = viewerActionEpoch
         viewerActionEpoch &+= 1
+        playbackControl.viewerActionChanged()
         // The viewer has moved on from whatever was being staged for them, so
         // a fault about that destination is no longer about anything.
         present(.intentSuperseded(superseded))
@@ -4161,7 +4163,9 @@ final class PlayerController: ObservableObject {
         seekPresentationTask?.cancel()
         seekPresentationTask = nil
         seekPresentationLifecycle.removeAll()
+        seekVideoOutput?.setDelegate(nil, queue: nil)
         seekVideoOutput = nil
+        seekOutputWakeup = nil
         viewerActionEpoch &+= 1
         pendingControlSequence = nil
         itemObserver?.cancel()
@@ -6902,15 +6906,20 @@ final class PlayerController: ObservableObject {
     private func installSeekVideoOutput(on item: AVPlayerItem) {
         seekPresentationTask?.cancel()
         seekPresentationTask = nil
+        seekVideoOutput?.setDelegate(nil, queue: nil)
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
+        let wakeup = SeekOutputWakeup()
+        output.setDelegate(wakeup, queue: .main)
         item.add(output)
         seekVideoOutput = output
+        seekOutputWakeup = wakeup
     }
 
     private func beginSeekPresentationMonitor(generation: Int, targetMs: Int) {
         seekPresentationTask?.cancel()
         guard let item = player.currentItem else { return }
         let output = seekVideoOutput
+        let wakeup = seekOutputWakeup
         let hasVideo = decision?.source?.videoCodec != nil
         seekPresentationBackgrounded = UIApplication.shared.applicationState == .background
         seekPresentationLifecycle = [
@@ -7003,7 +7012,12 @@ final class PlayerController: ObservableObject {
                     }
                     return
                 }
-                try? await Task.sleep(for: .milliseconds(50))
+                if let output, let wakeup {
+                    output.requestNotificationOfMediaDataChange(withAdvanceInterval: 0.05)
+                    await wakeup.waitOrPoll(afterNanoseconds: 50_000_000)
+                } else {
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
             }
         }
     }

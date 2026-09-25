@@ -470,10 +470,10 @@ struct PreparedOfferWait: Equatable {
     /// past the floor to come back.
     ///
     /// A sequence, not a flag, and that is the whole of the rule. The caller
-    /// polls every 25 ms and is handed the *same* answer back until the next
-    /// exchange lands, so "have I observed an accepted answer before" is true
-    /// again 25 ms later. Keyed that way this rule declined 25 milliseconds
-    /// after the dispatch exchange instead of one exchange later — precisely
+    /// can inspect the same answer after a timer wake before the next exchange
+    /// lands, so "have I observed an accepted answer before" can become true
+    /// for that same response. Keyed that way this rule declined after the
+    /// dispatch exchange instead of one exchange later — precisely
     /// the behaviour it was written to prevent, and invisible to any test whose
     /// only timing assertion is "inside the bound".
     ///
