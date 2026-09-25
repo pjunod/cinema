@@ -156,7 +156,9 @@ function settlePlaybackControlAcknowledgement(p,request){
     const change=p.directedChange;
     if(sent.state==="committed"&&change&&change.committedActionId===sent.action_id
        &&change.outcome==="committed"&&change.autoMove){
-      p.autoRequestedHeight=null;
+      // The successor's first control exchange must keep the rung it was
+      // built for. Plain Auto is a *new* ask to the server and would stage an
+      // immediate, unwanted replacement back toward the opening rung.
       change.committedActionId=null;
     }
     const pending=p.preparedControlPending;

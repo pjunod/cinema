@@ -5493,9 +5493,10 @@ async function main() {
     const committed=h.pending("active");
     assert.equal(committed.state,"committed");
     h.settle({acknowledgement:committed});
-    assert.equal(p.autoRequestedHeight, null,
-      "only an accepted committed acknowledgement returns selection to plain Auto");
-    assert.deepEqual(h.selection().quality, { mode: "auto" });
+    assert.equal(p.autoRequestedHeight, 1080,
+      "the successor reporter continues to ask for the delivered rung");
+    assert.deepEqual(h.selection().quality, { mode: "auto", height: 1080 },
+      "plain Auto would stage an unwanted replacement on the successor");
   }
   {
     // A viewer who picks by hand overrides whatever the controller wanted.
