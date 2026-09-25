@@ -410,7 +410,11 @@ digest before rebinding to the receiving node. Full-hash memos survive sampled
 subtitle observations of the same object; both SQLite and Hiqlite enforce this.
 A changed object version creates a new preparation generation even when size
 and scanner mtime stayed the same. Source freshness is checked before publication
-and by the existing held-source producer fence.
+and by the existing held-source producer fence. The local-only index pass
+refreshes missing, stale-node, stale-revision or stale-object proofs while
+retaining completed refusals for the current object. First-play requests queue
+shared work only when shared analysis is enabled; otherwise the refusal reports
+that it is disabled and the bounded local pass remains responsible.
 
 Full attestation reads the entire file once per changed object, in bounded
 256 KiB buffers. The existing ten-minute analysis budget and preemption still

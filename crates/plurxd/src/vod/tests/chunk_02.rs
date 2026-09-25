@@ -2010,7 +2010,7 @@
             )
             .await
             .expect_err("an unindexed file must not change presentation");
-        assert!(index_error.contains("vod_index_pending"));
+        assert!(index_error.contains("hevc_configuration_unverified"));
     }
 
     #[tokio::test]
@@ -2122,8 +2122,8 @@
                     session.to_owned(),
                 )
                 .await
-                .expect_err("rolling fallback is still needed");
-            assert!(refused.contains("vod_index_pending"), "{refused}");
+                .expect_err("HEVC copy waits for verified preparation");
+            assert!(refused.contains("hevc_configuration_unverified"), "{refused}");
             assert!(
                 refused.contains("exact copy preparation is queued"),
                 "{refused}"

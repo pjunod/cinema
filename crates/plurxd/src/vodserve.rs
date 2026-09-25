@@ -3154,21 +3154,43 @@ impl VodServe {
                                 == self.shared.cluster_node_id.as_deref()
                     })
                     .and_then(|proof| proof.refusal.as_deref());
-                if reason.is_none() {
+                let mut preparation = if cluster_cache_enabled {
+                    "HEVC copy needs preparation".to_owned()
+                } else {
+                    "HEVC copy needs preparation; shared preparation is disabled".to_owned()
+                };
+                if reason.is_none() && cluster_cache_enabled {
                     if let Some(node) = self.shared.cluster_node_id.as_deref() {
-                        let _ = crate::state::enqueue_copy_preparation_for_object(
+                        preparation = match crate::state::enqueue_copy_preparation_for_object(
                             self.shared.store.as_ref(),
                             node,
                             file,
                             video,
                             Some(&current),
                         )
-                        .await;
+                        .await
+                        {
+                            Ok(request) => {
+                                format!("HEVC exact copy preparation is {}", request.state)
+                            }
+                            Err(error) => {
+                                format!("HEVC copy preparation could not be queued: {error}")
+                            }
+                        };
                     }
                 }
+                let detail = reason.map(str::to_owned).unwrap_or_else(|| {
+                    format!(
+                    "{preparation}; Settings → Developer can enable unverified copy without waiting"
+                )
+                });
                 return Err(crate::transcode::vod_refusal_error(
-                    if reason.is_some() { "hevc_configuration_unsupported" } else { "hevc_configuration_unverified" },
-                    reason.unwrap_or("HEVC copy needs preparation; Settings → Developer can enable unverified copy without waiting"),
+                    if reason.is_some() {
+                        "hevc_configuration_unsupported"
+                    } else {
+                        "hevc_configuration_unverified"
+                    },
+                    detail,
                 ));
             }
             Some(current)

@@ -118,3 +118,18 @@ the real local indexer. The fast-lane validation phase follows this disposition.
 The reviewer confirmed that previous trace completion, portable proof,
 full/sampled memo, cached admission and worker fencing findings are addressed,
 and the explicit enable bypasses proof restrictions without readiness gates.
+
+### Validation-phase corrections
+
+Fast lane #3128 exposed omitted regression trailers in existing main merge
+#524. Its original PR references were verified in the landing tree and recorded
+with the documented permanent erratum mechanism; the history audit then passed.
+Lane #3132 exposed four ownership inventory deltas from finite fixture commands
+and removal of a test-only sleep. Their owners and counts are now documented.
+
+Focused delivery-contract checks also preserve the intended distinction between
+default HEVC refusal and explicit unverified progressive playback. First-play
+preparation respects the shared-analysis switch so an inactive queue is not
+filled with requests that its disabled resolver cannot consume. A refusal now
+reports the actual preparation state, while the Developer override still bypasses
+proof admission. These are validation-phase corrections, not another agent review.
