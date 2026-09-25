@@ -339,6 +339,17 @@
   .lth[data-mode="dock"] video{height:216px}
   .lth[data-mode="full"]{inset:0;width:100vw;height:100dvh;border-radius:0}
   .lth[data-mode="full"] video{height:100dvh;max-height:100dvh}
+  /* The caption selector lives with the persistent video, not the overlay that
+     repaints every status tick. A viewer can keep its menu open in any mode. */
+  .lth-captions{position:absolute;top:12px;right:12px;z-index:4;display:flex;align-items:center;
+    gap:6px;padding:5px 7px;border-radius:6px;background:rgba(0,0,0,.7);color:#fff;
+    font-size:12px;line-height:1.2}
+  .lth-captions select{width:auto;min-width:92px;max-width:160px;padding:4px 6px;
+    border:1px solid rgba(255,255,255,.5);background:#191919;color:#fff;font-size:12px;
+    color-scheme:dark}
+  .lth-captions select:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .lth[data-mode="full"] .lth-captions{top:76px;right:24px}
+  .lth[data-mode="full"].idle .lth-captions:not(:focus-within){opacity:0;visibility:hidden;pointer-events:none}
 
   .lth-overlay{position:absolute;inset:0;pointer-events:none;transition:opacity .2s ease-out}
   .lth-overlay > *{pointer-events:auto}

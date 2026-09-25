@@ -151,6 +151,39 @@ async function main() {
       [["🔇", "Mute", "Mute"], ["🔇", "Mute", "Mute"]]);
   });
 
+  await test("live captions select the media track in every player geometry", () => {
+    const tracks=[
+      {kind:"captions",label:"English 708",language:"en",mode:"hidden"},
+      {kind:"captions",label:"English CC1",language:"en",mode:"hidden"},
+      {kind:"metadata",label:"timing",language:"",mode:"hidden"},
+    ];
+    const select={dataset:{},innerHTML:"",value:"off"};
+    const document={getElementById:id=>id==="live-tv-video"?{textTracks:tracks}
+      :id==="live-tv-captions"?select:null};
+    const controls=new Function("document","esc",[
+      shipped("liveTvCaptionTracks"),shipped("liveTvCaptionTrackLabel"),
+      shipped("liveTvRefreshCaptionControls"),shipped("liveTvSelectCaption"),
+      "return {refresh:liveTvRefreshCaptionControls,select:liveTvSelectCaption};",
+    ].join("\n"))(document,String);
+    controls.refresh();
+    assert.match(select.innerHTML,/English 708/);
+    assert.match(select.innerHTML,/English CC1/);
+    assert.doesNotMatch(select.innerHTML,/timing/);
+    assert.equal(select.value,"off");
+    controls.select("0");
+    assert.deepEqual(tracks.map(track=>track.mode),["showing","disabled","hidden"]);
+    assert.equal(select.value,"0");
+    controls.select("1");
+    assert.deepEqual(tracks.map(track=>track.mode),["disabled","showing","hidden"]);
+    assert.equal(select.value,"1");
+    controls.select("off");
+    assert.deepEqual(tracks.map(track=>track.mode),["disabled","disabled","hidden"]);
+    assert.equal(select.value,"off");
+    assert.match(shellSource().html,/id="live-tv-captions"[^>]*aria-label="Live TV captions"/);
+    assert.match(shell,/\.lth-captions\{position:absolute/);
+    assert.match(shipped("liveTvStatsTelemetry"),/selectedCaption\?liveTvCaptionTrackLabel/);
+  });
+
   await test("protected channels are visible but never watchable", () => {
     assert.deepEqual(liveTv.channelView({ drm: true, support: "drm_unsupported" }), {
       disabled: true,
