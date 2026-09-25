@@ -4390,6 +4390,102 @@ pub(crate) async fn maintenance_loop(state: AppState) {
     }
 }
 
+/// How stale the takeover loop's cached switches may become (K-03 M3). A
+/// switch flipped on another node is seen within this bound; one flipped on
+/// this node wakes the loop at once through [`takeover_settings_changed`].
+const TAKEOVER_SETTINGS_REFRESH: Duration = Duration::from_secs(60);
+/// How long the loop sleeps between looks while either switch is off, which
+/// is the fleet default. Matches the watched drain's idle ceiling.
+const TAKEOVER_IDLE_TICK: Duration = plurx_core::store::watched_drain::IDLE_TICK_MAX;
+
+static TAKEOVER_SETTINGS: LazyLock<tokio::sync::Notify> = LazyLock::new(tokio::sync::Notify::new);
+
+/// The settings route wrote a takeover switch on this node.
+pub(crate) fn takeover_settings_changed() {
+    TAKEOVER_SETTINGS.notify_one();
+}
+
+/// The one Store read the takeover gate makes: both switches in one
+/// statement, an authority read on the replicated backend.
+#[plurx_core::cluster::coordination::cluster_job_async_trait]
+pub(crate) trait TakeoverSwitches: Send + Sync {
+    async fn takeover_switches(&self) -> Result<bool, StoreError>;
+}
+
+#[plurx_core::cluster::coordination::cluster_job_async_trait]
+impl<T: Store + ?Sized> TakeoverSwitches for T {
+    async fn takeover_switches(&self) -> Result<bool, StoreError> {
+        let (media_pool, takeover) = self
+            .get_setting_pair(
+                plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED,
+                plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            )
+            .await?;
+        Ok(media_pool.as_deref() == Some("1") && takeover.as_deref() == Some("1"))
+    }
+}
+
+/// Both takeover switches, cached for [`TAKEOVER_SETTINGS_REFRESH`].
+///
+/// The loop used to read each switch with its own consistent read every 2 s
+/// on every node — 86,400 authority reads per node per day for a feature
+/// that is off across the fleet. Only the settings reads are cached; with
+/// both switches on, the 2 s cadence and the takeover CAS are unchanged.
+#[derive(Default)]
+pub(crate) struct TakeoverGate {
+    cached: Option<(bool, tokio::time::Instant)>,
+}
+
+impl TakeoverGate {
+    pub(crate) fn invalidate(&mut self) {
+        self.cached = None;
+    }
+
+    pub(crate) async fn enabled<S: TakeoverSwitches + ?Sized>(&mut self, store: &S) -> bool {
+        let now = tokio::time::Instant::now();
+        if let Some((enabled, read_at)) = self.cached {
+            if now.saturating_duration_since(read_at) < TAKEOVER_SETTINGS_REFRESH {
+                return enabled;
+            }
+        }
+        match store.takeover_switches().await {
+            Ok(enabled) => {
+                self.cached = Some((enabled, now));
+                enabled
+            }
+            // As before, an unreadable switch is off for this tick; the
+            // stale cache is not trusted and the next tick reads again.
+            Err(error) => {
+                tracing::debug!(%error, "media-session takeover switches unavailable");
+                false
+            }
+        }
+    }
+
+    /// Wait for the loop's next tick and say whether takeover may run on it.
+    ///
+    /// On: one `TAKEOVER_INTERVAL` tick, exactly as before. Off (the fleet
+    /// default): the rest of an idle period is slept here, cut short by a
+    /// local switch write, so the caller never reaches the inventory read.
+    /// `MissedTickBehavior::Delay` makes the tick after a long sleep fire at
+    /// once, so a flip is acted on within one tick.
+    pub(crate) async fn wait_for_tick<S: TakeoverSwitches + ?Sized>(
+        &mut self,
+        interval: &mut tokio::time::Interval,
+        store: &S,
+    ) -> bool {
+        interval.tick().await;
+        if self.enabled(store).await {
+            return true;
+        }
+        tokio::select! {
+            () = tokio::time::sleep(TAKEOVER_IDLE_TICK.saturating_sub(TAKEOVER_INTERVAL)) => {}
+            () = TAKEOVER_SETTINGS.notified() => self.invalidate(),
+        }
+        false
+    }
+}
+
 /// Contest expired session routes only after the separate replicated rollout
 /// switch is enabled. Every candidate independently proves source/pipeline
 /// eligibility; the Store CAS still admits exactly one successor epoch.
@@ -4400,28 +4496,16 @@ pub(crate) async fn takeover_loop(state: AppState) {
     // malformed recipes remain authoritative until expiry/maintenance, but
     // cannot pin this bounded scanner to the oldest page in the meantime.
     let mut scan_cursor: Option<MediaSessionTakeoverCursor> = None;
+    let mut gate = TakeoverGate::default();
     loop {
-        interval.tick().await;
-        let media_pool_enabled = state
-            .store
-            .get_setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED)
+        if !gate
+            .wait_for_tick(&mut interval, state.store.as_ref())
             .await
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some("1");
-        let takeover_enabled = state
-            .store
-            .get_setting(plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
-            .await
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some("1");
-        if !media_pool_enabled
-            || !takeover_enabled
-            || !state.media_pool.remote_rollout_ready().await
         {
+            scan_cursor = None;
+            continue;
+        }
+        if !state.media_pool.remote_rollout_ready().await {
             scan_cursor = None;
             continue;
         }
@@ -8309,5 +8393,105 @@ mod tests {
             .expect("decode relayed terminal body");
             assert_eq!(decoded, expected, "{disposition} relay changed the ack");
         }
+    }
+}
+
+/// K-03 M3: the takeover loop's switch reads, on a virtual clock.
+#[cfg(test)]
+mod takeover_gate_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[derive(Default)]
+    struct Switches {
+        on: AtomicBool,
+        reads: AtomicU64,
+    }
+
+    #[plurx_core::cluster::coordination::cluster_job_async_trait]
+    impl TakeoverSwitches for Switches {
+        async fn takeover_switches(&self) -> Result<bool, StoreError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(self.on.load(Ordering::SeqCst))
+        }
+    }
+
+    fn interval() -> tokio::time::Interval {
+        let mut interval = tokio::time::interval(TAKEOVER_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval
+    }
+
+    /// Off (the fleet default): ten minutes cost one switch read a minute,
+    /// where the old loop paid two consistent reads every 2 s (600), and the
+    /// loop never once reaches the expired-session inventory.
+    #[tokio::test(start_paused = true)]
+    async fn takeover_loop_reads_the_switches_once_a_minute_while_off() {
+        let switches = Switches::default();
+        let mut gate = TakeoverGate::default();
+        let mut interval = interval();
+        let started = tokio::time::Instant::now();
+        let mut inventories = 0;
+        while started.elapsed() < Duration::from_secs(600) {
+            if gate.wait_for_tick(&mut interval, &switches).await {
+                inventories += 1;
+            }
+        }
+        assert_eq!(
+            inventories, 0,
+            "an off switch must never reach expired_media_sessions"
+        );
+        let reads = switches.reads.load(Ordering::SeqCst);
+        assert!(
+            (10..=11).contains(&reads),
+            "ten minutes off should read the switches about once a minute, read {reads}"
+        );
+    }
+
+    /// Flipping the switch on this node wakes the loop within one tick,
+    /// and with both switches on the cadence is the unchanged 2 s while the
+    /// switches are still read only once a minute.
+    #[tokio::test(start_paused = true)]
+    async fn takeover_loop_wakes_on_a_local_flip_and_keeps_its_two_second_cadence() {
+        let switches = Arc::new(Switches::default());
+        let mut gate = TakeoverGate::default();
+        let mut interval = interval();
+        // Settle into the off state.
+        for _ in 0..3 {
+            assert!(!gate.wait_for_tick(&mut interval, switches.as_ref()).await);
+        }
+        let flip = Arc::clone(&switches);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            flip.on.store(true, Ordering::SeqCst);
+            takeover_settings_changed();
+        });
+        let flipped_from = tokio::time::Instant::now();
+        loop {
+            if gate.wait_for_tick(&mut interval, switches.as_ref()).await {
+                break;
+            }
+        }
+        assert!(
+            flipped_from.elapsed() <= Duration::from_secs(3) + TAKEOVER_INTERVAL,
+            "a local flip must be acted on within one tick, took {:?}",
+            flipped_from.elapsed()
+        );
+
+        let reads_before = switches.reads.load(Ordering::SeqCst);
+        let on_since = tokio::time::Instant::now();
+        let mut ticks = 0;
+        while on_since.elapsed() < Duration::from_secs(120) {
+            assert!(gate.wait_for_tick(&mut interval, switches.as_ref()).await);
+            ticks += 1;
+        }
+        assert!(
+            (59..=61).contains(&ticks),
+            "enabled takeover keeps its 2 s cadence, ticked {ticks} times in 120 s"
+        );
+        assert!(
+            switches.reads.load(Ordering::SeqCst) - reads_before <= 2,
+            "and reads the switches once per minute, not per tick"
+        );
     }
 }

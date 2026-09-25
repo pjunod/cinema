@@ -3705,6 +3705,10 @@ pub async fn update_settings(
             )
             .await?;
     }
+    if req.cluster_media_pool_enabled.is_some() || req.cluster_session_takeover_enabled.is_some() {
+        // The takeover loop caches both switches for 60 s; wake it now.
+        crate::media_sessions::takeover_settings_changed();
+    }
     if let Some(mode) = &req.sub_mode {
         // Normalize through the parser so only valid modes are stored.
         let mode = plurx_core::tracks::SubMode::parse(mode.trim()).as_str();
