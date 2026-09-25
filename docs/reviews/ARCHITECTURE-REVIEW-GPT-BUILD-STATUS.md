@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — PR #524 includes current main `4bba363bc7a` through merge commit `316b38dcd` (#502 K-05) after gate #3089 was canceled for a moved base; versionCode 127 release and exact-head fast lane await rerun. L-03 caption-positive acceptance and A-04 trace remain open. Three voters and the nuc3 learner are healthy; m6/nuc4 still run OCI `60f3803d1` and all nodes await #524 rollout. · **Updated:** 2026-09-25 19:13 UTC · **Main:** `4bba363bc7a`
+**Status:** open — PR #524 includes current main through #526 after merge commit `316b38dcd` included #502 K-05 after gate #3089 was canceled for a moved base; versionCode 128 release awaits a new exact-head fast lane after #526 moved main at the merge click. L-03 caption-positive acceptance and A-04 trace remain open. Three voters and the nuc3 learner are healthy; m6/nuc4 still run OCI `60f3803d1` and all nodes await #524 rollout. · **Updated:** 2026-09-25 19:39 UTC · **Main:** `1781e8e2d65c`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating

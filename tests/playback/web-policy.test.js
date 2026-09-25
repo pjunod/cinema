@@ -3899,11 +3899,12 @@ test("every available diagnostic field is rendered in a named disclosure", () =>
   assert.match(markup, /<summary>Session &amp; history<\/summary>/);
 });
 
-test("missing player resolution stays explicit beside source metadata", () => {
+test("missing stream frame stays explicit beside source and player facts", () => {
   const render = new Function(`${shippedSource("esc")}\n${shippedSource("playbackInfoOverview")}\nreturn playbackInfoOverview;`)();
-  const markup = render({decode_resolution: "Not reported", source_resolution: "3840×2160", player_state: "Playing", method: "Transcode · cached"});
-  assert.match(markup, /pi-picture[^]*?Playing resolution[^]*?<strong>Not reported<\/strong>/);
-  assert.match(markup, /Original file[^]*?<strong>3840×2160<\/strong>/);
+  const markup = render({decode_resolution: "Unavailable", source_resolution: "3840×2160", stream_frame: "Unavailable", player_state: "Playing", method: "Transcode · cached"});
+  assert.match(markup, /pi-picture[^]*?Source frame[^]*?<strong>3840×2160<\/strong>/);
+  assert.match(markup, /Stream frame[^]*?<strong>Unavailable<\/strong>/);
+  assert.match(markup, /Player display size[^]*?<strong>Unavailable<\/strong>/);
   assert.match(markup, /Buffered on this device/);
 });
 
