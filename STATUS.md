@@ -295,74 +295,15 @@ gate unbounded; `Drop for StartedSessionGuard` still releases only after a full
 retirement rather than after the fence; and a hold wedged before it registers
 anything still has nothing to fence. Neither client half has run on hardware.
 
-## Implementation plans for the architecture review, and one work board for every vendor
-
-**46 handoff plans** under `docs/{streaming,server,cluster,features,clients,ci}/`
-(index rows in [docs/README.md](docs/README.md)), one per finding or per
-shared mechanism, each executing named ids of
-[the review](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md) with the
-adversarial assessment's dispositions as guardrails, the current code copied
-into a contract section, and a runnable acceptance check per milestone.
-The remaining twelve landed in a second pass the same day, so **all 46
-board rows have a document**. The second pass corrected the review in
-several places worth knowing before Astra reviews: the encoded-VOD master
-already emits output geometry (only the rolling path does not) and the
-hard-coded codec string is `avc1.640034`, not `.640028`; `publish_main` is
-unreachable on `ci.yml`'s current triggers, so no `sha-` rollback image has
-been produced automatically since 2026-09-10; half the clock-skew exchange
-already exists (`x-plurx-cluster-time-ms`) and the peer-auth windows already
-assume ≤5 s; there are 29 discarded store results, not 13; removing the
-cryptr `s3` edge does not remove the second `reqwest`, and renaming the fork
-is actively expensive because the patch stack substitutes by registry name;
-`files_for_items` does not exist and there are no recorded Kodi fixtures;
-there is no HTTP access log at all; and the review's "unreplicated SQLite
-mode" is the one recovery boot, so ARCHITECTURE's 1-voter sentence is
-incomplete rather than wrong.
-
-**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md)
-is the only shared status.** The plans will be executed by Claude, GPT and
-OpenRouter sessions concurrently, so the board defines the claim protocol in
-vendor-neutral terms: a claim is a draft PR that edits the row (the push is
-the atomic step), every row and every commit carries the exact **model
-identifier** and **session id** (`Agent-Model:` / `Agent-Session:` trailers),
-statuses are a fixed vocabulary, stale rows are reclaimable after seven days
-with a note, and every plan ends with an **Execution log** table the
-executing session fills per milestone. Writers' corrections to the review
-found while reading the code are recorded at the top of each plan (for
-example: `live_tv.rs:7403` already pipes stderr; `bounded_process::output` is
-the better primitive for scan probes than the one the review named; the guide
-is cloned three times per DVR tick, not two). Astra reviews the plans next.
-
-## Architecture review, revision 3 — Astra's review merged
-
-**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-revised in place again.** Astra's independent review was written against the
-first draft; revision 3 keeps revision 2's corrected remedies and merges
-everything Astra added that the first draft had not found, each re-verified in
-the tree: an unbounded, unkillable scan probe (`scan/probe.rs:190-215`, C12);
-decode-fact lookups that hash three executable-sized inputs under a one-permit
-gate before consulting the cache and fall back to catalogue facts on any error
-(C13); item-detail badges that unpack whole fragment indexes and `stat` every
-media path with no deadline (C14); telemetry that spawns a task and a
-consistent settings read per event with no bounded queue (C15); DVR fan-out
-that writes sinks sequentially with the lock outside the timeout (L10); HDR10
-HEVC output limited to software and QSV by design (Q12); no native adaptive
-quality and dormant stall-ticket plumbing (§3.8); and two policy tests red on
-`main` — `web-policy.test.js:6007` (a stale call count) and
-`web-control.test.js:3164` under Node 22 — both reproduced here (§4.8).
-Astra's interlace experiment was re-run on this container's ffmpeg 6.1.1 with
-identical counts: the current CPU chain emits 90/90 combed frames tagged
-progressive. The seek-scratch reservation finding (C16) is a tracking item
-for the existing repair. §9 records what was run and what was not. No code
-changed.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24 into the
-status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24 and 2026-09-25
+into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-20 | Architecture review, revision 3 — Astra's review merged | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
+| 2026-09-20 | Implementation plans for the architecture review, and one work board for every vendor | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-20 | Architecture review, revision 2 — after the adversarial assessment | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-20 | End-to-end architecture review — ten verified do-first items, ranked | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-19 | The web app is a tree, and the bytes are the same ones | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |
