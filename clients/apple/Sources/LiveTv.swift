@@ -310,11 +310,29 @@ struct LiveTvDeliveryOutput: Decodable, Sendable {
     let audioChannels: Int
 }
 
+struct LiveTvDeliverySource: Decodable, Sendable {
+    let width: Int?
+    let height: Int?
+    let videoCodec: String?
+    let fieldOrder: String?
+    let frameRate: LiveTvRational?
+    let sampleAspectRatio: String?
+}
+
+struct LiveTvDeliveryReason: Decodable, Sendable {
+    let code: String?
+    let explanation: String?
+}
+
 struct LiveTvDelivery: Decodable, Sendable {
     let output: LiveTvDeliveryOutput
     let videoAction: String
     let audioAction: String
     let packaging: String
+    var source: LiveTvDeliverySource? = nil
+    var reasons: [LiveTvDeliveryReason]? = nil
+    var deinterlace: Bool? = nil
+    var deinterlaceOutput: String? = nil
 
     var playbackMethod: String {
         switch (videoAction, audioAction) {
@@ -327,7 +345,14 @@ struct LiveTvDelivery: Decodable, Sendable {
     }
 
     var videoDescription: String {
-        "\(Self.actionDescription(videoAction)) · \(output.videoCodec.uppercased()) · \(output.width)×\(output.height)"
+        let scan = deinterlace == true ? "Progressive planned" :
+            (videoAction == "copy" && ["tt", "bb", "tb", "bt"].contains(source?.fieldOrder ?? "") ? "Interlaced" : nil)
+        let cadence = output.frameRate.flatMap { rate -> String? in
+            guard rate.num > 0, rate.den > 0 else { return nil }
+            return String(format: "%.2f frames/s (planned)", Double(rate.num) / Double(rate.den))
+        }
+        return ([Self.actionDescription(videoAction), output.videoCodec.uppercased(), scan, cadence]
+            .compactMap { $0 }).joined(separator: " · ")
     }
 
     var audioDescription: String {
@@ -342,6 +367,85 @@ struct LiveTvDelivery: Decodable, Sendable {
         case "encode": return "Transcoded"
         default: return "Unknown method"
         }
+    }
+}
+
+/// Pure formatting of one attached delivery. Presentation size is supplied
+/// separately because AVPlayerItem does not report encoded frame dimensions.
+struct LiveTvPictureInfo {
+    let sourceFrame: String
+    let sourceNote: String
+    let streamFrame: String
+    let streamNote: String
+    let sourcePixelAspect: String
+    let sourceDisplayAspect: String
+    let frameComparison: String
+    let reason: String
+
+    static func frame(_ width: Int?, _ height: Int?) -> String {
+        let w = width.flatMap { (1...16_384).contains($0) ? $0 : nil }
+        let h = height.flatMap { (1...16_384).contains($0) ? $0 : nil }
+        if let w, let h { return "\(w)×\(h)" }
+        if let h { return "Height \(h)" }
+        return "Unavailable"
+    }
+
+    static func ratio(_ text: String?) -> (Int, Int)? {
+        guard let text, text.range(of: #"^[1-9][0-9]*:[1-9][0-9]*$"#, options: .regularExpression) != nil else { return nil }
+        let parts = text.split(separator: ":")
+        guard parts.count == 2, let n = Int(parts[0]), let d = Int(parts[1]), n > 0, d > 0 else { return nil }
+        let divisor = gcd(n, d)
+        return (n / divisor, d / divisor)
+    }
+
+    private static func gcd(_ lhs: Int, _ rhs: Int) -> Int {
+        var a = lhs, b = rhs
+        while b != 0 { (a, b) = (b, a % b) }
+        return a
+    }
+
+    init(delivery: LiveTvDelivery?, channel: LiveTvChannel?) {
+        let source = delivery?.source
+        if source != nil {
+            sourceFrame = Self.frame(source?.width, source?.height)
+            sourceNote = "Source probe"
+        } else if let observation = channel?.sourceFormat,
+                  observation.observedAt + 1_200 > Int64(Date().timeIntervalSince1970) {
+            sourceFrame = Self.frame(observation.videoWidth, observation.videoHeight)
+            sourceNote = "Last observed broadcast"
+        } else {
+            sourceFrame = "Unavailable"
+            sourceNote = "Unavailable"
+        }
+        streamFrame = Self.frame(delivery?.output.width, delivery?.output.height)
+        streamNote = delivery == nil ? "Unavailable" : "Planned output"
+        let sar = Self.ratio(source?.sampleAspectRatio)
+        sourcePixelAspect = sar.map { "\($0.0):\($0.1)" } ?? "Unavailable"
+        if let source, let sar, let width = source.width, let height = source.height,
+           (1...16_384).contains(width), (1...16_384).contains(height) {
+            let (n, overflowN) = width.multipliedReportingOverflow(by: sar.0)
+            let (d, overflowD) = height.multipliedReportingOverflow(by: sar.1)
+            if !overflowN && !overflowD {
+                let divisor = Self.gcd(n, d)
+                sourceDisplayAspect = "\(n / divisor):\(d / divisor)"
+            } else { sourceDisplayAspect = "Unavailable" }
+        } else { sourceDisplayAspect = "Unavailable" }
+        if let source, let delivery, let sw = source.width, let sh = source.height,
+           (1...16_384).contains(sw), (1...16_384).contains(sh),
+           (1...16_384).contains(delivery.output.width), (1...16_384).contains(delivery.output.height) {
+            let dw = delivery.output.width - sw, dh = delivery.output.height - sh
+            if dw == 0 && dh == 0 { frameComparison = "No resize planned" }
+            else if dw <= 0 && dh <= 0 { frameComparison = "Resolution reduction planned" }
+            else if dw >= 0 && dh >= 0 { frameComparison = "Larger frame dimensions planned" }
+            else { frameComparison = "Frame dimensions change planned" }
+        } else { frameComparison = "Unavailable" }
+        var seen = Set<String>()
+        let explanations = (delivery?.reasons ?? []).compactMap { item -> String? in
+            guard let value = item.explanation?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+            let key = "\(item.code ?? "")\u{0}\(value)"
+            return seen.insert(key).inserted ? value : nil
+        }
+        reason = explanations.isEmpty ? "The server did not provide a conversion reason." : explanations.joined(separator: " · ")
     }
 }
 

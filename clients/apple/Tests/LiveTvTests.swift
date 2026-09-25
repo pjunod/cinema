@@ -217,7 +217,7 @@ final class LiveTvTests: XCTestCase {
         }
         let copied = try delivery(video: "copy", audio: "copy")
         XCTAssertEqual(copied.playbackMethod, "Direct stream · no transcoding")
-        XCTAssertEqual(copied.videoDescription, "Copied unchanged · H264 · 1920×1080")
+        XCTAssertEqual(copied.videoDescription, "Copied unchanged · H264")
         XCTAssertEqual(copied.audioDescription, "Copied unchanged · AAC · Stereo")
         let audio = try delivery(video: "copy", audio: "encode")
         XCTAssertEqual(audio.playbackMethod, "Audio transcoding · original video")
@@ -232,6 +232,25 @@ final class LiveTvTests: XCTestCase {
             .hasPrefix("Audio transcoding · original video"))
         XCTAssertTrue(liveTvTechnicalSummary(channel, status: nil)
             .hasPrefix("Playback method unavailable"))
+    }
+
+    func testPictureInfoKeepsSourcePlanAndPresentationSeparate() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let modern = #"{"source":{"video_codec":"mpeg2video","width":704,"height":480,"field_order":"tt","frame_rate":{"num":30000,"den":1001},"sample_aspect_ratio":"40:33"},"output":{"container":"mpegts","video_codec":"h264","audio_codec":"ac3","width":704,"height":480,"audio_channels":2,"frame_rate":{"num":60000,"den":1001}},"video_action":"encode","audio_action":"copy","packaging":"mpegts","deinterlace":true,"reasons":[{"code":"video_incompatible","explanation":"The active player did not claim the complete source video route."}]}"#
+        let plan = try decoder.decode(LiveTvDelivery.self, from: Data(modern.utf8))
+        let picture = LiveTvPictureInfo(delivery: plan, channel: nil)
+        XCTAssertEqual(picture.sourceFrame, "704×480")
+        XCTAssertEqual(picture.streamFrame, "704×480")
+        XCTAssertEqual(picture.streamNote, "Planned output")
+        XCTAssertEqual(picture.sourcePixelAspect, "40:33")
+        XCTAssertEqual(picture.sourceDisplayAspect, "16:9")
+        XCTAssertEqual(picture.frameComparison, "No resize planned")
+        XCTAssertEqual(picture.reason, "The active player did not claim the complete source video route.")
+        XCTAssertTrue(plan.videoDescription.contains("Progressive planned"))
+        let old = #"{"output":{"container":"mpegts","video_codec":"h264","audio_codec":"ac3","width":704,"height":480,"audio_channels":2},"video_action":"copy","audio_action":"copy","packaging":"mpegts"}"#
+        let legacy = try decoder.decode(LiveTvDelivery.self, from: Data(old.utf8))
+        XCTAssertEqual(LiveTvPictureInfo(delivery: legacy, channel: nil).sourceFrame, "Unavailable")
     }
 
     func testTheHintStoreRoundTripsAndTreatsAMissingFileAsNoHint() throws {

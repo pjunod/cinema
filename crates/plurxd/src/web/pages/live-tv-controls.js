@@ -133,7 +133,9 @@ async function liveTvAttachSession(info,index,serial,generation){
         if(frames!==null) LIVE_TV.lastFrames=frames;
         LIVE_TV.lastPosition=position; LIVE_TV.unplayedSince=liveTvNow();
         if(document.visibilityState!=="hidden"||liveTvInPip()) await LIVE_TV_LEASE.keepalive();
+        if(!owned()) return;
         const status=await LIVE_TV_LEASE.status();
+        if(!owned()) return;
         if(status&&status.state!=="active") await failed({code:"stream_failed"});
         else if(status){
           if(status.channel&&status.channel.id===LIVE_TV.selected){

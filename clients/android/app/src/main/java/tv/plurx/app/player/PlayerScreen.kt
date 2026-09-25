@@ -2133,8 +2133,11 @@ private fun PlayerInfo(
             container = source?.container?.uppercase(),
             sourceAudio = sourceAudioSummary(source),
             playingVideo = videoFormatSummary(videoFormat),
-            decodeResolution = player.videoSize.takeIf { it.width > 0 && it.height > 0 }
+            streamFrame = player.videoSize.takeIf { it.width > 0 && it.height > 0 && it.unappliedRotationDegrees == 0 }
                 ?.let { "${it.width}×${it.height}" },
+            streamPixelAspect = player.videoSize.takeIf { it.width > 0 && it.height > 0 && it.unappliedRotationDegrees == 0 }
+                ?.pixelWidthHeightRatio?.takeIf { it.isFinite() && it > 0f }
+                ?.let { if (it == 1f) "1:1" else String.format(Locale.US, "≈%.4f:1", it) },
             playingAudio = selectedAudio,
             dynamicRange = dynamicRangeSummary(
                 source = sourceDynamicRange(plan.source),
@@ -2236,6 +2239,8 @@ internal data class PlaybackInfoDetails(
     val sourceAudio: String? = null,
     val playingVideo: String? = null,
     val decodeResolution: String? = null,
+    val streamFrame: String? = null,
+    val streamPixelAspect: String? = null,
     val playingAudio: String? = null,
     val dynamicRange: String? = null,
     val subtitles: String = "Off",
@@ -2392,13 +2397,19 @@ internal fun playbackInfoRows(
         InfoRow("file_id", "File ID", "PLAYBACK", setOf(PlaybackStatsMode.Debug), "#${details.fileId}"),
         InfoRow("session", "Session", "PLAYBACK", setOf(PlaybackStatsMode.Debug), details.sessionId, placement = "notes"),
         InfoRow("source_video", "Original video", "SOURCE", StandardAndDebug, details.sourceVideo, placement = "notes"),
-        InfoRow("source_resolution", "Original resolution", "SOURCE", StandardAndDebug, details.sourceResolution),
+        InfoRow("source_resolution", "Source frame", "SOURCE", StandardAndDebug, details.sourceResolution),
+        InfoRow("source_pixel_aspect", "Source pixel aspect", "SOURCE", setOf(PlaybackStatsMode.Details, PlaybackStatsMode.Debug), "Unavailable"),
+        InfoRow("source_display_aspect", "Source display aspect", "SOURCE", setOf(PlaybackStatsMode.Details, PlaybackStatsMode.Debug), "Unavailable"),
         InfoRow("source_bitrate", "Source bitrate", "SOURCE", StandardAndDebug, details.sourceBitrate),
         InfoRow("container", "Container", "SOURCE", StandardAndDebug, details.container),
         InfoRow("source_audio", "Source audio track", "SOURCE", StandardAndDebug, details.sourceAudio, placement = "notes"),
         InfoRow("source_file", "File", "SOURCE", setOf(PlaybackStatsMode.Debug), details.sourceFile, placement = "notes"),
         InfoRow("av_offset", "AV offset", "SOURCE", setOf(PlaybackStatsMode.Debug), details.audioSync ?: "0 ms"),
-        InfoRow("decode_resolution", "Playing resolution", "NOW DECODING", AllInfoModes, details.decodeResolution ?: "Not reported"),
+        InfoRow("decode_resolution", "Player display size", "NOW DECODING", AllInfoModes, "Unavailable", note = "Not reported by this player"),
+        InfoRow("stream_frame", "Stream frame", "NOW DECODING", AllInfoModes, details.streamFrame ?: "Unavailable", note = if (details.streamFrame != null) "Measured stream · decoded/cropped frame" else "Unavailable"),
+        InfoRow("stream_pixel_aspect", "Stream pixel aspect", "NOW DECODING", setOf(PlaybackStatsMode.Details, PlaybackStatsMode.Debug), details.streamPixelAspect ?: "Not measured"),
+        InfoRow("frame_comparison", "Frame comparison", "NOW DECODING", setOf(PlaybackStatsMode.Details, PlaybackStatsMode.Debug), "Unavailable"),
+        InfoRow("aspect_comparison", "Aspect comparison", "NOW DECODING", setOf(PlaybackStatsMode.Details, PlaybackStatsMode.Debug), "Not verified"),
         InfoRow("stream_format", "Stream format", "NOW DECODING", StandardAndDebug, details.playingVideo ?: "Not reported"),
         InfoRow("device_audio", "Device audio output", "NOW DECODING", StandardAndDebug, "Not reported"),
         InfoRow(
@@ -2844,7 +2855,6 @@ private fun videoFormatSummary(format: Format?): String? {
     }
     return listOfNotNull(
         codecShort(format.sampleMimeType) ?: format.codecs?.takeIf { it.isNotBlank() },
-        if (format.width != Format.NO_VALUE && format.height != Format.NO_VALUE) "${format.width}×${format.height}" else null,
         hdr,
         format.bitrate.takeIf { it != Format.NO_VALUE && it > 0 }?.toLong()?.let(::formatBitrate),
     ).joinToString(" · ").ifBlank { null }

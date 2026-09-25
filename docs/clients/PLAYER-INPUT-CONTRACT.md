@@ -670,7 +670,9 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 | Row | mini | standard | details | debug | Format | Placement | Available on | Note |
 |---|---|---|---|---|---|---|---|---|
 | `Original video` | – | ✓ | ✓ | ✓ | list | notes | all | codec · profile · bit depth · HDR format. |
-| `Original resolution` | – | ✓ | ✓ | ✓ | resolution | grid | all |  |
+| `Source frame` | – | ✓ | ✓ | ✓ | resolution | grid | all |  |
+| `Source pixel aspect` | – | – | ✓ | ✓ | text | grid | all |  |
+| `Source display aspect` | – | – | ✓ | ✓ | text | grid | all |  |
 | `Source bitrate` | – | ✓ | ✓ | ✓ | bitrate | grid | all |  |
 | `Container` | – | ✓ | ✓ | ✓ | text | grid | all |  |
 | `Source audio track` | – | ✓ | ✓ | ✓ | list | notes | all | codec · channels · language, "+N tracks" when more exist. |
@@ -681,8 +683,12 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 
 | Row | mini | standard | details | debug | Format | Placement | Available on | Note |
 |---|---|---|---|---|---|---|---|---|
-| `Playing resolution` | ✓ | ✓ | ✓ | ✓ | resolution | grid | all | always shown Positive dimensions reported by the attached player. Not reported is not zero or the original file size. |
-| `Stream format` | – | ✓ | ✓ | ✓ | text | grid | all | always shown Stream or manifest metadata. Not a player picture measurement. |
+| `Player display size` | ✓ | ✓ | ✓ | ✓ | resolution | grid | all | always shown Presentation dimensions reported by the attached player; not encoded frame dimensions. |
+| `Stream frame` | ✓ | ✓ | ✓ | ✓ | resolution | grid | all | always shown Encoded output plan or eligible attached stream sample, with provenance shown beside the value. |
+| `Stream pixel aspect` | – | – | ✓ | ✓ | text | grid | all |  |
+| `Frame comparison` | – | – | ✓ | ✓ | text | grid | all |  |
+| `Aspect comparison` | – | – | ✓ | ✓ | text | grid | all |  |
+| `Stream format` | – | ✓ | ✓ | ✓ | text | grid | all | always shown Codec, scan and cadence only. Stream frame is the sole active output dimension row. |
 | `Device audio output` | – | ✓ | ✓ | ✓ | text | grid | all | always shown Speaker or HDMI output only when reported by the platform; never inferred from the audio track. |
 | `Dynamic range` | – | ✓ | ✓ | ✓ | text | notes | all | Mini shows the chip form ("DV P7 → HDR10"); the ledger shows the sentence. |
 | `Stream audio track` | – | ✓ | ✓ | ✓ | list | notes | all | Selected stream audio track metadata; not a claim about speaker or HDMI output. |

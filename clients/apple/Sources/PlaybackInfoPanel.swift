@@ -61,7 +61,8 @@ struct PlaybackInfoPanel: View {
     private var compactBody: some View {
         HStack(alignment: .top, spacing: 12) {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 16, alignment: .topLeading)], alignment: .leading, spacing: 12) {
-                summary("Playing resolution", value("decode_resolution"), size: bodySize + 1)
+                summary("Player display size", value("decode_resolution"), size: bodySize + 1)
+                summary("Stream frame", value("stream_frame"), note: fact("stream_frame")?.note, size: bodySize + 1)
                 summary("Playback", value("player_state"), size: bodySize + 1)
                 summary("Buffered on device", value("client_loaded"), size: bodySize + 1)
             }
@@ -144,8 +145,12 @@ struct PlaybackInfoPanel: View {
             Text(value("player_state") + (isLive ? " · Live TV" : ""))
                 .font(.system(size: bodySize, weight: .semibold)).foregroundStyle(Palette.accent)
             adaptiveFacts {
-                summary("Playing resolution", value("decode_resolution"), note: "Size reported by the attached player.", size: pictureSize)
-                summary(isLive ? "Broadcast source" : "Original file", value("source_resolution"), note: fact("source_video")?.value)
+                summary("Source frame", value("source_resolution"), note: fact("source_resolution")?.note, size: pictureSize)
+                summary("Stream frame", value("stream_frame"), note: fact("stream_frame")?.note, size: pictureSize)
+            }
+            summary("Player display size", value("decode_resolution"), note: fact("decode_resolution")?.note)
+            if let comparison = fact("frame_comparison"), comparison.value != "Unavailable" {
+                summary("Frame comparison", comparison.value)
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text(value("method")).fontWeight(.semibold)
@@ -238,8 +243,9 @@ func playbackInfoGroup(_ section: String) -> String {
 
 func playbackInfoExplanation(_ id: String) -> String? {
     switch id {
-    case "decode_resolution": return "Attached player measurement; never inferred from source size."
-    case "source_resolution": return "Original file metadata."
+    case "decode_resolution": return "Player presentation dimensions; not encoded frame dimensions."
+    case "source_resolution": return "Source frame metadata or probe."
+    case "stream_frame": return "Planned output or eligible stream sample; see provenance."
     case "decode_audio": return "Selected stream track; not the device's audio output."
     case "client_loaded": return "Contiguous media loaded ahead on this device."
     case "server_ready": return "Complete media ahead on the server; separate from the device buffer."

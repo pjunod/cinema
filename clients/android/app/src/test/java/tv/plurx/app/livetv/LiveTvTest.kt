@@ -24,6 +24,44 @@ import tv.plurx.app.player.DisplayModeMatchResult
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LiveTvTest {
+    @Test fun playbackPictureSeparatesPlanSampleAndPlayerDisplay() {
+        val plan = LiveTvDelivery(
+            output = LiveTvDeliveryOutput("mpegts", "h264", "ac3", 704, 480, audio_channels = 2),
+            video_action = "encode", audio_action = "copy", packaging = "mpegts",
+            source = LiveTvDeliverySource(704, 480, "mpeg2video", "tt", sample_aspect_ratio = "40:33"),
+            deinterlace = true,
+            reasons = listOf(LiveTvDeliveryReason("video_incompatible", "The active player did not claim the complete source video route.")),
+        )
+        val planned = liveTvPictureInfo(plan, null, null)
+        assertEquals("704×480", planned.sourceFrame)
+        assertEquals("16:9", planned.sourceDisplayAspect)
+        assertEquals("No resize planned", planned.frameComparison)
+        assertEquals("Planned output", planned.streamNote)
+        assertEquals("Not measured", planned.streamPixelAspect)
+        assertEquals("The active player did not claim the complete source video route.", planned.reason)
+
+        val measured = liveTvPictureInfo(plan, androidx.media3.common.VideoSize(704, 480, 0, 40f / 33f), null)
+        assertEquals("Measured stream · decoded/cropped frame", measured.streamNote)
+        assertEquals("≈40:33", measured.streamPixelAspect)
+        assertEquals("Frame dimensions unchanged", measured.frameComparison)
+        assertEquals("Not verified", measured.aspectComparison)
+        val rotated = liveTvPictureInfo(plan, androidx.media3.common.VideoSize(704, 480, 90, 1f), null)
+        assertEquals("Planned output", rotated.streamNote)
+    }
+
+    @Test fun playbackPictureReportsMeasuredReductionAndPlanConflict() {
+        val plan = LiveTvDelivery(
+            output = LiveTvDeliveryOutput("mpegts", "h264", "ac3", 1280, 720, audio_channels = 2),
+            video_action = "encode", audio_action = "copy", packaging = "mpegts",
+            source = LiveTvDeliverySource(1920, 1080, sample_aspect_ratio = "1:1"),
+        )
+        val reduced = liveTvPictureInfo(plan, androidx.media3.common.VideoSize(1280, 720, 0, 1f), null)
+        assertEquals("Stream resolution reduced", reduced.frameComparison)
+        val disagreement = liveTvPictureInfo(plan, androidx.media3.common.VideoSize(1920, 1080, 0, 1f), null)
+        assertEquals("1920×1080", disagreement.streamFrame)
+        assertTrue(disagreement.planConflict!!.contains("planned 1280×720"))
+    }
+
     @Test fun liveConfigurationLeavesTheTargetOffsetToThePlaylist() {
         val item = MediaItem.Builder()
             .setLiveConfiguration(

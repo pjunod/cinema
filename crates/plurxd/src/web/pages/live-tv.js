@@ -458,6 +458,18 @@ function liveTvStatsTelemetry(){
   const attached=!!current&&!!v&&!!(v.currentSrc||v.src);
   const status=LIVE_TV.status,plan=status?.delivery||current?.delivery;
   const source=PlurxLiveTv.sourceDetails(channel,liveTvNowSeconds(),liveTvSourceProgrammeEnd(channel));
+  const picture=PlurxLiveTv.formatLiveTvPictureFacts(PlurxLiveTv.normalizeLiveTvPictureFacts({
+    delivery:plan,
+    presentation:attached?{width:v.videoWidth,height:v.videoHeight}:null,
+    channelObservation:PlurxLiveTv.measuredSourceFormat(channel,liveTvNowSeconds(),liveTvSourceProgrammeEnd(channel)),
+    attachmentCurrent:attached,
+    nowSeconds:liveTvNowSeconds(),
+  }));
+  const scan=plan?.deinterlace===true?"Progressive planned":
+    plan?.video_action==="copy"&&["tt","bb","tb","bt"].includes(plan.source?.field_order)?"Interlaced":null;
+  const rate=plan?.output?.frame_rate;
+  const cadence=Number.isSafeInteger(rate?.num)&&Number.isSafeInteger(rate?.den)&&rate.den>0&&rate.num>0
+    ?`${(rate.num/rate.den).toFixed(2).replace(/0+$/,'').replace(/\.$/,'')} frames/s (planned)`:null;
   const level=LIVE_TV.hls?.levels?.[LIVE_TV.hls.currentLevel];
   const signal=status?.signal;
   const captions=liveTvCaptionTracks();
@@ -471,11 +483,13 @@ function liveTvStatsTelemetry(){
   return {
     method:plan?(plan.video_action==="copy"?(plan.audio_action==="copy"?"Remux":"Audio converted for this player"):"Video converted for this player"):"Not reported",
     player_state:!attached?"Waiting for player":v.error?"Failed":v.ended?"Ended":v.paused?"Paused":v.readyState<3?"Buffering":"Playing",
-    decode_resolution:attached&&v.videoWidth>0&&v.videoHeight>0?`${v.videoWidth}×${v.videoHeight}`:"Not reported",
-    source_resolution:source.exact[0]||"Not reported",
-    source_video:source.exact.slice(1).join(" · ")||null,
-    source_resolution_note:source.observedAt?`Tuner source observed ${new Date(source.observedAt*1000).toLocaleString()}`:"Source measurement not reported.",
-    stream_format:plan?.output?[plan.output.width>0&&plan.output.height>0?`${plan.output.width}×${plan.output.height}`:null,plan.output.video_codec,plan.output.hdr].filter(Boolean).join(" · "):null,
+    ...picture,
+    source_video:[plan?.source?.video_codec?.toUpperCase()||source.exact.slice(1)[0],
+      ["tt","bb","tb","bt"].includes(plan?.source?.field_order)?"Interlaced":null].filter(Boolean).join(" · ")||null,
+    stream_format:plan?.output?[plan.output.video_codec?.toUpperCase(),scan,cadence].filter(Boolean).join(" · ")||null:null,
+    reason:plan?PlurxLiveTv.liveTvReasonText(plan.reasons):null,
+    delivery_reasons:plan?.reasons?.map(r=>[r.code,r.explanation].filter(Boolean).join(": ")).join(" · ")||null,
+    aspect_comparison_note:picture.aspect_comparison==="Not verified"?"Output pixel aspect and compatible aperture are not verified.":null,
     decode_audio:plan?.output?[plan.output.audio_codec,plan.output.audio_channels>0?`${plan.audio_action==="encode"&&!(plan.source?.audio_channels>0)?"up to ":""}${plan.output.audio_channels} channels`:null].filter(Boolean).join(" · "):null,
     subtitles:!attached?"Not reported":selectedCaption?liveTvCaptionTrackLabel(selectedCaption.track,selectedCaption.index):"Off",
     subtitles_note:!attached?null:selectedCaption?"Track selected; text appears when this broadcast supplies cues.":
@@ -533,10 +547,11 @@ function updateLiveTvStats(){
 
     extra("live_edge","Behind stream live edge","BUFFERING / DELIVERY","Behind latest available media; not broadcast delay.");
     extra("reception","Tuner reception","BUFFERING / DELIVERY","Strength, quality and symbol quality reported by the tuner.");
+    if(mode==="debug")extra("delivery_reasons","Delivery reasons","PLAYBACK","Raw server reason codes and explanations.");
   }
   patchPlaybackInfoRows(body,mode,rows,"","");
   const overview=body.querySelector("[data-stats-overview]");
-  if(overview)overview.innerHTML=mode==="mini"?[["Playing resolution",t.decode_resolution],["Playback",t.player_state],["Buffered on device",t.client_loaded]].map(([label,value])=>`<div class="pi-fact"><span class="pi-label">${esc(label)}</span><strong>${esc(value)}</strong></div>`).join(""):playbackInfoOverview(t,true);
+  if(overview)overview.innerHTML=mode==="mini"?playbackInfoCompact(t):playbackInfoOverview(t,true);
   panel.querySelectorAll("[data-live-stats-mode]").forEach(button=>{const selected=button.dataset.liveStatsMode===mode;button.classList.toggle("on",selected);button.setAttribute("aria-checked",String(selected));});
 }
 function liveTvRefreshTechnicalDetails(){
