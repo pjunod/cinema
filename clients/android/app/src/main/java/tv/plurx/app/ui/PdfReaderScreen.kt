@@ -5,8 +5,10 @@ import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,13 +23,19 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -58,9 +66,12 @@ private class LocalPdf(val file: File) {
 
     suspend fun close() {
         renderLock.withLock {
-            renderer.close()
-            descriptor.close()
-            file.delete()
+            try {
+                renderer.close()
+            } finally {
+                descriptor.close()
+                file.delete()
+            }
         }
     }
 }
@@ -162,14 +173,44 @@ fun PdfReaderScreen(fileId: Long, onExit: () -> Unit) {
                 }
                 Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), contentAlignment = Alignment.TopCenter) {
                     if (page == null) CircularProgressIndicator()
-                    else Image(
-                        bitmap = page!!.asImageBitmap(),
-                        contentDescription = "PDF page ${pageIndex + 1}",
-                        modifier = Modifier.fillMaxWidth(),
-                        contentScale = ContentScale.FillWidth,
-                    )
+                    else PdfPage(page!!, pageIndex)
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun PdfPage(bitmap: Bitmap, pageIndex: Int) {
+    var zoom by remember(pageIndex) { mutableFloatStateOf(1f) }
+    var pan by remember(pageIndex) { mutableStateOf(Offset.Zero) }
+    BoxWithConstraints(Modifier.fillMaxWidth().clipToBounds()) {
+        val width = constraints.maxWidth.toFloat()
+        val height = width * bitmap.height / bitmap.width
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "PDF page ${pageIndex + 1}",
+            modifier = Modifier
+                .fillMaxWidth()
+                .pointerInput(pageIndex, bitmap) {
+                    detectTransformGestures { _, panChange, zoomChange, _ ->
+                        val next = (zoom * zoomChange).coerceIn(1f, 4f)
+                        val maxX = width * (next - 1f) / 2f
+                        val maxY = height * (next - 1f) / 2f
+                        pan = Offset(
+                            (pan.x + panChange.x).coerceIn(-maxX, maxX),
+                            (pan.y + panChange.y).coerceIn(-maxY, maxY),
+                        )
+                        zoom = next
+                    }
+                }
+                .graphicsLayer {
+                    scaleX = zoom
+                    scaleY = zoom
+                    translationX = pan.x
+                    translationY = pan.y
+                },
+            contentScale = ContentScale.FillWidth,
+        )
     }
 }
