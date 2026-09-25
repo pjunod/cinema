@@ -118,3 +118,14 @@ implementation is claimed; “compiled” does not mean tests passed.
   attempt limit is captured on acceptance so an accepted job keeps a stable
   budget; setting changes apply to newly accepted jobs. Core and Hiqlite tests
   compile with Rust 1.97.1; execution remains deferred to the final fast lane.
+
+- 2026-09-25: typed fragment retry policy committed and pushed as `c3b3e3999`.
+  Draft PR #532 remains a draft, verified through Forgejo; its description now
+  reflects the pre-transcode integration and remaining fragment work.
+
+- 2026-09-25: added atomic analysis-to-shared-job admission and per-target
+  history links. One shared claim projects its owner and retry outcomes into
+  the existing domain rows, retaining their prior diagnostics and attempt
+  history. Domain-history deletion releases its compact request identity.
+  Core/Hiqlite compilation passed; production fragment entry points and
+  workers still use their old implementation until the adapter is complete.

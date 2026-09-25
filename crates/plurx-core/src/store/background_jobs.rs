@@ -13,6 +13,7 @@ pub use super::background_jobs_delivery::{
 use super::background_jobs_delivery::{DELIVERIES_SQL, WAITERS_SQL};
 use super::background_jobs_fragment::PUBLISH_FRAGMENT_SQL;
 pub use super::background_jobs_fragment::{FragmentJobFailure, PublishFragmentJob};
+pub use super::background_jobs_fragment_admission::EnqueueFragmentJob;
 use super::background_jobs_maintenance::{CANCEL_WAITER_SQL, MAINTENANCE_NEEDED, MAINTENANCE_SQL};
 use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
 pub use super::background_jobs_publication::{
@@ -74,14 +75,43 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
       AND expires_at_ms > json_extract(body, '$.now_ms')
       AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || owner_node_id)
     ) THEN 'producer_fenced'
+    WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
+    WHEN prior_job IS NOT NULL THEN 'existing'
     WHEN json_type(body, '$.delivery_parent') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_job_waiters WHERE job_id = json_extract(body, '$.delivery_parent')
         AND target_node_id = json_extract(body, '$.payload.target_node_id') AND state = 'awaiting_hydration'
         AND (deadline_ms IS NULL OR deadline_ms > json_extract(body, '$.now_ms'))
         AND CASE WHEN json_valid(result_ref) THEN 'fragment:' || json_extract(result_ref, '$.artifact_key') END = json_extract(body, '$.payload.artifact_key')
     ) THEN 'no_demand'
-    WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
-    WHEN prior_job IS NOT NULL THEN 'existing'
+    WHEN json_type(body, '$.fragment_domain') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM files WHERE id = json_extract(body, '$.fragment_domain.file_id')
+        AND size = json_extract(body, '$.fragment_domain.source_size') AND mtime = json_extract(body, '$.fragment_domain.source_mtime')
+    ) THEN 'source_changed'
+    WHEN json_type(body, '$.analysis_request') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM analysis_requests WHERE request_id = json_extract(body, '$.analysis_request.request_id')
+        AND state = 'running' AND component = 'fragment_index' AND cancel_requested = 0
+        AND owner_node_id = json_extract(body, '$.analysis_request.owner_node_id')
+        AND fence = json_extract(body, '$.analysis_request.fence') AND lease_expires_ms > json_extract(body, '$.now_ms')
+        AND file_id = json_extract(body, '$.fragment_domain.file_id')
+        AND source_size = json_extract(body, '$.fragment_domain.source_size')
+        AND source_mtime = json_extract(body, '$.fragment_domain.source_mtime')
+        AND target_node_id = json_extract(body, '$.fragment_domain.target_node_id')
+        AND force_rebuild = json_extract(body, '$.analysis_request.force_rebuild')
+        AND requested_generation = json_extract(body, '$.analysis_request.requested_generation')
+        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || owner_node_id)
+    ) THEN 'request_fenced'
+    WHEN json_type(body, '$.fragment_domain') IS NOT NULL
+      AND COALESCE(json_extract(body, '$.analysis_request.force_rebuild'), 0) = 0
+      AND json_extract(body, '$.fragment_domain.cache_key') != COALESCE((
+        SELECT generation_cache_key FROM cluster_fragment_index_heads WHERE logical_cache_key = json_extract(body, '$.logical_key')
+      ), json_extract(body, '$.logical_key')) THEN 'conflict'
+    WHEN json_type(body, '$.fragment_domain') IS NOT NULL
+      AND COALESCE(json_extract(body, '$.analysis_request.force_rebuild'), 0) = 0
+      AND EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
+        WHERE cache_key = json_extract(body, '$.fragment_domain.cache_key')
+          AND target_node_id = json_extract(body, '$.fragment_domain.target_node_id')
+          AND state IN ('failed','cancelled')
+          AND (COALESCE(last_error_code, '') != 'queue_expired' OR index_retry_deadline_ms != 0)) THEN 'domain_terminal'
     WHEN active_state = 'cancelling' THEN 'job_cancelling'
     WHEN active_job IS NOT NULL AND json_remove(active_payload, '$.reason') != json_remove(json_extract(body, '$.payload'), '$.reason') THEN 'conflict'
     WHEN EXISTS (SELECT 1 FROM background_jobs WHERE id = json_extract(body, '$.id')) THEN 'conflict'
@@ -593,6 +623,9 @@ pub enum EnqueueOutcome {
     QueueFull,
     ProducerFenced,
     NoDemand,
+    SourceChanged,
+    RequestFenced,
+    DomainTerminal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -769,6 +802,10 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn enqueue_fragment_job(
+        &self,
+        request: EnqueueFragmentJob,
+    ) -> Result<EnqueueOutcome, StoreError>;
     async fn job_waiters(&self, query: WaiterQuery) -> Result<WaiterPage, StoreError>;
     async fn delivery_intents(&self, now_ms: i64) -> Result<Vec<DeliveryIntent>, StoreError>;
     async fn enqueue_delivery(
@@ -853,6 +890,28 @@ async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn enqueue_fragment_job(
+        &self,
+        input: EnqueueFragmentJob,
+    ) -> Result<EnqueueOutcome, StoreError> {
+        let (request, logical_key) = super::background_jobs_fragment_admission::prepare(&input)?;
+        let mut body = enqueue_body(self, &request).await?;
+        body["fragment_domain"] =
+            serde_json::to_value(input.job).map_err(|error| invalid(&error.to_string()))?;
+        body["logical_key"] = logical_key.into();
+        if let Some(analysis) = input.analysis_request {
+            body["analysis_request"] =
+                serde_json::to_value(analysis).map_err(|error| invalid(&error.to_string()))?;
+        }
+        let rows = self
+            .queue_sql(ENQUEUE_SQL.into(), encode(&body)?, true, true)
+            .await?;
+        decode(
+            rows.first()
+                .ok_or_else(|| invalid("fragment admission returned no verdict"))?,
+        )
+    }
+
     async fn job_waiters(&self, query: WaiterQuery) -> Result<WaiterPage, StoreError> {
         if uuid::Uuid::parse_str(&query.job_id).is_err()
             || query.limit == 0

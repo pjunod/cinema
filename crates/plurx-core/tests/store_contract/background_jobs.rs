@@ -350,3 +350,99 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn background_jobs_fragment_targets_share_claims_and_keep_domain_history() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "durable-fragment-domain").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let source = "a".repeat(64);
+        let pipeline = "b".repeat(64);
+        let key = plurx_core::store::cluster_fragment_index_key(
+            file_id, file.size, file.mtime, &source, &pipeline,
+        )
+        .expect("key");
+        let mut id = String::new();
+        for target in ["node-a", "node-b"] {
+            let outcome = store
+                .enqueue_fragment_job(EnqueueFragmentJob {
+                    job: plurx_core::store::NewClusterFragmentIndexJob {
+                        cache_key: key.clone(),
+                        file_id,
+                        source_size: file.size,
+                        source_mtime: file.mtime,
+                        source_sha256: source.clone(),
+                        pipeline_sha256: pipeline.clone(),
+                        priority: "normal".into(),
+                        trigger: "background".into(),
+                        target_node_id: target.into(),
+                        not_before_ms: 1_000,
+                        created_at_ms: 1_000,
+                    },
+                    analysis_request: None,
+                    repair: false,
+                    now_ms: 1_000,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: admit target: {error}"));
+            let EnqueueOutcome::Accepted { job_id, .. } = outcome else {
+                panic!("{backend}: not accepted: {outcome:?}")
+            };
+            if id.is_empty() {
+                id = job_id;
+            } else {
+                assert_eq!(id, job_id);
+            }
+        }
+        let ClaimOutcome::Claimed { job } = store
+            .claim_job(ClaimJob {
+                job_id: id.clone(),
+                expected_revision: 0,
+                node_id: "node-c".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::FragmentIndexBuild,
+                payload_version: 1,
+                now_ms: 1_001,
+                dispatched_at_ms: 1_001,
+            })
+            .await
+            .expect("claim")
+        else {
+            panic!("{backend}: not claimed")
+        };
+        for target in ["node-a", "node-b"] {
+            let domain = store
+                .cluster_fragment_index_job(&key, target)
+                .await
+                .expect("domain row")
+                .expect("domain row");
+            assert_eq!(domain.owner_node_id, "node-c", "{backend}");
+            assert_eq!(domain.state, "running");
+            assert_eq!(domain.attempts, 1);
+        }
+        store
+            .fail_fragment_job(FragmentJobFailure {
+                token: job.token.expect("token"),
+                code: plurx_core::content_analysis::IndexFailureCode::IndexBudgetExceeded,
+                transient_allowlisted: false,
+                diagnostic: Default::default(),
+                now_ms: 1_002,
+            })
+            .await
+            .expect("typed failure")
+            .expect("settled");
+        for target in ["node-a", "node-b"] {
+            let domain = store
+                .cluster_fragment_index_job(&key, target)
+                .await
+                .expect("domain row")
+                .expect("domain row");
+            assert_eq!(domain.state, "queued");
+            assert_eq!(domain.attempts, 1);
+            assert_eq!(domain.attempt_errors, "index_budget_exceeded");
+            assert!(domain.index_retry_deadline_ms > 1_002);
+        }
+    })
+    .await;
+}

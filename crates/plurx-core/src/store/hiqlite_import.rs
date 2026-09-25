@@ -415,6 +415,15 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "background_fragment_targets",
+        columns: &["cache_key", "target_node_id", "job_id"],
+        order_by: "cache_key, target_node_id",
+        minimum_schema: 70,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "background_job_waiters",
         columns: &[
             "request_scope",
@@ -3175,7 +3184,7 @@ mod tests {
         assert!(names.contains(&"media_classifications"));
         assert!(names.contains(&"file_grants"));
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 57, "review every imported durable table");
+        assert_eq!(names.len(), 58, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

@@ -382,6 +382,7 @@ struct DurableDump {
     watched_outbox: Vec<String>,
     pretranscode_jobs: Vec<String>,
     background_jobs: Vec<String>,
+    background_fragment_targets: Vec<String>,
     background_job_waiters: Vec<String>,
     background_job_attempts: Vec<String>,
     background_job_reservations: Vec<String>,
@@ -422,6 +423,8 @@ pub(super) async fn local_durable_digest(client: &TimedClient) -> Result<String,
              FROM watched_outbox ORDER BY id",
         )
         .await?,
+        background_fragment_targets: rows(client, "SELECT json_array(cache_key, target_node_id, job_id) AS value
+            FROM background_fragment_targets ORDER BY cache_key, target_node_id").await?,
         background_jobs: rows(client, "SELECT json_array(id, kind, payload_version, payload_json, dedupe_key,
             priority, state, target_node_id, owner_node_id, owner_boot_id, claim_id, fence, revision,
             lease_expires_ms, failed_attempts, attempt_limit, retry_deadline_ms, attempt_errors, index_diagnostic_json, yield_count, abandoned_count, not_before_ms, checkpoint_json,

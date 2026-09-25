@@ -2919,6 +2919,10 @@ impl HiqliteAuthStore {
         self.telemetry.clear().await?;
         let statements = vec![
             ("DELETE FROM background_job_commands".to_owned(), params!()),
+            (
+                "DELETE FROM background_fragment_targets".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM background_job_waiters".to_owned(), params!()),
             (
                 "DELETE FROM background_job_reservations".to_owned(),

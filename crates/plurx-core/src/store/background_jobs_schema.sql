@@ -103,6 +103,25 @@ CREATE TABLE IF NOT EXISTS background_job_reservations (
 CREATE INDEX IF NOT EXISTS background_job_reservations_job
     ON background_job_reservations(job_id, fence);
 
+-- Target progress stays in the existing domain history. This link names the
+-- shared computation currently responsible for a target without making the
+-- legacy domain row a second independently claimable ownership record.
+-- next statement
+CREATE TABLE IF NOT EXISTS background_fragment_targets (
+    cache_key TEXT NOT NULL,
+    target_node_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    PRIMARY KEY (cache_key, target_node_id)
+) STRICT;
+-- next statement
+CREATE INDEX IF NOT EXISTS background_fragment_targets_job ON background_fragment_targets(job_id);
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_fragment_target_history_removed
+AFTER DELETE ON cluster_fragment_index_jobs
+BEGIN
+    DELETE FROM background_fragment_targets WHERE cache_key = OLD.cache_key AND target_node_id = OLD.target_node_id;
+END;
+
 -- The immutable RETURNING envelope is selected before this trigger runs.
 -- Its mutations and retirement share that one statement's transaction. This
 -- uses the same result-envelope pattern as the existing DV admission path.
@@ -176,6 +195,53 @@ BEGIN
         AND EXISTS (SELECT 1 FROM background_job_waiters
             WHERE request_scope = json_extract(NEW.request_json, '$.request.scope')
             AND request_id = json_extract(NEW.request_json, '$.request.request_id') AND state = 'pending');
+
+    UPDATE analysis_requests SET state = 'submitted', owner_node_id = NULL, lease_expires_ms = NULL,
+        result_cache_key = json_extract(NEW.request_json, '$.fragment_domain.cache_key'),
+        expected_predecessor_generation = COALESCE((SELECT generation_cache_key FROM cluster_fragment_index_heads
+            WHERE logical_cache_key = json_extract(NEW.request_json, '$.logical_key')), ''),
+        last_error_code = NULL, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE request_id = json_extract(NEW.request_json, '$.analysis_request.request_id')
+        AND json_extract(NEW.result_json, '$.outcome') = 'accepted';
+
+    INSERT INTO background_fragment_targets (cache_key, target_node_id, job_id)
+    SELECT json_extract(NEW.request_json, '$.fragment_domain.cache_key'),
+        json_extract(NEW.request_json, '$.fragment_domain.target_node_id'), json_extract(NEW.result_json, '$.job_id')
+    WHERE json_type(NEW.request_json, '$.fragment_domain') IS NOT NULL
+        AND json_extract(NEW.result_json, '$.outcome') = 'accepted'
+    ON CONFLICT(cache_key, target_node_id) DO UPDATE SET job_id = excluded.job_id;
+
+    INSERT INTO cluster_fragment_index_jobs (cache_key, file_id, source_size, source_mtime, source_sha256,
+        pipeline_sha256, priority, trigger, target_node_id, state, owner_node_id, fence, lease_expires_ms,
+        attempts, not_before_ms, created_at_ms, updated_at_ms)
+    SELECT json_extract(NEW.request_json, '$.fragment_domain.cache_key'),
+        json_extract(NEW.request_json, '$.fragment_domain.file_id'), json_extract(NEW.request_json, '$.fragment_domain.source_size'),
+        json_extract(NEW.request_json, '$.fragment_domain.source_mtime'), json_extract(NEW.request_json, '$.fragment_domain.source_sha256'),
+        json_extract(NEW.request_json, '$.fragment_domain.pipeline_sha256'), json_extract(NEW.request_json, '$.fragment_domain.priority'),
+        json_extract(NEW.request_json, '$.fragment_domain.trigger'), json_extract(NEW.request_json, '$.fragment_domain.target_node_id'),
+        job.state, job.owner_node_id, job.fence, job.lease_expires_ms,
+        job.failed_attempts + CASE WHEN job.state = 'running' THEN 1 ELSE 0 END,
+        job.not_before_ms, job.created_at_ms, job.updated_at_ms
+    FROM background_jobs job WHERE job.id = json_extract(NEW.result_json, '$.job_id')
+        AND json_type(NEW.request_json, '$.fragment_domain') IS NOT NULL
+        AND json_extract(NEW.result_json, '$.outcome') = 'accepted'
+    ON CONFLICT(cache_key, target_node_id) DO UPDATE SET state = excluded.state,
+        owner_node_id = excluded.owner_node_id, fence = excluded.fence, lease_expires_ms = excluded.lease_expires_ms,
+        priority = excluded.priority, trigger = excluded.trigger, updated_at_ms = excluded.updated_at_ms,
+        attempts = CASE WHEN cluster_fragment_index_jobs.state = 'ready'
+            OR json_extract(NEW.request_json, '$.analysis_request.force_rebuild') = 1 THEN excluded.attempts ELSE cluster_fragment_index_jobs.attempts END,
+        attempt_errors = CASE WHEN cluster_fragment_index_jobs.state = 'ready'
+            OR json_extract(NEW.request_json, '$.analysis_request.force_rebuild') = 1 THEN '' ELSE cluster_fragment_index_jobs.attempt_errors END,
+        index_retry_deadline_ms = CASE WHEN cluster_fragment_index_jobs.state = 'ready'
+            OR json_extract(NEW.request_json, '$.analysis_request.force_rebuild') = 1 THEN 0 ELSE cluster_fragment_index_jobs.index_retry_deadline_ms END,
+        index_diagnostic_json = CASE WHEN cluster_fragment_index_jobs.state = 'ready'
+            OR json_extract(NEW.request_json, '$.analysis_request.force_rebuild') = 1 THEN '' ELSE cluster_fragment_index_jobs.index_diagnostic_json END;
+
+    UPDATE background_fragment_targets SET job_id = json_extract(NEW.result_json, '$.job_id')
+    WHERE json_type(NEW.request_json, '$.delivery_parent') IS NOT NULL
+        AND cache_key = substr(json_extract(NEW.request_json, '$.payload.artifact_key'), 10)
+        AND target_node_id = json_extract(NEW.request_json, '$.payload.target_node_id')
+        AND json_extract(NEW.result_json, '$.outcome') = 'accepted';
 
     DELETE FROM background_job_commands WHERE id = NEW.id;
 END;
@@ -572,4 +638,68 @@ BEGIN
             WHERE generation_cache_key = json_extract(NEW.request_json, '$.artifact.cache_key'))
         AND json_extract(NEW.result_json, '$.outcome') = 'published';
     DELETE FROM background_job_commands WHERE id = NEW.id;
+END;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_fragment_domain_projection
+AFTER UPDATE ON background_jobs
+WHEN EXISTS (SELECT 1 FROM background_fragment_targets WHERE job_id = NEW.id)
+BEGIN
+    UPDATE cluster_fragment_index_jobs SET
+        state = CASE NEW.state
+            WHEN 'succeeded' THEN CASE WHEN target_node_id = json_extract(NEW.result_ref, '$.node_id') THEN 'ready' ELSE 'queued' END
+            WHEN 'cancelling' THEN 'cancelled' ELSE NEW.state END,
+        owner_node_id = CASE WHEN NEW.state = 'running' THEN NEW.owner_node_id ELSE NULL END,
+        lease_expires_ms = CASE WHEN NEW.state = 'running' THEN NEW.lease_expires_ms ELSE NULL END,
+        fence = NEW.fence,
+        attempts = CASE
+            WHEN NEW.state = 'running' AND (OLD.state != 'running' OR NEW.fence > OLD.fence) THEN attempts + 1
+            WHEN OLD.state = 'running' AND NEW.state = 'queued' AND NEW.failed_attempts = OLD.failed_attempts THEN MAX(0, attempts - 1)
+            ELSE attempts END,
+        attempt_errors = CASE WHEN NEW.failed_attempts > OLD.failed_attempts THEN
+            attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END ||
+            CASE WHEN NEW.fence > OLD.fence THEN 'lease_expired'
+                WHEN CASE WHEN json_valid(NEW.index_diagnostic_json)
+                    THEN json_extract(NEW.index_diagnostic_json, '$.recorded_at_ms') END = NEW.updated_at_ms
+                THEN json_extract(NEW.index_diagnostic_json, '$.code')
+                ELSE COALESCE(NEW.last_error_code, 'execution_abandoned') END
+            ELSE attempt_errors END,
+        index_retry_deadline_ms = CASE WHEN index_retry_deadline_ms > 0 THEN index_retry_deadline_ms ELSE NEW.retry_deadline_ms END,
+        index_diagnostic_json = CASE WHEN NEW.index_diagnostic_json != '' AND NEW.index_diagnostic_json != OLD.index_diagnostic_json
+            THEN NEW.index_diagnostic_json ELSE index_diagnostic_json END,
+        not_before_ms = NEW.not_before_ms,
+        last_error_code = CASE WHEN NEW.state = 'succeeded'
+            AND target_node_id != json_extract(NEW.result_ref, '$.node_id') THEN 'awaiting_hydration'
+            ELSE NEW.last_error_code END,
+        updated_at_ms = NEW.updated_at_ms
+    WHERE (cache_key, target_node_id) IN (SELECT cache_key, target_node_id FROM background_fragment_targets WHERE job_id = NEW.id);
+
+    UPDATE analysis_attempts SET phase = CASE WHEN NEW.state = 'failed' THEN 'failed' ELSE 'canceled' END,
+        terminal_code = NEW.last_error_code, phase_updated_at_ms = NEW.updated_at_ms
+    WHERE NEW.state IN ('failed','cancelling','cancelled') AND (request_id, claim_epoch) IN (
+        SELECT request_id, fence FROM analysis_requests WHERE state = 'submitted' AND component = 'fragment_index'
+            AND (result_cache_key, target_node_id) IN (SELECT cache_key, target_node_id FROM background_fragment_targets WHERE job_id = NEW.id));
+    UPDATE analysis_requests SET state = CASE WHEN NEW.state = 'failed' THEN 'failed' ELSE 'cancelled' END,
+        last_error_code = NEW.last_error_code, updated_at_ms = NEW.updated_at_ms
+    WHERE NEW.state IN ('failed','cancelling','cancelled') AND state = 'submitted' AND component = 'fragment_index'
+        AND (result_cache_key, target_node_id) IN (SELECT cache_key, target_node_id FROM background_fragment_targets WHERE job_id = NEW.id);
+END;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_analysis_history_removed
+AFTER DELETE ON analysis_requests
+BEGIN
+    -- Compact identities live as long as their domain history, never forever
+    -- merely because an old request once opted out of seven-day pruning.
+    DELETE FROM background_job_waiters WHERE request_scope = 'analysis' AND request_id = OLD.request_id;
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_interest_removed
+AFTER DELETE ON background_job_waiters
+BEGIN
+    UPDATE background_jobs SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE 'cancelling' END,
+        revision = revision + 1, updated_at_ms = MAX(updated_at_ms, OLD.updated_at_ms)
+    WHERE id = OLD.job_id AND state IN ('queued','running') AND revision < 9223372036854775807
+        AND NOT EXISTS (SELECT 1 FROM background_job_waiters WHERE job_id = OLD.job_id
+            AND state IN ('pending','awaiting_hydration'));
 END;
