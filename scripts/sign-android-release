@@ -113,10 +113,12 @@ def main() -> None:
     if not min_sdk or int(min_sdk.group(1)) < 28:
         fail("release APK must exclude API 23-27, which cannot rotate the old signer")
 
+    # AGP already aligns and signs the release output with the new key. Check
+    # its alignment without touching it; changing a signed APK after this
+    # point would invalidate the Gradle signature before apksigner replaces it.
+    run(zipalign, "-c", "-P", "16", "4", str(APK))
     with tempfile.TemporaryDirectory(prefix="plurx-sign-", dir=APK.parent) as temporary:
-        aligned = Path(temporary) / "aligned.apk"
         signed = Path(temporary) / "signed.apk"
-        run(zipalign, "-f", "-p", "4", str(APK), str(aligned))
         run(
             apksigner, "sign", "--out", str(signed),
             "--ks", str(old_store), "--ks-key-alias", old_alias,
@@ -126,7 +128,7 @@ def main() -> None:
             "--ks-pass", "env:PLURX_ANDROID_KEYSTORE_PASSWORD",
             "--key-pass", "env:PLURX_ANDROID_KEY_PASSWORD",
             "--lineage", str(lineage), "--rotation-min-sdk-version", "28",
-            str(aligned),
+            str(APK),
         )
         for api in (28, 36):
             if cert_digest(apksigner, signed, api) != expected_new:
