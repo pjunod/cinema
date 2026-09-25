@@ -66,6 +66,7 @@ final class LiveTvPlayerController: ObservableObject {
     private var itemEventTask: Task<Void, Never>?
     private var itemFailure: NSError?
     private var itemDidFail = false
+    private let remoteCommands = LiveRemoteCommands()
     #if os(tvOS)
     private var displayCriteriaObservation: NSKeyValueObservation?
     #endif
@@ -194,6 +195,19 @@ final class LiveTvPlayerController: ObservableObject {
         attachedAt = Date()
         playing = true
         player.play()
+        remoteCommands.start(
+            title: channel.title,
+            playing: true,
+            play: { [weak self] in
+                guard let self, self.paused else { return }
+                self.togglePause()
+            },
+            pause: { [weak self] in
+                guard let self, !self.paused else { return }
+                self.togglePause()
+            },
+            toggle: { [weak self] in self?.togglePause() }
+        )
         surfaceMessage = nil
         message = "Playing live"
         let observer = AVPlayerItemObserver(item: item, player: player)
@@ -480,6 +494,7 @@ final class LiveTvPlayerController: ObservableObject {
             message = "Playing live"
             surfaceMessage = nil
         }
+        remoteCommands.update(title: title ?? "", playing: !paused && !systemPaused)
     }
 
     #if os(tvOS)
@@ -570,6 +585,7 @@ final class LiveTvPlayerController: ObservableObject {
     }
 
     private func detach() {
+        remoteCommands.stop()
         heartbeat?.cancel()
         heartbeat = nil
         channelChange?.cancel()
