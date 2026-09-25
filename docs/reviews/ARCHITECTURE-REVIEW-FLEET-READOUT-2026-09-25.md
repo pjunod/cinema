@@ -288,3 +288,35 @@ has not yet merged into its base, so it is not a current-main or final
 qualification claim. Safari, Firefox, Apple TV, iPhone, Android devices, HDR
 and the remaining §5.3 platform matrix remain owed. PR #527 received its
 sole adversarial review already; no second review is planned.
+
+## Draft PR #527 remaining browser and native availability — 2026-09-25
+
+The source-exact `ca7ec94db` isolated server attempted the same A-04
+two-cliff fixture in Safari. `/usr/bin/safaridriver` was present, but
+WebDriver `POST /session` timed out while connecting to a Safari automation
+instance. The run ended before browser playback, so it measured no cliff,
+frame, or recovery outcome. Raw Safari harness report SHA-256:
+`38f62ee501b13058e3f0f70bbd8b7422787f9026deab493bd7b765cda106ed8f`;
+normalized SHA-256:
+`5c235c59023396788bce31f7b5b3364c9af3e32b98da0599ec7826cf31f0aeb2`;
+JUnit SHA-256:
+`9cc19c76a3a07615bdfb305bb0c3fb6e21f035db4250fb20d7f86b5c89802eba`.
+Firefox and geckodriver were absent on this host, so no Firefox trace was
+started. The host ffmpeg lacks `zscale`, which prevents the HDR corpus case.
+
+Read-only native inventory found Plurx bundle version 183 on the connected
+iPhone Air, iPhone 17 Pro Max, iPad mini, iPad Pro and iPhone 18 Pro, and
+version 184 on the Bedroom Apple TV. Android package inventory found
+versionCode 126 on the 9445X and 125 on the Google TV Streamer, Pixel 10 Pro
+Fold and Pixel 11 Pro XL. These installed builds do not identify the draft
+PR's exact client source. No app was launched, installed, or controlled; the
+inventory establishes availability only and is not native D3 playback
+evidence.
+
+The private sanitized receipt and Safari reports are in
+`/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/pr527-platform-attempts/`;
+receipt SHA-256
+`07b200bdef6e8d9777ceccb93cd0aed64804d0b0a40c0b793219632396388217`.
+The Chrome SDR result above remains the only D3 candidate pass. Safari,
+Firefox, native devices, HDR and the rest of the §5.3 platform matrix
+remain open.
