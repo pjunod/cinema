@@ -93,7 +93,7 @@ PGS cannot use this path because palette and object state can cross display
 sets. ASS/SSA display still uses VTT where already supported; styled burns
 continue to require the complete Matroska representation.
 
-Named regression anchors (written, not yet executed):
+Named regression anchors (passed after review fixes):
 
 - `subtitle_ranges::tests::range_identity_rejects_stale_stamp_bad_grid_and_bitmap`
 - `subtitle_ranges::tests::peer_range_rejects_malformed_nonfinite_and_wrong_timeline`
@@ -106,10 +106,11 @@ Named regression anchors (written, not yet executed):
 
 A second synthetic fixture on local FFmpeg 9.0.1 had video start 7.500 s and
 subtitle start 8.500 s. Direct extraction returned cues at 1–4, 102–106 and
-132–136 s. The production-shaped `-copyts -start_at_zero -ss 40 -i source
+132–136 s. The initial candidate `-copyts -start_at_zero -ss 40 -i source
 -ss 100 -to 200` returned 102–106 and 132–136 s exactly, with no normalization
-shift. This verifies the nonzero-origin choice on that version; the named
-regression retains it for the pinned build environment.
+shift. That experiment validated the initial output-seek candidate only.
+The final command omits output `-ss`; §5 records its cross-version and
+sparse-track evidence.
 
 The time range selects overlapping cues found by the bounded preroll; it does
 not bound the exact physical bytes read.
@@ -149,7 +150,7 @@ cannot settle until that rename finishes. A deterministic regression pauses
 an actual staged write, cancels its owner, publishes a successor, then releases
 the obsolete writer and checks that the successor survives.
 
-Additional regression anchors (written; execution follows review fixes):
+Additional regression anchors (passed after review fixes):
 
 - `subtitle_ranges::tests::cancellation_during_blocking_publish_prevents_obsolete_rename`
 - `subtitle_ranges::tests::source_replacement_and_attestation_mismatch_reject_publication`
@@ -167,3 +168,22 @@ controlled two-member cluster, a long indexed Matroska source, and observable
 cold HLS range requests through the real peer transport. The unsigned-handler
 and payload-validation regressions do not establish that end-to-end proof.
 No service was deployed or started for this change.
+
+## 7. Verification after review fixes
+
+At `ff7d1835`, Rust 1.97.1 passed `cargo check -p plurxd --all-targets
+--offline`, formatting, and the normal hook's workspace/all-target Clippy
+with warnings denied. The following focused commands passed on the checkout
+host after review fixes:
+
+```sh
+rustup run 1.97.1 cargo test -p plurxd --bin plurxd subtitle_ranges::tests --offline
+rustup run 1.97.1 cargo test -p plurxd --bin plurxd subtitle_range_rejects_unsigned_work_before_reading_file --offline
+```
+
+The range module ran 10 tests successfully; the HTTP filter ran one. The
+actual FFmpeg fixture is included in those 10 tests. The macOS linker emitted
+a large `__eh_frame` compact-unwind warning; neither compilation nor tests
+failed. Windows has the matching secure-write API but was not exercised by
+this host run. The main fast lane and live two-member acceptance remain
+separate verification steps; these focused results do not claim either.
