@@ -2002,6 +2002,8 @@ function playerSnapshotExpression() {
       playerGeneration=labPlayers.ids.get(playerObject);
     }
     const v=document.getElementById('video');
+    if(v&&globalThis.__plurxLabInstallVideoProbe)
+      globalThis.__plurxLabInstallVideoProbe(v);
     const h=p.hitches||{};
     const hitchCount=(h.back||0)+(h.held||0)+(h.late||0)+(h.drop||0)+(h.gap||0);
     if(!labPlayers.rollup) labPlayers.rollup={object:null,closed_stalls:0,closed_hitches:0,
@@ -2086,11 +2088,12 @@ async function setCasePreferences(driver, quality) {
     try{closePlayer()}catch(e){}
     globalThis.__plurxLabMediaEvents=[];
     globalThis.__plurxLabMediaEventSeq=globalThis.__plurxLabMediaEventSeq||0;
-    { const v=document.getElementById('video');
+    globalThis.__plurxLabInstallVideoProbe=(v)=>{
       if(v&&!v.__plurxLabEvents){
         v.__plurxLabEvents=true;
         for(const event of ['play','playing','pause','waiting','stalled','suspend','ended','abort','emptied'])
           v.addEventListener(event,()=>{
+            if(document.getElementById('video')!==v) return;
             const p=(typeof PLAYER!=='undefined'&&PLAYER)||{};
             globalThis.__plurxLabMediaEvents.push({seq:++globalThis.__plurxLabMediaEventSeq,
               event,at_ms:Math.round(performance.now()),
@@ -2102,9 +2105,11 @@ async function setCasePreferences(driver, quality) {
       }
       if(v&&typeof v.requestVideoFrameCallback==='function'&&!v.__plurxLabFrameProbe){
         v.__plurxLabFrameProbe=true;
-        globalThis.__plurxLabFrameProbe={supported:true,sequence:0,last_frame_at_ms:null,
-          maximum_gap_ms:0,frames:0,last_frame:null,auto_presentations:[]};
+        if(!globalThis.__plurxLabFrameProbe||!globalThis.__plurxLabFrameProbe.supported)
+          globalThis.__plurxLabFrameProbe={supported:true,sequence:0,last_frame_at_ms:null,
+            maximum_gap_ms:0,frames:0,last_frame:null,auto_presentations:[]};
         const frame=(now,metadata)=>{
+          if(document.getElementById('video')!==v) return;
           const probe=globalThis.__plurxLabFrameProbe;
           if(probe){
             if(probe.last_frame_at_ms!=null)
@@ -2142,7 +2147,8 @@ async function setCasePreferences(driver, quality) {
       }else if(!globalThis.__plurxLabFrameProbe){
         globalThis.__plurxLabFrameProbe={supported:false,last_frame_at_ms:null,maximum_gap_ms:0,frames:0};
       }
-    }
+    };
+    globalThis.__plurxLabInstallVideoProbe(document.getElementById('video'));
     localStorage.setItem('plurx_quality', ${JSON.stringify(quality)});
     localStorage.setItem('plurx_autonext', '0');
     localStorage.setItem('plurx_autoskip', '0');
