@@ -104,6 +104,18 @@ test("a physical-device profile can descend through three exact link stages", ()
   );
 });
 
+test("browser run refuses a multistage profile before creating misleading evidence", () => {
+  assert.doesNotThrow(() => lab.requireSupportedRunProfile(
+    lab.parseNetworkProfile("8mbps-to-1.5mbps"),
+  ));
+  assert.throws(
+    () => lab.requireSupportedRunProfile(
+      lab.parseNetworkProfile("8mbps-to-1.1mbps-to-350kbps"),
+    ),
+    /observer applies and scores only the first cliff/,
+  );
+});
+
 test("no profile means no shaping, so existing suites keep today's behavior", () => {
   for (const spec of [undefined, null, "", false, "none"]) {
     assert.equal(lab.parseNetworkProfile(spec), null, JSON.stringify(spec));

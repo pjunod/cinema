@@ -112,6 +112,16 @@ function parseNetworkProfile(spec) {
   };
 }
 
+function requireSupportedRunProfile(profile) {
+  if (profile && profile.stages.length > 2) {
+    throw new Error(
+      `browser run cannot score ${profile.stages.length - 1} network cliffs: `
+      + "the current observer applies and scores only the first cliff; "
+      + "use a two-stage profile or device-proxy for a multistage trace",
+    );
+  }
+}
+
 function usage() {
   process.stdout.write(`plurx playback lab
 
@@ -3674,6 +3684,7 @@ async function runSuite(manifest, options, dependencies = {}) {
   // Parsed before the corpus is built: a typo in the profile should cost a
   // second, not the 195 MB fixture build and a server boot.
   const profile = parseNetworkProfile(options.network_profile);
+  requireSupportedRunProfile(profile);
   const plan = printPlan(manifest, suite, options.case, options.exclude_case);
   if (preparationMeasurement && (suite !== "vod" || plan.cases.length !== 1)) {
     throw new Error("--preparation-measurement requires --suite vod and a --case filter selecting exactly one case");
@@ -4211,6 +4222,7 @@ module.exports = {
   normalizeTrace,
   parseApiJson,
   parseNetworkProfile,
+  requireSupportedRunProfile,
   playbackServerConfig,
   peakUpgradeRate,
   performOperation,
