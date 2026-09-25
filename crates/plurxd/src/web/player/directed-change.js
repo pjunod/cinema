@@ -156,11 +156,12 @@ function settlePreparedOfferWaiter(p,waiter,mine,response,error){
 // `fallback` is optional and is how Auto keeps its own reopen: the automatic
 // controller goes through `requestPlaybackMediaChange` so the create carries
 // the rung, where the menu goes through `play()`.
-async function requestQualityChange(p,reason,fallback){
+async function requestQualityChange(p,reason,fallback,autoMove){
   if(!p) return "superseded";
   const change={intentGeneration:p.controlIntentGeneration||0,
     tappedAt:performance.now(),settled:false,reason:reason||"manual",
-    fallback:fallback||null,outcome:null,outcomeAt:null};
+    fallback:fallback||null,autoMove:autoMove||null,commitTimer:null,
+    outcome:null,outcomeAt:null};
   p.directedChange=change;
   let outcome="timed_out";
   try{ outcome=await awaitPreparedOffer(p,change.tappedAt); }catch(e){ outcome="timed_out"; }
@@ -183,6 +184,7 @@ function fallBackDirectedChange(p,change,why){
   if(change.settled||p.directedChange!==change
      ||(p.controlIntentGeneration||0)!==change.intentGeneration) return false;
   change.settled=true;
+  if(change.commitTimer!=null){ clearTimeout(change.commitTimer); change.commitTimer=null; }
   change.outcome=why;
   change.outcomeAt=performance.now();
   const v=document.getElementById("video");
@@ -190,6 +192,7 @@ function fallBackDirectedChange(p,change,why){
   // The reopen's own create carries the rung explicitly, so the ask on the
   // wire has done its job and would otherwise keep re-announcing itself.
   p.autoRequestedHeight=null;
+  if(change.autoMove&&p.abr){ p.abr.switching=false; releaseAutoFallback(p); }
   clientLog(Object.assign({level:"warn",event:"quality_switch",
     detail:`via=fallback why=${why}`,reason:change.reason||"manual",
     message:`prepared handoff did not carry the change (${why}); reopening the stream`},
@@ -215,12 +218,25 @@ function settleDirectedChange(p,change,why,detail){
   const owned=change||(p&&p.directedChange);
   if(!p||!owned||owned.settled||p.directedChange!==owned) return false;
   owned.settled=true;
+  if(owned.commitTimer!=null){ clearTimeout(owned.commitTimer); owned.commitTimer=null; }
   owned.outcome=why;
   owned.outcomeAt=performance.now();
   if(detail!=null) owned.detail=detail;
   // Requested and delivered are the same rung now, so the selection goes back
   // to plain Auto -- a stable digest rather than a standing ask.
   p.autoRequestedHeight=null;
+  if(owned.autoMove&&p.abr){
+    if(why==="committed"){
+      const now=performance.now(), move=owned.autoMove;
+      p.autoHeight=move.to;
+      Object.assign(p.abr,{lastSwitchAtMs:now,stableSinceMs:now,
+        mildSamples:0,upgradeSinceMs:null,previousRunway:null});
+      recordAutoSwitch(p,move.from,move.to,move.switchReason,
+        positionForPlaybackIntent(document.getElementById("video"),p),p.sessionId);
+    }
+    p.abr.switching=false;
+    releaseAutoFallback(p);
+  }
   return true;
 }
 // A viewer command, a teardown, a stream replacement. The ask is retired and
@@ -762,4 +778,3 @@ function releaseSession(sessionId){
       headers:TOKEN?{"authorization":"Bearer "+TOKEN}:{}}).catch(()=>{});
   }catch(e){}
 }
-

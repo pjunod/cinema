@@ -98,6 +98,7 @@ function rollbackPreparedReplacement(p,state,successor){
   const retired=predecessor.element, successorHls=state.hls;
   state.predecessor=null;
   p.hls=predecessor.hls;
+  resumePreparedIncumbentLoad(p,state);
   p.sessionId=predecessor.sessionId;
   p.probeUrl=predecessor.probeUrl;
   p.offset=predecessor.offset;
@@ -276,6 +277,7 @@ function abandonPreparedReplacement(p,ackState,reason){
 }
 function freePreparedReplacement(p,state){
   if(preparedState(p)!==state) return;
+  resumePreparedIncumbentLoad(p,state);
   p.prepared=null;
   markPreparedSettlement(p,state.actionId);
   const spare=preparedVideoElement();

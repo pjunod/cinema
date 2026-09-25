@@ -294,6 +294,7 @@ async function switchAutoRung(currentHeight,decision){
       {title:`Quality → ${decision.height}p — ${decision.reason}`});
     return attached;
   };
+  let retainClaim=false;
   try{
     // A stalled incumbent has nothing to hand off from. The server cancels a
     // preparation on `waiting` or `stalled` anyway, so asking would spend the
@@ -306,8 +307,17 @@ async function switchAutoRung(currentHeight,decision){
     // already carries the rung and the server sees a selection change rather
     // than the same Auto it has been reading all along.
     p.autoRequestedHeight=decision.height;
-    await requestQualityChange(p,"auto-quality",reopen);
-  } finally { releaseAutoFallback(p); }
+    p.abr.switching=true;
+    const outcome=await requestQualityChange(p,"auto-quality",reopen,
+      {from:currentHeight,to:decision.height,switchReason:decision.reason});
+    if(outcome==="prepared"&&p.directedChange&&!p.directedChange.settled){
+      const change=p.directedChange;
+      change.commitTimer=setTimeout(()=>fallBackDirectedChange(p,change,"commit_timeout"),
+        Math.max(0,10000-(performance.now()-change.tappedAt)));
+      retainClaim=true;
+      return;
+    }
+  } finally { if(!retainClaim) releaseAutoFallback(p); }
 }
 async function rescueAutoSupply(causeEvidence){
   const p=PLAYER, v=document.getElementById("video");
@@ -572,4 +582,3 @@ async function probePlaybackSource(url,headers,evidence){
     })()]);
   }finally{clearTimeout(timer);ctl.abort();}
 }
-

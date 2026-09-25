@@ -1267,6 +1267,7 @@ async function main() {
       shippedSource("preparedVideoElement"), shippedSource("preparedState"),
       shippedSource("queuePlaybackControlAcknowledgement"),
       shippedSource("destroyHlsInstance"),
+      shippedSource("resumePreparedIncumbentLoad"),
       shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
       "function cancelPreparedFirstFrame(){} function cancelHlsStartup(){}",
       shippedSource("rememberPlaybackTransportIntent"),shippedSource("pausePlaybackInternally"),
@@ -2539,6 +2540,7 @@ async function main() {
         shippedSource("finishStoppingPlaybackControl"),
         shippedSource("continueStoppingPlaybackControl"),
         shippedSource("destroyHlsInstance"),
+        shippedSource("resumePreparedIncumbentLoad"),
         shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
         // The dispatch under test: a `prepare` answer must reach the player's
         // state machine. Recorded rather than run — the pipeline itself has its
@@ -3518,6 +3520,7 @@ async function main() {
         shippedSource("finishStoppingPlaybackControl"),
         shippedSource("continueStoppingPlaybackControl"),
         shippedSource("destroyHlsInstance"),
+        shippedSource("resumePreparedIncumbentLoad"),
         shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
         shippedSource("askPlaybackControl"),
         shippedSource("settlePlaybackControlWaiters"),
@@ -3912,6 +3915,8 @@ async function main() {
       on(event, fn) { this.events[event] = fn; }
       loadSource(url) { this.source = url; }
       attachMedia(media) { this.media = media; }
+      stopLoad() { this.loadsStopped = (this.loadsStopped || 0) + 1; }
+      startLoad() { this.loadsResumed = (this.loadsResumed || 0) + 1; }
       destroy() { this.destroyed = true; }
     }
     const scope = new Function(
@@ -3935,6 +3940,7 @@ async function main() {
         "function tok(url){return url;}",
         "function preferNativeHls(){return nativeHls;}",
         "function bufferTargets(){return {fwd:20,back:10,budgeted:false};}",
+        shippedSource("bufferRunway"),
         "function vodClientContract(){return {fragLoadPolicy:{}};}",
         shippedConst("PREPARED_HANDOFF_KEY"),
         shippedConst("PREPARED_BUFFER_LEAD_MS"),
@@ -3957,6 +3963,7 @@ async function main() {
         shippedSource("handlePreparedReplacementAction"),
         shippedSource("beginPreparedReplacement"), shippedSource("preparedSelectionText"),
         shippedSource("preparedHlsAttach"), shippedSource("preparedNativeAttach"),
+        shippedSource("resumePreparedIncumbentLoad"),
         shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
         shippedConst("PREPARED_ALIGN_SEEK_MS"), shippedConst("PREPARED_ALIGN_ATTEMPTS"),
         shippedSource("notePreparedBuffer"), shippedSource("commitPreparedReplacement"),
@@ -3997,6 +4004,7 @@ async function main() {
         "async function requestPlaybackMediaChange(p,change){mediaChanges.push(change);return true;}",
         "function selectedAudioIndex(){return 0;} function playQuality(){return quality;}",
         "function hlsStartupCurrent(){return false;}",
+        "function recordAutoSwitch(p,from,to,reason,pos,id){(p.abr.switches||(p.abr.switches=[])).push({from,to,reason,pos,id});}",
         shippedConst("PREPARED_OFFER_BOUND_MS"),
         shippedConst("PREPARED_OFFER_CADENCE_MS"),
         shippedSource("playbackControlSelection"),
@@ -4113,6 +4121,33 @@ async function main() {
     controlAcknowledgement: null, pendingMediaChange: null, wantsPlayback: true,
   }, overrides);
 
+  // Preparing a second HLS pipeline temporarily gives it the shaped link.
+  // Every abort and the bounded pause must restore incumbent loading.
+  {
+    const h = preparedHarness();
+    h.live.currentTime = 20;
+    h.live.ranges = [[18, 29]];
+    const incumbent = { stopped: 0, resumed: 0, destroyed: false,
+      stopLoad() { this.stopped++; }, startLoad() { this.resumed++; },
+      destroy() { this.destroyed = true; } };
+    const p = h.set(preparedPlayer({ hls: incumbent }));
+    h.handle(prepareAction());
+    assert.equal(incumbent.stopped, 1);
+    assert.equal(incumbent.resumed, 0);
+    h.abandon("aborted", "fixture abort");
+    assert.equal(incumbent.resumed, 1, "abort resumes the still-authoritative pipeline");
+    assert.equal(incumbent.destroyed, false);
+    h.fireAll();
+    assert.equal(incumbent.resumed, 1, "a canceled timer cannot resume twice");
+    h.handle(prepareAction({ action_id: "817334fb-1472-4be4-9240-fc890a346cf8" }));
+    assert.equal(incumbent.stopped, 2);
+    h.fireAll();
+    assert.equal(incumbent.resumed, 2, "the bounded pause expires even before settlement");
+    h.abandon("aborted", "fixture abort after bound");
+    assert.equal(incumbent.resumed, 2);
+    assert.equal(p.hls, incumbent);
+  }
+
   // §4 — the alignment functions, as pure functions, with no player at all.
   {
     const h = preparedHarness();
@@ -4129,6 +4164,25 @@ async function main() {
     assert.equal(h.film(Number.NaN, 900_000, false), 0);
     assert.equal(h.local(910_000, 900_000), 10_000, "and the inverse puts the successor there");
     assert.equal(h.local(10_000, 900_000), 0, "a successor never starts before its own zero");
+  }
+
+  // With safe incumbent runway, the successor begins one lead ahead and
+  // cannot commit until its buffered range covers the incumbent's real second.
+  {
+    const h = preparedHarness();
+    h.live.currentTime = 20;
+    h.live.ranges = [[18, 29]];
+    const p = h.set(preparedPlayer({ hls: { destroy() {} } }));
+    h.handle(prepareAction());
+    assert.equal(h.instances[0].config.startPosition, 26);
+    h.instances[0].events.manifest();
+    h.spare.currentTime = 24;
+    h.spare.ranges = [[24, 30]];
+    h.instances[0].events.append();
+    assert.ok(p.prepared, "a range beginning ahead cannot skip the incumbent's 20th second");
+    h.live.currentTime = 24;
+    h.instances[0].events.append();
+    assert.equal(p.hls, h.instances[0], "overlap and four seconds of lead permit the handoff");
   }
 
   // Building the second pipeline: one instance, on the hidden element, and the
@@ -4811,6 +4865,10 @@ async function main() {
     h.spare.ranges = [[306, 330]];
     h.live.currentTime = 301;                 // film 901 s
     h.instances[0].events.append();
+    assert.equal(h.spare.currentTime, 306,
+      "a disjoint range is not a safe place to align the successor");
+    h.spare.ranges = [[300, 330]];
+    h.instances[0].events.append();
     assert.equal(h.spare.currentTime, 301,
       "the successor is put on the incumbent's second before the picture changes");
   }
@@ -5339,7 +5397,7 @@ async function main() {
     // cancels a preparation on `waiting`/`stalled` anyway, so asking would
     // spend twelve seconds to be told no — with the viewer already stalled.
     const h = preparedHarness();
-    const p = directedPlayer(h, { abr: { switching: false } });
+    const p = directedPlayer(h, { abr: { switching: false, switches: [] } });
     offerReporter(h);
     p.waitAt = 1;                      // the incumbent is not decoding
     await h.autoRung(720, { height: 1080, reason: "runway" });
@@ -5369,7 +5427,7 @@ async function main() {
   // ---- §7.4 D3-a, the web half: Auto carries the rung it wants -------------
   {
     const h = preparedHarness();
-    const p = directedPlayer(h, { abr: { switching: false } });
+    const p = directedPlayer(h, { abr: { switching: false, switches: [] } });
     offerReporter(h);
     p.autoHeight = 720;
     assert.deepEqual(h.selection().quality, { mode: "auto" },
@@ -5389,10 +5447,19 @@ async function main() {
     h.exchange(offerRequest(6), offerResponse({ action: prepareAction() }));
     fireOfferConfirm(h);
     await outcomeOf(moving);
+    assert.equal(p.abr.switching, true,
+      "the first prepared Auto ask keeps later controller ticks from opening another owner");
+    assert.equal(p.autoFallbackInFlight, true);
+    await h.autoRung(720, { height: 1080, reason: "runway" });
+    assert.equal(h.instances.length, 1, "a second tick cannot open another preparation");
     h.instances[0].events.manifest();
     h.spare.ranges = [[0, 30]];
     h.instances[0].events.append();
     h.spare.frameCallback(0, { presentationTime: 1, presentedFrames: 1 });
+    assert.equal(p.abr.switching, false);
+    assert.equal(p.autoFallbackInFlight, false);
+    assert.equal(p.autoHeight, 1080, "the committed rung is the next tick's delivered height");
+    assert.equal(p.abr.switches.length, 1, "prepared Auto success is recorded as a switch");
     assert.equal(p.autoRequestedHeight, null,
       "a committed rung is the delivered one now; the selection returns to plain Auto");
     assert.deepEqual(h.selection().quality, { mode: "auto" },

@@ -240,11 +240,19 @@ function beginPreparedReplacement(p,action){
   const offeredOriginMs=Math.max(0,Math.round(Number(action.media_origin_ms)||0));
   const originMs=sessionMediaOriginMs({vod:!!p.vod,media_origin_ms:offeredOriginMs});
   const filmMs=playbackFilmPositionMs(v,p);
+  // A replacement that begins encoding at the incumbent's current second
+  // spends its entire preparation chasing a moving playhead. Begin up to six
+  // seconds ahead when the incumbent already has enough runway to play
+  // until that second. The buffer gate below still requires overlap with the
+  // actual incumbent position before exposure, so this cannot skip content.
+  const startLeadMs=Math.min(PREPARED_BUFFER_LEAD_MS+2000,
+    Math.max(0,Math.round((bufferRunway(v)-3)*1000)));
   const state={actionId:action.action_id,sessionId:action.session_id,
     playlistUrl:action.playlist_url,mediaOriginMs:originMs,offeredOriginMs,
     selection:action.effective_selection,
-    startAtSec:preparedLocalPositionMs(filmMs,originMs)/1000,
+    startAtSec:preparedLocalPositionMs(filmMs+startLeadMs,originMs)/1000,
     state:"building",hls:null,metadata:false,buffered:false,
+    incumbentHls:null,incumbentLoadPaused:false,incumbentResumeTimer:null,
     frameTimer:null,framePollTimer:null,frameListener:null,startedAt:Date.now()};
   p.prepared=state;
   clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"staged",
@@ -291,6 +299,21 @@ function preparedHlsAttach(p,state,spare){
     outgoingEstimateBps:p&&p.bandwidthSeedBps, priorKbps:p&&p.priorKbps});
   if(seed) try{ hls.bandwidthEstimate=seed; }catch(e){}
   state.hls=hls;
+  // The successor and incumbent share the viewer's link. Give the lower
+  // bitrate successor a bounded first-fragment window while the incumbent
+  // continues playing its buffered media. Restore incumbent loading on every
+  // failed/aborted preparation and after at most six seconds if no handoff occurred.
+  const incumbent=p&&p.hls;
+  const pauseMs=Math.min(6000,Math.max(0,(bufferRunway(document.getElementById("video"))-3)*1000));
+  if(pauseMs>0&&incumbent&&typeof incumbent.stopLoad==="function"
+     &&typeof incumbent.startLoad==="function"){
+    try{
+      incumbent.stopLoad();
+      state.incumbentHls=incumbent;
+      state.incumbentLoadPaused=true;
+      state.incumbentResumeTimer=setTimeout(()=>resumePreparedIncumbentLoad(p,state),pauseMs);
+    }catch(e){}
+  }
   hls.loadSource(state.playlistUrl);
   hls.attachMedia(spare);
   const current=()=>preparedState(p)===state&&PLAYER===p;
@@ -309,6 +332,18 @@ function preparedHlsAttach(p,state,spare){
     if(!current()||!d||!d.fatal) return;
     failPreparedReplacement(p,state,String(d.details||d.type||"hls.js fatal error"));
   });
+}
+function resumePreparedIncumbentLoad(p,state){
+  if(!state) return;
+  if(state.incumbentResumeTimer!=null){
+    clearTimeout(state.incumbentResumeTimer);
+    state.incumbentResumeTimer=null;
+  }
+  if(!state.incumbentLoadPaused) return;
+  state.incumbentLoadPaused=false;
+  if(p&&p.hls===state.incumbentHls){
+    try{ state.incumbentHls.startLoad(-1); }catch(e){}
+  }
 }
 // Native HLS: the session id in the URL is the credential, same as the
 // incumbent's path.
@@ -358,7 +393,17 @@ function notePreparedBuffer(p,state){
   if(!v||!spare) return;
   const through=preparedBufferedThroughMs(state,spare);
   if(through==null) return;
-  const target=playbackFilmPositionMs(v,p)+PREPARED_BUFFER_LEAD_MS;
+  const filmMs=playbackFilmPositionMs(v,p);
+  // The successor may start ahead to catch up quickly. Wait until its first
+  // buffered range also covers the exact incumbent second to avoid a skip.
+  let coversIncumbent=false;
+  for(let i=0;i<spare.buffered.length;i++){
+    const start=state.mediaOriginMs+spare.buffered.start(i)*1000;
+    const end=state.mediaOriginMs+spare.buffered.end(i)*1000;
+    if(start<=filmMs+250&&end>=filmMs){ coversIncumbent=true; break; }
+  }
+  if(!coversIncumbent) return;
+  const target=filmMs+PREPARED_BUFFER_LEAD_MS;
   if(through<target) return;
   if(!state.buffered){
     state.buffered=true;
@@ -469,6 +514,13 @@ function preparedAlignedBuffered(spare){
 // rollback is no longer needed.
 function exposePreparedReplacement(p,state,v,spare,filmMs){
   const predecessor=p.hls, retired=v;
+  // The timer is only for a still-authoritative incumbent. Keep the paused
+  // state for rollback, which explicitly restarts this pipeline if exposure
+  // fails its first-frame proof.
+  if(state.incumbentResumeTimer!=null){
+    clearTimeout(state.incumbentResumeTimer);
+    state.incumbentResumeTimer=null;
+  }
   // Intent is sampled at the last reversible boundary. Preparation can take
   // seconds, during which the viewer may pause, mute, or change rate; copying
   // the earlier snapshot would overwrite that newer choice.
