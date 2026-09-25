@@ -190,3 +190,23 @@ a large `__eh_frame` compact-unwind warning; neither compilation nor tests
 failed. Windows has the matching secure-write API but was not exercised by
 this host run. The main fast lane and live two-member acceptance remain
 separate verification steps; these focused results do not claim either.
+
+## 8. Qualification corrections
+
+Fast-lane preflight exposed metadata contracts updated with this change:
+the permanent PR #512 landing-trailer erratum, reviewed task/timer/process
+inventory increments, and the API route total of 231. The Rust lane also
+found the old output-helper caller count: `subtitles.rs` now has one call,
+for whole-track extraction. Playback windows moved to
+`BoundedDiagnosticChild` so both VTT output and diagnostics are bounded;
+they no longer use the unbounded captured-output helper. Its public caller
+table and audited expected set now reflect that ownership change. Final
+candidate qualification remains pending.
+
+Developer → Stored subtitle tracks now explains automatic playback ranges,
+their indexed-text and local-cache conditions, and current local fallback.
+It reuses the existing live media-peer directory observation as advisory
+evidence, explicitly without claiming a successful authenticated exchange.
+Durable stored-track controls remain separate; no new feature gate was added.
+The focused `process::tests::output_job_owned_call_sites_are_the_audited_set`
+regression passed with Rust 1.97.1 and `hiqlite-store` enabled.
