@@ -19,7 +19,7 @@ targets `main`. Package boundaries are commits in one PR under the user's
 | Android delivery facts and presentation | Local checks passed | `148829768`; `:app:assembleDebug` and 35 selected unit tests passed. |
 | Adversarial implementation review | Findings addressed | One review found Apple Compact label drift, Android aspect basis, unattached web plan facts, and stale handoff ledger. Follow-up code and tests passed their focused checks. |
 | History evidence | Passed locally | `make history-check` on the current merged base found 2,304 corrective commits, 282 client-fix anchors, eleven post-boundary landing commits. One anchor per branch corrective client commit; current main carries errata for earlier PRs #519 and #522. |
-| Fast lane | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | Run 3062 stopped at runner cache cleanup; run 3076 found an index/header status contradiction, both corrected. Run 3080 passed policy, web, Apple and Android before `main` moved; the next candidate includes that new base. Use the PR's current-head `Main promotion gate` for the final result. |
+| Fast lane | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | Run 3062 stopped at runner cache cleanup; run 3076 found an index/header status contradiction, both corrected. Run 3080 passed policy, web, Apple and Android before `main` moved. Run 3087 passed scope and mobile version, then preflight hit its five-minute job limit while checks were passing. The limit is now ten minutes; use the PR's current-head `Main promotion gate` for the final result. |
 | PR merge | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | The PR is the authoritative merge record. Merge requires a successful current-head `Main promotion gate`. |
 | Production and physical session evidence | Unavailable | No real Live TV Cozi session or physical phone/TV capture was available in this isolated checkout. The stream frame is planned on web/Apple and measured only from an eligible Android player sample. |
 
@@ -78,6 +78,12 @@ and Android. While its Rust and Windows lanes were running, `main` gained
 Android PR #523 at `1d68af6eb`. The candidate now integrates that change;
 Android source build advances from 126 to 127 so the merged source stays
 monotonic. The new exact tree needs a current-head promotion gate.
+
+Run 3087 passed scope and mobile version, then the preflight job reached its
+five-minute deadline while the static contracts were still running. The log
+showed no failing assertion before the runner killed the step. The preflight
+job now has a ten-minute deadline so the same checks can finish under shared
+runner load. Its operation-contract test was updated to hold that limit.
 
 ## Scope decisions
 

@@ -83,9 +83,10 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # Checkout plus the passing static-contract workload now exceeds three
-    # minutes on a busy self-hosted runner; keep a small deterministic margin.
-    timeout-minutes: 5
+    # Full-history and operations contracts reached the five-minute limit on
+    # a busy shared runner (PR #526 run 3087) while their checks were passing.
+    # Allow the checks to finish; this does not skip or reduce any contract.
+    timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
