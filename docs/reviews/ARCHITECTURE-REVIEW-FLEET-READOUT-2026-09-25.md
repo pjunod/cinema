@@ -356,3 +356,11 @@ under `/private/tmp/codex-apple-*.xcresult`; they include device diagnostics
 and are not part of the repo. The Debug runner replaced the prior installed
 Release app on this one Apple TV. Exact-main signed Release reinstallation and
 native controller, paging and caption interaction acceptance remain owed.
+
+## L-03 caption-positive current-main web revisit — 17:45–17:51 UTC
+
+Current main `c99a29090` differed from deployed healthy `60f3803d1` only in `validation/merge-errata.toml`; the web and streaming source was identical. Two bounded direct HDHomeRun 8.1 WRIC-TV MPEG-TS captures sampled the same GMA3 airing. The first (16 seconds, 15,058,628 bytes) had A/53 side data on 911/911 decoded video frames and yielded nine timed CC1 SRT cues. The second (12 seconds, 13,731,676 bytes), taken during web playback, had A/53 data on 639/639 frames and yielded one timed CC1 cue. Local FFmpeg/ffprobe 9.0.1 decoded the transport directly. Raw captures and SRT files were removed after hashing.
+
+A dedicated signed-in Chrome tab on `m6` played channel 8.1 past 106 seconds at 1280×720, `readyState=4`; Playback info reported server-converted H.264/AAC MPEG-TS. The visible Live TV caption selector listed only **Off**, `video.textTracks` had zero entries, and Playback info said no caption track was listed by the player. No caption text appeared. The browser stream was stopped; the tuner page then reported all four tuners idle. The separate isolated Chrome profile on port 9341 reached only Sign in, so the signed-in check used its own tab in the existing Chrome profile; no authentication state was copied.
+
+This is a caption-positive source with an **open M4 web visual acceptance**, unlike the earlier source-empty #520 revisit. The concurrent source stream and web HLS session were different tuner streams, and this run did not decode the HLS output; it cannot assign the missing track to the graph probe, playlist advertisement, or browser. A bounded source-to-HLS-to-selector comparison is next. Sanitized local receipt: `/Users/pjunod/code/plurx-agent/codex-l03-caption-evidence-20260925/l03-channel-8-1-caption-positive-web-off-20260925.json` (SHA-256 `e3f93552a5bed5cd9668dc92c972a5706a16c5c176dcd5d80bbbe63bad21abe2`).
