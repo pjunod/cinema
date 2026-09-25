@@ -4665,6 +4665,11 @@ final class AppleClientTests: XCTestCase {
                 mode.rawValue
             )
         }
+        let compact = fixture.fields.filter { $0.modes.contains("mini")
+            && ($0.availableOn == nil || $0.availableOn?.contains("apple") == true) }
+        XCTAssertEqual(PlaybackInfoPanel.compactFields.map(\.id),
+                       ["decode_resolution", "stream_frame", "player_state", "client_loaded"])
+        XCTAssertEqual(PlaybackInfoPanel.compactFields.map(\.label), compact.map(\.label))
     }
 
     func testPlayerRootCarriesTheRemoteAdapter() throws {

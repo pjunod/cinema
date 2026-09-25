@@ -111,11 +111,12 @@ const info = new Function("esc", source.slice(infoStart, infoEnd) + "\nreturn {p
   value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;"),
 );
 const missingPicture = info.playbackInfoOverview({
-  method: "Transcode · cached", player_state: "Playing", decode_resolution: "Not reported",
-  source_resolution: "3840×2160", client_loaded: "12.0 s", stalls: "0",
+  method: "Transcode · cached", player_state: "Playing", decode_resolution: "Unavailable",
+  source_resolution: "3840×2160", stream_frame: "Unavailable", client_loaded: "12.0 s", stalls: "0",
 });
-assert.match(missingPicture, /pi-picture[^]*?Playing resolution[^]*?<strong>Not reported<\/strong>/);
-assert.match(missingPicture, /Original file[^]*?<strong>3840×2160<\/strong>/);
+assert.match(missingPicture, /pi-picture[^]*?Source frame[^]*?<strong>3840×2160<\/strong>/);
+assert.match(missingPicture, /Stream frame[^]*?<strong>Unavailable<\/strong>/);
+assert.match(missingPicture, /Player display size[^]*?<strong>Unavailable<\/strong>/);
 const infoFields = require("../playback/playback-info-fields.json").fields;
 const diagnosticMarkup = info.playbackInfoMarkup("debug", infoFields.map(f => ({...f, value: "observation"})), "", "");
 for (const field of infoFields) assert.equal(diagnosticMarkup.split(`data-stats-id="${field.id}"`).length - 1, 1, `${field.id} remains reachable exactly once`);

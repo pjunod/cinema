@@ -1034,6 +1034,7 @@ struct LiveTvStreamInfoPanel: View {
 
     private var facts: [PlaybackInfoFact] {
         let plan = status?.delivery ?? delivery
+        let picture = LiveTvPictureInfo(delivery: plan, channel: channel)
         func seconds(_ value: Double?) -> String { value.map { String(format: "%.1f s", $0) } ?? "Not reported" }
         let reception = [
             status?.signal?.strengthPercent.map { "Strength \($0)%" },
@@ -1041,15 +1042,22 @@ struct LiveTvStreamInfoPanel: View {
             status?.signal?.symbolQualityPercent.map { "Symbol \($0)%" },
         ].compactMap { $0 }.joined(separator: " · ")
         var facts = [
-            PlaybackInfoFact(id: "decode_resolution", label: "Playing resolution", value: player.resolution ?? "Not reported", note: playbackInfoExplanation("decode_resolution")),
-            PlaybackInfoFact(id: "source_resolution", label: "Broadcast source", value: channel.sourceFormatDescription ?? "Not reported", note: channel.sourceFormat.map { "Source observed \(Date(timeIntervalSince1970: TimeInterval($0.observedAt)).formatted())" }),
-            PlaybackInfoFact(id: "stream_format", label: "Stream format", value: plan?.videoDescription ?? "Not reported", note: "Server delivery metadata; separate from the picture reported by the player."),
-            PlaybackInfoFact(id: "method", label: "Delivery method", value: plan?.playbackMethod ?? "Not reported", group: "Server work"),
+            PlaybackInfoFact(id: "decode_resolution", label: "Player display size", value: player.resolution ?? "Unavailable", note: "AVPlayerItem presentation size"),
+            PlaybackInfoFact(id: "source_resolution", label: "Source frame", value: picture.sourceFrame, note: picture.sourceNote),
+            PlaybackInfoFact(id: "source_pixel_aspect", label: "Source pixel aspect", value: picture.sourcePixelAspect),
+            PlaybackInfoFact(id: "source_display_aspect", label: "Source display aspect", value: picture.sourceDisplayAspect, note: "Derived from source frame and pixel aspect"),
+            PlaybackInfoFact(id: "stream_frame", label: "Stream frame", value: picture.streamFrame, note: picture.streamNote),
+            PlaybackInfoFact(id: "stream_pixel_aspect", label: "Stream pixel aspect", value: "Not measured"),
+            PlaybackInfoFact(id: "frame_comparison", label: "Frame comparison", value: picture.frameComparison),
+            PlaybackInfoFact(id: "aspect_comparison", label: "Aspect comparison", value: "Not verified", note: "Output pixel aspect and compatible aperture are not reported."),
+            PlaybackInfoFact(id: "stream_format", label: "Stream format", value: plan?.videoDescription ?? "Not reported", note: "Codec, scan and cadence; dimensions are in Stream frame."),
+            PlaybackInfoFact(id: "reason", label: "Reason", value: picture.reason, group: "Server work"),
+            PlaybackInfoFact(id: "method", label: "Method", value: plan?.playbackMethod ?? "Not reported", group: "Server work"),
             PlaybackInfoFact(id: "status", label: "Server state", value: status?.state ?? "Not reported", note: playbackInfoExplanation("status"), group: "Server work"),
             PlaybackInfoFact(id: "device_audio", label: "Device audio output", value: "Not reported", note: "Track metadata does not confirm speaker or HDMI output."),
             PlaybackInfoFact(id: "decode_audio", label: "Stream audio track", value: plan?.audioDescription ?? "Not reported", note: playbackInfoExplanation("decode_audio")),
             PlaybackInfoFact(id: "subtitles", label: "Subtitles", value: "Not reported"),
-            PlaybackInfoFact(id: "player_state", label: "Playback", value: player.playerState),
+            PlaybackInfoFact(id: "player_state", label: "Player state", value: player.playerState),
             PlaybackInfoFact(id: "client_loaded", label: "Buffered on device", value: seconds(player.bufferedSeconds), note: playbackInfoExplanation("client_loaded"), group: "Buffer & delivery"),
             PlaybackInfoFact(id: "live_edge", label: "Behind stream live edge", value: seconds(player.behindEdgeSeconds), note: "Behind latest available media; not broadcast delay.", group: "Live stream & reception"),
             PlaybackInfoFact(id: "reception", label: "Tuner reception", value: reception.isEmpty ? "Not reported" : reception, group: "Live stream & reception"),
@@ -1060,6 +1068,11 @@ struct LiveTvStreamInfoPanel: View {
         facts += rows.map { row in
             PlaybackInfoFact(id: "live-" + row.id, label: row.label, value: row.value,
                 group: row.section == .signal ? "Live stream & reception" : row.section == .delivery ? "Server work" : "Session & history", diagnosticOnly: true)
+        }
+        if let reasons = plan?.reasons, !reasons.isEmpty {
+            facts.append(PlaybackInfoFact(id: "delivery_reasons", label: "Delivery reasons",
+                value: reasons.map { "\($0.code ?? "unknown"): \($0.explanation ?? "")" }.joined(separator: " · "),
+                group: "Session & history", diagnosticOnly: true))
         }
         return facts
     }
