@@ -27,7 +27,7 @@ final class AVPlayerItemObserver {
     private var notificationTokens: [NSObjectProtocol] = []
     private var cancelled = false
 
-    init(item: AVPlayerItem, player: AVPlayer) {
+    init(item: AVPlayerItem, player: AVPlayer? = nil) {
         self.item = item
         var streamContinuation: AsyncStream<PlayerItemEvent>.Continuation!
         events = AsyncStream(bufferingPolicy: .bufferingNewest(16)) {
@@ -39,11 +39,13 @@ final class AVPlayerItemObserver {
             let status = item.status
             Task { @MainActor [weak self] in self?.emit(.status(status)) }
         }
-        timeControlObservation = player.observe(\.timeControlStatus, options: [.initial, .new]) {
-            [weak self] player, _ in
-            let status = player.timeControlStatus
-            let reason = player.reasonForWaitingToPlay
-            Task { @MainActor [weak self] in self?.emit(.timeControl(status, reason)) }
+        if let player {
+            timeControlObservation = player.observe(\.timeControlStatus, options: [.initial, .new]) {
+                [weak self] player, _ in
+                let status = player.timeControlStatus
+                let reason = player.reasonForWaitingToPlay
+                Task { @MainActor [weak self] in self?.emit(.timeControl(status, reason)) }
+            }
         }
 
         let center = NotificationCenter.default

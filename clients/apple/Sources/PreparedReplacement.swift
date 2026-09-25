@@ -729,6 +729,20 @@ final class PreparedReplacementCoordinator {
         }
     }
 
+    /// Remaining time on the current stage's original monotonic deadline.
+    /// Observation may wake earlier, but it must not restart the 6 s or 12 s
+    /// clock when the item publishes another status value.
+    func readinessRemainingMs() -> Int? {
+        guard let openedAtMs, ledger.hasActivePreparation else { return nil }
+        let bound: Int
+        switch ledger.phase {
+        case .building: bound = PreparedReplacementBounds.metadataMs
+        case .metadataReady, .bufferReady: bound = PreparedReplacementBounds.readinessMs
+        case .switching: return nil
+        }
+        return max(0, bound - (now() - openedAtMs))
+    }
+
     /// Give the staging up and take the in-place path instead.
     func abandon(_ reason: PreparedReplacementAbandonment) {
         guard let action = ledger.active, !ledger.isSwitching else { return }

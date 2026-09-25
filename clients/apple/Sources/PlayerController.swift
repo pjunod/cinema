@@ -4785,7 +4785,7 @@ final class PlayerController: ObservableObject {
                 seekAfterAttach = itemPosition
             }
             url = Session.shared.url(hls.playlistUrl)
-            startStatusPolling()
+            startRecoveryEvidencePoll()
         }
 
         guard let url else {
@@ -4972,7 +4972,7 @@ final class PlayerController: ObservableObject {
         // during it there is nothing left to keep watching, and resuming here
         // would restart a player `stop()` has already paused and detached from.
         guard started else { return }
-        if session != nil { startStatusPolling() }
+        if session != nil { startRecoveryEvidencePoll() }
         if wantsPlayback {
             player.play()
             // Restore the rate the viewer was last actually playing at (P2-5).
@@ -5290,7 +5290,9 @@ final class PlayerController: ObservableObject {
         pgsOverlayImageLRU.append(key)
     }
 
-    private func startStatusPolling() {
+    /// One server request supplies both recovery evidence and panel state.
+    /// Recovery keeps its two-second cadence regardless of panel visibility.
+    private func startRecoveryEvidencePoll() {
         statusTask?.cancel()
         guard let polledSessionId = sessionId else { return }
         let generation = openGeneration
@@ -5303,7 +5305,6 @@ final class PlayerController: ObservableObject {
                       self.openGeneration == generation,
                       self.sessionId == polledSessionId
                 else { return }
-                self.sessionStatus = status
                 if status == nil {
                     // Row 18: a stats poll is telemetry. The picture is
                     // untouched and the log line is the only trace.
@@ -5314,18 +5315,30 @@ final class PlayerController: ObservableObject {
                 // only sampler there is outside the commit itself.
                 self.sampleThePreparedSwitch()
                 if let status {
-                    self.diagnosticSessionStatus = status
-                    self.diagnosticSessionStatusObservedAt = Date()
                     // A fired wedge recovery replaces the session — and
                     // `open()` cancels THIS poll task, so the recovery must
                     // not run inside it. `observeDeliveryStarvation` spawns
                     // an unstructured task (immune to this task's
                     // cancellation) and this loop ends; the successor
                     // session starts its own poll.
-                    if self.observeDeliveryStarvation(status) { return }
+                    let recovered = self.observeDeliveryStarvation(status)
+                    self.publishPanelTelemetry(status)
+                    if recovered { return }
+                } else {
+                    self.publishPanelTelemetry(nil)
                 }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
+        }
+    }
+
+    /// Presentation state from the same response used by recovery; no second
+    /// request and no influence on the recovery clock.
+    private func publishPanelTelemetry(_ status: PlaybackSessionStatus?) {
+        sessionStatus = status
+        if let status {
+            diagnosticSessionStatus = status
+            diagnosticSessionStatusObservedAt = Date()
         }
     }
 
@@ -5836,7 +5849,7 @@ final class PlayerController: ObservableObject {
 
     /// A deferred delivery stall leaves the poll that found it dead.
     ///
-    /// `startStatusPolling`'s task ends itself the moment
+    /// `startRecoveryEvidencePoll`'s task ends itself the moment
     /// `observeDeliveryStarvation` fires, on the documented assumption that a
     /// reopen follows and `open()` will start a fresh one. A deferral breaks
     /// that assumption: nothing reopens, so the server-truth wedge detector —
@@ -5845,10 +5858,10 @@ final class PlayerController: ObservableObject {
     /// the session, long after the hold lifted.
     private func restartDeliveryPollAfterDeferral(_ event: PlaybackStallEvent) {
         // The task object outlives its own `return`, so there is nothing to
-        // test for. `startStatusPolling` cancels whatever is there first, and
+        // test for. `startRecoveryEvidencePoll` cancels whatever is there first, and
         // for any other stall kind the poll was never the thing that ended.
         guard event.kind == .delivery else { return }
-        startStatusPolling()
+        startRecoveryEvidencePoll()
     }
 
     /// The server's seven hold reasons, in the viewer's words. An unknown
@@ -8275,25 +8288,32 @@ final class PlayerController: ObservableObject {
 
     /// Wait for the attached item to reach `.readyToPlay`, or give up.
     ///
-    /// AVPlayerItem's KVO publisher is not guaranteed to deliver another
-    /// value when a tvOS network request stalls. The old unbounded
-    /// `for await` consequently held the initial `play()` forever and left
-    /// the transport looking paused. Poll the authoritative status with a
-    /// finite deadline so playback either resumes or surfaces a useful
-    /// connection error.
+    /// Subscribe before inspecting the status so a ready transition cannot
+    /// fall between the initial read and observation. A separate timer keeps
+    /// the original finite deadline even when AVFoundation emits nothing.
     private static func awaitItemReady(_ item: AVPlayerItem) async throws {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(Self.itemReadinessDeadlineSeconds))
-        while item.status == .unknown {
-            try Task.checkCancellation()
-            guard clock.now < deadline else { throw PlaybackPreparationError.timedOut }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-
+        let observer = AVPlayerItemObserver(item: item)
+        defer { observer.cancel() }
         if item.status == .failed {
             throw item.error ?? PlaybackPreparationError.failed
         }
-        guard item.status == .readyToPlay else { throw PlaybackPreparationError.failed }
+        if item.status == .readyToPlay { return }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { @MainActor in
+                for await event in observer.events {
+                    guard case .status(let status) = event else { continue }
+                    if status == .readyToPlay { return }
+                    if status == .failed { throw item.error ?? PlaybackPreparationError.failed }
+                }
+                throw PlaybackPreparationError.failed
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(Self.itemReadinessDeadlineSeconds))
+                throw PlaybackPreparationError.timedOut
+            }
+            defer { group.cancelAll() }
+            guard let _ = try await group.next() else { throw PlaybackPreparationError.failed }
+        }
     }
 
     func seekPreparationOwner(at targetMs: Int) -> SeekPreparationOwner {
@@ -9474,8 +9494,40 @@ extension PlayerController: PreparedSuccessorHost {
     private func beginPreparedReadinessMonitor() {
         preparedMonitor?.cancel()
         preparedMonitor = Task { @MainActor [weak self] in
+            guard let self, let item = self.preparedItem,
+                  let successor = self.preparedPlayer else { return }
+            let observer = AVPlayerItemObserver(item: item, player: successor)
+            defer { observer.cancel() }
+            // Subscribe before the initial status read. The timer uses the
+            // coordinator's original open clock, not a fresh six seconds.
+            if item.status == .unknown {
+                let remaining = self.preparedReplacement.readinessRemainingMs() ?? 0
+                let ready = await withTaskGroup(of: Bool.self) { group in
+                    group.addTask { @MainActor in
+                        for await event in observer.events {
+                            guard case .status(let status) = event else { continue }
+                            if status == .readyToPlay { return true }
+                            if status == .failed { return false }
+                        }
+                        return false
+                    }
+                    group.addTask {
+                        try? await Task.sleep(for: .milliseconds(remaining))
+                        return false
+                    }
+                    defer { group.cancelAll() }
+                    return await group.next() ?? false
+                }
+                guard !Task.isCancelled, self.preparedItem === item,
+                      self.preparedPlayer === successor else { return }
+                if !ready {
+                    self.preparedReplacement.abandon(.failed)
+                    return
+                }
+            }
             while !Task.isCancelled {
-                guard let self, let item = self.preparedItem else { return }
+                guard self.preparedItem === item,
+                      self.preparedPlayer === successor else { return }
                 if item.status == .failed {
                     self.preparedReplacement.abandon(.failed)
                     return
@@ -9516,9 +9568,13 @@ extension PlayerController: PreparedSuccessorHost {
                         return
                     }
                 }
-                try? await Task.sleep(
-                    nanoseconds: UInt64(PreparedReplacementBounds.pollMs) * 1_000_000
+                let delayMs = min(
+                    PreparedReplacementBounds.pollMs,
+                    self.preparedReplacement.readinessRemainingMs() ?? PreparedReplacementBounds.pollMs
                 )
+                if delayMs > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+                }
             }
         }
     }
@@ -9700,7 +9756,7 @@ extension PlayerController: PreparedSuccessorHost {
             await reconcileNativeMediaSelections(to: item)
         }
         applyDisplayCriteria(for: item, generation: openGeneration)
-        startStatusPolling()
+        startRecoveryEvidencePoll()
         player.play()
         if !wantsPlayback { player.pause() }
         isPlaying = wantsPlayback
