@@ -676,19 +676,11 @@ class ShipPhysicalReleaseVariantCase(unittest.TestCase):
         self.assertIn('if cert_digest(apksigner, signed, api) != expected_new:', helper)
         self.assertNotIn('CN=Android Debug', self.script)
 
-    def test_a_debuggable_install_of_the_same_version_code_is_not_skipped(self) -> None:
-        """Equal versionCode is not "already installed" when it is the debug build.
-
-        A device on debug build 120 would otherwise be reported as already on
-        120 and left debuggable, with the run counted a success.
-        """
-        debuggable = self.script.index("*DEBUGGABLE*")
-        skipped = self.script.index('already on versionCode $ANDROID_CODE')
-        self.assertLess(debuggable, skipped)
-        self.assertRegex(
-            self.script,
-            r'"\$current" == "\$ANDROID_CODE" && \$debuggable -eq 1',
-        )
+    def test_an_equal_version_code_still_installs_the_exact_main_artifact(self) -> None:
+        """A version number does not identify the source tree or signer."""
+        self.assertNotIn('already on versionCode $ANDROID_CODE', self.script)
+        self.assertIn('install --no-streaming -r "$APK"', self.script)
+        self.assertIn('if [[ $debuggable -eq 1 ]]', self.script)
 
     def test_a_signer_mismatch_never_uninstalls_the_existing_app(self) -> None:
         """A rejected rotation must preserve sign-in and offline downloads."""

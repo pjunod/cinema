@@ -23,9 +23,8 @@
 #   scripts/ship-physical --keep             # keep the release worktree afterwards
 #
 # Android ships the signed release variant, never the debuggable debug APK:
-# set PLURX_ANDROID_KEYSTORE, PLURX_ANDROID_KEYSTORE_PASSWORD,
-# PLURX_ANDROID_KEY_ALIAS and PLURX_ANDROID_KEY_PASSWORD, the same four inputs
-# `make android-release` and the Ansible role take (docs/PUBLISHING.md 5.1).
+# set the durable release key, audited predecessor key, lineage and expected
+# release certificate inputs listed in docs/PUBLISHING.md 5.1.
 #
 # What it will not do: downgrade an app, install to a device it cannot name,
 # or ship an artifact that fails codesign/apksigner verification.
@@ -474,19 +473,15 @@ if [[ $DO_ANDROID -eq 1 ]]; then
     pkginfo="$("$ADB" -s "$serial" shell dumpsys package "$ANDROID_PACKAGE" 2>/dev/null || true)"
     current="$(printf '%s\n' "$pkginfo" \
       | awk -F= '/versionCode=/{print $2}' | awk '{print $1}' | head -1)"
-    # A debuggable install is the pre-release debug build. Matching its
-    # versionCode is not "already installed": skipping it would leave the
-    # bearer readable through `run-as` with the run reported as a success.
+    # A debuggable install is the pre-release debug build. Even a signed app
+    # with an equal versionCode may be an older source tree: a version number
+    # alone cannot prove that the exact current-main APK is installed.
     debuggable=0
     if [[ "$pkginfo" == *DEBUGGABLE* ]]; then debuggable=1; fi
 
     if [[ -n "$current" ]]; then
-      if [[ "$current" == "$ANDROID_CODE" && $debuggable -eq 1 ]]; then
-        warn "$model has a debuggable build of versionCode $ANDROID_CODE — replacing it with the release build"
-      elif [[ "$current" == "$ANDROID_CODE" ]]; then
-        log "$model already on versionCode $ANDROID_CODE — skipped"
-        record_skipped "$model (already $ANDROID_CODE)"
-        continue
+      if [[ $debuggable -eq 1 ]]; then
+        warn "$model has a debuggable build of versionCode $current — replacing it with the release build"
       fi
       # A downgrade keeps /data, so older code inherits whatever schema the
       # newer build wrote. Refuse it rather than corrupting the install.
