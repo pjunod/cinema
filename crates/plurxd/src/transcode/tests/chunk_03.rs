@@ -1074,6 +1074,96 @@
         assert!(reason.contains("hard deadline"), "{reason}");
     }
 
+    /// Publish once, then hold the producer for `reason` starting a second
+    /// later. Returns the served snapshot's publication instant.
+    async fn scratch_hold_published_and_held(session: &Session, reason: AheadHoldReason) -> Instant {
+        tokio::fs::write(
+            session.dir.join("index.m3u8"),
+            rolling_playlist(&[16.0, 16.0, 16.0], false),
+        )
+        .await
+        .expect("writer playlist");
+        session
+            .publication_cycle("scratch-hold-deadline")
+            .await
+            .expect("initial publication");
+        let published = session
+            .publication
+            .lock()
+            .await
+            .served
+            .as_ref()
+            .expect("served snapshot")
+            .available_at;
+        *session.suspended_at.lock().await = Some(SuspendedAt {
+            since: published + Duration::from_secs(1),
+            hold: AheadHold {
+                reason,
+                release_value: 1,
+            },
+        });
+        session.suspended.store(true, Relaxed);
+        published
+    }
+
+    /// A producer held because global scratch is exhausted is waiting on
+    /// capacity, and scratch_put lets its starved writer wait as long as the
+    /// session lives. The 24 s publication deadline used to retire it anyway,
+    /// with the client still rendering from its buffer. Once the hold clears
+    /// the deadline runs its full length again, so a producer that stays
+    /// stuck is still retired.
+    #[tokio::test]
+    async fn scratch_hold_publication_deadline_waits_out_a_global_scratch_hold() {
+        let directory = crate::test_tempdir().expect("publication deadline");
+        let session = test_session(directory.path().to_path_buf());
+        let published = scratch_hold_published_and_held(&session, AheadHoldReason::Global).await;
+        let held_until = published + ROLLING_PUBLICATION_HARD * 3;
+        let mut now = published;
+        while now < held_until {
+            now += Duration::from_secs(1);
+            session
+                .publication_cycle_at("scratch-hold-deadline", now)
+                .await
+                .expect("a producer held for scratch is waiting, not stuck");
+        }
+
+        *session.suspended_at.lock().await = None;
+        session.suspended.store(false, Relaxed);
+        session
+            .publication_cycle_at(
+                "scratch-hold-deadline",
+                held_until + ROLLING_PUBLICATION_HARD - Duration::from_secs(1),
+            )
+            .await
+            .expect("the deadline restarts from the end of the hold");
+        let reason = session
+            .publication_cycle_at(
+                "scratch-hold-deadline",
+                held_until + ROLLING_PUBLICATION_HARD + Duration::from_secs(1),
+            )
+            .await
+            .expect_err("a producer still stuck after the hold clears is retired");
+        assert!(reason.contains("hard deadline"), "{reason}");
+    }
+
+    /// Only a scratch hold suspends the deadline. A producer held because it
+    /// ran ahead of demand has nothing to wait for from the budget, and keeps
+    /// the ordinary deadline.
+    #[tokio::test]
+    async fn scratch_hold_publication_deadline_still_applies_to_a_demand_hold() {
+        let directory = crate::test_tempdir().expect("publication deadline");
+        let session = test_session(directory.path().to_path_buf());
+        let published = scratch_hold_published_and_held(&session, AheadHoldReason::Demand).await;
+        let reason = session
+            .publication_cycle_at(
+                "scratch-hold-deadline",
+                published + ROLLING_PUBLICATION_HARD + Duration::from_secs(1),
+            )
+            .await
+            .expect_err("a demand hold does not extend the publication deadline");
+        assert!(reason.contains("hard deadline"), "{reason}");
+    }
+
     #[tokio::test]
     async fn rolling_publication_budget_retention_cannot_pass_the_protected_prefix() {
         let directory = crate::test_tempdir().expect("retention snapshot");

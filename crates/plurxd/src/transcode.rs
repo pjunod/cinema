@@ -6740,9 +6740,23 @@ impl Session {
                     && demand.runway_ms() <= ROLLING_PUBLICATION_GUARD_MS
             })
         });
+        // A producer the flow controller holds for scratch (the global cap or
+        // a refused ledger grant) is waiting on capacity, not stuck: the same
+        // hold the progress deadline already exempts. Its publication clock
+        // must not retire the session while the hold lasts.
+        let held_for_scratch = (*self.suspended_at.lock().await)
+            .is_some_and(|held| held.hold.reason == AheadHoldReason::Global);
         let (publish, expired, insufficient, retention_first_segment, budget) = {
             let mut clock = self.publication.lock().await;
             clock.reset_for_attempt(producer_attempt);
+            if held_for_scratch {
+                // Restart the hard deadline on every held cycle, so it runs
+                // its full length again from the moment the hold clears and
+                // a producer that stays stuck afterwards is still retired.
+                if let Some(deadline) = clock.hard_deadline.as_mut() {
+                    *deadline = (*deadline).max(now + ROLLING_PUBLICATION_HARD);
+                }
+            }
             if clock
                 .staged_last_segment
                 .is_none_or(|current| last_segment >= current)
