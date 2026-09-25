@@ -127,6 +127,7 @@ jobs:
           node tests/playback/web-policy.test.js
           node tests/playback/web-control.test.js
           node tests/web/player-dom.test.js
+          node tests/web/live-tv.test.js
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; compiler surfaces are skipped."

@@ -125,6 +125,48 @@ async function saveLiveTvDeinterlace(btn){
   }catch(e){if(err)err.textContent=e.message||String(e);btn.disabled=false;}
 }
 
+// F-1: the same replicated switch, moved to Developer. Every readiness row is
+// an observation or a dated qualification receipt; none is read on save or by
+// the player. Enabling remains an operator choice even when rows are red.
+function autoQualityCard(settings){
+  const enabled=!!settings.playback_auto_abr;
+  const webController=typeof autoControllerTick==="function";
+  return setCard(`${cardHead("Adaptive Auto quality","Let Auto react to changing playback conditions during a stream.",`<span class="pill" id="aqstate">${enabled?"Enabled":"Disabled"}</span>`)}
+      ${togRow("pabr",`Adjust Auto quality while playing <span class="pill warn">experimental</span>`,`Off keeps the server's first Auto choice and the full manual quality menu. On lets supported clients adjust rungs and recover supply stalls.`,enabled)}
+      <div class="hint"><b>This switch is the enable path.</b> It is saved on the server and is never disabled or overridden by the readiness rows below. It affects eligible Auto sessions; a manual rung remains the viewer's choice.</div>
+      <details class="setdetails" open><summary>Requirements and current evidence</summary><div class="setdetails-body">
+      ${devStaticReq("Web controller in this browser",webController?"met":"not met","This page can see the shipped browser controller. A missing controller means this browser cannot adjust Auto while playing.",webController?"ok":"warn")}
+      ${devStaticReq("Native controllers","not met in this build","Apple and Android native adapters have not shipped. The server setting remains selectable and applies to a native client only when that client's controller exists.","warn")}
+      ${devStaticReq("Chrome shaped-network recovery","not met · 2026-09-24","The 8 to 1.5 Mb/s trace restarted and downshifted after 21.113 s, with a 4.2665 s maximum frame gap. Repeat the D3 cliff matrix after improving recovery.","warn")}
+      ${devStaticReq("Safari, Firefox and physical devices","not measured · 2026-09-24","Safari WebDriver session creation timed out; Firefox was unavailable. Native two-cliff, HDR and device traces remain owed. Record each platform's first-frame, gap, rung and restart results.","warn")}
+      <p class="devcheck-note">Evidence is dated because this server cannot inspect another device's trace. Recheck the architecture-review fleet evidence before enabling broadly. These observations never gate this checkbox.</p>
+      </div></details><div class="err" id="aqerr" role="alert"></div>
+      ${setCardFoot("saveAutoQuality")}`);
+}
+
+async function saveAutoQuality(btn){
+  const err=document.getElementById("aqerr"); if(err) err.textContent="";
+  const card=btn&&btn.closest?btn.closest(".setcard"):null;
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const requested=document.getElementById("pabr").checked;
+  if(btn) btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{playback_auto_abr:requested}}));
+    if(SERVER) SERVER.playback_auto_abr=!!saved.playback_auto_abr;
+    if(card&&!card.isConnected) return true;
+    const currentRevision=Number(card&&card.dataset?card.dataset.revision||0:0);
+    if(card&&currentRevision!==revision){
+      toast("Earlier Auto quality choice saved; newer edit remains unsaved");
+      return true;
+    }
+    const toggle=document.getElementById("pabr");
+    if(toggle) toggle.checked=!!saved.playback_auto_abr;
+    const state=document.getElementById("aqstate");
+    if(state) state.textContent=saved.playback_auto_abr?"Enabled":"Disabled";
+    toast("Auto quality saved"); if(btn) setCardSaved(btn);
+  }catch(e){if(err) err.textContent=e.message||String(e); if(btn) btn.disabled=false;}
+}
+
 function preparedQualityCard(settings,readiness){
   return setCard(`${cardHead("Quality switching","Prepare the next stream before replacing the one you are watching.",`<span class="pill" id="pqhstate">${settings.prepared_quality_handoff?"Enabled":"Disabled"}</span>`)}
       ${togRow("pqh",`Prepare quality changes <span class="pill warn">experimental</span>`,`Uses a second player and temporary server capacity to reduce interruptions. Applies after saving to the next eligible quality change.`,settings.prepared_quality_handoff)}
@@ -287,6 +329,7 @@ function developerPanel(settings,readiness){
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
       <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}
       <div class="setsection" id="enable-seek-scratch"><h2>Seek scratch accounting</h2><p>Recently shipped accounting and retention changes with unverified native-device behavior.</p></div>${seekScratchReservationsCard()}
+      <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}
       <div class="setsection" id="enable-subtitle-sources"><h2>Stored subtitle tracks</h2><p>Keep each PGS track while the file is indexed, and read it instead of the whole source.</p></div>${subtitleStoredSourcesCard(settings,readiness)}

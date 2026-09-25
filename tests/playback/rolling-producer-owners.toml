@@ -2014,7 +2014,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # owns a process, a recipe or a recovery decision. Seven are test fixtures:
 # four `spawn_blocking` calls that run a finite FFmpeg encode or remux to
 # completion, and three request senders joined before their tests end.
-expected_occurrences = 600
+# 600 -> 604 with this architecture-review build. `live_tv::start_caption_probe`
+# starts one boot-only task, which awaits a second task for the finite graph
+# matrix; `probe_available_graphs` joins each individual graph task before it
+# advances to the next case. Each graph feeds a finite fixture to FFmpeg and
+# waits at most 180 s with kill-on-drop, then publishes a caption proof only
+# after both decoders match known text and timing. Until proof publication,
+# captions remain unclaimed; none of these tasks owns a live session or elects
+# a producer. The fourth spawn registers `file_grants::prune_loop` beside the
+# existing background loops; its cloned shutdown token ends the daily sweep
+# when the server stops. It owns no media producer or child process.
+expected_occurrences = 604
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2731,6 +2741,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # playback-progress watchdog or chooses a recipe. The other ten are test-only
 # and awaited: the receiver tests' sleeps and timeouts, and in `copyseg.rs`
 # the bounded grant-wait and starvation-signal checks.
+# 921 -> 922: `file_grants::prune_loop` creates one daily interval. Its
+# `select!` observes the server's background shutdown token on every tick;
+# the timer only schedules expired-grant row cleanup, not media admission,
+# playback recovery, or a producer deadline.
 # 921 -> 923 (measured after merging main's 921; was 901 -> 903 on the
 # branch's older base) with C-08 M5: two test-only `tokio::time::sleep`s in
 # `http::tests` -- a 5 ms poll while `a_ttff_beacon_is_labelled_by_the_requesters_client_class`
@@ -2748,7 +2762,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `ArtworkCoordinator::derive_permit`'s `tokio::time::timeout` is unchanged
 # in count (it lost its `let permit =` binding, nothing else). Bounds no
 # producer, process or response.
-expected_occurrences = 924
+# 925 (measured by zeroing this row) after merging `origin/main` at
+# `44cdfccc7`: main's 922 (its `file_grants::prune_loop` interval, reviewed
+# above) plus this branch's three test-only sleeps reviewed above.
+expected_occurrences = 925
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3321,6 +3338,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 372 -> 374: the `.status()` on those two test-only FFmpeg commands,
 # inventoried under `process-command-construction` above. Same children,
 # counted once in each sentinel.
+# 374 -> 375: `http::stream::serve_book_content` reads
+# `Response::status().is_success()` before setting inline range-response
+# headers. It inspects an in-process HTTP response and neither constructs nor
+# launches an OS process.
 # 374 -> 375 (measured after merging main's 374; was 370 -> 371 on the
 # branch's older base) with C-08 M5: one `Response::status()` read in
 # `http::stream::count_direct_play_bytes`, which leaves a non-success direct
@@ -3331,7 +3352,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `http::tests::a_direct_play_get_credits_exactly_its_body_to_delivered_bytes`
 # (the ranged GET, the whole GET, the HEAD twice, and the 416). HTTP status
 # codes of in-process router responses; no process is launched.
-expected_occurrences = 380
+# 381 (measured by zeroing this row) after merging `origin/main` at
+# `44cdfccc7`: main's 375 (`serve_book_content`'s read, reviewed above) plus
+# this branch's six reviewed above.
+expected_occurrences = 381
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

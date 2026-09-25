@@ -2618,7 +2618,16 @@ pub async fn book_content(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let file = load_file(&state, id).await?;
+    serve_book_content(&state, id, &method, &headers).await
+}
+
+pub(super) async fn serve_book_content(
+    state: &AppState,
+    id: i64,
+    method: &Method,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let file = load_file(state, id).await?;
     let item = state
         .store
         .get_item(file.item_id)
@@ -2627,7 +2636,23 @@ pub async fn book_content(
     if item.kind != ItemKind::Book {
         return Err(ApiError::NotFound("book content"));
     }
-    serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64)).await
+    let mut response =
+        serve_file_range(&file.path, headers, method, Some(file.size.max(0) as u64)).await?;
+    if response.status().is_success() {
+        let name = file
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("book");
+        let safe_name = name.replace(['\\', '"', '\r', '\n'], "_");
+        if let Ok(disposition) = HeaderValue::from_str(&format!("inline; filename=\"{safe_name}\""))
+        {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_DISPOSITION, disposition);
+        }
+    }
+    Ok(response)
 }
 
 // The caps fields are inlined (not `#[serde(flatten)]`ed) because axum's

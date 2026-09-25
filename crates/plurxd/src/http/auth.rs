@@ -435,11 +435,21 @@ pub(crate) fn prometheus_login_attempts() -> String {
 /// POST /api/v1/auth/logout — invalidate the presented token.
 pub async fn logout(
     State(state): State<AppState>,
-    _user: AuthUser,
+    AuthUser(user): AuthUser,
     RawToken(token): RawToken,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let hash = auth::hash_token(&token);
     let proof_revocation = ClusterCacheRevocation::begin_digest(&state, &hash).await?;
+    state
+        .store
+        .revoke_file_grants_for_user(
+            user.id,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+        )
+        .await?;
     if !state
         .store
         .delete_token_with_cache_admin_claim(&hash, proof_revocation.mutation_claim())
