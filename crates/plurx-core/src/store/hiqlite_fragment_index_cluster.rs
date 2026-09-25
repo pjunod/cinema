@@ -52,6 +52,20 @@ impl From<&mut Row<'_>> for SchemaCountRow {
     }
 }
 
+struct SubtitleRepairCountsRow {
+    lifetime: i64,
+    recent: i64,
+}
+
+impl From<&mut Row<'_>> for SubtitleRepairCountsRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            lifetime: row.get("lifetime"),
+            recent: row.get("recent"),
+        }
+    }
+}
+
 async fn configured_max_attempts(store: &HiqliteAuthStore) -> Result<i64, StoreError> {
     let raw = store
         .client()
@@ -867,6 +881,35 @@ END;"#,
  WHEN OLD.size <> NEW.size OR OLD.mtime <> NEW.mtime BEGIN
  DELETE FROM subtitle_source_publications WHERE file_id = NEW.id AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
  END;"#,
+    r#"CREATE TABLE IF NOT EXISTS subtitle_source_repair_epochs (
+ file_id INTEGER NOT NULL, source_size INTEGER NOT NULL, source_mtime INTEGER NOT NULL,
+ pipeline_version TEXT NOT NULL, next_epoch INTEGER NOT NULL CHECK(next_epoch >= 0),
+ last_1_ms INTEGER, last_2_ms INTEGER, last_3_ms INTEGER,
+ PRIMARY KEY(file_id, source_size, source_mtime, pipeline_version)
+) STRICT;"#,
+    r#"CREATE TRIGGER IF NOT EXISTS subtitle_source_repair_epochs_advance
+ AFTER UPDATE OF state ON analysis_requests
+ WHEN OLD.state = 'ready' AND NEW.state = 'cancelled'
+  AND NEW.component = 'subtitle_source'
+  AND NEW.last_error_code IN ('artifact_lost','coverage_incomplete') BEGIN
+ INSERT INTO subtitle_source_repair_epochs
+  (file_id, source_size, source_mtime, pipeline_version,
+   next_epoch, last_1_ms, last_2_ms, last_3_ms)
+ VALUES (NEW.file_id, NEW.source_size, NEW.source_mtime, NEW.pipeline_version,
+         1, NEW.updated_at_ms, NULL, NULL)
+ ON CONFLICT(file_id, source_size, source_mtime, pipeline_version)
+ DO UPDATE SET next_epoch = next_epoch + 1,
+               last_3_ms = last_2_ms, last_2_ms = last_1_ms,
+               last_1_ms = NEW.updated_at_ms;
+ END;"#,
+    r#"CREATE TRIGGER IF NOT EXISTS subtitle_source_repair_epochs_delete_source AFTER DELETE ON files BEGIN
+ DELETE FROM subtitle_source_repair_epochs WHERE file_id = OLD.id;
+ END;"#,
+    r#"CREATE TRIGGER IF NOT EXISTS subtitle_source_repair_epochs_supersede_source AFTER UPDATE OF size, mtime ON files
+ WHEN OLD.size <> NEW.size OR OLD.mtime <> NEW.mtime BEGIN
+ DELETE FROM subtitle_source_repair_epochs WHERE file_id = NEW.id
+  AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
+ END;"#,
 ];
 
 pub(super) fn subtitle_source_schema_migration_statements(
@@ -1532,12 +1575,13 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 "invalid subtitle source request".to_owned(),
             ));
         }
+        self.retire_subtitle_source_ready(stamp, now_ms).await?;
         for _ in 0..4 {
-            let repairs = self.client().query_consistent_map::<SchemaCountRow, _>(
-                "SELECT COUNT(*) AS count FROM analysis_requests WHERE file_id = $1 AND source_size = $2 AND source_mtime = $3 AND component = 'subtitle_source' AND pipeline_version = $4 AND last_error_code = 'artifact_lost' AND updated_at_ms >= $5",
+            let repairs = self.client().query_consistent_map::<SubtitleRepairCountsRow, _>(
+                "SELECT next_epoch AS lifetime, COALESCE(last_1_ms >= $5, 0) + COALESCE(last_2_ms >= $5, 0) + COALESCE(last_3_ms >= $5, 0) AS recent FROM subtitle_source_repair_epochs WHERE file_id = $1 AND source_size = $2 AND source_mtime = $3 AND pipeline_version = $4",
                 params!(stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, now_ms.saturating_sub(SUBTITLE_SOURCE_REPAIR_WINDOW_MS)),
-            ).await?.into_iter().next().map(|row| row.0).unwrap_or(0);
-            let generation = stamp.generation(repairs);
+            ).await?.into_iter().next().unwrap_or(SubtitleRepairCountsRow { lifetime: 0, recent: 0 });
+            let generation = stamp.generation(repairs.lifetime);
             let trigger = if priority == "foreground" {
                 "playback"
             } else {
@@ -1546,8 +1590,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             let results = self.client().txn(vec![
                 ("UPDATE analysis_requests SET priority = 'foreground', trigger = 'playback', updated_at_ms = $1 WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state = 'queued' AND priority = 'normal' AND $6 = 'foreground'".to_owned(),
                  params!(now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, priority)),
-                ("INSERT OR IGNORE INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT $1,$2,$3,$4,'subtitle_source',$5,'',$1,'',$6,$7,0,'','queued',NULL,0,NULL,0,$8,NULL,NULL,0,$8,$8 WHERE $9 < $10 AND (SELECT COUNT(*) FROM analysis_requests WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND last_error_code = 'artifact_lost' AND updated_at_ms >= $11) = $9 AND EXISTS (SELECT 1 FROM files WHERE id = $2 AND size = $3 AND mtime = $4) AND NOT EXISTS (SELECT 1 FROM analysis_requests WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state IN ('queued','running','submitted')) AND (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')) < $12".to_owned(),
-                 params!(&generation, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, priority, trigger, now_ms, repairs, SUBTITLE_SOURCE_REPAIR_LIMIT, now_ms.saturating_sub(SUBTITLE_SOURCE_REPAIR_WINDOW_MS), MAX_ANALYSIS_REQUESTS)),
+                ("INSERT OR IGNORE INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT $1,$2,$3,$4,'subtitle_source',$5,'',$1,'',$6,$7,0,'','queued',NULL,0,NULL,0,$8,NULL,NULL,0,$8,$8 WHERE $13 < $10 AND COALESCE((SELECT next_epoch FROM subtitle_source_repair_epochs WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND pipeline_version = $5), 0) = $9 AND COALESCE((SELECT COALESCE(last_1_ms >= $11, 0) + COALESCE(last_2_ms >= $11, 0) + COALESCE(last_3_ms >= $11, 0) FROM subtitle_source_repair_epochs WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND pipeline_version = $5), 0) = $13 AND EXISTS (SELECT 1 FROM files WHERE id = $2 AND size = $3 AND mtime = $4) AND NOT EXISTS (SELECT 1 FROM analysis_requests WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state IN ('queued','running','submitted')) AND (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')) < $12".to_owned(),
+                 params!(&generation, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, priority, trigger, now_ms, repairs.lifetime, SUBTITLE_SOURCE_REPAIR_LIMIT, now_ms.saturating_sub(SUBTITLE_SOURCE_REPAIR_WINDOW_MS), MAX_ANALYSIS_REQUESTS, repairs.recent)),
             ]).await?.into_iter().collect::<Result<Vec<_>, _>>().map_err(database_error)?;
             let _ = results;
             let active = self.client().query_consistent_map::<RequestRow, _>(
@@ -1570,7 +1614,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             if terminal.is_some() {
                 return Ok(terminal);
             }
-            if repairs >= SUBTITLE_SOURCE_REPAIR_LIMIT {
+            if repairs.recent >= SUBTITLE_SOURCE_REPAIR_LIMIT {
                 return Ok(None);
             }
         }
@@ -1618,7 +1662,79 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         stamp: &SubtitleSourceStamp,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
-        let changed = self.execute("UPDATE analysis_requests SET state = 'cancelled', last_error_code = 'artifact_lost', owner_node_id = NULL, lease_expires_ms = NULL, updated_at_ms = $1 WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state = 'ready' AND NOT EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.origin = 'extracted')", params!(now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version)).await?;
+        const SQL: &str = r#"UPDATE analysis_requests
+           SET state = 'cancelled',
+               last_error_code = CASE WHEN EXISTS (
+                 SELECT 1 FROM subtitle_source_publications p
+                 WHERE p.file_id = analysis_requests.file_id
+                   AND p.source_size = analysis_requests.source_size
+                   AND p.source_mtime = analysis_requests.source_mtime
+                   AND p.origin = 'extracted'
+               ) THEN 'coverage_incomplete' ELSE 'artifact_lost' END,
+               owner_node_id = NULL, lease_expires_ms = NULL, updated_at_ms = $1
+         WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4
+           AND component = 'subtitle_source' AND pipeline_version = $5
+           AND state = 'ready'
+           AND (NOT EXISTS (
+             SELECT 1 FROM subtitle_source_publications p
+             WHERE p.file_id = analysis_requests.file_id
+               AND p.source_size = analysis_requests.source_size
+               AND p.source_mtime = analysis_requests.source_mtime
+               AND p.origin = 'extracted'
+           ) OR EXISTS (
+             SELECT 1 FROM files AS f,
+               json_each(CASE WHEN json_valid(f.subtitle_streams)
+                              THEN f.subtitle_streams ELSE '[]' END) AS s
+             WHERE f.id = analysis_requests.file_id
+               AND f.size = analysis_requests.source_size
+               AND f.mtime = analysis_requests.source_mtime
+               AND json_type(s.value, '$.index') = 'integer'
+               AND CAST(json_extract(s.value, '$.index') AS INTEGER) >= 0
+               AND lower(json_extract(s.value, '$.codec')) IN
+                   ('hdmv_pgs_subtitle','subrip','srt','ass','ssa','mov_text','webvtt','text')
+               AND NOT EXISTS (
+                 SELECT 1 FROM subtitle_source_publications AS p
+                 WHERE p.file_id = f.id AND p.source_size = f.size
+                   AND p.source_mtime = f.mtime
+                   AND p.ordinal = CAST(json_extract(s.value, '$.index') AS INTEGER)
+                   AND p.origin = 'extracted'
+                   AND (p.verdict IN ('kept','empty','malformed')
+                        OR (p.verdict = 'transient' AND p.attempts >= 3))
+               )
+           ))"#;
+        let changed = self
+            .execute(
+                SQL,
+                params!(
+                    now_ms,
+                    stamp.file_id,
+                    stamp.source_size,
+                    stamp.source_mtime,
+                    &stamp.pipeline_version
+                ),
+            )
+            .await?;
+        Ok(changed > 0)
+    }
+
+    async fn retire_subtitle_source_ready_for_ordinal(
+        &self,
+        stamp: &SubtitleSourceStamp,
+        ordinal: i64,
+        source_attestation: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if ordinal < 0
+            || source_attestation.len() != 64
+            || !source_attestation
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(StoreError::Task(
+                "invalid subtitle source observation".to_owned(),
+            ));
+        }
+        let changed = self.execute("UPDATE analysis_requests SET state = 'cancelled', last_error_code = CASE WHEN EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.source_attestation = $7 AND p.origin = 'extracted') THEN 'coverage_incomplete' ELSE 'artifact_lost' END, owner_node_id = NULL, lease_expires_ms = NULL, updated_at_ms = $1 WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state = 'ready' AND NOT EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.ordinal = $6 AND p.source_attestation = $7 AND p.origin = 'extracted' AND (p.verdict IN ('kept','empty','malformed') OR (p.verdict = 'transient' AND p.attempts >= 3)))", params!(now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, ordinal, source_attestation)).await?;
         Ok(changed > 0)
     }
 

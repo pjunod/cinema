@@ -28,19 +28,21 @@
 //!   parser the overlay uses accepts it.
 //! - **A fresh private stage per attempt**, on the store's filesystem so
 //!   publishing is a rename, removed by a drop guard on every exit route.
-//! - **Nothing rides unless** the Developer switch is on, the startup
-//!   self-test proved this `ffmpeg` behaves as the design measured, and the
-//!   cache is on a local filesystem.
+//! - **The Developer switch controls the producer.** The startup self-test,
+//!   filesystem and free-space readings are advisory in Developer settings;
+//!   they never silently override the operator's saved choice.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use plurx_core::store::{Store, SubtitleSourcePublication};
+use plurx_core::store::{AnalysisRequest, Store, SubtitleSourcePublication};
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 
 use crate::subtitle_source::{
     self as store, Consumer, Manifest, RepresentationEntry, RepresentationFormat,
@@ -233,9 +235,20 @@ fn set_self_test_state(state: SelfTest) {
 
 /// Permission for one pass to ride along. Only [`RideAlongGate::open`] makes
 /// one outside tests, and only when every condition holds.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct RideAlongGate {
     root: PathBuf,
+    catalog: Option<Arc<dyn Store>>,
+}
+
+impl std::fmt::Debug for RideAlongGate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RideAlongGate")
+            .field("root", &self.root)
+            .field("has_catalog", &self.catalog.is_some())
+            .finish()
+    }
 }
 
 impl RideAlongGate {
@@ -247,10 +260,10 @@ impl RideAlongGate {
     /// is asked once per pass, so turning the switch off stops the next pass
     /// from riding without a restart.
     pub(crate) async fn open(
-        store: &dyn plurx_core::store::Store,
+        store: Arc<dyn plurx_core::store::Store>,
         runtime_cache: &Path,
     ) -> Option<Self> {
-        let switch_on = crate::subtitle_source::enabled(store).await;
+        let switch_on = crate::subtitle_source::enabled(store.as_ref()).await;
         let root = store::store_root(runtime_cache);
         if !switch_on {
             return None;
@@ -261,13 +274,19 @@ impl RideAlongGate {
                 return None;
             }
         }
-        Some(Self { root })
+        Some(Self {
+            root,
+            catalog: Some(store),
+        })
     }
 
     /// A gate for a test that exercises the pass itself.
     #[cfg(test)]
     pub(crate) fn for_test(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            catalog: None,
+        }
     }
 }
 
@@ -294,7 +313,10 @@ pub(crate) fn gate_from(
     }
     filesystem.map_err(|reason| format!("the cache is not usable for the ride-along: {reason}"))?;
     space.map_err(|reason| format!("the cache is too full for the ride-along: {reason}"))?;
-    Ok(RideAlongGate { root })
+    Ok(RideAlongGate {
+        root,
+        catalog: None,
+    })
 }
 
 /// Advisory conditions for relying on stored tracks. Developer settings
@@ -760,10 +782,14 @@ pub(crate) async fn plan_tracks(
             && manifest.file_id == file_id
             && manifest.source_matches(&live, Consumer::Burn)
     });
+    let cluster_covered = cluster_extracted_coverage(gate, file_id, source, probed).await;
     let mut tracks = Vec::new();
     let mut carried = Vec::new();
     let mut prior_attempts = BTreeMap::new();
     for ProbedTrack { ordinal, .. } in probed {
+        if cluster_covered.contains(ordinal) {
+            continue;
+        }
         match previous
             .as_ref()
             .and_then(|manifest| manifest.track(*ordinal))
@@ -824,6 +850,58 @@ pub(crate) async fn plan_tracks(
         stage,
         _claim: Some(claim),
     })
+}
+
+/// A second node's settled extraction covers an ordinal only when its
+/// portable source digest matches this held file. The index pass otherwise
+/// keeps its normal local ride-along and never trusts size/mtime alone.
+async fn cluster_extracted_coverage(
+    gate: &RideAlongGate,
+    file_id: i64,
+    source: &std::fs::File,
+    probed: &[ProbedTrack],
+) -> HashSet<i64> {
+    let Some(catalog) = gate.catalog.as_ref() else {
+        return HashSet::new();
+    };
+    let cluster_on = catalog
+        .get_setting(plurx_core::store::keys::SUBTITLE_CLUSTER_SOURCES)
+        .await
+        .ok()
+        .is_some_and(|value| plurx_core::store::stored_switch(value.as_deref(), false));
+    if !cluster_on {
+        return HashSet::new();
+    }
+    let Some(file) = catalog.get_file(file_id).await.ok().flatten() else {
+        return HashSet::new();
+    };
+    let Ok(rows) = catalog
+        .list_subtitle_source_publications(file_id, file.size, file.mtime)
+        .await
+    else {
+        return HashSet::new();
+    };
+    if rows.is_empty() {
+        return HashSet::new();
+    }
+    let Ok(attested) = crate::fragment_index_cluster::attest_source("", &file, None, &|_| {}).await
+    else {
+        return HashSet::new();
+    };
+    if !crate::fragment_index_cluster::source_still_matches(source, &attested.observation)
+        .unwrap_or(false)
+    {
+        return HashSet::new();
+    }
+    let current: Vec<_> = rows
+        .into_iter()
+        .filter(|row| row.source_attestation == attested.observation.source_sha256)
+        .collect();
+    probed
+        .iter()
+        .filter(|track| store::extracted_ordinal_covered(&current, track.ordinal))
+        .map(|track| track.ordinal)
+        .collect()
 }
 
 /// A `kept` entry's stored file exists as a regular file; any other verdict
@@ -1695,6 +1773,67 @@ pub(crate) struct RideAlongHarvest {
     outcomes: Vec<TrackOutcome>,
 }
 
+pub(crate) struct ClusterPublishReceipt {
+    pub(crate) manifest: Manifest,
+    root: PathBuf,
+    dir: PathBuf,
+    previous: Option<Manifest>,
+    placed: Vec<String>,
+    written_rows: Vec<(SubtitleSourcePublication, Option<SubtitleSourcePublication>)>,
+}
+
+impl ClusterPublishReceipt {
+    pub(crate) async fn rollback(self, catalog: &dyn Store) -> Result<(), String> {
+        let _guard = store::file_lock(&self.root, self.manifest.file_id)
+            .lock()
+            .await;
+        // Hydration can merge the manifest after our rename. Even then the
+        // cancelled request's rows must go away. Compare the exact row first
+        // so a later publisher's replacement is left intact.
+        let current_rows = catalog
+            .list_subtitle_source_publications(
+                self.manifest.file_id,
+                self.manifest.source.size as i64,
+                self.manifest.source.mtime,
+            )
+            .await
+            .map_err(|error| format!("reading rows for publication compensation: {error}"))?;
+        let still_ours: Vec<_> = self
+            .written_rows
+            .iter()
+            .filter(|(published, _)| current_rows.contains(published))
+            .cloned()
+            .collect();
+        let current_manifest = store::read_manifest(&self.dir).await;
+        if current_manifest.as_ref() != Some(&self.manifest) {
+            rollback_cluster_rows(catalog, &still_ours).await?;
+            PUBLISHED.fetch_sub(1, Ordering::Relaxed);
+            return Err("subtitle-source manifest changed before local compensation".to_owned());
+        }
+        rollback_cluster_publish(
+            catalog,
+            &self.dir,
+            self.previous.as_ref(),
+            &self.placed,
+            &still_ours,
+        )
+        .await?;
+        PUBLISHED.fetch_sub(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub(crate) async fn commit(self) {
+        let _guard = store::file_lock(&self.root, self.manifest.file_id)
+            .lock()
+            .await;
+        if store::read_manifest(&self.dir).await.as_ref() == Some(&self.manifest) {
+            if let Some(previous) = &self.previous {
+                cleanup_replaced_files(&self.dir, previous, &self.manifest).await;
+            }
+        }
+    }
+}
+
 impl RideAlongHarvest {
     /// Judge a reaped pass whose index was built. `scan` is `None` when the
     /// stderr reader did not finish.
@@ -1835,7 +1974,9 @@ impl RideAlongHarvest {
     ///    under the size cap.
     #[cfg(test)]
     pub(crate) async fn publish(self) -> Result<Manifest, String> {
-        self.publish_internal(None).await
+        self.publish_internal(None, None, None, || async {})
+            .await
+            .map(|receipt| receipt.manifest)
     }
 
     /// Publish the local bytes first, then expose the representations as
@@ -1846,6 +1987,7 @@ impl RideAlongHarvest {
         catalog: &dyn Store,
         node_id: &str,
         source_attestation: &str,
+        guard: Option<&CancellationToken>,
     ) -> Result<Manifest, String> {
         if source_attestation.len() != 64
             || !source_attestation
@@ -1854,14 +1996,54 @@ impl RideAlongHarvest {
         {
             return Err("invalid portable source attestation".to_owned());
         }
-        self.publish_internal(Some((catalog, node_id, source_attestation)))
-            .await
+        self.publish_internal(
+            Some((catalog, node_id, source_attestation)),
+            guard,
+            None,
+            || async {},
+        )
+        .await
+        .map(|receipt| receipt.manifest)
     }
 
-    async fn publish_internal(
+    /// Worker publication keeps a compensation receipt until the fenced
+    /// request has completed. Admin cancellation changes the request fence,
+    /// which is checked around every externally visible write.
+    pub(crate) async fn publish_guarded_worker(
+        self,
+        catalog: &dyn Store,
+        node_id: &str,
+        source_attestation: &str,
+        lost: &CancellationToken,
+        request: &AnalysisRequest,
+    ) -> Result<ClusterPublishReceipt, String> {
+        if source_attestation.len() != 64
+            || !source_attestation
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("invalid portable source attestation".to_owned());
+        }
+        self.publish_internal(
+            Some((catalog, node_id, source_attestation)),
+            Some(lost),
+            Some(request),
+            || async {},
+        )
+        .await
+    }
+
+    async fn publish_internal<F, Fut>(
         self,
         cluster: Option<(&dyn Store, &str, &str)>,
-    ) -> Result<Manifest, String> {
+        guard: Option<&CancellationToken>,
+        request: Option<&AnalysisRequest>,
+        after_row: F,
+    ) -> Result<ClusterPublishReceipt, String>
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = ()>,
+    {
         let dir = store::file_dir(&self.plan.root, self.plan.file_id);
         let _file_guard = store::file_lock(&self.plan.root, self.plan.file_id)
             .lock()
@@ -1869,6 +2051,30 @@ impl RideAlongHarvest {
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|error| format!("creating {}: {error}", dir.display()))?;
+        if guard.is_some_and(CancellationToken::is_cancelled) {
+            let _ = tokio::fs::remove_dir(&dir).await;
+            return Err("subtitle-source claim lost before publication".to_owned());
+        }
+        // Snapshot the exact rows this publish may replace. On a lost claim,
+        // restore those rows rather than deleting coverage from a prior pass.
+        let prior_rows = if let (Some((catalog, _, _)), Some(_)) = (cluster, guard) {
+            match catalog
+                .list_subtitle_source_publications(
+                    self.plan.file_id,
+                    self.plan.source.size as i64,
+                    self.plan.source.mtime,
+                )
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    let _ = tokio::fs::remove_dir(&dir).await;
+                    return Err(format!("reading prior subtitle-source rows: {error}"));
+                }
+            }
+        } else {
+            Vec::new()
+        };
         let mut manifest = self.manifest();
 
         // (1)
@@ -1922,53 +2128,26 @@ impl RideAlongHarvest {
         let replaced = store::read_manifest(&dir).await;
         manifest = store::merge_manifest(manifest, replaced.as_ref());
 
+        if !publication_claim_live(cluster, guard, request).await {
+            remove_newly_placed(&dir, &placed, replaced.as_ref()).await;
+            if replaced.is_none() {
+                let _ = tokio::fs::remove_dir(&dir).await;
+            }
+            return Err("subtitle-source claim lost before manifest rename".to_owned());
+        }
+
         // (2)
         if let Err(error) = write_manifest(&dir, &manifest).await {
-            for name in placed {
-                let named_before = replaced.as_ref().is_some_and(|old| names(old, &name));
-                if !named_before {
-                    let _ = tokio::fs::remove_file(dir.join(name)).await;
-                }
+            remove_newly_placed(&dir, &placed, replaced.as_ref()).await;
+            if replaced.is_none() {
+                let _ = tokio::fs::remove_dir(&dir).await;
             }
             return Err(error);
         }
 
         sync_directory(&dir).await;
 
-        // (3)
-        if let Some(replaced) = replaced {
-            for track in &replaced.tracks {
-                let reps = if track.representations.is_empty() {
-                    track
-                        .representation(RepresentationFormat::Sup)
-                        .into_iter()
-                        .collect::<Vec<_>>()
-                } else {
-                    track.representations.clone()
-                };
-                for representation in reps {
-                    let (Some(name), Some(sha256)) = (
-                        representation.file.as_deref(),
-                        representation.sha256.as_deref(),
-                    ) else {
-                        continue;
-                    };
-                    // Only a content name this build would write; a manifest
-                    // naming a path is not one it will delete through.
-                    if store::representation_file_name(track.ordinal, representation.format, sha256)
-                        .as_deref()
-                        != Some(name)
-                        || names(&manifest, name)
-                    {
-                        continue;
-                    }
-                    let _ = tokio::fs::remove_file(dir.join(name)).await;
-                }
-            }
-        }
-
-        // (4)
-        store::record_access(&dir).await;
+        let mut written_rows = Vec::new();
         if let Some((catalog, node_id, source_attestation)) = cluster {
             for outcome in &self.outcomes {
                 let Some(track) = manifest.track(outcome.ordinal) else {
@@ -1982,6 +2161,17 @@ impl RideAlongHarvest {
                             .any(|produced| produced.format == representation.format)
                     {
                         continue;
+                    }
+                    if !publication_claim_live(cluster, guard, request).await {
+                        rollback_cluster_publish(
+                            catalog,
+                            &dir,
+                            replaced.as_ref(),
+                            &placed,
+                            &written_rows,
+                        )
+                        .await?;
+                        return Err("subtitle-source claim lost during publication".to_owned());
                     }
                     let publication = SubtitleSourcePublication {
                         file_id: self.plan.file_id,
@@ -2010,15 +2200,215 @@ impl RideAlongHarvest {
                         bytes: representation.bytes as i64,
                         published_at_ms: unix_ms(),
                     };
-                    catalog
+                    if guard.is_some() {
+                        let prior = prior_rows
+                            .iter()
+                            .find(|row| {
+                                row.node_id == publication.node_id
+                                    && row.ordinal == publication.ordinal
+                                    && row.format == publication.format
+                            })
+                            .cloned();
+                        // Include this row before the write: a store error may
+                        // follow a successful durable write.
+                        written_rows.push((publication.clone(), prior));
+                    }
+                    if let Err(error) = catalog
                         .upsert_subtitle_source_publication(&publication)
                         .await
-                        .map_err(|error| format!("publishing subtitle-source row: {error}"))?;
+                    {
+                        if guard.is_some() {
+                            rollback_cluster_publish(
+                                catalog,
+                                &dir,
+                                replaced.as_ref(),
+                                &placed,
+                                &written_rows,
+                            )
+                            .await?;
+                        }
+                        return Err(format!("publishing subtitle-source row: {error}"));
+                    }
+                    after_row().await;
+                    if !publication_claim_live(cluster, guard, request).await {
+                        rollback_cluster_publish(
+                            catalog,
+                            &dir,
+                            replaced.as_ref(),
+                            &placed,
+                            &written_rows,
+                        )
+                        .await?;
+                        return Err("subtitle-source claim lost during publication".to_owned());
+                    }
                 }
             }
         }
+
+        if !publication_claim_live(cluster, guard, request).await {
+            if let Some((catalog, _, _)) = cluster {
+                rollback_cluster_publish(catalog, &dir, replaced.as_ref(), &placed, &written_rows)
+                    .await?;
+            }
+            return Err("subtitle-source claim lost during publication".to_owned());
+        }
+
+        // (3) A guarded worker retains the prior bytes until its fenced
+        // request completes, so cancellation can restore the old manifest.
+        if guard.is_none() {
+            if let Some(replaced) = &replaced {
+                cleanup_replaced_files(&dir, replaced, &manifest).await;
+            }
+        }
+
+        // (4)
+        store::record_access(&dir).await;
+        if !publication_claim_live(cluster, guard, request).await {
+            if let Some((catalog, _, _)) = cluster {
+                rollback_cluster_publish(catalog, &dir, replaced.as_ref(), &placed, &written_rows)
+                    .await?;
+            }
+            return Err("subtitle-source claim lost at publication boundary".to_owned());
+        }
         PUBLISHED.fetch_add(1, Ordering::Relaxed);
-        Ok(manifest)
+        Ok(ClusterPublishReceipt {
+            manifest,
+            root: self.plan.root.clone(),
+            dir,
+            previous: replaced,
+            placed,
+            written_rows,
+        })
+    }
+}
+
+async fn publication_claim_live(
+    cluster: Option<(&dyn Store, &str, &str)>,
+    guard: Option<&CancellationToken>,
+    request: Option<&AnalysisRequest>,
+) -> bool {
+    if guard.is_some_and(CancellationToken::is_cancelled) {
+        return false;
+    }
+    if let (Some((catalog, _, _)), Some(request)) = (cluster, request) {
+        if !catalog
+            .record_analysis_request_phase(request, "publishing", None, unix_ms())
+            .await
+            .unwrap_or(false)
+        {
+            return false;
+        }
+    }
+    !guard.is_some_and(CancellationToken::is_cancelled)
+}
+
+async fn remove_newly_placed(dir: &Path, placed: &[String], replaced: Option<&Manifest>) {
+    for name in placed {
+        if !replaced.is_some_and(|old| names(old, name)) {
+            let _ = tokio::fs::remove_file(dir.join(name)).await;
+        }
+    }
+}
+
+async fn cleanup_replaced_files(dir: &Path, replaced: &Manifest, manifest: &Manifest) {
+    for track in &replaced.tracks {
+        let reps = if track.representations.is_empty() {
+            track
+                .representation(RepresentationFormat::Sup)
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            track.representations.clone()
+        };
+        for representation in reps {
+            let (Some(name), Some(sha256)) = (
+                representation.file.as_deref(),
+                representation.sha256.as_deref(),
+            ) else {
+                continue;
+            };
+            if store::representation_file_name(track.ordinal, representation.format, sha256)
+                .as_deref()
+                != Some(name)
+                || names(manifest, name)
+            {
+                continue;
+            }
+            let _ = tokio::fs::remove_file(dir.join(name)).await;
+        }
+    }
+}
+
+/// A cancelled worker must leave neither its cluster rows nor a newly named
+/// local manifest. The per-file lock is held by the caller throughout this
+/// compensation, so no later local publish can be rolled back by mistake.
+async fn rollback_cluster_publish(
+    catalog: &dyn Store,
+    dir: &Path,
+    replaced: Option<&Manifest>,
+    placed: &[String],
+    written_rows: &[(SubtitleSourcePublication, Option<SubtitleSourcePublication>)],
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    if let Err(error) = rollback_cluster_rows(catalog, written_rows).await {
+        errors.push(error);
+    }
+    let restore = if let Some(replaced) = replaced {
+        write_manifest(dir, replaced).await
+    } else {
+        match tokio::fs::remove_file(dir.join(MANIFEST_NAME)).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("removing cancelled manifest: {error}")),
+        }
+    };
+    if let Err(error) = restore {
+        errors.push(error);
+    }
+    remove_newly_placed(dir, placed, replaced).await;
+    if replaced.is_none() {
+        let _ = tokio::fs::remove_file(dir.join(".access")).await;
+    }
+    sync_directory(dir).await;
+    if replaced.is_none() {
+        let _ = tokio::fs::remove_dir(dir).await;
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+async fn rollback_cluster_rows(
+    catalog: &dyn Store,
+    written_rows: &[(SubtitleSourcePublication, Option<SubtitleSourcePublication>)],
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for (row, prior) in written_rows.iter().rev() {
+        if let Err(error) = catalog
+            .delete_subtitle_source_publication(
+                row.file_id,
+                row.source_size,
+                row.source_mtime,
+                &row.node_id,
+                row.ordinal,
+                &row.format,
+            )
+            .await
+        {
+            errors.push(format!("removing cancelled subtitle-source row: {error}"));
+        }
+        if let Some(prior) = prior {
+            if let Err(error) = catalog.upsert_subtitle_source_publication(prior).await {
+                errors.push(format!("restoring prior subtitle-source row: {error}"));
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
     }
 }
 
@@ -3516,6 +3906,7 @@ mod tests {
     struct LatchCase {
         _dir: tempfile::TempDir,
         root: PathBuf,
+        source_path: PathBuf,
         source: std::fs::File,
         stamp: SourceStamp,
     }
@@ -3526,6 +3917,7 @@ mod tests {
         std::fs::write(&path, b"source").expect("source");
         LatchCase {
             root: dir.path().join(store::STORE_DIR),
+            source_path: path.clone(),
             source: std::fs::File::open(&path).expect("open"),
             stamp: stamp_of(&path),
             _dir: dir,
@@ -4191,7 +4583,7 @@ mod tests {
         let id = 70_012;
         let catalog = plurx_core::store::SqliteStore::open_in_memory().expect("catalog");
         let manifest = harvest_of(&case.root, id, case.stamp, b"PG source")
-            .publish_with_cluster(&catalog, "nuc4", &"a".repeat(64))
+            .publish_with_cluster(&catalog, "nuc4", &"a".repeat(64), None)
             .await
             .expect("publish");
         let rows = catalog
@@ -4210,6 +4602,136 @@ mod tests {
                     .expect("name")
             )
             .is_file());
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_publish_removes_new_cluster_rows_and_local_entry() {
+        let case = latch_case();
+        let id = 70_013;
+        let catalog = plurx_core::store::SqliteStore::open_in_memory().expect("catalog");
+        let lost = CancellationToken::new();
+        let result = harvest_of(&case.root, id, case.stamp, b"cancelled source")
+            .publish_internal(
+                Some((&catalog, "nuc4", &"a".repeat(64))),
+                Some(&lost),
+                None,
+                || async { lost.cancel() },
+            )
+            .await;
+        assert!(result.is_err(), "a cancelled publish cannot commit");
+        assert!(lost.is_cancelled());
+        assert!(
+            catalog
+                .list_subtitle_source_publications(id, case.stamp.size as i64, case.stamp.mtime)
+                .await
+                .expect("rows")
+                .is_empty(),
+            "the row written at the controlled seam was compensated"
+        );
+        let dir = store::file_dir(&case.root, id);
+        assert!(store::read_manifest(&dir).await.is_none());
+        assert!(
+            !dir.join(
+                store::representation_file_name(
+                    0,
+                    RepresentationFormat::Sup,
+                    &hex::encode(Sha256::digest(b"cancelled source"))
+                )
+                .expect("name")
+            )
+            .exists(),
+            "the unpublished content file is removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_cancellation_during_publish_compensates_rows_and_manifest() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        use plurx_core::store::{LibraryStore, MediaStore, NewAnalysisRequest};
+
+        let case = latch_case();
+        let catalog = plurx_core::store::SqliteStore::open_in_memory().expect("catalog");
+        let library = catalog
+            .create_library(&NewLibrary {
+                name: "Source".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: vec![case.root.clone()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = catalog
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Source".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let id = catalog
+            .upsert_file(
+                item,
+                case.source_path.to_str().expect("source path"),
+                case.stamp.size as i64,
+                case.stamp.mtime,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("file");
+        let now = unix_ms();
+        let request = catalog
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "cancel-publish".to_owned(),
+                file_id: id,
+                source_size: case.stamp.size as i64,
+                source_mtime: case.stamp.mtime,
+                component: "subtitle_source".to_owned(),
+                pipeline_version: "test-pipeline".to_owned(),
+                video_identity: String::new(),
+                requested_generation: "cancel-publish".to_owned(),
+                priority: "foreground".to_owned(),
+                trigger: "test".to_owned(),
+                force_rebuild: false,
+                target_node_id: "nuc4".to_owned(),
+                not_before_ms: now,
+                created_at_ms: now,
+            })
+            .await
+            .expect("enqueue");
+        let claimed = catalog
+            .claim_analysis_request("nuc4", now, now + 60_000)
+            .await
+            .expect("claim")
+            .expect("running");
+        assert_eq!(claimed.request_id, request.request_id);
+        let lost = CancellationToken::new();
+        assert!(!lost.is_cancelled(), "admin cancel is a separate fence");
+        let result = harvest_of(&case.root, id, case.stamp, b"admin cancelled")
+            .publish_internal(
+                Some((&catalog, "nuc4", &"a".repeat(64))),
+                Some(&lost),
+                Some(&claimed),
+                || async {
+                    catalog
+                        .cancel_analysis_request_admin(&claimed.request_id, now + 1)
+                        .await
+                        .expect("cancel");
+                },
+            )
+            .await;
+        assert!(result.is_err(), "the cancelled fence cannot publish");
+        assert!(store::read_manifest(&store::file_dir(&case.root, id))
+            .await
+            .is_none());
+        assert!(catalog
+            .list_subtitle_source_publications(id, case.stamp.size as i64, case.stamp.mtime)
+            .await
+            .expect("rows")
+            .is_empty());
     }
 
     /// Readers racing a stream of publishes see the old manifest or the new
@@ -4373,13 +4895,17 @@ mod tests {
     async fn the_ride_along_enable_is_not_gated_by_advisory_readiness() {
         plurx_core::testfixtures::require_ffmpeg();
         let cache = fresh_cache();
-        let catalog = plurx_core::store::SqliteStore::open_in_memory().expect("catalog");
+        let catalog = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
         set_self_test_state(SelfTest::NotRun);
-        assert!(RideAlongGate::open(&catalog, cache.path()).await.is_some());
+        assert!(RideAlongGate::open(catalog.clone(), cache.path())
+            .await
+            .is_some());
         set_self_test_state(SelfTest::Failed {
             reason: "test".into(),
         });
-        assert!(RideAlongGate::open(&catalog, cache.path()).await.is_some());
+        assert!(RideAlongGate::open(catalog.clone(), cache.path())
+            .await
+            .is_some());
         startup_self_test(
             cache.path().to_owned(),
             tokio_util::sync::CancellationToken::new(),
@@ -4390,15 +4916,124 @@ mod tests {
             "{:?}",
             self_test_state()
         );
-        assert!(RideAlongGate::open(&catalog, cache.path()).await.is_some());
+        assert!(RideAlongGate::open(catalog.clone(), cache.path())
+            .await
+            .is_some());
         // One switch: off stops the producer too.
         plurx_core::store::SettingsStore::put_setting(
-            &catalog,
+            catalog.as_ref(),
             plurx_core::store::keys::SUBTITLE_STORED_SOURCES,
             "0",
         )
         .await
         .expect("switch off");
-        assert!(RideAlongGate::open(&catalog, cache.path()).await.is_none());
+        assert!(RideAlongGate::open(catalog, cache.path()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_second_nodes_index_pass_skips_cluster_extracted_coverage_for_the_same_source() {
+        use plurx_core::domain::{
+            ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult, SubtitleStream,
+        };
+        use plurx_core::store::SqliteStore;
+
+        let temp = crate::test_tempdir().expect("catalogue and source");
+        let source_path = temp.path().join("source.mkv");
+        std::fs::write(&source_path, b"portable-source-digest-fixture").expect("source");
+        let catalog: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("catalogue"));
+        let library = catalog
+            .create_library(&NewLibrary {
+                name: "Other node".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: vec![temp.path().to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = catalog
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Source".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let metadata = std::fs::metadata(&source_path).expect("metadata");
+        let stamp = crate::fragment_index_cluster::source_stamp(&metadata);
+        let file_id = catalog
+            .upsert_file(
+                item,
+                source_path.to_str().expect("source path"),
+                stamp.size as i64,
+                stamp.mtime,
+                &ProbeResult {
+                    container: Some("mkv".to_owned()),
+                    subtitle_streams: vec![SubtitleStream {
+                        index: 0,
+                        codec: "subrip".to_owned(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("catalogued source");
+        for key in [
+            plurx_core::store::keys::SUBTITLE_STORED_SOURCES,
+            plurx_core::store::keys::SUBTITLE_CLUSTER_SOURCES,
+        ] {
+            catalog.put_setting(key, "1").await.expect("switch");
+        }
+        let file = catalog
+            .get_file(file_id)
+            .await
+            .expect("lookup")
+            .expect("file");
+        let digest = crate::fragment_index_cluster::attest_source("", &file, None, &|_| {})
+            .await
+            .expect("attest source")
+            .observation
+            .source_sha256;
+        let mut row = SubtitleSourcePublication {
+            file_id,
+            source_size: stamp.size as i64,
+            source_mtime: stamp.mtime,
+            source_attestation: digest,
+            node_id: "node-a".to_owned(),
+            ordinal: 0,
+            kind: "text".to_owned(),
+            format: "webvtt".to_owned(),
+            verdict: "empty".to_owned(),
+            attempts: 1,
+            origin: "extracted".to_owned(),
+            sha256: String::new(),
+            bytes: 0,
+            published_at_ms: 1,
+        };
+        catalog
+            .upsert_subtitle_source_publication(&row)
+            .await
+            .expect("node A publication");
+        let gate = RideAlongGate::open(catalog.clone(), temp.path())
+            .await
+            .expect("ride enabled");
+        let held = std::fs::File::open(&source_path).expect("held source");
+        let tracks = [ProbedTrack {
+            ordinal: 0,
+            kind: ProbedKind::Text,
+            stream_index: 1,
+        }];
+        assert!(plan_tracks(&gate, file_id, &held, &tracks).await.is_none());
+
+        row.source_attestation = "f".repeat(64);
+        catalog
+            .upsert_subtitle_source_publication(&row)
+            .await
+            .expect("stale publication");
+        assert!(plan_tracks(&gate, file_id, &held, &tracks).await.is_some());
     }
 }

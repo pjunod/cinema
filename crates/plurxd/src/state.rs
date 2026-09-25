@@ -7497,6 +7497,7 @@ impl JobManager {
                 self.store.as_ref(),
                 self.coordinator.node_id(),
                 &attested.observation.source_sha256,
+                None,
             )
             .await
         {
@@ -7672,7 +7673,7 @@ impl JobManager {
                 // Asked per pass, so the switch turning off stops the next
                 // pass from riding without a restart.
                 let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
-                    self.store.as_ref(),
+                    Arc::clone(&self.store),
                     &runtime_cache,
                 )
                 .await;
@@ -8516,7 +8517,7 @@ impl JobManager {
             return Ok(());
         }
         let gate =
-            crate::subtitle_ride_along::RideAlongGate::open(self.store.as_ref(), runtime_cache)
+            crate::subtitle_ride_along::RideAlongGate::open(Arc::clone(&self.store), runtime_cache)
                 .await
                 .ok_or(AnalysisResolutionError::Retry {
                     code: "source_unavailable",
@@ -8707,17 +8708,42 @@ impl JobManager {
         {
             return Err(AnalysisResolutionError::Terminal("source_superseded"));
         }
-        harvest
-            .publish_with_cluster(
+        let published = harvest
+            .publish_guarded_worker(
                 self.store.as_ref(),
                 node_id,
                 &attested.observation.source_sha256,
+                lost,
+                request,
             )
+            .await;
+        let receipt = match published {
+            Ok(receipt) => receipt,
+            Err(_) if lost.is_cancelled() => return Err(AnalysisResolutionError::ClaimLost),
+            Err(_) => {
+                return Err(AnalysisResolutionError::Retry {
+                    code: "queue_write_failed",
+                    charge_attempt: true,
+                });
+            }
+        };
+        if lost.is_cancelled() {
+            if let Err(error) = receipt.rollback(self.store.as_ref()).await {
+                tracing::error!(file_id = file.id, %error, "compensating lost subtitle-source publication");
+            }
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        if !self
+            .store
+            .record_analysis_request_phase(request, "publishing", None, clock_ms())
             .await
-            .map_err(|_| AnalysisResolutionError::Retry {
-                code: "queue_write_failed",
-                charge_attempt: true,
-            })?;
+            .unwrap_or(false)
+        {
+            if let Err(error) = receipt.rollback(self.store.as_ref()).await {
+                tracing::error!(file_id = file.id, %error, "compensating lost subtitle-source publication");
+            }
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
         tracing::info!(
             file_id = file.id,
             node_id,
@@ -8728,8 +8754,21 @@ impl JobManager {
             elapsed_ms = started.elapsed().as_millis(),
             "subtitle_source job published"
         );
-        self.complete_subtitle_source_request(request, node_id, &result_key, stop)
+        match self
+            .complete_subtitle_source_request(request, node_id, &result_key, stop)
             .await
+        {
+            Ok(()) => {
+                receipt.commit().await;
+                Ok(())
+            }
+            Err(error) => {
+                if let Err(rollback_error) = receipt.rollback(self.store.as_ref()).await {
+                    tracing::error!(file_id = file.id, %rollback_error, "compensating unsettled subtitle-source publication");
+                }
+                Err(error)
+            }
+        }
     }
 
     async fn complete_subtitle_source_request(
@@ -9888,7 +9927,7 @@ impl JobManager {
         let report_progress = self.index_pass_reporter(&job.cache_key, &job.target_node_id);
         // Asked per job: the switch, the self-test and the filesystem, now.
         let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
-            self.store.as_ref(),
+            Arc::clone(&self.store),
             transcode.runtime_cache_dir(),
         )
         .await;

@@ -31105,6 +31105,368 @@ async fn subtitle_source_retiring_ready_reenqueues_new_generation_and_fourth_rep
 }
 
 #[tokio::test]
+async fn subtitle_source_partial_ready_uncovered_ordinal_gets_foreground_repair_without_losing_covered_ordinal(
+) {
+    for_each_backend(|store, backend| async move {
+        let file_id = seed_backfill_file(
+            &store,
+            "subtitle-partial-ready-foreground",
+            &["hdmv_pgs_subtitle", "subrip"],
+        )
+        .await;
+        let stamp = subtitle_source_stamp(file_id);
+        let initial = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 10)
+            .await
+            .expect("initial enqueue")
+            .expect("initial request");
+        let running = store
+            .claim_analysis_request_foreground(&initial.request_id, "node-a", 11, 1_000)
+            .await
+            .expect("initial claim")
+            .expect("running");
+        store
+            .upsert_subtitle_source_publication(&backfill_publication(file_id, 0, "extracted"))
+            .await
+            .expect("PGS publication");
+        assert!(store
+            .complete_analysis_request(&running, "stamp", 12)
+            .await
+            .expect("complete partial request"));
+
+        let successor = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 13)
+            .await
+            .expect("foreground repair")
+            .expect("successor");
+        assert_eq!(successor.state, "queued", "{backend}");
+        assert_eq!(
+            successor.requested_generation,
+            stamp.generation(1),
+            "{backend}"
+        );
+        let retired = store
+            .analysis_request(&initial.request_id)
+            .await
+            .expect("read retired")
+            .expect("retired request");
+        assert_eq!(retired.state, "cancelled", "{backend}");
+        assert_eq!(retired.last_error_code, "coverage_incomplete", "{backend}");
+        let rows = store
+            .list_subtitle_source_publications(file_id, stamp.source_size, stamp.source_mtime)
+            .await
+            .expect("retained rows");
+        assert!(
+            rows.iter()
+                .any(|row| row.ordinal == 0 && row.origin == "extracted"),
+            "{backend}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.ordinal == 1 && row.origin == "extracted"),
+            "{backend}"
+        );
+        let joined = store
+            .enqueue_or_promote_subtitle_source(&stamp, "normal", 14)
+            .await
+            .expect("backfill joins foreground")
+            .expect("active successor");
+        assert_eq!(joined.request_id, successor.request_id, "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_live_foreground_ordinal_absent_from_scanner_repairs_partial_ready() {
+    for_each_backend(|store, backend| async move {
+        let file_id =
+            seed_backfill_file(&store, "subtitle-stale-scanner-foreground", &["subrip"]).await;
+        let stamp = subtitle_source_stamp(file_id);
+        let initial = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 10)
+            .await
+            .expect("initial enqueue")
+            .expect("request");
+        let running = store
+            .claim_analysis_request_foreground(&initial.request_id, "node-a", 11, 1_000)
+            .await
+            .expect("claim")
+            .expect("running");
+        let mut scanner_track = backfill_publication(file_id, 0, "extracted");
+        scanner_track.kind = "text".to_owned();
+        scanner_track.format = "webvtt".to_owned();
+        store
+            .upsert_subtitle_source_publication(&scanner_track)
+            .await
+            .expect("scanner track publication");
+        assert!(store
+            .complete_analysis_request(&running, "stamp", 12)
+            .await
+            .expect("complete"));
+        let ready = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 13)
+            .await
+            .expect("full scanner coverage")
+            .expect("ready row");
+        assert_eq!(ready.state, "ready", "{backend}");
+        assert!(!store
+            .retire_subtitle_source_ready_for_ordinal(&stamp, 0, &"a".repeat(64), 14)
+            .await
+            .expect("covered ordinal cannot retire"));
+        assert!(store
+            .retire_subtitle_source_ready_for_ordinal(&stamp, 7, &"a".repeat(64), 15)
+            .await
+            .expect("live ordinal repair"));
+        let successor = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 16)
+            .await
+            .expect("successor enqueue")
+            .expect("successor");
+        assert_eq!(successor.state, "queued", "{backend}");
+        assert_eq!(
+            successor.requested_generation,
+            stamp.generation(1),
+            "{backend}"
+        );
+        let rows = store
+            .list_subtitle_source_publications(file_id, stamp.source_size, stamp.source_mtime)
+            .await
+            .expect("retained scanner publication");
+        assert!(
+            rows.iter()
+                .any(|row| row.ordinal == 0 && row.origin == "extracted"),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_foreground_repair_ignores_stale_digest_at_same_size_and_mtime() {
+    for_each_backend(|store, backend| async move {
+        let file_id =
+            seed_backfill_file(&store, "subtitle-stale-digest-foreground", &["subrip"]).await;
+        let stamp = subtitle_source_stamp(file_id);
+        let initial = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 10)
+            .await
+            .expect("initial enqueue")
+            .expect("request");
+        let running = store
+            .claim_analysis_request_foreground(&initial.request_id, "node-a", 11, 1_000)
+            .await
+            .expect("claim")
+            .expect("running");
+        let mut stale = backfill_publication(file_id, 0, "extracted");
+        stale.kind = "text".to_owned();
+        stale.format = "webvtt".to_owned();
+        store
+            .upsert_subtitle_source_publication(&stale)
+            .await
+            .expect("stale publication");
+        assert!(store
+            .complete_analysis_request(&running, "stamp", 12)
+            .await
+            .expect("complete"));
+        assert!(store
+            .retire_subtitle_source_ready_for_ordinal(&stamp, 0, &"c".repeat(64), 13)
+            .await
+            .expect("different sampled source bytes"));
+        let successor = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 14)
+            .await
+            .expect("successor enqueue")
+            .expect("successor");
+        assert_eq!(successor.state, "queued", "{backend}");
+        assert_eq!(
+            successor.requested_generation,
+            stamp.generation(1),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_repair_epoch_stays_monotonic_after_daily_allowance_resets() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-repair-window-epoch").await;
+        let stamp = subtitle_source_stamp(file_id);
+        let first = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 10)
+            .await
+            .expect("first enqueue")
+            .expect("first request");
+        let running = store
+            .claim_analysis_request_foreground(&first.request_id, "node-a", 11, 1_000)
+            .await
+            .expect("first claim")
+            .expect("running");
+        assert!(store
+            .complete_analysis_request(&running, "stamp", 12)
+            .await
+            .expect("first complete"));
+        assert!(store
+            .retire_subtitle_source_ready(&stamp, 13)
+            .await
+            .expect("first lost publication"));
+        let next_day = 13 + plurx_core::store::SUBTITLE_SOURCE_REPAIR_WINDOW_MS + 1;
+        let second = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", next_day)
+            .await
+            .expect("new day enqueue")
+            .expect("second request");
+        assert_eq!(second.state, "queued", "{backend}");
+        assert_eq!(
+            second.requested_generation,
+            stamp.generation(1),
+            "{backend}"
+        );
+        assert_ne!(second.request_id, first.request_id, "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_repair_epoch_and_daily_budget_survive_terminal_history_pruning() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-repair-pruned-history").await;
+        let stamp = subtitle_source_stamp(file_id);
+        let mut first_id = String::new();
+        for epoch in 0..3_i64 {
+            let queued = store
+                .enqueue_or_promote_subtitle_source(&stamp, "foreground", 10 + epoch * 10)
+                .await
+                .expect("enqueue")
+                .expect("request");
+            assert_eq!(
+                queued.requested_generation,
+                stamp.generation(epoch),
+                "{backend}"
+            );
+            if epoch == 0 {
+                first_id = queued.request_id.clone();
+            }
+            let running = store
+                .claim_analysis_request_foreground(
+                    &queued.request_id,
+                    "node-a",
+                    11 + epoch * 10,
+                    1_000 + epoch * 10,
+                )
+                .await
+                .expect("claim")
+                .expect("running");
+            assert!(store
+                .complete_analysis_request(&running, "stamp", 12 + epoch * 10)
+                .await
+                .expect("complete"));
+            assert!(store
+                .retire_subtitle_source_ready(&stamp, 13 + epoch * 10)
+                .await
+                .expect("retire"));
+        }
+        let pruned = store
+            .prune_analysis_requests(1_000, 100)
+            .await
+            .expect("prune terminal history");
+        assert!(pruned >= 2, "{backend}: expected old generations pruned");
+        assert!(
+            store
+                .analysis_request(&first_id)
+                .await
+                .expect("read first generation")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .enqueue_or_promote_subtitle_source(&stamp, "foreground", 40)
+                .await
+                .expect("daily cap")
+                .is_none(),
+            "{backend}: pruning must not reset daily repair cap"
+        );
+        let next_day = plurx_core::store::SUBTITLE_SOURCE_REPAIR_WINDOW_MS + 1_000;
+        let successor = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", next_day)
+            .await
+            .expect("new day enqueue")
+            .expect("successor");
+        assert_eq!(successor.state, "queued", "{backend}");
+        assert_eq!(
+            successor.requested_generation,
+            stamp.generation(3),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_transient_ready_is_repaired_by_later_backfill_until_settled() {
+    for_each_backend(|store, backend| async move {
+        let file_id =
+            seed_backfill_file(&store, "subtitle-transient-ready-backfill", &["subrip"]).await;
+        let stamp = subtitle_source_stamp(file_id);
+        for epoch in 0..3_i64 {
+            let queued = store
+                .enqueue_or_promote_subtitle_source(&stamp, "normal", 10 + epoch * 130_000)
+                .await
+                .expect("backfill enqueue")
+                .expect("request");
+            assert_eq!(
+                queued.requested_generation,
+                stamp.generation(epoch),
+                "{backend}"
+            );
+            let running = store
+                .claim_analysis_request("node-a", 11 + epoch * 130_000, 1_000 + epoch * 130_000)
+                .await
+                .expect("worker claim")
+                .expect("running");
+            assert_eq!(running.request_id, queued.request_id, "{backend}");
+            let mut publication = backfill_publication(file_id, 0, "extracted");
+            publication.kind = "text".to_owned();
+            publication.format = "webvtt".to_owned();
+            publication.verdict = "transient".to_owned();
+            publication.sha256.clear();
+            publication.bytes = 0;
+            publication.attempts = epoch + 1;
+            store
+                .upsert_subtitle_source_publication(&publication)
+                .await
+                .expect("transient publication");
+            assert!(store
+                .complete_analysis_request(&running, "stamp", 12 + epoch * 130_000)
+                .await
+                .expect("complete request"));
+            let candidates = store
+                .subtitle_backfill_candidates(i64::MAX, i64::MAX, 130_013 + epoch * 130_000, 8)
+                .await
+                .expect("backfill candidates");
+            assert_eq!(
+                candidates
+                    .iter()
+                    .any(|candidate| candidate.file_id == file_id),
+                epoch < 2,
+                "{backend}: transient coverage at attempt {}",
+                epoch + 1
+            );
+        }
+        let ready = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 390_010)
+            .await
+            .expect("covered foreground request")
+            .expect("ready request");
+        assert_eq!(ready.state, "ready", "{backend}");
+        assert_eq!(ready.requested_generation, stamp.generation(2), "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn subtitle_source_publication_crud_is_per_stamp_holder_and_representation() {
     for_each_backend(|store, backend| async move {
         let (_, file_id) = seed_file(&store, "subtitle-m2-publication").await;

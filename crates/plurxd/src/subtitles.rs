@@ -991,26 +991,29 @@ async fn cluster_vtt_into(
         _ => return Ok(false),
     };
     if request.state == "ready" {
-        let publications = store
-            .list_subtitle_source_publications(file.id, file.size, file.mtime)
-            .await
-            .unwrap_or_default();
-        if !publications.iter().any(|row| row.origin == "extracted")
-            && store
-                .retire_subtitle_source_ready(&stamp, subtitle_clock_ms())
+        let source_digest = publication_source_digest(access, file, None).await;
+        if let Some(source_digest) = source_digest.filter(|digest| !digest.is_empty()) {
+            if store
+                .retire_subtitle_source_ready_for_ordinal(
+                    &stamp,
+                    index,
+                    &source_digest,
+                    subtitle_clock_ms(),
+                )
                 .await
                 .unwrap_or(false)
-        {
-            crate::telemetry::record_subtitle_source(
-                crate::telemetry::SubtitleSourceMetric::Repair,
-            );
-            request = match store
-                .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
-                .await
             {
-                Ok(Some(request)) => request,
-                _ => return Ok(false),
-            };
+                crate::telemetry::record_subtitle_source(
+                    crate::telemetry::SubtitleSourceMetric::Repair,
+                );
+                request = match store
+                    .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+                    .await
+                {
+                    Ok(Some(request)) => request,
+                    _ => return Ok(false),
+                };
+            }
         }
     }
     let started = tokio::time::Instant::now();
@@ -1070,13 +1073,21 @@ async fn cluster_vtt_into(
                         .flatten()
                         .is_some_and(|latest| latest.state == "queued")
                 {
-                    return Ok(false);
+                    return Err(
+                        "subtitle cluster job is still queued after the foreground claim wait"
+                            .to_owned(),
+                    );
                 }
             }
             _ => {}
         }
         if started.elapsed() >= EXTRACTION_TIMEOUT {
-            return Ok(false);
+            // The queue worker may legitimately own this row longer than the
+            // old inline extractor's bound. Expiring our wait must not start
+            // a second full-source producer beside that running job.
+            return Err(
+                "subtitle cluster job is still running after the sidecar wait bound".to_owned(),
+            );
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -1772,21 +1783,32 @@ async fn cluster_wait_burn(
         }
         _ => return Ok(StoredBurn::Extract),
     };
-    if request.state == "ready"
-        && !rows.iter().any(|row| row.origin == "extracted")
-        && store
-            .retire_subtitle_source_ready(&stamp, subtitle_clock_ms())
-            .await
-            .unwrap_or(false)
-    {
-        crate::telemetry::record_subtitle_source(crate::telemetry::SubtitleSourceMetric::Repair);
-        request = match store
-            .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
-            .await
-        {
-            Ok(Some(request)) => request,
-            _ => return Ok(StoredBurn::Extract),
-        };
+    if request.state == "ready" {
+        let source_digest =
+            publication_source_digest(access, file, Some(source.object_version())).await;
+        if let Some(source_digest) = source_digest.filter(|digest| !digest.is_empty()) {
+            if store
+                .retire_subtitle_source_ready_for_ordinal(
+                    &stamp,
+                    index,
+                    &source_digest,
+                    subtitle_clock_ms(),
+                )
+                .await
+                .unwrap_or(false)
+            {
+                crate::telemetry::record_subtitle_source(
+                    crate::telemetry::SubtitleSourceMetric::Repair,
+                );
+                request = match store
+                    .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+                    .await
+                {
+                    Ok(Some(request)) => request,
+                    _ => return Ok(StoredBurn::Extract),
+                };
+            }
+        }
     }
     let started = tokio::time::Instant::now();
     let mut self_claimed = false;
@@ -1831,13 +1853,21 @@ async fn cluster_wait_burn(
                         .flatten()
                         .is_some_and(|latest| latest.state == "queued")
                 {
-                    return Ok(StoredBurn::Extract);
+                    return Err(
+                        "subtitle cluster job is still queued after the foreground claim wait"
+                            .to_owned(),
+                    );
                 }
             }
             _ => {}
         }
         if started.elapsed() >= EXTRACTION_TIMEOUT {
-            return Ok(StoredBurn::Extract);
+            // A running worker retains the sole producer slot until its own
+            // lease/worker deadline. Memo this flight error instead of
+            // launching an inline extraction in parallel with it.
+            return Err(
+                "subtitle cluster job is still running after the burn wait bound".to_owned(),
+            );
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -2091,13 +2121,6 @@ pub(crate) fn burn_routes_for_test(file_id: i64) -> Vec<&'static str> {
 /// two seconds, while a real extraction may scan a multi-gigabyte source for
 /// minutes. One detached warmer per key lets playback begin immediately and
 /// lets later segments pick up the finished captions.
-pub async fn warm_vtt(dir: &Path, file: &MediaFile, index: i64) {
-    warm_vtt_with(dir, file, index, |tmp, file, index| async move {
-        extract_vtt(&tmp, &file, index).await
-    })
-    .await;
-}
-
 pub(crate) async fn warm_vtt_with_store(
     dir: &Path,
     file: &MediaFile,
@@ -2107,7 +2130,15 @@ pub(crate) async fn warm_vtt_with_store(
     if matches!(try_store_vtt(dir, file, index, stored).await, Ok(Some(_))) {
         return;
     }
-    warm_vtt(dir, file, index).await;
+    let stored = stored.clone();
+    warm_vtt_with(dir, file, index, move |tmp, file, index| async move {
+        match cluster_vtt_into(&tmp, &file, index, &stored).await {
+            Ok(true) => Ok(()),
+            Ok(false) => extract_vtt(&tmp, &file, index).await,
+            Err(reason) => Err(reason),
+        }
+    })
+    .await;
 }
 
 /// The whole-track warmer seam used by deterministic HTTP boundary tests.
@@ -5282,5 +5313,118 @@ mod cluster_consumer_tests {
         let rows = store.analysis_requests(10).await.expect("requests");
         assert_eq!(rows.len(), 1, "both callers joined one producer");
         assert_eq!(rows[0].state, "ready");
+    }
+
+    #[tokio::test]
+    async fn cold_hls_rendition_warm_enqueues_and_completes_queued_source() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(97_001, &[Sub::Srt]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("SQLite"));
+        let file = catalogued_text_source(&store, &fixture.source).await;
+        let access = access(Arc::clone(&store), fixture.dir.path()).await;
+        let jobs = Arc::clone(access.jobs().expect("queue worker"));
+        let cache = fixture.dir.path().join("hls-subs");
+
+        // The HLS segment returns while its detached warmer owns the flight.
+        warm_vtt_with_store(&cache, &file, 0, &access).await;
+        let request = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(request) = store
+                    .analysis_requests(10)
+                    .await
+                    .expect("queued requests")
+                    .into_iter()
+                    .next()
+                {
+                    break request;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("detached HLS warm enqueued its source");
+        assert_eq!(request.priority, "foreground");
+        assert!(!request.force_rebuild);
+        assert!(
+            jobs.self_claim_subtitle_source(
+                &request.request_id,
+                &fixture.dir.path().join("runtime")
+            )
+            .await
+        );
+        let sidecar = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let sidecar = vtt_path(&cache, &file, 0);
+                if valid_sidecar(&sidecar, MAX_SIDECAR_BYTES).await {
+                    break sidecar;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("queue result reached the detached HLS warmer");
+        assert!(std::fs::read_to_string(sidecar)
+            .expect("VTT")
+            .contains("hello"));
+        assert_eq!(
+            store.analysis_requests(10).await.expect("requests").len(),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remote_running_beyond_wait_bound_never_starts_inline_producer() {
+        let base = crate::test_tempdir().expect("fixture");
+        let (store, file, access) = source_and_access(base.path()).await;
+        let now = subtitle_clock_ms();
+        let request = store
+            .enqueue_or_promote_subtitle_source(&stamp(&file).await, "foreground", now)
+            .await
+            .expect("enqueue")
+            .expect("request");
+        store
+            .claim_analysis_request_foreground(
+                &request.request_id,
+                "remote-worker",
+                now,
+                now + 1_800_000,
+            )
+            .await
+            .expect("claim")
+            .expect("running row");
+
+        let cache = base.path().join("vtt-cache");
+        let error = tokio::time::timeout(
+            Duration::from_secs(670),
+            ensure_vtt_with_store(&cache, &file, 0, &access),
+        )
+        .await
+        .expect("bounded VTT wait")
+        .expect_err("active worker cannot release inline");
+        assert!(error.contains("still running"), "{error}");
+        assert_eq!(
+            remembered_failure(&vtt_path(&cache, &file, 0)).await,
+            Some(error)
+        );
+
+        let mut pgs = file.clone();
+        pgs.subtitle_streams[0].codec = "hdmv_pgs_subtitle".to_owned();
+        let source = crate::fragment_index_cluster::open_source_fence(&pgs, None)
+            .await
+            .expect("held source");
+        let error = tokio::time::timeout(
+            Duration::from_secs(610),
+            cluster_wait_burn(&access, &pgs, 0, &source),
+        )
+        .await
+        .expect("bounded burn wait")
+        .err()
+        .expect("active worker cannot release burn inline");
+        assert!(error.contains("still running"), "{error}");
+        let rows = store.analysis_requests(10).await.expect("requests");
+        assert_eq!(rows.len(), 1, "neither consumer forked a producer");
+        assert_eq!(rows[0].state, "running");
+        assert!(!rows[0].force_rebuild);
     }
 }

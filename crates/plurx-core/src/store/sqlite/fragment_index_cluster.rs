@@ -10,7 +10,7 @@ use crate::store::fragment_index_cluster::{
 use crate::store::fragment_index_cluster::{ANALYSIS_CANONICAL_CTE, ANALYSIS_SUMMARY_CTE};
 use crate::store::fragment_index_cluster::{
     SUBTITLE_BACKFILL_CANDIDATES, SUBTITLE_BACKFILL_DIAGNOSTICS,
-    SUBTITLE_BACKFILL_TERMINAL_SETTLE_MS,
+    SUBTITLE_BACKFILL_TERMINAL_SETTLE_MS, SUBTITLE_SOURCE_READY_UNCOVERED,
 };
 use crate::store::{
     cluster_fragment_index_generation_key, cluster_fragment_index_key, AnalysisAttempt,
@@ -431,6 +431,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 "invalid subtitle source request".to_owned(),
             ));
         }
+        // A completed pass may have published only some ordinals, or a
+        // transient representation may still be below its settled-attempt
+        // threshold. Retire the ready tombstone before computing the next
+        // deterministic generation. This is also the artifact-loss path.
+        self.retire_subtitle_source_ready(stamp, now_ms).await?;
         let stamp = stamp.clone();
         let priority = priority.to_owned();
         self.with_conn(move |conn| {
@@ -449,15 +454,17 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 tx.commit()?;
                 return Ok(Some(request));
             }
-            let repairs: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM analysis_requests WHERE file_id = ?1 AND source_size = ?2 AND source_mtime = ?3 AND component = 'subtitle_source' AND pipeline_version = ?4 AND last_error_code = 'artifact_lost' AND updated_at_ms >= ?5",
-                params![stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version, now_ms.saturating_sub(SUBTITLE_SOURCE_REPAIR_WINDOW_MS)], |row| row.get(0),
-            )?;
-            if repairs >= SUBTITLE_SOURCE_REPAIR_LIMIT {
+            let (repair_epoch, recent_repairs): (i64, i64) = tx.query_row(
+                "SELECT next_epoch, COALESCE(last_1_ms >= ?5, 0) + COALESCE(last_2_ms >= ?5, 0) + COALESCE(last_3_ms >= ?5, 0) FROM subtitle_source_repair_epochs WHERE file_id = ?1 AND source_size = ?2 AND source_mtime = ?3 AND pipeline_version = ?4",
+                params![stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version, now_ms.saturating_sub(SUBTITLE_SOURCE_REPAIR_WINDOW_MS)], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?.unwrap_or((0, 0));
+            if recent_repairs >= SUBTITLE_SOURCE_REPAIR_LIMIT {
                 tx.commit()?;
                 return Ok(None);
             }
-            let generation = stamp.generation(repairs);
+            // The counter outlives bounded terminal request history, while
+            // the three timestamps enforce a sliding daily allowance.
+            let generation = stamp.generation(repair_epoch);
             let terminal = tx.query_row(
                 &format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"),
                 params![generation], request_from_row,
@@ -511,7 +518,33 @@ impl ClusterFragmentIndexStore for SqliteStore {
     ) -> Result<bool, StoreError> {
         let stamp = stamp.clone();
         self.with_conn(move |conn| {
-            let changed = conn.execute("UPDATE analysis_requests SET state = 'cancelled', last_error_code = 'artifact_lost', owner_node_id = NULL, lease_expires_ms = NULL, updated_at_ms = ?1 WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4 AND component = 'subtitle_source' AND pipeline_version = ?5 AND state = 'ready' AND NOT EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.origin = 'extracted')", params![now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version])?;
+            let sql = format!("UPDATE analysis_requests SET state = 'cancelled', last_error_code = CASE WHEN EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.origin = 'extracted') THEN 'coverage_incomplete' ELSE 'artifact_lost' END, owner_node_id = NULL, lease_expires_ms = NULL, updated_at_ms = ?1 WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4 AND component = 'subtitle_source' AND pipeline_version = ?5 AND state = 'ready' AND (NOT EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.origin = 'extracted') OR {SUBTITLE_SOURCE_READY_UNCOVERED})");
+            let changed = conn.execute(&sql, params![now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version])?;
+            Ok(changed > 0)
+        }).await
+    }
+
+    async fn retire_subtitle_source_ready_for_ordinal(
+        &self,
+        stamp: &SubtitleSourceStamp,
+        ordinal: i64,
+        source_attestation: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if ordinal < 0
+            || source_attestation.len() != 64
+            || !source_attestation
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(StoreError::Task(
+                "invalid subtitle source observation".to_owned(),
+            ));
+        }
+        let stamp = stamp.clone();
+        let source_attestation = source_attestation.to_owned();
+        self.with_conn(move |conn| {
+            let changed = conn.execute("UPDATE analysis_requests SET state = 'cancelled', last_error_code = CASE WHEN EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.source_attestation = ?7 AND p.origin = 'extracted') THEN 'coverage_incomplete' ELSE 'artifact_lost' END, owner_node_id = NULL, lease_expires_ms = NULL, updated_at_ms = ?1 WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4 AND component = 'subtitle_source' AND pipeline_version = ?5 AND state = 'ready' AND NOT EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.ordinal = ?6 AND p.source_attestation = ?7 AND p.origin = 'extracted' AND (p.verdict IN ('kept','empty','malformed') OR (p.verdict = 'transient' AND p.attempts >= 3)))", params![now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version, ordinal, source_attestation])?;
             Ok(changed > 0)
         }).await
     }

@@ -809,6 +809,35 @@ CREATE TRIGGER IF NOT EXISTS subtitle_source_publications_supersede_source AFTER
  WHEN OLD.size <> NEW.size OR OLD.mtime <> NEW.mtime BEGIN
  DELETE FROM subtitle_source_publications WHERE file_id = NEW.id AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
  END;
+CREATE TABLE IF NOT EXISTS subtitle_source_repair_epochs (
+ file_id INTEGER NOT NULL, source_size INTEGER NOT NULL, source_mtime INTEGER NOT NULL,
+ pipeline_version TEXT NOT NULL, next_epoch INTEGER NOT NULL CHECK(next_epoch >= 0),
+ last_1_ms INTEGER, last_2_ms INTEGER, last_3_ms INTEGER,
+ PRIMARY KEY(file_id, source_size, source_mtime, pipeline_version)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS subtitle_source_repair_epochs_advance
+ AFTER UPDATE OF state ON analysis_requests
+ WHEN OLD.state = 'ready' AND NEW.state = 'cancelled'
+  AND NEW.component = 'subtitle_source'
+  AND NEW.last_error_code IN ('artifact_lost','coverage_incomplete') BEGIN
+ INSERT INTO subtitle_source_repair_epochs
+  (file_id, source_size, source_mtime, pipeline_version,
+   next_epoch, last_1_ms, last_2_ms, last_3_ms)
+ VALUES (NEW.file_id, NEW.source_size, NEW.source_mtime, NEW.pipeline_version,
+         1, NEW.updated_at_ms, NULL, NULL)
+ ON CONFLICT(file_id, source_size, source_mtime, pipeline_version)
+ DO UPDATE SET next_epoch = next_epoch + 1,
+               last_3_ms = last_2_ms, last_2_ms = last_1_ms,
+               last_1_ms = NEW.updated_at_ms;
+ END;
+CREATE TRIGGER IF NOT EXISTS subtitle_source_repair_epochs_delete_source AFTER DELETE ON files BEGIN
+ DELETE FROM subtitle_source_repair_epochs WHERE file_id = OLD.id;
+ END;
+CREATE TRIGGER IF NOT EXISTS subtitle_source_repair_epochs_supersede_source AFTER UPDATE OF size, mtime ON files
+ WHEN OLD.size <> NEW.size OR OLD.mtime <> NEW.mtime BEGIN
+ DELETE FROM subtitle_source_repair_epochs WHERE file_id = NEW.id
+  AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
+ END;
 "#;
 
 /// SQLite v46 / replicated v26: the code each *charged* attempt ended with.
@@ -1352,6 +1381,32 @@ pub const SUBTITLE_SOURCE_REPAIR_LIMIT: i64 = 3;
 pub const SUBTITLE_SOURCE_REPAIR_WINDOW_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const SUBTITLE_BACKFILL_TERMINAL_SETTLE_MS: i64 = 120_000;
 
+/// An already-ready request can still have an eligible ordinal without
+/// settled extraction coverage. Keep this predicate identical in the two
+/// store implementations so a partial publication can be repaired without
+/// discarding the ordinals that did settle.
+pub(crate) const SUBTITLE_SOURCE_READY_UNCOVERED: &str = r#"EXISTS (
+    SELECT 1 FROM files AS f,
+      json_each(CASE WHEN json_valid(f.subtitle_streams)
+                     THEN f.subtitle_streams ELSE '[]' END) AS s
+    WHERE f.id = analysis_requests.file_id
+      AND f.size = analysis_requests.source_size
+      AND f.mtime = analysis_requests.source_mtime
+      AND json_type(s.value, '$.index') = 'integer'
+      AND CAST(json_extract(s.value, '$.index') AS INTEGER) >= 0
+      AND lower(json_extract(s.value, '$.codec')) IN
+          ('hdmv_pgs_subtitle','subrip','srt','ass','ssa','mov_text','webvtt','text')
+      AND NOT EXISTS (
+        SELECT 1 FROM subtitle_source_publications AS p
+        WHERE p.file_id = f.id AND p.source_size = f.size
+          AND p.source_mtime = f.mtime
+          AND p.ordinal = CAST(json_extract(s.value, '$.index') AS INTEGER)
+          AND p.origin = 'extracted'
+          AND (p.verdict IN ('kept','empty','malformed')
+               OR (p.verdict = 'transient' AND p.attempts >= 3))
+      )
+)"#;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubtitleBackfillCandidate {
     pub file_id: i64,
@@ -1720,6 +1775,18 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     async fn retire_subtitle_source_ready(
         &self,
         stamp: &SubtitleSourceStamp,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Foreground may probe a live ordinal that is absent from stale scanner
+    /// metadata. Retire only if that ordinal still lacks settled extracted
+    /// coverage for its current portable source digest when the store applies
+    /// the update.
+    async fn retire_subtitle_source_ready_for_ordinal(
+        &self,
+        stamp: &SubtitleSourceStamp,
+        ordinal: i64,
+        source_attestation: &str,
         now_ms: i64,
     ) -> Result<bool, StoreError>;
 
