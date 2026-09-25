@@ -382,6 +382,8 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
       shippedSource("subtitleStoredSourcesCard"),
+      shippedSource("subtitleClusterSourcesCard"),
+      shippedSource("subtitleBackfillCard"),
       shippedSource("chapterThumbnailsCard"),
       shippedSource("seekScratchReservationsCard"),
       shippedSource("liveTvGuideCard"), shippedSource("liveTvDeinterlaceCard"),
@@ -457,7 +459,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "subsrc", "chthumb"])
+  for (const id of ["pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "subsrc", "subcluster", "subbackfill", "chthumb"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   // Absent from the settings document is on: chapter thumbnails default on.
   assert.match(html, /TOG:chthumb\|[^|]*\|[^|]*\|checked=true/);
@@ -473,6 +475,20 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     panels.developerPanel({ ...settings, subtitle_stored_sources: false }, readiness),
     /TOG:subsrc\|[^|]*\|[^|]*\|checked=false/,
   );
+  // Neither the unseen schema report nor an unmet queue reading may remove
+  // the switch or force a saved cluster/backfill choice off.
+  const unmet = {items:[
+    {id:"subtitle_cluster_sources",requirements:[{id:"analysis_queue",status:"unmet",evidence:"Queue is off."}]},
+    {id:"subtitle_backfill",requirements:[{id:"backfill_lease",status:"unobservable",evidence:"No holder between passes."}]},
+  ]};
+  const optedIn = renderComposedPanel("developerPanel", () => panels.developerPanel(
+    {...settings,subtitle_cluster_sources:true,subtitle_backfill:true}, unmet));
+  assert.match(optedIn, /TOG:subcluster\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(optedIn, /TOG:subbackfill\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(optedIn, /Queue is off\./);
+  assert.match(optedIn, /No holder between passes\./);
+  for (const id of ["backfill_lease","backfill_enqueued","backfill_remaining","backfill_bytes"])
+    assert.match(optedIn,new RegExp(`data-devstat="subtitle_backfill:${id}"`));
   assert.doesNotMatch(html, /HDHomeRun Live TV|CARDHEAD:Programme guide/);
   for (const route of ["livetv", "playback", "cluster"])
     assert.ok(html.includes(`href="#/settings/${route}"`), `${route} has a destination link`);
@@ -562,6 +578,33 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(live, /api\.hdhomerun\.com/);
   assert.match(live, /never stores, logs or relays that credential/);
   assert.match(live, /FOOT:saveLiveTvGuide/);
+});
+
+test("unmet subtitle readiness cannot refuse the saved cluster or backfill switches", async () => {
+  const writes=[];
+  const nodes=new Map([
+    ["subcluster",{checked:true}], ["subbackfill",{checked:true}],
+    ["subclustererr",{textContent:""}], ["subbackfillerr",{textContent:""}],
+    ["subclustercard",{outerHTML:""}], ["subbackfillcard",{outerHTML:""}],
+  ]);
+  const document={getElementById:id=>nodes.get(id)};
+  const api=async (_path,request)=>{writes.push(request.body);return request.body;};
+  const save=new Function("document","api",
+    `const DEVELOPER_READINESS={items:[{id:"subtitle_cluster_sources",requirements:[{id:"analysis_queue",status:"unmet"}]}]};
+     const cacheSettings=value=>value,toast=()=>{},setCardSaved=()=>{};
+     const subtitleClusterSourcesCard=s=>\`cluster: \${s.subtitle_cluster_sources}\`;
+     const subtitleBackfillCard=s=>\`backfill: \${s.subtitle_backfill}\`;
+     ${shippedSource("saveSubtitleClusterSources")}
+     ${shippedSource("saveSubtitleBackfill")}
+     return {saveSubtitleClusterSources,saveSubtitleBackfill};`,
+  )(document,api);
+  await save.saveSubtitleClusterSources(null);
+  await save.saveSubtitleBackfill(null);
+  assert.deepEqual(writes,[{subtitle_cluster_sources:true},{subtitle_backfill:true}]);
+  assert.equal(nodes.get("subclustercard").outerHTML,"cluster: true");
+  assert.equal(nodes.get("subbackfillcard").outerHTML,"backfill: true");
+  assert.equal(nodes.get("subclustererr").textContent,"");
+  assert.equal(nodes.get("subbackfillerr").textContent,"");
 });
 
 test("server guidance sends disabled Live TV features to their current settings", () => {
@@ -985,14 +1028,14 @@ test("Maintenance shows the stored subtitle tracks: size, what is riding now, an
   assert.match(html, /a pass already running finishes its index but publishes none of the tracks it kept/, "what off does, exactly");
   assert.doesNotMatch(html, /setwarn/);
 
-  // Switch on, gate closed: the card says so and why, instead of a green pill
-  // over "nothing is riding".
+  // Switch on with a readiness concern: the card explains it without
+  // treating the observation as a feature gate.
   const blocked = render({
     subtitle_stored_sources: true,
     subtitle_store: { riding: [], gate: { open: false, reason: "the startup self-test failed: ffprobe <7.1> and ffmpeg 8.0 differ" } },
   });
-  assert.match(blocked, /HEAD:Stored subtitle tracks\|<span class="pill bad">not keeping tracks<\/span>/);
-  assert.match(blocked, /class="setwarn">⚠ <b>The index pass on this node keeps no PGS tracks:<\/b> the startup self-test failed: ffprobe &lt;7\.1&gt; and ffmpeg 8\.0 differ\./);
+  assert.match(blocked, /HEAD:Stored subtitle tracks\|<span class="pill warn">readiness concern<\/span>/);
+  assert.match(blocked, /class="setwarn">⚠ <b>Review stored-track readiness:<\/b> the startup self-test failed: ffprobe &lt;7\.1&gt; and ffmpeg 8\.0 differ\./);
 
   const idle = render({ subtitle_stored_sources: false, vod_index_mins: 15, subtitle_store: { riding: [], gate: { open: false, reason: "subtitles.stored_sources is off" } } });
   assert.match(idle, /HEAD:Stored subtitle tracks\|<span class="pill">off<\/span>/);

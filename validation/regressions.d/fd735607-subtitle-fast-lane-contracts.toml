@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["fd735607"]
+points = ["core.media", "playback.pipeline", "server.api"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The first local fast lane found unregistered SQLite transactions, out-of-order replicated placeholders, a missed dynamic SQLite binding count, a new migration object absent from downgrade fixtures, forced work bypassing aged normal work, and subtitle HTTP test fixtures without live source identity or an advertised segment. every_sqlite_transaction_site_is_classified, every_replicated_placeholder_is_introduced_in_order, every_sqlite_placeholder_and_local_binding_arity_is_valid, the_downgrade_fixture_undoes_every_migration_after_the_guard, analysis_priority_ages_fairly_and_survives_worker_handoff_through_dyn_store, stored_whole_track_skips_window_warm, developer_readiness_reports_what_it_reads_and_admits_what_it_cannot, and the stored VTT no-flight cases pass as focused regressions after the fixes."

@@ -55,9 +55,10 @@ use plurx_core::domain::{
 use plurx_core::error::StoreError;
 use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
-    ApiKeyStore, ArtworkRepairFence, CatalogueReader, ClusterCompatibility, CoordinationStore,
-    FencedPublicationStore, HiqliteAuthStore, LibraryStore, MediaStore, OfflinePackageStore,
-    PlaybackTelemetryStore, ReconcileOutcome, RootFingerprintStatus, SettingsStore, TraktStore,
+    ApiKeyStore, ArtworkRepairFence, CatalogueReader, ClusterCompatibility,
+    ClusterFragmentIndexStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore,
+    LibraryStore, MediaStore, OfflinePackageStore, PlaybackTelemetryStore, ReconcileOutcome,
+    RootFingerprintStatus, SettingsStore, SubtitleSourcePublication, TraktStore,
     TranscodeCacheStore, UserStore, WatchStore, WatchedOutboxStore, AUTH_PROTOCOL_MAX,
     AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_VERSION,
 };
@@ -91,6 +92,7 @@ use production_job_lease::ActiveJobLease;
 mod production_serving_fence;
 use production_serving_fence::ServingFence;
 
+mod cluster_activity;
 mod failure_drills;
 mod named_runner;
 #[cfg(test)]
@@ -861,6 +863,8 @@ async fn controller() -> Result<()> {
     let failure_drills_started_at = topology::unix_ms()?;
     println!("cluster-check: membership lifecycle 1 -> 3 -> 2");
     run_membership_lifecycle_case().await?;
+    println!("cluster-check: node B looks up node A's subtitle-source publication");
+    cluster_activity::subtitle_source_node_b_looks_up_node_a_publication().await?;
     println!("cluster-check: current-leader self-leave");
     run_leader_self_leave_case().await?;
     println!("cluster-check: four-voter leader self-leave with one survivor down");
@@ -7430,6 +7434,14 @@ struct ServingReady {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
+    PublishSubtitleSource {
+        publication: SubtitleSourcePublication,
+    },
+    LookupSubtitleSource {
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+    },
     /// Recreate the origin/main M3 table shape and its former shared join-URL
     /// rows before MembershipManager starts, proving the rolling upgrade path
     /// rather than only the schema a fresh binary would create.
@@ -7791,6 +7803,9 @@ impl Request {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
+    SubtitleSourcePublications {
+        rows: Vec<SubtitleSourcePublication>,
+    },
     Ready {
         node_id: u64,
     },
@@ -9476,6 +9491,21 @@ async fn handle_request(
         cluster_job,
     } = state;
     match request {
+        Request::PublishSubtitleSource { publication } => {
+            store_ref(store)?
+                .upsert_subtitle_source_publication(&publication)
+                .await?;
+            Ok(Response::Ok)
+        }
+        Request::LookupSubtitleSource {
+            file_id,
+            source_size,
+            source_mtime,
+        } => Ok(Response::SubtitleSourcePublications {
+            rows: store_ref(store)?
+                .list_subtitle_source_publications(file_id, source_size, source_mtime)
+                .await?,
+        }),
         Request::SeedLegacyArtworkUrls => {
             client
                 .execute(

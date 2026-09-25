@@ -447,7 +447,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/cluster/join/finalize"
         | "/api/v1/cluster/learner/join/redeem"
         | "/api/v1/cluster/learner/join/finalize"
-        | "/internal/media/fragment-index/{cache_key}" => 7,
+        | "/internal/media/fragment-index/{cache_key}"
+        | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         internal_activity::PATH
         | cluster_operations::INTERNAL_PATH
         | internal_auth_revocation::PATH
@@ -1092,7 +1093,7 @@ fn declared_body_length(
 /// and a node refusing everything with an uncounted 503 is exactly the failure
 /// this family exists to show.
 async fn http_request_metrics(request: Request<axum::body::Body>, next: Next) -> Response {
-    measure_http_request(&HTTP_REQUEST_METRICS, request, next).await
+    measure_http_request(&HTTP_REQUEST_METRICS, &ACCESS_LINES, request, next).await
 }
 
 /// `http_request_metrics` over a metrics table the caller names, so a test can
@@ -1100,6 +1101,7 @@ async fn http_request_metrics(request: Request<axum::body::Body>, next: Next) ->
 /// the binary for the process-wide cells.
 async fn measure_http_request(
     metrics: &'static HttpRequestMetrics,
+    access_lines: &'static AccessLineThrottle,
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
@@ -1132,7 +1134,7 @@ async fn measure_http_request(
         // viewer, and a line per refusal would do the same on a fenced node.
         // The counters above carry the volume, this ring carries the
         // exceptions — and `also_suppressed` says what the sampling cost.
-        if let Some(also_suppressed) = ACCESS_LINES.admit(group) {
+        if let Some(also_suppressed) = access_lines.admit(group) {
             tracing::warn!(
                 target: "plurxd::http",
                 route_group = HTTP_ROUTE_GROUPS[group],
@@ -1831,6 +1833,10 @@ pub fn router(state: AppState) -> Router {
             get(internal_media::fragment_index),
         )
         .route(
+            "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}",
+            get(internal_media::subtitle_source),
+        )
+        .route(
             crate::media_sessions::START_PATH,
             post(internal_media_sessions::start).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
@@ -2075,7 +2081,17 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         && path
             .strip_prefix(crate::fragment_index_cluster::PEER_PATH_PREFIX)
             .is_some_and(|cache_key| !cache_key.is_empty() && !cache_key.contains('/'));
+    let subtitle_source_read = method == Method::GET
+        && path
+            .strip_prefix("/internal/media/subtitle-source/")
+            .is_some_and(|suffix| {
+                let segments = suffix.split('/').collect::<Vec<_>>();
+                matches!(segments.as_slice(), [file_id, ordinal, "sup" | "webvtt" | "matroska"]
+                    if file_id.parse::<i64>().is_ok_and(|value| value > 0)
+                    && ordinal.parse::<i64>().is_ok_and(|value| value >= 0))
+            });
     if fragment_index_read
+        || subtitle_source_read
         || (method == Method::GET && path == crate::media_pool::SNAPSHOT_PATH)
         || (method == Method::POST
             && matches!(
@@ -2683,6 +2699,7 @@ mod tests {
     /// these tests share the `search` group.
     fn observability_probe_router() -> (Router, &'static HttpRequestMetrics) {
         let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let access_lines: &'static AccessLineThrottle = Box::leak(Box::default());
         let router = Router::new()
             .route("/api/v1/items/{id}", axum::routing::get(|| async { "ok" }))
             .route(
@@ -2696,7 +2713,7 @@ mod tests {
             .route("/api/v1/search", axum::routing::get(streaming_test_handler))
             .layer(axum::middleware::from_fn(
                 move |request: Request<axum::body::Body>, next: Next| {
-                    measure_http_request(metrics, request, next)
+                    measure_http_request(metrics, access_lines, request, next)
                 },
             ))
             .layer(axum::middleware::from_fn(http_request_id));
@@ -2952,6 +2969,7 @@ mod tests {
     #[tokio::test]
     async fn a_fully_delivered_body_counts_complete_over_a_real_connection_whatever_its_framing() {
         let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let access_lines: &'static AccessLineThrottle = Box::leak(Box::default());
         let app = Router::new()
             .route(
                 "/api/v1/items/{id}",
@@ -2959,7 +2977,7 @@ mod tests {
             )
             .layer(axum::middleware::from_fn(
                 move |request: Request<axum::body::Body>, next: Next| {
-                    measure_http_request(metrics, request, next)
+                    measure_http_request(metrics, access_lines, request, next)
                 },
             ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3762,6 +3780,7 @@ mod tests {
                 Method::GET,
                 "/internal/media/fragment-index/abc123def456abc123def456abc123de",
             ),
+            (Method::GET, "/internal/media/subtitle-source/7/2/webvtt"),
         ] {
             assert!(learner_route_eligible(&method, path), "{method} {path}");
         }
@@ -3776,6 +3795,19 @@ mod tests {
         assert!(!learner_route_eligible(
             &Method::POST,
             "/internal/media/fragment-index/abc123def456abc123def456abc123de"
+        ));
+        for path in [
+            "/internal/media/subtitle-source/7/2",
+            "/internal/media/subtitle-source/7/2/raw",
+            "/internal/media/subtitle-source/7/2/sup/extra",
+            "/internal/media/subtitle-source/0/2/sup",
+            "/internal/media/subtitle-source/7/-1/sup",
+        ] {
+            assert!(!learner_route_eligible(&Method::GET, path), "{path}");
+        }
+        assert!(!learner_route_eligible(
+            &Method::POST,
+            "/internal/media/subtitle-source/7/2/sup"
         ));
     }
 
@@ -8978,6 +9010,8 @@ mod tests {
                 "live_hls_recovery",
                 "pgs_overlay",
                 "subtitle_stored_sources",
+                "subtitle_cluster_sources",
+                "subtitle_backfill",
                 "subtitle_not_ready_503",
                 "chapter_thumbnails",
                 "dolby_vision_convert",
@@ -9031,6 +9065,9 @@ mod tests {
                         | "stored_source_self_test"
                         | "stored_source_local_cache"
                         | "stored_source_free_space"
+                        | "local_cache"
+                        | "free_space"
+                        | "chapter_thumbs_cache_space"
                 )
             })
             .collect::<Vec<_>>();
@@ -9069,12 +9106,13 @@ mod tests {
             green,
             vec![
                 "authoritative_store",
-                // The chapter-thumbnail rows read this process: the runtime
-                // cache has room on any host that can run the suite, and the
-                // counters row is a statement of what ran (nothing yet). The
-                // ffmpeg row is absent here because the fixture never probed
-                // a build.
-                "chapter_thumbs_cache_space",
+                "backfill_bytes",
+                "backfill_enqueued",
+                "backfill_remaining",
+                // The chapter-thumbnail work counter is a statement of what
+                // ran (nothing yet); cache space depends on the host disk.
+                // The ffmpeg row is absent here because the fixture never
+                // probed a build.
                 "chapter_thumbs_work",
                 "durable_queue",
                 "rolling_contract_built",

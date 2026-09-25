@@ -258,6 +258,139 @@ fn render_histogram<const N: usize>(
 
 static QUEUE_METRICS: QueueMetrics = QueueMetrics::new();
 
+/// Bounded labels for the subtitle cluster path. No file, title, node or
+/// source-derived value can enter a Prometheus label.
+#[allow(dead_code)]
+pub(crate) enum SubtitleSourceMetric {
+    LookupHit,
+    LookupHydrated,
+    LookupMiss,
+    RequestForeground,
+    RequestBackground,
+    VerdictKept,
+    VerdictEmpty,
+    VerdictMalformed,
+    VerdictTransient,
+    JobBytes(u64),
+    HydrationServedBytes(u64),
+    HydrationFetchedBytes(u64),
+    ForegroundSelfClaim,
+    Repair,
+}
+
+struct SubtitleSourceMetrics {
+    lookups: [AtomicU64; 3],
+    requests: [AtomicU64; 2],
+    verdicts: [AtomicU64; 4],
+    job_bytes: AtomicU64,
+    hydration_bytes: [AtomicU64; 2],
+    foreground_self_claims: AtomicU64,
+    repairs: AtomicU64,
+}
+
+impl SubtitleSourceMetrics {
+    const fn new() -> Self {
+        Self {
+            lookups: [const { AtomicU64::new(0) }; 3],
+            requests: [const { AtomicU64::new(0) }; 2],
+            verdicts: [const { AtomicU64::new(0) }; 4],
+            job_bytes: AtomicU64::new(0),
+            hydration_bytes: [const { AtomicU64::new(0) }; 2],
+            foreground_self_claims: AtomicU64::new(0),
+            repairs: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, event: SubtitleSourceMetric) {
+        let one = |counter: &AtomicU64| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        };
+        match event {
+            SubtitleSourceMetric::LookupHit => one(&self.lookups[0]),
+            SubtitleSourceMetric::LookupHydrated => one(&self.lookups[1]),
+            SubtitleSourceMetric::LookupMiss => one(&self.lookups[2]),
+            SubtitleSourceMetric::RequestForeground => one(&self.requests[0]),
+            SubtitleSourceMetric::RequestBackground => one(&self.requests[1]),
+            SubtitleSourceMetric::VerdictKept => one(&self.verdicts[0]),
+            SubtitleSourceMetric::VerdictEmpty => one(&self.verdicts[1]),
+            SubtitleSourceMetric::VerdictMalformed => one(&self.verdicts[2]),
+            SubtitleSourceMetric::VerdictTransient => one(&self.verdicts[3]),
+            SubtitleSourceMetric::JobBytes(bytes) => {
+                self.job_bytes.fetch_add(bytes, Ordering::Relaxed);
+            }
+            SubtitleSourceMetric::HydrationServedBytes(bytes) => {
+                self.hydration_bytes[0].fetch_add(bytes, Ordering::Relaxed);
+            }
+            SubtitleSourceMetric::HydrationFetchedBytes(bytes) => {
+                self.hydration_bytes[1].fetch_add(bytes, Ordering::Relaxed);
+            }
+            SubtitleSourceMetric::ForegroundSelfClaim => one(&self.foreground_self_claims),
+            SubtitleSourceMetric::Repair => one(&self.repairs),
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut out = String::from(
+            "# HELP plurx_subtitle_source_lookups_total Stored subtitle source lookups by result.\n\
+             # TYPE plurx_subtitle_source_lookups_total counter\n",
+        );
+        for (index, label) in ["hit", "hydrated", "miss"].iter().enumerate() {
+            out.push_str(&format!(
+                "plurx_subtitle_source_lookups_total{{outcome=\"{label}\"}} {}\n",
+                self.lookups[index].load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str("# HELP plurx_subtitle_source_requests_total Subtitle extraction requests by trigger.\n# TYPE plurx_subtitle_source_requests_total counter\n");
+        for (index, label) in ["foreground", "background"].iter().enumerate() {
+            out.push_str(&format!(
+                "plurx_subtitle_source_requests_total{{trigger=\"{label}\"}} {}\n",
+                self.requests[index].load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str("# HELP plurx_subtitle_source_verdicts_total Subtitle representation extraction verdicts.\n# TYPE plurx_subtitle_source_verdicts_total counter\n");
+        for (index, label) in ["kept", "empty", "malformed", "transient"]
+            .iter()
+            .enumerate()
+        {
+            out.push_str(&format!(
+                "plurx_subtitle_source_verdicts_total{{verdict=\"{label}\"}} {}\n",
+                self.verdicts[index].load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str(&format!(
+            "# HELP plurx_subtitle_source_job_bytes_total Source bytes read by subtitle extraction jobs.\n\
+             # TYPE plurx_subtitle_source_job_bytes_total counter\n\
+             plurx_subtitle_source_job_bytes_total {}\n",
+            self.job_bytes.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP plurx_subtitle_source_hydration_bytes_total Subtitle artefact bytes transferred over media peers.\n# TYPE plurx_subtitle_source_hydration_bytes_total counter\n");
+        for (index, label) in ["served", "fetched"].iter().enumerate() {
+            out.push_str(&format!(
+                "plurx_subtitle_source_hydration_bytes_total{{direction=\"{label}\"}} {}\n",
+                self.hydration_bytes[index].load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str(&format!(
+            "# HELP plurx_subtitle_source_foreground_self_claims_total Foreground requests claimed by their waiting node.\n\
+             # TYPE plurx_subtitle_source_foreground_self_claims_total counter\n\
+             plurx_subtitle_source_foreground_self_claims_total {}\n\
+             # HELP plurx_subtitle_source_repairs_total Lost-publication repairs requested.\n\
+             # TYPE plurx_subtitle_source_repairs_total counter\n\
+             plurx_subtitle_source_repairs_total {}\n",
+            self.foreground_self_claims.load(Ordering::Relaxed),
+            self.repairs.load(Ordering::Relaxed)
+        ));
+        out
+    }
+}
+
+static SUBTITLE_SOURCE_METRICS: SubtitleSourceMetrics = SubtitleSourceMetrics::new();
+
+#[allow(dead_code)]
+pub(crate) fn record_subtitle_source(event: SubtitleSourceMetric) {
+    SUBTITLE_SOURCE_METRICS.record(event);
+}
+
 struct PlaybackMetrics {
     ttff_buckets: [[[AtomicU64; TTFF_BUCKETS.len() + 1]; CLIENT_CLASSES.len()]; METHODS.len()],
     ttff_count: [[AtomicU64; CLIENT_CLASSES.len()]; METHODS.len()],
@@ -1798,12 +1931,36 @@ fn prior_observation(
 pub fn prometheus() -> String {
     let mut metrics = METRICS.render();
     metrics.push_str(&QUEUE_METRICS.render());
+    metrics.push_str(&SUBTITLE_SOURCE_METRICS.render());
     metrics
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtitle_source_metrics_render_bounded_labels_and_bytes() {
+        let metrics = SubtitleSourceMetrics::new();
+        metrics.record(SubtitleSourceMetric::LookupHydrated);
+        metrics.record(SubtitleSourceMetric::RequestBackground);
+        metrics.record(SubtitleSourceMetric::VerdictMalformed);
+        metrics.record(SubtitleSourceMetric::JobBytes(123));
+        metrics.record(SubtitleSourceMetric::HydrationFetchedBytes(17));
+        metrics.record(SubtitleSourceMetric::ForegroundSelfClaim);
+        metrics.record(SubtitleSourceMetric::Repair);
+        let rendered = metrics.render();
+        assert!(rendered.contains("plurx_subtitle_source_lookups_total{outcome=\"hydrated\"} 1"));
+        assert!(rendered.contains("plurx_subtitle_source_requests_total{trigger=\"background\"} 1"));
+        assert!(rendered.contains("plurx_subtitle_source_verdicts_total{verdict=\"malformed\"} 1"));
+        assert!(rendered.contains("plurx_subtitle_source_job_bytes_total 123"));
+        assert!(rendered
+            .contains("plurx_subtitle_source_hydration_bytes_total{direction=\"fetched\"} 17"));
+        assert!(rendered.contains("plurx_subtitle_source_foreground_self_claims_total 1"));
+        assert!(rendered.contains("plurx_subtitle_source_repairs_total 1"));
+        assert!(!rendered.contains("node_id="));
+        assert!(!rendered.contains("file_id="));
+    }
 
     fn metric_value(rendered: &str, prefix: &str) -> u64 {
         rendered

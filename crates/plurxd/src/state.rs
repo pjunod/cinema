@@ -1,7 +1,7 @@
 //! Shared application state and the background job manager.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29,7 +29,7 @@ use plurx_core::store::{
     ArtworkRepairFence, CatalogueReader, ClusterFragmentIndexArtifact,
     ClusterFragmentIndexLocation, DvConversionMode, DvConversionQueueBatch, DvConversionState,
     DvRecoveryGuardState, NewAnalysisRequest, NewClusterFragmentIndexJob, PrometheusStoreSnapshot,
-    PublicationStore, QueueDvConversionOutcome, SeriesHintOutcome, Store,
+    PublicationStore, QueueDvConversionOutcome, SeriesHintOutcome, Store, SubtitleSourceStamp,
     DV_CONVERSION_QUEUE_BATCH_MAX,
 };
 use plurx_core::transcode::EncoderCaps;
@@ -146,6 +146,14 @@ pub struct SystemInfo {
     /// this exact record, so a missing binary is named before any media work
     /// starts instead of after a 60–80 GB extraction.
     pub dv_disk: crate::dv_disk::DvDiskCapabilities,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SubtitleBackfillStatus {
+    pub(crate) lease_holder: Option<String>,
+    pub(crate) enqueued_process: u64,
+    pub(crate) remaining_files: i64,
+    pub(crate) remaining_bytes: i64,
 }
 
 /// The daemon's managed directories across the configured storage roots.
@@ -832,6 +840,20 @@ impl AppState {
             &self.runtime_cache_dir,
         )
         .on_node(Some(&self.node_id))
+        .with_membership(self.membership.clone())
+        .with_jobs(Arc::clone(&self.jobs))
+    }
+
+    pub(crate) async fn subtitle_backfill_status(
+        &self,
+    ) -> Result<SubtitleBackfillStatus, StoreError> {
+        let diagnostics = self.store.subtitle_backfill_diagnostics(clock_ms()).await?;
+        Ok(SubtitleBackfillStatus {
+            lease_holder: diagnostics.lease_holder,
+            enqueued_process: self.jobs.subtitle_backfill_enqueued_process(),
+            remaining_files: diagnostics.remaining_files,
+            remaining_bytes: diagnostics.remaining_bytes,
+        })
     }
 
     /// `node_id` is this server's stable id — the `node_id` a cache location
@@ -986,6 +1008,7 @@ impl AppState {
                 node_id.clone(),
                 Some(membership.clone()),
             )
+            .with_subtitle_jobs(Arc::clone(&jobs))
             .with_serving_authority(serving.authority())
             .with_shared_cache(Arc::clone(&shared_cache)),
         );
@@ -1448,6 +1471,8 @@ pub struct JobManager {
     /// The subtitle-source store's own sweep cursor: `f<id>` of the last
     /// directory examined, or empty once a walk has wrapped.
     subtitle_source_sweep_cursor: Mutex<Option<String>>,
+    /// Process-local discovery count shown in the Developer backfill item.
+    subtitle_backfill_enqueued_process: AtomicU64,
     /// A genre-backfill pass is running. Same reasoning as `producing`: the
     /// question is "may another one start", not "wait for this one" — two
     /// passes would read the same cursor, fetch the same titles and double
@@ -1500,6 +1525,9 @@ pub struct AnalysisProgress {
     /// the field.
     #[serde(default)]
     pub pgs_tracks: usize,
+    /// Text tracks (including styled text) this subtitle-source pass maps.
+    #[serde(default)]
+    pub text_tracks: usize,
     /// Bytes the ride-along has written so far.
     #[serde(default)]
     pub pgs_bytes_written: u64,
@@ -1529,6 +1557,7 @@ impl AnalysisProgress {
             total_media_ms: 2,
             fragments_indexed: 1,
             pgs_tracks: 0,
+            text_tracks: 0,
             pgs_bytes_written: 0,
             started_at_ms: 1,
             updated_at_ms: 1,
@@ -1540,9 +1569,10 @@ impl AnalysisProgress {
     }
 }
 
-const ANALYSIS_STAGES: [&str; 6] = [
+const ANALYSIS_STAGES: [&str; 7] = [
     "probing",
     "fragment_index",
+    "subtitle_source",
     "fingerprints",
     "marker_correlation",
     "persisting",
@@ -2623,6 +2653,176 @@ pub(crate) fn clock_ms() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+pub(crate) async fn subtitle_source_pipeline_version() -> String {
+    format!(
+        "subtitle-source:{}:{}",
+        crate::subtitle_source::MANIFEST_VERSION,
+        crate::ffmpeg::fragment_index_engine_digest().await
+    )
+}
+
+fn subtitle_source_argv(
+    input: &str,
+    plan: &crate::subtitle_ride_along::RideAlongPlan,
+) -> Vec<String> {
+    let mut args = vec![
+        "-hide_banner".to_owned(),
+        "-loglevel".to_owned(),
+        "error".to_owned(),
+        "-copyts".to_owned(),
+        "-i".to_owned(),
+        input.to_owned(),
+    ];
+    args.extend(plan.args());
+    args
+}
+
+fn subtitle_source_covered(
+    tracks: &[crate::subtitle_ride_along::ProbedTrack],
+    rows: &[plurx_core::store::SubtitleSourcePublication],
+) -> bool {
+    tracks
+        .iter()
+        .all(|track| crate::subtitle_source::extracted_ordinal_covered(rows, track.ordinal))
+}
+
+/// The subtitle worker has no index pipe: the tee's null slave is its sole
+/// stdout destination. A job-owned child and a separate stderr reader ensure
+/// even a noisy decoder cannot deadlock a lease holder.
+async fn run_subtitle_source_pass(
+    plan: crate::subtitle_ride_along::RideAlongPlan,
+    source: &std::fs::File,
+    runtime_cache: &Path,
+    lost: &CancellationToken,
+    preempt_when_busy: Option<&TranscodeManager>,
+    progress: &(dyn Fn() + Sync),
+) -> Result<crate::subtitle_ride_along::PendingRideAlong, AnalysisResolutionError> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+
+    if preempt_when_busy.is_some_and(|manager| !manager.pretranscode_worker_idle()) {
+        return Err(AnalysisResolutionError::Retry {
+            code: "foreground_preempted",
+            charge_attempt: false,
+        });
+    }
+
+    #[cfg(unix)]
+    let input = "/dev/fd/3".to_owned();
+    #[cfg(windows)]
+    let input = crate::ffmpeg::windows_source_path(source)
+        .map_err(|_| AnalysisResolutionError::Terminal("source_unavailable"))?
+        .to_string_lossy()
+        .into_owned();
+    let args = subtitle_source_argv(&input, &plan);
+    let mut command = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+    crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let source_fd = source.as_raw_fd();
+        unsafe {
+            command.pre_exec(move || {
+                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
+                if duplicate == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(duplicate, 3) == -1 {
+                    libc::close(duplicate);
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(duplicate);
+                let flags = libc::fcntl(3, libc::F_GETFD);
+                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    crate::ffmpeg::verify_windows_source_path(source, Path::new(&input))
+        .map_err(|_| AnalysisResolutionError::Terminal("source_unavailable"))?;
+    command
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let (mut child, _child_job) =
+        crate::process_control::spawn_job_owned(&mut command).map_err(|_| {
+            AnalysisResolutionError::Retry {
+                code: "source_process_failed",
+                charge_attempt: true,
+            }
+        })?;
+    let mut stderr = child.stderr.take().ok_or(AnalysisResolutionError::Retry {
+        code: "source_process_failed",
+        charge_attempt: true,
+    })?;
+    let mut scan = plan.stderr_scan();
+    let stderr_task = tokio::spawn(async move {
+        let mut chunk = [0_u8; 8192];
+        loop {
+            match stderr.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(read) => scan.feed(&chunk[..read]),
+                Err(_) => return None,
+            }
+        }
+        scan.finish();
+        Some(scan)
+    });
+    let deadline = tokio::time::sleep(Duration::from_secs(30 * 60));
+    tokio::pin!(deadline);
+    let status = loop {
+        tokio::select! {
+            () = lost.cancelled() => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                stderr_task.abort();
+                return Err(AnalysisResolutionError::ClaimLost);
+            }
+            () = &mut deadline => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                stderr_task.abort();
+                return Err(AnalysisResolutionError::Retry {
+                    code: "source_pass_timeout",
+                    charge_attempt: true,
+                });
+            }
+            status = child.wait() => break status.map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_process_failed",
+                charge_attempt: true,
+            })?,
+            () = tokio::time::sleep(Duration::from_millis(500)) => {
+                progress();
+                if preempt_when_busy.is_some_and(|manager| !manager.pretranscode_worker_idle()) {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    stderr_task.abort();
+                    return Err(AnalysisResolutionError::Retry {
+                        code: "foreground_preempted",
+                        charge_attempt: false,
+                    });
+                }
+            }
+        }
+    };
+    progress();
+    let scan = stderr_task.await.ok().flatten();
+    if !status.success() {
+        return Err(AnalysisResolutionError::Retry {
+            code: "source_process_failed",
+            charge_attempt: true,
+        });
+    }
+    Ok(crate::subtitle_ride_along::PendingRideAlong::new(
+        plan, scan,
+    ))
+}
+
 pub(crate) async fn wait_analysis_deadline(duration: Duration) {
     tokio::time::sleep(duration).await;
 }
@@ -2933,6 +3133,11 @@ impl JobManager {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_new(store: Arc<dyn Store>, artwork_dir: PathBuf) -> Arc<Self> {
+        Arc::new(Self::new(store, artwork_dir))
+    }
+
     fn new_with_scan_prune_percent(
         store: Arc<dyn Store>,
         artwork_dir: PathBuf,
@@ -2976,6 +3181,7 @@ impl JobManager {
             last_pretranscode_cache_sweep_ms: AtomicI64::new(0),
             fragment_index_sweep_cursor: Mutex::new(None),
             subtitle_source_sweep_cursor: Mutex::new(None),
+            subtitle_backfill_enqueued_process: AtomicU64::new(0),
             backfilling_genres: std::sync::atomic::AtomicBool::new(false),
             retrying_artwork: std::sync::atomic::AtomicBool::new(false),
             book_cover_workers: metadata::book::CoverMaterializationWorkers::default(),
@@ -4142,13 +4348,50 @@ impl JobManager {
         trigger: &str,
         video_identity: &str,
     ) -> Result<(AnalysisRequest, bool), StoreError> {
-        if !matches!(component, "fragment_index" | "skip_markers") {
+        if !matches!(
+            component,
+            "fragment_index" | "skip_markers" | "subtitle_source"
+        ) {
             return Err(StoreError::Task(
                 "unsupported analysis component".to_owned(),
             ));
         }
-        if !matches!(trigger, "admin" | "background") {
+        if !matches!(trigger, "admin" | "background" | "playback") {
             return Err(StoreError::Task("unsupported analysis trigger".to_owned()));
+        }
+        if component == "subtitle_source" {
+            if force_rebuild || !video_identity.is_empty() {
+                return Err(StoreError::Task(
+                    "subtitle_source has no forced or video-specific generation".to_owned(),
+                ));
+            }
+            let file = self
+                .store
+                .get_file(file_id)
+                .await?
+                .ok_or_else(|| StoreError::Task("analysis file does not exist".to_owned()))?;
+            let stamp = SubtitleSourceStamp {
+                file_id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                pipeline_version: subtitle_source_pipeline_version().await,
+            };
+            let request = self
+                .store
+                .enqueue_or_promote_subtitle_source(
+                    &stamp,
+                    if trigger == "playback" {
+                        "foreground"
+                    } else {
+                        "normal"
+                    },
+                    clock_ms(),
+                )
+                .await?
+                .ok_or_else(|| {
+                    StoreError::Task("subtitle_source repair limit exhausted".to_owned())
+                })?;
+            return Ok((request, true));
         }
         let file = self
             .store
@@ -4200,6 +4443,207 @@ impl JobManager {
         self.cluster_fragment_index_enabled().await
     }
 
+    /// The queue switch is an operator choice. Developer readiness facts are
+    /// advisory; none of them silently overrides an enabled switch.
+    pub(crate) async fn subtitle_source_queue_enabled(&self) -> bool {
+        self.cluster_fragment_index_enabled().await
+            && setting_enabled(
+                self.store
+                    .get_setting(keys::SUBTITLE_CLUSTER_SOURCES)
+                    .await
+                    .unwrap_or(None),
+            )
+    }
+
+    pub(crate) fn subtitle_backfill_enqueued_process(&self) -> u64 {
+        self.subtitle_backfill_enqueued_process
+            .load(Ordering::Relaxed)
+    }
+
+    /// After the bounded claim wait, playback may claim its own queued row.
+    /// The same lease and fence protect it as an idle worker, but this one
+    /// claim bypasses `pretranscode_worker_idle`: it is foreground playback.
+    pub(crate) async fn self_claim_subtitle_source(
+        self: &Arc<Self>,
+        request_id: &str,
+        runtime_cache: &Path,
+    ) -> bool {
+        if !self.may_run_cluster_jobs().await || !self.subtitle_source_queue_enabled().await {
+            return false;
+        }
+        let node_id = self.coordinator.node_id().to_owned();
+        let retry_policy = self.analysis_retry_policy().await;
+        let now = clock_ms();
+        let request = match self
+            .store
+            .claim_analysis_request_foreground(
+                request_id,
+                &node_id,
+                now,
+                now.saturating_add(retry_policy.lease_ms),
+            )
+            .await
+        {
+            Ok(Some(request)) => request,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(%error, request_id, "self-claiming subtitle_source request");
+                return false;
+            }
+        };
+        crate::telemetry::record_subtitle_source(
+            crate::telemetry::SubtitleSourceMetric::ForegroundSelfClaim,
+        );
+        let _progress = self.start_analysis_progress(
+            (&request.request_id, &request.target_node_id),
+            request.file_id,
+            &request.component,
+            "probing",
+            request.source_size.max(0) as u64,
+            0,
+        );
+        let stop = CancellationToken::new();
+        let lost = CancellationToken::new();
+        let heartbeat = {
+            let store = Arc::clone(&self.store);
+            let request_id = request.request_id.clone();
+            let node_id = node_id.clone();
+            let metrics = Arc::clone(&self.analysis_metrics);
+            let stop = stop.clone();
+            let lost = lost.clone();
+            let fence = request.fence;
+            let beat = LeaseHeartbeat {
+                queue: "analysis-request",
+                row: request.request_id.clone(),
+                fence,
+                attempts: request.attempts,
+                known_expiry_ms: request.lease_expires_ms,
+                lease_ms: retry_policy.lease_ms,
+                renew_every: retry_policy.renew_every(),
+                metrics,
+                stop,
+                lost,
+            };
+            tokio::spawn(async move {
+                beat.run(move |now, expires_at| {
+                    let store = Arc::clone(&store);
+                    let request_id = request_id.clone();
+                    let node_id = node_id.clone();
+                    async move {
+                        store
+                            .renew_analysis_request(&request_id, &node_id, fence, now, expires_at)
+                            .await
+                    }
+                })
+                .await;
+            })
+        };
+        let outcome = if !self
+            .store
+            .record_analysis_request_phase(&request, "source_probe", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            Err(AnalysisResolutionError::ClaimLost)
+        } else {
+            match self.store.get_file(request.file_id).await {
+                Ok(Some(file))
+                    if file.size == request.source_size && file.mtime == request.source_mtime =>
+                {
+                    self.set_analysis_progress_totals(
+                        &request.request_id,
+                        &request.target_node_id,
+                        file.size.max(0) as u64,
+                        file.duration_ms.unwrap_or_default(),
+                    );
+                    self.resolve_subtitle_source_request(
+                        &request,
+                        &node_id,
+                        &file,
+                        runtime_cache,
+                        None,
+                        &stop,
+                        &lost,
+                    )
+                    .await
+                }
+                Ok(_) => Err(AnalysisResolutionError::Terminal("source_superseded")),
+                Err(_) => Err(AnalysisResolutionError::Retry {
+                    code: "source_catalog_read_failed",
+                    charge_attempt: true,
+                }),
+            }
+        };
+        stop.cancel();
+        let _ = heartbeat.await;
+        match outcome {
+            Ok(()) => true,
+            Err(AnalysisResolutionError::ClaimLost) => false,
+            Err(AnalysisResolutionError::Retry {
+                code,
+                charge_attempt,
+            }) => {
+                let now = clock_ms();
+                let delay_ms =
+                    retry_policy.backoff_ms(&request.request_id, request.attempts.max(1));
+                match self
+                    .store
+                    .retry_analysis_request(
+                        &request,
+                        code,
+                        now,
+                        now.saturating_add(delay_ms),
+                        charge_attempt,
+                    )
+                    .await
+                {
+                    Ok(true) => {
+                        crate::store_result::observe(
+                            crate::store_result::Operation::RecordAnalysisRetryWaitPhase,
+                            crate::store_result::Discard::BestEffort,
+                            self.store
+                                .record_analysis_request_phase(
+                                    &request,
+                                    "retry_wait",
+                                    Some(code),
+                                    now,
+                                )
+                                .await,
+                        );
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, request_id, "retrying foreground subtitle_source")
+                    }
+                }
+                false
+            }
+            Err(AnalysisResolutionError::Terminal(code)) => {
+                let now = clock_ms();
+                match self
+                    .store
+                    .fail_analysis_request(&request.request_id, &node_id, request.fence, code, now)
+                    .await
+                {
+                    Ok(true) => {
+                        crate::store_result::observe(
+                            crate::store_result::Operation::RecordAnalysisFailedPhase,
+                            crate::store_result::Discard::BestEffort,
+                            self.store
+                                .record_analysis_request_phase(&request, "failed", Some(code), now)
+                                .await,
+                        );
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, request_id, "failing foreground subtitle_source")
+                    }
+                }
+                false
+            }
+        }
+    }
+
     fn start_analysis_progress(
         self: &Arc<Self>,
         identity: (&str, &str),
@@ -4246,6 +4690,7 @@ impl JobManager {
                 total_media_ms: total_media_ms.max(0),
                 fragments_indexed: 0,
                 pgs_tracks: 0,
+                text_tracks: 0,
                 pgs_bytes_written: 0,
                 started_at_ms: now,
                 updated_at_ms: now,
@@ -4346,6 +4791,25 @@ impl JobManager {
         if let Some(value) = progress.get_mut(&(job_id.to_owned(), target_node_id.to_owned())) {
             value.pgs_tracks = pgs_tracks;
             value.pgs_bytes_written = pgs_bytes_written;
+        }
+    }
+
+    fn update_analysis_subtitle_tracks(
+        &self,
+        job_id: &str,
+        target_node_id: &str,
+        pgs_tracks: usize,
+        text_tracks: usize,
+        bytes_written: u64,
+    ) {
+        let mut progress = self
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(value) = progress.get_mut(&(job_id.to_owned(), target_node_id.to_owned())) {
+            value.pgs_tracks = pgs_tracks;
+            value.text_tracks = text_tracks;
+            value.pgs_bytes_written = bytes_written;
         }
     }
 
@@ -6879,6 +7343,7 @@ impl JobManager {
         let cursor = self.subtitle_source_sweep_cursor.lock().await.clone();
         match crate::subtitle_source::sweep(
             self.store.as_ref(),
+            self.coordinator.node_id(),
             &root,
             cursor.as_deref(),
             crate::subtitle_source::SWEEP_PAGE,
@@ -6971,13 +7436,76 @@ impl JobManager {
             record_discard(Discard::SwitchOff);
             return None;
         }
+        // The publication row must carry a portable sampled digest. The
+        // object version used by the fragment-index source memo includes this
+        // host's device and inode, so it cannot identify bytes on a peer.
+        let memo = match crate::fragment_index_cluster::inspect_source(file).await {
+            Ok(version) => self
+                .store
+                .fragment_index_source(self.coordinator.node_id(), file.id, &version)
+                .await
+                .ok()
+                .flatten(),
+            Err(_) => None,
+        };
+        let attested = match crate::fragment_index_cluster::attest_source(
+            self.coordinator.node_id(),
+            file,
+            memo.as_ref(),
+            &|_| {},
+        )
+        .await
+        {
+            Ok(attested) => attested,
+            Err(reason) => {
+                tracing::warn!(file_id, %reason, "attesting subtitle ride-along source");
+                record_discard(Discard::SourceMoved);
+                return None;
+            }
+        };
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            record_discard(Discard::SourceMoved);
+            return None;
+        }
         let harvest = pending.judge().await;
         let verdicts: Vec<_> = harvest
             .outcomes()
             .iter()
             .map(|outcome| (outcome.ordinal, outcome.verdict))
             .collect();
-        match harvest.publish().await {
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            record_discard(Discard::SourceMoved);
+            return None;
+        }
+        match harvest
+            .publish_with_cluster(
+                self.store.as_ref(),
+                self.coordinator.node_id(),
+                &attested.observation.source_sha256,
+                None,
+            )
+            .await
+        {
             Ok(manifest) => {
                 tracing::info!(file_id, ?verdicts, "published the pass's PGS tracks");
                 Some(manifest)
@@ -7015,6 +7543,7 @@ impl JobManager {
             };
         if cluster_cache_enabled {
             if self.may_run_cluster_jobs().await {
+                self.discover_subtitle_sources(Arc::clone(&transcode)).await;
                 self.discover_cluster_fragment_indexes(transcode).await;
             }
             return;
@@ -7149,7 +7678,7 @@ impl JobManager {
                 // Asked per pass, so the switch turning off stops the next
                 // pass from riding without a restart.
                 let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
-                    self.store.as_ref(),
+                    Arc::clone(&self.store),
                     &runtime_cache,
                 )
                 .await;
@@ -7289,6 +7818,107 @@ impl JobManager {
                 built,
                 built_files = ?built_file_ids,
                 "fragment indexing pass finished"
+            );
+        }
+    }
+
+    /// Fill cold subtitle sources only while this node is idle. The cluster
+    /// lease fences competing discovery passes; the request store still owns
+    /// exact per-stamp de-duplication with a viewer's foreground enqueue.
+    pub(crate) async fn discover_subtitle_sources(
+        self: &Arc<Self>,
+        transcode: Arc<TranscodeManager>,
+    ) {
+        const BACKFILL_PER_TICK: i64 = 8;
+        if !self.subtitle_source_queue_enabled().await
+            || !setting_enabled(
+                self.store
+                    .get_setting(keys::SUBTITLE_BACKFILL)
+                    .await
+                    .unwrap_or(None),
+            )
+            || !transcode.pretranscode_worker_idle()
+            || !self.may_run_cluster_jobs().await
+        {
+            return;
+        }
+        let lease = match self
+            .acquire_job("media:subtitle-source:backfill".to_owned())
+            .await
+        {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "acquiring subtitle-source backfill lease");
+                return;
+            }
+        };
+        let lost = lease.loss_token();
+        let now = clock_ms();
+        let candidates = self
+            .store
+            .subtitle_backfill_candidates(i64::MAX, i64::MAX, now, BACKFILL_PER_TICK)
+            .await;
+        let pipeline_version = subtitle_source_pipeline_version().await;
+        let mut enqueued = 0_i64;
+        let mut considered = 0_i64;
+        match candidates {
+            Ok(candidates) => {
+                for candidate in candidates {
+                    if lost.is_cancelled() || !transcode.pretranscode_worker_idle() {
+                        break;
+                    }
+                    considered += 1;
+                    let file = match self.store.get_file(candidate.file_id).await {
+                        Ok(Some(file))
+                            if file.size == candidate.source_size
+                                && file.mtime == candidate.source_mtime =>
+                        {
+                            file
+                        }
+                        _ => continue,
+                    };
+                    if crate::subtitle_source::is_mpegts_container(&file) {
+                        continue;
+                    }
+                    let stamp = SubtitleSourceStamp {
+                        file_id: file.id,
+                        source_size: file.size,
+                        source_mtime: file.mtime,
+                        pipeline_version: pipeline_version.clone(),
+                    };
+                    match self
+                        .store
+                        .enqueue_or_promote_subtitle_source(&stamp, "normal", clock_ms())
+                        .await
+                    {
+                        Ok(Some(request)) if request.state == "queued" => {
+                            enqueued += 1;
+                            self.subtitle_backfill_enqueued_process
+                                .fetch_add(1, Ordering::Relaxed);
+                            crate::telemetry::record_subtitle_source(
+                                crate::telemetry::SubtitleSourceMetric::RequestBackground,
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(
+                            file_id = file.id,
+                            %error,
+                            "enqueuing subtitle-source backfill"
+                        ),
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error, "discovering subtitle-source backfill"),
+        }
+        if let Err(error) = lease.release().await {
+            tracing::warn!(%error, "releasing subtitle-source backfill lease");
+        }
+        if considered > 0 {
+            tracing::info!(
+                considered,
+                enqueued,
+                "subtitle-source backfill pass finished"
             );
         }
     }
@@ -7762,6 +8392,421 @@ impl JobManager {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn resolve_subtitle_source_request(
+        &self,
+        request: &AnalysisRequest,
+        node_id: &str,
+        file: &MediaFile,
+        runtime_cache: &Path,
+        preempt_when_busy: Option<&TranscodeManager>,
+        stop: &CancellationToken,
+        lost: &CancellationToken,
+    ) -> Result<(), AnalysisResolutionError> {
+        if request.force_rebuild
+            || !request.video_identity.is_empty()
+            || !request.target_node_id.is_empty()
+            || request.pipeline_version != subtitle_source_pipeline_version().await
+        {
+            return Err(AnalysisResolutionError::Terminal(
+                "pipeline_version_unavailable",
+            ));
+        }
+        if !self.subtitle_source_queue_enabled().await
+            || !crate::subtitle_source::enabled(self.store.as_ref()).await
+        {
+            return Err(AnalysisResolutionError::Retry {
+                code: "pipeline_version_unavailable",
+                charge_attempt: false,
+            });
+        }
+        if crate::subtitle_source::is_mpegts_container(file) {
+            return Err(AnalysisResolutionError::Terminal("stored_probe_invalid"));
+        }
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        self.update_analysis_progress(
+            &request.request_id,
+            &request.target_node_id,
+            "hashing",
+            0,
+            0,
+            0,
+        );
+        if !self
+            .store
+            .record_analysis_request_phase(request, "hashing", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        let memo = match crate::fragment_index_cluster::inspect_source(file).await {
+            Ok(version) => self
+                .store
+                .fragment_index_source(node_id, file.id, &version)
+                .await
+                .ok()
+                .flatten(),
+            Err(_) => None,
+        };
+        let progress = |bytes| {
+            self.update_analysis_progress(
+                &request.request_id,
+                &request.target_node_id,
+                "hashing",
+                bytes,
+                0,
+                0,
+            );
+        };
+        let attested = tokio::select! {
+            () = lost.cancelled() => return Err(AnalysisResolutionError::ClaimLost),
+            result = tokio::time::timeout(
+                Duration::from_secs(10 * 60),
+                crate::fragment_index_cluster::attest_source(node_id, file, memo.as_ref(), &progress)
+            ) => match result {
+                Ok(Ok(attested)) => attested,
+                Ok(Err(_)) => return Err(AnalysisResolutionError::Retry {
+                    code: "source_attestation_failed",
+                    charge_attempt: true,
+                }),
+                Err(_) => return Err(AnalysisResolutionError::Retry {
+                    code: "source_attestation_timeout",
+                    charge_attempt: true,
+                }),
+            },
+        };
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            return Err(AnalysisResolutionError::Terminal("source_superseded"));
+        }
+        let raw = tokio::select! {
+            () = lost.cancelled() => return Err(AnalysisResolutionError::ClaimLost),
+            result = crate::ffmpeg::held_source_index_probe_json(&attested.handle) => result
+                .map_err(|_| AnalysisResolutionError::Terminal("stored_probe_invalid"))?,
+        };
+        let tracks = crate::subtitle_ride_along::eligible_tracks_from_probe(&raw);
+        let rows = self
+            .store
+            .list_subtitle_source_publications(file.id, file.size, file.mtime)
+            .await
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_catalog_read_failed",
+                charge_attempt: true,
+            })?;
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|row| row.source_attestation == attested.observation.source_sha256)
+            .collect();
+        let result_key = format!(
+            "subtitle-source:{}:{}:{}:{}",
+            file.id, file.size, file.mtime, request.pipeline_version
+        );
+        if subtitle_source_covered(&tracks, &rows) {
+            tracing::info!(
+                file_id = file.id,
+                "subtitle_source request already covered; no source read"
+            );
+            self.complete_subtitle_source_request(request, node_id, &result_key, stop)
+                .await?;
+            return Ok(());
+        }
+        let gate =
+            crate::subtitle_ride_along::RideAlongGate::open(Arc::clone(&self.store), runtime_cache)
+                .await
+                .ok_or(AnalysisResolutionError::Retry {
+                    code: "source_unavailable",
+                    charge_attempt: true,
+                })?;
+        let plan =
+            crate::subtitle_ride_along::plan_tracks(&gate, file.id, &attested.handle, &tracks)
+                .await;
+        let Some(plan) = plan else {
+            if tracks.is_empty() {
+                self.complete_subtitle_source_request(request, node_id, &result_key, stop)
+                    .await?;
+                return Ok(());
+            }
+            // A local pass may have committed its manifest before the
+            // replicated publication writes, or a migration may introduce
+            // the publication table after that manifest. Reassert only
+            // verified, locally extracted rows instead of rereading media.
+            let root = crate::subtitle_source::store_root(runtime_cache);
+            let _ = crate::subtitle_ride_along::publish_existing_manifest_rows(
+                self.store.as_ref(),
+                node_id,
+                &root,
+                file.id,
+                &attested.handle,
+                &attested.observation.source_sha256,
+            )
+            .await;
+            if let Ok(rows) = self
+                .store
+                .list_subtitle_source_publications(file.id, file.size, file.mtime)
+                .await
+            {
+                let rows: Vec<_> = rows
+                    .into_iter()
+                    .filter(|row| row.source_attestation == attested.observation.source_sha256)
+                    .collect();
+                if subtitle_source_covered(&tracks, &rows) {
+                    self.complete_subtitle_source_request(request, node_id, &result_key, stop)
+                        .await?;
+                    return Ok(());
+                }
+            }
+            // A concurrently running local pass may hold the file claim;
+            // retry after its ordinary backoff. An old failed ride latch or
+            // an unreadable manifest is also possible, so charge the attempt
+            // rather than keeping an immortal queued row.
+            return Err(AnalysisResolutionError::Retry {
+                code: "queue_full_or_busy",
+                charge_attempt: true,
+            });
+        };
+        let stage = plan.stage().to_owned();
+        let track_count = plan.tracks().len();
+        let pgs_count = tracks
+            .iter()
+            .filter(|track| {
+                plan.tracks().contains(&track.ordinal)
+                    && track.kind == crate::subtitle_ride_along::ProbedKind::Pgs
+            })
+            .count();
+        let text_count = track_count.saturating_sub(pgs_count);
+        self.update_analysis_subtitle_tracks(
+            &request.request_id,
+            &request.target_node_id,
+            pgs_count,
+            text_count,
+            0,
+        );
+        self.update_analysis_progress(
+            &request.request_id,
+            &request.target_node_id,
+            "subtitle_source",
+            0,
+            0,
+            0,
+        );
+        if !self
+            .store
+            .record_analysis_request_phase(request, "staged", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        let meter = || {
+            self.update_analysis_subtitle_tracks(
+                &request.request_id,
+                &request.target_node_id,
+                pgs_count,
+                text_count,
+                crate::subtitle_ride_along::stage_bytes(&stage),
+            );
+        };
+        let started = Instant::now();
+        tracing::info!(
+            file_id = file.id,
+            node_id,
+            pgs_count,
+            text_count,
+            "subtitle_source job reading source"
+        );
+        let pending = run_subtitle_source_pass(
+            plan,
+            &attested.handle,
+            runtime_cache,
+            lost,
+            if request.priority == "foreground" {
+                None
+            } else {
+                preempt_when_busy
+            },
+            &meter,
+        )
+        .await?;
+        crate::telemetry::record_subtitle_source(crate::telemetry::SubtitleSourceMetric::JobBytes(
+            file.size.max(0) as u64,
+        ));
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            return Err(AnalysisResolutionError::Terminal("source_superseded"));
+        }
+        let current = self
+            .store
+            .get_file(file.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
+        if !current {
+            return Err(AnalysisResolutionError::Terminal("source_superseded"));
+        }
+        if !self
+            .store
+            .record_analysis_request_phase(request, "publishing", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        let harvest = pending.judge().await;
+        let mut representation_count = 0_usize;
+        for outcome in harvest.outcomes() {
+            for representation in &outcome.representations {
+                representation_count += 1;
+                let event = match representation.verdict {
+                    crate::subtitle_source::Verdict::Kept => {
+                        crate::telemetry::SubtitleSourceMetric::VerdictKept
+                    }
+                    crate::subtitle_source::Verdict::Empty => {
+                        crate::telemetry::SubtitleSourceMetric::VerdictEmpty
+                    }
+                    crate::subtitle_source::Verdict::Malformed => {
+                        crate::telemetry::SubtitleSourceMetric::VerdictMalformed
+                    }
+                    crate::subtitle_source::Verdict::Transient => {
+                        crate::telemetry::SubtitleSourceMetric::VerdictTransient
+                    }
+                };
+                crate::telemetry::record_subtitle_source(event);
+            }
+        }
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            return Err(AnalysisResolutionError::Terminal("source_superseded"));
+        }
+        let published = harvest
+            .publish_guarded_worker(
+                self.store.as_ref(),
+                node_id,
+                &attested.observation.source_sha256,
+                lost,
+                request,
+            )
+            .await;
+        let receipt = match published {
+            Ok(receipt) => receipt,
+            Err(_) if lost.is_cancelled() => return Err(AnalysisResolutionError::ClaimLost),
+            Err(_) => {
+                return Err(AnalysisResolutionError::Retry {
+                    code: "queue_write_failed",
+                    charge_attempt: true,
+                });
+            }
+        };
+        if lost.is_cancelled() {
+            if let Err(error) = receipt.rollback(self.store.as_ref()).await {
+                tracing::error!(file_id = file.id, %error, "compensating lost subtitle-source publication");
+            }
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        if !self
+            .store
+            .record_analysis_request_phase(request, "publishing", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            if let Err(error) = receipt.rollback(self.store.as_ref()).await {
+                tracing::error!(file_id = file.id, %error, "compensating lost subtitle-source publication");
+            }
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        tracing::info!(
+            file_id = file.id,
+            node_id,
+            pgs_count,
+            text_count,
+            representation_count,
+            bytes_read = file.size.max(0),
+            elapsed_ms = started.elapsed().as_millis(),
+            "subtitle_source job published"
+        );
+        match self
+            .complete_subtitle_source_request(request, node_id, &result_key, stop)
+            .await
+        {
+            Ok(()) => {
+                receipt.commit().await;
+                Ok(())
+            }
+            Err(error) => {
+                if let Err(rollback_error) = receipt.rollback(self.store.as_ref()).await {
+                    tracing::error!(file_id = file.id, %rollback_error, "compensating unsettled subtitle-source publication");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn complete_subtitle_source_request(
+        &self,
+        request: &AnalysisRequest,
+        _node_id: &str,
+        result_key: &str,
+        stop: &CancellationToken,
+    ) -> Result<(), AnalysisResolutionError> {
+        stop.cancel();
+        if !self
+            .store
+            .complete_analysis_request(request, result_key, clock_ms())
+            .await
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "queue_write_failed",
+                charge_attempt: true,
+            })?
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        self.analysis_metrics.publication("subtitle_source", false);
+        crate::store_result::observe(
+            crate::store_result::Operation::RecordPublishedAnalysisPhase,
+            crate::store_result::Discard::BestEffort,
+            self.store
+                .record_analysis_request_phase(request, "published", None, clock_ms())
+                .await,
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn resolve_analysis_request(
         &self,
         request: &AnalysisRequest,
@@ -7801,6 +8846,19 @@ impl JobManager {
             file.size.max(0) as u64,
             file.duration_ms.unwrap_or_default(),
         );
+        if request.component == "subtitle_source" {
+            return self
+                .resolve_subtitle_source_request(
+                    request,
+                    node_id,
+                    &file,
+                    transcode.runtime_cache_dir(),
+                    Some(transcode),
+                    stop,
+                    lost,
+                )
+                .await;
+        }
         if request.component == "skip_markers" {
             if request.pipeline_version != crate::http::stream::CHAPTER_ANNOTATION_VERSION {
                 return Err(AnalysisResolutionError::Terminal(
@@ -8874,7 +9932,7 @@ impl JobManager {
         let report_progress = self.index_pass_reporter(&job.cache_key, &job.target_node_id);
         // Asked per job: the switch, the self-test and the filesystem, now.
         let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
-            self.store.as_ref(),
+            Arc::clone(&self.store),
             transcode.runtime_cache_dir(),
         )
         .await;
@@ -9782,6 +10840,70 @@ mod tests {
     };
 
     #[test]
+    fn subtitle_source_job_argv_has_no_index_pipe_and_ends_in_null_sentinel() {
+        let temp = tempfile::tempdir().expect("stage root");
+        let source = temp.path().join("movie.mkv");
+        std::fs::write(&source, b"source").expect("source");
+        let stamp = crate::fragment_index_cluster::source_stamp(
+            &std::fs::metadata(&source).expect("metadata"),
+        );
+        let plan =
+            crate::subtitle_ride_along::RideAlongPlan::standalone(temp.path(), 7, stamp, vec![0])
+                .expect("plan");
+        let argv = subtitle_source_argv("/dev/fd/3", &plan);
+        assert!(argv.iter().all(|arg| arg != "pipe:1"));
+        assert!(argv.last().is_some_and(|arg| arg.ends_with("[f=null]-")));
+        assert!(argv.windows(2).any(|pair| pair == ["-i", "/dev/fd/3"]));
+    }
+
+    #[test]
+    fn subtitle_source_full_extracted_coverage_is_a_no_op_before_spawning() {
+        use plurx_core::store::SubtitleSourcePublication;
+        let tracks = [
+            crate::subtitle_ride_along::ProbedTrack {
+                ordinal: 0,
+                kind: crate::subtitle_ride_along::ProbedKind::Text,
+                stream_index: 1,
+            },
+            crate::subtitle_ride_along::ProbedTrack {
+                ordinal: 1,
+                kind: crate::subtitle_ride_along::ProbedKind::Pgs,
+                stream_index: 2,
+            },
+        ];
+        let mut row = SubtitleSourcePublication {
+            file_id: 7,
+            source_size: 10,
+            source_mtime: 1,
+            source_attestation: "a".repeat(64),
+            node_id: "peer".to_owned(),
+            ordinal: 0,
+            kind: "text".to_owned(),
+            format: "webvtt".to_owned(),
+            verdict: "kept".to_owned(),
+            attempts: 1,
+            origin: "hydrated".to_owned(),
+            sha256: "b".repeat(64),
+            bytes: 5,
+            published_at_ms: 1,
+        };
+        assert!(!subtitle_source_covered(&tracks, &[row.clone()]));
+        row.origin = "extracted".to_owned();
+        let text_row = row.clone();
+        row.ordinal = 1;
+        row.kind = "pgs".to_owned();
+        row.format = "sup".to_owned();
+        row.verdict = "transient".to_owned();
+        row.attempts = i64::from(crate::subtitle_source::TRANSIENT_ATTEMPTS) - 1;
+        assert!(!subtitle_source_covered(
+            &tracks,
+            &[text_row.clone(), row.clone()]
+        ));
+        row.attempts += 1;
+        assert!(subtitle_source_covered(&tracks, &[text_row, row]));
+    }
+
+    #[test]
     fn field_order_backfill_recovers_selected_video_and_marks_missing_or_invalid_unknown() {
         let stored = r#"{
             "streams": [
@@ -10249,8 +11371,8 @@ mod tests {
         ));
     }
     use plurx_core::store::{
-        DvConversionMode, DvConversionStore, LibraryStore, MediaStore, PlaybackTelemetryStore,
-        SettingsStore, SqliteStore,
+        ClusterFragmentIndexStore, DvConversionMode, DvConversionStore, LibraryStore, MediaStore,
+        PlaybackTelemetryStore, SettingsStore, SqliteStore,
     };
     use plurx_core::transcode::Pipeline;
     use serde_json::json;
@@ -10387,6 +11509,460 @@ mod tests {
 
     fn manager(store: Arc<dyn Store>, artwork: &std::path::Path) -> Arc<JobManager> {
         Arc::new(JobManager::new(store, artwork.to_path_buf()))
+    }
+
+    async fn seed_subtitle_backfill(store: &SqliteStore, media: &Path, count: usize) -> Vec<i64> {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Subtitle backfill".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let mut ids = Vec::new();
+        for n in 0..count {
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("Subtitle movie {n}"),
+                    year: Some(2026),
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            let source = media.join(format!("movie-{n}.mkv"));
+            std::fs::write(&source, b"source").expect("source");
+            let id = store
+                .upsert_file(
+                    item,
+                    source.to_str().expect("path"),
+                    6,
+                    1,
+                    &ProbeResult {
+                        container: Some("mkv".to_owned()),
+                        subtitle_streams: vec![plurx_core::domain::SubtitleStream {
+                            index: 0,
+                            codec: "subrip".to_owned(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("file");
+            ids.push(id);
+        }
+        ids
+    }
+
+    async fn enable_subtitle_backfill(store: &SqliteStore) {
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+            keys::SUBTITLE_BACKFILL,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_workers_allow_one_foreground_self_claim_and_one_subtitle_producer() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(7, &[Sub::Srt]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Foreground subtitles".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: vec![fixture.dir.path().to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Cold subtitle".to_owned(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let file_id = store
+            .upsert_file(
+                item,
+                fixture.source.to_str().expect("source path"),
+                fixture.file.size,
+                fixture.file.mtime,
+                &ProbeResult {
+                    container: Some("mkv".to_owned()),
+                    subtitle_streams: vec![plurx_core::domain::SubtitleStream {
+                        index: 0,
+                        codec: "subrip".to_owned(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("catalog file");
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let _busy = transcode.test_mark_live_waiting();
+        let (request, _) = jobs
+            .request_file_analysis(file_id, false, "subtitle_source", "playback")
+            .await
+            .expect("one durable foreground request");
+        assert_eq!(request.priority, "foreground");
+        let (first, second) = tokio::join!(
+            jobs.self_claim_subtitle_source(&request.request_id, work.path()),
+            jobs.self_claim_subtitle_source(&request.request_id, work.path())
+        );
+        assert_eq!((first as u8) + (second as u8), 1, "one owner runs");
+        let rows = store.analysis_requests(20).await.expect("requests");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, "ready");
+        let publications = store
+            .list_subtitle_source_publications(file_id, fixture.file.size, fixture.file.mtime)
+            .await
+            .expect("publications");
+        assert!(publications.iter().any(|row| {
+            row.origin == "extracted" && row.ordinal == 0 && row.format == "webvtt"
+        }));
+        let directory = crate::subtitle_source::file_dir(
+            &crate::subtitle_source::store_root(work.path()),
+            file_id,
+        );
+        assert!(directory
+            .join(crate::subtitle_source::MANIFEST_NAME)
+            .is_file());
+        let finished = jobs
+            .finished_analysis_rows
+            .lock()
+            .expect("finished progress");
+        let progress = finished
+            .iter()
+            .find(|row| row.job_id == request.request_id)
+            .expect("subtitle progress");
+        assert_eq!((progress.text_tracks, progress.pgs_tracks), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn learner_never_claims_a_foreground_subtitle_source_request() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = tempfile::tempdir().expect("media");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        let file_id = seed_subtitle_backfill(store.as_ref(), media.path(), 1).await[0];
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+        let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
+            store.clone(),
+            artwork.path().to_owned(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "learner".to_owned(),
+            MovableJobAuthority::learner(),
+        ));
+        let (request, _) = jobs
+            .request_file_analysis(file_id, false, "subtitle_source", "playback")
+            .await
+            .expect("request");
+        assert!(
+            !jobs
+                .self_claim_subtitle_source(&request.request_id, work.path())
+                .await
+        );
+        let rows = store.analysis_requests(10).await.expect("requests");
+        assert_eq!(rows[0].state, "queued");
+    }
+
+    #[tokio::test]
+    async fn full_subtitle_coverage_settles_ready_without_spawning_a_pass() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+        use plurx_core::store::SubtitleSourcePublication;
+
+        let fixture = fixture(10, &[Sub::Srt]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        let attestation =
+            crate::fragment_index_cluster::attest_source("test-node", &file, None, &|_| {})
+                .await
+                .expect("sampled source digest")
+                .observation
+                .source_sha256;
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+        store
+            .upsert_subtitle_source_publication(&SubtitleSourcePublication {
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_attestation: attestation,
+                node_id: "peer".to_owned(),
+                ordinal: 0,
+                kind: "text".to_owned(),
+                format: "webvtt".to_owned(),
+                verdict: "empty".to_owned(),
+                attempts: 1,
+                origin: "extracted".to_owned(),
+                sha256: String::new(),
+                bytes: 0,
+                published_at_ms: clock_ms(),
+            })
+            .await
+            .expect("coverage");
+        let jobs = manager(store.clone(), artwork.path());
+        let (request, _) = jobs
+            .request_file_analysis(file.id, false, "subtitle_source", "playback")
+            .await
+            .expect("request");
+        assert!(
+            jobs.self_claim_subtitle_source(&request.request_id, work.path())
+                .await
+        );
+        assert_eq!(
+            store.analysis_requests(10).await.expect("requests")[0].state,
+            "ready"
+        );
+        assert!(
+            !crate::subtitle_source::store_root(work.path()).exists(),
+            "the no-op never opens a stage or ffmpeg child"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_original_complete_publisher_and_request_third_ordinal_recovers_through_repair()
+    {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(9, &[Sub::Srt, Sub::Srt, Sub::Srt]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+        let jobs = manager(store.clone(), artwork.path());
+        let (initial, _) = jobs
+            .request_file_analysis(file.id, false, "subtitle_source", "playback")
+            .await
+            .expect("initial request");
+        assert!(
+            jobs.self_claim_subtitle_source(&initial.request_id, work.path())
+                .await
+        );
+        let stamp = SubtitleSourceStamp {
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            pipeline_version: subtitle_source_pipeline_version().await,
+        };
+        let before = store
+            .list_subtitle_source_publications(file.id, file.size, file.mtime)
+            .await
+            .expect("original publications");
+        assert!(before
+            .iter()
+            .any(|row| row.ordinal == 2 && row.origin == "extracted"));
+        store
+            .delete_subtitle_source_publications(file.id, jobs.coordinator.node_id())
+            .await
+            .expect("publisher removed");
+        let dir = crate::subtitle_source::file_dir(
+            &crate::subtitle_source::store_root(work.path()),
+            file.id,
+        );
+        std::fs::remove_dir_all(dir).expect("publisher files removed");
+        assert!(store
+            .retire_subtitle_source_ready(&stamp, clock_ms())
+            .await
+            .expect("retire lost publication"));
+        let (repair, _) = jobs
+            .request_file_analysis(file.id, false, "subtitle_source", "playback")
+            .await
+            .expect("repair request for missing third ordinal");
+        assert_ne!(repair.request_id, initial.request_id);
+        assert!(
+            jobs.self_claim_subtitle_source(&repair.request_id, work.path())
+                .await
+        );
+        let after = store
+            .list_subtitle_source_publications(file.id, file.size, file.mtime)
+            .await
+            .expect("repaired publications");
+        assert!(after
+            .iter()
+            .any(|row| row.ordinal == 2 && row.origin == "extracted"));
+    }
+
+    #[tokio::test]
+    async fn normal_subtitle_job_yields_uncharged_to_playback_but_foreground_is_not_preempted() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(8, &[Sub::Pgs]);
+        let source = std::fs::File::open(&fixture.source).expect("source");
+        let stamp =
+            crate::fragment_index_cluster::source_stamp(&source.metadata().expect("metadata"));
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let transcode = TranscodeManager::new(
+            store,
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let _busy = transcode.test_mark_live_waiting();
+        let lost = CancellationToken::new();
+        for _ in 0..3 {
+            let plan = crate::subtitle_ride_along::RideAlongPlan::standalone(
+                work.path(),
+                8,
+                stamp,
+                vec![0],
+            )
+            .expect("normal plan");
+            assert!(matches!(
+                run_subtitle_source_pass(
+                    plan,
+                    &source,
+                    work.path(),
+                    &lost,
+                    Some(&transcode),
+                    &|| {},
+                )
+                .await,
+                Err(AnalysisResolutionError::Retry {
+                    code: "foreground_preempted",
+                    charge_attempt: false,
+                })
+            ));
+        }
+        let plan =
+            crate::subtitle_ride_along::RideAlongPlan::standalone(work.path(), 8, stamp, vec![0])
+                .expect("foreground plan");
+        assert!(
+            run_subtitle_source_pass(plan, &source, work.path(), &lost, None, &|| {})
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn subtitle_backfill_enqueues_nothing_when_worker_is_busy() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = tempfile::tempdir().expect("media");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        seed_subtitle_backfill(store.as_ref(), media.path(), 1).await;
+        enable_subtitle_backfill(store.as_ref()).await;
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let _busy = transcode.test_mark_live_waiting();
+        jobs.discover_subtitle_sources(transcode).await;
+        assert!(store
+            .analysis_requests(20)
+            .await
+            .expect("requests")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn subtitle_backfill_lease_is_exclusive_and_pass_enqueues_at_most_eight() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = tempfile::tempdir().expect("media");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        let ids = seed_subtitle_backfill(store.as_ref(), media.path(), 10).await;
+        enable_subtitle_backfill(store.as_ref()).await;
+        let first = Arc::new(JobManager::new_with_scan_prune_percent(
+            store.clone(),
+            artwork.path().to_owned(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "first".to_owned(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+        ));
+        let second = Arc::new(JobManager::new_with_scan_prune_percent(
+            store.clone(),
+            artwork.path().to_owned(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "second".to_owned(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+        ));
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let lease = first
+            .acquire_job("media:subtitle-source:backfill".to_owned())
+            .await
+            .expect("lease")
+            .expect("first holder");
+        second
+            .discover_subtitle_sources(Arc::clone(&transcode))
+            .await;
+        assert!(store
+            .analysis_requests(20)
+            .await
+            .expect("requests")
+            .is_empty());
+        lease.release().await.expect("release");
+        second.discover_subtitle_sources(transcode).await;
+        let requests = store.analysis_requests(20).await.expect("requests");
+        assert_eq!(requests.len(), 8, "one pass admits at most eight sources");
+        let newest: std::collections::HashSet<_> = ids.into_iter().rev().take(8).collect();
+        assert!(requests
+            .iter()
+            .all(|request| newest.contains(&request.file_id)));
+        assert!(requests.iter().all(|request| {
+            request.component == "subtitle_source"
+                && request.priority == "normal"
+                && request.trigger == "background"
+                && !request.force_rebuild
+                && request.target_node_id.is_empty()
+        }));
     }
 
     #[test]
@@ -12068,12 +13644,20 @@ mod tests {
         // A peer that predates the fields still parses, as not riding.
         let mut value = serde_json::to_value(row(&jobs)).expect("json");
         value.as_object_mut().expect("object").remove("pgs_tracks");
+        value.as_object_mut().expect("object").remove("text_tracks");
         value
             .as_object_mut()
             .expect("object")
             .remove("pgs_bytes_written");
         let parsed: AnalysisProgress = serde_json::from_value(value).expect("old row");
-        assert_eq!((parsed.pgs_tracks, parsed.pgs_bytes_written), (0, 0));
+        assert_eq!(
+            (
+                parsed.pgs_tracks,
+                parsed.text_tracks,
+                parsed.pgs_bytes_written
+            ),
+            (0, 0, 0)
+        );
     }
 
     /// A file the indexer cannot index is asked once, not once per pass.
