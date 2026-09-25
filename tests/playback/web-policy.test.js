@@ -2355,17 +2355,21 @@ asyncTest("an Auto rung that did not attach says nothing", async () => {
 });
 
 // The remaining row 17 and row 18 sites live inside functions whose harness
-// would cost more than the assertion is worth — a cold-start `play()`, the
+// would cost more than the assertion is worth — the cold-start chrome setup,
 // subtitle menu, the PiP toggle, the two-second stats poll. What can still be
 // pinned from here is the thing a refactor would quietly drop: that each of
 // them leaves the player through the presenter and not through `toast`.
 test("every remaining row 17/18 site raises rather than toasts", () => {
   const sites = [
-    ["play", "degraded_notice", "That subtitle requires an SDR burn-in."],
+    ["presentPlayerChrome", "degraded_notice", "That subtitle requires an SDR burn-in."],
     ["setSub", "degraded_notice", "That subtitle requires an SDR burn-in."],
     ["togglePip", "degraded_notice", "Picture-in-picture did not start."],
     ["pollSessionHealth", "log_only", null],
   ];
+  assert.ok(
+    shippedSource("play").includes("presentPlayerChrome(attempt,decided,prepared,openIsAttached)"),
+    "play must present the new generation's chrome and its degraded notice",
+  );
   for (const [name, source, sentence] of sites) {
     const src = shippedSource(name);
     assert.ok(
