@@ -22,6 +22,10 @@ use std::io::{Seek, SeekFrom, Write};
 /// directory and every truncation of a valid archive.
 const MAX_FUZZ_BYTES: usize = 1024 * 1024;
 
+// One reusable input file per thread, as in `inspect_sup`. libFuzzer ends the
+// process with `exit()`, which does not run thread-local destructors, so the
+// last temporary file is left behind when a campaign ends; that is accepted,
+// as it is for `inspect_sup`.
 thread_local! {
     static INPUT: RefCell<tempfile::NamedTempFile> = RefCell::new(
         tempfile::NamedTempFile::new().expect("create reusable fuzz input")
@@ -43,7 +47,13 @@ fuzz_target!(|data: &[u8]| {
             return;
         }
         if let Ok(facts) = read_epub_facts(input.path()) {
-            let _ = format!("{facts:?}");
+            // Touch every field without formatting it: `Debug` on a cover of
+            // up to the reader's 12 MiB cap would spend the budget on
+            // formatting bytes rather than on the reader.
+            let _ = facts.title.as_ref().map(String::len);
+            let _ = facts.author.as_ref().map(String::len);
+            let _ = facts.identifier.as_ref().map(String::len);
+            let _ = facts.cover.as_ref().map(Vec::len);
         }
     });
 });

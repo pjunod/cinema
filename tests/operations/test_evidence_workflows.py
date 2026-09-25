@@ -152,68 +152,95 @@ class EvidenceWorkflowCase(unittest.TestCase):
     def test_parser_fuzzers_are_bounded_seeded_artifacted_and_gating(self) -> None:
         """P-02 M8: the four parser seams run nightly on the PGS campaign's terms.
 
-        Each target is a `[[bin]]` in the standalone fuzz crate with a seed
-        corpus committed beside it; the matrix job runs every one on the same
-        bounded budget, uploads its log and artefacts whatever happens, and
-        fails from the recorded outcome; and the campaign script prints
-        executions and corpus growth into the step summary so all five
-        campaigns are listed on one page.
+        Each target is a `[[bin]]` in fuzz/parsers/, a cargo-fuzz package of
+        its own with a seed corpus committed beside it; the matrix job runs
+        every one on the same bounded budget, uploads its log and artefacts
+        whatever happens, and fails from the recorded outcome; and the campaign
+        script writes executions and corpus growth into each job's step
+        summary, so the run's summary page lists all five campaigns. The PGS
+        package in fuzz/ must not depend on plurx-core: the PGS job builds it
+        under AddressSanitizer inside a 20-minute step budget, and compiling
+        plurx-core there would spend that budget on the parser targets' crate.
         """
         targets = ("fmp4_reader", "rpu_rewrite", "nfo_parse", "epub_facts")
-        manifest = self.read("fuzz/Cargo.toml")
+        manifest = self.read("fuzz/parsers/Cargo.toml")
         workflow = self.read(".github/workflows/validation-nightly.yml")
         campaign = self.read("scripts/fuzz-campaign")
         seeds = self.read("scripts/fuzz-seeds")
 
-        self.assertIn('plurx-core = { path = "../crates/plurx-core" }', manifest)
+        self.assertNotIn("plurx-core", self.read("fuzz/Cargo.toml"))
+        self.assertIn('name = "plurx-parser-fuzz"', manifest)
+        self.assertIn("cargo-fuzz = true", manifest)
+        self.assertIn('plurx-core = { path = "../../crates/plurx-core" }', manifest)
+        self.assertIn('dolby_vision = { path = "../../vendor/dolby_vision" }', manifest)
+        self.assertTrue((ROOT / "fuzz/parsers/Cargo.lock").is_file())
+        self.assertEqual(
+            self.read("fuzz/parsers/rust-toolchain.toml"),
+            self.read("fuzz/rust-toolchain.toml"),
+        )
         for target in targets:
             self.assertIn(f'name = "{target}"', manifest)
             self.assertIn(f'path = "fuzz_targets/{target}.rs"', manifest)
-            source = self.read(f"fuzz/fuzz_targets/{target}.rs")
+            self.assertFalse((ROOT / f"fuzz/fuzz_targets/{target}.rs").exists())
+            source = self.read(f"fuzz/parsers/fuzz_targets/{target}.rs")
             self.assertIn("#![no_main]", source)
             self.assertIn("fuzz_target!", source)
             self.assertIn("MAX_FUZZ_BYTES", source, f"{target} has no input bound")
-            corpus = ROOT / "fuzz/corpus" / target
+            corpus = ROOT / "fuzz/parsers/corpus" / target
             self.assertTrue(
                 any(path.is_file() for path in corpus.iterdir()) if corpus.is_dir() else False,
-                f"fuzz/corpus/{target} has no seeds; run scripts/fuzz-seeds",
+                f"fuzz/parsers/corpus/{target} has no seeds; run scripts/fuzz-seeds",
             )
             self.assertIn(target, seeds)
+        self.assertIn('CORPUS="$ROOT/fuzz/parsers/corpus"', seeds)
+        # Sliced threads would make the fMP4 seeds follow the host's CPU count.
+        self.assertIn("-threads 1", seeds)
 
         # The filesystem seam reads only its own tempfile (assessment F-build-13).
-        epub = self.read("fuzz/fuzz_targets/epub_facts.rs")
+        epub = self.read("fuzz/parsers/fuzz_targets/epub_facts.rs")
         self.assertIn("tempfile::NamedTempFile", epub)
         self.assertIn("read_epub_facts(input.path())", epub)
 
         parser = workflow.split("\n  parser-fuzz:\n", 1)[1].split("\n  ffmpeg8-pacing:\n", 1)[0]
         self.assertIn("target: [fmp4_reader, rpu_rewrite, nfo_parse, epub_facts]", parser)
         self.assertIn("fail-fast: false", parser)
+        self.assertIn("fuzz/parsers -> target", parser)
         self.assertIn("scripts/fuzz-seeds --check", parser)
         self.assertIn("scripts/fuzz-campaign ${{ matrix.target }} 900", parser)
         self.assertIn("continue-on-error: true", parser)
         self.assertIn("steps.campaign.outcome == 'failure'", parser)
-        self.assertIn("fuzz/artifacts", parser)
+        self.assertIn("fuzz/parsers/artifacts", parser)
         self.assertIn("target/validation/fuzz-${{ matrix.target }}.log", parser)
         self.assertIn("name: nightly-fuzz-${{ matrix.target }}-evidence", parser)
         self.assertIn("exit 1", parser)
         self.assertNotIn("needs:", parser)
 
         # Five campaigns on one summary page: the PGS job reports through the
-        # same script, and the script records executions and corpus growth.
+        # same script with its recorded outcome, and the script records
+        # executions and corpus growth.
         self.assertIn(
-            "scripts/fuzz-campaign --summarize inspect_sup target/validation/pgs-fuzz.log",
+            "scripts/fuzz-campaign --summarize inspect_sup target/validation/pgs-fuzz.log "
+            "${{ steps.pgs_fuzz.outcome == 'failure' && 1 || 0 }}",
             workflow,
         )
+        self.assertIn(
+            'fuzz run --fuzz-dir fuzz/parsers "$TARGET" "fuzz/parsers/corpus/$TARGET"',
+            campaign,
+        )
+        self.assertIn("fuzz/parsers/artifacts", campaign)
         self.assertIn("-max_total_time=", campaign)
         self.assertIn("-print_final_stats=1", campaign)
+        self.assertIn("stat::number_of_executed_units", campaign)
         self.assertIn("Done [0-9]+ runs", campaign)
+        self.assertIn('STATUS="${PIPESTATUS[0]}"', campaign)
         self.assertIn("GITHUB_STEP_SUMMARY", campaign)
         self.assertIn("| Target | Executions | Corpus before → after | Outcome |", campaign)
 
     def test_nightly_deep_fuzz_and_mutation_jobs_are_independent(self) -> None:
         workflow = self.read(".github/workflows/validation-nightly.yml")
         deep = workflow.split("\n  deep-validation:\n", 1)[1].split("\n  pgs-fuzz:\n", 1)[0]
-        fuzz = workflow.split("\n  pgs-fuzz:\n", 1)[1].split("\n  mutation:\n", 1)[0]
+        fuzz = workflow.split("\n  pgs-fuzz:\n", 1)[1].split("\n  parser-fuzz:\n", 1)[0]
+        parser = workflow.split("\n  parser-fuzz:\n", 1)[1].split("\n  mutation:\n", 1)[0]
         mutation = workflow.split("\n  mutation:\n", 1)[1]
 
         self.assertIn("run: make validate-nightly", deep)
@@ -221,6 +248,8 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertNotIn("cargo-mutants", deep)
         self.assertIn("cargo-fuzz", fuzz)
         self.assertNotIn("needs:", fuzz)
+        self.assertIn("cargo-fuzz", parser)
+        self.assertNotIn("needs:", parser)
         self.assertIn("cargo-mutants", mutation)
         self.assertNotIn("needs:", mutation)
 

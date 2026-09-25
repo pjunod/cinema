@@ -118,7 +118,7 @@ jobs:
           retention-days: 14
       - name: Summarize the PGS campaign
         if: always()
-        run: scripts/fuzz-campaign --summarize inspect_sup target/validation/pgs-fuzz.log
+        run: scripts/fuzz-campaign --summarize inspect_sup target/validation/pgs-fuzz.log ${{ steps.pgs_fuzz.outcome == 'failure' && 1 || 0 }}
       - name: Fail when the PGS fuzzer finds a crash
         if: always() && steps.pgs_fuzz.outcome == 'failure'
         run: |
@@ -128,12 +128,15 @@ jobs:
 
   # The four parser seams of docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md
   # §3.6, on the same bounded budget and artefact upload as the PGS campaign.
+  # They are their own cargo-fuzz package, fuzz/parsers/, so the PGS job above
+  # never compiles plurx-core under AddressSanitizer inside its step budget.
   # One matrix job rather than four copies: the toolchain and cargo-fuzz install
   # are identical, and `fail-fast: false` keeps one target's finding from
-  # cancelling the other three. `scripts/fuzz-campaign` prints executions and
-  # corpus growth into the step summary so a target that has stopped finding new
-  # edges is visible without opening its log; ten minutes per target is a
-  # budget, not coverage evidence.
+  # cancelling the other three. `scripts/fuzz-campaign` writes executions and
+  # corpus growth as a one-row table into each job's own step summary, and the
+  # run's summary page lists all five campaigns under their job headings, so a
+  # target that has stopped finding new edges is visible without opening its
+  # log; fifteen minutes per target is a budget, not coverage evidence.
   parser-fuzz:
     name: bounded ${{ matrix.target }} fuzz campaign
     runs-on: [self-hosted, Linux, X64, lab, general]
@@ -153,8 +156,7 @@ jobs:
         with:
           key: nightly-parser-fuzz
           workspaces: |
-            . -> target
-            fuzz -> target
+            fuzz/parsers -> target
       - name: Install the fuzz runner
         run: |
           rustup toolchain install nightly-2026-08-01 --profile minimal
@@ -174,7 +176,7 @@ jobs:
           name: nightly-fuzz-${{ matrix.target }}-evidence
           path: |
             target/validation/fuzz-${{ matrix.target }}.log
-            fuzz/artifacts
+            fuzz/parsers/artifacts
           if-no-files-found: warn
           retention-days: 14
       - name: Fail when the ${{ matrix.target }} fuzzer finds a crash

@@ -4,31 +4,31 @@
 # fmp4_reader, rpu_rewrite, nfo_parse and epub_facts. inspect_sup's corpus is
 # hand-built and is not touched.
 #
-# The seeds are committed under fuzz/corpus/<target>/ so a campaign starts
-# from real structure instead of discovering `ftyp` one byte at a time. They
-# are generated, never library media: the fMP4 stream is a one-second lavfi
-# test pattern through libx264, the RPU is the repository's own Profile 7
+# The seeds are committed under fuzz/parsers/corpus/<target>/ so a campaign
+# starts from real structure instead of discovering `ftyp` one byte at a time.
+# They are generated, never library media: the fMP4 stream is a one-second
+# lavfi test pattern through libx264, the RPU is the repository's own Profile 7
 # fixture (tests/playback/dv-p7-rpu.hex), the NFO sidecars are the parser's
 # own test fixtures, and the EPUBs are built here from a handful of strings.
 #
 # Deterministic where the tools allow it (fixed lavfi input, fixed encoder
-# settings, fixed zip timestamps); an x264 build change can move a few bytes
-# in the fMP4 seeds, which is why regeneration is a PR that says which build
-# it used, not a step of the nightly.
+# settings on one thread, fixed zip timestamps); an x264 build change can move
+# a few bytes in the fMP4 seeds, which is why regeneration is a PR that says
+# which build it used, not a step of the nightly.
 #
-#   scripts/fuzz-seeds            # writes fuzz/corpus/{fmp4_reader,rpu_rewrite,nfo_parse,epub_facts}
+#   scripts/fuzz-seeds            # writes fuzz/parsers/corpus/{fmp4_reader,rpu_rewrite,nfo_parse,epub_facts}
 #   scripts/fuzz-seeds --check    # exits 1 if any seed directory is empty
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CORPUS="$ROOT/fuzz/corpus"
+CORPUS="$ROOT/fuzz/parsers/corpus"
 TARGETS=(fmp4_reader rpu_rewrite nfo_parse epub_facts)
 
 if [[ "${1:-}" == "--check" ]]; then
   status=0
   for target in "${TARGETS[@]}"; do
     if [[ -z "$(ls -A "$CORPUS/$target" 2>/dev/null)" ]]; then
-      echo "fuzz/corpus/$target is empty; run scripts/fuzz-seeds" >&2
+      echo "fuzz/parsers/corpus/$target is empty; run scripts/fuzz-seeds" >&2
       status=1
     fi
   done
@@ -45,11 +45,13 @@ done
 
 # One second of a 64x64 test pattern, fragmented at every keyframe with a
 # 12-frame GOP, so the stream is ftyp, moov and then two (moof, mdat) pairs.
+# `-threads 1` because `-tune zerolatency` turns on sliced threads, and the
+# slice count, and so the bytes, would otherwise follow the host's CPU count.
 STREAM="$(mktemp)"
 trap 'rm -f "$STREAM"' EXIT
 "$FFMPEG" -hide_banner -loglevel error -nostdin \
   -f lavfi -i "testsrc2=size=64x64:rate=24" -t 1 \
-  -c:v libx264 -preset ultrafast -tune zerolatency -g 12 -keyint_min 12 \
+  -c:v libx264 -preset ultrafast -tune zerolatency -threads 1 -g 12 -keyint_min 12 \
   -sc_threshold 0 -bf 0 -pix_fmt yuv420p \
   -movflags frag_keyframe+empty_moov+default_base_moof \
   -f mp4 pipe:1 > "$STREAM"
@@ -126,6 +128,7 @@ write("fmp4_reader", "empty", b"\x00")
 rpu_hex = (root / "tests/playback/dv-p7-rpu.hex").read_text().strip()
 rpu = bytes.fromhex(rpu_hex)
 assert rpu[0] == 0x7C, "the RPU fixture should start with a type-62 NAL header"
+assert rpu[-1] == 0x80, "the RPU fixture should end with its 0x80 terminator"
 vcl = bytes([0x02, 0x01]) + bytes(range(32))  # a type-1 slice with a fake payload
 sei = bytes([0x4E, 0x01]) + b"\x05\x04abcd\x80"  # a prefix SEI
 
@@ -138,10 +141,18 @@ write("rpu_rewrite", "one-rpu-4byte", b"\x00" + prefixed(4, rpu))
 write("rpu_rewrite", "vcl-then-rpu-4byte", b"\x01" + prefixed(4, vcl, rpu))
 write("rpu_rewrite", "sei-vcl-rpu-4byte", b"\x02" + prefixed(4, sei, vcl, rpu))
 write("rpu_rewrite", "one-rpu-2byte", b"\x03" + prefixed(2, vcl, rpu))
-write("rpu_rewrite", "one-rpu-1byte", b"\x05" + prefixed(1, vcl[:40]))
+# A 1-byte prefix cannot frame the 367-byte RPU, so no width-1 seed carries
+# one: these two are the width-1 walk over units the converter passes through
+# untouched, one unit and two.
+write("rpu_rewrite", "vcl-only-1byte", b"\x05" + prefixed(1, vcl))
+write("rpu_rewrite", "vcl-then-sei-1byte", b"\x06" + prefixed(1, vcl, sei))
 write("rpu_rewrite", "no-rpu", b"\x00" + prefixed(4, vcl, sei))
 write("rpu_rewrite", "rpu-short-three-bytes", b"\x00" + prefixed(4, rpu[:-3]))
-write("rpu_rewrite", "rpu-crc-wrong", b"\x00" + prefixed(4, rpu[:-1] + bytes([rpu[-1] ^ 0xFF])))
+# The RPU ends in its CRC-32 and then the 0x80 terminator byte: flipping the
+# CRC's last byte exercises the checksum refusal, flipping the terminator the
+# "invalid last byte" one.
+write("rpu_rewrite", "rpu-crc-last-byte-wrong", b"\x00" + prefixed(4, rpu[:-2] + bytes([rpu[-2] ^ 0xFF]) + rpu[-1:]))
+write("rpu_rewrite", "rpu-last-byte-wrong", b"\x00" + prefixed(4, rpu[:-1] + bytes([rpu[-1] ^ 0xFF])))
 flipped = bytearray(rpu)
 for at in range(4, len(flipped), 23):
     flipped[at] ^= 0x81

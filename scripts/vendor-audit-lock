@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 VENDORED = (
+    ("bitvec_helpers", "4.0.2"),
     ("dolby_vision", "3.4.0"),
     ("hiqlite", "0.14.0"),
     ("hiqlite-wal", "0.14.0"),
@@ -106,6 +107,16 @@ def package_inventory(lock: str) -> tuple[str, list[str], str, list[tuple[str, s
 
 
 def merge_package_inventories(primary: str, additions: list[str]) -> str:
+    """Append every package of `additions` that `primary` does not already hold.
+
+    A separate workspace (a fuzz package) that patches in the same vendored
+    crate records it as a path package with no `source`. The root's block for
+    that crate has already been given its registry provenance by `synthesize`,
+    so the path-sourced copy is dropped rather than merged: two blocks for one
+    name and version, one with a source and one without, are ambiguous in a
+    lockfile, and the root's block is the one the advisory scan must see.
+    """
+
     preamble, blocks, suffix, identities = package_inventory(primary)
     known = set(identities)
     merged = list(blocks)
@@ -116,6 +127,9 @@ def merge_package_inventories(primary: str, additions: list[str]) -> str:
             raise ValueError("lockfile versions do not match")
         _, extra_blocks, _, extra_identities = package_inventory(addition)
         for block, identity in zip(extra_blocks, extra_identities, strict=True):
+            name, version, source = identity
+            if not source and (name, version) in VENDORED:
+                continue
             if identity in known:
                 continue
             known.add(identity)

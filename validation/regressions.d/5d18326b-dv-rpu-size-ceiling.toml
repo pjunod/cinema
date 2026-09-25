@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5d18326b"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The correction is the 64 KiB RPU ceiling in crates/plurx-core/src/transcode/dvconvert.rs (MAX_RPU_NAL_BYTES) plus patches 4 and 5 of vendor/dolby_vision and the vendored vendor/bitvec_helpers reader; see both PLURX-PATCH.md files. Its evidence is an_rpu_larger_than_any_real_one_is_refused_by_size_before_parsing in dvconvert's tests: the Profile 7 fixture padded to 64 KiB + 1 is refused as Unreadable naming the limit with an empty output buffer, and the same fixture padded to exactly 64 KiB is not refused by the size check. Reverting the ceiling makes the first half fail (the padded RPU parses, as the second half shows). The capacity caps and the bit-reader bounds are hints and refusals of values no valid RPU carries; the three earlier hostile fixtures still pass through the same suite, and the rpu_rewrite fuzz target (fuzz/parsers) ran 60 s with debug assertions on against this tree, which is where the bit-reader overflow would have surfaced. All run under `cargo test --workspace`, which rust-gate reaches through make rust-check -> test -> unit."
