@@ -86,7 +86,7 @@ fun LibraryScreen(
         pager.setDriveToCompletion(filter != WatchFilter.Everything)
     }
     LaunchedEffect(pager, filter) {
-        combine(pager.state, snapshotFlow { filter }) { state, selected -> state.decided to selected }
+        combine(pager.state, snapshotFlow { filter }.debounce(150)) { state, selected -> state.decided to selected }
             .mapLatest { (snapshot, selected) ->
                 withContext(Dispatchers.Default) { snapshot.filter { matchesFilter(it, selected) } }
             }.collectLatest { shown = it }

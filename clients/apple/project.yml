@@ -116,6 +116,8 @@ targets:
         buildPhase: resources
       - path: ../../tests/contracts/native-api.json
         buildPhase: resources
+      - path: ../../tests/contracts/library-sort-cases.json
+        buildPhase: resources
       - path: ../../tests/playback/player-input-contract.json
         buildPhase: resources
       - path: ../../tests/playback/playback-info-fields.json
@@ -147,6 +149,8 @@ targets:
       - path: ../../tests/contracts/channel-subject-wire.json
         buildPhase: resources
       - path: ../../tests/contracts/native-api.json
+        buildPhase: resources
+      - path: ../../tests/contracts/library-sort-cases.json
         buildPhase: resources
       - path: ../../tests/playback/player-input-contract.json
         buildPhase: resources
