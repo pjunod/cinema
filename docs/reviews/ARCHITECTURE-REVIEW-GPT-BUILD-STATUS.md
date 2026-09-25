@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** ready PR, fast lane pending · **Updated:** 2026-09-25 03:01 UTC · **Base:** `f600d2823`
+**Status:** history gate repaired; fast lane rerun pending · **Updated:** 2026-09-25 03:13 UTC · **Base:** `f600d2823`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -31,9 +31,17 @@ resume now returns the caption master at `676b62393`; Android fixes are
 integrated at `dc26817db` and `22e9bf667`. The combined `bc5fee5d2` head passed pinned Rust check, pinned Clippy with
 `-D warnings`, iOS/tvOS simulator build, Android app/test-source compilation,
 Rust formatting, JavaScript syntax, and a clean merge-tree against current
-`main`. PR #506 is ready after the sole review. The fast lane has not run yet. The D-03 milestone remains open
+`main`. PR #506 is ready after the sole review. Fast-lane run #2933 at `50be59127`
+stopped in preflight on the repository history ledger before compiler jobs.
+`19ecaa6`, `2f2ff9d67` and `fadbe098e` repaired its moved source anchor,
+coverage fragments and 16 client anchors. Focused `make history-check` passed
+on the combined candidate; the new fast-lane run is pending. The D-03 milestone remains open
 until the external-reader call sites use scoped grants. No second adversarial
-review will be requested for this PR. PR #506 is ready after the sole review. The fast lane has not run yet.
+review will be requested for this PR. PR #506 is ready after the sole review. Fast-lane run #2933 at `50be59127`
+stopped in preflight on the repository history ledger before compiler jobs.
+`19ecaa6`, `2f2ff9d67` and `fadbe098e` repaired its moved source anchor,
+coverage fragments and 16 client anchors. Focused `make history-check` passed
+on the combined candidate; the new fast-lane run is pending.
 
 ## Current impediments
 
