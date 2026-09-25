@@ -209,6 +209,11 @@ BEGIN
     UPDATE background_job_waiters SET state = NEW.state, updated_at_ms = NEW.updated_at_ms
     WHERE job_id = NEW.id AND state IN ('pending','awaiting_hydration')
         AND NEW.state IN ('failed','cancelled');
+    UPDATE background_job_waiters SET state = 'failed', updated_at_ms = NEW.updated_at_ms
+    WHERE NEW.kind = 'artifact_hydrate' AND NEW.state = 'failed' AND state = 'awaiting_hydration'
+        AND target_node_id = json_extract(NEW.payload_json, '$.target_node_id')
+        AND CASE WHEN json_valid(result_ref) THEN 'fragment:' || json_extract(result_ref, '$.artifact_key') END = json_extract(NEW.payload_json, '$.artifact_key');
+
 END;
 
 -- next statement
@@ -218,6 +223,10 @@ WHEN NEW.state IN ('cancelling','cancelled') AND OLD.state IN ('queued','running
 BEGIN
     UPDATE background_job_waiters SET state = 'cancelled', updated_at_ms = NEW.updated_at_ms
     WHERE job_id = NEW.id AND state IN ('pending','awaiting_hydration');
+    UPDATE background_job_waiters SET state = 'cancelled', updated_at_ms = NEW.updated_at_ms
+    WHERE NEW.kind = 'artifact_hydrate' AND state = 'awaiting_hydration'
+        AND target_node_id = json_extract(NEW.payload_json, '$.target_node_id')
+        AND CASE WHEN json_valid(result_ref) THEN 'fragment:' || json_extract(result_ref, '$.artifact_key') END = json_extract(NEW.payload_json, '$.artifact_key');
 END;
 
 -- All claim side effects depend on the same successful row transition.
@@ -278,6 +287,15 @@ END;
 CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command
 AFTER INSERT ON background_job_commands WHEN NEW.operation = 'maintain'
 BEGIN
+    UPDATE background_job_waiters SET state = 'cancelled', updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE (request_scope, request_id) IN (SELECT delivery.request_scope, delivery.request_id FROM background_job_waiters delivery
+        WHERE delivery.consumer_kind = 'background_delivery' AND delivery.state = 'pending'
+            AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
+                WHERE interest.job_id = delivery.consumer_ref AND interest.target_node_id = delivery.target_node_id
+                    AND interest.state = 'awaiting_hydration'
+                    AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract(NEW.request_json, '$.now_ms')))
+        ORDER BY delivery.request_scope, delivery.request_id LIMIT 128);
+
     UPDATE background_job_waiters SET state = 'cancelled',
         updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
     WHERE (request_scope, request_id) IN (
@@ -425,7 +443,7 @@ AFTER UPDATE OF size, mtime ON files WHEN NEW.size != OLD.size OR NEW.mtime != O
 BEGIN
     UPDATE background_jobs SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE 'cancelling' END,
         last_error_code = 'source_changed', revision = revision + 1
-    WHERE kind = 'transcode_prepare' AND state IN ('queued','running')
+    WHERE kind IN ('transcode_prepare','fragment_index_build') AND state IN ('queued','running')
         AND json_extract(payload_json, '$.file_id') = OLD.id AND revision < 9223372036854775807
         AND (json_extract(payload_json, '$.source_size') != NEW.size
             OR json_extract(payload_json, '$.source_mtime') != NEW.mtime);
@@ -437,6 +455,106 @@ AFTER DELETE ON files
 BEGIN
     UPDATE background_jobs SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE 'cancelling' END,
         last_error_code = 'source_changed', revision = revision + 1
-    WHERE kind = 'transcode_prepare' AND state IN ('queued','running')
+    WHERE kind IN ('transcode_prepare','fragment_index_build') AND state IN ('queued','running')
         AND json_extract(payload_json, '$.file_id') = OLD.id AND revision < 9223372036854775807;
+END;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_job_publish_fragment_command
+AFTER INSERT ON background_job_commands WHEN NEW.operation = 'publish_fragment'
+BEGIN
+    INSERT INTO cluster_fragment_index_artifacts (cache_key, file_id, source_size, source_mtime,
+        source_sha256, pipeline_sha256, blob_sha256, bytes, built_by_node_id, built_at_ms)
+    SELECT json_extract(NEW.request_json, '$.artifact.cache_key'),
+        json_extract(NEW.request_json, '$.artifact.file_id'), json_extract(NEW.request_json, '$.artifact.source_size'),
+        json_extract(NEW.request_json, '$.artifact.source_mtime'), json_extract(NEW.request_json, '$.artifact.source_sha256'),
+        json_extract(NEW.request_json, '$.artifact.pipeline_sha256'), json_extract(NEW.request_json, '$.artifact.blob_sha256'),
+        json_extract(NEW.request_json, '$.artifact.bytes'), json_extract(NEW.request_json, '$.artifact.built_by_node_id'),
+        json_extract(NEW.request_json, '$.artifact.built_at_ms')
+    WHERE json_extract(NEW.result_json, '$.outcome') = 'published'
+    ON CONFLICT(cache_key) DO NOTHING;
+
+    INSERT INTO cluster_fragment_index_locations (cache_key, node_id, bytes, verified_at_ms, last_seen_at_ms)
+    SELECT json_extract(NEW.request_json, '$.artifact.cache_key'), json_extract(NEW.request_json, '$.token.node_id'),
+        json_extract(NEW.request_json, '$.artifact.bytes'), json_extract(NEW.request_json, '$.now_ms'),
+        json_extract(NEW.request_json, '$.now_ms')
+    WHERE json_extract(NEW.result_json, '$.outcome') = 'published'
+    ON CONFLICT(cache_key, node_id) DO UPDATE SET bytes = excluded.bytes,
+        verified_at_ms = excluded.verified_at_ms, last_seen_at_ms = excluded.last_seen_at_ms;
+
+    INSERT INTO cluster_fragment_index_heads (logical_cache_key, generation_cache_key, request_id, updated_at_ms)
+    SELECT json_extract(NEW.request_json, '$.logical_key'), json_extract(NEW.request_json, '$.artifact.cache_key'),
+        request_id, json_extract(NEW.request_json, '$.now_ms') FROM analysis_requests
+    WHERE component = 'fragment_index' AND state = 'submitted'
+        AND result_cache_key = json_extract(NEW.request_json, '$.artifact.cache_key')
+        AND json_extract(NEW.result_json, '$.outcome') = 'published'
+        AND (force_rebuild = 1 OR expected_predecessor_generation = '')
+        AND expected_predecessor_generation = COALESCE((SELECT generation_cache_key FROM cluster_fragment_index_heads
+            WHERE logical_cache_key = json_extract(NEW.request_json, '$.logical_key')), '')
+        AND NOT EXISTS (SELECT 1 FROM analysis_requests newer
+            WHERE newer.file_id = analysis_requests.file_id AND newer.source_size = analysis_requests.source_size
+                AND newer.source_mtime = analysis_requests.source_mtime AND newer.component = 'fragment_index'
+                AND newer.target_node_id = analysis_requests.target_node_id
+                AND (newer.created_at_ms > analysis_requests.created_at_ms OR
+                    (newer.created_at_ms = analysis_requests.created_at_ms AND newer.request_id > analysis_requests.request_id))
+                AND newer.state IN ('queued','running','submitted','ready'))
+    ORDER BY created_at_ms DESC, request_id DESC LIMIT 1
+    ON CONFLICT(logical_cache_key) DO UPDATE SET generation_cache_key = excluded.generation_cache_key,
+        request_id = excluded.request_id, updated_at_ms = excluded.updated_at_ms
+    WHERE cluster_fragment_index_heads.generation_cache_key = (
+        SELECT expected_predecessor_generation FROM analysis_requests WHERE request_id = excluded.request_id);
+
+    INSERT INTO cluster_fragment_index_heads (logical_cache_key, generation_cache_key, request_id, updated_at_ms)
+    SELECT json_extract(NEW.request_json, '$.logical_key'), json_extract(NEW.request_json, '$.artifact.cache_key'),
+        '', json_extract(NEW.request_json, '$.now_ms')
+    WHERE json_extract(NEW.result_json, '$.outcome') = 'published'
+        AND json_extract(NEW.request_json, '$.logical_key') = json_extract(NEW.request_json, '$.artifact.cache_key')
+    ON CONFLICT(logical_cache_key) DO NOTHING;
+
+    UPDATE background_jobs SET state = 'succeeded', result_ref = json_extract(NEW.result_json, '$.result_ref'),
+        owner_node_id = NULL, owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL,
+        revision = revision + 1, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE id = json_extract(NEW.result_json, '$.job_id') AND json_extract(NEW.result_json, '$.outcome') = 'published';
+
+    UPDATE background_job_waiters SET state = CASE WHEN deadline_ms <= json_extract(NEW.request_json, '$.now_ms') THEN 'cancelled' WHEN target_node_id IS NULL
+            OR target_node_id = json_extract(NEW.request_json, '$.token.node_id') THEN 'succeeded' ELSE 'awaiting_hydration' END,
+        result_ref = json_extract(NEW.result_json, '$.result_ref'), updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE job_id = json_extract(NEW.result_json, '$.job_id') AND state = 'pending'
+        AND json_extract(NEW.result_json, '$.outcome') = 'published';
+
+    -- A target receipt is completed only by publication of verified bytes on
+    -- that target. The original build's awaiting waiters are the durable
+    -- delivery intent, including when scheduling was interrupted by a crash.
+    UPDATE background_job_waiters SET state = 'succeeded', result_ref = json_extract(NEW.result_json, '$.result_ref'),
+        updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE state = 'awaiting_hydration' AND (deadline_ms IS NULL OR deadline_ms > json_extract(NEW.request_json, '$.now_ms'))
+        AND target_node_id = json_extract(NEW.request_json, '$.token.node_id')
+        AND CASE WHEN json_valid(result_ref) THEN json_extract(result_ref, '$.artifact_kind') END = 'fragment_index'
+        AND CASE WHEN json_valid(result_ref) THEN json_extract(result_ref, '$.artifact_key') END = json_extract(NEW.request_json, '$.artifact.cache_key')
+        AND json_extract(NEW.result_json, '$.outcome') = 'published';
+
+    UPDATE cluster_fragment_index_jobs SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
+        last_error_code = NULL, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE cache_key = json_extract(NEW.request_json, '$.artifact.cache_key')
+        AND target_node_id = json_extract(NEW.request_json, '$.token.node_id')
+        AND state IN ('queued','running') AND json_extract(NEW.result_json, '$.outcome') = 'published';
+
+    UPDATE analysis_attempts SET phase = 'published', terminal_code = NULL,
+        phase_updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE (request_id, claim_epoch) IN (SELECT request_id, fence FROM analysis_requests
+        WHERE state = 'submitted' AND component = 'fragment_index'
+            AND result_cache_key = json_extract(NEW.request_json, '$.artifact.cache_key')
+            AND target_node_id = json_extract(NEW.request_json, '$.token.node_id'))
+        AND EXISTS (SELECT 1 FROM cluster_fragment_index_heads
+            WHERE generation_cache_key = json_extract(NEW.request_json, '$.artifact.cache_key'))
+        AND json_extract(NEW.result_json, '$.outcome') = 'published';
+    UPDATE analysis_requests SET state = 'ready', last_error_code = NULL,
+        updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE state = 'submitted' AND component = 'fragment_index'
+        AND result_cache_key = json_extract(NEW.request_json, '$.artifact.cache_key')
+        AND target_node_id = json_extract(NEW.request_json, '$.token.node_id')
+        AND EXISTS (SELECT 1 FROM cluster_fragment_index_heads
+            WHERE generation_cache_key = json_extract(NEW.request_json, '$.artifact.cache_key'))
+        AND json_extract(NEW.result_json, '$.outcome') = 'published';
+    DELETE FROM background_job_commands WHERE id = NEW.id;
 END;

@@ -98,6 +98,8 @@ mod consistent_read_census;
 
 pub mod background_jobs;
 pub use background_jobs::BackgroundJobStore;
+mod background_jobs_delivery;
+mod background_jobs_fragment;
 mod background_jobs_maintenance;
 pub mod background_jobs_pretranscode;
 mod background_jobs_publication;

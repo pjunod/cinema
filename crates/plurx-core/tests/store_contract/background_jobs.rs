@@ -134,3 +134,219 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
     })
     .await;
 }
+
+#[tokio::test]
+async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "durable-fragment-delivery").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let source_sha256 = "a".repeat(64);
+        let pipeline_digest = "b".repeat(64);
+        let cache_key = plurx_core::store::cluster_fragment_index_key(
+            file_id,
+            file.size,
+            file.mtime,
+            &source_sha256,
+            &pipeline_digest,
+        )
+        .expect("key");
+        let id = uuid::Uuid::new_v4().to_string();
+        let payload = JobPayload::FragmentIndexBuild {
+            file_id,
+            source_generation: cache_key.clone(),
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_sha256: source_sha256.clone(),
+            cache_key: cache_key.clone(),
+            pipeline_digest: pipeline_digest.clone(),
+        };
+        for (index, target) in ["node-a", "node-b", "node-b"].into_iter().enumerate() {
+            let outcome = store
+                .enqueue_job(EnqueueJob {
+                    id: if index == 0 {
+                        id.clone()
+                    } else {
+                        uuid::Uuid::new_v4().to_string()
+                    },
+                    payload: payload.clone(),
+                    dedupe_key: format!("fragment:{cache_key}"),
+                    priority: 2,
+                    not_before_ms: 1_000,
+                    now_ms: 1_000,
+                    request: JobRequest {
+                        scope: "user:1".into(),
+                        request_id: format!("fragment-{index}"),
+                        request_digest: "c".repeat(64),
+                        consumer_kind: "analysis".into(),
+                        consumer_ref: index.to_string(),
+                        target_node_id: Some(target.into()),
+                        deadline_ms: None,
+                        retain_identity: true,
+                    },
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}"));
+            assert!(matches!(outcome, EnqueueOutcome::Accepted { job_id, .. } if job_id == id));
+        }
+        store
+            .cancel_waiter(CancelWaiter {
+                scope: "user:1".into(),
+                request_id: "fragment-2".into(),
+                now_ms: 1_001,
+            })
+            .await
+            .expect("cancel one interest");
+        let revision = store
+            .background_job(&id)
+            .await
+            .expect("read")
+            .expect("job")
+            .revision;
+        let ClaimOutcome::Claimed { job } = store
+            .claim_job(ClaimJob {
+                job_id: id.clone(),
+                expected_revision: revision,
+                node_id: "node-a".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::FragmentIndexBuild,
+                payload_version: 1,
+                now_ms: 1_002,
+                dispatched_at_ms: 1_002,
+            })
+            .await
+            .expect("build claim")
+        else {
+            panic!("{backend}: build not claimed")
+        };
+        let artifact = plurx_core::store::ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_sha256,
+            pipeline_sha256: pipeline_digest,
+            blob_sha256: "d".repeat(64),
+            bytes: 100,
+            built_by_node_id: "node-a".into(),
+            built_at_ms: 1_003,
+        };
+        let publication = PublishFragmentJob {
+            token: job.token.expect("token"),
+            artifact: artifact.clone(),
+            now_ms: 1_003,
+        };
+        assert!(matches!(
+            store
+                .publish_fragment_job(publication.clone())
+                .await
+                .expect("build publication"),
+            JobPublishOutcome::Published { .. }
+        ));
+        assert!(matches!(
+            store
+                .publish_fragment_job(publication)
+                .await
+                .expect("lost acknowledgement replay"),
+            JobPublishOutcome::AlreadyPublished { .. }
+        ));
+        let waiters = store
+            .job_waiters(WaiterQuery {
+                job_id: id.clone(),
+                after: None,
+                limit: 100,
+            })
+            .await
+            .expect("receipts")
+            .waiters;
+        assert_eq!(
+            waiters
+                .iter()
+                .map(|waiter| waiter.state.as_str())
+                .collect::<Vec<_>>(),
+            ["succeeded", "awaiting_hydration", "cancelled"],
+            "{backend}"
+        );
+        // A scheduler restart needs no in-memory callback to recover this intent.
+        let intents = store.delivery_intents(1_004).await.expect("durable outbox");
+        assert_eq!(intents.len(), 1, "{backend}");
+        assert_eq!(intents[0].target_node_id, "node-b");
+        let EnqueueOutcome::Accepted {
+            job_id: hydration_id,
+            ..
+        } = store
+            .enqueue_delivery(intents[0].clone(), 1_004)
+            .await
+            .expect("schedule delivery")
+        else {
+            panic!("{backend}: hydration not admitted")
+        };
+        assert!(store
+            .delivery_intents(1_005)
+            .await
+            .expect("scheduled outbox")
+            .is_empty());
+        assert!(matches!(
+            store
+                .enqueue_delivery(intents[0].clone(), 1_005)
+                .await
+                .expect("retry scheduler acknowledgement"),
+            EnqueueOutcome::Existing { .. }
+        ));
+        let ClaimOutcome::Claimed { job } = store
+            .claim_job(ClaimJob {
+                job_id: hydration_id.clone(),
+                expected_revision: 0,
+                node_id: "node-b".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::ArtifactHydrate,
+                payload_version: 1,
+                now_ms: 1_005,
+                dispatched_at_ms: 1_005,
+            })
+            .await
+            .expect("delivery claim")
+        else {
+            panic!("{backend}: delivery not claimed")
+        };
+        assert!(matches!(
+            store
+                .publish_fragment_job(PublishFragmentJob {
+                    token: job.token.expect("token"),
+                    artifact: artifact.clone(),
+                    now_ms: 1_006
+                })
+                .await
+                .expect("delivery publication"),
+            JobPublishOutcome::Published { .. }
+        ));
+        let waiters = store
+            .job_waiters(WaiterQuery {
+                job_id: id,
+                after: None,
+                limit: 100,
+            })
+            .await
+            .expect("delivered receipts")
+            .waiters;
+        assert_eq!(
+            waiters
+                .iter()
+                .map(|waiter| waiter.state.as_str())
+                .collect::<Vec<_>>(),
+            ["succeeded", "succeeded", "cancelled"],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .cluster_fragment_index_artifact(&cache_key)
+                .await
+                .expect("artifact")
+                .expect("artifact"),
+            artifact,
+            "hydration preserves the original builder: {backend}"
+        );
+    })
+    .await;
+}

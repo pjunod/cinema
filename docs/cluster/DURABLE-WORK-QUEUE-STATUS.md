@@ -15,7 +15,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | Isolated clone | Complete | Agent-owned `/private/tmp/plurx-durable-work-agent`; original checkout untouched |
 | Compiler | Ready | Rust 1.97.1; core + Hiqlite all-target compile and baseline daemon compile passed |
 | M1 durable queue and pre-transcode | In progress | Queue ownership, publication and upkeep committed; pre-transcode discovery/worker integration being compiled. Legacy cutover and fault-injection coverage remain |
-| M2 fragment analysis and hydration | Planned | Preserve request identity, history and target completion |
+| M2 fragment analysis and hydration | In progress | Atomic fragment publication and durable delivery receipts compiled; existing worker, request history and retry adapters still need conversion |
 | M3 UI, recovery and migration | Planned | Advisory requirements, admin operations, bounded cutover |
 | E0 subtitle and library workers | Planned | Reuse newly landed subtitle extraction implementation |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
@@ -94,3 +94,15 @@ implementation is claimed; “compiled” does not mean tests passed.
 
 - 2026-09-25: Rust 1.97.1 workspace Clippy with all targets and denied warnings
   passed for the integrated pre-transcode path. No tests have been executed.
+
+- 2026-09-25: pre-transcode worker integration committed and pushed as
+  `84c188a87`. The pinned normal pre-commit hook passed, with no tests run.
+
+- 2026-09-25: added the fragment publication transaction and a bounded durable
+  delivery outbox derived from waiting target receipts. Hydration preserves
+  the artifact's original builder and completes only the receiving target.
+  Cancellation retains independent interests; unsupported payloads stay
+  inspectable. The replicated-state digest now includes queue jobs, receipts,
+  attempts and reservations. A backend contract exercises one shared build,
+  independent cancellation and delivery after a scheduler restart. These
+  Store paths are compiled but not yet connected to the fragment worker.

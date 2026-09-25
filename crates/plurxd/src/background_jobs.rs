@@ -597,6 +597,10 @@ mod tests {
                 payload: JobPayload::FragmentIndexBuild {
                     file_id: 1,
                     source_generation: "source:1".into(),
+                    source_size: 100,
+                    source_mtime: 1,
+                    source_sha256: "d".repeat(64),
+                    cache_key: "c".repeat(64),
                     pipeline_digest: "a".repeat(64),
                 },
                 dedupe_key: "fragment:1".into(),

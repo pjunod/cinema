@@ -16,6 +16,12 @@ pub(super) const MAINTENANCE_NEEDED: &str = r#"
 SELECT json_object('needed', 1) AS result_json
 WHERE EXISTS (SELECT 1 FROM background_job_waiters
     WHERE state IN ('pending','awaiting_hydration') AND deadline_ms <= json_extract($1, '$.now_ms'))
+  OR EXISTS (SELECT 1 FROM background_job_waiters delivery
+    WHERE delivery.consumer_kind = 'background_delivery' AND delivery.state = 'pending'
+      AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
+        WHERE interest.job_id = delivery.consumer_ref AND interest.target_node_id = delivery.target_node_id
+          AND interest.state = 'awaiting_hydration'
+          AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))))
   OR EXISTS (SELECT 1 FROM background_jobs
     WHERE state = 'cancelling' AND lease_expires_ms <= json_extract($1, '$.now_ms'))
   OR EXISTS (SELECT 1 FROM background_jobs WHERE state = 'running' AND failed_attempts >= 4

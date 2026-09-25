@@ -7,6 +7,12 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+pub use super::background_jobs_delivery::{
+    DeliveryIntent, JobWaiter, WaiterCursor, WaiterPage, WaiterQuery,
+};
+use super::background_jobs_delivery::{DELIVERIES_SQL, WAITERS_SQL};
+pub use super::background_jobs_fragment::PublishFragmentJob;
+use super::background_jobs_fragment::PUBLISH_FRAGMENT_SQL;
 use super::background_jobs_maintenance::{CANCEL_WAITER_SQL, MAINTENANCE_NEEDED, MAINTENANCE_SQL};
 use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
 pub use super::background_jobs_publication::{
@@ -68,6 +74,12 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
       AND expires_at_ms > json_extract(body, '$.now_ms')
       AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || owner_node_id)
     ) THEN 'producer_fenced'
+    WHEN json_type(body, '$.delivery_parent') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM background_job_waiters WHERE job_id = json_extract(body, '$.delivery_parent')
+        AND target_node_id = json_extract(body, '$.payload.target_node_id') AND state = 'awaiting_hydration'
+        AND (deadline_ms IS NULL OR deadline_ms > json_extract(body, '$.now_ms'))
+        AND CASE WHEN json_valid(result_ref) THEN 'fragment:' || json_extract(result_ref, '$.artifact_key') END = json_extract(body, '$.payload.artifact_key')
+    ) THEN 'no_demand'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
     WHEN active_state = 'cancelling' THEN 'job_cancelling'
@@ -230,6 +242,10 @@ pub enum JobPayload {
     FragmentIndexBuild {
         file_id: i64,
         source_generation: String,
+        source_size: i64,
+        source_mtime: i64,
+        source_sha256: String,
+        cache_key: String,
         pipeline_digest: String,
     },
     ArtifactHydrate {
@@ -327,9 +343,20 @@ impl JobPayload {
             Self::FragmentIndexBuild {
                 file_id,
                 source_generation,
+                source_size,
+                source_sha256,
+                cache_key,
                 pipeline_digest,
+                ..
+            } => {
+                *file_id > 0
+                    && identifier(source_generation)
+                    && *source_size >= 0
+                    && digest(source_sha256)
+                    && digest(cache_key)
+                    && digest(pipeline_digest)
             }
-            | Self::SubtitleExtract {
+            Self::SubtitleExtract {
                 file_id,
                 source_generation,
                 pipeline_digest,
@@ -551,6 +578,7 @@ pub enum EnqueueOutcome {
     },
     QueueFull,
     ProducerFenced,
+    NoDemand,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -727,6 +755,13 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn job_waiters(&self, query: WaiterQuery) -> Result<WaiterPage, StoreError>;
+    async fn delivery_intents(&self, now_ms: i64) -> Result<Vec<DeliveryIntent>, StoreError>;
+    async fn enqueue_delivery(
+        &self,
+        intent: DeliveryIntent,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError>;
     /// Authoritative single-job lookup for ownership-sensitive cleanup.
     async fn background_job(&self, id: &str) -> Result<Option<BackgroundJob>, StoreError>;
     async fn background_staging_jobs(&self, node_id: &str) -> Result<Vec<String>, StoreError>;
@@ -755,6 +790,10 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: PublishTranscodeJob,
     ) -> Result<JobPublishOutcome, StoreError>;
+    async fn publish_fragment_job(
+        &self,
+        request: PublishFragmentJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
 }
 
 /// Narrow internal SQL bridge: callers cannot submit SQL through Store.
@@ -777,6 +816,102 @@ fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, StoreError> 
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn job_waiters(&self, query: WaiterQuery) -> Result<WaiterPage, StoreError> {
+        if uuid::Uuid::parse_str(&query.job_id).is_err()
+            || query.limit == 0
+            || query.limit > MAX_PAGE_SIZE
+            || query
+                .after
+                .as_ref()
+                .is_some_and(|after| !identifier(&after.scope) || !identifier(&after.request_id))
+        {
+            return Err(invalid("invalid job waiter page"));
+        }
+        let rows = self
+            .queue_sql(WAITERS_SQL.into(), encode(&query)?, false, false)
+            .await?;
+        let mut waiters: Vec<JobWaiter> = rows
+            .iter()
+            .map(|row| decode(row))
+            .collect::<Result<_, _>>()?;
+        let more = waiters.len() > query.limit;
+        waiters.truncate(query.limit);
+        let next = if more {
+            waiters.last().map(|waiter| WaiterCursor {
+                scope: waiter.scope.clone(),
+                request_id: waiter.request_id.clone(),
+            })
+        } else {
+            None
+        };
+        Ok(WaiterPage { waiters, next })
+    }
+
+    async fn enqueue_delivery(
+        &self,
+        intent: DeliveryIntent,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError> {
+        use sha2::{Digest, Sha256};
+        if uuid::Uuid::parse_str(&intent.job_id).is_err()
+            || !intent
+                .artifact_key
+                .strip_prefix("fragment:")
+                .is_some_and(digest)
+        {
+            return Err(invalid("invalid background delivery intent"));
+        }
+        let payload = JobPayload::ArtifactHydrate {
+            artifact_key: intent.artifact_key.clone(),
+            target_node_id: intent.target_node_id.clone(),
+        };
+        let request_digest = hex::encode(Sha256::digest(encode(&payload)?.as_bytes()));
+        let request = EnqueueJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            payload,
+            dedupe_key: format!("hydrate:{request_digest}"),
+            priority: intent.priority,
+            not_before_ms: now_ms,
+            now_ms,
+            request: JobRequest {
+                scope: format!("delivery:{}", intent.job_id),
+                request_id: intent.target_node_id.clone(),
+                request_digest,
+                consumer_kind: "background_delivery".into(),
+                consumer_ref: intent.job_id.clone(),
+                target_node_id: Some(intent.target_node_id),
+                deadline_ms: None,
+                retain_identity: false,
+            },
+        };
+        request.validate()?;
+        let mut body =
+            serde_json::to_value(request).map_err(|error| invalid(&error.to_string()))?;
+        body["delivery_parent"] = intent.job_id.into();
+        let rows = self
+            .queue_sql(ENQUEUE_SQL.into(), encode(&body)?, true, true)
+            .await?;
+        decode(
+            rows.first()
+                .ok_or_else(|| invalid("delivery admission returned no verdict"))?,
+        )
+    }
+
+    async fn delivery_intents(&self, now_ms: i64) -> Result<Vec<DeliveryIntent>, StoreError> {
+        if now_ms < 0 {
+            return Err(invalid("invalid delivery scheduling time"));
+        }
+        let rows = self
+            .queue_sql(
+                DELIVERIES_SQL.into(),
+                encode(&serde_json::json!({"now_ms": now_ms}))?,
+                false,
+                false,
+            )
+            .await?;
+        rows.iter().map(|row| decode(row)).collect()
+    }
+
     async fn background_job(&self, id: &str) -> Result<Option<BackgroundJob>, StoreError> {
         if uuid::Uuid::parse_str(id).is_err() {
             return Err(invalid("invalid background job id"));
@@ -807,6 +942,49 @@ impl<T: QueueSql> BackgroundJobStore for T {
             return Err(invalid("background staging inventory exceeds active bound"));
         }
         rows.iter().map(|row| decode(row)).collect()
+    }
+
+    async fn publish_fragment_job(
+        &self,
+        request: PublishFragmentJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        request.token.validate()?;
+        let artifact = &request.artifact;
+        if request.now_ms < 0
+            || artifact.file_id <= 0
+            || artifact.source_size < 0
+            || artifact.bytes <= 0
+            || artifact.bytes > super::MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES as i64
+            || artifact.built_at_ms < 0
+            || !identifier(&artifact.built_by_node_id)
+            || !digest(&artifact.cache_key)
+            || !digest(&artifact.source_sha256)
+            || !digest(&artifact.pipeline_sha256)
+            || !digest(&artifact.blob_sha256)
+        {
+            return Err(invalid("invalid fragment job publication"));
+        }
+        let logical_key = super::cluster_fragment_index_key(
+            artifact.file_id,
+            artifact.source_size,
+            artifact.source_mtime,
+            &artifact.source_sha256,
+            &artifact.pipeline_sha256,
+        )
+        .ok_or_else(|| invalid("invalid fragment source identity"))?;
+        use sha2::{Digest, Sha256};
+        let publication_digest = hex::encode(Sha256::digest(encode(&request.artifact)?.as_bytes()));
+        let mut body =
+            serde_json::to_value(request).map_err(|error| invalid(&error.to_string()))?;
+        body["logical_key"] = logical_key.into();
+        body["publication_digest"] = publication_digest.into();
+        let rows = self
+            .queue_sql(PUBLISH_FRAGMENT_SQL.into(), encode(&body)?, true, true)
+            .await?;
+        decode(
+            rows.first()
+                .ok_or_else(|| invalid("fragment publication returned no verdict"))?,
+        )
     }
 
     async fn publish_transcode_job(
