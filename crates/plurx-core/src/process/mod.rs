@@ -47,8 +47,11 @@ pub fn spawn_job_owned(
 /// | `pipeprobe.rs` | 2 | stdout and stderr |
 /// | `ffmpeg.rs` | 4 | status, stdout and stderr |
 /// | `transcode.rs` | 1 | stdout and stderr |
-/// | `subtitles.rs` | 2 | status and stderr |
+/// | `subtitles.rs` | 1 | whole-track status and stderr |
 /// | `live_tv.rs` | 1 | status and stderr |
+///
+/// Subtitle window extraction uses the bounded diagnostic child instead of
+/// this helper, so its VTT pipe and diagnostics have explicit byte limits.
 ///
 /// Dropping this future drops the job after Tokio has requested child
 /// termination, so timeout and cancellation cannot strand a grandchild
@@ -317,7 +320,7 @@ mod tests {
             ("ffmpeg.rs".to_owned(), 4),
             ("live_tv.rs".to_owned(), 1),
             ("pipeprobe.rs".to_owned(), 2),
-            ("subtitles.rs".to_owned(), 2),
+            ("subtitles.rs".to_owned(), 1),
             ("transcode.rs".to_owned(), 1),
         ]);
         let mut actual = BTreeMap::new();

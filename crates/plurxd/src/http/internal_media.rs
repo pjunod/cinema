@@ -336,6 +336,79 @@ pub(crate) async fn shared_cache_canary(
         .map_err(|_| StatusCode::CONFLICT)
 }
 
+/// At most two playback ranges execute on a node. HTTP cancellation or the
+/// worker deadline drops the job-owned FFmpeg and its private temporary file.
+pub(crate) async fn subtitle_range(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    let peer = authorize(
+        &state,
+        &headers,
+        "POST",
+        crate::subtitle_ranges::PATH,
+        &body,
+    )
+    .await?;
+    if !state.transcode.pretranscode_worker_idle() {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+    static PEERS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let _permit = WORKERS
+        .try_acquire()
+        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+    struct PeerClaim(String);
+    impl Drop for PeerClaim {
+        fn drop(&mut self) {
+            PEERS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&self.0);
+        }
+    }
+    if !PEERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(peer.clone())
+    {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    let _peer_claim = PeerClaim(peer);
+    let request = serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let answer = tokio::time::timeout(
+        crate::subtitle_ranges::WORK_BUDGET,
+        crate::subtitle_ranges::execute(&state, request),
+    )
+    .await
+    .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+    .map_err(|error| {
+        tracing::debug!(%error, "subtitle peer range refused");
+        StatusCode::CONFLICT
+    })?;
+    let body = serde_json::to_vec(&answer).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let auth = exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let payload = super::peer_transport::signed_response_payload(StatusCode::OK.as_u16(), &body);
+    let signature = state
+        .membership
+        .sign_internal_peer_response(
+            &auth.node_id,
+            &auth.nonce,
+            crate::subtitle_ranges::PATH,
+            &payload,
+        )
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(super::peer_transport::RESPONSE_SIGNATURE_HEADER, signature)
+        .body(Body::from(body))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 async fn authorize(
     state: &AppState,
     headers: &HeaderMap,
@@ -484,6 +557,15 @@ mod tests {
                 .expect_err("household bearer must not authorize a media offer"),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[tokio::test]
+    async fn subtitle_range_rejects_unsigned_work_before_reading_file() {
+        let (_, state) = crate::http::tests::test_app_with_state();
+        let error = subtitle_range(State(state), HeaderMap::new(), Bytes::from_static(b"{}"))
+            .await
+            .expect_err("unsigned range work");
+        assert_eq!(error, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
