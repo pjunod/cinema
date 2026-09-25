@@ -65,6 +65,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -822,6 +823,13 @@ private fun PlayerContent(
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
                 activity?.isInPictureInPictureMode == true,
         )
+    }
+    // The panel, its quality chip, and the wait overlay consume session status.
+    // Prepared replacement is also checked by the controller itself.
+    SideEffect {
+        controller.statusPollingVisible = {
+            !isInPip && (panel != null || controlsVisible || findingNext || progressFault != null)
+        }
     }
     var pipAspectRatio by remember(plan) {
         mutableStateOf(calculatePipAspectRatio(plan.videoWidth ?: 0, plan.videoHeight ?: 0))

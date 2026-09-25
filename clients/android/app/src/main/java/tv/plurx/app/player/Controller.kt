@@ -588,6 +588,8 @@ class Controller internal constructor(
     internal val surfaceHistory: List<SurfaceLedgerRow> get() = surfaceOwner.history
 
     private var statusPollingJob: Job? = null
+    /** Screen visibility for passive status readers. Recovery must supply true if it starts reading status. */
+    var statusPollingVisible: () -> Boolean = { false }
     var playbackStallCount by mutableIntStateOf(0)
         private set
     var lastTimeToFirstFrameMs by mutableStateOf<Long?>(null)
@@ -2360,16 +2362,18 @@ class Controller internal constructor(
      * Poll only while this controller owns an HLS session. The endpoint does
      * not count as playback activity, so showing Standard or Debug cannot keep
      * an abandoned encoder alive; keeping the last successful sample mirrors
-     * the browser and avoids a useful panel vanishing during teardown.
+     * the browser and avoids a useful panel vanishing during teardown. The
+     * playback-info panel, quality label, wait overlay and prepared replacement
+     * are the current readers. Any future recovery reader must keep [statusPollingVisible]
+     * true while it depends on this sample.
      */
     private fun startStatusPolling(polledSessionId: String) {
         statusPollingJob?.cancel()
         sessionStatus = null
         sessionStatusObservedAtMs = null
         statusPollingJob = scope.launch {
-            // §3.3 row 18 again, and once per polling job: the poll runs every
-            // two seconds, and a session that has gone away fails every one of
-            // them. The first is the event; the rest are the same event.
+            // Report the first failed sample once. A closed panel uses a
+            // bounded ten-second interval; visible readers keep two seconds.
             var reportedFailure = false
             while (isActive && sessionId == polledSessionId) {
                 try {
@@ -2390,7 +2394,9 @@ class Controller internal constructor(
                         )
                     }
                 }
-                delay(2_000)
+                delay(statusPollIntervalMs(
+                    statusPollingVisible() || preparedPlayer != null || preparedPredecessor != null,
+                ))
             }
         }
     }
@@ -4445,3 +4451,6 @@ internal fun codecShort(mime: String?): String? = when {
     mime.contains("opus", true) -> "Opus"
     else -> null
 }
+
+/** A hidden status panel cannot justify two-second network polling. */
+internal fun statusPollIntervalMs(visible: Boolean): Long = if (visible) 2_000L else 10_000L
