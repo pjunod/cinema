@@ -26,14 +26,12 @@ built from its PR head and sideloaded onto the lab devices (M3), and the PR
 merges after it. Once merged, the native tick reads `playback_auto_abr`, the
 replicated setting that already exists, exactly as the web tick does.
 
-That setting is **not** in Settings → Developer today and carries no
-readiness information: it is an ordinary toggle, "Adjust Auto quality while
-playing", in the Playback panel's Streaming card
-(`crates/plurxd/src/web/pages/settings-panels.js:546`), off unless stored
-as `1` (`http/system.rs:71-75`), and `http/system.rs` builds no readiness
-entry for it. The project rule puts optional functionality in Developer
-with advisory readiness that never gates enablement, so moving it there is
-follow-up F-1 (§4a) — recorded, not done, and not a precondition for M0–M2.
+At the design baseline, `playback_auto_abr` was a Playback-panel toggle
+with no readiness information. Follow-up F-1 (§4a) moves that existing
+replicated setting to Developer and adds dated advisory evidence on the
+`codex/adaptive-developer-advisory` branch (2026-09-25). The branch has not
+merged yet. Readiness does not disable the toggle or alter the controller's
+runtime checks; this is the location Paul requested before M3.
 
 ## 1. What is already here
 
@@ -214,8 +212,8 @@ Two more, specific to the sequence:
 ## 4a. Follow-ups
 
 - **F-1 — put `playback_auto_abr` in Settings → Developer with advisory
-  readiness (implemented 2026-09-25 on `codex/adaptive-developer-advisory`).** Today it is a Playback-panel toggle with no readiness entry
-  (see the top of this plan). The project rule places optional functionality in Developer
+  readiness (implemented 2026-09-25 on `codex/adaptive-developer-advisory`).**
+  The project rule places optional functionality in Developer
   with readiness information that informs and never gates. The Developer
   card now reports the browser controller and dated native/trace evidence;
   the same server setting remains the one enable path. The dated rows must be
