@@ -26,6 +26,7 @@ import androidx.media3.exoplayer.offline.DownloadService
 import androidx.media3.exoplayer.scheduler.Requirements
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -35,10 +36,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import tv.plurx.app.data.CreateOfflinePackageReq
@@ -107,7 +109,11 @@ object OfflineDownloads {
     lateinit var manager: DownloadManager
         private set
 
-    val records: StateFlow<List<OfflineRecord>> get() = catalog.records
+    private val readyRecords = MutableStateFlow<List<OfflineRecord>>(emptyList())
+    val records: StateFlow<List<OfflineRecord>> get() = readyRecords
+    private val recoveryReady = CompletableDeferred<Unit>()
+    /** Process-wide barrier for callers that act on durable download state. */
+    val recovered: Deferred<Unit> get() = recoveryReady
 
     fun initialize(context: Context) {
         if (::appContext.isInitialized) return
@@ -117,31 +123,9 @@ object OfflineDownloads {
         appContext = context.applicationContext
         catalog = OfflineCatalog(appContext)
         recovery = OfflineRecoveryStore(appContext)
-        val legacyNetwork = runBlocking(Dispatchers.IO) {
-            SettingsStore(appContext).flow.first().preferences.offlineNetwork
-        }
-        val initialNetwork = recovery.migrateNetworkPolicy(legacyNetwork)
-        runBlocking(Dispatchers.IO) {
-            recovery.intents().forEach { (id, encoded) ->
-                if (catalog.record(id) == null) {
-                    runCatching { json.decodeFromString<OfflineRecord>(encoded) }
-                        .getOrNull()
-                        ?.takeUnless { intent ->
-                            catalog.records.value.any { current ->
-                                current.serverInstanceId == intent.serverInstanceId &&
-                                    current.userId == intent.userId &&
-                                    current.fileId == intent.fileId &&
-                                    current.state !in setOf("failed", "missing")
-                            }
-                        }
-                        ?.let { catalog.upsert(it) }
-                }
-                recovery.clearIntent(id)
-            }
-        }
-        transferSequence.set(
-            (catalog.records.value.maxOfOrNull(OfflineRecord::transferSequence) ?: 0L) + 1L,
-        )
+        // SharedPreferences supplies the conservative startup policy without
+        // waiting for the legacy DataStore migration or catalog intent replay.
+        val initialNetwork = recovery.networkPolicy()
         database = StandaloneDatabaseProvider(appContext)
         cache = SimpleCache(
             File(appContext.filesDir, "offline/media"),
@@ -158,11 +142,10 @@ object OfflineDownloads {
         ).apply {
             maxParallelDownloads = 2
             requirements = offlineRequirements(initialNetwork)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                // A cold manager must not open a process-default socket before
-                // a persisted UIDT job supplies its granted Network.
-                pauseDownloads()
-            }
+            // Media3 may auto-resume persisted work during construction. Hold
+            // every download until the catalog has replayed durable intents;
+            // API 34+ stays paused until its UIDT job grants a Network.
+            pauseDownloads()
             addListener(object : DownloadManager.Listener {
                 override fun onInitialized(downloadManager: DownloadManager) {
                     check(Looper.myLooper() == Looper.getMainLooper())
@@ -217,7 +200,42 @@ object OfflineDownloads {
                 }
             })
         }
-        scope.launch { reconcile() }
+        scope.launch {
+            try {
+                val legacyNetwork = SettingsStore(appContext).flow.first().preferences.offlineNetwork
+                val authoritativeNetwork = recovery.migrateNetworkPolicy(legacyNetwork)
+                recovery.intents().forEach { (id, encoded) ->
+                    if (catalog.record(id) == null) {
+                        runCatching { json.decodeFromString<OfflineRecord>(encoded) }
+                            .getOrNull()
+                            ?.takeUnless { intent ->
+                                catalog.records.value.any { current ->
+                                    current.serverInstanceId == intent.serverInstanceId &&
+                                        current.userId == intent.userId &&
+                                        current.fileId == intent.fileId &&
+                                        current.state !in setOf("failed", "missing")
+                                }
+                            }
+                            ?.let { catalog.upsert(it) }
+                    }
+                    recovery.clearIntent(id)
+                }
+                transferSequence.set(
+                    (catalog.records.value.maxOfOrNull(OfflineRecord::transferSequence) ?: 0L) + 1L,
+                )
+                withContext(Dispatchers.Main.immediate) {
+                    manager.requirements = offlineRequirements(authoritativeNetwork)
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                        manager.resumeDownloads()
+                    }
+                }
+                recoveryReady.complete(Unit)
+                catalog.records.collect { readyRecords.value = it }
+            } catch (error: Exception) {
+                recoveryReady.completeExceptionally(error)
+            }
+        }
+        scope.launch { recovered.await(); reconcile() }
     }
 
     fun canUse(context: Context): Boolean =
@@ -263,6 +281,13 @@ object OfflineDownloads {
     }
 
     fun resumePending(template: OfflineQueueRequest, explicitResumeId: String? = null) {
+        scope.launch {
+            recovered.await()
+            resumePendingAfterRecovery(template, explicitResumeId)
+        }
+    }
+
+    private fun resumePendingAfterRecovery(template: OfflineQueueRequest, explicitResumeId: String?) {
         // DownloadManager is process-local and starts with the conservative
         // Wi-Fi-only requirement below. Reapply the persisted viewer policy
         // before restoring rows, otherwise an "Any network" transfer that was
@@ -628,6 +653,7 @@ object OfflineDownloads {
             if (preparationJobs.containsKey(id)) return
             preparationJobs[id] = scope.launch {
                 try {
+                    recovered.await()
                     block()
                 } finally {
                     synchronized(preparationJobs) { preparationJobs.remove(id) }
@@ -860,11 +886,13 @@ object OfflineDownloads {
         }
     }
 
-    private suspend fun <T> withManager(block: DownloadManagerAction<T>): T =
-        withContext(Dispatchers.Main.immediate) {
+    private suspend fun <T> withManager(block: DownloadManagerAction<T>): T {
+        recovered.await()
+        return withContext(Dispatchers.Main.immediate) {
             check(Looper.myLooper() == Looper.getMainLooper())
             manager.block()
         }
+    }
 
     /** Wait until Media3's internal thread has persisted the ownership stop reason. */
     private suspend fun awaitStopReason(id: String, expected: Int): Boolean {
