@@ -277,6 +277,9 @@ conversion, decoder selection, and the stall/stutter investigations.
 
 ## cluster/ — replication, membership, and recovery
 
+Durable cluster work: [implementation](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md) ·
+[build status](cluster/DURABLE-WORK-QUEUE-STATUS.md) — **open**.
+
 Phase 4 and everything under it: the clustering transition, the performance
 and media-pool work built on top, and the diagnoses of specific replicated
 failures.
