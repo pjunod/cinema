@@ -328,6 +328,7 @@ impl SwPool {
         drop(permits);
         LiveWait {
             permits: Arc::clone(&self.permits),
+            started: std::time::Instant::now(),
         }
     }
 
@@ -451,10 +452,18 @@ impl TranscodePermit {
 #[derive(Debug)]
 pub struct LiveWait {
     permits: Arc<Mutex<PermitState>>,
+    /// The guard's life is the wait: it is taken when a live start begins
+    /// queuing and dropped the moment it has a slot or gives up, so its age at
+    /// drop is `plurx_admission_wait_seconds{pool="encode_permit"}`.
+    started: std::time::Instant,
 }
 
 impl Drop for LiveWait {
     fn drop(&mut self) {
+        crate::telemetry::record_admission_wait(
+            crate::telemetry::AdmissionPool::EncodePermit,
+            self.started.elapsed(),
+        );
         let mut permits = self
             .permits
             .lock()
@@ -669,6 +678,7 @@ impl Admissions {
         drop(permits);
         LiveWait {
             permits: Arc::clone(&self.permits),
+            started: std::time::Instant::now(),
         }
     }
 
@@ -1138,6 +1148,19 @@ mod tests {
     /// deadlock. So there is no order: either both halves are reserved or
     /// neither is, and a refusal leaves the counters exactly where it found
     /// them.
+    /// A live start's queue is timed for exactly as long as its guard lives,
+    /// on both constructors, however it ends.
+    #[test]
+    fn a_live_wait_is_timed_into_the_encode_permit_pool_when_it_ends() {
+        use crate::telemetry::{admission_waits_for_test, AdmissionPool};
+        let admissions = Admissions::new();
+        let before = admission_waits_for_test(AdmissionPool::EncodePermit);
+        drop(admissions.wait_for_slot());
+        drop(admissions.software_pool().wait_for_capacity());
+        let after = admission_waits_for_test(AdmissionPool::EncodePermit);
+        assert!(after - before >= 2, "{before} -> {after}");
+    }
+
     #[test]
     fn a_bundle_is_taken_whole_or_not_at_all() {
         let a = Admissions::new();

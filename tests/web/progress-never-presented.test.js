@@ -66,6 +66,16 @@ test('a loaded player reports the position it is actually at',async()=>{
   assert.equal(posts[0].body.position_ms,1832000);
 });
 
+// The server's `plurx_watched_seconds_total{method}` is labelled by what the
+// beat names. Without it every web second is `unknown`, and bytes per watched
+// minute cannot be split by delivery method.
+test('a beat names the delivery method it is playing through',async()=>{
+  const {c,posts,p}=harness({readyState:4,currentTime:600},{knownDur:3125131,method:'remux'}); attach(p);
+  await c.reportProgress(7,false);
+  assert.equal(posts.length,1);
+  assert.equal(posts[0].body.method,'remux');
+});
+
 // HAVE_METADATA is the boundary on purpose: a player paused at metadata with a
 // real offset behind it is reporting a real position. Tightening the predicate
 // would silently suppress it, so pin it.

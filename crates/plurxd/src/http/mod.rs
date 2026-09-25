@@ -10369,6 +10369,129 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
+    /// C-08 M5 row 1 end to end: a `ttff` beacon is counted under the class
+    /// of the requester's own `User-Agent` header — not the client's `ua`
+    /// field, which is free text — and over IPv6 or no peer at all, where the
+    /// network identity is `None`.
+    #[tokio::test]
+    async fn a_ttff_beacon_is_labelled_by_the_requesters_client_class() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let bucket = r#"plurx_ttff_ms_bucket{method="remux",client="firefox",le="120000"} "#;
+        let read = || {
+            crate::telemetry::prometheus()
+                .lines()
+                .find_map(|line| line.strip_prefix(bucket).map(str::to_owned))
+                .and_then(|value| value.parse::<u64>().ok())
+                .expect("the firefox bucket renders")
+        };
+        let before = read();
+        let mut request = post(
+            "/api/v1/client-log",
+            Some(&admin),
+            json!({ "event": "ttff", "method": "remux", "ms": 97_000, "ua": "Safari" }),
+        );
+        request.headers_mut().insert(
+            axum::http::header::USER_AGENT,
+            axum::http::HeaderValue::from_static(super::test_agents::FIREFOX_WINDOWS_UA),
+        );
+        let (status, _) = call(&app, request).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // Recorded on the handler's spawned task.
+        for _ in 0..200 {
+            if read() > before {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(read() > before, "the ttff never reached client=\"firefox\"");
+    }
+
+    /// C-08 M5 row 3's denominator end to end: two live progress beats a
+    /// second apart credit the advance to the method the player names; an
+    /// offline replay (`recorded_at`) credits nothing.
+    #[tokio::test]
+    async fn live_progress_beats_credit_watched_seconds_to_the_named_method() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let uri = format!("/api/v1/items/{}/progress", seeded.movie);
+        let before = crate::telemetry::watched_ms_for_test("transcode");
+        for position in [60_000, 61_000] {
+            let (status, body) = call(
+                &app,
+                post(
+                    &uri,
+                    Some(&admin),
+                    json!({ "position_ms": position, "duration_ms": 600_000, "method": "transcode" }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        }
+        let credited = crate::telemetry::watched_ms_for_test("transcode") - before;
+        assert!(
+            (1_000..=1_100).contains(&credited),
+            "two beats one second apart credited {credited} ms"
+        );
+        let replayed = crate::telemetry::watched_ms_for_test("transcode");
+        let (status, _) = call(
+            &app,
+            post(
+                &uri,
+                Some(&admin),
+                json!({ "position_ms": 62_000, "method": "transcode", "recorded_at": 1 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(crate::telemetry::watched_ms_for_test("transcode"), replayed);
+    }
+
+    /// The progress handler hands the ledger the durable row it read before
+    /// writing, so a beat that another node already credited is not credited
+    /// again here. The other node is played by a direct store write between
+    /// this node's two beats: this node then credits only the second since
+    /// that write, not the two seconds since its own last beat.
+    #[tokio::test]
+    async fn a_beat_after_another_nodes_write_credits_only_the_time_since_it() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let user = state
+            .store
+            .get_user_by_username("paul")
+            .await
+            .expect("admin lookup")
+            .expect("admin user");
+        let uri = format!("/api/v1/items/{}/progress", seeded.movie);
+        let beat = |position: i64| {
+            post(
+                &uri,
+                Some(&admin),
+                json!({ "position_ms": position, "duration_ms": 600_000, "method": "transcode" }),
+            )
+        };
+        let before = crate::telemetry::watched_ms_on_this_thread("transcode");
+        let (status, body) = call(&app, beat(60_000)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // Another node receives the next beat and commits it.
+        state
+            .store
+            .put_progress(user.id, seeded.movie, 61_000, Some(600_000))
+            .await
+            .expect("the other node's commit");
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        let (status, body) = call(&app, beat(62_000)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            crate::telemetry::watched_ms_on_this_thread("transcode") - before,
+            1_000,
+            "only the advance since the other node's beat is this node's to credit"
+        );
+    }
+
     #[tokio::test]
     async fn client_telemetry_updates_the_matching_network_prior() {
         let (app, state) = test_state();
@@ -16308,6 +16431,93 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// Row 8's direct-play numerator is the body the real handler hands the
+    /// connection: a GET adds exactly the bytes its body carried, whole or
+    /// ranged, under `direct_play`; a HEAD and a 416 carry no media and add
+    /// nothing. Counted on this test's thread, so the rest of the suite
+    /// cannot make it pass.
+    #[tokio::test]
+    async fn a_direct_play_get_credits_exactly_its_body_to_delivered_bytes() {
+        use crate::telemetry::delivered_bytes_on_this_thread;
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let s = seed_content(&state).await;
+        let uri = format!("/api/v1/files/{}/direct?token={admin}", s.file);
+        let body_of = |response: axum::response::Response| async move {
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body")
+                .len() as u64
+        };
+
+        let before = delivered_bytes_on_this_thread("direct_play");
+        let ranged_response = app.clone().oneshot(ranged(&uri, 0, 9)).await.expect("r");
+        assert_eq!(ranged_response.status(), StatusCode::PARTIAL_CONTENT);
+        let ranged_len = body_of(ranged_response).await;
+        assert_eq!(ranged_len, 10);
+        assert_eq!(
+            delivered_bytes_on_this_thread("direct_play") - before,
+            ranged_len,
+            "a ranged GET credits the bytes its body carried"
+        );
+
+        let whole = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("r");
+        assert_eq!(whole.status(), StatusCode::OK);
+        let whole_len = body_of(whole).await;
+        assert!(
+            whole_len > ranged_len,
+            "the whole file is longer than the range"
+        );
+        assert_eq!(
+            delivered_bytes_on_this_thread("direct_play") - before,
+            ranged_len + whole_len,
+            "a whole GET credits the file"
+        );
+
+        let counted = delivered_bytes_on_this_thread("direct_play");
+        let head = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("r");
+        assert!(head.status().is_success(), "{}", head.status());
+        body_of(head).await;
+        let unsatisfiable = app
+            .clone()
+            .oneshot(ranged(&uri, 10_000, 20_000))
+            .await
+            .expect("r");
+        assert_eq!(unsatisfiable.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        body_of(unsatisfiable).await;
+        assert_eq!(
+            delivered_bytes_on_this_thread("direct_play"),
+            counted,
+            "neither a HEAD nor a 416 is media delivered"
+        );
+        for other in ["remux", "transcode", "unknown"] {
+            assert_eq!(
+                delivered_bytes_on_this_thread(other),
+                0,
+                "direct play credited {other}"
+            );
+        }
     }
 
     /// Direct play is a *storm* of ranged 206s, not a connection: a seeking

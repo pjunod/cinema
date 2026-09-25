@@ -3245,7 +3245,17 @@ impl VodServe {
             lifecycle: Arc::clone(&lifecycle),
             incarnation: Arc::new(()),
             last_touch: StdMutex::new(Instant::now()),
-            delivery: Arc::new(crate::meter::Meter::new()),
+            // The same decision as `kind` above: an encoded rendition is a
+            // transcode whatever the request asked for.
+            delivery: Arc::new(crate::meter::Meter::for_method(
+                if rendition.recipe.encoding.is_some()
+                    || matches!(req.kind, SessionKind::Transcode { .. })
+                {
+                    "transcode"
+                } else {
+                    "remux"
+                },
+            )),
             control: StdMutex::new(crate::playback_control::ControlState::default()),
             marker_destinations,
             last_control_snapshot: None,

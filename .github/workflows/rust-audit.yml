@@ -81,6 +81,7 @@ jobs:
         run: >-
           scripts/vendor-audit-lock --output target/rust-audit/Cargo.lock
           --additional-lock fuzz/Cargo.lock
+          --additional-lock fuzz/parsers/Cargo.lock
       # Keep exactly one issue publisher over the deduplicated root, vendored,
       # and fuzz package inventory. One reporter per lockfile can race when the
       # same advisory affects dependencies shared by more than one lock.
