@@ -2032,7 +2032,20 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # tree re-measured after the merge, the sum of both contributions.
 # Merged with main's FFmpeg write boundary (#505): the value is the whole
 # merged tree re-measured after the merge.
-expected_occurrences = 604
+# 604 -> 607 (measured) with the PR #496 review response. Production, one:
+# the `tokio::spawn` in `LiveTvManager::spawn_orphan_removal` that runs one
+# `tokio::fs::remove_dir_all` of an orphaned session's scratch directory, so
+# that the orphan list is never held across filesystem I/O. Its handle is the
+# orphan record's `removal`; at most one is in flight per orphan, a later
+# retry reads its result, and one stalled on a hung mount is kept rather than
+# replaced, so it pins one blocking thread and never a lock, a drain or a
+# handoff. It owns no process, no producer and no recovery decision; it is
+# dropped (detached) with its record. Test-only, two: the `#[cfg(test)]`
+# `tokio::spawn(pending())` standing in for such a hung removal, and the
+# retry loop in
+# `a_hung_orphan_removal_holds_up_no_handoff_and_no_drain_past_its_deadline`
+# that runs `retry_orphans` as `scratch_sweep_loop` does, aborted at the end.
+expected_occurrences = 607
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2770,7 +2783,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # tree re-measured after the merge, the sum of both contributions.
 # Merged with main's FFmpeg write boundary (#505): the value is the whole
 # merged tree re-measured after the merge.
-expected_occurrences = 933
+# 933 -> 942 (measured) with the PR #496 review response. Production, one:
+# `drain_orphans` now takes the orphan list under
+# `tokio::time::timeout_at(deadline, ...)`, the drain's own
+# `SESSION_DRAIN_TIMEOUT` deadline, so a drain answers by its deadline
+# whatever holds the list. Test-only, eight, each bounding one test wait: in
+# `a_joiner_of_a_warm_opening_starts_when_the_opener_leaves_before_attaching`
+# the 300 ms pause before the opener is stopped and the 25 s bound on the
+# joiner's answer; in
+# `a_hung_orphan_removal_holds_up_no_handoff_and_no_drain_past_its_deadline`
+# the retry loop's `sleep(ORPHAN_RETRY)`, a 10 ms pause, and the bounds on
+# a retry pass, a failed cleanup's handoff and the two drains. None is a
+# playback-progress watchdog, owns a producer or chooses a recipe. (The two
+# `tokio::time::advance` calls the review response removed are not this
+# shape.)
+expected_occurrences = 942
 
 [[module_structures]]
 id = "bare-time-constructor"
