@@ -176,6 +176,20 @@ targets:
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/plurx.app/plurx"
         BUNDLE_LOADER: "$(TEST_HOST)"
 
+  plurx-tvOSUITests:
+    type: bundle.ui-testing
+    platform: tvOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: plurx-tvOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tv.plurx.app.uitests.tvos
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        TEST_TARGET_NAME: plurx-tvOS
+
 schemes:
   plurx-iOS:
     build:
@@ -194,3 +208,12 @@ schemes:
     test:
       targets:
         - plurx-tvOSTests
+
+  plurx-tvOS-physical:
+    build:
+      targets:
+        plurx-tvOS: all
+        plurx-tvOSUITests: [test]
+    test:
+      targets:
+        - plurx-tvOSUITests
