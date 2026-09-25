@@ -129,24 +129,22 @@ class AttemptScopeCensusCase(unittest.TestCase):
                     self.assertTrue(errors)
                     self.assertTrue(any(f"AttemptFence.{fence}" in e for e in errors), errors)
 
-    def test_all_four_fences_swapped_at_once_are_each_reported(self) -> None:
-        """The exact rewrite the review ran on mba, which the census used to
-        pass: every fence moved onto one unrelated scope in the same edit."""
+    def test_all_fences_swapped_at_once_are_each_reported(self) -> None:
+        """Every registered continuation must fail even when all scope sets
+        are swapped in the same edit; a new fence joins this proof by having
+        a census row, without replacing a hard-coded four-case list."""
         attempt = repository_read(ATTEMPT_SOURCE)
         rewrites = {
-            "stallRecovery": "pgsSelection",
-            "seekPresentationDeadline": "seek",
-            "blackFrameDecodeFailure": "initialDecision",
-            "itemFailureLadder": "pgsItem",
+            fence: next(scope for scope in SCOPE_FIELDS if scope not in row["scopes"])
+            for fence, row in recorded_fences().items()
         }
-        self.assertEqual(set(rewrites), set(recorded_fences()))
         for fence, scope in rewrites.items():
             attempt = replace_once(
                 self, attempt, fence_arm(self, attempt, fence), f"case .{fence}: return [.{scope}]"
             )
         errors = audit(read_with(**{ATTEMPT_SOURCE: attempt}))
 
-        self.assertEqual(len(errors), 4, errors)
+        self.assertEqual(len(errors), len(rewrites), errors)
         for fence in rewrites:
             self.assertTrue(any(f"AttemptFence.{fence} " in e for e in errors), (fence, errors))
 
@@ -166,7 +164,10 @@ class AttemptScopeCensusCase(unittest.TestCase):
                 self.assertEqual(len(errors), 2, errors)
                 joined = "\n".join(errors)
                 self.assertIn(f"AttemptFence.{fence}, but", joined)
-                self.assertIn(f"AttemptFence.{other} 1 time(s)", joined)
+                expected_other_count = 1 + (
+                    recorded_fences()[fence]["function"] == recorded_fences()[other]["function"]
+                )
+                self.assertIn(f"AttemptFence.{other} {expected_other_count} time(s)", joined)
 
     def test_a_direct_still_current_call_is_reported(self) -> None:
         """A literal scope set at the call site is the shape #464 started

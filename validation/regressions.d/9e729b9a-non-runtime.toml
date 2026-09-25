@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["9e729b9a"]
+points = []
+checks = []
+reason = "Documentation only: the status page records CI runner disk pressure and the documented unused Docker build-cache cleanup. No product or validation behavior changed."
+ignore = true

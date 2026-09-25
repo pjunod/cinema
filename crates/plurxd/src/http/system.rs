@@ -866,6 +866,10 @@ pub async fn client_log(
     let event = client_playback_event(&ev, user.id);
     // Deliberately not `ev.ua`: the class must come from the same input the
     // read paths use, or the prior is written under a key nothing reads.
+    // The same derivation labels `plurx_ttff_ms{client}`, and it is taken
+    // here rather than from the identity below because that one is `None`
+    // for an IPv6 peer, and a start time is a start time on any address.
+    let client = super::network::client_class(&headers);
     let mut network = super::network::identity(&headers, remote);
     if let Some(ref mut id) = network {
         id.user_id = Some(user.id);
@@ -918,7 +922,7 @@ pub async fn client_log(
             Some(session_id) => transcode.session_status(session_id).await,
             None => None,
         };
-        emit_client_playback_event(store, event, info.as_ref(), network);
+        emit_client_playback_event(store, event, info.as_ref(), network, Some(client));
     });
     StatusCode::NO_CONTENT
 }
@@ -1027,6 +1031,7 @@ fn emit_client_playback_event(
     mut event: PlaybackEvent,
     info: Option<&crate::transcode::SessionInfo>,
     network: Option<crate::telemetry::NetworkIdentity>,
+    client: Option<&'static str>,
 ) {
     normalize_client_marker_prewarm(&mut event);
     if let Some(info) = info {
@@ -1036,7 +1041,7 @@ fn emit_client_playback_event(
         .session_id
         .as_deref()
         .map(crate::transcode::session_log_id);
-    crate::telemetry::emit_with_network(store, event, network);
+    crate::telemetry::emit_with_network(store, event, network, client);
 }
 
 fn normalize_client_marker_prewarm(event: &mut PlaybackEvent) {
@@ -1737,6 +1742,11 @@ pub struct SettingsDto {
     /// store kept instead of the whole source. On by default; off makes both
     /// ignore the store entirely.
     pub subtitle_stored_sources: bool,
+    /// Let a store miss join the cluster subtitle-source queue and hydrate a
+    /// peer's verified track. The Developer readiness report is advisory.
+    pub subtitle_cluster_sources: bool,
+    /// Fill uncovered subtitle sources while the analysis pool is idle.
+    pub subtitle_backfill: bool,
     /// Make a chapter thumbnail the first time a watch page asks for one.
     /// On by default; off answers the thumbnail route 404 and runs no
     /// ffmpeg. The Developer tab's readiness rows are advisory.
@@ -2145,6 +2155,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
             true,
         ),
+        subtitle_cluster_sources: plurx_core::store::stored_switch(
+            setting(keys::SUBTITLE_CLUSTER_SOURCES).as_deref(),
+            false,
+        ),
+        subtitle_backfill: plurx_core::store::stored_switch(
+            setting(keys::SUBTITLE_BACKFILL).as_deref(),
+            false,
+        ),
         chapter_thumbnails: plurx_core::store::stored_switch(
             setting(keys::CHAPTER_THUMBNAILS).as_deref(),
             true,
@@ -2397,6 +2415,8 @@ pub struct UpdateSettings {
     pub subtitle_window_secs: Option<i64>,
     pub subtitle_not_ready_503: Option<bool>,
     pub subtitle_stored_sources: Option<bool>,
+    pub subtitle_cluster_sources: Option<bool>,
+    pub subtitle_backfill: Option<bool>,
     pub chapter_thumbnails: Option<bool>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
@@ -2558,6 +2578,8 @@ impl UpdateSettings {
             || self.subtitle_window_secs.is_some()
             || self.subtitle_not_ready_503.is_some()
             || self.subtitle_stored_sources.is_some()
+            || self.subtitle_cluster_sources.is_some()
+            || self.subtitle_backfill.is_some()
             || self.chapter_thumbnails.is_some()
             || self.live_tv_deinterlace_output.is_some()
             || self.default_audio_lang.is_some()
@@ -3351,6 +3373,18 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::SUBTITLE_STORED_SOURCES, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.subtitle_cluster_sources {
+        state
+            .store
+            .put_setting(keys::SUBTITLE_CLUSTER_SOURCES, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.subtitle_backfill {
+        state
+            .store
+            .put_setting(keys::SUBTITLE_BACKFILL, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(on) = req.chapter_thumbnails {
@@ -6662,7 +6696,7 @@ mod tests {
             suspended: true,
             suspend_count: 1,
         };
-        emit_client_playback_event(Arc::clone(&store), event, Some(&info), None);
+        emit_client_playback_event(Arc::clone(&store), event, Some(&info), None, None);
         let row = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if let Some(row) = store

@@ -10,6 +10,17 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **The web watch view's menus and Playback info are no longer trapped in the
+  picture, and the picture no longer scrolls over the header.** The player on
+  the watch page outranked the sticky header and clipped everything to its
+  own box, so a subtitle menu with thirty tracks lost its top half above the
+  picture, the Playback info readout lost its bottom below it, and scrolling
+  the page slid the picture over the navigation. The player now sits under
+  the page's chrome and clips nothing: menus and the readout hang over the
+  page as far as the viewport allows and scroll inside that, follow the
+  picture as it scrolls, and stop under the header; the header paints over
+  the picture as it does over the rest of the page.
+
 - **A newer FFprobe describing an old scan no longer reads as a replaced
   file.** Starting an encoded session compares the catalog's scan with a fresh
   probe of the held source, and those two reports can come from different

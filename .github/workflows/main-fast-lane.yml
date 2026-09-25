@@ -105,7 +105,6 @@ jobs:
       # the same diff, and tests/validation/test_regression_field.py refuses
       # one without the other.
       - name: Check the pull request's Regression-Test fields
-        continue-on-error: true
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -127,6 +126,7 @@ jobs:
           node tests/playback/web-policy.test.js
           node tests/playback/web-control.test.js
           node tests/web/player-dom.test.js
+          node tests/web/live-tv.test.js
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; compiler surfaces are skipped."

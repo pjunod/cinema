@@ -146,7 +146,7 @@ struct RootView: View {
     private func mirrorReminders() {
         guard model.phase == .ready else { return }
         let origin = model.origin
-        let token = Session.shared.token
+        let token = Session.shared.credentials.token
         Task { await LocalReminders.shared.reconcile(origin: origin, token: token) }
     }
     #endif

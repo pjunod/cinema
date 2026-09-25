@@ -1,6 +1,6 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-24 · Kept current by the working agent in the same
+**Updated:** 2026-09-25 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
@@ -40,6 +40,22 @@ packed split debuginfo is 230 MiB plus a 177 MiB `.dwp`. `plurxd
 diagnostic-panic` (hidden) is the check; `Cargo.toml` keeps main's profile
 and **which one ships is Paul's** (plan §7 Q6). M3 stays blocked on Paul's
 spawn-seam decision, M4 on the lab1 matrix. Board row P-02 records it.
+## Watch view: menus and Playback info escape the picture; the picture goes under the header
+
+**Branch `fix/watch-popovers-escape-picture`, pull request open as a draft;
+not merged, nothing deployed.** Paul's report of 2026-09-24 on the new web
+watch view: the Playback info readout ran past the bottom of the picture and
+was cut off there, the subtitle menu ran past its top so half of it could not
+be chosen, and scrolling the page slid the picture over the main navigation.
+One cause: the slot player's host was fixed at z-index 90 with a clip-path to
+its own box. It now sits under the page's chrome (z-index 10) and clips
+nothing; `positionMenu` / `positionStats` bound each popover to the viewport
+minus the stuck chrome (`watchPopoverBounds`) and re-run on every scroll
+frame. Record: [docs/clients/WATCH-VIEW-LAYOUT.md](docs/clients/WATCH-VIEW-LAYOUT.md)
+(“The picture under the page; the menus and the readout over it”). Browser
+acceptance extended with a thirty-track menu, the Diagnostics readout and a
+scrolled-under-the-header check; passes on fine and coarse pointers.
+Native clients untouched.
 
 ## Live TV: direct play first, 5.1 stays 5.1
 
@@ -89,15 +105,16 @@ tracks never win, `und` is no language, the track is mapped by PID).
 
 ## P-03: the regression ledger stops growing, and releases get a weekly cadence
 
-**Branch `plan/P-03`, draft pull request; not merged, nothing deployed.**
+**Merged by #489 (`995b60f3e`); phase B switched on 2026-09-25 by branch
+`ci/p03-enforce` with Paul's approval** — the boundary is `448e803da`, and a
+corrective pull request now needs a resolving `Regression-Test:` line.
 Executes [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
 under Paul's two 2026-09-23 decisions. Built: the `Regression-Test:` field
 (checked before merge in the tree the merge will produce), the landing-commit
 audit that replaces new `validation/regressions.d/` fragments past a boundary
 commit, `scripts/release-cut`, and a Monday release-readiness run that tags a
-merged release only from a green gate. Nothing is in force yet: the boundary
-is set by a one-line follow-up once this lands, and the first weekly tag
-waits for `publish_main` to have a trigger (P-01). This page is now the
+merged release only from a green gate. The boundary is set (phase B); the
+first weekly tag still waits for `publish_main` to have a trigger (P-01). This page is now the
 newest sections plus an index; older sections moved verbatim into each
 folder's `STATUS-HISTORY.md`. The execution log in the plan is the record.
 

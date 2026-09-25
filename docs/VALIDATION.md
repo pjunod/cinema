@@ -1001,6 +1001,12 @@ judged by the legacy rule, fragments are still accepted, the merge audit
 reports nothing, and the fast lane's field step is advisory. Setting the
 boundary and removing that step's `continue-on-error` are one change;
 `tests/validation/test_regression_field.py` refuses either without the other.
+**Phase B has been in force since 2026-09-25:** `enforce_after` is
+`448e803da` (why that commit and not the audit's own landing commit is
+written in the file's header), and the field step blocks. Whoever merges a
+corrective pull request pastes the output of
+`python3 -m validation.regression_field --body-file <body> --landing-lines`
+into the landing commit's message.
 
 ```bash
 make history-check

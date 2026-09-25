@@ -2600,8 +2600,8 @@
     /// could be built.
     /// An `AppState` whose store can actually serve a create.
     ///
-    /// `HlsDeliveryFixture` cannot: its file is `/media/Heat.mkv`, a path with
-    /// no bytes behind it, so no fragment index can exist for it and every
+    /// `HlsDeliveryFixture` cannot: its file has a small placeholder payload,
+    /// not an encoded video, so no fragment index can exist for it and every
     /// create against it stops at `vod_index_pending` before reaching anything
     /// worth testing. That is fine for what that fixture is for and fatal for
     /// a test about what a create *decides*, because a create refused for an

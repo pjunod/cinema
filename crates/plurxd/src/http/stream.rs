@@ -2493,14 +2493,19 @@ pub async fn subtitles_vtt(
         ));
     }
 
-    let bytes = crate::subtitles::ensure_vtt_bytes(&state.subs_dir, &file, index)
-        .await
-        .map_err(|why| {
-            // Keep the endpoint's existing diagnostic while sharing the
-            // extraction/cache implementation with text subtitle burns.
-            tracing::warn!(file_id = id, index, "subtitle extraction failed: {why}");
-            ApiError::Internal("subtitle extraction failed".into())
-        })?;
+    let bytes = crate::subtitles::ensure_vtt_bytes_with_store(
+        &state.subs_dir,
+        &file,
+        index,
+        &state.subtitle_source_access(),
+    )
+    .await
+    .map_err(|why| {
+        // Keep the endpoint's existing diagnostic while sharing the
+        // extraction/cache implementation with text subtitle burns.
+        tracing::warn!(file_id = id, index, "subtitle extraction failed: {why}");
+        ApiError::Internal("subtitle extraction failed".into())
+    })?;
     Ok(vtt_response(bytes))
 }
 
@@ -2581,7 +2586,30 @@ pub async fn direct(
         // wrong — the unmounted-share case, arriving as it actually arrives.
         Err(_) => state.availability.forget(id),
     }
-    served
+    if method == Method::GET {
+        served.map(count_direct_play_bytes)
+    } else {
+        served
+    }
+}
+
+/// Credit a direct play's body to `plurx_delivered_bytes_total
+/// {method="direct_play"}` as each chunk is handed to the connection.
+///
+/// A direct play has no session and no meter, so this is its only count. The
+/// body was already a stream with its length in `Content-Length`, so wrapping
+/// it loses no size hint the connection was using. A body that is not a
+/// success (a 416, say) carries no media and is left alone.
+fn count_direct_play_bytes(response: Response) -> Response {
+    use futures_util::TryStreamExt;
+    if !response.status().is_success() {
+        return response;
+    }
+    response.map(|body| {
+        Body::from_stream(body.into_data_stream().inspect_ok(|chunk| {
+            crate::telemetry::record_delivered_bytes("direct_play", chunk.len() as u64);
+        }))
+    })
 }
 
 /// GET /api/v1/files/:id/content — original bytes for a text book.
@@ -2595,7 +2623,16 @@ pub async fn book_content(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let file = load_file(&state, id).await?;
+    serve_book_content(&state, id, &method, &headers).await
+}
+
+pub(super) async fn serve_book_content(
+    state: &AppState,
+    id: i64,
+    method: &Method,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let file = load_file(state, id).await?;
     let item = state
         .store
         .get_item(file.item_id)
@@ -2604,7 +2641,23 @@ pub async fn book_content(
     if item.kind != ItemKind::Book {
         return Err(ApiError::NotFound("book content"));
     }
-    serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64)).await
+    let mut response =
+        serve_file_range(&file.path, headers, method, Some(file.size.max(0) as u64)).await?;
+    if response.status().is_success() {
+        let name = file
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("book");
+        let safe_name = name.replace(['\\', '"', '\r', '\n'], "_");
+        if let Ok(disposition) = HeaderValue::from_str(&format!("inline; filename=\"{safe_name}\""))
+        {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_DISPOSITION, disposition);
+        }
+    }
+    Ok(response)
 }
 
 // The caps fields are inlined (not `#[serde(flatten)]`ed) because axum's

@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 225
+One binary serves everything on one port (`:32400` by default). plurx has 230
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -538,7 +538,10 @@ A poisoned limiter mutex fails *open*, because a lock bug must not silence
 diagnostics.
 
 `event` is one of `playback_failed`, `stream_rejected`, `hls_fatal`, `stall`,
-`stall_recovery`. Of the two dozen optional fields, `decode_hw` is the one
+`stall_end`, `stall_recovery`. `stall_end` closes a `stall` that was reported
+while it was still going (the web's persistent wait): its `ms` is the time
+after that report, and it adds to `plurx_stalled_seconds_total` without
+counting a second stall. Of the two dozen optional fields, `decode_hw` is the one
 that separates two failures every other field renders identically: a full
 buffer with late frames because the GPU is doing the work and something
 upstream hiccuped, versus a full buffer with late frames because a CPU is
@@ -1784,6 +1787,9 @@ valid URL, the only way forward is to release and start over.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/api/v1/files/{id}/content` | bearer | Original book bytes, with range support |
+| POST | `/api/v1/files/{id}/grants` | bearer | Mint a fixed-lifetime `open_in` capability for one book; body `{purpose:"open_in",ttl_secs:900}`; returns 201 with `{url,expires_at,grant_id}` |
+| GET, HEAD | `/api/v1/grants/{token}/content` | **capability** | Original book bytes with Range and repeat-open support until expiry; unknown 404, expired or revoked 410 `grant_gone` |
+| DELETE | `/api/v1/grants/{id}` | bearer, owner-scoped | Revoke the `grant_id` returned by mint; 204 on success |
 | POST | `/api/v1/files/{id}/publication` | bearer | Parses an EPUB, returns a manifest, mints a session |
 | GET | `/api/v1/publication/{session}/{*resource}` | **capability** | One bounded EPUB archive entry |
 | DELETE | `/api/v1/publication/{session}` | bearer, owner-scoped | Closes a session early |
@@ -2076,7 +2082,8 @@ is `health.verdict == "dead"`, and the fix — once the underlying cause is gone
    │                         │  │ │  5 s                    │ expires in 40 s
    │                         │◀─┴─┘ 200 {session_id,        │ if not activated
    │                         │       playlist_url, …}       │
-   │              ┌─ GET  .../index.m3u8 ──────────────────▶│ ≤6 segments
+   │              ┌─ GET  .../master.m3u8 ─────────────────▶│ captions
+   │              │  GET  .../index.m3u8 ──────────────────▶│ ≤6 segments
    │              │  GET  .../segment-000001.ts ───────────▶│ listed
    │              │  GET  .../status ─────────────────────▶ │ each of these
    │              └─ PUT  .../keepalive ──────────────────▶ │ sets last_touch
@@ -2095,7 +2102,8 @@ is `health.verdict == "dead"`, and the fix — once the underlying cause is gone
 | POST | `/api/v1/live-tv/guide/refresh` | admin | Forces one guide refresh on the owner and returns the new document |
 | GET | `/api/v1/live-tv/guide/readiness` | admin | Advisory: what has to be true for the configured source to work, and whether it is |
 | POST | `/api/v1/live-tv/channels/{channel}/sessions` | bearer | Two-phase start; issues the capability |
-| GET | `/api/v1/live-tv/sessions/{capability}/index.m3u8` | **capability** | Live media playlist |
+| GET | `/api/v1/live-tv/sessions/{capability}/master.m3u8` | **capability** | Caption-advertising master playlist returned by start and resume |
+| GET | `/api/v1/live-tv/sessions/{capability}/index.m3u8` | **capability** | Live media playlist referenced by the master |
 | GET | `/api/v1/live-tv/sessions/{capability}/{segment}` | **capability** | One MPEG-TS segment |
 | GET | `/api/v1/live-tv/sessions/{capability}/status` | **capability** | Session state |
 | PUT | `/api/v1/live-tv/sessions/{capability}/keepalive` | **capability** | 204; renews the idle timer and nothing else |
@@ -2906,6 +2914,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/internal/v1/media/offers` | 64 KiB | One placement bid; starts no work |
 | POST | `/api/v1/internal/media/shared-cache-canary` | 1 KiB | Proves shared-cache identity and generation |
 | GET | `/internal/media/fragment-index/{cache_key}` | — | Streams the verified local fragment index |
+| GET | `/internal/media/subtitle-source/{file_id}/{ordinal}/{format}` | — | Streams a verified local subtitle-source representation (`sup`, `webvtt`, or `matroska`) named by this node's manifest. Requires a signed cluster read request and the subtitle-cluster-sources switch; returns 404 for a missing or corrupt object so the caller can try another published holder. The source video is never opened. |
 | POST | `/_internal/v1/live-tv/snapshot` | 16 KiB | Tuner readiness and lineup for the current generation |
 | POST | `/_internal/v1/live-tv/guide` | 16 KiB | The owner's cached programme guide, relayed verbatim. Deliberately not gated on the Live TV protocol capability: an owner that predates the guide answers 404 and the ingress renders "no guide yet" rather than taking Live TV down across a mixed fleet |
 | POST | `/_internal/v1/live-tv/start`, `/_internal/v2/live-tv/start`, `/_internal/v1/live-tv/activate` | 16 KiB | Starts and activates a tuner session on the owner; v2 carries the exact signed live playback envelope |
