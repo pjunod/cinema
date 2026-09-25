@@ -55,6 +55,7 @@ struct Item: Codable, Identifiable, Hashable {
     var libraryId: Int?
     let kind: String
     let title: String
+    var sortTitle: String? = nil
     var year: Int?
     var overview: String?
     var poster: String?
@@ -621,6 +622,12 @@ struct OpenPublicationResponse: Codable, Hashable {
     let revision: ReadingRevision
     let publication: PublicationManifest
     let limits: PublicationLimits
+}
+
+struct FileGrantResponse: Codable, Hashable {
+    let url: String
+    let expiresAt: Int
+    let grantId: String
 }
 
 struct ReadingState: Codable, Hashable {

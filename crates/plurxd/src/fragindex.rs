@@ -1416,7 +1416,7 @@ impl IndexBuild {
 /// expectation, and the file's PGS tracks as subtitle ordinals.
 struct ProbedSource {
     expectation: VideoCompletionExpectation,
-    pgs_ordinals: Vec<i64>,
+    subtitle_tracks: Vec<crate::subtitle_ride_along::ProbedTrack>,
 }
 
 async fn probe_completion_expectation(
@@ -1501,7 +1501,7 @@ async fn probe_completion_expectation_inner(
     })?;
     // The ride-along's ordinals come from this document — the probe of the
     // very descriptor the pass reads — and never from scan-time facts.
-    let pgs_ordinals = crate::subtitle_ride_along::pgs_ordinals_from_probe(&raw);
+    let subtitle_tracks = crate::subtitle_ride_along::eligible_tracks_from_probe(&raw);
     let expectation = match completion_expectation_from_probe(&raw, source_object_version) {
         Ok(expectation) => Ok(expectation),
         Err(CompletionExpectationError::Unsupported(reason)) => {
@@ -1543,7 +1543,7 @@ async fn probe_completion_expectation_inner(
     }?;
     Ok(ProbedSource {
         expectation,
-        pgs_ordinals,
+        subtitle_tracks,
     })
 }
 
@@ -1687,7 +1687,8 @@ async fn build_attested(
         };
     let plan = match ride_along {
         Some(gate) => {
-            crate::subtitle_ride_along::plan(gate, file.id, source, &probed.pgs_ordinals).await
+            crate::subtitle_ride_along::plan_tracks(gate, file.id, source, &probed.subtitle_tracks)
+                .await
         }
         None => None,
     };

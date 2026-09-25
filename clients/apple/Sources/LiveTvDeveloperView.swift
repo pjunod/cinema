@@ -219,7 +219,7 @@ struct LiveTvDeveloperView: View {
         let expected = UUID()
         revision = expected
         busy = true
-        let client = LiveTvAPI(origin: model.origin, token: Session.shared.token)
+        let client = LiveTvAPI(origin: model.origin, token: Session.shared.credentials.token)
         api = client
         do {
             let settings = try await client.settings()

@@ -14,7 +14,8 @@ use super::hiqlite::{
     database_error, timeout_store, validate_sql, CacheTouchKey, HiqliteAuthStore, TimedClient,
 };
 use super::{
-    OfflinePackageStore, OutboxEntry, TraktStore, TranscodeCacheStore, WatchedOutboxStore,
+    FileGrant, FileGrantStore, NewFileGrant, OfflinePackageStore, OutboxEntry, TraktStore,
+    TranscodeCacheStore, WatchedOutboxStore,
 };
 use crate::domain::{
     CacheManifestCheck, CachedTranscode, NewOfflinePackage, OfflineActivityPackage,
@@ -247,7 +248,120 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     for result in timeout_store(client.batch(DURABLE_SCHEMA)).await? {
         result.map_err(database_error)?;
     }
+    for result in timeout_store(client.batch(super::FILE_GRANTS_SCHEMA)).await? {
+        result.map_err(database_error)?;
+    }
     Ok(())
+}
+
+pub(super) fn file_grants_migration_statements() -> Vec<(String, hiqlite::Params)> {
+    super::FILE_GRANTS_SCHEMA
+        .split(';')
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty())
+        .map(|statement| (statement.to_owned(), params!()))
+        .collect()
+}
+
+struct FileGrantRow {
+    id: String,
+    file_id: i64,
+    user_id: i64,
+    expires_at: i64,
+    revoked_at: Option<i64>,
+    source_active: i64,
+}
+
+impl From<&mut Row<'_>> for FileGrantRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            file_id: row.get("file_id"),
+            user_id: row.get("user_id"),
+            expires_at: row.get("expires_at"),
+            revoked_at: row.get("revoked_at"),
+            source_active: row.get("source_active"),
+        }
+    }
+}
+
+#[async_trait]
+impl FileGrantStore for HiqliteAuthStore {
+    async fn create_file_grant(&self, grant: NewFileGrant) -> Result<(), StoreError> {
+        self.execute(
+            "INSERT INTO file_grants
+             (id, token_hash, file_id, user_id, source_token_hash, purpose, created_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, 'open_in', $6, $7)",
+            params!(
+                grant.id,
+                grant.token_hash,
+                grant.file_id,
+                grant.user_id,
+                grant.source_token_hash,
+                grant.created_at,
+                grant.expires_at
+            ),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn file_grant_by_hash(&self, token_hash: &str) -> Result<Option<FileGrant>, StoreError> {
+        let sql = "SELECT g.id, g.file_id, g.user_id, g.expires_at, g.revoked_at,
+                          EXISTS (SELECT 1 FROM tokens t WHERE t.token_hash = g.source_token_hash
+                                    AND t.user_id = g.user_id) AS source_active
+                   FROM file_grants g WHERE g.token_hash = $1 AND g.purpose = 'open_in'";
+        validate_sql(sql)?;
+        Ok(self
+            .client()
+            .query_consistent_map::<FileGrantRow, _>(sql, params!(token_hash))
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| FileGrant {
+                id: row.id,
+                file_id: row.file_id,
+                user_id: row.user_id,
+                expires_at: row.expires_at,
+                revoked_at: row.revoked_at,
+                source_active: row.source_active != 0,
+            }))
+    }
+
+    async fn revoke_file_grant(
+        &self,
+        id: &str,
+        user_id: i64,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        Ok(self
+            .execute(
+                "UPDATE file_grants SET revoked_at = $1
+                 WHERE id = $2 AND user_id = $3 AND revoked_at IS NULL",
+                params!(now, id, user_id),
+            )
+            .await?
+            > 0)
+    }
+
+    async fn revoke_file_grants_for_user(&self, user_id: i64, now: i64) -> Result<(), StoreError> {
+        self.execute(
+            "UPDATE file_grants SET revoked_at = $1
+             WHERE user_id = $2 AND revoked_at IS NULL",
+            params!(now, user_id),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn prune_file_grants(&self, before: i64) -> Result<u64, StoreError> {
+        Ok(self
+            .execute(
+                "DELETE FROM file_grants WHERE expires_at < $1",
+                params!(before),
+            )
+            .await? as u64)
+    }
 }
 
 struct JsonValueRow {
@@ -273,6 +387,7 @@ struct DurableDump {
     cache_consumer_pins: Vec<String>,
     offline_packages: Vec<String>,
     offline_package_leases: Vec<String>,
+    file_grants: Vec<String>,
     offline_lease_guards: Vec<String>,
     offline_source_probes: Vec<String>,
 }
@@ -359,6 +474,12 @@ pub(super) async fn local_durable_digest(client: &TimedClient) -> Result<String,
             client,
             "SELECT json_array(token_hash, package_id, created_at, last_access_at, expires_at) \
                     AS value FROM offline_package_leases ORDER BY token_hash",
+        )
+        .await?,
+        file_grants: rows(
+            client,
+            "SELECT json_array(id, token_hash, file_id, user_id, source_token_hash, purpose, created_at, \
+                    expires_at, revoked_at) AS value FROM file_grants ORDER BY id",
         )
         .await?,
         offline_lease_guards: rows(

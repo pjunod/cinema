@@ -158,6 +158,34 @@ internal fun isCompatibilityPlaybackError(errorCode: Int): Boolean = errorCode i
     4005, // ERROR_CODE_DECODING_FORMAT_UNSUPPORTED
 )
 
+/** AudioTrack errors are sink failures, not proof that the media codec is unsupported. */
+internal enum class AudioSinkFailure { InitFailed, WriteFailed, OffloadInitFailed, None }
+
+internal enum class AudioSinkRecovery { ReSnapshotAndRetry, TranscodeRescue, FailDisconnected, Fail }
+
+internal fun audioSinkFailure(errorCode: Int): AudioSinkFailure = when (errorCode) {
+    5001 -> AudioSinkFailure.InitFailed
+    5002, 5003 -> AudioSinkFailure.WriteFailed
+    5004 -> AudioSinkFailure.OffloadInitFailed
+    else -> AudioSinkFailure.None
+}
+
+/** One route refresh and the existing one-shot transcode rescue are the whole budget. */
+internal fun audioSinkAction(
+    failure: AudioSinkFailure,
+    outputDevicePresent: Boolean,
+    routeChangedSinceSnapshot: Boolean,
+    sinkRetryUsed: Boolean,
+    transcodeRescueAlreadyUsed: Boolean,
+): AudioSinkRecovery = when {
+    failure == AudioSinkFailure.None -> AudioSinkRecovery.Fail
+    !outputDevicePresent -> AudioSinkRecovery.FailDisconnected
+    routeChangedSinceSnapshot && !sinkRetryUsed -> AudioSinkRecovery.ReSnapshotAndRetry
+    failure in setOf(AudioSinkFailure.InitFailed, AudioSinkFailure.OffloadInitFailed) &&
+        !transcodeRescueAlreadyUsed -> AudioSinkRecovery.TranscodeRescue
+    else -> AudioSinkRecovery.Fail
+}
+
 // ---- M5: the two bounded recovery additions this client owns ----------------
 
 /**

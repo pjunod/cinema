@@ -1751,7 +1751,7 @@ class CdpDriver {
     await this.send("Runtime.enable");
     await this.send("Page.enable");
     await this.send("Page.navigate", { url: this.baseUrl });
-    await waitFor(() => this.eval("document.readyState === 'complete'"), 20_000, "web app load");
+    await waitFor(() => this.eval("document.readyState === 'complete' && typeof render === 'function'"), 20_000, "web app load");
   }
 
   send(method, params = {}) {
@@ -1788,7 +1788,7 @@ class CdpDriver {
 
   async reload() {
     await this.send("Page.reload", { ignoreCache: true });
-    await waitFor(() => this.eval("document.readyState === 'complete'"), 20_000, "web app reload");
+    await waitFor(() => this.eval("document.readyState === 'complete' && typeof render === 'function'"), 20_000, "web app reload");
   }
 
   async startPlayback(fileId, title, durationMs) {
@@ -2055,7 +2055,10 @@ async function prepareBrowser(driver, token) {
     return true;
   `);
   await driver.reload();
-  await waitFor(() => driver.eval("typeof play === 'function' && typeof CAPS_Q === 'string'"), 30_000, "player code");
+  // `play` and `CAPS_Q` live in decode-tiers.js, ten rows before the watch
+  // presentation declares the bindings that play() reads. A shaped proxy can
+  // still be delivering those later rows after the early functions exist.
+  await waitFor(() => driver.eval("document.readyState === 'complete' && typeof play === 'function' && typeof CAPS_Q === 'string' && typeof watchPrepare === 'function' && typeof render === 'function'"), 30_000, "complete player code");
   return driver.eval(`({browser:browserLabel(),user_agent:navigator.userAgent,caps:PLAY_CAPS,caps_q:CAPS_Q,
     native_hls:useNativeHls(document.getElementById('video')),mse:!!(window.MediaSource&&window.Hls&&Hls.isSupported())})`);
 }
@@ -3773,7 +3776,7 @@ async function runSuite(manifest, options, dependencies = {}) {
         if (index + 1 < plan.cases.length) {
           await driver.reload();
           await waitFor(
-            () => driver.eval("typeof play === 'function' && typeof CAPS_Q === 'string'"),
+            () => driver.eval("document.readyState === 'complete' && typeof play === 'function' && typeof CAPS_Q === 'string' && typeof watchPrepare === 'function' && typeof render === 'function'"),
             30_000,
             `${browserName} player reset`,
           );

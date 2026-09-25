@@ -107,7 +107,7 @@ class LiveTvTest {
         override suspend fun start(channel: String, requestId: String): LiveTvStarted {
             events += "start:$channel"
             error?.let { throw LiveTvFailure(it, ownerDecided = ownerDecided) }
-            return response?.await() ?: LiveTvStarted("cap-$channel", this@LiveTvTest.channel, true)
+            return response?.await() ?: LiveTvStarted("cap-$channel", this@LiveTvTest.channel, true, playlist_url = "/api/v1/live-tv/sessions/cap-$channel/master.m3u8")
         }
         override suspend fun release(capability: String) {
             events += "release:$capability"
@@ -208,7 +208,7 @@ class LiveTvTest {
         val lease = lease(requests, Store(), CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
         val started = lease.start("one")
         val stopped = lease.stop()
-        requests.response!!.complete(LiveTvStarted("late", channel, true))
+        requests.response!!.complete(LiveTvStarted("late", channel, true, playlist_url = "/api/v1/live-tv/sessions/late/master.m3u8"))
         assertNull(started.await())
         stopped.await()
         assertEquals(listOf("start:one", "release:late"), requests.events)
@@ -223,7 +223,7 @@ class LiveTvTest {
         val waiter = launch { started.await() }
         waiter.cancel()
         val stopped = lease.stop()
-        requests.response!!.complete(LiveTvStarted("late", channel, true))
+        requests.response!!.complete(LiveTvStarted("late", channel, true, playlist_url = "/api/v1/live-tv/sessions/late/master.m3u8"))
         stopped.await()
         assertNull(lease.current)
         assertEquals(listOf("start:one", "release:late"), requests.events)
@@ -426,6 +426,29 @@ class LiveTvTest {
         assertEquals(21L, settings.live_tv_transition_drain_before)
         assertEquals(23L, settings.live_tv_config_generation)
         assertTrue(settings.playback_display_mode_match)
+    }
+
+    @Test fun playbackUsesReturnedMasterPlaylistAndRejectsOtherOrigins() {
+        val api = LiveTvApi("http://10.42.4.10:32400", "fixture-account-secret")
+        val channel = LiveTvChannel("one", "7.1", "Fixture News")
+        val started = LiveTvStarted(
+            "cap-one", channel, live = true,
+            playlist_url = "/api/v1/live-tv/sessions/cap-one/master.m3u8",
+        )
+        assertEquals(
+            "http://10.42.4.10:32400/api/v1/live-tv/sessions/cap-one/master.m3u8",
+            api.playbackUrl(started),
+        )
+        assertEquals(
+            "http://10.42.4.10:32400/api/v1/live-tv/sessions/cap-one/master.m3u8",
+            api.playbackUrl(started.copy(playlist_url = "/api/v1/live-tv/sessions/cap-one/index.m3u8")),
+        )
+        assertThrows(LiveTvFailure::class.java) {
+            api.playbackUrl(started.copy(playlist_url = "https://other.invalid/cap-one/master.m3u8"))
+        }
+        assertThrows(LiveTvFailure::class.java) {
+            api.playbackUrl(started.copy(playlist_url = "/api/v1/live-tv/sessions/other/master.m3u8"))
+        }
     }
 
     @Test fun playlistStaysAtOriginalOriginAndDoesNotCarryAccountToken() {

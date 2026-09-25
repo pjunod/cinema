@@ -1154,6 +1154,25 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "file_grants",
+        columns: &[
+            "id",
+            "token_hash",
+            "file_id",
+            "user_id",
+            "source_token_hash",
+            "purpose",
+            "created_at",
+            "expires_at",
+            "revoked_at",
+        ],
+        order_by: "id",
+        minimum_schema: 68,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "library_roots",
         columns: &["library_id", "fingerprint"],
         order_by: "library_id",
@@ -3063,8 +3082,9 @@ mod tests {
         assert!(names.contains(&"dvr_rules"));
         assert!(names.contains(&"dvr_reminders"));
         assert!(names.contains(&"media_classifications"));
+        assert!(names.contains(&"file_grants"));
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 52, "review every imported durable table");
+        assert_eq!(names.len(), 53, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

@@ -1270,11 +1270,19 @@ mod tests {
                 // `media_playback_pointers` fails with "no such table" rather
                 // than with anything about this fixture.
                 "DROP TRIGGER IF EXISTS cache_publication_generation_guard;
+                 DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_advance;
+                 DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_delete_source;
+                 DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_supersede_source;
+                 DROP TABLE IF EXISTS subtitle_source_repair_epochs;
+                 DROP TRIGGER IF EXISTS subtitle_source_publications_delete_source;
+                 DROP TRIGGER IF EXISTS subtitle_source_publications_supersede_source;
+                 DROP TABLE IF EXISTS subtitle_source_publications;
                  DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor;
                  DROP INDEX IF EXISTS analysis_requests_one_active_forced_skip_successor;
                  DROP INDEX IF EXISTS analysis_requests_one_active_source;
                  DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source;
                  DROP TABLE IF EXISTS analysis_index_repairs;
+                 DROP TABLE IF EXISTS file_grants;
                  DROP TRIGGER IF EXISTS classification_source_changed;
                  DROP TRIGGER IF EXISTS classification_au;
                  DROP TRIGGER IF EXISTS classification_ad;
@@ -1421,7 +1429,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 23] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 25] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1446,6 +1454,7 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS dvr_event_heads",
             "ADD COLUMN video_codec_tag",
             "CREATE TABLE IF NOT EXISTS media_classifications",
+            "CREATE TABLE IF NOT EXISTS file_grants",
             "CREATE TABLE analysis_index_repairs",
             "ADD COLUMN typed_code",
             // v64's field order. Like `video_codec_tag` it is an additive
@@ -1465,6 +1474,10 @@ mod tests {
             // table and takes the column with it.
             "ADD COLUMN validated_revision",
             "ADD COLUMN downloaded_subtitles",
+            // v67 rebuilds the request table and adds the subtitle-source
+            // publication and durable repair ledgers. Both tables and their
+            // triggers are dropped by the fixtures above.
+            "CREATE TABLE IF NOT EXISTS subtitle_source_repair_epochs",
         ];
 
         assert!(

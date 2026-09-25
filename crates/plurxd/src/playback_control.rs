@@ -4165,6 +4165,23 @@ impl ControlState {
         self.preparation.staged_incarnation_id()
     }
 
+    /// The successor incarnation this session is being replaced by right now
+    /// (staged or committing). An aborting slot names nobody: that successor
+    /// is being torn down and is owed nothing.
+    pub(crate) fn live_preparation_incarnation(&self) -> Option<&str> {
+        match &self.preparation {
+            PreparationSlot::Staged {
+                staged_incarnation_id,
+                ..
+            }
+            | PreparationSlot::Committing {
+                staged_incarnation_id,
+                ..
+            } => Some(staged_incarnation_id),
+            _ => None,
+        }
+    }
+
     /// Whether this exact successor may still be committed.
     pub(crate) fn may_commit_preparation(&self, staged_incarnation_id: &str) -> bool {
         self.preparation.may_commit(staged_incarnation_id)

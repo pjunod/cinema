@@ -159,6 +159,9 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         speculative: AtomicBool::new(false),
         queued: StdMutex::new(None),
         policy_retry: AtomicBool::new(false),
+        handoff_wait: AtomicBool::new(false),
+        last_refusal: StdMutex::new(None),
+        handoff_claim: StdMutex::new(None),
         admission_pause: StdMutex::new(None),
     });
     (file, encoding)
@@ -364,6 +367,9 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         speculative: AtomicBool::new(false),
         queued: StdMutex::new(None),
         policy_retry: AtomicBool::new(false),
+        handoff_wait: AtomicBool::new(false),
+        last_refusal: StdMutex::new(None),
+        handoff_claim: StdMutex::new(None),
         admission_pause: StdMutex::new(None),
     });
     new.try_create(
