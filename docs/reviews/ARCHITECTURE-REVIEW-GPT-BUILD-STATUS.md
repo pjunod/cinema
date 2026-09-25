@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — PR #524 includes current main `1781e8e2d65c` and advances Android to versionCode 128 and Apple to build 185 after #526 occupied earlier build numbers. Its prior exact-head gate #3094 passed, but main moved at the merge click; replacement gate #3099 found one generated Apple parity claim still at 184, now corrected to 185. L-03 caption-positive acceptance, A-04 trace, and postmerge rollout remain open. Three voters and the nuc3 learner are healthy; all four nodes await current-main rollout. · **Updated:** 2026-09-25 20:00 UTC · **Main:** `1781e8e2d65c`
+**Status:** open — PR #524 now includes merged K-04 PR #504 at main `9f9786b2e4bb` and retains Android versionCode 128 / Apple build 185. Gate #3100 was canceled when main moved during Rust/Windows compile; exact-base local checks and a replacement fast lane are pending. L-03 caption-positive acceptance, A-04 trace, and postmerge rollout remain open. Three voters and the nuc3 learner are healthy; all four nodes await current-main rollout. · **Updated:** 2026-09-25 20:12 UTC · **Main:** `9f9786b2e4bb`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
