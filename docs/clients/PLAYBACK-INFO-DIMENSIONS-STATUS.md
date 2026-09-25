@@ -1,6 +1,6 @@
 # Playback information dimensions — implementation status
 
-**Status:** built; promotion state is live on PR #526 · **Started:** 2026-09-25 · **Integrated main through:** `1d68af6eb` (refreshed from initial `415eb047f3`)
+**Status:** built; promotion state is live on PR #526 · **Started:** 2026-09-25 · **Integrated main through:** `4bba363bc` (refreshed from initial `415eb047f3`)
 
 This page tracks the playback information repair in one isolated clone. The
 implementation follows the supplied dimensions and aspect handoff. The
@@ -18,8 +18,8 @@ targets `main`. Package boundaries are commits in one PR under the user's
 | Apple delivery facts and presentation | Local checks passed | `148829768`; iOS and tvOS simulator builds passed; 83 selected tests passed on each. |
 | Android delivery facts and presentation | Local checks passed | `148829768`; `:app:assembleDebug` and 35 selected unit tests passed. |
 | Adversarial implementation review | Findings addressed | One review found Apple Compact label drift, Android aspect basis, unattached web plan facts, and stale handoff ledger. Follow-up code and tests passed their focused checks. |
-| History evidence | Passed locally | `make history-check` on the current merged base found 2,304 corrective commits, 282 client-fix anchors, eleven post-boundary landing commits. One anchor per branch corrective client commit; current main carries errata for earlier PRs #519 and #522. |
-| Fast lane | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | Run 3062 stopped at runner cache cleanup; run 3076 found an index/header status contradiction, both corrected. Run 3080 passed policy, web, Apple and Android before `main` moved. Run 3087 passed scope and mobile version, then preflight hit its five-minute job limit while checks were passing. The limit is now ten minutes; use the PR's current-head `Main promotion gate` for the final result. |
+| History evidence | Passed locally | `make history-check` on the current merged base found 2,312 corrective commits, 282 client-fix anchors, twelve post-boundary landing commits. One anchor per branch corrective client commit; current main carries errata for earlier PRs #519 and #522. |
+| Fast lane | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | Run 3062 stopped at runner cache cleanup; run 3076 found an index/header status contradiction, both corrected. Run 3080 passed policy, web, Apple and Android before `main` moved. Run 3087 hit the old five-minute preflight limit, now ten. Run 3091 passed policy, web, Apple, Android and Windows before `main` moved again. Use the PR's current-head `Main promotion gate` for the final result. |
 | PR merge | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | The PR is the authoritative merge record. Merge requires a successful current-head `Main promotion gate`. |
 | Production and physical session evidence | Unavailable | No real Live TV Cozi session or physical phone/TV capture was available in this isolated checkout. The stream frame is planned on web/Apple and measured only from an eligible Android player sample. |
 
@@ -34,7 +34,7 @@ The tracked pre-commit hook was installed in the isolated clone after its
 initial absence. The first commit was amended through it; catalog lint, Rust
 formatting, Clippy and embedded JavaScript syntax passed before rebasing
 `3e970ec42` onto `60f3803d1`, then merged `main` at `c99a29090` and
-`196d2a43e`, and `1d68af6eb`;
+`196d2a43e`, `1d68af6eb`, and `4bba363bc`;
 the reviewed candidate passed the tracked hook on its final status commit.
 The post-review local pass included
 `node tests/web/player-dom.test.js`, `node tests/playback/web-policy.test.js`,
@@ -84,6 +84,12 @@ five-minute deadline while the static contracts were still running. The log
 showed no failing assertion before the runner killed the step. The preflight
 job now has a ten-minute deadline so the same checks can finish under shared
 runner load. Its operation-contract test was updated to hold that limit.
+
+Run 3091 passed scope, mobile version, preflight, web syntax, Apple, Android,
+and Windows. Before its Rust gate finished, `main` gained SQLite PR #502 at
+`4bba363bc`. That Rust source is integrated here and passed pinned 1.97.1
+workspace check and Clippy, plus the exact-tree history audit. The PR needs
+a gate on this new combined tree.
 
 ## Scope decisions
 

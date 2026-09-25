@@ -818,7 +818,7 @@ candidate.
 | Item | State | Evidence required / current record |
 |---|---|---|
 | Chosen UI and renderings | Prepared | Illustrative captures in §3; not production acceptance |
-| Current behavior reference | Refreshed | Clone based on `415eb047f3`, rebased onto `60f3803d1`, then merged `c99a29090`, `196d2a43e`, and `1d68af6eb`; see status page. |
+| Current behavior reference | Refreshed | Clone based on `415eb047f3`, rebased onto `60f3803d1`, then merged `c99a29090`, `196d2a43e`, `1d68af6eb`, and `4bba363bc`; see status page. |
 | Fable design review | Corrections incorporated | B1–B4 and N1–N7 in §11; no second review claimed |
 | Fresh base and toolchains | Recorded | Actual base, branch and runtime versions in status page. |
 | M0 cross-client contract | Local checks passed | Integrated commit `148829768`; generated fixture and focused client checks passed. |
