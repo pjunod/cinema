@@ -2493,14 +2493,19 @@ pub async fn subtitles_vtt(
         ));
     }
 
-    let bytes = crate::subtitles::ensure_vtt_bytes(&state.subs_dir, &file, index)
-        .await
-        .map_err(|why| {
-            // Keep the endpoint's existing diagnostic while sharing the
-            // extraction/cache implementation with text subtitle burns.
-            tracing::warn!(file_id = id, index, "subtitle extraction failed: {why}");
-            ApiError::Internal("subtitle extraction failed".into())
-        })?;
+    let bytes = crate::subtitles::ensure_vtt_bytes_with_store(
+        &state.subs_dir,
+        &file,
+        index,
+        &state.subtitle_source_access(),
+    )
+    .await
+    .map_err(|why| {
+        // Keep the endpoint's existing diagnostic while sharing the
+        // extraction/cache implementation with text subtitle burns.
+        tracing::warn!(file_id = id, index, "subtitle extraction failed: {why}");
+        ApiError::Internal("subtitle extraction failed".into())
+    })?;
     Ok(vtt_response(bytes))
 }
 

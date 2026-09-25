@@ -193,6 +193,22 @@ async function saveSubtitleStoredSources(btn){
     if(card) card.outerHTML=subtitleStoredSourcesCard(saved,DEVELOPER_READINESS);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
+async function saveSubtitleClusterSources(btn){
+  const err=document.getElementById("subclustererr");err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{subtitle_cluster_sources:document.getElementById("subcluster").checked}}));
+    const card=document.getElementById("subclustercard");if(card)card.outerHTML=subtitleClusterSourcesCard(saved,DEVELOPER_READINESS);
+    toast("Cluster subtitle source setting saved");if(btn)setCardSaved(btn);
+  }catch(error){err.textContent=error.message;if(btn)btn.disabled=false;}
+}
+async function saveSubtitleBackfill(btn){
+  const err=document.getElementById("subbackfillerr");err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{subtitle_backfill:document.getElementById("subbackfill").checked}}));
+    const card=document.getElementById("subbackfillcard");if(card)card.outerHTML=subtitleBackfillCard(saved,DEVELOPER_READINESS);
+    toast("Subtitle backfill setting saved");if(btn)setCardSaved(btn);
+  }catch(error){err.textContent=error.message;if(btn)btn.disabled=false;}
+}
 async function saveAutomaticDecoderRecovery(btn){
   const err=document.getElementById("adrerr"); err.textContent="";
   if(btn) btn.disabled=true;
