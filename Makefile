@@ -211,6 +211,14 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::api::tests::write_ack_variants_are_appended_after_every_deployed_response_ordinal \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::api::tests::write_ack_log_index_is_sent_only_on_a_negotiated_connection \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::frame_io::tests::real_tls_tail_backpressure_completes_for_every_payload_direction \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -896,7 +904,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::extract::tests::replicated_exclusion_projection_outlives_remote_ttl_and_clock_skew \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
-	  http::extract::tests::cache_admin_revocation_operation_gate_fails_fast_and_is_raii_released \
+	  http::extract::tests::cache_admin_revocation_operation_queue_is_bounded_and_raii_released \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::capability_refresh_error_and_rollback_clear_cache_only_admin_authority \
