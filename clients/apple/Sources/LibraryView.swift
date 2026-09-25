@@ -17,6 +17,7 @@ struct LibraryView: View {
     @State private var total = 0
     @State private var complete = false
     @State private var filterGeneration = 0
+    @State private var pageGeneration = 0
     @State private var driveTask: Task<Void, Never>?
 
 
@@ -63,7 +64,7 @@ struct LibraryView: View {
             runDrive()
         }
         .onChange(of: items) { _, _ in filterNow() }
-        .onDisappear { driveTask?.cancel() }
+        .onDisappear { driveTask?.cancel(); pageGeneration += 1 }
     }
 
     private var summary: some View {
@@ -180,12 +181,14 @@ struct LibraryView: View {
     @MainActor
     private func fetchUntil(_ through: Int) async {
         guard !fetching, var current = pager else { return }
+        let generation = pageGeneration
         fetching = true
         defer { fetching = false }
         do {
-            while current.decided.count < through && !current.complete && !Task.isCancelled {
+            while current.decided.count < through && !current.complete && !Task.isCancelled && generation == pageGeneration {
                 guard let request = current.nextRequest else { break }
-                let page = try await model.libraryPage(request.libraryId, sort: sort, offset: request.offset)
+                let page = try await model.libraryPage(request.libraryId, sort: current.sort, offset: request.offset)
+                guard generation == pageGeneration, !Task.isCancelled else { return }
                 let snapshot = current
                 let batch = page.items ?? []
                 current = await Task.detached(priority: .userInitiated) {
@@ -193,6 +196,7 @@ struct LibraryView: View {
                     revised.receive(libraryId: request.libraryId, items: batch, total: page.total ?? batch.count)
                     return revised
                 }.value
+                guard generation == pageGeneration, !Task.isCancelled else { return }
                 if current.missingSortKey {
                     // Older servers do not expose the exact sort key. Keep the
                     // previous full-walk path until those servers are upgraded.
@@ -218,6 +222,8 @@ struct LibraryView: View {
     @MainActor
     private func load() async {
         driveTask?.cancel()
+        pageGeneration += 1
+        fetching = false
         loading = true
         error = nil
         pager = LibraryMerge(libraryIds: collection.libraries.map(\.id), sort: sort)

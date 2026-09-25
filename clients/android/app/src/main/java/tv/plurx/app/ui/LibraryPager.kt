@@ -2,6 +2,8 @@ package tv.plurx.app.ui
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -36,7 +38,7 @@ internal class LibraryPager(
             while (merge.decided.size < visibleThrough && !merge.complete) {
                 val (id, offset) = merge.nextRequest ?: break
                 val page = fetch(id, offset, sort)
-                merge.receive(id, page.items, page.total)
+                withContext(Dispatchers.Default) { merge.receive(id, page.items, page.total) }
                 mutable.value = LibraryGridState(
                     decided = merge.decided.toList(),
                     loadedCount = merge.loadedCount,
