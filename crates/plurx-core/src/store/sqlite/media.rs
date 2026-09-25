@@ -965,8 +965,7 @@ impl MediaStore for SqliteStore {
             // still surface it. Read from a widening window of the newest
             // rows; `sql_source::recently_added` states why that is exact.
             let sql =
-                super::super::sql_source::recently_added(&item_cols("i"), &item_cols("r"), true)
-                    .sqlite();
+                super::super::sql_source::recently_added(&item_cols("i"), &item_cols("r")).sqlite();
             let mut stmt = conn.prepare(&sql)?;
             let mut window_offset =
                 super::super::sql_source::recently_added_first_window_offset(limit);

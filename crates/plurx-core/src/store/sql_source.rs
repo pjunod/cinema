@@ -106,24 +106,14 @@ pub(super) fn recently_added_wider_window_offset(offset: i64) -> i64 {
 /// `rail_window_cut` tells the caller which case it is in: a cut window that
 /// yielded fewer than `limit` cards must be widened and read again.
 ///
-/// `exclude_recordings` keeps each call site's existing predicate: the
-/// standalone store and the replicated local read exclude Recordings from
-/// the catalogue-wide rail; the replicated Authority read never has.
-pub(super) fn recently_added(
-    item_columns: &str,
-    ranked_columns: &str,
-    exclude_recordings: bool,
-) -> Stmt {
-    let recordings = if exclude_recordings {
-        " AND (@library_id@ IS NOT NULL OR NOT EXISTS (SELECT 1 FROM libraries l \
-             WHERE l.id = i.library_id AND l.kind = 'recordings'))"
-    } else {
-        ""
-    };
-    let filter = format!(
-        "i.kind IN ('movie','episode','video','folder','book','audiobook') \
-         AND (@library_id@ IS NULL OR i.library_id = @library_id@){recordings}"
-    );
+/// The catalogue-wide rail (`@library_id@` null) leaves out Recordings
+/// libraries on every backend and read path; a Recordings library's own
+/// rail still lists its recordings.
+pub(super) fn recently_added(item_columns: &str, ranked_columns: &str) -> Stmt {
+    let filter = "i.kind IN ('movie','episode','video','folder','book','audiobook') \
+         AND (@library_id@ IS NULL OR i.library_id = @library_id@) \
+         AND (@library_id@ IS NOT NULL OR NOT EXISTS (SELECT 1 FROM libraries l \
+             WHERE l.id = i.library_id AND l.kind = 'recordings'))";
     Stmt::new(
         format!(
             "WITH cut AS ( \
@@ -201,21 +191,18 @@ mod tests {
 
     #[test]
     fn recently_added_renders_equivalent_valid_dialects_from_one_parameter_order() {
-        for exclude_recordings in [false, true] {
-            let statement =
-                recently_added("i.id, i.added_at", "r.id, r.added_at", exclude_recordings);
-            assert_eq!(
-                statement.params,
-                [Param::LibraryId, Param::WindowOffset, Param::Limit]
-            );
-            let sqlite = statement.sqlite();
-            let hiqlite = statement.hiqlite();
-            assert_eq!(sqlite.replace('?', "$"), hiqlite);
-            super::super::placeholder_census::validate_sqlite_placeholders(&sqlite)
-                .expect("the SQLite dialect has contiguous numeric placeholders");
-            super::super::hiqlite::validate_sql(&hiqlite)
-                .expect("the replicated dialect introduces placeholders in binding order");
-        }
+        let statement = recently_added("i.id, i.added_at", "r.id, r.added_at");
+        assert_eq!(
+            statement.params,
+            [Param::LibraryId, Param::WindowOffset, Param::Limit]
+        );
+        let sqlite = statement.sqlite();
+        let hiqlite = statement.hiqlite();
+        assert_eq!(sqlite.replace('?', "$"), hiqlite);
+        super::super::placeholder_census::validate_sqlite_placeholders(&sqlite)
+            .expect("the SQLite dialect has contiguous numeric placeholders");
+        super::super::hiqlite::validate_sql(&hiqlite)
+            .expect("the replicated dialect introduces placeholders in binding order");
     }
 
     #[test]

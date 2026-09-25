@@ -30699,6 +30699,68 @@ async fn k05_capture_hiqlite_statements() {
     .expect("write capture");
 }
 
+/// The catalogue-wide Recently Added rail leaves out Recordings libraries on
+/// every backend, as the standalone store and the replicated local read
+/// always have; a Recordings library's own rail still lists its recordings.
+/// The replicated Authority read (the consistent path the bounded reader
+/// falls back to) used to include them, so the Home rail changed with the
+/// read path that served it.
+#[tokio::test]
+async fn catalogue_recently_added_leaves_out_recordings_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let mut ids = Vec::new();
+        for (kind, item_kind) in [
+            (LibraryKind::Movies, ItemKind::Movie),
+            (LibraryKind::Recordings, ItemKind::Video),
+        ] {
+            let library = store
+                .create_library(&NewLibrary {
+                    name: format!("{kind:?}"),
+                    kind,
+                    paths: vec![],
+                    anime: false,
+                })
+                .await
+                .expect("library");
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: item_kind,
+                    parent_id: None,
+                    title: format!("{kind:?} item"),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            ids.push((library.id, item));
+        }
+        let [(_, movie), (recordings, recording)] = ids[..] else {
+            unreachable!("two libraries")
+        };
+        let rail = |library_id: Option<i64>| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .recently_added(library_id, 20)
+                    .await
+                    .expect("recently added")
+                    .into_iter()
+                    .map(|card| card.item.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(rail(None).await, [movie], "{backend}: catalogue-wide rail");
+        assert_eq!(
+            rail(Some(recordings)).await,
+            [recording],
+            "{backend}: the Recordings library's own rail"
+        );
+    })
+    .await;
+}
+
 /// K-05 M3 (plan section 3.6): search hides an item's `items_fts` hit only
 /// while it has a *current* classification index entry, which is membership
 /// of `classification_fts`, never existence of a `media_classifications`

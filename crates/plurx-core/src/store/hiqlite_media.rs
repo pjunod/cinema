@@ -1058,25 +1058,21 @@ impl HiqliteAuthStore {
         library_id: Option<i64>,
         limit: i64,
     ) -> Result<Vec<RecentItem>, StoreError> {
-        self.recently_added_window(library_id, limit, true, true)
-            .await
+        self.recently_added_window(library_id, limit, true).await
     }
 
     /// `recently_added` from a widening window of the newest rows (K-05
     /// section 3.5; `sql_source::recently_added` states why it is exact).
     /// Each pass is complete for the state it read, so the passes need no
-    /// shared snapshot. `exclude_recordings` and `local` keep each caller's
-    /// existing predicate and read path.
+    /// shared snapshot. `local` reads this voter's state machine; otherwise
+    /// the read is consistent (the Authority).
     async fn recently_added_window(
         &self,
         library_id: Option<i64>,
         limit: i64,
-        exclude_recordings: bool,
         local: bool,
     ) -> Result<Vec<RecentItem>, StoreError> {
-        let sql =
-            super::sql_source::recently_added(&item_cols("i"), &item_cols("r"), exclude_recordings)
-                .hiqlite();
+        let sql = super::sql_source::recently_added(&item_cols("i"), &item_cols("r")).hiqlite();
         validate_sql(&sql)?;
         let mut window_offset = super::sql_source::recently_added_first_window_offset(limit);
         loop {
@@ -2173,11 +2169,7 @@ impl MediaStore for HiqliteAuthStore {
         library_id: Option<i64>,
         limit: i64,
     ) -> Result<Vec<RecentItem>, StoreError> {
-        // The Authority read has never excluded Recordings from the
-        // catalogue-wide rail, unlike the local read and the standalone
-        // store; K-05 keeps that predicate as it found it.
-        self.recently_added_window(library_id, limit, false, false)
-            .await
+        self.recently_added_window(library_id, limit, false).await
     }
 
     async fn search_items(&self, query: &str, limit: i64) -> Result<Vec<RecentItem>, StoreError> {
