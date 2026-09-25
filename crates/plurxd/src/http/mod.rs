@@ -1088,7 +1088,7 @@ fn declared_body_length(
 /// and a node refusing everything with an uncounted 503 is exactly the failure
 /// this family exists to show.
 async fn http_request_metrics(request: Request<axum::body::Body>, next: Next) -> Response {
-    measure_http_request(&HTTP_REQUEST_METRICS, request, next).await
+    measure_http_request(&HTTP_REQUEST_METRICS, &ACCESS_LINES, request, next).await
 }
 
 /// `http_request_metrics` over a metrics table the caller names, so a test can
@@ -1096,6 +1096,7 @@ async fn http_request_metrics(request: Request<axum::body::Body>, next: Next) ->
 /// the binary for the process-wide cells.
 async fn measure_http_request(
     metrics: &'static HttpRequestMetrics,
+    access_lines: &'static AccessLineThrottle,
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
@@ -1128,7 +1129,7 @@ async fn measure_http_request(
         // viewer, and a line per refusal would do the same on a fenced node.
         // The counters above carry the volume, this ring carries the
         // exceptions — and `also_suppressed` says what the sampling cost.
-        if let Some(also_suppressed) = ACCESS_LINES.admit(group) {
+        if let Some(also_suppressed) = access_lines.admit(group) {
             tracing::warn!(
                 target: "plurxd::http",
                 route_group = HTTP_ROUTE_GROUPS[group],
@@ -2686,6 +2687,7 @@ mod tests {
     /// these tests share the `search` group.
     fn observability_probe_router() -> (Router, &'static HttpRequestMetrics) {
         let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let access_lines: &'static AccessLineThrottle = Box::leak(Box::default());
         let router = Router::new()
             .route("/api/v1/items/{id}", axum::routing::get(|| async { "ok" }))
             .route(
@@ -2699,7 +2701,7 @@ mod tests {
             .route("/api/v1/search", axum::routing::get(streaming_test_handler))
             .layer(axum::middleware::from_fn(
                 move |request: Request<axum::body::Body>, next: Next| {
-                    measure_http_request(metrics, request, next)
+                    measure_http_request(metrics, access_lines, request, next)
                 },
             ))
             .layer(axum::middleware::from_fn(http_request_id));
@@ -2955,6 +2957,7 @@ mod tests {
     #[tokio::test]
     async fn a_fully_delivered_body_counts_complete_over_a_real_connection_whatever_its_framing() {
         let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let access_lines: &'static AccessLineThrottle = Box::leak(Box::default());
         let app = Router::new()
             .route(
                 "/api/v1/items/{id}",
@@ -2962,7 +2965,7 @@ mod tests {
             )
             .layer(axum::middleware::from_fn(
                 move |request: Request<axum::body::Body>, next: Next| {
-                    measure_http_request(metrics, request, next)
+                    measure_http_request(metrics, access_lines, request, next)
                 },
             ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
