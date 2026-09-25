@@ -2691,7 +2691,7 @@ impl VodServe {
             .cluster_index_root
             .as_deref()
             .ok_or_else(|| "this process has no cluster index cache root".to_owned())?;
-        let object_version = crate::fragment_index_cluster::inspect_source(file).await?;
+        let object_version = crate::fragment_index_cluster::inspect_copy_source(file).await?;
         let Some(observation) = self
             .shared
             .store
@@ -2757,7 +2757,7 @@ impl VodServe {
             &artifact,
         )
         .await?;
-        let Some(index) = index else {
+        let Some(mut index) = index else {
             let repair = repair_job_for_artifact(repair, &artifact);
             // Lost work: without this transition the exact artifact remains
             // permanently complete even though no verified holder can serve it.
@@ -2772,6 +2772,13 @@ impl VodServe {
             );
             return Err("no verified holder could supply the v2 artifact".to_owned());
         };
+        let object_version =
+            crate::fragment_index_cluster::local_object_version(&object_version).to_owned();
+        if let Some(proof) = index.promotion.hevc_configuration.as_mut() {
+            if !proof.bind_equivalent_source(&observation.source_sha256, node_id, &object_version) {
+                return Err("HEVC artifact is not bound to the fully attested source".into());
+            }
+        }
         Ok(Some((index, object_version, artifact.cache_key)))
     }
 
@@ -3118,6 +3125,55 @@ impl VodServe {
                     None,
                 )
             }
+        };
+        // HEVC safety is established on original headers, before filters can
+        // hide updates. Bind the proof to this node's current source object;
+        // a peer's filesystem identity is not a local attestation.
+        let source_object_version = if prepared.encoding.is_none()
+            && matches!(file.video_codec.as_deref(), Some("hevc" | "h265"))
+            && !crate::transcode::unverified_hevc_copy_enabled(self.shared.store.as_ref()).await?
+        {
+            let current = crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .map_err(|reason| {
+                    crate::transcode::vod_refusal_error("hevc_configuration_unverified", reason)
+                })?;
+            let proof = index
+                .as_ref()
+                .and_then(|index| index.promotion.hevc_configuration.as_ref());
+            if !proof.is_some_and(|proof| {
+                proof.permits_on_node(
+                    &current,
+                    self.shared.cluster_node_id.as_deref().unwrap_or_default(),
+                )
+            }) {
+                let reason = proof
+                    .filter(|proof| {
+                        proof.source_object_version == current
+                            && Some(proof.source_node_id.as_str())
+                                == self.shared.cluster_node_id.as_deref()
+                    })
+                    .and_then(|proof| proof.refusal.as_deref());
+                if reason.is_none() {
+                    if let Some(node) = self.shared.cluster_node_id.as_deref() {
+                        let _ = crate::state::enqueue_copy_preparation_for_object(
+                            self.shared.store.as_ref(),
+                            node,
+                            file,
+                            video,
+                            Some(&current),
+                        )
+                        .await;
+                    }
+                }
+                return Err(crate::transcode::vod_refusal_error(
+                    if reason.is_some() { "hevc_configuration_unsupported" } else { "hevc_configuration_unverified" },
+                    reason.unwrap_or("HEVC copy needs preparation; Settings → Developer can enable unverified copy without waiting"),
+                ));
+            }
+            Some(current)
+        } else {
+            source_object_version
         };
         if index.is_none() && prepared.encoding.is_none() {
             let reason = if needs_attestation {
@@ -8178,6 +8234,18 @@ fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> String {
     hasher.update(identity.size.to_le_bytes());
     hasher.update(identity.mtime_ms.to_le_bytes());
     hasher.update(identity.argv_fingerprint.as_bytes());
+    if matches!(recipe.file.video_codec.as_deref(), Some("hevc" | "h265"))
+        && recipe.encoding.is_none()
+    {
+        hasher.update(b"hevc-source-object\0");
+        hasher.update(
+            recipe
+                .source_object_version
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+    }
     hasher.update(recipe.audio_index.unwrap_or(-1).to_le_bytes());
     hasher.update([
         u8::from(recipe.aac),

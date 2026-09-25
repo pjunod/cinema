@@ -1895,6 +1895,9 @@ pub mod keys {
     /// request: missing diagnostic contracts are reported as advisory facts
     /// and never override an explicit enable.
     pub const AUTOMATIC_DECODER_RECOVERY: &str = "playback.automatic_decoder_recovery";
+    /// Operator override for HEVC copy without configuration/source proof.
+    /// Off by default. Readiness is advisory and never prevents saving it.
+    pub const HEVC_UNVERIFIED_COPY: &str = "playback.hevc_unverified_copy";
     /// Ask this node to plan into the health-qualified artifact identity, so a
     /// transcode may only be reused when its producer's own receipt says the
     /// decode was clean.

@@ -3985,6 +3985,13 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
         let (status, code) = match code {
             "vod_disabled" => (StatusCode::SERVICE_UNAVAILABLE, "vod_disabled"),
             "vod_index_pending" => (StatusCode::SERVICE_UNAVAILABLE, "vod_index_pending"),
+            "hevc_configuration_unverified" => {
+                (StatusCode::CONFLICT, "hevc_configuration_unverified")
+            }
+            "hevc_configuration_unsupported" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "hevc_configuration_unsupported",
+            ),
             "vod_transcode_unavailable" => {
                 (StatusCode::NOT_IMPLEMENTED, "vod_transcode_unavailable")
             }

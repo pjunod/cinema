@@ -32591,3 +32591,55 @@ async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_r
         .expect("new request");
     assert_eq!(fresh.component, "subtitle_source");
 }
+
+#[tokio::test]
+async fn hevc_full_attestation_survives_sampled_memos_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let mut observation = plurx_core::store::FragmentIndexSourceObservation {
+            node_id: "proof-node".into(),
+            file_id: 41,
+            object_version: "hevc-full-v1:s1:object-a".into(),
+            source_size: 100,
+            source_mtime: 1,
+            source_sha256: "a".repeat(64),
+            observed_at_ms: 1,
+        };
+        store
+            .record_fragment_index_source(&observation)
+            .await
+            .expect(backend);
+        observation.object_version = "s1:object-a".into();
+        observation.source_sha256 = "b".repeat(64);
+        store
+            .record_fragment_index_source(&observation)
+            .await
+            .expect(backend);
+        let retained = store
+            .fragment_index_source("proof-node", 41, "hevc-full-v1:s1:object-a")
+            .await
+            .expect(backend)
+            .expect("full proof memo survives sample of identical object");
+        assert_eq!(retained.source_sha256, "a".repeat(64), "{backend}");
+        observation.object_version = "s1:object-b".into();
+        store
+            .record_fragment_index_source(&observation)
+            .await
+            .expect(backend);
+        assert!(store
+            .fragment_index_source("proof-node", 41, "s1:object-b")
+            .await
+            .expect(backend)
+            .is_some());
+        observation.object_version = "hevc-full-v1:s1:object-b".into();
+        store
+            .record_fragment_index_source(&observation)
+            .await
+            .expect(backend);
+        assert!(store
+            .fragment_index_source("proof-node", 41, &observation.object_version)
+            .await
+            .expect(backend)
+            .is_some());
+    })
+    .await;
+}

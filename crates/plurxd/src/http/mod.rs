@@ -7333,6 +7333,46 @@ mod tests {
     /// test order. What is asserted is the shape — which is what the surface
     /// promises.
     #[tokio::test]
+    async fn hevc_copy_override_saves_without_readiness_and_controls_admission() {
+        use plurx_core::store::keys;
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        assert!(
+            !crate::transcode::unverified_hevc_copy_enabled(state.store.as_ref())
+                .await
+                .expect("default")
+        );
+        for enabled in [true, false] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"hevc_unverified_copy": enabled}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["hevc_unverified_copy"], json!(enabled));
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(keys::HEVC_UNVERIFIED_COPY)
+                    .await
+                    .expect("saved setting")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+            assert_eq!(
+                crate::transcode::unverified_hevc_copy_enabled(state.store.as_ref())
+                    .await
+                    .expect("policy"),
+                enabled
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn the_verified_decode_request_is_stored_and_the_node_answers_it_separately() {
         use plurx_core::store::keys;
 

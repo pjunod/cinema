@@ -2676,6 +2676,19 @@ async fn probe_ffmpeg(args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Read-only Developer advice. A missing measurement is not a save gate.
+pub(crate) async fn hevc_header_trace_available() -> Option<bool> {
+    static VALUE: tokio::sync::OnceCell<Option<bool>> = tokio::sync::OnceCell::const_new();
+    *VALUE
+        .get_or_init(|| async {
+            probe_ffmpeg(&["-hide_banner", "-bsfs"])
+                .await
+                .ok()
+                .map(|list| declares_bsf(&list, "trace_headers"))
+        })
+        .await
+}
+
 /// Classify a `-bsfs` listing, including the case where it never arrived.
 ///
 /// A build that could not be asked is treated exactly like one that answered

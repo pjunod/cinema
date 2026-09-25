@@ -2212,6 +2212,17 @@ pub fn copy_index_pipe_args_with_input(
         .iter()
         .map(|s| s.to_string()),
     );
+    if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
+        args[2] = "info".to_owned();
+        args.insert(3, "-xerror".to_owned());
+        if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
+            args[index + 1] = format!("trace_headers,{}", args[index + 1]);
+        } else {
+            // Insert before the output URL so this remains an output option.
+            let at = args.len() - 1;
+            args.splice(at..at, ["-bsf:v".to_owned(), "trace_headers".to_owned()]);
+        }
+    }
     args
 }
 

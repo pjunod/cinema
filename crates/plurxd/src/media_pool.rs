@@ -23,10 +23,10 @@ use crate::state::AppState;
 
 pub(crate) const SNAPSHOT_PATH: &str = "/internal/v1/media/snapshot";
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
-/// Protocol 5 carries Library-channel purpose in every worker/takeover
-/// envelope. Exact-version offer filtering is the activation fence: a mixed
-/// cluster refuses placement instead of losing following semantics.
-pub(crate) const PROTOCOL_VERSION: i64 = 6;
+/// Protocol 7 requires pre-filter HEVC proof and source-fenced copy VOD.
+/// Exact-version placement/takeover checks exclude pre-fix workers. Old
+/// public ingress and existing sessions must still be drained on rollout.
+pub(crate) const PROTOCOL_VERSION: i64 = 7;
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);

@@ -532,7 +532,7 @@
     async fn terminal_tombstone_replays_410_for_the_retention_window_then_releases() {
         let base = crate::test_tempdir().expect("base");
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let serve = VodServe::new(base.path().to_path_buf(), store.clone());
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
         let rendition = synthetic_rendition(base.path()).await;
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
@@ -579,7 +579,7 @@
         const ENDED_COUNT: usize = TERMINAL_ROUTE_CONFIRM_BATCH * 2 + 3;
         let base = crate::test_tempdir().expect("base");
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let serve = VodServe::new(base.path().to_path_buf(), store.clone());
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
         let rendition = synthetic_rendition(base.path()).await;
         let mut ended_ids = Vec::new();
         for _ in 0..ENDED_COUNT {
@@ -1495,7 +1495,7 @@
     async fn one_unfinished_terminal_cleanup_cannot_wedge_node_maintenance() {
         let base = crate::test_tempdir().expect("base");
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let serve = VodServe::new(base.path().to_path_buf(), store.clone());
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
 
         let wedged = Arc::new(TerminalCleanup::new());
         insert_terminal_session(
@@ -1788,7 +1788,7 @@
         let base = crate::test_tempdir().expect("base");
         let file = fixture_file();
         let (store, _) = store_with_index(&file).await;
-        let first = VodServe::new(base.path().to_path_buf(), Arc::clone(&store));
+        let first = local_serve(base.path().to_path_buf(), Arc::clone(&store));
         create(&first, &file, "sess-a", "play-a", &settings()).await;
         let len = plan_len(&first, "sess-a").await;
         for segment in 0..len {
@@ -1810,7 +1810,7 @@
         .await;
         drop(first);
 
-        let second = VodServe::new(base.path().to_path_buf(), store);
+        let second = local_serve(base.path().to_path_buf(), store);
         create(&second, &file, "sess-b", "play-b", &settings()).await;
         let playlist_after = second
             .playlist("sess-b")
@@ -1852,7 +1852,7 @@
             .await
             .expect("replace the index");
         let base = crate::test_tempdir().expect("base");
-        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let serve = local_serve(base.path().to_path_buf(), store);
 
         let error = serve
             .try_create(
@@ -1995,7 +1995,7 @@
 
         // No index stored for the current identity.
         let empty_store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let bare = VodServe::new(base.path().join("bare"), empty_store);
+        let bare = local_serve(base.path().join("bare"), empty_store);
         let index_error = bare
             .try_create(
                 &request("play-a", 0.0),

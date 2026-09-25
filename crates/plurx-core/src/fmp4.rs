@@ -855,6 +855,9 @@ fn parse_stbl(payload: &[u8], track: &mut Track) -> Result<(), Fmp4Error> {
 /// a refused generation whose media the stored init describes perfectly.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PromotionInputs {
+    /// Complete original-header scan; old persisted records remain unverified.
+    #[serde(default)]
+    pub hevc_configuration: Option<crate::hevc_configuration::Proof>,
     /// HEVC VPS/SPS/PPS NAL units (types 32-34), in the order found.
     pub parameter_sets: Vec<Vec<u8>>,
     /// Prefix-SEI NAL units carrying HDR10 static metadata.
@@ -925,6 +928,7 @@ impl PromotionInputs {
             return PromotionInputs::default();
         };
         PromotionInputs {
+            hevc_configuration: None,
             // Never from a fragment: a fragment has no record and no facts to
             // build one from. Both answers are the caller's, taken from the
             // source file and the session's own copy options.
@@ -5726,6 +5730,7 @@ mod tests {
         let converted =
             DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("a representable record");
         let inputs = PromotionInputs {
+            hevc_configuration: None,
             dolby_vision: Some(converted.clone()),
             ..PromotionInputs::default()
         };
@@ -5932,6 +5937,7 @@ mod tests {
         let record = DolbyVisionRecord::new(7, 6, true, true, false, 0).expect("record");
         assert!(set_dolby_vision_record(&mut stale, &record).expect("insert"));
         let inputs = PromotionInputs {
+            hevc_configuration: None,
             strip_dolby_vision: true,
             hdr10_sei,
             ..PromotionInputs::default()
@@ -6063,6 +6069,7 @@ mod tests {
         assert!(set_dolby_vision_record(&mut muxer, &stale).expect("insert"));
 
         let inputs = PromotionInputs {
+            hevc_configuration: None,
             strip_dolby_vision: true,
             ..PromotionInputs::default()
         };
@@ -6128,6 +6135,7 @@ mod tests {
         assert_ne!(moves.bytes, minimal.bytes);
 
         let contradiction = PromotionInputs {
+            hevc_configuration: None,
             dolby_vision: Some(DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("record")),
             strip_dolby_vision: true,
             parameter_sets,
@@ -7298,6 +7306,7 @@ mod tests {
         // promotes from the stored copy rather than a live one.
         let init = muxed_init();
         let inputs = PromotionInputs {
+            hevc_configuration: None,
             dolby_vision: None,
             strip_dolby_vision: false,
             parameter_sets: vec![vec![0x40, 0x01, 0x0c], vec![0x42, 0x01, 0x01]],

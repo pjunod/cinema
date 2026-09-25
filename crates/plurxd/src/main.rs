@@ -108,38 +108,6 @@ pub(crate) fn test_tempdir() -> std::io::Result<tempfile::TempDir> {
     tempfile::tempdir_in(root)
 }
 
-/// A scoped tracing subscriber for one test, with a global default behind it.
-///
-/// `tracing::subscriber::set_default` alone is not enough in a parallel test
-/// binary. tracing caches an `Interest` per callsite, computed the first
-/// time the callsite is hit; when exactly one dispatcher is registered,
-/// tracing-core computes it from the *current thread's* default rather than
-/// the registered one, and on a thread with no scoped subscriber that is
-/// `NoSubscriber`, whose answer is "never". So a test that sets a scoped
-/// subscriber and then walks into a callsite another thread reached first
-/// finds that callsite cached as never-interesting, and its event is dropped
-/// before the subscriber sees it — on a loaded machine, often enough to fail
-/// the copy-argv test one run in three.
-///
-/// Installing a permissive global default once per process closes that:
-/// with a real dispatcher as the fallback on every thread, no callsite is
-/// ever cached as "never". A bare `Registry` accepts every callsite and
-/// keeps nothing but span data. A scoped subscriber set afterwards still
-/// wins on its own thread, exactly as before.
-#[cfg(test)]
-pub(crate) fn test_tracing_default<S>(subscriber: S) -> tracing::subscriber::DefaultGuard
-where
-    S: tracing::Subscriber + Send + Sync + 'static,
-{
-    static GLOBAL: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    GLOBAL.get_or_init(|| {
-        // Already set by an earlier `try_init` in this process is fine: any
-        // real dispatcher as the fallback is what matters.
-        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
-    });
-    tracing::subscriber::set_default(subscriber)
-}
-
 #[cfg(test)]
 pub(crate) fn test_temp_path(name: impl AsRef<std::path::Path>) -> std::path::PathBuf {
     std::fs::canonicalize(std::env::temp_dir())
