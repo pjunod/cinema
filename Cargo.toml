@@ -8,6 +8,7 @@ members = [
     "crates/plurxd",
 ]
 exclude = [
+    "vendor/dolby_vision",
     "vendor/hiqlite",
     "vendor/hiqlite-wal",
     "vendor/rust_decimal",
@@ -159,6 +160,11 @@ strip = "symbols"
 # 0.39.1; `deny.toml`'s ban on that aws-lc-sys version is the tripwire, and
 # this row has to come back with it.
 [patch.crates-io]
+# dolby_vision 3.4.0 sizes allocations from unbounded ue(v) counts in the
+# RPU it is parsing; a corrupted or hostile RPU could abort plurxd. The
+# vendored copy refuses counts that cannot fit in the bits left. See
+# vendor/dolby_vision/PLURX-PATCH.md.
+dolby_vision = { path = "vendor/dolby_vision" }
 hiqlite = { path = "vendor/hiqlite" }
 hiqlite-wal = { path = "vendor/hiqlite-wal" }
 rust_decimal = { path = "vendor/rust_decimal" }

@@ -1150,8 +1150,6 @@ dependencies = [
 [[package]]
 name = "dolby_vision"
 version = "3.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a5f4ca7214c0353837ad9f9f7ac48df4da212aa0333b1adf5a515f1bae1e171"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -5292,7 +5290,3 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[patch.unused]]
-name = "s3-simple"
-version = "0.8.0"

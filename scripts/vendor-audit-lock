@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 VENDORED = (
+    ("dolby_vision", "3.4.0"),
     ("hiqlite", "0.14.0"),
     ("hiqlite-wal", "0.14.0"),
     ("rust_decimal", "1.42.1"),

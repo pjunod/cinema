@@ -269,11 +269,15 @@ fn convert_length_prefixed_into(
             continue;
         }
 
+        // `{error:#}` is anyhow's whole chain. `dolby_vision` wraps each
+        // parse failure in the metadata version it was reading ("CM v4.0"),
+        // and `to_string()` shows only that outermost context — a refusal
+        // that named the version and not the reason told the operator nothing.
         let mut rpu =
             DoviRpu::parse_unspec62_nalu(nal).map_err(|error| DvConvertError::Unreadable {
                 frame: report.rpus,
                 offset: at,
-                detail: error.to_string(),
+                detail: format!("{error:#}"),
             })?;
         // Refuse before converting, not after. `To81` has an answer for every
         // profile it is handed and none of them fail loudly; the error type's
@@ -297,7 +301,7 @@ fn convert_length_prefixed_into(
             .map_err(|error| DvConvertError::Unconvertible {
                 frame: report.rpus,
                 offset: at,
-                detail: error.to_string(),
+                detail: format!("{error:#}"),
             })?;
         // `write_hevc_unspec62_nalu` emits the Annex B spelling: the NAL with
         // its type byte, ready for a start code. Inside a sample the same
@@ -308,7 +312,7 @@ fn convert_length_prefixed_into(
                 .map_err(|error| DvConvertError::Unconvertible {
                     frame: report.rpus,
                     offset: at,
-                    detail: error.to_string(),
+                    detail: format!("{error:#}"),
                 })?;
         let length = written.len();
         if length >= 1usize << (8 * width) {
@@ -549,6 +553,109 @@ mod tests {
             matches!(error, DvConvertError::Unreadable { frame: 0, .. }),
             "{error}"
         );
+    }
+
+    /// An RPU whose extension-block count is a lie is refused, not allocated for.
+    ///
+    /// Found by the `rpu_rewrite` fuzz target on its first minute
+    /// (P-02 M8, 2026-09-24): eight bytes of the real Profile 7 fixture
+    /// changed so that `num_ext_blocks`, a ue(v) the parser trusted as a
+    /// `Vec::with_capacity` argument, read as about 4×10⁹. Upstream
+    /// `dolby_vision` 3.4.0 asked the allocator for ~26 GB and the process
+    /// aborted — a corrupted disc remux, or one made on purpose, would have
+    /// taken `plurxd` down with it on the far side of the muxer. The vendored
+    /// copy refuses a count that cannot fit in the bits left
+    /// (`vendor/dolby_vision/PLURX-PATCH.md`, patch 1), so this arrives as
+    /// an ordinary `Unreadable` refusal. Without the patch this test does not
+    /// fail; it aborts the test binary, which is the point.
+    #[test]
+    fn an_rpu_claiming_billions_of_extension_blocks_is_refused_without_allocating() {
+        let hex =
+            include_str!("../../../../tests/playback/dv-p7-rpu-hostile-ext-blocks.hex").trim();
+        let hostile: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex"))
+            .collect();
+        assert_eq!(
+            hostile.len(),
+            rpu_bytes().len(),
+            "same length as the fixture it corrupts"
+        );
+        assert_eq!(&hostile[..2], &rpu_bytes()[..2], "still routed as an RPU");
+        let input = sample(&[&hostile], 4);
+        let mut out = Vec::new();
+        let error = convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
+        assert!(
+            matches!(error, DvConvertError::Unreadable { frame: 0, .. }),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("num_ext_blocks"),
+            "the refusal names the count it would not allocate for: {error}"
+        );
+        assert!(out.is_empty());
+    }
+
+    /// An RPU that asks for the one curve shape upstream never implemented is
+    /// refused rather than panicked on.
+    ///
+    /// The `rpu_rewrite` target's second finding (2026-09-24): with
+    /// `poly_order_minus1 == 0` and `linear_interp_flag` set — two bits —
+    /// upstream `dolby_vision` 3.4.0 reaches `unimplemented!()`, so a media
+    /// file could unwind whatever thread was converting it. Patch 2 in
+    /// `vendor/dolby_vision/PLURX-PATCH.md` turns that into a refusal.
+    #[test]
+    fn an_rpu_with_a_linear_interpolation_curve_is_refused_not_panicked_on() {
+        let hex =
+            include_str!("../../../../tests/playback/dv-p7-rpu-hostile-linear-interp.hex").trim();
+        let hostile: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex"))
+            .collect();
+        assert_eq!(&hostile[..2], &rpu_bytes()[..2], "still routed as an RPU");
+        let input = sample(&[&hostile], 4);
+        let mut out = Vec::new();
+        let error = convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
+        assert!(
+            matches!(error, DvConvertError::Unreadable { frame: 0, .. }),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("linear interpolation"),
+            "the refusal names the unsupported curve: {error}"
+        );
+        assert!(out.is_empty());
+    }
+
+    /// An extension block with a length the parser has no layout for is
+    /// refused, not `unreachable!()`d.
+    ///
+    /// The `rpu_rewrite` target's third finding (2026-09-25): a level 8 block
+    /// whose `ext_block_length` is none of 10/12/13/19/25 was parsed and then
+    /// panicked in upstream's `required_bits` during validation. Patch 3 in
+    /// `vendor/dolby_vision/PLURX-PATCH.md` refuses the length up front, for
+    /// levels 8, 9 and 10.
+    #[test]
+    fn an_rpu_with_an_unknown_extension_block_length_is_refused_not_panicked_on() {
+        let hex =
+            include_str!("../../../../tests/playback/dv-p7-rpu-hostile-level8-length.hex").trim();
+        let hostile: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex"))
+            .collect();
+        assert_eq!(&hostile[..2], &rpu_bytes()[..2], "still routed as an RPU");
+        let input = sample(&[&hostile], 4);
+        let mut out = Vec::new();
+        let error = convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
+        assert!(
+            matches!(error, DvConvertError::Unreadable { frame: 0, .. }),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("block length"),
+            "the refusal names the length it did not know: {error}"
+        );
+        assert!(out.is_empty());
     }
 
     /// A refusal leaves nothing behind for a caller to forward by accident.
