@@ -219,18 +219,20 @@ it unit-tests without a video element:
 Asymmetric *selection* (down in one move, up one rung slowly) is the whole
 trick of ABR; the constants are starting points to tune on real use.
 
-The switch itself is the honest cost of the JIT model: a restart, not a
-seamless splice — and the restart machinery **destroys the old stream
-before the new one is ready** (`teardownHls` runs first), so the claim
-that "the buffer covers it" is not true as built and this plan no longer
-makes it. The interruption is a measured product property with an SLO
+The web player offers a prepared successor for an Auto rung move when its
+incumbent can still present. It starts the successor at most four seconds
+ahead, waits until the successor overlaps the incumbent's film position and
+has two seconds buffered beyond it, aligns the two elements, then exposes the
+successor. The incumbent remains available until the successor presents a
+frame. A stalled incumbent or a failed preparation falls back to a bounded
+reopen, which can interrupt playback. The interruption has an SLO
 ([PERF-PLAN.md](../performance/PERF-PLAN.md) §8.6, decision 4: p95 ≤ 2.5 s on LAN,
 operator-confirmed): the loading overlay says "Adjusting quality…", the
 toast names the move (`Quality → 480p — bandwidth`), and every switch is
 logged to the Stats overlay with its reason, so "why did it get blurry"
-always has an answer. A prepared-handoff variant (start the replacement,
-switch at a boundary) is Option B in the review record — build it only if
-the measured p95 misses the SLO.
+always has an answer. The prepared path keeps the old session alive until
+the new picture proves the handoff; the fallback's restart cost remains a
+measured product property.
 
 Voluntary moves make that restart cost explicit. Over the 60 s dwell horizon,
 a mild downgrade's estimated saved pressure is

@@ -22,7 +22,7 @@ const PREPARED_HANDOFF_KEY="plurx.prepared_handoff";
 // How far past the incumbent's current film position the successor must be
 // buffered before this client will switch. A handoff that commits at the
 // playhead hands the viewer a decoder with nothing in front of it.
-const PREPARED_BUFFER_LEAD_MS=4000;
+const PREPARED_BUFFER_LEAD_MS=2000;
 // Drift the successor may carry into the switch before it is seeked onto the
 // incumbent's second. Below this a corrective seek costs more than it fixes:
 // it flushes the buffer that was the whole point of preparing.
@@ -263,7 +263,7 @@ function beginPreparedReplacement(p,action){
   const originMs=sessionMediaOriginMs({vod:!!p.vod,media_origin_ms:offeredOriginMs});
   const filmMs=playbackFilmPositionMs(v,p);
   // A replacement that begins encoding at the incumbent's current second
-  // spends its entire preparation chasing a moving playhead. Begin up to six
+  // spends its entire preparation chasing a moving playhead. Begin up to four
   // seconds ahead when the incumbent already has enough runway to play
   // until that second. The buffer gate below still requires overlap with the
   // actual incumbent position before exposure, so this cannot skip content.

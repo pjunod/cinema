@@ -4200,7 +4200,7 @@ async function main() {
     h.live.ranges = [[18, 29]];
     const p = h.set(preparedPlayer({ hls: { destroy() {} } }));
     h.handle(prepareAction());
-    assert.equal(h.instances[0].config.startPosition, 26);
+    assert.equal(h.instances[0].config.startPosition, 24);
     h.instances[0].events.manifest();
     h.spare.currentTime = 24;
     h.spare.ranges = [[24, 30]];
@@ -4208,7 +4208,7 @@ async function main() {
     assert.ok(p.prepared, "a range beginning ahead cannot skip the incumbent's 20th second");
     h.live.currentTime = 24;
     h.instances[0].events.append();
-    assert.equal(p.hls, h.instances[0], "overlap and four seconds of lead permit the handoff");
+    assert.equal(p.hls, h.instances[0], "overlap and two seconds of lead permit the handoff");
   }
 
   // Building the second pipeline: one instance, on the hidden element, and the
@@ -4254,7 +4254,7 @@ async function main() {
 
     // Buffered short of the lead is not ready…
     h.spare.currentTime = 300;
-    h.spare.ranges = [[300, 302]];
+    h.spare.ranges = [[300, 301.5]];
     h.instances[0].events.append();
     assert.equal(latest(h).state, "metadata_ready",
       "buffered to the playhead is not buffered past the switch point");
