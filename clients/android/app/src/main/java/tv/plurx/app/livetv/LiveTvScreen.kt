@@ -2273,9 +2273,11 @@ internal data class LiveTvPictureInfo(
 
 internal fun liveTvPictureInfo(
     plan: LiveTvDelivery?,
-    sample: androidx.media3.common.VideoSize?,
+    readAttachedSample: () -> androidx.media3.common.VideoSize?,
     channel: LiveTvChannel?,
     nowSeconds: Long = System.currentTimeMillis() / 1_000,
+    format: androidx.media3.common.Format? = null,
+    attachmentCurrent: Boolean = true,
 ): LiveTvPictureInfo {
     fun dimension(value: Int?): Int? = value?.takeIf { it in 1..16_384 }
     fun frame(width: Int?, height: Int?): String = when {
@@ -2288,7 +2290,9 @@ internal fun liveTvPictureInfo(
     val sourceWidth = dimension(source?.width ?: if (source == null) observation?.validVideoWidth else null)
     val sourceHeight = dimension(source?.height ?: if (source == null) observation?.validVideoHeight else null)
     val sourceNote = if (source != null) "Source probe" else if (observation != null) "Last observed broadcast" else "Unavailable"
-    val eligible = sample?.takeIf { it.width in 1..16_384 && it.height in 1..16_384 && it.unappliedRotationDegrees == 0 }
+    val eligible = (if (attachmentCurrent) readAttachedSample() else null)?.takeIf {
+        it.width in 1..16_384 && it.height in 1..16_384 && it.unappliedRotationDegrees == 0
+    }
     val streamWidth = dimension(eligible?.width ?: plan?.output?.width)
     val streamHeight = dimension(eligible?.height ?: plan?.output?.height)
     val streamNote = if (eligible != null) "Measured stream · decoded/cropped frame" else if (plan != null) "Planned output" else "Unavailable"
@@ -2327,6 +2331,22 @@ internal fun liveTvPictureInfo(
         kotlin.math.abs(sampleSar - 10f / 11f) <= 0.0001f -> "≈10:11"
         else -> String.format(java.util.Locale.US, "≈%.4f:1", sampleSar)
     }
+    // Media3 videoSize is a decoded/cropped frame. Compare aspect only when
+    // the attached format establishes that no crop changed its frame basis.
+    val compatibleBasis = eligible != null && format?.let {
+        it.width == eligible.width && it.height == eligible.height
+    } == true
+    val aspectComparison = if (compatibleBasis && sampleSar != null && ratio != null &&
+        sourceWidth != null && sourceHeight != null) {
+        val expectedWidth = eligible!!.height.toDouble() * sourceWidth * ratio.first /
+            (sourceHeight.toDouble() * ratio.second)
+        val observedWidth = eligible.width.toDouble() * sampleSar
+        if (expectedWidth.isFinite() && observedWidth.isFinite()) {
+            if (observedWidth >= kotlin.math.floor(expectedWidth) && observedWidth <= kotlin.math.ceil(expectedWidth))
+                "Stream aspect agrees with source"
+            else "Stream aspect differs from source"
+        } else "Not verified"
+    } else "Not verified"
     val reasons = LinkedHashMap<String, String>()
     plan?.reasons?.forEach { item ->
         val explanation = item.explanation?.trim().orEmpty()
@@ -2344,9 +2364,10 @@ internal fun liveTvPictureInfo(
         streamFrame = frame(streamWidth, streamHeight), streamNote = streamNote,
         streamPixelAspect = streamSar, sourcePixelAspect = sourceSar, sourceDisplayAspect = sourceDar,
         frameComparison = frameComparison,
-        aspectComparison = "Not verified",
-        planConflict = eligible?.takeIf { plan != null && (it.width != plan.output.width || it.height != plan.output.height) }
-            ?.let { "Stream differs from the delivery plan · planned ${plan!!.output.width}×${plan.output.height}" },
+        aspectComparison = aspectComparison,
+        planConflict = plan?.let { planned -> eligible?.takeIf {
+            it.width != planned.output.width || it.height != planned.output.height
+        }?.let { "Stream differs from the delivery plan · planned ${planned.output.width}×${planned.output.height}" } },
         reason = reasons.values.joinToString(" · ").ifEmpty { "The server did not provide a conversion reason." },
         streamFormat = listOfNotNull(plan?.output?.video_codec?.uppercase(), scan, cadence).joinToString(" · ").ifEmpty { "Not reported" },
     )
@@ -2368,9 +2389,10 @@ private fun LiveTvPlaybackInformation(
     // The sample only exists while the panel is composed; it never polls or
     // renews a tuner lease. A replaced player creates a fresh observation set.
     val facts = remember(player, channel, status, sample) {
-        val size = player?.videoSize
         val plan = status?.delivery
-        val picture = liveTvPictureInfo(plan, size, channel)
+        val picture = liveTvPictureInfo(plan, { player?.videoSize }, channel,
+            format = player?.videoFormat,
+            attachmentCurrent = player?.currentMediaItem != null)
         fun seconds(value: Long?) = value?.takeIf { it >= 0 }?.let { String.format(java.util.Locale.US, "%.1f s", it / 1_000.0) } ?: "Not reported"
         val buffered = player?.takeIf { it.currentMediaItem != null }?.let { (it.bufferedPosition - it.currentPosition).coerceAtLeast(0) }
         val edge = player?.takeIf { it.isCurrentMediaItemLive && it.duration != androidx.media3.common.C.TIME_UNSET && it.duration >= 0 }

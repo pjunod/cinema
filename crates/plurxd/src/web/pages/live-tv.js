@@ -456,7 +456,7 @@ function liveTvStatsTelemetry(){
   const v=document.getElementById("live-tv-video"),current=LIVE_TV_LEASE.current;
   const channel=current&&liveTvChannelById(current.channel?.id||LIVE_TV.selected);
   const attached=!!current&&!!v&&!!(v.currentSrc||v.src);
-  const status=LIVE_TV.status,plan=status?.delivery||current?.delivery;
+  const status=attached?LIVE_TV.status:null,plan=attached?(status?.delivery||current?.delivery):null;
   const source=PlurxLiveTv.sourceDetails(channel,liveTvNowSeconds(),liveTvSourceProgrammeEnd(channel));
   const picture=PlurxLiveTv.formatLiveTvPictureFacts(PlurxLiveTv.normalizeLiveTvPictureFacts({
     delivery:plan,
@@ -484,8 +484,8 @@ function liveTvStatsTelemetry(){
     method:plan?(plan.video_action==="copy"?(plan.audio_action==="copy"?"Remux":"Audio converted for this player"):"Video converted for this player"):"Not reported",
     player_state:!attached?"Waiting for player":v.error?"Failed":v.ended?"Ended":v.paused?"Paused":v.readyState<3?"Buffering":"Playing",
     ...picture,
-    source_video:[plan?.source?.video_codec?.toUpperCase()||source.exact.slice(1)[0],
-      ["tt","bb","tb","bt"].includes(plan?.source?.field_order)?"Interlaced":null].filter(Boolean).join(" · ")||null,
+    source_video:attached?[plan?.source?.video_codec?.toUpperCase()||source.exact.slice(1)[0],
+      ["tt","bb","tb","bt"].includes(plan?.source?.field_order)?"Interlaced":null].filter(Boolean).join(" · ")||null:null,
     stream_format:plan?.output?[plan.output.video_codec?.toUpperCase(),scan,cadence].filter(Boolean).join(" · ")||null:null,
     reason:plan?PlurxLiveTv.liveTvReasonText(plan.reasons):null,
     delivery_reasons:plan?.reasons?.map(r=>[r.code,r.explanation].filter(Boolean).join(": ")).join(" · ")||null,

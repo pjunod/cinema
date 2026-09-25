@@ -12,6 +12,12 @@ struct PlaybackInfoFact: Identifiable {
 }
 
 struct PlaybackInfoPanel: View {
+    static let compactFields: [(id: String, label: String)] = [
+        ("decode_resolution", "Player display size"),
+        ("stream_frame", "Stream frame"),
+        ("player_state", "Player state"),
+        ("client_loaded", "Buffered on device"),
+    ]
     let title: String
     let facts: [PlaybackInfoFact]
     @Binding var mode: PlaybackStatsMode
@@ -61,10 +67,10 @@ struct PlaybackInfoPanel: View {
     private var compactBody: some View {
         HStack(alignment: .top, spacing: 12) {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 16, alignment: .topLeading)], alignment: .leading, spacing: 12) {
-                summary("Player display size", value("decode_resolution"), size: bodySize + 1)
-                summary("Stream frame", value("stream_frame"), note: fact("stream_frame")?.note, size: bodySize + 1)
-                summary("Playback", value("player_state"), size: bodySize + 1)
-                summary("Buffered on device", value("client_loaded"), size: bodySize + 1)
+                ForEach(Self.compactFields.indices, id: \.self) { index in
+                    let field = Self.compactFields[index]
+                    summary(field.label, value(field.id), note: fact(field.id)?.note, size: bodySize + 1)
+                }
             }
             VStack(spacing: 4) {
                 Button { mode = .standard } label: {

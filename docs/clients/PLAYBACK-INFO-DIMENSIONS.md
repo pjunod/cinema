@@ -807,21 +807,23 @@ review or authorize deployment.
 
 ## 10. Execution ledger — update this in each package
 
-Do not mark a row complete from a plan, a prototype or another branch's test
-result. Every completed package names the exact source commit, PR and local
-commands/results. If main or the effort moves, qualify the new candidate.
+The current execution record is [the status page](PLAYBACK-INFO-DIMENSIONS-STATUS.md).
+The table below records the imported handoff's package states as of
+2026-09-25. `Implemented; unverified` is not a completion claim. The user
+requested one integrated PR, so package PR cells are represented by commits
+on that branch. If main moves, qualify the new candidate.
 
 | Item | State | Evidence required / current record |
 |---|---|---|
 | Chosen UI and renderings | Prepared | Illustrative captures in §3; not production acceptance |
-| Current behavior reference | Prepared | Key claims checked against `38f61dfe6`; refresh at start |
+| Current behavior reference | Refreshed | Clone based on `415eb047f3`, then rebased onto `60f3803d1`; see status page. |
 | Fable design review | Corrections incorporated | B1–B4 and N1–N7 in §11; no second review claimed |
-| Fresh base and toolchains | Not started | Actual base SHA, branch, Node/Python/Xcode/Android runtime versions |
-| M0 cross-client contract | Not started | Task SHA/PR, web plus both native contract tests and builds |
-| M1 web | Not started | Task SHA/PR, semantic and delayed-poll regressions, production renders |
-| M2 Apple | Not started | Task SHA/PR, DTO/formatter/serial regressions, iOS/tvOS builds and renders |
-| M3 Android | Not started | Task SHA/PR, measured-frame/rotation/serial regressions, build and renders |
-| M4 integrated candidate | Not started | Current-base integrated SHA, all required checks and implementation review |
+| Fresh base and toolchains | Recorded | Actual base, branch and runtime versions in status page. |
+| M0 cross-client contract | Implemented; unverified | Integrated commit `148829768`; contract tests and native builds pending fast lane. |
+| M1 web | Implemented; unverified | Integrated commit `148829768`; semantic and delayed-poll regressions pending fast lane. |
+| M2 Apple | Implemented; unverified | Integrated commit `148829768`; DTO/formatter regressions and iOS/tvOS builds pending fast lane. |
+| M3 Android | Implemented; unverified | Integrated commit `148829768`; measured-frame/rotation regressions and build pending fast lane. |
+| M4 integrated candidate | Under review | Adversarial findings addressed in a follow-up commit; exact-tree fast lane pending. |
 | Live Cozi source/output comparison | Not performed | Matched source/output probes and panel, or explicit unverified limitation |
 | Promotion / deployment | Not started | Record only operations actually authorized and performed |
 

@@ -17,7 +17,7 @@ workflow instruction.
 | Web delivery facts and presentation | Implemented; unverified | `148829768`; source and planned frames, separate browser display, reason text and serial guard. |
 | Apple delivery facts and presentation | Implemented; unverified | `148829768`; optional DTO decoding, planned output and presentation size. |
 | Android delivery facts and presentation | Implemented; unverified | `148829768`; eligible Media3 frame sample, approximate pixel aspect and planned fallback. |
-| Adversarial implementation review | Pending | Run once the integrated PR is ready for `main`; address findings before fast lane. |
+| Adversarial implementation review | Findings addressed; unverified | One review found Apple Compact label drift, Android aspect basis, unattached web plan facts, and stale handoff ledger. Follow-up code and tests address them; fast lane must verify. |
 | Fast lane and affected builds | Pending | Run after review on the exact candidate commit. |
 | PR merge | Pending | Merge only after the required gate and qualification receipt. |
 | Production and physical session evidence | Pending | Record actual observations or state unavailable. |

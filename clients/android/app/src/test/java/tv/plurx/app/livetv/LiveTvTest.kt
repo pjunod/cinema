@@ -32,7 +32,7 @@ class LiveTvTest {
             deinterlace = true,
             reasons = listOf(LiveTvDeliveryReason("video_incompatible", "The active player did not claim the complete source video route.")),
         )
-        val planned = liveTvPictureInfo(plan, null, null)
+        val planned = liveTvPictureInfo(plan, { null }, null)
         assertEquals("704×480", planned.sourceFrame)
         assertEquals("16:9", planned.sourceDisplayAspect)
         assertEquals("No resize planned", planned.frameComparison)
@@ -40,13 +40,25 @@ class LiveTvTest {
         assertEquals("Not measured", planned.streamPixelAspect)
         assertEquals("The active player did not claim the complete source video route.", planned.reason)
 
-        val measured = liveTvPictureInfo(plan, androidx.media3.common.VideoSize(704, 480, 0, 40f / 33f), null)
+        val matchingFormat = androidx.media3.common.Format.Builder().setWidth(704).setHeight(480).build()
+        var attachedSample = androidx.media3.common.VideoSize(704, 480, 0, 40f / 33f)
+        val measured = liveTvPictureInfo(plan, { attachedSample }, null,
+            format = matchingFormat)
         assertEquals("Measured stream · decoded/cropped frame", measured.streamNote)
         assertEquals("≈40:33", measured.streamPixelAspect)
         assertEquals("Frame dimensions unchanged", measured.frameComparison)
-        assertEquals("Not verified", measured.aspectComparison)
-        val rotated = liveTvPictureInfo(plan, androidx.media3.common.VideoSize(704, 480, 90, 1f), null)
+        assertEquals("Stream aspect agrees with source", measured.aspectComparison)
+        attachedSample = androidx.media3.common.VideoSize(704, 480, 0, 1f)
+        val changedAspect = liveTvPictureInfo(plan, { attachedSample }, null,
+            format = matchingFormat)
+        assertEquals("Stream aspect differs from source", changedAspect.aspectComparison)
+        val unknownBasis = liveTvPictureInfo(plan, { attachedSample }, null)
+        assertEquals("Not verified", unknownBasis.aspectComparison)
+        val rotated = liveTvPictureInfo(plan, { androidx.media3.common.VideoSize(704, 480, 90, 1f) }, null)
         assertEquals("Planned output", rotated.streamNote)
+        val unattached = liveTvPictureInfo(plan, { error("stale sample must not be read") }, null,
+            format = matchingFormat, attachmentCurrent = false)
+        assertEquals("Planned output", unattached.streamNote)
     }
 
     @Test fun playbackPictureReportsMeasuredReductionAndPlanConflict() {
@@ -55,9 +67,9 @@ class LiveTvTest {
             video_action = "encode", audio_action = "copy", packaging = "mpegts",
             source = LiveTvDeliverySource(1920, 1080, sample_aspect_ratio = "1:1"),
         )
-        val reduced = liveTvPictureInfo(plan, androidx.media3.common.VideoSize(1280, 720, 0, 1f), null)
+        val reduced = liveTvPictureInfo(plan, { androidx.media3.common.VideoSize(1280, 720, 0, 1f) }, null)
         assertEquals("Stream resolution reduced", reduced.frameComparison)
-        val disagreement = liveTvPictureInfo(plan, androidx.media3.common.VideoSize(1920, 1080, 0, 1f), null)
+        val disagreement = liveTvPictureInfo(plan, { androidx.media3.common.VideoSize(1920, 1080, 0, 1f) }, null)
         assertEquals("1920×1080", disagreement.streamFrame)
         assertTrue(disagreement.planConflict!!.contains("planned 1280×720"))
     }

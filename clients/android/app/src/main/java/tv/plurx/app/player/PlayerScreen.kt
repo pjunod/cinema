@@ -2848,16 +2848,7 @@ internal fun toneMapPeakSummary(status: PlaybackSessionStatus?): String? {
 
 private fun videoFormatSummary(format: Format?): String? {
     if (format == null) return null
-    val hdr = when (format.colorInfo?.colorTransfer) {
-        C.COLOR_TRANSFER_ST2084 -> "HDR10 / PQ"
-        C.COLOR_TRANSFER_HLG -> "HLG"
-        else -> null
-    }
-    return listOfNotNull(
-        codecShort(format.sampleMimeType) ?: format.codecs?.takeIf { it.isNotBlank() },
-        hdr,
-        format.bitrate.takeIf { it != Format.NO_VALUE && it > 0 }?.toLong()?.let(::formatBitrate),
-    ).joinToString(" · ").ifBlank { null }
+    return codecShort(format.sampleMimeType) ?: format.codecs?.takeIf { it.isNotBlank() }
 }
 
 private fun selectedSubtitleLabel(
