@@ -287,6 +287,12 @@ async fn captioned_fixture_with_scan(
     interlaced: bool,
 ) -> PathBuf {
     let suffix = if interlaced { "1080i" } else { "720p" };
+    let mux_rate = if interlaced {
+        "30000/1001"
+    } else {
+        "60000/1001"
+    };
+    let duration = if interlaced { "10" } else { "5" };
     let mut generate = tokio::process::Command::new(&system.ffmpeg);
     generate.args([
         "-hide_banner",
@@ -301,7 +307,7 @@ async fn captioned_fixture_with_scan(
             "testsrc2=size=1280x720:rate=60000/1001"
         },
         "-t",
-        if interlaced { "10" } else { "5" },
+        duration,
     ]);
     if interlaced {
         generate.args([
@@ -338,7 +344,7 @@ async fn captioned_fixture_with_scan(
         "-fflags",
         "+genpts",
         "-r",
-        "30000/1001",
+        mux_rate,
         "-f",
         "mpegvideo",
         "-i",
@@ -350,7 +356,7 @@ async fn captioned_fixture_with_scan(
         "-i",
         "sine=frequency=440:sample_rate=48000",
         "-t",
-        "10",
+        duration,
         "-c:v",
         "copy",
         "-c:a",

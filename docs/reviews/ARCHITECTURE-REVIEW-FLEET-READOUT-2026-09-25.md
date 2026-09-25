@@ -422,3 +422,16 @@ owed on an unlocked supported Android device with a verified playable
 download. Sanitized receipt
 `/private/tmp/codex-google-tv-offline-baseline-20260925.json` has SHA-256
 `b9ea4ad58421421d2598198a63e8b4601402a1a8e82ab4e015847b337336b8ea`.
+
+## PR #528 sole review correction — 21:08 UTC
+
+The one adversarial review found that the new progressive fixture generated
+300 frames at 60000/1001 over five seconds but muxed them with input
+`-r 30000/1001` and `-t 10`. That doubled cue timestamps and prevented
+the progressive graph from satisfying the startup proof. The mux now selects
+rate and duration from the scan type: 29.97 fps/10 s for 1080i and
+59.94 fps/5 s for 720p. The pinned Rust 1.97.1 targeted regression
+`the_progressive_live_graph_proves_and_advertises_608_and_708` passed 1/1,
+including source cue times, transcoded cue times, positive advertisement and
+source-height mismatch. This is local code evidence, not an on-air drawn-text
+pass; exact-head fast lane and deployment remain owed.
