@@ -688,11 +688,9 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
               let base = Session.canonicalOrigin(origin)
         else { throw LiveTvFailure(code: "capability_expired") }
         let sessionPath = "/api/v1/live-tv/sessions/" + Self.pathComponent(sessionId)
-        // The start response supplies master.m3u8; recovery currently supplies
-        // index.m3u8. Accept only those exact node-relative capabilities for
-        // this session, never an authority, query, fragment or another path.
-        guard playlistUrl == sessionPath + "/master.m3u8" ||
-              playlistUrl == sessionPath + "/index.m3u8",
+        // Both start and recovery supply the caption-advertising master.
+        // Accept only that exact node-relative capability for this session.
+        guard playlistUrl == sessionPath + "/master.m3u8",
               let url = URL(string: base + playlistUrl)
         else { throw LiveTvFailure(code: "capability_expired") }
         return url

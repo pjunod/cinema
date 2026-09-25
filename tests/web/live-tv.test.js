@@ -801,7 +801,7 @@ async function main() {
     const second = shippedResume({
       storage, wall: () => wall, tabs: new Channel(),
       answer: () => ({ outcome: "live", session: { session_id: "cap-a", live: true,
-        playlist_url: "/api/v1/live-tv/sessions/cap-a/index.m3u8", channel: { id: "7.1" } } }),
+        playlist_url: "/api/v1/live-tv/sessions/cap-a/master.m3u8", channel: { id: "7.1" } } }),
     });
     await second.resume(1, "#/live-tv");
     assert.deepEqual(second.asked, [],
@@ -816,7 +816,7 @@ async function main() {
     const later = shippedResume({
       storage, wall: () => wall, tabs: new Channel(),
       answer: () => ({ outcome: "live", session: { session_id: "cap-a", live: true,
-        playlist_url: "/api/v1/live-tv/sessions/cap-a/index.m3u8", channel: { id: "7.1" } } }),
+        playlist_url: "/api/v1/live-tv/sessions/cap-a/master.m3u8", channel: { id: "7.1" } } }),
     });
     watching.LIVE_TV.hint = null; // the watching document is gone
     await later.resume(1, "#/live-tv");
@@ -832,7 +832,7 @@ async function main() {
     const storage = memoryStorage(), wall = 1_000_000;
     storage.setItem("plurx_live_tv_hint_v1:stranded", String(wall - 600_000));
     const session = { session_id: "cap", live: true, channel: { id: "7.1" },
-      playlist_url: "/api/v1/live-tv/sessions/cap/index.m3u8" };
+      playlist_url: "/api/v1/live-tv/sessions/cap/master.m3u8" };
     const run = shippedResume({
       storage, wall: () => wall,
       state: { lineupRead: false, protocols: null },
@@ -916,7 +916,7 @@ async function main() {
     );
     await attach(session, -1, 1, 1);
     assert.equal(state.selected, session.channel.id, "watching is the channel the owner named");
-    assert.equal(video.src, `/api/live-tv/sessions/${session.session_id}/index.m3u8`,
+    assert.equal(video.src, `/api/live-tv/sessions/${session.session_id}/master.m3u8`,
       "the playlist is the capability's own same-origin route, not the wire URL");
     assert.ok(poll, "a resumed session is watched by the same tuner watchdog");
     video.currentTime = 30; await poll();

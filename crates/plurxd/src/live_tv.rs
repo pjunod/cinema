@@ -4487,7 +4487,7 @@ impl LiveTvManager {
                 session: Some(LiveTvActivated {
                     session_id: session.capability.clone(),
                     playlist_url: format!(
-                        "/api/v1/live-tv/sessions/{}/index.m3u8",
+                        "/api/v1/live-tv/sessions/{}/master.m3u8",
                         session.capability
                     ),
                     channel: session.channel_with_source_format(),

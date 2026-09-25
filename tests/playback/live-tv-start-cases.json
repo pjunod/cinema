@@ -145,7 +145,7 @@
         "outcome": "live",
         "session": {
           "session_id": "ltv1.7de1a4c0.9f2b",
-          "playlist_url": "/api/v1/live-tv/sessions/ltv1.7de1a4c0.9f2b/index.m3u8",
+          "playlist_url": "/api/v1/live-tv/sessions/ltv1.7de1a4c0.9f2b/master.m3u8",
           "channel": {
             "id": "7.1",
             "guide_number": "7.1",

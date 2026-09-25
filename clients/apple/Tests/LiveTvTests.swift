@@ -1395,8 +1395,7 @@ final class LiveTvTests: XCTestCase {
         XCTAssertEqual(master.absoluteString, "https://media.example" + prefix + "master.m3u8")
         XCTAssertNil(master.query)
         XCTAssertFalse(master.absoluteString.contains("account-secret"))
-        let recovered = try api.playlistURL(prefix + "index.m3u8", sessionId: capability)
-        XCTAssertEqual(recovered.absoluteString, "https://media.example" + prefix + "index.m3u8")
+        XCTAssertThrowsError(try api.playlistURL(prefix + "index.m3u8", sessionId: capability))
         for invalid in [
             "https://elsewhere.example" + prefix + "master.m3u8",
             "//elsewhere.example" + prefix + "master.m3u8",
