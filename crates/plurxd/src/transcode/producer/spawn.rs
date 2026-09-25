@@ -64,7 +64,7 @@ fn apply_and_observe_progress_line(
 pub(super) type FfmpegDescriptors = crate::producer_spawn::Descriptors;
 
 #[cfg(windows)]
-fn windows_session_descriptors(session: &Session) -> Result<FfmpegDescriptors, String> {
+pub(super) fn windows_session_descriptors(session: &Session) -> Result<FfmpegDescriptors, String> {
     let source = session
         .source_handle
         .as_ref()
@@ -83,7 +83,7 @@ fn windows_session_descriptors(session: &Session) -> Result<FfmpegDescriptors, S
 }
 
 #[cfg(windows)]
-fn windows_offline_descriptors(
+pub(super) fn windows_offline_descriptors(
     source: Option<&BoundPretranscodeSource>,
     output: &plurx_core::fs_secure::SecureDirectory,
     subtitle: Option<&std::fs::File>,

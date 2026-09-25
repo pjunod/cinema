@@ -1084,7 +1084,7 @@ pub(super) fn available_cache_scratch_bytes(path: &std::path::Path) -> Option<i6
 }
 
 #[cfg(windows)]
-fn available_cache_scratch_bytes(path: &std::path::Path) -> Option<i64> {
+pub(super) fn available_cache_scratch_bytes(path: &std::path::Path) -> Option<i64> {
     const EMERGENCY_MARGIN: u64 = 512 * 1024 * 1024;
     use std::os::windows::ffi::OsStrExt as _;
 

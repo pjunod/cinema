@@ -240,7 +240,7 @@ impl LocalSourceSnapshot {
     }
 
     #[cfg(windows)]
-    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+    pub(super) fn from_metadata(metadata: &std::fs::Metadata) -> Self {
         use std::os::windows::fs::MetadataExt as _;
 
         let modified = metadata
@@ -557,7 +557,7 @@ pub async fn pretranscode_source_snapshot(
 }
 
 #[cfg(windows)]
-async fn bind_windows_session_source(
+pub(super) async fn bind_windows_session_source(
     file: &mut plurx_core::domain::MediaFile,
 ) -> Result<std::fs::File, String> {
     let path = file.path.clone();

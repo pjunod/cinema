@@ -156,9 +156,9 @@ pub(super) struct Session {
     /// authorized source and output directory alive so every initial or retry
     /// launch can revalidate its pathname against the exact held object.
     #[cfg(windows)]
-    source_handle: Option<std::fs::File>,
+    pub(super) source_handle: Option<std::fs::File>,
     #[cfg(windows)]
-    output_handle: Option<plurx_core::fs_secure::SecureDirectory>,
+    pub(super) output_handle: Option<plurx_core::fs_secure::SecureDirectory>,
     /// Small authenticated inventory loaded once at offer time. Media objects
     /// are verified only when requested, not walked before playback starts.
     pub(super) cache_manifest: Option<Arc<plurx_core::transcode::manifest::GenerationManifest>>,
