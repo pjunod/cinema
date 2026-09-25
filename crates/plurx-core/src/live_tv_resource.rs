@@ -159,7 +159,7 @@ pub fn valid_request_id(id: &str) -> bool {
     let raw = id.strip_prefix("v4_").unwrap_or(id);
     raw.len() == 32
         && raw.bytes().all(|c| c.is_ascii_hexdigit())
-        && (!id.starts_with("v4_") || raw.bytes().all(|c| !c.is_ascii_uppercase()))
+        && raw.bytes().all(|c| !c.is_ascii_uppercase())
 }
 
 /// Only the server mints prefixed IDs. Missing-ticket fallback must never
@@ -224,6 +224,7 @@ pub enum Command {
         recording_id: String,
         worker: Worker,
         storage_id: String,
+        legacy: Option<Capture>,
     },
     RenewFinalizer {
         recording_id: String,
@@ -331,6 +332,9 @@ pub struct CaptureInput {
     pub stop: bool,
     pub capture_start: i64,
     pub capture_end: i64,
+    pub attempt: i64,
+    pub worker: Option<String>,
+    pub path: Option<String>,
 }
 
 #[derive(Default)]
@@ -726,7 +730,17 @@ pub(crate) fn transition(
         } => {
             if !worker_valid(&capture.worker)
                 || capture.recording_id.is_empty()
+                || capture.recording_id.len() > 128
                 || capture.storage_id.is_empty()
+                || capture.storage_id.len() > 128
+                || capture.base_path.is_empty()
+                || capture.base_path.len() > 8192
+                || ingest_id.is_empty()
+                || ingest_id.len() > 128
+                || device_id.is_empty()
+                || device_id.len() > 128
+                || channel_id.is_empty()
+                || channel_id.len() > 256
                 || !(1..=4).contains(limit)
             {
                 return Err(error("invalid capture claim"));
@@ -747,18 +761,27 @@ pub(crate) fn transition(
                 Some(Record::Capture(c)) if c.stopped || c.deleted => {
                     return Ok((Outcome::Retired, changes))
                 }
-                Some(Record::Capture(c))
-                    if c.expires_at_ms > now && c.generation == capture.generation =>
-                {
-                    return Ok((Outcome::Record(Record::Capture(c.clone())), changes))
-                }
                 Some(Record::Capture(c)) if c.storage_id != capture.storage_id => {
                     return Ok((Outcome::Conflict, changes));
+                }
+                Some(Record::Capture(c)) if c.expires_at_ms > now => {
+                    if c.generation != capture.generation || c.finalizer.is_some() {
+                        return Ok((Outcome::Conflict, changes));
+                    }
+                    return Ok((Outcome::Record(Record::Capture(c.clone())), changes));
                 }
                 Some(Record::Capture(c)) => c
                     .epoch
                     .checked_add(1)
                     .ok_or_else(|| error("capture epoch exhausted"))?,
+                None if row.state == "recording" => {
+                    if row.worker.as_deref() != Some(capture.worker.node_id.as_str()) {
+                        return Ok((Outcome::Conflict, changes));
+                    }
+                    row.attempt
+                        .checked_add(1)
+                        .ok_or_else(|| error("capture epoch exhausted"))?
+                }
                 None => 1,
                 _ => return Ok((Outcome::Conflict, changes)),
             };
@@ -809,7 +832,12 @@ pub(crate) fn transition(
             next.stopped = false;
             next.deleted = false;
             next.finalizer = None;
-            next.finalizer_epoch = 0;
+            if let Some(Record::Capture(previous)) = current {
+                next.base_path = previous.base_path.clone();
+                next.finalizer_epoch = previous.finalizer_epoch;
+            } else {
+                next.finalizer_epoch = 0;
+            }
             next.published_path = None;
             ingest
                 .consumers
@@ -868,12 +896,29 @@ pub(crate) fn transition(
             recording_id: _,
             worker,
             storage_id,
+            legacy,
         } => {
             if !worker_valid(worker) {
                 return Err(error("invalid capture finalizer"));
             }
-            let Some(Record::Capture(c)) = current else {
-                return Ok((Outcome::Absent, changes));
+            let c = match current {
+                Some(Record::Capture(c)) => c,
+                None => {
+                    let Some(c) = legacy.as_ref() else {
+                        return Ok((Outcome::Absent, changes));
+                    };
+                    if !s.recordings.iter().any(|row| {
+                        row.id == c.recording_id
+                            && row.state == "recording"
+                            && row.worker.as_deref() == Some(worker.node_id.as_str())
+                            && row.attempt == c.epoch
+                            && row.path.as_deref() == Some(format!("{}.ts", c.base_path).as_str())
+                    }) {
+                        return Ok((Outcome::Fenced, changes));
+                    }
+                    c
+                }
+                _ => return Ok((Outcome::Conflict, changes)),
             };
             if c.storage_id != *storage_id {
                 return Ok((Outcome::Conflict, changes));
@@ -1004,7 +1049,7 @@ SELECT json_object(
  'user_history_count', (SELECT COUNT(*) FROM live_tv_resource_records,input WHERE kind='start' AND live=0 AND live_tv_resource_records.user_id=input.user_id AND expires_at_ms>input.now_ms),
  'recordings', json((SELECT COALESCE(json_group_array(json_object('id',id,'state',state,
     'stop',json(CASE WHEN stop_requested_at_ms IS NULL THEN 'false' ELSE 'true' END),
-    'capture_start',capture_start,'capture_end',capture_end)),'[]') FROM dvr_recordings
+    'capture_start',capture_start,'capture_end',capture_end,'attempt',attempt,'worker',tuner_owner_node_id,'path',path)),'[]') FROM dvr_recordings
     WHERE id=substr((SELECT request_key FROM input),9) OR id IN
         (SELECT substr(id,9) FROM live_tv_resource_records WHERE kind='capture' AND live=1)))
 ) AS payload FROM live_tv_resource_revision WHERE singleton=1";
@@ -1175,6 +1220,21 @@ fn statements(
         AND EXISTS (SELECT 1 FROM live_tv_resource_revision WHERE singleton=1 AND revision=$2 AND nonce=$3)".into(),
         values:vec![I(now),I(next),T(nonce.clone())]});
     if let Some((id, worker, epoch, path)) = changes.claim {
+        append_event(
+            &mut out,
+            &id,
+            if epoch == 1 {
+                "attempt_started"
+            } else {
+                "retry_started"
+            },
+            epoch,
+            false,
+            serde_json::json!({"attempt": epoch}).to_string(),
+            now,
+            next,
+            &nonce,
+        );
         out.push(Statement { sql: "UPDATE dvr_recordings SET
             gap_s=gap_s+CASE WHEN state='recording' THEN MAX(0,$1/1000-COALESCE(last_progress_ms,started_at_ms,$1)/1000) ELSE 0 END,
             state='recording',attempt=$2,tuner_owner_node_id=$3,path=$4,
@@ -1191,6 +1251,17 @@ fn statements(
             values: vec![I(bytes),I(now),T(id),I(next),T(nonce.clone())] });
     }
     if let Some((id, path, bytes, gap, stopped_by)) = changes.publish {
+        append_event(
+            &mut out,
+            &id,
+            if bytes == 0 { "failed" } else { "finished" },
+            0,
+            bytes == 0 || (gap > 0 && stopped_by.is_none()),
+            serde_json::json!({"bytes": bytes, "gap_s": gap}).to_string(),
+            now,
+            next,
+            &nonce,
+        );
         out.push(Statement { sql: "UPDATE dvr_recordings SET state=CASE WHEN $1=0 THEN 'failed'
             WHEN $2>0 OR late_start_s>0 THEN 'partial' ELSE 'done' END,
             bytes=$1,gap_s=$2,path=$3,finished_at_ms=$4,updated_at_ms=$4,
@@ -1199,4 +1270,39 @@ fn statements(
             values: vec![I(bytes),I(gap),T(path),I(now),I(stopped_by.unwrap_or(0)),T(id),I(next),T(nonce.clone())] });
     }
     Ok(out)
+}
+
+/// Event sequence allocation shares the claim/publication transaction. The DVR
+/// row update is last because its trigger advances the ledger revision.
+#[allow(clippy::too_many_arguments)]
+fn append_event(
+    out: &mut Vec<Statement>,
+    id: &str,
+    kind: &str,
+    attempt: i64,
+    actionable: bool,
+    facts: String,
+    now: i64,
+    revision: i64,
+    nonce: &str,
+) {
+    use Value::{Integer as I, Text as T};
+    let event_id = uuid::Uuid::new_v4().to_string();
+    out.push(Statement { sql: "INSERT OR IGNORE INTO dvr_event_heads
+        (recording_id,next_sequence,latest_attention_sequence,latest_attention_at_ms,history_started_at_ms,history_has_gap,pruned_through_sequence)
+        SELECT $1,1,0,NULL,$2,0,0 FROM live_tv_resource_revision
+        WHERE singleton=1 AND revision=$3 AND nonce=$4".into(),
+        values: vec![T(id.into()),I(now),I(revision),T(nonce.into())] });
+    out.push(Statement { sql: "INSERT INTO dvr_events
+        (recording_id,sequence,event_id,kind,occurred_at_ms,attempt,actor_user_id,reason_code,facts_json)
+        SELECT $1,next_sequence,$2,$3,$4,NULLIF($5,0),NULL,NULL,$6 FROM dvr_event_heads
+        WHERE recording_id=$1 AND EXISTS(SELECT 1 FROM live_tv_resource_revision
+        WHERE singleton=1 AND revision=$7 AND nonce=$8)".into(),
+        values: vec![T(id.into()),T(event_id.clone()),T(kind.into()),I(now),I(attempt),T(facts),I(revision),T(nonce.into())] });
+    out.push(Statement { sql: "UPDATE dvr_event_heads SET
+        latest_attention_sequence=CASE WHEN $1 THEN next_sequence ELSE latest_attention_sequence END,
+        latest_attention_at_ms=CASE WHEN $1 THEN $2 ELSE latest_attention_at_ms END,
+        next_sequence=next_sequence+1 WHERE recording_id=$3 AND EXISTS
+        (SELECT 1 FROM dvr_events WHERE event_id=$4)".into(),
+        values: vec![I(i64::from(actionable)),I(now),T(id.into()),T(event_id)] });
 }

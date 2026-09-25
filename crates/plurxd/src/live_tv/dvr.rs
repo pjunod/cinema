@@ -1548,12 +1548,8 @@ impl LiveTvManager {
         Ok(())
     }
 
-    /// The owner's recording loop.
-    ///
-    /// Owner-only by construction, like the guide loop, and holding no job
-    /// lease: the tuner configuration already names one owner, and a lease
-    /// would be a second authority over the same resource that could disagree
-    /// with it.
+    /// Every serving worker may plan recordings; replicated capture claims
+    /// choose the executor before it opens a file or tuner response.
     pub(crate) async fn dvr_loop(
         self: Arc<Self>,
         events: super::webhook::DvrEventSink,
@@ -1591,6 +1587,34 @@ impl LiveTvManager {
                     // captures, and leave the transports viewers are watching
                     // (they are not the DVR's to close).
                     self.close_recordings().await;
+                }
+                // Finalization consumes sealed bytes, not tuner authority.
+                // Disabling capture must still preserve useful partial work.
+                if self.serving.admit().is_some() {
+                    if !live_tv.enabled || !dvr.enabled {
+                        if let Ok(rows) = self.dvr_rows(&[DvrState::Recording]).await {
+                            for row in rows {
+                                let _ = self.stop_sink(&row.id, row.attempt).await;
+                                if let Err(error) = self
+                                    .finish_row(
+                                        &row,
+                                        &events,
+                                        unix_seconds(),
+                                        (row.capture_end - unix_seconds()).max(0),
+                                        None,
+                                        "recording disabled",
+                                        live_tv.generation,
+                                    )
+                                    .await
+                                {
+                                    tracing::debug!(recording = %row.id, %error, "finalization will retry");
+                                }
+                            }
+                        }
+                    }
+                    if let Err(error) = self.dvr_purge_deleted().await {
+                        tracing::debug!(%error, "recording deletion will retry");
+                    }
                 }
             }
             tokio::select! {
@@ -1742,6 +1766,7 @@ impl LiveTvManager {
                 {
                     Ok(()) => {
                         tracing::info!(recording = %row.id, attempt, "recording capture reclaimed");
+                        continue;
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -2110,13 +2135,11 @@ impl LiveTvManager {
             .into_iter()
             .map(|rule| (rule.id, rule.priority))
             .collect::<BTreeMap<_, _>>();
-        let floor_met = super::free_space_bytes(&dvr.root).is_none_or(|free| {
-            free >= (dvr.free_floor_gb.max(0) as u64).saturating_mul(1_000_000_000)
-        });
         let plan = schedule::allocate(
             &rows,
             dvr.recording_slots(live_tv.max_sessions),
-            floor_met,
+            // A local disk reading cannot reject work for the whole cluster.
+            true,
             &|rule_id| priorities.get(rule_id).copied().unwrap_or(i64::MAX),
         );
         for entry in plan {
@@ -2265,7 +2288,9 @@ impl LiveTvManager {
             if row.path.is_none() {
                 continue;
             }
-            self.delete_recording_files(&row).await;
+            if !self.delete_recording_files(&row).await {
+                continue;
+            }
             self.transition(
                 &row.id,
                 &[DvrState::Deleted],
@@ -2321,7 +2346,6 @@ impl LiveTvManager {
                 }
             };
             for row in doomed {
-                self.delete_recording_files(row).await;
                 self.transition(
                     &row.id,
                     &[DvrState::Done, DvrState::Partial],
@@ -2356,6 +2380,13 @@ impl LiveTvManager {
         if dvr.root.trim().is_empty() {
             return Err(LiveTvError::InvalidConfig(
                 "no DVR root is configured, so a recording has nowhere to go".to_owned(),
+            ));
+        }
+        if super::free_space_bytes(&dvr.root).is_some_and(|free| {
+            free < (dvr.free_floor_gb.max(0) as u64).saturating_mul(1_000_000_000)
+        }) {
+            return Err(LiveTvError::Capacity(
+                "this worker's recording storage is below its free-space floor".into(),
             ));
         }
         let snapshot = self.local_snapshot(live_tv, true, false).await?;
@@ -2394,6 +2425,7 @@ impl LiveTvManager {
         let claim = self
             .resource_capture_claim(&effective, dvr, row, &device_id, &base)
             .await?;
+        let base = PathBuf::from(&claim.base_path);
         if claim.epoch != attempt {
             return Err(LiveTvError::Conflict(
                 "the recording attempt changed; retry the current claim".into(),
@@ -3043,7 +3075,6 @@ impl LiveTvManager {
         _generation: i64,
     ) -> Result<(), LiveTvError> {
         let (_, dvr) = self.dvr_configs().await?;
-        let input_base = self.recording_base_path(&dvr, row);
         let finalizer_deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(plurx_core::live_tv_resource::LEASE_MS as u64);
         let claim = tokio::time::timeout_at(
@@ -3054,6 +3085,7 @@ impl LiveTvManager {
         .map_err(|_| {
             LiveTvError::OwnerUnavailable("recording finalization authority timed out".into())
         })??;
+        let input_base = PathBuf::from(&claim.base_path);
         let base = sibling(&input_base, &format!(".f{}", claim.finalizer_epoch));
         let gap = row.gap_s + extra_gap;
         let assembled = tokio::select! {
@@ -3071,7 +3103,10 @@ impl LiveTvManager {
                     %error,
                     "could not assemble a recording's attempts"
                 );
-                0
+                let _ = tokio::fs::remove_file(final_path(&base)).await;
+                return Err(LiveTvError::DeviceUnavailable(format!(
+                    "assembling recording: {error}"
+                )));
             }
         };
         let state = if bytes == 0 {
@@ -3151,11 +3186,12 @@ impl LiveTvManager {
         facts
     }
 
-    async fn delete_recording_files(&self, row: &DvrRecording) {
+    async fn delete_recording_files(&self, row: &DvrRecording) -> bool {
+        let mut artifacts = Vec::new();
         match self.resource_capture(&row.id).await {
             Ok(Some(claim)) => {
                 let Ok((_, dvr)) = self.dvr_configs().await else {
-                    return;
+                    return false;
                 };
                 if super::resource::storage_identity(&dvr.root)
                     .await
@@ -3163,28 +3199,42 @@ impl LiveTvManager {
                     .as_deref()
                     != Some(claim.storage_id.as_str())
                 {
-                    return;
+                    return false;
                 }
-                if self
-                    .store
-                    .live_tv_resource_command(
-                        plurx_core::live_tv_resource::Command::StopCapture {
-                            recording_id: row.id.clone(),
-                            delete: true,
-                        },
-                        super::resource::now_ms(),
-                    )
-                    .await
-                    .is_err()
-                {
-                    return;
+                if !matches!(
+                    self.store
+                        .live_tv_resource_command(
+                            plurx_core::live_tv_resource::Command::StopCapture {
+                                recording_id: row.id.clone(),
+                                delete: true,
+                            },
+                            super::resource::now_ms(),
+                        )
+                        .await,
+                    Ok(plurx_core::live_tv_resource::Outcome::Applied)
+                ) {
+                    return false;
+                }
+                // Fence first, then let every previously authorized writer's
+                // deadline elapse before removing its private artifacts.
+                if claim.expires_at_ms > super::resource::now_ms() {
+                    return false;
+                }
+                let base = PathBuf::from(&claim.base_path);
+                for attempt in 1..=claim.epoch {
+                    artifacts.push(attempt_path(&base, attempt));
+                }
+                for epoch in 1..=claim.finalizer_epoch {
+                    let output = sibling(&base, &format!(".f{epoch}"));
+                    artifacts.push(final_path(&output));
+                    artifacts.push(sibling(&output, ".json"));
                 }
             }
             Ok(None) if row.tuner_owner_node_id.as_deref() == Some(self.node_id.as_str()) => {}
-            _ => return,
+            _ => return false,
         }
         let Some(path) = row.path.as_deref() else {
-            return;
+            return true;
         };
         let base = PathBuf::from(path);
         // The row stores the final `.ts` path, so the sidecar is found by
@@ -3194,13 +3244,19 @@ impl LiveTvManager {
             .to_str()
             .and_then(|path| path.strip_suffix(".ts"))
             .map(|stem| PathBuf::from(format!("{stem}.json")));
-        for candidate in std::iter::once(base.clone()).chain(sidecar) {
+        let mut removed = true;
+        for candidate in std::iter::once(base.clone())
+            .chain(sidecar)
+            .chain(artifacts)
+        {
             if let Err(error) = tokio::fs::remove_file(&candidate).await {
                 if error.kind() != std::io::ErrorKind::NotFound {
+                    removed = false;
                     tracing::warn!(%error, path = %candidate.display(), "could not remove a recording");
                 }
             }
         }
+        removed
     }
 }
 

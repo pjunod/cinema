@@ -1,7 +1,7 @@
 # Live TV cluster resource — implementation status
 
 **Status:** building · **Updated:** 2026-09-25 · **Branch:**
-`codex/live-tv-cluster-resource` · **Base:** `8ae8cab1e`
+`codex/live-tv-cluster-resource` · **Base:** `0915b3ee9`
 
 The [implementation contract](LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md)
 and [accepted design review](LIVE-TV-CLUSTER-RESOURCE-REVIEW.md) define the
@@ -14,9 +14,9 @@ The user's existing checkouts are not build or edit workspaces for this work.
 | Milestone | State | Evidence / next action |
 |---|---|---|
 | Isolated workspace and pinned compiler | Complete | Fresh Forgejo clone; Rust 1.97.1; offline cargo check -p plurxd --all-targets passed in 95 s. |
-| Replicated admission and request recovery | Building | Shared SQLite/Hiqlite transition engine compiles; global request identity and routing are being integrated. |
-| Worker placement and lifecycle | Building | Candidate placement and shared-channel assignment replace configured-owner routing; lease fencing is being connected. |
-| DVR claims, storage and finalization | Building | Atomic pre-I/O capture claims, storage identities and fenced publication are being integrated. |
+| Replicated admission and request recovery | Implemented | Shared SQLite/Hiqlite transition engine, durable intent identity and cross-ingress routing. Review and final lane pending. |
+| Worker placement and lifecycle | Implemented | Candidate placement, shared-channel claims, boot/epoch/generation and monotonic lease fencing. |
+| DVR claims, storage and finalization | Implemented | Pre-I/O claims, storage identities, independent finalization, immutable publication and storage-local deletion. |
 | Guide, Activity and reminders | Building | Source-refresh lease, persistent guide copies and local worker Activity are integrated; validation pending. |
 | Developer enablement and clients | Building | Advisory Developer control and protocol 4 intents wired on web, Apple and Android. iOS/tvOS and Android compilation passed. |
 | One adversarial code review | Deferred | Only when the complete main-bound PR is ready. |
@@ -51,10 +51,11 @@ The user's existing checkouts are not build or edit workspaces for this work.
 ## Commits and release evidence
 
 Commits: `02b173d8f` (reviewed contract/status), `1f5ba9c81` (replicated
-claims and worker integration). Follow-up lifecycle, client and guide changes
-are being completed. Pinned Rust checks pass; the normal hook also passed
+claims and worker integration). `8fa3dad27` contains lifecycle, client and guide integration. Final cleanup and current-main integration are being committed. Pinned Rust checks pass; the normal hook also passed
 catalog lint, formatting, workspace Clippy and served JavaScript syntax.
 Apple iOS/tvOS builds and Android application/test-source compilation pass.
 No test methods were executed by these compiler checks.
 No PR yet. No runtime tests, hardware acceptance,
 code review, fast-lane result, merge or deployment is claimed.
+
+Latest integration: current main merged; cleanup retains deletion until file removal succeeds, capture recovery preserves base paths and finalizer epochs, lifecycle events commit with claim/publication, and Developer readiness reports each worker. Unit execution remains deferred until the final review is addressed.

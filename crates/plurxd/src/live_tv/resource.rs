@@ -473,13 +473,39 @@ impl LiveTvManager {
         id: &str,
         root: &str,
     ) -> Result<ledger::Capture, LiveTvError> {
+        let storage_id = storage_identity(root).await?;
+        let legacy = self
+            .store
+            .get_dvr_recording(id)
+            .await
+            .map_err(store_error)?
+            .and_then(|row| {
+                let base_path = row.path.as_deref()?.strip_suffix(".ts")?.to_owned();
+                Some(ledger::Capture {
+                    recording_id: id.into(),
+                    epoch: row.attempt,
+                    worker: self.resource_worker(),
+                    ingest_id: String::new(),
+                    ingest_epoch: 0,
+                    storage_id: storage_id.clone(),
+                    base_path,
+                    generation: 0,
+                    expires_at_ms: 0,
+                    stopped: true,
+                    deleted: false,
+                    finalizer: None,
+                    finalizer_epoch: 0,
+                    published_path: None,
+                })
+            });
         match self
             .store
             .live_tv_resource_command(
                 Command::ClaimFinalizer {
                     recording_id: id.into(),
                     worker: self.resource_worker(),
-                    storage_id: storage_identity(root).await?,
+                    storage_id,
+                    legacy,
                 },
                 now_ms(),
             )

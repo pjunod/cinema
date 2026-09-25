@@ -9723,20 +9723,20 @@ mod tests {
     /// Put a session in the registry under a public identity, and give it the
     /// fake worker `cancel_and_wait` waits for: on cancellation it retires the
     /// session the way `run_live_session` would.
-    fn register_test_session(
+    async fn register_test_session(
         manager: &Arc<LiveTvManager>,
         user_id: i64,
         request_id: &str,
         phase: LiveTvSessionPhase,
         last_touch: tokio::time::Instant,
     ) -> Arc<LiveTvSession> {
-        register_test_session_at(manager, user_id, request_id, phase, last_touch, 0)
+        register_test_session_at(manager, user_id, request_id, phase, last_touch, 0).await
     }
 
     /// `serving_generation` distinguishes two sessions under one public
     /// identity: `LiveTvRequestKey` includes it, so a fence blip between a POST
     /// and its replay is exactly how a viewer ends up with two.
-    fn register_test_session_at(
+    async fn register_test_session_at(
         manager: &Arc<LiveTvManager>,
         user_id: i64,
         request_id: &str,
@@ -9811,6 +9811,15 @@ mod tests {
                 .sessions
                 .insert(session.capability.clone(), Arc::clone(&session));
         }
+        manager
+            .store
+            .put_settings(&[("live_tv.enabled", "1"), ("live_tv.config_generation", "1")])
+            .await
+            .expect("fixture generation");
+        manager
+            .resource_start(&session.request, &session.device_id, 4)
+            .await
+            .expect("fixture admission");
         let worker_manager = Arc::clone(manager);
         let worker_session = Arc::clone(&session);
         tokio::spawn(async move {
@@ -9921,8 +9930,10 @@ mod tests {
         // Two sessions for one identity: legitimate, because the registry key
         // includes the ingress's serving generation and a fence blip between a
         // POST and its replay makes a second one.
-        let first = register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Active, now, 0);
-        let second = register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Active, now, 1);
+        let first =
+            register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Active, now, 0).await;
+        let second =
+            register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Active, now, 1).await;
         assert_eq!(
             manager
                 .registry
@@ -9982,9 +9993,10 @@ mod tests {
             LiveTvSessionPhase::Active,
             now - Duration::from_secs(30),
             0,
-        );
+        )
+        .await;
         let freshest =
-            register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Active, now, 1);
+            register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Active, now, 1).await;
 
         let answer = manager.resume_local(7, &id).await;
         assert_eq!(answer.outcome, LiveTvResumeOutcome::Live);
@@ -10016,7 +10028,8 @@ mod tests {
             &pending_id,
             LiveTvSessionPhase::Provisional,
             now,
-        );
+        )
+        .await;
         let answer = manager.resume_local(7, &pending_id).await;
         assert_eq!(
             answer.outcome,
@@ -10030,7 +10043,8 @@ mod tests {
         );
 
         let ended_id = hex_request_id(6);
-        let ended = register_test_session(&manager, 7, &ended_id, LiveTvSessionPhase::Active, now);
+        let ended =
+            register_test_session(&manager, 7, &ended_id, LiveTvSessionPhase::Active, now).await;
         ended.cancel.cancel();
         manager.retire_session(&ended);
         assert_eq!(
@@ -10070,7 +10084,8 @@ mod tests {
             LiveTvSessionPhase::Active,
             idle,
             0,
-        );
+        )
+        .await;
         let mine_fresh = register_test_session_at(
             &manager,
             7,
@@ -10078,7 +10093,8 @@ mod tests {
             LiveTvSessionPhase::Active,
             now,
             1,
-        );
+        )
+        .await;
         let mine_starting = register_test_session_at(
             &manager,
             7,
@@ -10086,7 +10102,8 @@ mod tests {
             LiveTvSessionPhase::Starting,
             idle,
             2,
-        );
+        )
+        .await;
         let mine_provisional = register_test_session_at(
             &manager,
             7,
@@ -10094,7 +10111,8 @@ mod tests {
             LiveTvSessionPhase::Provisional,
             idle,
             3,
-        );
+        )
+        .await;
         let theirs_idle = register_test_session_at(
             &manager,
             8,
@@ -10102,7 +10120,8 @@ mod tests {
             LiveTvSessionPhase::Active,
             idle,
             4,
-        );
+        )
+        .await;
         // Slots are transports now: each of these holds a tuner of its own,
         // so evicting any one of them would free one.
         for session in [
@@ -10238,7 +10257,8 @@ mod tests {
             LiveTvSessionPhase::Active,
             idle,
             0,
-        );
+        )
+        .await;
         let transport = test_viewer_transport(&manager, &stray);
         manager
             .registry
@@ -10276,7 +10296,8 @@ mod tests {
             LiveTvSessionPhase::Active,
             now,
             1,
-        );
+        )
+        .await;
         sibling.hold_seat_on(Arc::clone(&transport));
         assert!(transport.reserve_seat());
         join_test_transport(&sibling, &transport);
@@ -10295,7 +10316,8 @@ mod tests {
         // Freshly touched and only provisional: neither half of the idleness
         // rule can reach it.
         let provisional =
-            register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Provisional, now, 0);
+            register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Provisional, now, 0)
+                .await;
         give_own_transport(&manager, &provisional);
 
         assert!(
@@ -10361,7 +10383,8 @@ mod tests {
         let id = hex_request_id(9);
         let now = tokio::time::Instant::now();
         assert_eq!(manager.start_state_local(7, &id).state, "unknown");
-        let session = register_test_session(&manager, 7, &id, LiveTvSessionPhase::Active, now);
+        let session =
+            register_test_session(&manager, 7, &id, LiveTvSessionPhase::Active, now).await;
         assert_eq!(manager.start_state_local(7, &id).state, "active");
         session.cancel.cancel();
         manager.retire_session(&session);
@@ -10386,7 +10409,8 @@ mod tests {
             &hex_request_id(10),
             LiveTvSessionPhase::Active,
             now,
-        );
+        )
+        .await;
         released.cancel.cancel();
         manager.retire_session(&released);
 
@@ -10396,7 +10420,8 @@ mod tests {
             &hex_request_id(11),
             LiveTvSessionPhase::Active,
             now,
-        );
+        )
+        .await;
         failed
             .state
             .lock()
@@ -15761,7 +15786,8 @@ Output #0, hls, to 'index.m3u8':
             &hex_request_id(30),
             LiveTvSessionPhase::Active,
             tokio::time::Instant::now(),
-        );
+        )
+        .await;
         session.cancel.cancel();
 
         let rendered = format!(

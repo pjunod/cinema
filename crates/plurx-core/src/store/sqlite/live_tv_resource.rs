@@ -358,6 +358,7 @@ mod tests {
                     recording_id: "recording".into(),
                     worker: worker("b"),
                     storage_id: "storage-a".into(),
+                    legacy: None,
                 },
                 1003,
             )
@@ -405,5 +406,60 @@ mod tests {
             .expect("exists");
         assert_eq!(row.state, crate::dvr::DvrState::Partial);
         assert_eq!(row.path.as_deref(), Some("/recordings/news.f1.ts"));
+    }
+    #[tokio::test]
+    async fn removed_worker_cannot_reserve_or_renew_but_can_release_its_closed_body() {
+        let store = store().await;
+        store
+            .live_tv_resource_command(
+                reserve("33333333333333333333333333333333", "2.1", "a"),
+                1000,
+            )
+            .await
+            .expect("reserve");
+        let i = ingest(&store).await;
+        store
+            .put_settings(&[("internal.cluster_job_owner_removed.a", "1")])
+            .await
+            .expect("remove");
+        assert_eq!(
+            store
+                .live_tv_resource_command(
+                    Command::Renew {
+                        ingest_id: i.id.clone(),
+                        epoch: i.epoch,
+                        revision: i.revision,
+                        worker: i.worker.clone(),
+                    },
+                    1001
+                )
+                .await
+                .expect("renew refused"),
+            Outcome::Fenced
+        );
+        assert_eq!(
+            store
+                .live_tv_resource_command(
+                    reserve("44444444444444444444444444444444", "3.1", "a"),
+                    1001
+                )
+                .await
+                .expect("admission refused"),
+            Outcome::Fenced
+        );
+        assert_eq!(
+            store
+                .live_tv_resource_command(
+                    Command::Release {
+                        ingest_id: i.id,
+                        epoch: i.epoch,
+                        worker: i.worker,
+                    },
+                    1001
+                )
+                .await
+                .expect("body closed"),
+            Outcome::Applied
+        );
     }
 }

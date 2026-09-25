@@ -100,7 +100,7 @@ pub(crate) async fn guide_document(
     let config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
         return Err(api_error(LiveTvError::Disabled(
-            "Live TV is disabled; an administrator can enable it in Settings → Live TV".into(),
+            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
         )));
     }
     let window = requested_window(&config, query);
@@ -548,7 +548,7 @@ pub(crate) async fn start_session(
     let mut config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
         return Err(api_error(LiveTvError::Disabled(
-            "Live TV is disabled; an administrator can enable it in Settings → Live TV".into(),
+            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
         )));
     }
     let Json(body) = body.unwrap_or(Json(PublicLiveTvStart {
@@ -829,7 +829,7 @@ async fn live_tv_enabled_config(state: &AppState) -> Result<LiveTvConfig, ApiErr
     let config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
         return Err(api_error(LiveTvError::Disabled(
-            "Live TV is disabled; an administrator can enable it in Settings → Live TV".into(),
+            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
         )));
     }
     Ok(config)
@@ -968,7 +968,7 @@ pub(crate) async fn channels(
     let config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
         return Err(api_error(LiveTvError::Disabled(
-            "Live TV is disabled; an administrator can enable it in Settings → Live TV".into(),
+            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
         )));
     }
     let snapshot = owner_snapshot(&state, &config, false, false)
@@ -1065,6 +1065,46 @@ pub(crate) async fn readiness_for_config(
             "No reachable worker has reported the cluster resource protocol; upgrade the servers"
                 .into()
         },
+    });
+    let mut nodes = vec![state.node_id.clone()];
+    if let Ok(peers) = state.membership.activity_peers().await {
+        nodes.extend(peers.into_iter().map(|peer| peer.node_id));
+    }
+    nodes.sort();
+    nodes.dedup();
+    let observations = futures_util::future::join_all(nodes.into_iter().map(|node| async move {
+        let mut candidate = config.clone();
+        candidate.owner_node_id = node.clone();
+        let deadline = deadline_after(Duration::from_secs(5));
+        let result = tokio::time::timeout_at(
+            deadline,
+            owner_snapshot_within(state, &candidate, force, true, deadline),
+        )
+        .await;
+        match result {
+            Ok(Ok(snapshot)) => (
+                snapshot.start_protocols.contains(&4) && snapshot.ffmpeg_graph_ready,
+                format!(
+                    "{node}: device {}, {} tuners, protocol 4 {}, encoder {}",
+                    snapshot.device.device_id,
+                    snapshot.device.tuner_count,
+                    snapshot.start_protocols.contains(&4),
+                    snapshot.ffmpeg_graph_ready
+                ),
+            ),
+            Ok(Err(error)) => (false, format!("{node}: {error}")),
+            Err(_) => (false, format!("{node}: observation timed out")),
+        }
+    }))
+    .await;
+    checks.push(LiveTvReadinessCheck {
+        id: "worker_observations",
+        ready: observations.iter().any(|(ready, _)| *ready),
+        message: observations
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>()
+            .join("; "),
     });
     checks.push(LiveTvReadinessCheck { id: "clock_sync", ready: false,
         message: "Clock synchronization and shared DVR mount identity require operator verification; matching path strings are not proof".into() });
@@ -1938,10 +1978,12 @@ async fn owner_snapshot_within(
                 "the selected owner is not a committed voter".to_owned(),
             ));
         }
-        return state
-            .live_tv
-            .local_snapshot(config, force, probe_graph)
-            .await;
+        return tokio::time::timeout_at(
+            budget,
+            state.live_tv.local_snapshot(config, force, probe_graph),
+        )
+        .await
+        .map_err(|_| LiveTvError::OwnerUnavailable("tuner observation timed out".into()))?;
     }
     if !state.membership.is_replicated() {
         return Err(LiveTvError::OwnerUnavailable(
