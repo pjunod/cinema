@@ -3,6 +3,7 @@
 
 package tv.plurx.app.player
 
+import android.Manifest
 import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.graphics.Rect
@@ -10,6 +11,8 @@ import android.os.Build
 import android.util.Log
 import android.util.Rational
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -192,7 +195,7 @@ private data class Plan(
     val progressOffsetMs: Long,
     val itemDurationMs: Long?,
     val nextAudiobookPartId: Long?,
-    val isAudioOnly: Boolean,
+    override val isAudioOnly: Boolean,
     /** Quality captured by the exact request that produced this plan. */
     override val requestedQuality: PlaybackQuality,
 ) : PlanLike {
@@ -747,13 +750,23 @@ private fun PlayerContent(
     val scope = rememberCoroutineScope()
     val displayModeMatcher = remember(activity) { activity?.let(::DisplayModeMatcher) }
     val preferences by vm.preferences.collectAsStateWithLifecycle()
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* Media3 still owns playback if notification permission is denied. */ }
+    LaunchedEffect(plan.isAudioOnly) {
+        if (plan.isAudioOnly && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     val controller = remember(plan) {
         // The decision and its session body must describe the same quality,
         // even if the stored preference changes between request and compose.
         playbackIntent.adoptQuality(plan.requestedQuality)
         Controller(
             context,
-            buildPlayer(context, vm),
+            buildPlayer(context, vm, plan.isAudioOnly),
             plan,
             plan.legacyCaps,
             plan.decisionCaps,

@@ -477,7 +477,10 @@ class Controller internal constructor(
     val currentSessionId: String? get() = sessionId
     val currentSessionIsVod: Boolean get() = sessionIsVod
 
-    private val mediaSession = MediaSession.Builder(context, player).build()
+    private val mediaSession = MediaSession.Builder(context.applicationContext, player).build()
+    init {
+        if (plan.isAudioOnly) PlaybackService.attach(context, mediaSession)
+    }
 
     /** The HLS session this player owns, if the plan opened one. */
     private var sessionId: String? = null
@@ -1555,6 +1558,9 @@ class Controller internal constructor(
 
     fun playPause() {
         if (!playbackControlBootstrapFence.isActive()) return
+        if (plan.isAudioOnly && !playbackIntent.playbackRequested) {
+            PlaybackService.attach(context, mediaSession)
+        }
         playbackControl.clearVerdict()
         stallGuard.setPlaybackRequested(playbackIntent, !playbackIntent.playbackRequested) {
             player.playWhenReady = it
@@ -1608,6 +1614,7 @@ class Controller internal constructor(
         surfaceOwner.retire(mediaMutationEpoch)
         player.removeListener(listener)
         disarmVideoPresentation()
+        if (plan.isAudioOnly) PlaybackService.detach(context, mediaSession)
         mediaSession.release()
         player.release()
     }
@@ -3450,7 +3457,7 @@ class Controller internal constructor(
         val playlist = action.playlistUrl ?: return
         val originMs = action.mediaOriginMs ?: return
         val built = try {
-            buildSuccessorPlayer(context, vm)
+            buildSuccessorPlayer(context, vm, plan.isAudioOnly)
         } catch (_: Exception) {
             // A device that cannot stand up a second pipeline at all is the
             // measured Google TV case. It is a `failed`, not a crash.
@@ -3745,6 +3752,7 @@ class Controller internal constructor(
         externalListeners.forEach { successor.addListener(it) }
 
         player = successor
+        if (plan.isAudioOnly) mediaSession.setPlayer(successor)
         mediaSession.setPlayer(successor)
         // A different `ExoPlayer` with its own item is on the screen now, so
         // it gets its own single `BEHIND_LIVE_WINDOW` recovery. This path never
@@ -3884,6 +3892,7 @@ class Controller internal constructor(
         retiredPlayer = failedSuccessor
         retiredParkedAtMs = monotonicNowMs()
         player = predecessor.player
+        if (plan.isAudioOnly) mediaSession.setPlayer(player)
         mediaSession.setPlayer(predecessor.player)
         return true
     }
@@ -4111,6 +4120,7 @@ internal fun isTelevision(context: Context): Boolean =
 /** Minimal view of [Plan] so the controller doesn't depend on the screen file. */
 interface PlanLike {
     val title: String
+    val isAudioOnly: Boolean get() = false
     val fileId: Long
     val playUrl: String
     val mode: String // "direct" | "remux" | "transcode"
@@ -4159,8 +4169,8 @@ class BuiltPlayer internal constructor(
 )
 
 @UnstableApi
-fun buildPlayer(context: Context, vm: AppViewModel): BuiltPlayer =
-    buildPipeline(context, vm, PlayerRole.Finite)
+fun buildPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean = false): BuiltPlayer =
+    buildPipeline(context, vm, if (audioOnly) PlayerRole.Audio else PlayerRole.Finite)
 
 /**
  * The second pipeline a prepared replacement primes.
@@ -4184,8 +4194,8 @@ fun buildPlayer(context: Context, vm: AppViewModel): BuiltPlayer =
  * (`docs/playback-control/PLAYBACK-CONTROL-STATUS.md:1240-1243`).
  */
 @UnstableApi
-fun buildSuccessorPlayer(context: Context, vm: AppViewModel): BuiltPlayer {
-    val built = buildPipeline(context, vm, PlayerRole.Successor)
+fun buildSuccessorPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean = false): BuiltPlayer {
+    val built = buildPipeline(context, vm, if (audioOnly) PlayerRole.Audio else PlayerRole.Successor)
     // Never audible and never visible before the switch. Silence is set here
     // rather than relied on from the composition not rendering it: a prepared
     // successor that is merely off-screen is still an audio stream.
