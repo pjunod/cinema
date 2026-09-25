@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3f4e8a76"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "A quality change at a full encoder pool killed the stream: the prepared successor is primed as speculative work, speculative admission registers no waiter and is refused while the pool is full, and the viewer's own running predecessor only released its permit when it stopped or went idle, which comes after the successor's first frame, so the handoff was a circular wait that ended in init.mp4 producer_failed (m6, 2026-09-25 acceptance run). a_prepared_successor_takes_its_own_viewers_running_predecessors_permit is the reproduction: a one-permit pool, a running predecessor inside its ahead window, and a speculative successor for the same playback with a staged preparation must spawn within a bounded time; on the unfixed tree it times out with the predecessor still Running. a_prepared_successor_never_preempts_past_a_waiting_viewer_or_a_shared_rendition is the control: a waiting live viewer, a rendition another viewer reads, or a plan that the released permit could not admit must never be preempted. a_running_encoder_yields_to_its_own_viewers_prepared_successor and a_handoff_never_starts_or_rewrites_a_move pin the prodexec rule to exactly Nothing/Stop/Resume steps, and a_speculative_fit_after_release_keeps_every_priority_rule pins that the release arithmetic keeps live-before-speculative and background-yields-to-live."
