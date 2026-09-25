@@ -364,3 +364,74 @@ Current main `c99a29090` differed from deployed healthy `60f3803d1` only in `val
 A dedicated signed-in Chrome tab on `m6` played channel 8.1 past 106 seconds at 1280×720, `readyState=4`; Playback info reported server-converted H.264/AAC MPEG-TS. The visible Live TV caption selector listed only **Off**, `video.textTracks` had zero entries, and Playback info said no caption track was listed by the player. No caption text appeared. The browser stream was stopped; the tuner page then reported all four tuners idle. The separate isolated Chrome profile on port 9341 reached only Sign in, so the signed-in check used its own tab in the existing Chrome profile; no authentication state was copied.
 
 This is a caption-positive source with an **open M4 web visual acceptance**, unlike the earlier source-empty #520 revisit. The concurrent source stream and web HLS session were different tuner streams, and this run did not decode the HLS output; it cannot assign the missing track to the graph probe, playlist advertisement, or browser. A bounded source-to-HLS-to-selector comparison is next. Sanitized local receipt: `/Users/pjunod/code/plurx-agent/codex-l03-caption-evidence-20260925/l03-channel-8-1-caption-positive-web-off-20260925.json` (SHA-256 `e3f93552a5bed5cd9668dc92c972a5706a16c5c176dcd5d80bbbe63bad21abe2`).
+
+## L-03 caption-positive HLS comparison — 17:50–17:59 UTC
+
+A 12-second direct HDHomeRun capture of 8.1 WRIC-TV during signed-in Chrome
+playback had A/53 on 639/639 decoded MPEG-2 frames and one timed CC1 cue.
+Its SHA-256 is `a5f34204ea9c875b4debac6c16a466c4472a17695df00947616579b0ff4ac2a5`.
+The source was 1280×720 progressive at 60000/1001. Nine bounded HLS
+MPEG-TS segments from the active `nynuc` transcode (`000041`–`000049`)
+decoded as H.264 with A/53 on 540/540 frames and one CC1 cue; the joined
+media SHA-256 is
+`49cba80bf0a4e8468e85196927aee049085782ce621d2c45279a53367f264f78`.
+Raw media was removed after hashing and decoding.
+
+At media time 89.994 seconds, Chrome was playing with `readyState=4` at
+1280×720, but the Live TV selector offered only Off and
+`video.textTracks.length` was zero. The deployed `60f3803d1` runtime had the
+same web and streaming source as then-current main `c99a29090`. Its startup
+caption proof covered only 1080i MPEG-2 graphs with deinterlacing. The
+progressive 720p graph had no proof, so the master reported
+`CLOSED-CAPTIONS=NONE` despite CC1 in the encoded segments. This locates
+the missing track at proof/playlist advertisement for that source and build;
+it does not establish a drawn-caption pass.
+
+[PR #528](http://192.168.4.7:3000/noirr/plurx/pulls/528) adds a 720p59.94
+CC1/SERVICE1 fixture and matches proof to source height and deinterlace
+mode. After its merge and deployment, caption choice and rendered text still
+need web, tvOS and Android TV checks. Sanitized receipt
+`/Users/pjunod/code/plurx-agent/codex-l03-caption-evidence-20260925/l03-8-1-hls-diagnosis-20260925.json`
+has SHA-256
+`5e79da98c9353f202a699fcc71de84dba6fb4c368e375611278009e2b88ec31f`.
+
+## Bounded physical acceptance refusals — 18:27–18:53 UTC
+
+The TCL 9445X had signed release126 installed without a debug flag, but its
+keyguard and NotificationShade stayed foreground after bounded wake, Back,
+Home and one swipe. D-02 Notification Pause and A-03 paging/filter/playback
+controls were unavailable; no result is claimed. Sanitized receipt
+`/private/tmp/codex-tcl-premerge-acceptance-20260925.json` has SHA-256
+`817966025b459ac3afa4897666dce3779d638106433bcb99af85b46a94f2b412`.
+
+The Bedroom Apple TV test found `player-subtitles`, but its remote focus
+landed on adjacent Playback quality and Select opened Quality. The test did
+not select a subtitle track; this VOD fixture does not test L-03 Live TV.
+Sanitized diagnosis `/private/tmp/codex-apple-caption-diagnostic-20260925.json`
+has SHA-256
+`603fcd799b8a6ca4061b47d727de3897db3e6a5bca8f65bb5f32cdff41902d2f`.
+
+An unlocked Google TV Streamer launched signed-in Plurx on debuggable
+versionCode 125. Android reported television `uiMode=0x24`; that build hides
+Downloads on television and `OfflineDownloads.canUse` refuses queueing.
+Metadata-only inspection found one zero-byte offline/media file and no
+offline/books files. No playable offline item was established. The temporary
+redacted UI dump was removed, and the device returned to launcher/sleep.
+No APK install, uninstall or clear-data occurred. Offline retention remains
+owed on an unlocked supported Android device with a verified playable
+download. Sanitized receipt
+`/private/tmp/codex-google-tv-offline-baseline-20260925.json` has SHA-256
+`b9ea4ad58421421d2598198a63e8b4601402a1a8e82ab4e015847b337336b8ea`.
+
+## PR #528 sole review correction — 21:08 UTC
+
+The one adversarial review found that the new progressive fixture generated
+300 frames at 60000/1001 over five seconds but muxed them with input
+`-r 30000/1001` and `-t 10`. That doubled cue timestamps and prevented
+the progressive graph from satisfying the startup proof. The mux now selects
+rate and duration from the scan type: 29.97 fps/10 s for 1080i and
+59.94 fps/5 s for 720p. The pinned Rust 1.97.1 targeted regression
+`the_progressive_live_graph_proves_and_advertises_608_and_708` passed 1/1,
+including source cue times, transcoded cue times, positive advertisement and
+source-height mismatch. This is local code evidence, not an on-air drawn-text
+pass; exact-head fast lane and deployment remain owed.
