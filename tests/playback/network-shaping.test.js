@@ -2666,6 +2666,31 @@ test("a shaped suite enables the in-play Auto controller it measures", async () 
   });
 });
 
+test("two-cliff run refuses a source that ends before both recovery windows", async () => {
+  await withTempDir(async (directory) => {
+    const manifest = lab.loadManifest();
+    const json = path.join(directory, "short-fixture.json");
+    const state = { server_closed: 0, shaper_closed: 0, driver_closed: 0 };
+    const result = { ...lab.scoreRecovery(CRITERIA, observation()), status: "passed" };
+    const dependencies = lifecycleDependencies(manifest, result, state);
+    const buildFixtures = dependencies.buildFixtures;
+    dependencies.buildFixtures = async (...args) => {
+      const corpus = await buildFixtures(...args);
+      corpus.metadata["shaping-mpeg4-mp3-720"].duration_seconds = 120;
+      return corpus;
+    };
+    const outcome = await lab.executeRun(manifest, {
+      suite: "stall-recovery",
+      network_profile: "8mbps-to-1.1mbps-to-350kbps",
+      json,
+    }, dependencies);
+    assert.equal(outcome.code, 1);
+    assert.match(outcome.error.message, /need at least 177s of source/);
+    assert.deepEqual(state, { server_closed: 0, shaper_closed: 0, driver_closed: 0 });
+    assert.equal(JSON.parse(await fsp.readFile(json, "utf8")).outcome, "harness");
+  });
+});
+
 test("an unavailable shaper fails the full run, retains artifacts, and cleans owned state", async () => {
   await withTempDir(async (directory) => {
     const manifest = lab.loadManifest();
