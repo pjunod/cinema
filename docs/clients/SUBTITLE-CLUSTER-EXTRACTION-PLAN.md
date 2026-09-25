@@ -1,10 +1,11 @@
 # Subtitle extraction on the cluster — why every first subtitle waits on one node's full read, and how the pool takes it over
 
-**Status:** implementation handoff, **v2** — revised for the adversarial review
-([SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md](SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md),
-Codex, 2026-09-24, "request changes"); every finding R1–R7 is dispositioned in
-§0 and its acceptance case is bound to a milestone in §5. Ready for an
-executing session to claim under the work-board protocol. Nothing built.
+**Status:** built — **v2** implementation contract; M0–M5 are implemented in
+[PR #507](http://192.168.4.7:3000/noirr/plurx/pulls/507), with merge
+qualification in progress and fleet and device evidence pending. The plan
+incorporates every R1–R7 finding from the
+[adversarial review](SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md); §5 binds each
+acceptance case to a milestone.
 · **Written:** 2026-09-24 (v1), revised 2026-09-24 (v2) · **Author:** Fable
 (claude-fable-5-1) · **Reported by:** Paul, 2026-09-24, "every subtitle I try
 tells me I have to wait for some work to be performed" while three server nodes
