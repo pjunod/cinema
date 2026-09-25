@@ -30,7 +30,7 @@ use super::hiqlite::validate_sql;
 ///
 /// [`the module list matches the directory`](module_list_matches_the_directory)
 /// fails if a new `hiqlite*.rs` appears without being added here.
-const STORE_SOURCES: &[(&str, &str)] = &[
+pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
     ("hiqlite.rs", include_str!("hiqlite.rs")),
     ("hiqlite_catalog.rs", include_str!("hiqlite_catalog.rs")),
     (

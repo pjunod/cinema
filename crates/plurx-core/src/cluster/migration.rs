@@ -8055,6 +8055,16 @@ pub mod status {
         #[doc(hidden)]
         #[must_use]
         pub fn validation_bounded_ready() -> Self {
+            Self::validation_bounded_ready_applied(41)
+        }
+
+        /// [`Self::validation_bounded_ready`] with a caught-up replica at
+        /// `applied_index`, so a contract can place a read-your-write fence
+        /// above or below what this node has applied.
+        #[cfg(feature = "cluster-read-cost-validation")]
+        #[doc(hidden)]
+        #[must_use]
+        pub fn validation_bounded_ready_applied(applied_index: u64) -> Self {
             let metrics = Self::new(true);
             assert!(metrics.publish_at(
                 &LocalDbRaftSnapshot {
@@ -8063,7 +8073,7 @@ pub mod status {
                     current_term: 7,
                     current_leader: Some(1),
                     last_applied_term: Some(7),
-                    last_applied_index: Some(41),
+                    last_applied_index: Some(applied_index),
                 },
                 0,
             ));
@@ -8071,7 +8081,7 @@ pub mod status {
                 DbQuorumWatermark {
                     term: 7,
                     leader_id: 1,
-                    committed_index: 41,
+                    committed_index: applied_index,
                     local_read_protocol_version: hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION,
                 },
                 0,
@@ -8107,9 +8117,30 @@ pub mod status {
         /// the proof expires, changes generation, or exceeds the entry budget
         /// while the query is running. Store code must then perform its named
         /// authority fallback.
+        #[cfg(test)]
         pub(crate) async fn run_bounded_replica<T, F, Fut>(
             &self,
             max_apply_lag_entries: u64,
+            local_read: F,
+        ) -> Option<T>
+        where
+            F: FnOnce() -> Fut,
+            Fut: Future<Output = T>,
+        {
+            self.run_bounded_replica_after(max_apply_lag_entries, 0, local_read)
+                .await
+        }
+
+        /// [`Self::run_bounded_replica`] that additionally requires this
+        /// node to have applied `min_applied_index` — a read-your-write fence
+        /// (K-04 M2). The permit is issued only when the sampled applied
+        /// index already reaches it, and the permit's own revalidation keeps
+        /// the applied index from moving below the one it was issued at, so
+        /// the fence holds for the whole local read.
+        pub(crate) async fn run_bounded_replica_after<T, F, Fut>(
+            &self,
+            max_apply_lag_entries: u64,
+            min_applied_index: u64,
             local_read: F,
         ) -> Option<T>
         where
@@ -8122,6 +8153,9 @@ pub mod status {
                 duration_nanos(elapsed),
                 max_apply_lag_entries,
             )?;
+            if permit.applied_index < min_applied_index {
+                return None;
+            }
             let result = local_read().await;
             permit.remains_valid().then_some(result)
         }
@@ -9430,6 +9464,43 @@ pub mod status {
                     })
                     .await,
                 Some(42)
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+
+        /// K-04 M2: a read-your-write fence above the sampled applied index
+        /// refuses the permit before the local read runs, even though the
+        /// bounded lag proof alone would grant it; at the fence it runs.
+        #[tokio::test]
+        async fn bounded_replica_after_refuses_before_reading_until_the_fence_is_applied() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish(&local_sample(7, Some(45), Some(1))));
+            let started_nanos = metrics.elapsed_nanos();
+            assert!(metrics.publish_watermark(watermark(7, 1, 48), started_nanos));
+            let calls = Arc::new(AtomicU64::new(0));
+
+            let fenced_calls = Arc::clone(&calls);
+            assert_eq!(
+                metrics
+                    .run_bounded_replica_after(64, 46, move || {
+                        fenced_calls.fetch_add(1, Ordering::Relaxed);
+                        async { 1 }
+                    })
+                    .await,
+                None,
+                "applied 45 is inside the lag budget but below the write fence 46"
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+            let applied_calls = Arc::clone(&calls);
+            assert_eq!(
+                metrics
+                    .run_bounded_replica_after(64, 45, move || {
+                        applied_calls.fetch_add(1, Ordering::Relaxed);
+                        async { 2 }
+                    })
+                    .await,
+                Some(2)
             );
             assert_eq!(calls.load(Ordering::Relaxed), 1);
         }

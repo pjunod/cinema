@@ -369,6 +369,7 @@ pub struct HiqliteAuthStore {
     telemetry: NodeLocalTelemetry,
     activity_refreshes: Arc<ActivityRefreshGate>,
     cache_touches: Arc<ReplaceableWriteGate<CacheTouchKey>>,
+    watch_fences: Arc<super::watch_fence::WatchWriteFences>,
 }
 
 /// Cache activity is advisory recency, not ownership or completion. One
@@ -1179,6 +1180,29 @@ impl TimedClient {
         .await
     }
 
+    /// [`Self::execute`] that also returns the committed entry's Raft log
+    /// index when the leader reported it (see [`hiqlite::WriteAck`]).
+    pub(super) async fn execute_acked<S>(
+        &self,
+        sql: S,
+        params: hiqlite::Params,
+    ) -> Result<hiqlite::WriteAck<usize>, StoreError>
+    where
+        S: Into<Cow<'static, str>>,
+    {
+        let sql = sql.into();
+        validate_sql(&sql)?;
+        #[cfg(feature = "cluster-read-cost-validation")]
+        self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
+        time_store_operation(
+            &STORE_OPERATION_METRICS,
+            StoreOperationClass::Write,
+            timeout_store(self.inner().execute_acked(sql, params)),
+            |_| true,
+        )
+        .await
+    }
+
     pub(super) async fn execute_idempotent<S>(
         &self,
         sql: S,
@@ -1235,6 +1259,30 @@ impl TimedClient {
             StoreOperationClass::Write,
             timeout_store(self.inner().execute_returning_map(sql, params)),
             |rows| rows.iter().all(Result::is_ok),
+        )
+        .await
+    }
+
+    /// [`Self::execute_returning_map`] that also returns the committed
+    /// entry's Raft log index when the leader reported it.
+    pub(super) async fn execute_returning_map_acked<S, T>(
+        &self,
+        sql: S,
+        params: hiqlite::Params,
+    ) -> Result<hiqlite::WriteAck<Vec<Result<T, hiqlite::Error>>>, StoreError>
+    where
+        S: Into<Cow<'static, str>>,
+        T: for<'a, 'r> From<&'a mut hiqlite::Row<'r>> + Send + 'static,
+    {
+        let sql = sql.into();
+        validate_sql(&sql)?;
+        #[cfg(feature = "cluster-read-cost-validation")]
+        self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
+        time_store_operation(
+            &STORE_OPERATION_METRICS,
+            StoreOperationClass::Write,
+            timeout_store(self.inner().execute_returning_map_acked(sql, params)),
+            |ack| ack.result.iter().all(Result::is_ok),
         )
         .await
     }
@@ -3074,7 +3122,24 @@ impl HiqliteAuthStore {
             telemetry,
             activity_refreshes: Arc::new(ActivityRefreshGate::default()),
             cache_touches: Arc::new(ReplaceableWriteGate::default()),
+            watch_fences: Arc::new(super::watch_fence::WatchWriteFences::default()),
         }
+    }
+
+    /// Record one acknowledged watch mutation: raise this process's
+    /// read-your-write fence for `user_id` and, inside an HTTP request, offer
+    /// the index to the response as `X-Plurx-Commit-Index`. `None` means the
+    /// write committed through a leader that did not report its log position.
+    pub(super) fn record_watch_write(&self, user_id: i64, log_index: Option<u64>) {
+        self.watch_fences.record(user_id, log_index);
+        super::record_http_watch_write(log_index);
+    }
+
+    /// The applied index a local watch read for `user_id` must reach, or
+    /// `None` when only Authority may answer. See [`super::watch_fence`].
+    pub(super) fn watch_read_fence(&self, user_id: i64, read_after: Option<u64>) -> Option<u64> {
+        self.watch_fences
+            .required_applied_index(user_id, read_after)
     }
 
     pub(super) async fn coalesce_cache_touch<F>(

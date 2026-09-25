@@ -20,11 +20,11 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `127` — playback information separates source frame,
-> measured or planned stream frame, and player display size. Build 126 preserves
-> navigation history after repeated Back actions; build 125 preserves native
-> viewer parity across phone, foldable, and TV. Build 124 settles a progressive
-> remux seek after later rendered video
+> Status: **v0.3.0**, build `128` — data-preserving signed release rotation and
+> exact-artifact reinstall. Build 127 separates playback source, stream, and
+> display dimensions; build 126 preserves Back navigation history; build 125
+> preserves native viewer parity across phone, foldable, and TV. Build 124
+> settles a progressive remux seek after later rendered video
 > crosses the requested position, even if its first frame lands slightly early;
 > background playback cannot settle that pending seek. PGS tracks display as
 > Overlay in the player. Build 121 lands on the login screen with the server's sentence when a
@@ -290,8 +290,8 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 
 ## Requirements
 
-- **Android 6.0 (API 23)** or newer — covers phones and the vast majority of Android
-  TV / Google TV boxes.
+- **Android 9.0 (API 28)** or newer for all variants. The audited
+  debug-to-release signing rotation cannot preserve installed data on API 23–27.
 - A reachable plurx server (default port `32400`). Because home servers are usually plain
   `http` on the LAN, the app sets `usesCleartextTraffic="true"`.
 
@@ -357,19 +357,20 @@ it provisions the SDK for you.
 
 **Toolchain** (pinned): AGP 9.3.2, Gradle 9.7.1, built-in Kotlin
 2.3.10, JDK 25, Compose BOM 2026.06.01, Media3 1.10.1,
-`compileSdk`/`targetSdk` 37, `minSdk` 23. The Gradle daemon runs on
+`compileSdk`/`targetSdk` 37, `minSdk` 28 in debug, release and tests. The Gradle daemon runs on
 Java 25 while Android source and bytecode stay at Java 17 for device
 compatibility. Outside Docker the SDK location comes from `local.properties`
 (`sdk.dir=…`) or `ANDROID_HOME`.
 
-The release build is **signed with the upload key**: `make android-release`
-bind-mounts the keystore named by `PLURX_ANDROID_KEYSTORE` and passes
-`PLURX_ANDROID_KEYSTORE_PASSWORD`, `PLURX_ANDROID_KEY_ALIAS` and
-`PLURX_ANDROID_KEY_PASSWORD` through to Gradle. Any of the four unset fails the
-build naming it; there is no fallback to the debug key, because a debug-signed
-"release" cannot later be upgraded in place by a properly signed one. `make
-android` still builds the unsigned debug APK for local use, and
-`make android-publish` now serves the release variant.
+The release build uses the durable app signing key: `make android-release`
+bind-mounts the new keystore, the audited old debug keystore and the signing
+lineage. Gradle fails if a new-key input is missing; the signing helper checks
+both lineage certificates, installed-data capability and the APK's effective
+release signer before publication. The old key is used only to migrate
+existing debug-signed installs without clearing app data on API 28+. Keep all
+signing inputs outside the repository; see [Publishing](../../docs/PUBLISHING.md#51-what-has-to-change-in-the-repo-first).
+`make android` still builds a debug-signed APK for local use, and
+`make android-publish` serves the verified release variant.
 
 The release build is **minified and resource-shrunk** (R8 +
 `shrinkResources`), which is what keeps the APK near 3 MB rather than 18: this
