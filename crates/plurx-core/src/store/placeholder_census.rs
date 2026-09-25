@@ -32,6 +32,10 @@ use super::hiqlite::validate_sql;
 /// fails if a new `hiqlite*.rs` appears without being added here.
 pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
     ("hiqlite.rs", include_str!("hiqlite.rs")),
+    (
+        "hiqlite_background_jobs.rs",
+        include_str!("hiqlite_background_jobs.rs"),
+    ),
     ("hiqlite_catalog.rs", include_str!("hiqlite_catalog.rs")),
     (
         "hiqlite_classification.rs",
@@ -84,6 +88,10 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
 /// makes adding a module without adding its SQL to the census impossible.
 const SQLITE_SOURCES: &[(&str, &str)] = &[
     ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
+    (
+        "background_jobs.rs",
+        include_str!("sqlite/background_jobs.rs"),
+    ),
     ("cache.rs", include_str!("sqlite/cache.rs")),
     (
         "classification.rs",

@@ -378,6 +378,89 @@ async fn receive_source<T>(
 
 const TABLES: &[TablePlan] = &[
     TablePlan {
+        name: "background_jobs",
+        columns: &[
+            "id",
+            "kind",
+            "payload_version",
+            "payload_json",
+            "dedupe_key",
+            "priority",
+            "state",
+            "target_node_id",
+            "owner_node_id",
+            "owner_boot_id",
+            "claim_id",
+            "fence",
+            "revision",
+            "lease_expires_ms",
+            "failed_attempts",
+            "not_before_ms",
+            "checkpoint_json",
+            "result_ref",
+            "last_error_code",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "id",
+        minimum_schema: 70,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_job_waiters",
+        columns: &[
+            "request_scope",
+            "request_id",
+            "request_digest",
+            "job_id",
+            "consumer_kind",
+            "consumer_ref",
+            "priority",
+            "state",
+            "target_node_id",
+            "deadline_ms",
+            "receipt_expires_ms",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "request_scope, request_id",
+        minimum_schema: 70,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_job_attempts",
+        columns: &[
+            "job_id",
+            "fence",
+            "claim_id",
+            "owner_node_id",
+            "owner_boot_id",
+            "started_at_ms",
+            "resolve_until_ms",
+            "finished_at_ms",
+            "outcome",
+            "error_code",
+        ],
+        order_by: "job_id, fence",
+        minimum_schema: 70,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_job_reservations",
+        columns: &["resource_key", "slot", "job_id", "fence", "expires_at_ms"],
+        order_by: "resource_key, slot",
+        minimum_schema: 70,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "settings",
         columns: &["key", "value", "updated_at"],
         order_by: "key",
@@ -3084,7 +3167,7 @@ mod tests {
         assert!(names.contains(&"media_classifications"));
         assert!(names.contains(&"file_grants"));
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 53, "review every imported durable table");
+        assert_eq!(names.len(), 57, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

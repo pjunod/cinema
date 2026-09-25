@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** setup in progress · **Updated:** 2026-09-25 ·
+**Status:** M1 foundation in progress · **Updated:** 2026-09-25 ·
 **Branch:** `codex/durable-cluster-work` ·
 **Base:** `9f9786b2e` · **PR:** not opened
 
@@ -13,8 +13,8 @@ implementation is claimed; “compiled” does not mean tests passed.
 | Work | State | Evidence / next action |
 |---|---|---|
 | Isolated clone | Complete | Agent-owned `/private/tmp/plurx-durable-work-agent`; original checkout untouched |
-| Compiler | Core ready | Rust 1.97.1; baseline core + Hiqlite check passed; daemon all-target compile running |
-| M1 durable queue and pre-transcode | Planned | Reconcile current Store and migration seams |
+| Compiler | Ready | Rust 1.97.1; core + Hiqlite all-target compile and baseline daemon compile passed |
+| M1 durable queue and pre-transcode | In progress | Typed queue, shared SQLite/Hiqlite SQL, claims, renewal and cancellation compile; publication, retention and worker integration remain |
 | M2 fragment analysis and hydration | Planned | Preserve request identity, history and target completion |
 | M3 UI, recovery and migration | Planned | Advisory requirements, admin operations, bounded cutover |
 | E0 subtitle and library workers | Planned | Reuse newly landed subtitle extraction implementation |
@@ -45,3 +45,10 @@ implementation is claimed; “compiled” does not mean tests passed.
   baseline compile started. Main includes changes absent from the reviewed
   plan, including K-04 replica reads and K-09 subtitle extraction. Inspect
   and reuse those changes before writing overlapping implementations.
+
+- 2026-09-25: committed plan and status as `76f79006d`; tracked pre-commit
+  catalog, formatting, Clippy and served-JavaScript checks passed. Added the
+  common queue foundation and six regression contracts; compiled core tests
+  with `hiqlite-store` without executing them. This is not an accepted queue
+  implementation: publication, retention, authority integration, worker
+  adapters and legacy cutover remain unfinished.

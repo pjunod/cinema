@@ -1,12 +1,14 @@
 # Durable cluster work — one queue, useful workers, a bounded delivery
 
-**Status:** adversarial findings addressed; awaiting external review ·
+**Status:** implementation in progress; design findings addressed ·
 **Written / revised:** 2026-09-25 ·
 **Executes:** Paul's cluster-utilization direction, with the durable job queue
 as the first deliverable. Reviewed against checkout `bafeb08766ce057634f3fab0850cdd9e03507a98`;
 running-fleet configuration and performance have not been measured here.
 
 Read this document for the build order, queue contract, and stopping points.
+The [build status](DURABLE-WORK-QUEUE-STATUS.md) records implementation progress
+and actual evidence in the agent-owned clone.
 [CLUSTER-MEDIA-POOL-PLAN.md](CLUSTER-MEDIA-POOL-PLAN.md) explains the existing
 media pool; [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) and its dated
 amendments govern delivery. This plan adopts the repository's current fast
@@ -1187,7 +1189,7 @@ the shell/asset/index contract. Native-client changes are unnecessary for M1–M
 | Unit | Status | Branch/PR | Evidence |
 |---|---|---|---|
 | Implementation plan | review findings addressed 2026-09-25; external review pending | Working-tree documentation only | One independent adversarial review; dispositions in §13; four docs-index tests and explicit new-file link/whitespace checks |
-| M1 queue + pre-transcode | not started | — | — |
+| M1 queue + pre-transcode | foundation in progress | `codex/durable-cluster-work` | Core + Hiqlite compile; no implementation tests executed yet |
 | M2 fragment build + hydration | not started | — | — |
 | M3 operations + qualification | not started | — | — |
 | Core promotion/deployment | not started | — | — |

@@ -51,6 +51,8 @@ mod hiqlite;
 #[doc(hidden)]
 pub use hiqlite::validation_time_http_store_operation;
 #[cfg(feature = "hiqlite-store")]
+mod hiqlite_background_jobs;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_catalog;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_coordination;
@@ -94,6 +96,9 @@ mod placeholder_census;
 #[cfg(all(test, feature = "hiqlite-store"))]
 mod consistent_read_census;
 
+pub mod background_jobs;
+#[cfg(test)]
+mod background_jobs_tests;
 pub mod replicated;
 
 pub use dv_conversion::{

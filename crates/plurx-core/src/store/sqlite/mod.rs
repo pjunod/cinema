@@ -9,6 +9,7 @@
 //! `watch` — this file owns open/migrate, shared row mappers, and settings.
 
 mod apikeys;
+mod background_jobs;
 mod cache;
 mod classification;
 mod coordination;
@@ -1147,6 +1148,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::FILE_GRANTS_SCHEMA,
     // v69: cluster subtitle-source queue constraints and publication metadata.
     crate::store::fragment_index_cluster::SUBTITLE_SOURCE_SCHEMA,
+    // v70: common durable background work identities and ownership.
+    super::background_jobs::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
