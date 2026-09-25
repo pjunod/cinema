@@ -692,6 +692,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { settings.saveViewerPreferences(updated) }
     }
 
+    private var activeLibraryPager: LibraryPager? = null
+
+    internal fun libraryPager(ids: List<Long>, sort: String): LibraryPager {
+        val active = activeLibraryPager
+        if (active != null && active.ids == ids && active.sort == sort) return active
+        active?.setDriveToCompletion(false)
+        return LibraryPager(ids, sort, viewModelScope) { id, offset, order ->
+            api().libraryItems(id, limit = 200, offset = offset, sort = order)
+        }.also { activeLibraryPager = it }
+    }
+
     // ---- Suspend loaders used by individual screens --------------------------
 
     /**
