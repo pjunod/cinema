@@ -5,7 +5,12 @@ function detachLiveTvMedia(){
   LIVE_TV.status=null;
   if(LIVE_TV.hls){ LIVE_TV.hls.destroy(); LIVE_TV.hls=null; }
   const video=document.getElementById("live-tv-video");
-  if(video){ video.onerror=null; video.onended=null; video.pause(); video.removeAttribute("src"); video.load(); }
+  if(video){
+    video.onerror=null; video.onended=null; video.pause();
+    for(const {track} of liveTvCaptionTracks()) track.mode="disabled";
+    video.removeAttribute("src"); video.load();
+  }
+  liveTvRefreshCaptionControls();
 }
 async function stopLiveTv(){
   // Stop owns the tuner immediately. A keyup delivered after this point must
@@ -97,12 +102,12 @@ async function liveTvAttachSession(info,index,serial,generation){
     if(window.Hls&&Hls.isSupported()){
       const hls=new Hls({liveSyncDurationCount:2,liveMaxLatencyDurationCount:4,maxBufferLength:12,maxMaxBufferLength:18,backBufferLength:0});
       LIVE_TV.hls=hls;
-      hls.on(Hls.Events.MANIFEST_PARSED,play);
+      hls.on(Hls.Events.MANIFEST_PARSED,()=>{ liveTvRefreshCaptionControls(); play(); });
       hls.on(Hls.Events.ERROR,(_,data)=>{ if(data.fatal) failed({code:data.type===Hls.ErrorTypes.MEDIA_ERROR?"codec_unsupported":"stream_failed"},
         data.type===Hls.ErrorTypes.MEDIA_ERROR?{failed_video:true,failed_audio:true,failed_container:true}:null); });
       hls.loadSource(playlist); hls.attachMedia(video);
     }else if(video.canPlayType("application/vnd.apple.mpegurl")){
-      video.src=playlist; play();
+      video.src=playlist; liveTvRefreshCaptionControls(); play();
     }else{ await failed({code:"codec_unsupported"}); return; }
     LIVE_TV.timer=setInterval(async()=>{
       if(!owned()||LIVE_TV.polling) return;
