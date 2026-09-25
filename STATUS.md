@@ -11,7 +11,13 @@ Paul's go of 2026-09-25: every child starts through one launcher, playback,
 VOD and Live TV as realtime (nice 5) and scans, probes and extraction as
 background (nice 15), with Activity → Processes and a pidfd-safe Stop for
 admins, and `/metrics` counts children by class. A source census and
-clippy's `disallowed-methods` keep every spawn on the launcher. Outstanding:
+clippy's `disallowed-methods` keep every spawn on the launcher. After the
+review (comment 4817) the class is the caller's: the probes and extractions
+a session start or a viewer's `/subs` request waits on (held source probe,
+decode-fact probes, the Profile 5 pixel proof, burn and text-track
+extraction) run realtime, the same work from warm-ups, offline packages and
+the pre-transcode pass background, and `/metrics` counts spawns by class and
+purpose; each `spikes/` workspace has its own `clippy.toml`. Outstanding:
 the realtime cadence measurement on a busy media host (post-merge), and M4
 (unit hardening plus `OOMScoreAdjust=-500`), whose steps are written.
 Record: §3.2.2 of [the P-02 plan](docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md).

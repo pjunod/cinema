@@ -502,17 +502,54 @@ observed node, §3.1.1). `nice` is a floor: a class never raises a child
 above what it would have inherited. The measurement in §3.2 still decides
 whether these values stay (§7 question 2).
 
-Realtime: playback transcode, copy HLS and remux producers, the VOD
-transcode and its init segment, the Live TV stream and its source probe, the
-playhead subtitle window, and the session-start probes a viewer waits on
-(the playback-start media probe, the chapter list, `ffprobe -version` for
-the reporter identity). Background: whole-track subtitle, burn-in and PGS
-extraction, the PGS ride-along self-test and verdict probe, decode-fact
-probes, the pre-transcode producer, encoder, decoder, Dolby Vision, HDR and
-engine capability probes, scan thumbnails, luminance probes and book covers,
-chapter thumbnails and artwork derivatives, fragment indexing, Dolby Vision
+**The class is the caller's, not the child's.** The first build fixed one
+class per kind of child, so the probes and extractions a VOD start waits on
+ran at the background class whenever a start, not a warm-up, asked for them
+(the review of #518, [comment 4817](http://192.168.4.7:3000/noirr/plurx/pulls/518#issuecomment-4817), finding 1). Several of them have
+short deadlines, and under the load the classes exist for a slow probe
+becomes a refusal: `vod_source_rescan_required` for a file that is fine, a
+Profile 5 proof memoized as failed, a burn start answered "pending". A helper
+whose child either kind of caller can await now takes the class from its
+caller:
+
+| Child (helper) | Realtime when | Background when |
+|---|---|---|
+| held source probe (`ffmpeg::held_source_probe_json(source, work)`) | the VOD start, under the 5 s `ENGINE_PROBE_TIMEOUT` | no production caller |
+| decode-fact probes (the `ChildWork` rides on `DecodeFactSource`; `BoundPlanCaller::decode_fact_work`) | the VOD start (`resolve_vod_movie_plan`, `DECODE_PLAN_PROBE_BUDGET`) | the pre-transcode pass (`resolve_bound_movie_plan`); the probe binary's `-version` check at discovery |
+| Dolby Vision Profile 5 pixel proof (`dovi_reshape_changes_pixels(file, class)`) | `encoder_and_grade_for`, whose every caller is a session start (VOD or streamed) or a peer's media offer for one | the pre-transcode and offline producers, an offline package's rate-control snapshot, the rate-control refresh |
+| burn-in extraction and derivation (`subtitles::ensure_burn_source(…, class)`) | the VOD start that joins it for `SIDECAR_JOIN_BUDGET` | no production caller |
+| whole-track text `.vtt` (`ensure_vtt*_with_store(…, work)`) | `GET /api/v1/files/{id}/subs/{n}` when a viewer turns a track on; a streamed start's text burn (`ensure_text_subtitle`) | the native-HLS warm-up; offline package production and the offline subtitle download |
+
+Realtime otherwise: playback transcode, copy HLS and remux producers, the
+VOD transcode and its init segment, the Live TV stream and its source probe,
+the playhead subtitle window, and the other session-start probes (the
+playback-start media probe, the chapter list, `ffprobe -version` for the
+reporter identity). Background otherwise: PGS track demux, the PGS
+ride-along self-test and verdict probe, the pre-transcode producer, encoder,
+decoder, Dolby Vision, HDR and engine capability probes, scan thumbnails,
+luminance probes and book covers, chapter thumbnails and artwork
+derivatives, fragment indexing, subtitle source extraction, Dolby Vision
 conversion and its source probes, Live TV readiness and caption probes, and
 the library-root `find`.
+
+`plurx_child_spawns_by_purpose_total{class, purpose}` (and
+`process::priority::spawns_of`) reads each caller's choice back, and a test
+per path pins it: `vodencode_manager_tests`'s
+`an_empty_stored_track_starts_an_encoded_session_without_the_overlay` (the
+start's held probe and burn extraction), `decode_fact_probes_take_the_class_of_the_caller_waiting_on_them`
+(VOD start realtime, pre-transcode background),
+`the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it`
+(start realtime, offline package background),
+`a_whole_track_extraction_runs_at_the_class_its_caller_passes` (viewer
+realtime, warm-up background) and `subtitle_extraction_is_cached_by_source_identity`
+(the `/subs` handler itself).
+
+**A known limit.** A single-flight extraction (a whole-track `.vtt` or a
+burn sidecar) and a memoized proof keep the class of the caller that started
+them. A viewer who joins a warm-up already running waits on a background
+child: an unprivileged daemon cannot lower a running child's `nice` (that
+needs `CAP_SYS_NICE`), so a joined flight is not promoted. The first caller
+decides; a start that finds nothing running starts it at realtime.
 
 **The `pre_exec`.** `process::priority::apply_policy` registers one closure
 that makes raw syscalls on values computed before the fork: `getpriority` /
@@ -550,7 +587,12 @@ called as `Command::spawn(…)`, a job attached by hand, or a raw
 `Command::{spawn, output, status}` in tokio and std: each daemon crate root
 allows them under `cfg(test)` only, and the harness crate, integration
 tests, examples and `build.rs` allow them with a line saying why.
-`clippy_refuses_every_spawning_method_outside_tests` pins both.
+Clippy reads the nearest `clippy.toml` upwards, so the root policy also
+reached the separate `spikes/` workspaces and failed the spike's own clippy
+lane (`ci.yml`'s replicated topology contracts, on a `ps` RSS read in its
+test; review of #518, finding 2). Each spike workspace now carries its own
+`clippy.toml` without the policy.
+`clippy_refuses_every_spawning_method_outside_tests` pins all three.
 
 **Seen and stopped from inside the product.** Each child is registered with
 its class, purpose, program and start time until its owner drops the job.
@@ -563,7 +605,8 @@ child through the pidfd opened at spawn, so a reused pid cannot be hit
 The web Activity page draws a **Processes** table with a **Stop** per
 stoppable row (`tests/web/activity-processes.test.js`). `/metrics` adds
 `plurx_child_processes`, `plurx_child_spawns_total` and
-`plurx_child_priority_unapplied_total`, each by class (OPERATIONS.md,
+`plurx_child_priority_unapplied_total`, each by class, and
+`plurx_child_spawns_by_purpose_total` by class and purpose (OPERATIONS.md,
 Health & metrics).
 
 **Not in M3.** `OOMScoreAdjust=-500` in `deploy/plurxd.service` (and any
@@ -1161,3 +1204,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-25 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M6 release-profile half — measured, profile not shipped | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | `c5ee15d8` adds `plurxd diagnostic-panic`; four profiles built on nuc3 (§5.6 table): PR 1 as written is +427 % binary; `strip = "debuginfo"` is +36 % (+11.5 % gzipped) with named frames; packed split is 230 MiB + a 177 MiB `.dwp`. `Cargo.toml` keeps main's profile; which one ships is §7 question 6, Paul's. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — built (Paul 2026-09-25: go) | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | §3.2.2. One launcher with a `ChildWork` on every call; realtime 5 / BE 4 / `+500`, background 15 / BE 7 / `+800`; the eleven §3.2.1 rows and three Windows-only probes migrated; the decode-fact probe registers its priority before its exec-from-`pre_exec`; a source census plus clippy `disallowed-methods` over every production spawn; `processes` on `/activity/detail`, admin `DELETE /activity/processes/{pid}` through a pidfd, the web Processes table and three `/metrics` families. Built on `origin/main` @ `448e803d`, apart from [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) (M6 profile measurement, M8); #510 merged while this was open and main was merged in after it, with conflicts in documents only. Each behavioural hunk was reverted and its test seen to fail: the `pre_exec` (three priority tests), the pidfd kill (the stop test times out), a spawn site put back to `cmd.spawn()` (the census names `metadata/local.rs:419`), the decode-facts `apply` (its order test), the `processes` field, the `/metrics` families and the DELETE route (the HTTP test, each at its own assertion), the painter line (the web suite), and the census's lexical path resolution (without it the census reads `vodencode_tests.rs`, `include!`d from a test chunk, as production). Gate results are in the PR body. **Outstanding, post-merge (GPT):** §3.2's measurement — on media1, with three concurrent transcodes, a 4K direct play and a DVR recording, `for p in $(pgrep ffmpeg); do echo $p $(awk '{print $19}' /proc/$p/stat) $(cat /proc/$p/oom_score_adj); done` inside the container (realtime children read 5 / 500, background 15 / 800, `/proc/1` its own), the Activity page's Processes table and `curl -s localhost:32400/metrics \| grep plurx_child_` (`plurx_child_priority_unapplied_total` 0 for both classes), then each session's `http_wait_count` and the journal's segment materialisation interval with the build before this PR and with this PR; if a copy-HLS or transcode producer that kept up now falls behind, report it — the values move, not the launcher. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 — not started | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | Not separable from its evidence: no node runs the unit, and each row's acceptance needs a lab VM's playback matrix or GPU selection under the new unit. `OOMScoreAdjust=-500` joins M4. **Steps (GPT, lab VM running `deploy/install`):** (1) at peak (two transcodes, a direct play, a DVR recording) record `systemctl show plurxd -p TasksCurrent -p MemoryCurrent` and `cat /proc/$(pidof plurxd)/oom_score_adj`; (2) add `TasksMax=4096` (only if the peak is ≤ 25 % of it), `PrivateTmp=true`, `ProtectKernelTunables=true`, `RestrictSUIDSGID=true`, `LockPersonality=true` and `OOMScoreAdjust=-500` to the unit, `systemctl daemon-reload && systemctl restart plurxd`; (3) paste `systemd-analyze security plurxd` before and after; (4) play direct, copy HLS, a transcode with burned text subtitles, record one DVR programme, and confirm the GPU probe still selects QSV/VAAPI; (5) confirm `/proc/$(pidof plurxd)/oom_score_adj` is -500 while every ffmpeg reads 500 or 800. Any row that breaks playback stays out and is recorded. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — review round ([comment 4817](http://192.168.4.7:3000/noirr/plurx/pulls/518#issuecomment-4817)) | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | Main @ `3c89ad2ee` merged in first (`76608b5ca`); conflicts in `subtitles.rs` (main's bounded playhead-window pipe kept, this branch's realtime class given to it), `process/mod.rs` (the `output_job_owned` audit), the ownership ledger (three counts measured by zeroing) and the board; the textually clean `/metrics` `format!` had 17 placeholders for 18 arguments and was given one. **Finding 1 (P1), fixed:** the class is now the caller's (§3.2.2's table). The VOD start's held source probe, its decode-fact probes, the Profile 5 pixel proof asked for by any session start or peer offer, the burn extraction a start joins, and the `/subs` extraction a viewer waits on are realtime; the pre-transcode pass, offline packages, the rate-control refresh and the HLS warm-up are background. `plurx_child_spawns_by_purpose_total{class,purpose}` reads each choice back. Revert-proved: each helper put back to its fixed background class (held probe, decode-fact collection, pixel probe, whole-track `.vtt`, burn extraction) and each caller's choice flipped (`SESSION_START_CLASS`, `BoundPlanCaller::decode_fact_work`, the `/subs` handler) fails its test — `an_empty_stored_track_starts_an_encoded_session_without_the_overlay`, `decode_fact_probes_take_the_class_of_the_caller_waiting_on_them`, `the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it`, `a_whole_track_extraction_runs_at_the_class_its_caller_passes`, `subtitle_extraction_is_cached_by_source_identity`; the counter itself, `every_spawn_is_counted_by_its_class_and_purpose`. **Not changed, recorded:** a joined single flight or a memoized proof keeps the class of the caller that started it (§3.2.2's known limit), and a Profile 5 proof that fails because it timed out is still memoized as failed until restart; the class change makes that timeout less likely under load but does not change the memo, which is a behaviour question for Paul rather than part of this finding. **Finding 2 (P2), fixed:** each `spikes/` workspace carries its own `clippy.toml`; `cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings` exits 0 with it and 101 without it, and `clippy_refuses_every_spawning_method_outside_tests` now fails when a spike workspace has none. **Post-merge (GPT), added to the measurement above:** after a VOD start, a Profile 5 start and a `/subs` request on media1, `curl -s localhost:32400/metrics \| grep plurx_child_spawns_by_purpose_total` shows `held source probe for a session start`, `decode-fact probe for a session start`, `Dolby Vision pixel probe`, `burned-subtitle track extraction` and `subtitle track a viewer turned on` under `class="realtime"`. |
