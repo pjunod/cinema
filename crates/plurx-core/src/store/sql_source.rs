@@ -85,7 +85,7 @@ pub(super) fn recently_added_first_window_offset(limit: i64) -> i64 {
 
 /// The next window after one that was cut and yielded too few cards.
 pub(super) fn recently_added_wider_window_offset(offset: i64) -> i64 {
-    offset.saturating_add(1).saturating_mul(2).saturating_sub(1)
+    offset.saturating_mul(2).saturating_add(1)
 }
 
 /// One card per movie, per show (its newest episode represents it) and per
