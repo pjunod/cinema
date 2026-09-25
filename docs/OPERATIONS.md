@@ -404,8 +404,10 @@ cluster node keeps its catalogue in Hiqlite and is covered by
 **While running**, a store call whose code panics while it holds a SQLite
 connection no longer leaves that connection unusable until restart. The next
 call rolls back any transaction the panic left open and checks the connection
-(`SELECT 1`, `quick_check(1)`, and foreign keys still on for the writer); a
-connection that fails is replaced by a freshly opened one. Recovery of an
+(back in autocommit, `SELECT 1`, and foreign keys still on for the writer); a
+connection that fails is replaced by a freshly opened one. This checks the
+connection only and reads no table pages: a panic cannot damage the file, and
+the file itself is checked at boot, within the budget above. Recovery of an
 in-memory database (tests only) cannot reopen and reports failure instead.
 
 Both are counted on `/metrics`:

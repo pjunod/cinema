@@ -210,25 +210,29 @@ fn reopen(pool: Pool, path: &Path) -> Result<Connection, StoreError> {
 /// Is this connection fit to serve the next caller? A closure that panicked
 /// mid-transaction left it open (rusqlite's guards roll back on drop, but a
 /// raw `BEGIN` has no guard), so that is rolled back first; then the
-/// connection must answer a query, its database must pass `quick_check(1)`,
-/// and a writer must still enforce foreign keys, which a migration turns
-/// off while it runs.
+/// connection must be back in autocommit, must answer a query, and a writer
+/// must still enforce foreign keys, which a migration turns off while it
+/// runs.
+///
+/// This checks the connection, not the file. A Rust panic cannot damage the
+/// database, and `quick_check(1)` (which the plan's section 3.9 lists here)
+/// reads every page of a healthy file, since the `1` only caps the errors
+/// it reports; run under the slot's lock it turned one panicking closure
+/// into a whole-file read ahead of every later caller on that slot. The
+/// file is checked at boot instead, inside a budget (`boot_integrity_check`).
 fn validate(conn: &Connection, pool: Pool) -> Result<(), String> {
     if !conn.is_autocommit() {
         conn.execute_batch("ROLLBACK")
             .map_err(|error| format!("rollback of the open transaction failed: {error}"))?;
+    }
+    if !conn.is_autocommit() {
+        return Err("still inside a transaction after the rollback".to_owned());
     }
     let one: i64 = conn
         .query_row("SELECT 1", [], |row| row.get(0))
         .map_err(|error| format!("SELECT 1 failed: {error}"))?;
     if one != 1 {
         return Err(format!("SELECT 1 returned {one}"));
-    }
-    let check: String = conn
-        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
-        .map_err(|error| format!("quick_check failed: {error}"))?;
-    if check != "ok" {
-        return Err(format!("quick_check reported {check}"));
     }
     if pool == Pool::Writer {
         let foreign_keys: i64 = conn
@@ -614,6 +618,95 @@ mod tests {
             Some(1),
             "a query inside its budget is not interrupted"
         );
+    }
+
+    /// Pages this connection has read from the file (SQLite's per-connection
+    /// page-cache miss counter), resetting the counter when `reset` is set.
+    fn pages_read(conn: &Connection, reset: bool) -> i32 {
+        let (mut current, mut highwater) = (0, 0);
+        // SAFETY: `conn.handle()` is live for the borrow of `conn`, and
+        // `sqlite3_db_status` only reads (and optionally zeroes) that
+        // connection's counters into the two locals.
+        let code = unsafe {
+            rusqlite::ffi::sqlite3_db_status(
+                conn.handle(),
+                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                &mut current,
+                &mut highwater,
+                i32::from(reset),
+            )
+        };
+        assert_eq!(code, rusqlite::ffi::SQLITE_OK);
+        current
+    }
+
+    /// Review of #502, finding 1: taking back a poisoned connection proves
+    /// the connection usable and does not read the database. On a cold
+    /// connection to a file of 400-odd pages, recovery on either pool keeps
+    /// the connection (the marker `busy_timeout` survives, so it was not
+    /// reopened) and reads at most a handful of pages; the whole-file
+    /// `quick_check` the first version ran there reads them all, which the
+    /// control at the end shows with the same counter.
+    #[test]
+    fn recovering_a_poisoned_connection_does_not_read_the_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&path).expect("create");
+            conn.execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE filler(x BLOB);
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400)
+                 INSERT INTO filler SELECT randomblob(4096) FROM n;",
+            )
+            .expect("fill");
+        }
+        for pool in Pool::ALL {
+            let conn = match pool {
+                Pool::Writer => {
+                    let conn = Connection::open(&path).expect("writer");
+                    configure_writer(&conn).expect("configure");
+                    conn
+                }
+                Pool::Read => open_reader(&path).expect("reader"),
+            };
+            let pages: i64 = conn
+                .query_row("PRAGMA page_count", [], |row| row.get(0))
+                .expect("page_count");
+            assert!(pages > 400, "{pool:?}: fixture has {pages} pages");
+            conn.pragma_update(None, "busy_timeout", 1234)
+                .expect("marker");
+            let slot = Mutex::new(conn);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _held = slot.lock();
+                panic!("a closure bug while holding the connection");
+            }));
+            assert!(slot.is_poisoned());
+            pages_read(&slot.lock().unwrap_or_else(|p| p.into_inner()), true);
+            let guard = lock_or_recover(&slot, pool, Some(&path)).expect("recovered");
+            let read = pages_read(&guard, false);
+            let marker: i64 = guard
+                .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+                .expect("busy_timeout");
+            assert_eq!(
+                marker, 1234,
+                "{pool:?}: the connection was kept, not reopened"
+            );
+            assert!(
+                read <= 4,
+                "{pool:?}: recovery read {read} of {pages} pages; it must not scan the file"
+            );
+            // Control: the counter does see a whole-file check.
+            let check: String = guard
+                .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+                .expect("quick_check");
+            assert_eq!(check, "ok");
+            let scanned = pages_read(&guard, false);
+            assert!(
+                i64::from(scanned) > 400,
+                "{pool:?}: quick_check read {scanned} pages"
+            );
+        }
     }
 
     #[test]
