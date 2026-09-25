@@ -87,6 +87,14 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
       SELECT 1 FROM files WHERE id = json_extract(body, '$.fragment_domain.file_id')
         AND size = json_extract(body, '$.fragment_domain.source_size') AND mtime = json_extract(body, '$.fragment_domain.source_mtime')
     ) THEN 'source_changed'
+    WHEN json_extract(body, '$.fragment_repair') = 1 AND NOT EXISTS (
+      SELECT 1 FROM cluster_fragment_index_artifacts WHERE cache_key = json_extract(body, '$.fragment_domain.cache_key')
+        AND file_id = json_extract(body, '$.fragment_domain.file_id')
+        AND source_size = json_extract(body, '$.fragment_domain.source_size')
+        AND source_mtime = json_extract(body, '$.fragment_domain.source_mtime')
+        AND source_sha256 = json_extract(body, '$.fragment_domain.source_sha256')
+        AND pipeline_sha256 = json_extract(body, '$.fragment_domain.pipeline_sha256')
+    ) THEN 'conflict'
     WHEN json_type(body, '$.analysis_request') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM analysis_requests WHERE request_id = json_extract(body, '$.analysis_request.request_id')
         AND state = 'running' AND component = 'fragment_index' AND cancel_requested = 0
@@ -899,6 +907,7 @@ impl<T: QueueSql> BackgroundJobStore for T {
         body["fragment_domain"] =
             serde_json::to_value(input.job).map_err(|error| invalid(&error.to_string()))?;
         body["logical_key"] = logical_key.into();
+        body["fragment_repair"] = input.repair.into();
         if let Some(analysis) = input.analysis_request {
             body["analysis_request"] =
                 serde_json::to_value(analysis).map_err(|error| invalid(&error.to_string()))?;

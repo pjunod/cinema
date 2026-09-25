@@ -703,3 +703,17 @@ BEGIN
         AND NOT EXISTS (SELECT 1 FROM background_job_waiters WHERE job_id = OLD.job_id
             AND state IN ('pending','awaiting_hydration'));
 END;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_analysis_cancelled
+AFTER UPDATE ON analysis_requests
+WHEN NEW.component = 'fragment_index' AND (NEW.state = 'cancelled' OR NEW.cancel_requested = 1)
+    AND (OLD.state != 'cancelled' AND OLD.cancel_requested = 0)
+BEGIN
+    INSERT INTO background_job_commands (id, operation, request_json, result_json)
+    SELECT 'analysis-cancel:' || NEW.request_id, 'cancel_waiter',
+        json_object('scope', 'analysis', 'request_id', NEW.request_id, 'now_ms', NEW.updated_at_ms),
+        json_object('job_id', job_id, 'cancelled', json('true'))
+    FROM background_job_waiters WHERE request_scope = 'analysis' AND request_id = NEW.request_id
+        AND state IN ('pending','awaiting_hydration');
+END;

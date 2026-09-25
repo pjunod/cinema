@@ -11866,6 +11866,11 @@ pub struct PretranscodeFence {
     admission: Arc<PretranscodeAdmission>,
 }
 
+pub(crate) struct FragmentAdmission {
+    threads: usize,
+    _permit: crate::admission::TranscodePermit,
+}
+
 pub(crate) struct PretranscodeAdmission {
     encoder: Encoder,
     threads: usize,
@@ -14585,6 +14590,39 @@ impl TranscodeManager {
                 threads,
                 _permit: permit,
             }))
+    }
+
+    pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {
+        if !self.pretranscode_worker_idle() {
+            return None;
+        }
+        // Copy indexing can still run CPU transforms. Reserve the available
+        // software budget conservatively until a per-pipeline estimate exists.
+        let threads = self.software_budget().await.max(1);
+        self.admissions
+            .try_admit_bundle(
+                self.max_hw_sessions().await,
+                threads,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: threads,
+                    decoder_threads: None,
+                },
+                Priority::Background,
+            )
+            .map(|permit| FragmentAdmission {
+                threads,
+                _permit: permit,
+            })
+    }
+
+    pub(crate) fn fragment_worker_idle(&self, admission: &FragmentAdmission) -> bool {
+        !self.admissions.live_is_waiting()
+            && self.admissions.in_use() == 0
+            && self.admissions.software_in_use() <= admission.threads
+            && !self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn pretranscode_worker_idle(&self) -> bool {

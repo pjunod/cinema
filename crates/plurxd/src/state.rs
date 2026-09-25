@@ -26,10 +26,10 @@ use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
     cluster_fragment_index_blob_sha256, cluster_fragment_index_generation_key,
     cluster_fragment_index_key, encode_cluster_fragment_index_blob, keys, AnalysisRequest,
-    ArtworkRepairFence, CatalogueReader, ClusterFragmentIndexArtifact,
-    ClusterFragmentIndexLocation, DvConversionMode, DvConversionQueueBatch, DvConversionState,
-    DvRecoveryGuardState, NewAnalysisRequest, NewClusterFragmentIndexJob, PrometheusStoreSnapshot,
-    PublicationStore, QueueDvConversionOutcome, SeriesHintOutcome, Store, SubtitleSourceStamp,
+    ArtworkRepairFence, CatalogueReader, ClusterFragmentIndexArtifact, DvConversionMode,
+    DvConversionQueueBatch, DvConversionState, DvRecoveryGuardState, NewAnalysisRequest,
+    NewClusterFragmentIndexJob, PrometheusStoreSnapshot, PublicationStore,
+    QueueDvConversionOutcome, SeriesHintOutcome, Store, SubtitleSourceStamp,
     DV_CONVERSION_QUEUE_BATCH_MAX,
 };
 use plurx_core::transcode::EncoderCaps;
@@ -2344,26 +2344,6 @@ const MAX_PRETRANSCODE_REFUSALS: usize = 4_096 + PRODUCE_MAX_PER_PASS;
 fn lease_time_remaining(expires_at_unix_ms: i64) -> std::time::Duration {
     let now_unix_ms = clock_ms();
     std::time::Duration::from_millis(expires_at_unix_ms.saturating_sub(now_unix_ms).max(0) as u64)
-}
-
-/// Proof that a job's lease heartbeat has been retired.
-///
-/// Every fragment-index outcome write takes one, so a path that settles a row
-/// while its heartbeat is still beating does not compile. The ordering matters
-/// because a tick landing between the write and the cancel renews a row the
-/// write has already settled, reads back `Ok(false)`, and reports a lease loss
-/// that never happened.
-#[must_use]
-pub(crate) struct HeartbeatRetired;
-
-/// Retire a spawned heartbeat and hand back the proof.
-async fn retire_heartbeat(
-    stop: tokio_util::sync::CancellationToken,
-    heartbeat: tokio::task::JoinHandle<()>,
-) -> HeartbeatRetired {
-    stop.cancel();
-    let _ = heartbeat.await;
-    HeartbeatRetired
 }
 
 /// Report a terminal fragment-index write that did not land.
@@ -7962,8 +7942,6 @@ impl JobManager {
         self: Arc<Self>,
         transcode: Arc<TranscodeManager>,
     ) {
-        const GLOBAL_SLOTS: usize = 2;
-
         if self.cluster_index_working.swap(true, Ordering::Relaxed) {
             return;
         }
@@ -8007,39 +7985,17 @@ impl JobManager {
             return;
         }
 
-        let mut slots = tokio::task::JoinSet::new();
-        for slot in 0..GLOBAL_SLOTS {
-            let lease = match self
-                .acquire_job(format!("media:fragment-index:{slot}"))
-                .await
-            {
-                Ok(Some(lease)) => lease,
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::warn!(slot, %error, "acquiring cluster fragment-index media slot");
-                    continue;
+        match self.store.delivery_intents(clock_ms()).await {
+            Ok(intents) => {
+                for intent in intents {
+                    if let Err(error) = self.store.enqueue_delivery(intent, clock_ms()).await {
+                        tracing::warn!(%error, "admitting fragment delivery");
+                    }
                 }
-            };
-            let state = Arc::clone(&self);
-            let transcode = Arc::clone(&transcode);
-            slots.spawn(async move {
-                let permit_lost = lease.loss_token();
-                let built = state
-                    .drain_cluster_fragment_index_slot(transcode, permit_lost)
-                    .await;
-                if let Err(error) = lease.release().await {
-                    tracing::warn!(slot, %error, "releasing cluster fragment-index media slot");
-                }
-                built
-            });
-        }
-        let mut built = 0_usize;
-        while let Some(result) = slots.join_next().await {
-            match result {
-                Ok(count) => built += count,
-                Err(error) => tracing::warn!(%error, "cluster fragment-index slot panicked"),
             }
+            Err(error) => tracing::warn!(%error, "reading fragment delivery obligations"),
         }
+        let built = self.drain_cluster_fragment_index_slot(transcode).await;
         if built > 0 {
             tracing::info!(built, "cluster fragment-index queue pass finished");
         }
@@ -8331,11 +8287,16 @@ impl JobManager {
         {
             return Err(AnalysisResolutionError::Terminal("source_superseded"));
         }
-        let raw = tokio::select! {
-            () = lost.cancelled() => return Err(AnalysisResolutionError::ClaimLost),
-            result = crate::ffmpeg::held_source_index_probe_json(&attested.handle) => result
-                .map_err(|_| AnalysisResolutionError::Terminal("stored_probe_invalid"))?,
-        };
+        let raw = crate::ffmpeg::held_source_index_probe_json(
+            &attested.handle,
+            Duration::from_secs(30),
+            Some(lost),
+        )
+        .await;
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        let raw = raw.map_err(|_| AnalysisResolutionError::Terminal("stored_probe_invalid"))?;
         let tracks = crate::subtitle_ride_along::eligible_tracks_from_probe(&raw);
         let rows = self
             .store
@@ -9071,7 +9032,6 @@ impl JobManager {
     async fn drain_cluster_fragment_index_slot(
         self: &Arc<Self>,
         transcode: Arc<TranscodeManager>,
-        permit_lost: tokio_util::sync::CancellationToken,
     ) -> usize {
         const MAX_JOBS_PER_SLOT: usize = 4;
         const MAX_REFUSALS: usize = 4_096;
@@ -9086,8 +9046,7 @@ impl JobManager {
         };
         let mut built = 0_usize;
         for _ in 0..MAX_JOBS_PER_SLOT {
-            if permit_lost.is_cancelled()
-                || !transcode.pretranscode_worker_idle()
+            if !transcode.pretranscode_worker_idle()
                 || !self.cluster_fragment_index_enabled().await
                 || !crate::ffmpeg::fragment_index_engine_is_current().await
             {
@@ -9103,20 +9062,19 @@ impl JobManager {
                     .cloned()
                     .collect::<Vec<_>>()
             };
-            let job = match self
-                .store
-                .claim_cluster_fragment_index(
-                    &node_id,
-                    &excluded,
-                    now,
-                    now.saturating_add(worker.retry_policy.lease_ms),
-                )
-                .await
+            let (job, active, admission) = match crate::background_jobs::claim_fragment(
+                Arc::clone(&self.store),
+                Arc::clone(&self.job_authority),
+                &transcode,
+                &node_id,
+                &excluded,
+            )
+            .await
             {
-                Ok(Some(job)) => job,
+                Ok(Some(claimed)) => claimed,
                 Ok(None) => break,
                 Err(error) => {
-                    tracing::warn!(%error, "claiming a cluster fragment-index job");
+                    tracing::warn!(%error, "claiming durable fragment work");
                     break;
                 }
             };
@@ -9125,12 +9083,15 @@ impl JobManager {
                     Arc::clone(&transcode),
                     job,
                     worker.clone(),
-                    permit_lost.clone(),
+                    active.fence(),
+                    &admission,
                 )
                 .await
             {
                 built += 1;
             }
+            active.finish().await;
+            drop(admission);
         }
         built
     }
@@ -9169,6 +9130,26 @@ impl JobManager {
         }
     }
 
+    async fn wait_for_fragment_worker_stop(
+        &self,
+        transcode: &TranscodeManager,
+        admission: &crate::transcode::FragmentAdmission,
+        lost: &tokio_util::sync::CancellationToken,
+    ) {
+        loop {
+            if lost.is_cancelled()
+                || !transcode.fragment_worker_idle(admission)
+                || !self.cluster_fragment_index_enabled().await
+            {
+                return;
+            }
+            tokio::select! {
+                () = lost.cancelled() => return,
+                () = tokio::time::sleep(Duration::from_millis(500)) => {}
+            }
+        }
+    }
+
     async fn remember_fragment_index_refusal(&self, cache_key: &str, retry_at_ms: i64) {
         const MAX_REFUSALS: usize = 4_096;
         let mut refusals = self.fragment_index_refusals.lock().await;
@@ -9185,17 +9166,8 @@ impl JobManager {
         refusals.insert(cache_key.to_owned(), retry_at_ms);
     }
 
-    /// Report a terminal write that did not land.
-    ///
-    /// `fail`, `yield` and `complete` all answer `Ok(false)` when the row moved
-    /// under the worker, and `Err` when the store refused the statement
-    /// outright. Eighteen call sites discarded both with `let _ = …`, which is
-    /// most of why a queue that failed every job it claimed for seventy-two
-    /// hours produced no log line saying so. The row is not repaired here —
-    /// the sweep owns that — but the loss is now visible.
     fn record_job_outcome(
         &self,
-        _retired: &HeartbeatRetired,
         job: &plurx_core::store::ClusterFragmentIndexJob,
         action: &str,
         code: &str,
@@ -9204,62 +9176,42 @@ impl JobManager {
         record_analysis_outcome(&self.analysis_metrics, job, action, code, result)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn fail_fragment_index_job(
         &self,
-        retired: &HeartbeatRetired,
+        fence: &crate::background_jobs::JobFence,
         job: &plurx_core::store::ClusterFragmentIndexJob,
-        node_id: &str,
         code: &str,
         retryable: bool,
-        now_ms: i64,
         retry_at_ms: i64,
     ) -> bool {
-        let written = self
-            .store
-            .fail_cluster_fragment_index(
-                &job.cache_key,
-                &job.target_node_id,
-                node_id,
-                job.fence,
-                code,
-                retryable,
-                now_ms,
-                retry_at_ms,
-            )
-            .await;
-        self.record_job_outcome(retired, job, "fail", code, written)
+        use plurx_core::store::background_jobs::JobSettlement;
+        let settlement = if retryable {
+            JobSettlement::Retry {
+                error_code: code.into(),
+                not_before_ms: retry_at_ms,
+            }
+        } else {
+            JobSettlement::Fail {
+                error_code: code.into(),
+            }
+        };
+        self.record_job_outcome(job, "fail", code, fence.settle(settlement).await)
     }
 
-    /// Hand an untargeted job back to the cluster.
-    ///
-    /// A yield writes no durable code — the row goes back to `queued` and
-    /// keeps whatever it had — so `code` here is only ever *reported*: it is
-    /// what the lost-write log says this yield was for. That still matters,
-    /// because "this node refused the source" and "the mount stopped
-    /// answering" are the two reasons a yield happens and they send an
-    /// operator to different places.
     async fn yield_fragment_index_job(
         &self,
-        retired: &HeartbeatRetired,
+        fence: &crate::background_jobs::JobFence,
         job: &plurx_core::store::ClusterFragmentIndexJob,
-        node_id: &str,
         code: &str,
-        now_ms: i64,
         retry_at_ms: i64,
     ) -> bool {
-        let written = self
-            .store
-            .yield_cluster_fragment_index(
-                &job.cache_key,
-                &job.target_node_id,
-                node_id,
-                job.fence,
-                now_ms,
-                retry_at_ms,
-            )
+        let result = fence
+            .settle(plurx_core::store::background_jobs::JobSettlement::Yield {
+                checkpoint: None,
+                not_before_ms: retry_at_ms,
+            })
             .await;
-        self.record_job_outcome(retired, job, "yield", code, written)
+        self.record_job_outcome(job, "yield", code, result)
     }
 
     /// Record a cluster worker's refusal in this node's own outcome table too.
@@ -9325,12 +9277,10 @@ impl JobManager {
         transcode: Arc<TranscodeManager>,
         job: plurx_core::store::ClusterFragmentIndexJob,
         worker: ClusterFragmentIndexWorker,
-        permit_lost: tokio_util::sync::CancellationToken,
+        fence: crate::background_jobs::JobFence,
+        admission: &crate::transcode::FragmentAdmission,
     ) -> bool {
-        // Long enough for a node to walk the entire enforced 4,096-job active
-        // queue at eight refusals per minute. Discovery removes an exclusion
-        // immediately when the exact source becomes readable again.
-        const LOCAL_REFUSAL_MS: i64 = 24 * 60 * 60_000;
+        const LOCAL_REFUSAL_MS: i64 = 30_000;
         /// A deadline on a hung mount, not a bound on file size. Attestation
         /// samples at most 64 MiB whatever the source weighs, so ten minutes
         /// is reached only when the filesystem has stopped answering.
@@ -9345,61 +9295,40 @@ impl JobManager {
             0,
         );
         let node_id = self.coordinator.node_id().to_owned();
-        let stop = tokio_util::sync::CancellationToken::new();
-        let lost = tokio_util::sync::CancellationToken::new();
+        let lost = fence.loss_token();
         let retry_identity = format!("{}:{}", job.cache_key, job.target_node_id);
         let retry_ms = worker
             .retry_policy
             .backoff_ms(&retry_identity, job.attempts.max(1));
-        let heartbeat = {
-            let store = Arc::clone(&self.store);
-            let cache_key = job.cache_key.clone();
-            let target_node_id = job.target_node_id.clone();
-            let node_id = node_id.clone();
-            let metrics = Arc::clone(&self.analysis_metrics);
-            let stop = stop.clone();
-            let lost = lost.clone();
-            let fence = job.fence;
-            let heartbeat = LeaseHeartbeat {
-                queue: "fragment-index",
-                row: format!("{}:{}", job.cache_key, job.target_node_id),
-                fence: job.fence,
-                attempts: job.attempts,
-                known_expiry_ms: job.lease_expires_ms,
-                lease_ms: worker.retry_policy.lease_ms,
-                renew_every: worker.retry_policy.renew_every(),
-                metrics,
-                stop,
-                lost,
+        let published = self
+            .store
+            .cluster_fragment_index_artifact(&job.cache_key)
+            .await
+            .ok()
+            .flatten();
+        if let Some(artifact) = &published {
+            let hydrated = tokio::select! {
+                result = crate::fragment_index_cluster::hydrate_for_job(self.store.as_ref(), self.membership.as_ref(),
+                    &node_id, &worker.cache_root, artifact) => matches!(result, Ok(Some(_))),
+                () = lost.cancelled() => false,
             };
-            tokio::spawn(async move {
-                heartbeat
-                    .run(move |now, expires_at| {
-                        let store = Arc::clone(&store);
-                        let cache_key = cache_key.clone();
-                        let target_node_id = target_node_id.clone();
-                        let node_id = node_id.clone();
-                        async move {
-                            store
-                                .renew_cluster_fragment_index(
-                                    &cache_key,
-                                    &target_node_id,
-                                    &node_id,
-                                    fence,
-                                    now,
-                                    expires_at,
-                                )
-                                .await
-                        }
-                    })
-                    .await;
-            })
-        };
-
-        // Retirement happens *before* the outcome write, not after it. A tick
-        // that lands between the write and the cancel renews a row the write
-        // has already settled, and reads back `Ok(false)` — a lost lease that
-        // never happened.
+            if hydrated {
+                let result = fence.publish_fragment(artifact.clone()).await;
+                return self.record_job_outcome(&job, "hydrate", "", result);
+            }
+        }
+        if !job.target_node_id.is_empty() {
+            let now = clock_ms();
+            self.fail_fragment_index_job(
+                &fence,
+                &job,
+                "artifact_unavailable",
+                true,
+                now.saturating_add(retry_ms),
+            )
+            .await;
+            return false;
+        }
 
         let file = match classify_fragment_source_read(
             self.store.get_file(job.file_id).await,
@@ -9408,19 +9337,16 @@ impl JobManager {
         ) {
             Ok(file) => file,
             Err(failure) => {
-                let retired = retire_heartbeat(stop, heartbeat).await;
                 let now = clock_ms();
                 let (code, retryable) = match failure {
                     FragmentSourceReadFailure::Stale => ("source_superseded", false),
                     FragmentSourceReadFailure::Transient => ("source_catalog_read_failed", true),
                 };
                 self.fail_fragment_index_job(
-                    &retired,
+                    &fence,
                     &job,
-                    &node_id,
                     code,
                     retryable,
-                    now,
                     now.saturating_add(retry_ms),
                 )
                 .await;
@@ -9444,15 +9370,13 @@ impl JobManager {
             Ok(videos) => videos,
             Err(error) => {
                 tracing::warn!(file_id = file.id, %error, "reading probe for claimed fragment index");
-                let retired = retire_heartbeat(stop, heartbeat).await;
+
                 let now = clock_ms();
                 self.fail_fragment_index_job(
-                    &retired,
+                    &fence,
                     &job,
-                    &node_id,
                     "source_catalog_read_failed",
                     true,
-                    now,
                     now.saturating_add(retry_ms),
                 )
                 .await;
@@ -9463,7 +9387,7 @@ impl JobManager {
             Ok(version) => version,
             Err(error) => {
                 tracing::debug!(file_id = file.id, %error, "claimed index source is not local");
-                let retired = retire_heartbeat(stop, heartbeat).await;
+
                 let now = clock_ms();
                 if job.target_node_id.is_empty() {
                     self.remember_fragment_index_refusal(
@@ -9471,23 +9395,14 @@ impl JobManager {
                         now.saturating_add(LOCAL_REFUSAL_MS),
                     )
                     .await;
-                    self.yield_fragment_index_job(
-                        &retired,
-                        &job,
-                        &node_id,
-                        "node_local_refusal",
-                        now,
-                        now,
-                    )
-                    .await;
+                    self.yield_fragment_index_job(&fence, &job, "node_local_refusal", now)
+                        .await;
                 } else {
                     self.fail_fragment_index_job(
-                        &retired,
+                        &fence,
                         &job,
-                        &node_id,
                         "source_unavailable",
                         true,
-                        now,
                         now.saturating_add(retry_ms),
                     )
                     .await;
@@ -9526,23 +9441,20 @@ impl JobManager {
                 memo.as_ref(),
                 &report_progress,
             ) => Some(result.map_err(AttestationFailure::Refused)),
-            () = self.wait_for_cluster_fragment_index_stop(
-                transcode.as_ref(),
-                &permit_lost,
+            () = self.wait_for_fragment_worker_stop(
+                transcode.as_ref(), admission,
+                &lost,
             ) => None,
             () = tokio::time::sleep(ATTEST_TIMEOUT) => {
                 Some(Err(AttestationFailure::TimedOut))
             }
         };
         let Some(attestation) = attestation else {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.yield_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "node_local_refusal",
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
@@ -9567,12 +9479,12 @@ impl JobManager {
                         "fragment-index source attestation refused"
                     );
                 }
-                let retired = retire_heartbeat(stop, heartbeat).await;
+
                 let now = clock_ms();
                 if job.target_node_id.is_empty() {
                     // An untargeted job is yielded back to the cluster rather
                     // than failed, so its code has nowhere durable to go. A
-                    // refusal earns a day-long local exclusion: this node has
+                    // refusal earns a bounded local exclusion: this node has
                     // proved it cannot serve that source. A timeout has proved
                     // nothing of the kind — the mount was unreachable for ten
                     // minutes, which is a condition and not a verdict, and
@@ -9591,15 +9503,13 @@ impl JobManager {
                         .await;
                     }
                     self.yield_fragment_index_job(
-                        &retired,
+                        &fence,
                         &job,
-                        &node_id,
                         // A yield writes no durable code, but the lost-write
                         // log is the one place this distinction can still be
                         // read, and it is the distinction the code above
                         // exists to make.
                         code,
-                        now,
                         if timed_out {
                             now.saturating_add(retry_ms)
                         } else {
@@ -9609,12 +9519,10 @@ impl JobManager {
                     .await;
                 } else {
                     self.fail_fragment_index_job(
-                        &retired,
+                        &fence,
                         &job,
-                        &node_id,
                         code,
                         true,
-                        now,
                         now.saturating_add(retry_ms),
                     )
                     .await;
@@ -9640,135 +9548,17 @@ impl JobManager {
             crate::fragment_index_cluster::pipeline_digest(&file, &worker.engine_sha256, *video)
                 == job.pipeline_sha256
         }) else {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.fail_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "pipeline_superseded",
                 false,
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
             return false;
         };
-
-        // Before building: has anybody already built exactly this?
-        //
-        // Discovery on each voter targets itself, so four voters queue four
-        // jobs for one `cache_key`, and on a healthy queue that is four full
-        // passes over the same file to produce one artifact. Once any of them
-        // has published it, the rest need the bytes and a location row, not a
-        // decode. `hydrate` reads the local cache first and then asks holders
-        // over the peer transport; a miss just falls through to the build.
-        //
-        // Settling from inside the claimed job is what makes this safe, and is
-        // what the older comment above `submit_fragment_index_analysis` could
-        // not do from the request side: the fence, the lease and the source
-        // identity are all still checked by the store, and the artifact row
-        // itself is never rewritten.
-        //
-        // The hydrate itself runs with the heartbeat still beating, because a
-        // peer fetch takes seconds and the lease has to survive it. Retiring
-        // comes first only for the *write*, which is the invariant every other
-        // terminal path in this function keeps.
-        let hydrated = match self
-            .store
-            .cluster_fragment_index_artifact(&job.cache_key)
-            .await
-        {
-            Ok(Some(published)) => matches!(
-                crate::fragment_index_cluster::hydrate(
-                    self.store.as_ref(),
-                    self.membership.as_ref(),
-                    &node_id,
-                    &worker.cache_root,
-                    &published,
-                )
-                .await,
-                Ok(Some(_))
-            )
-            .then_some(published),
-            _ => None,
-        };
-        if let Some(published) = hydrated {
-            let retired = retire_heartbeat(stop, heartbeat).await;
-            let now = clock_ms();
-            let location = plurx_core::store::ClusterFragmentIndexLocation {
-                cache_key: job.cache_key.clone(),
-                node_id: node_id.clone(),
-                bytes: published.bytes,
-                verified_at_ms: now,
-                last_seen_at_ms: now,
-            };
-            match self
-                .store
-                .complete_cluster_fragment_index_by_hydration(&job, &published, &location, now)
-                .await
-            {
-                Ok(true) => {
-                    // Best-effort maintenance: hydration is already durable
-                    // and the next pass retries settlement of pending requests.
-                    crate::store_result::observe(
-                        crate::store_result::Operation::SettleAnalysisAfterHydration,
-                        crate::store_result::Discard::BestEffort,
-                        self.store.settle_analysis_requests(now).await,
-                    );
-                    tracing::info!(
-                        cache_key = %job.cache_key,
-                        built_by = %published.built_by_node_id,
-                        "settled a fragment-index job from an artifact another node built"
-                    );
-                    return true;
-                }
-                // The claim moved, or the source did. Not a build worth
-                // starting on a lease this node no longer holds.
-                Ok(false) => {
-                    self.yield_fragment_index_job(
-                        &retired,
-                        &job,
-                        &node_id,
-                        "lease_expired",
-                        now,
-                        now.saturating_add(retry_ms),
-                    )
-                    .await;
-                    return false;
-                }
-                Err(error) => {
-                    // The bytes on disk are not the artifact they claim to be.
-                    // Keeping them would fail every later hydration of this
-                    // key the same way, and keeping the location row would
-                    // send peers here for them, so drop both and hand the job
-                    // back. The next claim hydrates from a real holder or
-                    // builds.
-                    tracing::warn!(
-                        cache_key = %job.cache_key,
-                        %error,
-                        "hydrated fragment index did not match its artifact; discarding the local copy"
-                    );
-                    crate::fragment_index_cluster::discard_local_blob(
-                        self.store.as_ref(),
-                        &node_id,
-                        &worker.cache_root,
-                        &job.cache_key,
-                    )
-                    .await;
-                    self.yield_fragment_index_job(
-                        &retired,
-                        &job,
-                        &node_id,
-                        "queue_write_failed",
-                        now,
-                        now.saturating_add(retry_ms),
-                    )
-                    .await;
-                    return false;
-                }
-            }
-        }
 
         let report_progress = self.index_pass_reporter(&job.cache_key, &job.target_node_id);
         // Asked per job: the switch, the self-test and the filesystem, now.
@@ -9777,35 +9567,36 @@ impl JobManager {
             transcode.runtime_cache_dir(),
         )
         .await;
-        // A dropped build future — `foreground_preempted`, or the lease lost
-        // — drops the pass's ride-along plan with it, and the plan's guard
-        // removes its stage.
+        let cancel = lost.child_token();
+        let build = crate::fragindex::build_from_attested_file_with_progress(
+            &file,
+            &attested.handle,
+            &attested.observation.object_version,
+            video,
+            transcode.runtime_cache_dir(),
+            index_file_budget(file.duration_ms),
+            move |progress: &crate::fragindex::PassProgress| report_progress(progress),
+            ride_along.as_ref(),
+            &cancel,
+        );
+        tokio::pin!(build);
         let (outcome, preempted) = tokio::select! {
-            built = crate::fragindex::build_from_attested_file_with_progress(
-                &file,
-                &attested.handle,
-                &attested.observation.object_version,
-                video,
-                transcode.runtime_cache_dir(),
-                index_file_budget(file.duration_ms),
-                move |progress: &crate::fragindex::PassProgress| report_progress(progress),
-                ride_along.as_ref(),
-            ) => (Some(built), false),
-            () = lost.cancelled() => (None, false),
-            () = self.wait_for_cluster_fragment_index_stop(
-                transcode.as_ref(),
-                &permit_lost,
-            ) => (None, true),
+            built = &mut build => (Some(built), false),
+            () = self.wait_for_fragment_worker_stop(transcode.as_ref(), admission, &lost) => {
+                cancel.cancel();
+                let _ = build.await;
+                (None, !lost.is_cancelled())
+            }
         };
+        if lost.is_cancelled() {
+            return false;
+        }
         if preempted {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.yield_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "foreground_preempted",
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
@@ -9820,7 +9611,7 @@ impl JobManager {
             // The lease was lost mid-build. The row stays `running` until a
             // sweep reclaims it; writing an outcome on a claim we no longer
             // hold is exactly what the fence forbids.
-            let _retired = retire_heartbeat(stop, heartbeat).await;
+
             return false;
         };
         // Every outcome is a statement about the held source, including a
@@ -9833,15 +9624,12 @@ impl JobManager {
         )
         .unwrap_or(false)
         {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.fail_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "source_changed",
                 false,
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
@@ -9855,15 +9643,12 @@ impl JobManager {
             .flatten()
             .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
         if !still_current {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.fail_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "source_superseded",
                 false,
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
@@ -9893,15 +9678,13 @@ impl JobManager {
                     &reason,
                 )
                 .await;
-                let retired = retire_heartbeat(stop, heartbeat).await;
+
                 let now = clock_ms();
                 self.fail_fragment_index_job(
-                    &retired,
+                    &fence,
                     &job,
-                    &node_id,
                     "unsupported",
                     false,
-                    now,
                     now.saturating_add(retry_ms),
                 )
                 .await;
@@ -9922,25 +9705,16 @@ impl JobManager {
                     worker.retry_policy.max_attempts,
                 )
                 .await;
-                let retired = retire_heartbeat(stop, heartbeat).await;
-                let now = clock_ms();
+
                 let code = failure.code.as_str().to_owned();
-                let written = self
-                    .store
-                    .fail_cluster_fragment_index_typed(
-                        &plurx_core::store::ClusterFragmentIndexFailure {
-                            cache_key: job.cache_key.clone(),
-                            target_node_id: job.target_node_id.clone(),
-                            node_id: node_id.clone(),
-                            fence: job.fence,
-                            code: failure.code,
-                            transient_allowlisted: failure.transient_allowlisted,
-                            diagnostic: failure.diagnostic,
-                            now_ms: now,
-                        },
+                let written = fence
+                    .fail_fragment(
+                        failure.code,
+                        failure.transient_allowlisted,
+                        failure.diagnostic,
                     )
                     .await;
-                self.record_job_outcome(&retired, &job, "fail", &code, written);
+                self.record_job_outcome(&job, "fail", &code, written);
                 return false;
             }
         };
@@ -9960,15 +9734,13 @@ impl JobManager {
             Ok(blob) => blob,
             Err(error) => {
                 tracing::warn!(file_id = file.id, %error, "encoding cluster fragment index");
-                let retired = retire_heartbeat(stop, heartbeat).await;
+
                 let now = clock_ms();
                 self.fail_fragment_index_job(
-                    &retired,
+                    &fence,
                     &job,
-                    &node_id,
                     "encode_failed",
                     false,
-                    now,
                     now.saturating_add(retry_ms),
                 )
                 .await;
@@ -9988,20 +9760,27 @@ impl JobManager {
             built_by_node_id: node_id.clone(),
             built_at_ms,
         };
+        // Rebuilding missing bytes preserves the immutable generation's original
+        // provenance. A different byte digest remains a publication conflict.
+        let artifact = match published {
+            Some(original)
+                if original.blob_sha256 == artifact.blob_sha256
+                    && original.bytes == artifact.bytes =>
+            {
+                original
+            }
+            _ => artifact,
+        };
         if lost.is_cancelled()
-            || permit_lost.is_cancelled()
-            || !transcode.pretranscode_worker_idle()
+            || !transcode.fragment_worker_idle(admission)
             || !self.cluster_fragment_index_enabled().await
             || !crate::ffmpeg::fragment_index_engine_is_current().await
         {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.yield_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "foreground_preempted",
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
@@ -10012,53 +9791,35 @@ impl JobManager {
                 .await
         {
             tracing::warn!(file_id = file.id, %error, "publishing local fragment-index blob");
-            let retired = retire_heartbeat(stop, heartbeat).await;
+
             let now = clock_ms();
             self.fail_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "local_publish_failed",
                 true,
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
             return false;
         }
         if lost.is_cancelled()
-            || permit_lost.is_cancelled()
-            || !transcode.pretranscode_worker_idle()
+            || !transcode.fragment_worker_idle(admission)
             || !self.cluster_fragment_index_enabled().await
             || !crate::ffmpeg::fragment_index_engine_is_current().await
         {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.yield_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "foreground_preempted",
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
             return false;
         }
-        let completed_at_ms = clock_ms();
-        let location = ClusterFragmentIndexLocation {
-            cache_key: job.cache_key.clone(),
-            node_id: node_id.clone(),
-            bytes: artifact.bytes,
-            verified_at_ms: completed_at_ms,
-            last_seen_at_ms: completed_at_ms,
-        };
-        let retired = retire_heartbeat(stop, heartbeat).await;
-        let settled = self
-            .store
-            .complete_cluster_fragment_index(&job, &artifact, &location, completed_at_ms)
-            .await;
-        let completed = self.record_job_outcome(&retired, &job, "complete", "", settled);
+        let settled = fence.publish_fragment(artifact).await;
+        let completed = self.record_job_outcome(&job, "complete", "", settled);
         if completed {
             if let Err(error) = self.store.put_fragment_index(file.id, &index).await {
                 tracing::warn!(file_id = file.id, %error, "installing built fragment index");
@@ -13198,6 +12959,7 @@ mod tests {
                 std::time::Duration::from_secs(60),
                 |_: &crate::fragindex::PassProgress| {},
                 Some(&gate),
+                &tokio_util::sync::CancellationToken::new(),
             )
             .await
             .ride_along
@@ -13406,6 +13168,7 @@ mod tests {
             std::time::Duration::from_secs(60),
             |_: &crate::fragindex::PassProgress| {},
             Some(&gate),
+            &tokio_util::sync::CancellationToken::new(),
         )
         .await
         .ride_along

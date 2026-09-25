@@ -522,32 +522,6 @@ pub(crate) async fn read_local_blob(
     Ok(Some(blob))
 }
 
-/// Drop this node's copy of a cached fragment index and the claim it made
-/// about holding it.
-///
-/// For the case where the bytes on disk are not the artifact they say they
-/// are: keeping them would make every later hydration of that key fail the
-/// same way, and keeping the location row would send peers here for them.
-pub(crate) async fn discard_local_blob(
-    store: &dyn Store,
-    node_id: &str,
-    root: &Path,
-    cache_key: &str,
-) {
-    if let Some(path) = cache_path(root, cache_key) {
-        let _ = tokio::fs::remove_file(path).await;
-    }
-    // Best-effort: the absent local blob already makes this location
-    // unverifiable, and later reconciliation removes a stale row.
-    crate::store_result::observe(
-        crate::store_result::Operation::ForgetIndexAfterLocalRemoval,
-        crate::store_result::Discard::BestEffort,
-        store
-            .forget_cluster_fragment_index_location(cache_key, node_id)
-            .await,
-    );
-}
-
 pub(crate) async fn install_local_blob(
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,
@@ -890,10 +864,33 @@ pub(crate) async fn hydrate(
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,
 ) -> Result<Option<FragmentIndex>, String> {
+    hydrate_inner(store, membership, node_id, root, artifact, true).await
+}
+
+pub(crate) async fn hydrate_for_job(
+    store: &dyn Store,
+    membership: Option<&MembershipManager>,
+    node_id: &str,
+    root: &Path,
+    artifact: &ClusterFragmentIndexArtifact,
+) -> Result<Option<FragmentIndex>, String> {
+    hydrate_inner(store, membership, node_id, root, artifact, false).await
+}
+
+async fn hydrate_inner(
+    store: &dyn Store,
+    membership: Option<&MembershipManager>,
+    node_id: &str,
+    root: &Path,
+    artifact: &ClusterFragmentIndexArtifact,
+    publish: bool,
+) -> Result<Option<FragmentIndex>, String> {
     match read_local_blob(root, artifact).await {
         Ok(Some(blob)) => {
             let index = decode_artifact(&blob, artifact)?;
-            publish_location(store, node_id, artifact).await?;
+            if publish {
+                publish_location(store, node_id, artifact).await?;
+            }
             return Ok(Some(index));
         }
         Ok(None) => {}
@@ -983,7 +980,9 @@ pub(crate) async fn hydrate(
             continue;
         }
         install_local_blob(root, artifact, &response.body).await?;
-        publish_location(store, node_id, artifact).await?;
+        if publish {
+            publish_location(store, node_id, artifact).await?;
+        }
         return decode_artifact(&response.body, artifact).map(Some);
     }
     Ok(None)

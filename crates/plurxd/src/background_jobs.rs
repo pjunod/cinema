@@ -387,6 +387,72 @@ impl JobFence {
         Ok(published)
     }
 
+    pub(crate) async fn publish_fragment(
+        &self,
+        artifact: plurx_core::store::ClusterFragmentIndexArtifact,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let mut request = plurx_core::store::background_jobs::PublishFragmentJob {
+            token,
+            artifact,
+            now_ms: unix_ms()?,
+        };
+        let result = match self.0.store.publish_fragment_job(request.clone()).await {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_fragment_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
+    }
+
+    pub(crate) async fn fail_fragment(
+        &self,
+        code: plurx_core::content_analysis::IndexFailureCode,
+        transient_allowlisted: bool,
+        diagnostic: plurx_core::content_analysis::IndexDiagnostic,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if self.0.lost.is_cancelled() || Instant::now() >= *self.0.deadline.borrow() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let result = self
+            .0
+            .store
+            .fail_fragment_job(plurx_core::store::background_jobs::FragmentJobFailure {
+                token,
+                code,
+                transient_allowlisted,
+                diagnostic,
+                now_ms: unix_ms()?,
+            })
+            .await?;
+        if result.is_some() {
+            state.token = None;
+        }
+        Ok(result.is_some())
+    }
+
     fn may_publish(&self) -> bool {
         !self.0.lost.is_cancelled()
             && self
@@ -569,6 +635,110 @@ pub(crate) async fn claim_pretranscode(
                 admission,
             );
             return Ok(Some((projection, active, fence)));
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+/// Reserve this node's actual indexing capacity before acquiring a durable lease.
+pub(crate) async fn claim_fragment(
+    store: Arc<dyn Store>,
+    authority: Arc<dyn ClusterJobAuthority>,
+    transcode: &crate::transcode::TranscodeManager,
+    node: &str,
+    excluded: &[String],
+) -> Result<
+    Option<(
+        plurx_core::store::ClusterFragmentIndexJob,
+        ActiveBackgroundJob,
+        crate::transcode::FragmentAdmission,
+    )>,
+    StoreError,
+> {
+    use plurx_core::store::background_jobs::{
+        CandidateQuery, JobKind, JobPayload, MAX_ACTIVE_JOBS, MAX_PAGE_SIZE,
+    };
+    static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    if !authority.may_run_cluster_jobs().await {
+        return Ok(None);
+    }
+    let mut cursor = None;
+    for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
+        let page = store
+            .job_candidates(CandidateQuery {
+                node_id: node.into(),
+                kinds: vec![JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate],
+                after: cursor,
+                now_ms: unix_ms()?,
+                limit: MAX_PAGE_SIZE,
+            })
+            .await?;
+        for candidate in page.jobs {
+            let Ok(payload) = candidate.supported_payload() else {
+                continue;
+            };
+            let (key, kind, artifact) = match &payload {
+                JobPayload::FragmentIndexBuild { cache_key, .. } => {
+                    (cache_key.clone(), JobKind::FragmentIndexBuild, None)
+                }
+                JobPayload::ArtifactHydrate {
+                    artifact_key,
+                    target_node_id,
+                } if target_node_id == node => {
+                    let Some(key) = artifact_key.strip_prefix("fragment:") else {
+                        continue;
+                    };
+                    (
+                        key.into(),
+                        JobKind::ArtifactHydrate,
+                        store.cluster_fragment_index_artifact(key).await?,
+                    )
+                }
+                _ => continue,
+            };
+            if excluded.contains(&key) {
+                continue;
+            }
+            let Some(admission) = transcode.admit_fragment().await else {
+                return Ok(None);
+            };
+            if !authority.may_run_cluster_jobs().await {
+                return Ok(None);
+            }
+            let now_ms = unix_ms()?;
+            let request = ClaimJob {
+                job_id: candidate.id.clone(),
+                expected_revision: candidate.revision,
+                node_id: node.into(),
+                boot_id: boot.clone(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind,
+                payload_version: 1,
+                now_ms,
+                dispatched_at_ms: now_ms,
+            };
+            let Some((job, deadline)) =
+                claim_with_resolution(store.as_ref(), &candidate, request).await?
+            else {
+                continue;
+            };
+            let projection = plurx_core::store::background_jobs_fragment_admission::projection(
+                &job,
+                artifact.as_ref(),
+            )?;
+            let active = ActiveBackgroundJob::start(
+                Arc::clone(&store),
+                Arc::clone(&authority),
+                job.token
+                    .ok_or_else(|| StoreError::Task("claimed fragment has no token".into()))?,
+                deadline,
+            )?;
+            return Ok(Some((projection, active, admission)));
         }
         cursor = page.next;
         if cursor.is_none() {

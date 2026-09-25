@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1 worker integration in progress · **Updated:** 2026-09-25 ·
+**Status:** M1/M2 worker integration in progress · **Updated:** 2026-09-25 ·
 **Branch:** `codex/durable-cluster-work` ·
 **Base:** `9f9786b2e` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
@@ -14,8 +14,8 @@ implementation is claimed; “compiled” does not mean tests passed.
 |---|---|---|
 | Isolated clone | Complete | Agent-owned `/private/tmp/plurx-durable-work-agent`; original checkout untouched |
 | Compiler | Ready | Rust 1.97.1; core + Hiqlite all-target compile and baseline daemon compile passed |
-| M1 durable queue and pre-transcode | In progress | Queue ownership, publication and upkeep committed; pre-transcode discovery/worker integration being compiled. Legacy cutover and fault-injection coverage remain |
-| M2 fragment analysis and hydration | In progress | Atomic fragment publication and durable delivery receipts compiled; existing worker, request history and retry adapters still need conversion |
+| M1 durable queue and pre-transcode | In progress | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Legacy cutover and fault-injection coverage remain |
+| M2 fragment analysis and hydration | In progress | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Repair and legacy cutover remain |
 | M3 UI, recovery and migration | Planned | Advisory requirements, admin operations, bounded cutover |
 | E0 subtitle and library workers | Planned | Reuse newly landed subtitle extraction implementation |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
@@ -129,3 +129,23 @@ implementation is claimed; “compiled” does not mean tests passed.
   history. Domain-history deletion releases its compact request identity.
   Core/Hiqlite compilation passed; production fragment entry points and
   workers still use their old implementation until the adapter is complete.
+
+- 2026-09-25: atomic fragment request admission and per-target history links
+  committed and pushed as `aba86328d`; the normal pinned hook passed.
+
+- 2026-09-25: connected fragment discovery, request handoff, repair admission,
+  claim/renewal and publication to the common queue on both Store backends.
+  Workers reserve conservative CPU capacity before claiming. The old two
+  singleton media-slot leases are replaced by shared source-I/O reservations.
+  Durable delivery receipts schedule hydration on the receiving node; verified
+  bytes publish their location through the job transaction. Retrieving or
+  rebuilding existing bytes preserves the immutable artifact's provenance.
+
+- 2026-09-25: fragment cancellation now signals the probe/index child and joins
+  it before releasing physical admission. Analysis cancellation retires only
+  its waiter, preserving other consumers of the same computation. Added a
+  real-process cancellation regression for the final fast lane. The integrated
+  workspace and all test targets passed Rust 1.97.1 Clippy with warnings denied.
+  No test has run.
+  Legacy migration, remaining old ownership APIs, bounded artifact repair,
+  operations/Developer UI and final fault-injection evidence remain open.

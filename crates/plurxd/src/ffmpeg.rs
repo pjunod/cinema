@@ -405,6 +405,7 @@ pub(crate) async fn held_source_probe_json(source: &std::fs::File) -> Result<Str
         ENGINE_PROBE_TIMEOUT,
         ENGINE_PROBE_MAX_BYTES,
         "engine probe",
+        None,
     )
     .await?;
     Ok(stamped_with_this_reporter(document).await)
@@ -428,12 +429,17 @@ async fn stamped_with_this_reporter(document: String) -> String {
 /// The content-index probe has its own budget. A metadata read on a slow held
 /// source may legitimately take longer than an executable capability probe,
 /// while its JSON is expected to remain far smaller.
-pub(crate) async fn held_source_index_probe_json(source: &std::fs::File) -> Result<String, String> {
+pub(crate) async fn held_source_index_probe_json(
+    source: &std::fs::File,
+    budget: Duration,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<String, String> {
     let document = held_source_probe_json_with_limits(
         source,
-        Duration::from_secs(30),
+        Duration::from_secs(30).min(budget),
         1024 * 1024,
         "index metadata probe",
+        cancel,
     )
     .await?;
     // Stamped for the same reason the engine probe is: the two entry points
@@ -627,6 +633,7 @@ async fn held_source_probe_json_with_limits(
     timeout: Duration,
     max_bytes: u64,
     label: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<String, String> {
     #[cfg(windows)]
     {
@@ -653,7 +660,8 @@ async fn held_source_probe_json_with_limits(
             "-show_chapters",
         ]);
         command.arg(&source_path);
-        let output = bounded_command_output_with_limits(command, timeout, max_bytes, label).await?;
+        let output =
+            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel).await?;
         if plurx_core::fs_secure::std_file_identity(source)
             .map_err(|error| format!("re-reading held source identity: {error}"))?
             != held_identity
@@ -685,7 +693,8 @@ async fn held_source_probe_json_with_limits(
             "-show_chapters",
             "/dev/fd/3",
         ]);
-        let output = bounded_command_output_with_limits(command, timeout, max_bytes, label).await?;
+        let output =
+            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel).await?;
         String::from_utf8(output.stdout)
             .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"))
     }
@@ -2369,45 +2378,69 @@ async fn bounded_command_output_with_timeout(
 }
 
 async fn bounded_command_output_with_limits(
-    mut command: tokio::process::Command,
+    command: tokio::process::Command,
     timeout: Duration,
     max_bytes: u64,
     label: &'static str,
 ) -> Result<BoundedOutput, String> {
+    bounded_command_output_cancellable(command, timeout, max_bytes, label, None).await
+}
+
+async fn bounded_command_output_cancellable(
+    mut command: tokio::process::Command,
+    timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<BoundedOutput, String> {
+    if cancel.is_some_and(|token| token.is_cancelled()) {
+        return Err(format!("{label} cancelled"));
+    }
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, child_job) =
-        crate::process_control::spawn_job_owned(&mut command).map_err(|error| error.to_string())?;
+    let (mut child, _child_job) =
+        crate::process_control::spawn_job_owned(&mut command).map_err(|e| e.to_string())?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "engine probe has no stdout".to_owned())?;
+        .ok_or_else(|| format!("{label} has no stdout"))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "engine probe has no stderr".to_owned())?;
-    let collect = async move {
-        let _child_job = child_job;
-        let (stdout, stderr, status) = tokio::join!(
-            read_bounded_with_limit(stdout, max_bytes, label),
-            read_bounded_with_limit(stderr, max_bytes, label),
-            child.wait()
-        );
-        let status = status.map_err(|error| error.to_string())?;
-        if !status.success() {
-            return Err(format!("engine probe exited {status}"));
+        .ok_or_else(|| format!("{label} has no stderr"))?;
+    let stopped = {
+        let collect = async {
+            let (stdout, stderr, status) = tokio::join!(
+                read_bounded_with_limit(stdout, max_bytes, label),
+                read_bounded_with_limit(stderr, max_bytes, label),
+                child.wait()
+            );
+            let status = status.map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("{label} exited {status}"));
+            }
+            Ok(BoundedOutput {
+                stdout: stdout?,
+                stderr: stderr?,
+            })
+        };
+        tokio::pin!(collect);
+        tokio::select! {
+            result = &mut collect => return result,
+            () = tokio::time::sleep(timeout) => format!("{label} timed out after {} seconds", timeout.as_secs()),
+            () = async { match cancel { Some(token) => token.cancelled().await, None => std::future::pending().await } } => format!("{label} cancelled"),
         }
-        Ok(BoundedOutput {
-            stdout: stdout?,
-            stderr: stderr?,
-        })
     };
-    tokio::time::timeout(timeout, collect)
+    let _ = child.start_kill();
+    // Keep the caller's admission alive until the child is reaped.
+    child
+        .wait()
         .await
-        .map_err(|_| format!("{label} timed out after {} seconds", timeout.as_secs()))?
+        .map_err(|error| format!("{stopped}; waiting for child: {error}"))?;
+    Err(stopped)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -3332,6 +3365,60 @@ async fn probe_burst() -> Result<Duration, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_probe_reaps_child_before_returning() {
+        let directory = tempfile::tempdir().expect("directory");
+        let marker = directory.path().join("child.pid");
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args([
+                "-c",
+                "echo $$ > \"$1\"; exec sleep 60",
+                "durable-queue-test",
+            ])
+            .arg(&marker);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let child_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            super::bounded_command_output_cancellable(
+                command,
+                std::time::Duration::from_secs(60),
+                1024,
+                "cancel regression",
+                Some(&child_cancel),
+            )
+            .await
+        });
+        let pid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&marker).await {
+                    if let Ok(pid) = text.trim().parse::<i32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child started");
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("cancel joined")
+            .expect("task");
+        assert!(result.is_err());
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "child remains alive after admission could be released"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
     /// Admission as a boolean. Production reads the richer comparison; these
     /// regressions are about the verdict, which must stay identical.
     fn probes_describe_same_input(stored: &str, held: &str) -> Result<bool, String> {

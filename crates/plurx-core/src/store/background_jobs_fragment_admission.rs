@@ -30,7 +30,6 @@ pub(super) fn prepare(input: &EnqueueFragmentJob) -> Result<(EnqueueJob, String)
     .ok_or_else(invalid)?;
     if !matches!(job.priority.as_str(), "normal" | "forced" | "foreground")
         || !matches!(job.trigger.as_str(), "admin" | "background" | "foreground")
-        || job.target_node_id.is_empty()
         || job.target_node_id.len() > 128
         || input.now_ms < 0
     {
@@ -109,7 +108,7 @@ pub(super) fn prepare(input: &EnqueueFragmentJob) -> Result<(EnqueueJob, String)
             request_digest,
             consumer_kind: "fragment_analysis".into(),
             consumer_ref: request_id,
-            target_node_id: Some(job.target_node_id.clone()),
+            target_node_id: (!job.target_node_id.is_empty()).then(|| job.target_node_id.clone()),
             deadline_ms: if retain_identity {
                 None
             } else {
@@ -120,4 +119,89 @@ pub(super) fn prepare(input: &EnqueueFragmentJob) -> Result<(EnqueueJob, String)
     };
     request.validate()?;
     Ok((request, logical_key))
+}
+
+/// Compatibility view for the media handler. These fields describe the work;
+/// all ownership decisions use the common job token, never this projection.
+pub fn projection(
+    job: &super::background_jobs::BackgroundJob,
+    artifact: Option<&super::ClusterFragmentIndexArtifact>,
+) -> Result<super::ClusterFragmentIndexJob, StoreError> {
+    let (file_id, source_size, source_mtime, source_sha256, cache_key, pipeline_sha256, target) =
+        match job.supported_payload()? {
+            JobPayload::FragmentIndexBuild {
+                file_id,
+                source_size,
+                source_mtime,
+                source_sha256,
+                cache_key,
+                pipeline_digest,
+                ..
+            } => (
+                file_id,
+                source_size,
+                source_mtime,
+                source_sha256,
+                cache_key,
+                pipeline_digest,
+                String::new(),
+            ),
+            JobPayload::ArtifactHydrate {
+                artifact_key,
+                target_node_id,
+            } => {
+                let artifact = artifact
+                    .filter(|a| artifact_key == format!("fragment:{}", a.cache_key))
+                    .ok_or_else(|| {
+                        StoreError::Task("fragment delivery has no matching artifact".into())
+                    })?;
+                (
+                    artifact.file_id,
+                    artifact.source_size,
+                    artifact.source_mtime,
+                    artifact.source_sha256.clone(),
+                    artifact.cache_key.clone(),
+                    artifact.pipeline_sha256.clone(),
+                    target_node_id,
+                )
+            }
+            _ => return Err(StoreError::Task("job is not fragment work".into())),
+        };
+    Ok(super::ClusterFragmentIndexJob {
+        cache_key,
+        file_id,
+        source_size,
+        source_mtime,
+        source_sha256,
+        pipeline_sha256,
+        priority: match job.priority {
+            3 => "foreground",
+            2 => "forced",
+            _ => "normal",
+        }
+        .into(),
+        trigger: if job.priority == 3 {
+            "foreground"
+        } else {
+            "background"
+        }
+        .into(),
+        target_node_id: target,
+        state: "running".into(),
+        owner_node_id: job
+            .token
+            .as_ref()
+            .map(|t| t.node_id.clone())
+            .unwrap_or_default(),
+        fence: job.fence,
+        lease_expires_ms: job.token.as_ref().map_or(0, |t| t.lease_expires_ms),
+        attempts: job.failed_attempts.saturating_add(1),
+        not_before_ms: job.not_before_ms,
+        created_at_ms: job.created_at_ms,
+        updated_at_ms: job.updated_at_ms,
+        last_error_code: job.last_error_code.clone().unwrap_or_default(),
+        attempt_errors: job.attempt_errors.clone(),
+        index_retry_deadline_ms: job.retry_deadline_ms,
+        index_diagnostic_json: job.index_diagnostic_json.clone(),
+    })
 }

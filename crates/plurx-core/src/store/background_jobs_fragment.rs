@@ -43,7 +43,10 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
         AND json_extract(job.payload_json, '$.source_mtime') = json_extract(body, '$.artifact.source_mtime')
         AND json_extract(job.payload_json, '$.source_sha256') = json_extract(body, '$.artifact.source_sha256')
         AND json_extract(job.payload_json, '$.pipeline_digest') = json_extract(body, '$.artifact.pipeline_sha256')
-        AND json_extract(body, '$.artifact.built_by_node_id') = job.owner_node_id)
+        AND ((artifact.cache_key IS NULL AND json_extract(body, '$.artifact.built_by_node_id') = job.owner_node_id)
+          OR (artifact.cache_key IS NOT NULL
+            AND artifact.built_by_node_id = json_extract(body, '$.artifact.built_by_node_id')
+            AND artifact.built_at_ms = json_extract(body, '$.artifact.built_at_ms'))))
       OR (job.kind = 'artifact_hydrate'
         AND json_extract(job.payload_json, '$.artifact_key') = 'fragment:' || json_extract(body, '$.artifact.cache_key')
         AND job.target_node_id = job.owner_node_id AND artifact.cache_key IS NOT NULL
