@@ -543,6 +543,10 @@ impl StoreAccess {
         self
     }
 
+    pub(crate) fn membership(&self) -> Option<&MembershipManager> {
+        self.membership.as_ref()
+    }
+
     pub(crate) fn jobs(&self) -> Option<&std::sync::Arc<crate::state::JobManager>> {
         self.jobs.as_ref()
     }

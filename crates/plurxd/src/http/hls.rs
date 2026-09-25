@@ -11144,6 +11144,7 @@ impl SubtitleSegmentSource for ProductionSubtitleSegmentSource {
             index,
             anchor_seconds,
             window_seconds,
+            &self.0,
         ))
     }
 
