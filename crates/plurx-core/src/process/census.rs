@@ -676,4 +676,30 @@ fn clippy_refuses_every_spawning_method_outside_tests() {
             "{root} must not allow the spawning methods in production"
         );
     }
+    // Clippy takes the nearest clippy.toml upwards, so the daemon's spawn
+    // policy also reaches every separate workspace below the root. A spike
+    // is not daemon code: each carries its own clippy.toml, without the
+    // policy, or its own clippy lane in CI fails on a spawn it is allowed.
+    let spikes = workspace.join("spikes");
+    for spike in std::fs::read_dir(&spikes).expect("spikes directory") {
+        let spike = spike.expect("spike entry").path();
+        let Ok(manifest) = std::fs::read_to_string(spike.join("Cargo.toml")) else {
+            continue;
+        };
+        if !manifest.contains("[workspace]") {
+            continue;
+        }
+        let own = std::fs::read_to_string(spike.join("clippy.toml")).unwrap_or_else(|_| {
+            panic!(
+                "{} is a separate workspace and needs its own clippy.toml",
+                spike.display()
+            )
+        });
+        assert!(
+            !own.lines()
+                .any(|line| line.trim_start().starts_with("disallowed-methods")),
+            "{} must not take the daemon's spawn policy",
+            spike.display()
+        );
+    }
 }
