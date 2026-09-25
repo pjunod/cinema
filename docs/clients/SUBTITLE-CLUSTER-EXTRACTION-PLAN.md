@@ -466,7 +466,7 @@ No client change is in this plan. What changes:
 | **Completion** | The worker writes `extracted` publication rows for every probed ordinal and representation (with their verdicts), then settles the row `ready` with `result_cache_key = stamp`. A job that finds every eligible ordinal already covered settles `ready` without reading (`no_op` reason in the lifecycle counters). |
 | **Cancellation** | Operator cancel (Maintenance) → row `cancelled`, no attempt charged, no publication. The consumer's flight, seeing `cancelled`, writes the existing **negative memo for `NEGATIVE_TTL` (120 s)** under the VTT key so polling clients do not re-enqueue inside it; after the memo a new miss may enqueue again. Stopping it for good is the switch. |
 | **Terminal failure** | `attempt_limit`, `stored_probe_invalid`, `pipeline_version_unavailable` → today's tombstone semantics; the consumer releases to the inline path (§3.5 step 5) and the inline path's own memo applies. |
-| **Artefact loss and repair** (R1) | A `ready` row with **no** `extracted` row anywhere for the stamp is a lost publication (all holders swept or gone). The miss path calls `retire_subtitle_source_ready(stamp)`: marks the `ready` row `cancelled` with `last_error_code = artifact_lost`, and the next enqueue uses `repair_epoch = 1 + count of prior artifact_lost rows for the stamp in the last 24 h`. **Bounded: `REPAIR_LIMIT = 3` per stamp per 24 h**; beyond it the miss releases to the inline path and the lifecycle counter records `repair_exhausted`. A stamp change (size/mtime) is a new identity, not a repair. |
+| **Artefact loss and repair** (R1, adversarial review #507) | A `ready` row with **no** `extracted` row anywhere for the stamp is a lost publication (all holders swept or gone). A `ready` row with one covered ordinal but another eligible ordinal lacking settled `extracted` coverage is incomplete, not finished. The miss path calls `retire_subtitle_source_ready_for_ordinal(stamp, ordinal, source_attestation)` for the requested live ordinal; backfill's scanner-ordinal check can retire the same incomplete row. Retirement is atomic with the coverage check and marks the row `cancelled` with `artifact_lost` when no extracted row exists or `coverage_incomplete` otherwise. The next enqueue uses `repair_epoch = 1 + lifetime count of both repair codes for the stamp`, never a UUID; a separate count in the last 24 h controls admission. Reusing the rolling count as the generation would collide with an older cancelled row after the window expires. **Bounded: `REPAIR_LIMIT = 3` per stamp per 24 h**; beyond it the miss releases to the inline path and the lifecycle counter records `repair_exhausted`. The requested ordinal check uses the receiver's current portable digest, so a stale same-size/mtime row does not claim coverage. A stamp change is a new identity, not a repair. |
 | **Unreachable holders** | Hydration that cannot reach any holder is a miss for this attempt; the row is still `ready`, so the miss does not enqueue — it releases to the inline path after `CLAIM_WAIT` unless a holder becomes reachable inside it. Counted as `holder_unreachable`. (Today's behaviour, with one more chance.) |
 
 ### 3.10 Contract 2 — the publication model
@@ -495,7 +495,9 @@ No client change is in this plan. What changes:
 - *Availability* of `(stamp, ordinal, format)`: a `kept` row (any origin)
   on a reachable node whose bytes verify.
 - *Eligible for enqueue* (playback or backfill): some eligible ordinal of
-  the file has no coverage.
+  the file has no coverage. A `ready` row with only partial coverage follows
+  §3.9's bounded `coverage_incomplete` repair path; its settled sibling rows
+  remain available while the uncovered ordinal is retried.
 - *Settled without artefact*: `empty` is served as the empty sidecar;
   `malformed` and exhausted `transient` release the consumer to the inline
   path (which will fail the same way, and memo it) — the store never
@@ -632,8 +634,9 @@ Tests: **three simultaneous enqueues plus one existing backfill row yield
 one active row; a `foreground` join promotes a `queued` `normal` row in place
 and leaves a `running` one alone; a promoted row is claimed before `forced`
 and `normal`; `force_rebuild = 1` is refused for the component; retiring a
-`ready` row and re-enqueueing produces a new generation, and the fourth
-repair in 24 h is refused** (R1 acceptance); the census over the new
+`ready` row and re-enqueueing produces a new generation, partial `ready`
+coverage repairs an unsettled ordinal while preserving a settled sibling,
+and the fourth repair in 24 h is refused** (R1 acceptance); the census over the new
 statements; migration from v45 with live rows. The single stop-the-fleet
 deploy. Nothing enqueues the component yet.
 
