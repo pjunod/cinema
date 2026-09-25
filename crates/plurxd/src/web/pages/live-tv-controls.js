@@ -27,7 +27,12 @@ function liveTvPlaybackState(state,message,actions={}){
     }
   }
   const host=document.getElementById("live-tv-host");
-  if(host&&!surface.hidden) host.hidden=false;
+  if(host&&!surface.hidden){
+    host.hidden=false;
+    // A terminal failure exits fullscreen before showing its actions. Restore
+    // the inline slot geometry before revealing the persistent host again.
+    if(host.dataset.mode==="slot") liveTvTrackSlot();
+  }
 }
 function liveTvPlaybackFailure(error){
   const view=PlurxLiveTv.errorView(error);

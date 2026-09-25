@@ -107,6 +107,11 @@ const root=path.resolve(__dirname,"../../crates/plurxd/src/web");
     assert.equal(await page.locator("#live-tv-host").evaluate(el=>el.classList.contains("idle")),false);
     await page.locator("#live-tv-search").focus();
     await page.waitForFunction(()=>document.getElementById("live-tv-host").classList.contains("idle"));
+    await page.evaluate(async()=>{await stopLiveTv();liveTvPlaybackFailure({code:"stream_failed"});});
+    const failedBoxes=await page.evaluate(()=>({host:document.getElementById("live-tv-host").getBoundingClientRect().toJSON(),slot:document.getElementById("live-tv-slot").getBoundingClientRect().toJSON()}));
+    for(const edge of ["x","y","width","height"])
+      assert.ok(Math.abs(failedBoxes.host[edge]-failedBoxes.slot[edge])<1,`fullscreen failure lost its inline ${edge}`);
+    assert.equal(await page.locator("#live-tv-status-retry").isVisible(),true);
     assert.deepEqual(errors,[]);
     console.log("PASS Live TV tuning, autoplay action, caption selection and inline/fullscreen/mobile geometry");
   }finally{await browser.close();}

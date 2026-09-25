@@ -74,6 +74,7 @@ function startupHarness(options={}) {
      function liveTvSelect(id){return watchLiveTv(LIVE_TV.channels.findIndex(channel=>channel.id===id));}
      function closeLiveTvStats(){} function liveTvCaptionTracks(){return [];}
      function liveTvRefreshCaptionControls(){} function liveTvInPip(){return false;}
+     function liveTvTrackSlot(){}
      function liveTvShowHost(){document.getElementById('live-tv-host').hidden=false;}
      function liveTvSetMode(mode){document.getElementById('live-tv-host').dataset.mode=mode;}
      function exitLiveTvPresentation(){return options.exit?.();}
