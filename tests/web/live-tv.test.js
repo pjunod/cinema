@@ -189,7 +189,7 @@ async function main() {
     await settled(0);
     assert.deepEqual(h.starts,["two"]);
     assert.equal(h.nodes["live-tv-status-offers"].children.length,0,"starting clears old alternatives");
-    h.liveTvPlaybackFailure({code:"channel_not_found",status:404});
+    h.liveTvPlaybackFailure({code:"admin_required",status:403});
     assert.equal(h.nodes["live-tv-status-retry"].hidden,true,"a permanent ingress refusal offers no retry");
     h.liveTvPlaybackFailure({code:"stream_failed",retry:"safe"});
     assert.equal(h.nodes["live-tv-status-retry"].hidden,false);
