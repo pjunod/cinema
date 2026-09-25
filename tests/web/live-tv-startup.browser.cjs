@@ -73,6 +73,16 @@ const root=path.resolve(__dirname,"../../crates/plurxd/src/web");
     assert.equal(await page.locator(".lt-captions").isVisible(),true);
     await page.locator(".lt-captions select").selectOption("0");
     assert.equal(await page.evaluate(()=>document.getElementById("live-tv-video").textTracks[0].mode),"showing");
+    await page.locator(".lt-captions select").focus();
+    await page.evaluate(()=>{
+      window.originalCaptionSelect=document.querySelector(".lt-captions select");
+      renderLiveTvChannels();renderLiveTvChannels();
+    });
+    assert.equal(await page.evaluate(()=>document.activeElement===originalCaptionSelect&&originalCaptionSelect.isConnected),true,
+      "guide and minute refreshes keep the open/focused inline selector");
+    await page.locator("#live-tv-search").focus();
+    await page.waitForFunction(()=>!LIVE_TV.captionRenderPending&&!originalCaptionSelect.isConnected);
+    assert.equal(await page.locator(".lt-captions select").inputValue(),"0","deferred rendering keeps the selected caption");
     for(const width of [1440,390]){
       await page.setViewportSize({width,height:1100});
       await page.evaluate(()=>liveTvTrackSlot());
@@ -85,6 +95,18 @@ const root=path.resolve(__dirname,"../../crates/plurxd/src/web");
     assert.equal(await page.locator(".lth-captions").evaluate(el=>getComputedStyle(el).opacity),"0");
     await page.locator("#live-tv-captions").focus();
     assert.equal(await page.locator(".lth-captions").evaluate(el=>getComputedStyle(el).opacity),"1","keyboard focus reveals captions");
+    await page.evaluate(()=>Object.defineProperty(document.getElementById("live-tv-video"),"paused",{configurable:true,get:()=>false}));
+    await page.locator(".lth-acts [data-live-tv-mute]").click();
+    await page.waitForFunction(()=>document.getElementById("live-tv-host").classList.contains("idle"));
+    assert.equal(await page.locator(".lth-captions").evaluate(el=>getComputedStyle(el).opacity),"0",
+      "pointer focus must not leave captions permanently over the picture");
+    await page.locator("#live-tv-captions").focus();
+    await page.keyboard.press("ArrowDown");
+    const idleDelay=await page.evaluate(()=>PlaybackPolicy.liveContractTiming("hide_after_ms"));
+    await page.waitForTimeout(idleDelay+100);
+    assert.equal(await page.locator("#live-tv-host").evaluate(el=>el.classList.contains("idle")),false);
+    await page.locator("#live-tv-search").focus();
+    await page.waitForFunction(()=>document.getElementById("live-tv-host").classList.contains("idle"));
     assert.deepEqual(errors,[]);
     console.log("PASS Live TV tuning, autoplay action, caption selection and inline/fullscreen/mobile geometry");
   }finally{await browser.close();}

@@ -1,7 +1,7 @@
 "use strict";
 // Playback feedback belongs to the persistent video host, including while a
 // start is pending or the viewer has navigated to another page.
-function liveTvPlaybackState(state,message){
+function liveTvPlaybackState(state,message,actions={}){
   LIVE_TV.playbackState=state;
   if(message) liveTvMessage(message);
   const surface=document.getElementById("live-tv-status");
@@ -13,13 +13,25 @@ function liveTvPlaybackState(state,message){
   const play=document.getElementById("live-tv-status-play");
   if(play) play.hidden=state!=="blocked"&&state!=="paused";
   const retry=document.getElementById("live-tv-status-retry");
-  if(retry) retry.hidden=state!=="error";
+  if(retry) retry.hidden=state!=="error"||actions.retryable===false;
+  const offers=document.getElementById("live-tv-status-offers");
+  if(offers){
+    offers.replaceChildren();
+    for(const offer of actions.offers||[]){
+      // The lineup may have changed since the owner sent this capacity answer.
+      if(!LIVE_TV.channels.some(channel=>channel.id===offer.channelId&&!PlurxLiveTv.channelView(channel).disabled)) continue;
+      const button=document.createElement("button");
+      button.type="button"; button.textContent=offer.label;
+      button.addEventListener("click",()=>liveTvWatchChannel(offer.channelId));
+      offers.append(button);
+    }
+  }
   const host=document.getElementById("live-tv-host");
   if(host&&!surface.hidden) host.hidden=false;
 }
 function liveTvPlaybackFailure(error){
   const view=PlurxLiveTv.errorView(error);
-  liveTvPlaybackState("error",`${view.title}. ${view.detail}`);
+  liveTvPlaybackState("error",`${view.title}. ${view.detail}`,view);
 }
 function detachLiveTvMedia(){
   closeLiveTvStats(false);
@@ -135,7 +147,7 @@ async function liveTvAttachSession(info,index,serial,generation){
       if(retry){ LIVE_TV.compatibilityRetried=true; LIVE_TV.compatibility=compatibility; }
       try{ await stopLiveTv(); }
       catch(e){
-        if(LIVE_TV.serial===serial+1) liveTvPlaybackState("error","Stream stopped. Owner cleanup is unconfirmed; retry Stop before opening another channel.");
+        if(LIVE_TV.serial===serial+1) liveTvPlaybackState("error","Stream stopped. Owner cleanup is unconfirmed; retry Stop before opening another channel.",{retryable:false});
         return;
       }
       if(LIVE_TV.serial!==serial+1) return;
@@ -259,12 +271,15 @@ async function liveTvResumeStart(generation,route){
     return;
   }
 }
-function retryLiveTv(){
-  const channel=LIVE_TV.channels[LIVE_TV.lastChannel];
-  if(!channel) return;
+function liveTvWatchChannel(id){
+  const channel=LIVE_TV.channels.find(channel=>channel.id===id);
+  if(!channel||PlurxLiveTv.channelView(channel).disabled) return;
   if(location.hash!=="#/live-tv"){
-    LIVE_TV.watchOnArrival=channel.id; location.hash="#/live-tv";
-  }else watchLiveTv(LIVE_TV.lastChannel);
+    LIVE_TV.watchOnArrival=id; location.hash="#/live-tv";
+  }else liveTvSelect(id);
+}
+function retryLiveTv(){
+  if(LIVE_TV.selected) liveTvWatchChannel(LIVE_TV.selected);
 }
 function resumeLiveTv(){
   const video=document.getElementById("live-tv-video"),serial=LIVE_TV.serial;

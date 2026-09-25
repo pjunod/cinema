@@ -348,13 +348,14 @@
   .lth-captions select,.lt-captions select{width:auto;min-width:92px;max-width:160px;padding:4px 6px}
   .lth-captions select{border:1px solid rgba(255,255,255,.5);background:#191919;color:#fff;color-scheme:dark}
   .lth-captions select:focus-visible{outline:2px solid #fff;outline-offset:2px}
-  .lth.idle .lth-captions:not(:focus-within){opacity:0;pointer-events:none}
+  .lth.idle .lth-captions{opacity:0;pointer-events:none}
   .lth[data-mode="dock"] .lth-captions{top:12px;right:12px}
   .lth[data-mode="dock"]:not(:hover):not(:focus-within) .lth-captions{opacity:0;pointer-events:none}
   .lth-status{position:absolute;inset:0;z-index:3;display:grid;place-items:center;
     padding:16px;background:rgba(0,0,0,.65);color:#fff;text-align:center;cursor:default}
   .lth-status[hidden],.lth-status button[hidden]{display:none}
   .lth-status-card{max-width:36em;padding:18px;border-radius:10px;background:rgba(15,15,18,.92)}
+  #live-tv-status-offers{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}
   .lth-status-card p{margin:12px 0;line-height:1.5}
   .lth-status .pspin{display:none;margin:auto}
   .lth-status[data-state="starting"] .pspin,.lth-status[data-state="buffering"] .pspin{display:block}

@@ -57,25 +57,28 @@ function startupHarness(options={}) {
     removeAttribute(){video.src="";},load(){loads++;}};
   const nodes={"live-tv-video":video,"live-tv-host":{hidden:true,dataset:{mode:"slot"}},
     "live-tv-status":{hidden:true,dataset:{}},"live-tv-status-text":{},
-    "live-tv-status-play":{},"live-tv-status-retry":{}};
+    "live-tv-status-play":{},"live-tv-status-retry":{},
+    "live-tv-status-offers":{children:[],replaceChildren(){this.children=[];},append(button){this.children.push(button);}}};
   const lease=new liveTv.Lease({
     start:async id=>{starts.push(id);return options.start?options.start(id):{session_id:`cap-${id}`};},
     release:async id=>{releases.push(id);},
     status:async()=>options.status?options.status():{state:"active"},keepalive:async()=>{},
   });
-  const document={getElementById:id=>nodes[id]||null,visibilityState:"visible",querySelectorAll:()=>[]};
+  const document={getElementById:id=>nodes[id]||null,visibilityState:"visible",querySelectorAll:()=>[],
+    createElement:()=>({addEventListener(name,fn){this[name]=fn;}})};
   const functions=["liveTvPlaybackState","liveTvPlaybackFailure","detachLiveTvMedia","stopLiveTv",
-    "watchLiveTv","liveTvAttachSession","resumeLiveTv","pauseLiveTv","liveTvNow"];
+    "watchLiveTv","liveTvAttachSession","resumeLiveTv","pauseLiveTv","liveTvNow","liveTvWatchChannel"];
   const controls=new Function("LIVE_TV","LIVE_TV_LEASE","document","PlurxLiveTv","performance","setInterval","clearInterval","options","messages",
     `const location={hash:'#/live-tv'},PAGE_RENDER_GENERATION=1,PLAYER=null,API='/api',window={};
      function liveTvMessage(message){messages.push(message);}
+     function liveTvSelect(id){return watchLiveTv(LIVE_TV.channels.findIndex(channel=>channel.id===id));}
      function closeLiveTvStats(){} function liveTvCaptionTracks(){return [];}
      function liveTvRefreshCaptionControls(){} function liveTvInPip(){return false;}
      function liveTvShowHost(){document.getElementById('live-tv-host').hidden=false;}
      function liveTvSetMode(mode){document.getElementById('live-tv-host').dataset.mode=mode;}
      function exitLiveTvPresentation(){return options.exit?.();}
      ${functions.map(shipped).join('\n')}
-     return {watchLiveTv,stopLiveTv,resumeLiveTv,pauseLiveTv};`)(state,lease,document,liveTv,
+     return {watchLiveTv,stopLiveTv,resumeLiveTv,pauseLiveTv,liveTvPlaybackFailure};`)(state,lease,document,liveTv,
     {now:()=>clock},fn=>{polls.push(fn);return polls.length;},()=>{},options,messages);
   return {...controls,state,lease,video,nodes,starts,releases,messages,polls,
     advance:ms=>{clock+=ms;},get plays(){return plays;},get loads(){return loads;}};
@@ -171,6 +174,46 @@ async function main() {
     assert.deepEqual(h.starts,["one","one"]);
     assert.equal(h.lease.current.session_id,"retry");
     assert.equal(h.state.playbackState,"buffering");
+  });
+
+  await test("in-picture failures preserve typed retry and alternate-channel actions", async () => {
+    const h=startupHarness();
+    h.state.channels.push({id:"protected",guide_number:"3",support:"drm",drm:true});
+    h.liveTvPlaybackFailure({code:"tuner_capacity",retry:"never",answer:{body:{watchable:[
+      {channel_id:"two",guide_number:"2.1"},{channel_id:"protected",guide_number:"3"},
+      {channel_id:"gone",guide_number:"4"}]}}});
+    assert.equal(h.nodes["live-tv-status-retry"].hidden,true);
+    const buttons=h.nodes["live-tv-status-offers"].children;
+    assert.deepEqual(buttons.map(button=>button.textContent),["Watch 2.1 instead"]);
+    buttons[0].click();
+    await settled(0);
+    assert.deepEqual(h.starts,["two"]);
+    assert.equal(h.nodes["live-tv-status-offers"].children.length,0,"starting clears old alternatives");
+    h.liveTvPlaybackFailure({code:"channel_not_found",status:404});
+    assert.equal(h.nodes["live-tv-status-retry"].hidden,true,"a permanent ingress refusal offers no retry");
+    h.liveTvPlaybackFailure({code:"stream_failed",retry:"safe"});
+    assert.equal(h.nodes["live-tv-status-retry"].hidden,false);
+  });
+
+  await test("fullscreen idle separates pointer focus from keyboard and open caption menus", () => {
+    let tick,menuOpen=false;
+    const classes=new Set(),button={},video={paused:false,ended:false};
+    const host={dataset:{mode:"full"},contains:node=>node===button,
+      querySelector:()=>menuOpen?{}:null,classList:{add:name=>classes.add(name),remove:name=>classes.delete(name)}};
+    const document={activeElement:button,getElementById:()=>video},state={controlsInput:"pointer"};
+    const reveal=new Function("LIVE_TV","document","PlaybackPolicy","liveTvHost","setTimeout","clearTimeout",
+      shipped("liveTvReveal")+shipped("liveTvIdle")+"return liveTvReveal;")(
+      state,document,policy,()=>host,fn=>{tick=fn;return 1;},()=>{});
+    reveal();tick();
+    assert.ok(classes.has("idle"),"clicking a button does not pin fullscreen controls");
+    state.controlsInput="keyboard";reveal();tick();
+    assert.ok(!classes.has("idle"),"keyboard focus remains visible");
+    document.activeElement=null;reveal();tick();
+    assert.ok(classes.has("idle"),"leaving a keyboard control rearms hiding");
+    state.controlsInput="pointer";document.activeElement=button;menuOpen=true;reveal();
+    const oldTick=tick;tick();
+    assert.ok(!classes.has("idle"));assert.notEqual(tick,oldTick,"an open native menu rearms the timer");
+    menuOpen=false;tick();assert.ok(classes.has("idle"));
   });
 
   await test("late Stop teardown cannot erase a newer channel start", async () => {
@@ -369,7 +412,7 @@ async function main() {
     assert.match(shellSource().html,/id="live-tv-captions"[^>]*aria-label="Live TV captions"/);
     assert.match(shipped("liveTvNowBar"),/data-live-tv-captions/);
     assert.match(shell,/\.lth\[data-mode="slot"\] \.lth-captions\{display:none\}/);
-    assert.match(shell,/\.lth\.idle \.lth-captions:not\(:focus-within\)/);
+    assert.match(shell,/\.lth\.idle \.lth-captions\{opacity:0/);
     tracks.splice(0);
     controls.refresh();
     assert.equal(select.parentElement.hidden,true);

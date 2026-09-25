@@ -31,6 +31,7 @@
     <div class="lth-status-card">
       <div class="pspin" aria-hidden="true"></div>
       <p id="live-tv-status-text" role="status" aria-live="polite"></p>
+      <div id="live-tv-status-offers"></div>
       <button type="button" id="live-tv-status-play" onclick="resumeLiveTv()" hidden>Play live</button>
       <button type="button" id="live-tv-status-retry" onclick="retryLiveTv()" hidden>Try again</button>
       <button type="button" onclick="stopLiveTv().catch(liveTvFailure)">Stop</button>

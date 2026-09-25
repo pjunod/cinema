@@ -444,6 +444,12 @@ function liveTvRefreshCaptionControls(){
   }
   if(document.getElementById("live-tv-stats")) updateLiveTvStats();
 }
+function liveTvCaptionBlur(){
+  // Focusout runs before activeElement has moved to the next control.
+  queueMicrotask(()=>{
+    if(LIVE_TV.captionRenderPending&&location.hash==="#/live-tv") renderLiveTvChannels();
+  });
+}
 function liveTvSelectCaption(value){
   const tracks=liveTvCaptionTracks();
   const selected=value==="off"?null:tracks.find(({index})=>String(index)===value);
@@ -631,7 +637,7 @@ function liveTvNowBar(channel){
     <span class="lt-mini" style="width:120px"><i style="width:${pct}%"></i></span>
     <button type="button" onclick="resumeLiveTv()" title="Play" aria-label="Play">▶</button>
     <button type="button" onclick="pauseLiveTv()" title="Pause" aria-label="Pause">⏸</button>
-    <label class="lt-captions" hidden>Captions <select data-live-tv-captions aria-label="Live TV captions" onchange="liveTvSelectCaption(this.value)"><option value="off">Off</option></select></label>
+    <label class="lt-captions" hidden>Captions <select data-live-tv-captions aria-label="Live TV captions" onchange="liveTvSelectCaption(this.value)" onblur="liveTvCaptionBlur()"><option value="off">Off</option></select></label>
     <button type="button" onclick="liveTvTogglePlayerSize()" title="${wide?"Use compact player":"Use original-size player"}" aria-label="${wide?"Use compact player":"Use original-size player"}">${wide?"⤡ Smaller":"⤢ Larger"}</button>
     <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
     ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)" aria-label="Picture-in-picture">⧉</button>':""}
@@ -777,6 +783,13 @@ function liveTvGridMarkup(visible,selected){
   </div>`;
 }
 function renderLiveTvChannels(){
+  // Keep the native dropdown and keyboard focus alive across the minute tick
+  // and asynchronous guide updates. Blur flushes the latest pending render.
+  if(document.activeElement?.matches?.(".lt-captions select")){
+    LIVE_TV.captionRenderPending=true;
+    return;
+  }
+  LIVE_TV.captionRenderPending=false;
   const mount=document.getElementById("live-tv-body"); if(!mount) return;
   const visible=liveTvVisible();
   const selected=liveTvChannelById(LIVE_TV.selected)||null;
@@ -1093,6 +1106,8 @@ function liveTvKeydown(event){
   if(document.getElementById("live-tv-stats")) return;
   const state=liveTvInputState();
   if(state===null) return;
+  LIVE_TV.controlsInput="keyboard";
+  if(event.target?.closest?.(".lth-captions")) liveTvReveal();
   if(event.target&&/^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName)) return;
   if(liveTvTargetOwnsKey(event.target,event.key)) return;
   const hotkey=PlaybackPolicy.liveHotkey(event.key);
@@ -1126,7 +1141,14 @@ function liveTvReveal(){
   if(host.dataset.mode!=="full"||!video||video.paused) return;
   LIVE_TV.idleTimer=setTimeout(()=>{
     const still=document.getElementById("live-tv-video");
-    if(still&&!still.paused&&!still.ended&&!host.contains(document.activeElement)) liveTvIdle();
+    if(!still||still.paused||still.ended) return;
+    if(LIVE_TV.controlsInput==="keyboard"&&host.contains(document.activeElement)) return;
+    // Keep an open native popup visible. Unsupported :open selectors simply
+    // fall back to the normal timer; keyboard focus is protected separately.
+    let menuOpen=false;
+    try{ menuOpen=!!host.querySelector("select:open"); }catch(_){}
+    if(menuOpen){ liveTvReveal(); return; }
+    liveTvIdle();
   },PlaybackPolicy.liveContractTiming("hide_after_ms"));
 }
 function liveTvIdle(){
@@ -1139,9 +1161,15 @@ function liveTvWireHost(){
   // what a key does, and a second listener that also reveals would give every
   // `ignore` row an effect. Same choice the finite player made.
   ["mousemove","pointerdown","touchstart"].forEach(event=>window.addEventListener(event,()=>{
+    if(event!=="mousemove") LIVE_TV.controlsInput="pointer";
     if(liveTvInputState()==="fullscreen_hidden"||liveTvInputState()==="fullscreen_controls") liveTvReveal();
   },{passive:true}));
   liveTvWireKeys();
+  const host=liveTvHost();
+  if(host){
+    host.addEventListener("focusin",liveTvReveal);
+    host.addEventListener("focusout",liveTvReveal);
+  }
   const video=document.getElementById("live-tv-video");
   if(video){
     video.addEventListener("leavepictureinpicture",()=>liveTvPaint());
