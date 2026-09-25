@@ -13,6 +13,7 @@ import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Rational
+import android.view.View
 import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -90,9 +91,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -2233,9 +2236,33 @@ private fun LiveTvOverlay(
     }
 }
 
+/**
+ * One PlayerView for the inline box and the fullscreen box: the surface is
+ * moved between them with `movableContentOf` so the decoder never loses its
+ * output. Moving a View subtree that way keeps its last measured size — the
+ * host layout node is re-placed, but the PlayerView, its
+ * AspectRatioFrameLayout and the SurfaceView inside it are not re-measured
+ * on their own, so on a tablet the fullscreen picture stayed the inline
+ * 160–260 dp box in the top-left corner (Lenovo TB322FC, TCL 9445X). Every
+ * host size change now forces a layout pass through the whole subtree, and
+ * `forceLayout` on each descendant is what defeats the View measure cache
+ * that a plain `requestLayout` on the root leaves in place.
+ */
 @Composable
 private fun LiveTvPlayerSurface(controller: LiveTvPlayer) {
     val state by controller.state.collectAsStateWithLifecycle()
+    var hostSize by remember { mutableStateOf(IntSize.Zero) }
+    var laidOutFor by remember { mutableStateOf(IntSize.Zero) }
+    var playerView by remember { mutableStateOf<PlayerView?>(null) }
+    LaunchedEffect(hostSize, playerView) {
+        val view = playerView ?: return@LaunchedEffect
+        val resized = LiveTvSurfaceRelayout.hostResized(
+            laidOutFor.width, laidOutFor.height, hostSize.width, hostSize.height,
+        )
+        if (!resized) return@LaunchedEffect
+        laidOutFor = hostSize
+        view.relayoutSubtree()
+    }
     AndroidView(
         factory = { context ->
             PlayerView(context).apply {
@@ -2246,14 +2273,33 @@ private fun LiveTvPlayerSurface(controller: LiveTvPlayer) {
                 )
                 player = controller.player
                 keepScreenOn = state.playing
+                playerView = this
             }
         },
         update = { view ->
             view.player = controller.player
             view.keepScreenOn = state.playing
         },
-        modifier = Modifier.fillMaxSize().background(Color.Black),
+        modifier = Modifier.fillMaxSize().background(Color.Black)
+            .onSizeChanged { hostSize = it },
     )
+}
+
+/** `forceLayout` every View under this one, then ask for the pass. */
+internal fun View.relayoutSubtree() {
+    forceLayoutTree(this)
+    requestLayout()
+    // A SurfaceView repositions its window surface from the next layout
+    // pass; post one more request so a pass that already ran this frame
+    // cannot leave the surface at the old bounds.
+    post { forceLayoutTree(this); requestLayout() }
+}
+
+private fun forceLayoutTree(view: View) {
+    view.forceLayout()
+    if (view is ViewGroup) {
+        for (index in 0 until view.childCount) forceLayoutTree(view.getChildAt(index))
+    }
 }
 
 @Composable

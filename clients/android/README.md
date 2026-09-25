@@ -20,9 +20,12 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `124` — native viewer parity across phone, foldable,
-> and TV. Build 124 settles a progressive remux seek after later rendered video
-> crosses the requested position, even if its first frame lands slightly early;
+> Status: **v0.3.0**, build `125` — native viewer parity across phone, foldable,
+> and TV. Build 125 re-lays out the Live TV PlayerView subtree whenever its
+> host box changes size, so the picture moved into the fullscreen box fills it
+> on tablets instead of keeping the inline size in the top-left corner.
+> Build 124 settled a progressive remux seek after later rendered video
+> crossed the requested position;
 > background playback cannot settle that pending seek. PGS tracks display as
 > Overlay in the player. Build 121 lands on the login screen with the server's sentence when a
 > sign-in expires after its idle window, instead of leaving an HTTP 401 on Home,
