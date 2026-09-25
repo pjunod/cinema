@@ -1,6 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["1375c9ab"]
-ignore = true
-reason = "Documentation only: the P-02 plan's §3.6 as-built record, its §5.8 status, STATUS.md and the ledger row for 9024fd63. The subject reads corrective to the wide rule because of the word fix's; no runtime, client or CI behaviour changes in this commit."
