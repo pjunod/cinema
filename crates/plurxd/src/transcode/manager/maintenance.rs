@@ -95,7 +95,7 @@ impl TranscodeManager {
         if lease.retired {
             return;
         }
-        let (ahead, published_end_ms) = {
+        let (ahead, produced_end_ms) = {
             let index = session.segments.lock().await;
             (
                 ahead_of(&index, session.fetched_end_ms.load(Relaxed).max(0)),
@@ -108,12 +108,13 @@ impl TranscodeManager {
             .await;
         let evaluation = evaluate_flow(FlowInputs {
             physical_ahead: ahead,
-            published_end_ms,
+            produced_end_ms,
             staged_publication_seconds,
             startup_protected: lease.startup.protects_from_time_hold(),
             media_origin_ms: (session.media_origin_seconds * 1_000.0).round() as i64,
             lease_mode: lease.mode,
             demand: lease.demand.as_ref(),
+            demand_observation_age: lease.demand_observation_age,
             global_live_bytes,
             global_ahead_bytes,
             limits,

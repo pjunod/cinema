@@ -30,7 +30,7 @@ use super::hiqlite::validate_sql;
 ///
 /// [`the module list matches the directory`](module_list_matches_the_directory)
 /// fails if a new `hiqlite*.rs` appears without being added here.
-const STORE_SOURCES: &[(&str, &str)] = &[
+pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
     ("hiqlite.rs", include_str!("hiqlite.rs")),
     ("hiqlite_catalog.rs", include_str!("hiqlite_catalog.rs")),
     (
@@ -98,6 +98,7 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
         "fragment_index_cluster.rs",
         include_str!("sqlite/fragment_index_cluster.rs"),
     ),
+    ("housekeeping.rs", include_str!("sqlite/housekeeping.rs")),
     ("library.rs", include_str!("sqlite/library.rs")),
     (
         "library_channels.rs",
@@ -848,10 +849,23 @@ fn is_sqlite_candidate(text: &str) -> bool {
 /// placeholders themselves are still covered by this census. The two entries
 /// main contributed (field order, luminance) and this one are the whole
 /// difference between the pre-merge sets; no other literal changed shape.
+///
+/// +2 on K-05's branch (93 -> 95 before main's two subtitle-source sites
+/// below, so 97 with them), re-measured site by site against `origin/main`
+/// (the census printed every unchecked literal on both trees): the query-plan
+/// capture needs each hot statement's SQL in a binding it can hand to
+/// `trace_statement` before running it, which takes three statements that
+/// bound inline out of the census's reach — `list_top_items_in_genre`'s
+/// `COUNT(*)` (`?1`/`?2`, two values) and `item_by_external_id` (`?1`-`?3`,
+/// three) in `sqlite/media.rs`, and `authenticate_token`'s read in
+/// `sqlite/users.rs` (a `const SQL` beside its `query_row`). `recently_added`
+/// left the directory for `sql_source` and takes its unchecked site with it.
+/// Each of the three runs in the SQLite contracts, where rusqlite refuses a
+/// wrong parameter count at run time.
 // Subtitle-source discovery prepares its shared candidate query before the
 // `query_map` binding, and ready retirement composes its shared
 // uncovered-ordinal predicate before binding in the next statement.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 95;
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 97;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

@@ -759,9 +759,23 @@ impl Session {
                     && demand.runway_ms() <= ROLLING_PUBLICATION_GUARD_MS
             })
         });
+        // A producer the flow controller holds for scratch (the global cap or
+        // a refused ledger grant) is waiting on capacity, not stuck: the same
+        // hold the progress deadline already exempts. Its publication clock
+        // must not retire the session while the hold lasts.
+        let held_for_scratch = (*self.suspended_at.lock().await)
+            .is_some_and(|held| held.hold.reason == AheadHoldReason::Global);
         let (publish, expired, insufficient, retention_first_segment, budget) = {
             let mut clock = self.publication.lock().await;
             clock.reset_for_attempt(producer_attempt);
+            if held_for_scratch {
+                // Restart the hard deadline on every held cycle, so it runs
+                // its full length again from the moment the hold clears and
+                // a producer that stays stuck afterwards is still retired.
+                if let Some(deadline) = clock.hard_deadline.as_mut() {
+                    *deadline = (*deadline).max(now + ROLLING_PUBLICATION_HARD);
+                }
+            }
             if clock
                 .staged_last_segment
                 .is_none_or(|current| last_segment >= current)
@@ -794,7 +808,10 @@ impl Session {
             let insufficient = !end_list
                 && rolling_insufficient_capacity(playback_rate, producer_speed)
                 && match clock.served.as_ref() {
-                    None => end_ms >= initial_runway_ms,
+                    // Before the first snapshot there is no deadline to
+                    // restart, and a held producer's recent speed is the last
+                    // one it measured before the stop, not a capacity reading.
+                    None => !held_for_scratch && end_ms >= initial_runway_ms,
                     Some(served) => {
                         clock.hard_deadline.is_some_and(|deadline| now >= deadline)
                             && end_ms <= served.end_ms
@@ -2417,12 +2434,13 @@ pub(super) async fn session_info(
     let flow = lease.as_ref().map(|lease| {
         evaluate_flow(FlowInputs {
             physical_ahead: ahead,
-            published_end_ms,
+            produced_end_ms,
             staged_publication_seconds,
             startup_protected: lease.startup.protects_from_time_hold(),
             media_origin_ms,
             lease_mode: lease.mode,
             demand: lease.demand.as_ref(),
+            demand_observation_age: lease.demand_observation_age,
             global_live_bytes,
             global_ahead_bytes,
             limits,

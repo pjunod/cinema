@@ -201,18 +201,14 @@ impl RollingPublicationClock {
             self.legacy_bootstrap_at = None;
             let demand = lease.demand.as_ref().expect("explicit demand checked");
             let observation_age = lease.demand_observation_age.unwrap_or_default();
-            let consumed_absolute_ms =
-                crate::playback_control::rolling_estimated_position_ms(demand, observation_age);
-            let consumed_end_ms = consumed_absolute_ms.saturating_sub(media_origin_ms).max(0);
-            let reserve_ms = rolling_initial_runway_ms(rolling_playback_rate(Some(demand)));
+            let ends = rolling_explicit_publication_ends(demand, observation_age, media_origin_ms);
             RollingPublicationBudget {
                 demand_sequence: lease.accepted_demand_sequence,
-                consumed_end_ms,
-                desired_end_ms: consumed_end_ms.saturating_add(reserve_ms),
-                allowed_end_ms: consumed_end_ms
-                    .saturating_add(reserve_ms)
-                    .saturating_add(ROLLING_SEGMENT_MAX_MS),
-                protected_position_ms: consumed_absolute_ms
+                consumed_end_ms: ends.consumed_end_ms,
+                desired_end_ms: ends.desired_end_ms,
+                allowed_end_ms: ends.allowed_end_ms,
+                protected_position_ms: ends
+                    .consumed_absolute_ms
                     .saturating_sub(ROLLING_PUBLICATION_GUARD_MS)
                     .saturating_sub(ROLLING_BACK_BUFFER_MS)
                     .max(media_origin_ms)
@@ -249,6 +245,36 @@ impl RollingPublicationClock {
             served.end_ms.saturating_sub(budget.desired_end_ms).max(0)
         });
         budget
+    }
+}
+
+/// The explicit publication allowance for one accepted demand observation,
+/// relative to the media origin. The publication clock and the flow
+/// controller both read it here so their frontiers cannot drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RollingExplicitPublicationEnds {
+    consumed_absolute_ms: i64,
+    pub(super) consumed_end_ms: i64,
+    pub(super) desired_end_ms: i64,
+    pub(super) allowed_end_ms: i64,
+}
+
+pub(super) fn rolling_explicit_publication_ends(
+    demand: &crate::playback_control::PlaybackDemandSnapshot,
+    observation_age: Duration,
+    media_origin_ms: i64,
+) -> RollingExplicitPublicationEnds {
+    let consumed_absolute_ms =
+        crate::playback_control::rolling_estimated_position_ms(demand, observation_age);
+    let consumed_end_ms = consumed_absolute_ms.saturating_sub(media_origin_ms).max(0);
+    let desired_end_ms = consumed_end_ms.saturating_add(rolling_initial_runway_ms(
+        rolling_playback_rate(Some(demand)),
+    ));
+    RollingExplicitPublicationEnds {
+        consumed_absolute_ms,
+        consumed_end_ms,
+        desired_end_ms,
+        allowed_end_ms: desired_end_ms.saturating_add(ROLLING_SEGMENT_MAX_MS),
     }
 }
 

@@ -1248,12 +1248,19 @@ impl ActivationMarker {
 /// Install the process-level rustls provider every TLS path here depends on.
 ///
 /// `rustls` panics rather than erroring when a process reaches TLS with no
-/// default provider, and the crate is built with more than one provider feature
-/// reachable, so it will not choose for us. `plurxd run` used to be covered only
-/// by accident: `hiqlite::start_node` installs one on the server side, which the
-/// maintenance commands never call, so `reset-password` and `refresh-metadata`
-/// aborted on every activated node. Installing here rather than in one binary's
-/// entry point keeps a future caller from reintroducing that gap.
+/// default provider and more than one provider feature compiled. `plurxd run`
+/// used to be covered only by accident: `hiqlite::start_node` installs one on the
+/// server side, which the maintenance commands never call, so `reset-password`
+/// and `refresh-metadata` aborted on every activated node. Installing here rather
+/// than in one binary's entry point keeps a future caller from reintroducing that
+/// gap.
+///
+/// Since K-08 §3.6 option A the workspace graph compiles `ring` as the only
+/// rustls provider (`vendor/hiqlite` no longer asks for `aws-lc-rs` through
+/// `axum-server/tls-rustls`, `rustls/prefer-post-quantum` or `tokio-rustls`'s
+/// default features), so rustls would now select `ring` on its own. The explicit
+/// install stays: it names the choice where a reader looks for it, and
+/// `tests/rustls_single_provider.rs` is what fails if a second provider returns.
 ///
 /// Idempotent: a losing race or an already-installed provider returns `Err`,
 /// which is the same end state as winning.
@@ -5517,6 +5524,41 @@ mod tests {
         );
     }
 
+    /// K-08 §3.6 / M3: the provider this crate installs is `ring`, suites and
+    /// key-exchange groups alike, so no hybrid post-quantum group is offered.
+    /// `prefer-post-quantum` only ever reordered the `aws-lc-rs` provider's
+    /// groups; this pins that the provider the process negotiates with is not
+    /// that one, which is the premise that made dropping the feature neutral.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn installed_provider_is_ring() {
+        install_default_crypto_provider();
+        let installed = rustls::crypto::CryptoProvider::get_default()
+            .expect("install_default_crypto_provider leaves a process provider");
+        let ring = rustls::crypto::ring::default_provider();
+        let suites = |provider: &rustls::crypto::CryptoProvider| {
+            provider
+                .cipher_suites
+                .iter()
+                .map(|suite| suite.suite())
+                .collect::<Vec<_>>()
+        };
+        let groups = |provider: &rustls::crypto::CryptoProvider| {
+            provider
+                .kx_groups
+                .iter()
+                .map(|group| group.name())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(suites(installed), suites(&ring));
+        assert_eq!(groups(installed), groups(&ring));
+        assert!(
+            !groups(installed).contains(&rustls::NamedGroup::X25519MLKEM768),
+            "the installed provider offers a hybrid post-quantum group, so it is \
+             not ring and dropping prefer-post-quantum was not behaviour-neutral"
+        );
+    }
+
     #[cfg(feature = "hiqlite-store")]
     #[test]
     fn maintenance_uses_the_persisted_local_api_address() {
@@ -8013,6 +8055,16 @@ pub mod status {
         #[doc(hidden)]
         #[must_use]
         pub fn validation_bounded_ready() -> Self {
+            Self::validation_bounded_ready_applied(41)
+        }
+
+        /// [`Self::validation_bounded_ready`] with a caught-up replica at
+        /// `applied_index`, so a contract can place a read-your-write fence
+        /// above or below what this node has applied.
+        #[cfg(feature = "cluster-read-cost-validation")]
+        #[doc(hidden)]
+        #[must_use]
+        pub fn validation_bounded_ready_applied(applied_index: u64) -> Self {
             let metrics = Self::new(true);
             assert!(metrics.publish_at(
                 &LocalDbRaftSnapshot {
@@ -8021,7 +8073,7 @@ pub mod status {
                     current_term: 7,
                     current_leader: Some(1),
                     last_applied_term: Some(7),
-                    last_applied_index: Some(41),
+                    last_applied_index: Some(applied_index),
                 },
                 0,
             ));
@@ -8029,7 +8081,7 @@ pub mod status {
                 DbQuorumWatermark {
                     term: 7,
                     leader_id: 1,
-                    committed_index: 41,
+                    committed_index: applied_index,
                     local_read_protocol_version: hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION,
                 },
                 0,
@@ -8065,9 +8117,30 @@ pub mod status {
         /// the proof expires, changes generation, or exceeds the entry budget
         /// while the query is running. Store code must then perform its named
         /// authority fallback.
+        #[cfg(test)]
         pub(crate) async fn run_bounded_replica<T, F, Fut>(
             &self,
             max_apply_lag_entries: u64,
+            local_read: F,
+        ) -> Option<T>
+        where
+            F: FnOnce() -> Fut,
+            Fut: Future<Output = T>,
+        {
+            self.run_bounded_replica_after(max_apply_lag_entries, 0, local_read)
+                .await
+        }
+
+        /// [`Self::run_bounded_replica`] that additionally requires this
+        /// node to have applied `min_applied_index` — a read-your-write fence
+        /// (K-04 M2). The permit is issued only when the sampled applied
+        /// index already reaches it, and the permit's own revalidation keeps
+        /// the applied index from moving below the one it was issued at, so
+        /// the fence holds for the whole local read.
+        pub(crate) async fn run_bounded_replica_after<T, F, Fut>(
+            &self,
+            max_apply_lag_entries: u64,
+            min_applied_index: u64,
             local_read: F,
         ) -> Option<T>
         where
@@ -8080,6 +8153,9 @@ pub mod status {
                 duration_nanos(elapsed),
                 max_apply_lag_entries,
             )?;
+            if permit.applied_index < min_applied_index {
+                return None;
+            }
             let result = local_read().await;
             permit.remains_valid().then_some(result)
         }
@@ -9388,6 +9464,43 @@ pub mod status {
                     })
                     .await,
                 Some(42)
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+
+        /// K-04 M2: a read-your-write fence above the sampled applied index
+        /// refuses the permit before the local read runs, even though the
+        /// bounded lag proof alone would grant it; at the fence it runs.
+        #[tokio::test]
+        async fn bounded_replica_after_refuses_before_reading_until_the_fence_is_applied() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish(&local_sample(7, Some(45), Some(1))));
+            let started_nanos = metrics.elapsed_nanos();
+            assert!(metrics.publish_watermark(watermark(7, 1, 48), started_nanos));
+            let calls = Arc::new(AtomicU64::new(0));
+
+            let fenced_calls = Arc::clone(&calls);
+            assert_eq!(
+                metrics
+                    .run_bounded_replica_after(64, 46, move || {
+                        fenced_calls.fetch_add(1, Ordering::Relaxed);
+                        async { 1 }
+                    })
+                    .await,
+                None,
+                "applied 45 is inside the lag budget but below the write fence 46"
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+            let applied_calls = Arc::clone(&calls);
+            assert_eq!(
+                metrics
+                    .run_bounded_replica_after(64, 45, move || {
+                        applied_calls.fetch_add(1, Ordering::Relaxed);
+                        async { 2 }
+                    })
+                    .await,
+                Some(2)
             );
             assert_eq!(calls.load(Ordering::Relaxed), 1);
         }

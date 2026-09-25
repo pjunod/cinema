@@ -1,0 +1,38 @@
+# K-08 M4 (docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md §3.7(a), §5.5):
+# the two-backend tokenizer comparison, committed so the result can be rerun.
+#
+# plurxd cannot make this comparison itself: `candle-core` 0.11.0 declares
+# `tokenizers` with `features = ["onig"]` on every non-wasm target, and
+# tokenizers 0.22 uses onig whenever that feature is on, so no plurxd build
+# ever runs `fancy-regex`. This crate depends on nothing but `tokenizers`, so
+# each backend can be built on its own:
+#
+#   make tokenizer-backends PLURX_TEST_MINILM_DIR=<dir holding tokenizer.json>
+#
+# builds it once with `--features onig` and once with `--features fancy-regex`,
+# runs both over the same corpus plurxd's `tokenizer_backends_agree` encodes,
+# checks each against the ids recorded in plurxd's testdata, checks the
+# fancy-regex graph holds no `onig_sys`, and `cmp`s the two outputs.
+#
+# A separate workspace, like spikes/hiqlite-m0: validation only, never shipped.
+[workspace]
+
+[package]
+name = "plurx-tokenizer-backends"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+# Exactly one of these. Both at once would silently measure onig twice, because
+# tokenizers prefers onig when both are enabled; main.rs refuses to compile it.
+onig = ["tokenizers/onig"]
+fancy-regex = ["tokenizers/fancy-regex"]
+
+[dependencies]
+# The exact release the root Cargo.lock resolves for plurxd, with plurxd's
+# features minus the backend (tests/operations/test_hiqlite_patch_ledger.py
+# TokenizerBackendHarnessCase holds the two together).
+tokenizers = { version = "=0.22.2", default-features = false }
+sha2 = "0.10"
+hex = "0.4"
