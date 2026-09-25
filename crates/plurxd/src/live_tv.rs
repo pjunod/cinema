@@ -7530,10 +7530,13 @@ async fn probe_live_source(
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
     }
-    let (mut child, _child_job) =
-        crate::process_control::spawn_job_owned(&mut command).map_err(|error| {
-            LiveTvError::CodecUnsupported(format!("starting bounded source probe: {error}"))
-        })?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::realtime("Live TV source probe"),
+    )
+    .map_err(|error| {
+        LiveTvError::CodecUnsupported(format!("starting bounded source probe: {error}"))
+    })?;
     let stdout = child.stdout.take().ok_or_else(|| {
         LiveTvError::StreamFailed("bounded source probe did not expose stdout".into())
     })?;
@@ -7632,8 +7635,11 @@ fn spawn_live_ffmpeg(
     directory: &Path,
 ) -> Result<(tokio::process::Child, crate::process_control::ChildJob), LiveTvError> {
     let mut command = live_ffmpeg_command(system, plan, directory)?;
-    crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|error| LiveTvError::CodecUnsupported(format!("starting live-TV FFmpeg: {error}")))
+    crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::realtime("Live TV stream"),
+    )
+    .map_err(|error| LiveTvError::CodecUnsupported(format!("starting live-TV FFmpeg: {error}")))
 }
 
 fn live_ffmpeg_command(
@@ -9386,7 +9392,10 @@ async fn run_graph_probe(
             .map_err(|error| format!("could not build live-TV graph probe: {error}"))?;
     let output = tokio::time::timeout(
         Duration::from_secs(20),
-        crate::process_control::output_job_owned(&mut command),
+        crate::process_control::output_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("Live TV readiness probe"),
+        ),
     )
     .await
     .map_err(|_| "live-TV FFmpeg graph probe timed out".to_owned())?
@@ -12711,7 +12720,11 @@ Output #0, hls, to 'index.m3u8':
         );
         let mut command = tokio::process::Command::new("sleep");
         command.arg("30");
-        let (child, job) = crate::process_control::spawn_job_owned(&mut command).expect("child");
+        let (child, job) = crate::process_control::spawn_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::realtime("Live TV test child"),
+        )
+        .expect("child");
         let pid = child.id().expect("child pid");
         *session.process.lock().await = Some(LiveTvProcess {
             child,

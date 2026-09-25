@@ -261,6 +261,8 @@ struct RootReadability {
 struct RootProbe {
     child: tokio::process::Child,
     kill_sent: bool,
+    /// Keeps the probe listed with its priority class until it is reaped.
+    _job: Option<crate::process_control::ChildJob>,
 }
 
 #[derive(Default)]
@@ -423,7 +425,7 @@ impl MediaPool {
                     continue;
                 }
                 match spawn_library_root_probe(&root) {
-                    Ok(mut child) => {
+                    Ok((mut child, job)) => {
                         let mut registry = registry
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -440,6 +442,7 @@ impl MediaPool {
                             RootProbe {
                                 child,
                                 kill_sent: late,
+                                _job: Some(job),
                             },
                         );
                     }
@@ -901,21 +904,27 @@ fn bounded_command_safe_roots(roots: impl IntoIterator<Item = PathBuf>) -> BTree
 /// `try_wait` confirms exit: SIGKILL cannot immediately release a process in
 /// uninterruptible filesystem I/O, and dropping/resubmitting it would turn a
 /// hard mount into unbounded PID growth.
-fn spawn_library_root_probe(root: &Path) -> std::io::Result<tokio::process::Child> {
+fn spawn_library_root_probe(
+    root: &Path,
+) -> std::io::Result<(tokio::process::Child, crate::process_control::ChildJob)> {
     debug_assert!(root.is_absolute());
     // Appending `.` forces directory traversal. A dangling symlink or a link
     // to a regular file fails instead of being mistaken for an empty readable
     // directory by `find -H`.
     let directory = root.join(".");
-    tokio::process::Command::new("find")
+    let mut command = tokio::process::Command::new("find");
+    command
         .arg("-H")
         .arg(directory)
         .args(["-mindepth", "1", "-maxdepth", "1", "-print", "-quit"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
+        .kill_on_drop(true);
+    crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("library root reachability probe"),
+    )
 }
 
 async fn fetch_offer(
@@ -1715,6 +1724,7 @@ mod tests {
                 RootProbe {
                     child: running_child,
                     kill_sent: false,
+                    _job: None,
                 },
             );
         pool.signal_timed_out_root_probes(&BTreeSet::from([running_root.clone()]));
@@ -1760,6 +1770,7 @@ mod tests {
                 RootProbe {
                     child: completed_child,
                     kill_sent: false,
+                    _job: None,
                 },
             );
         let outcomes = pool.reap_root_probes_until(

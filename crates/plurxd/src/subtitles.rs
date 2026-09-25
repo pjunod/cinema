@@ -1995,12 +1995,14 @@ async fn run_burn_derivation(
         .stdin(std::process::Stdio::null());
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(sup, &input)?;
-    let (status, diagnostics) =
-        crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(&mut command)
-            .map_err(|error| format!("starting burn-track derivation: {error}"))?
-            .output_to_bounded_file(tmp, max_bytes)
-            .await
-            .map_err(|error| format!("waiting for burn-track derivation: {error}"))?;
+    let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(
+        &mut command,
+        crate::process_control::ChildWork::background("burned-subtitle track derivation"),
+    )
+    .map_err(|error| format!("starting burn-track derivation: {error}"))?
+    .output_to_bounded_file(tmp, max_bytes)
+    .await
+    .map_err(|error| format!("waiting for burn-track derivation: {error}"))?;
     if !status.success() {
         return Err(format!(
             "burn-track derivation failed: {}",
@@ -2070,12 +2072,14 @@ async fn extract_burn_from_source(
         .stdin(std::process::Stdio::null());
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(&source.handle, &input)?;
-    let (status, diagnostics) =
-        crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(&mut command)
-            .map_err(|error| format!("starting burn-track extraction: {error}"))?
-            .output_to_bounded_file(tmp, MAX_BURN_BYTES)
-            .await
-            .map_err(|error| format!("waiting for burn-track extraction: {error}"))?;
+    let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(
+        &mut command,
+        crate::process_control::ChildWork::background("burned-subtitle track extraction"),
+    )
+    .map_err(|error| format!("starting burn-track extraction: {error}"))?
+    .output_to_bounded_file(tmp, MAX_BURN_BYTES)
+    .await
+    .map_err(|error| format!("waiting for burn-track extraction: {error}"))?;
     if !status.success() {
         return Err(format!(
             "burn-track extraction failed: {}",
@@ -2525,9 +2529,12 @@ async fn extract_vtt_window(
         .kill_on_drop(true);
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(&source.handle, &input)?;
-    let out = crate::process_control::output_job_owned(&mut command)
-        .await
-        .map_err(|e| format!("spawning subtitle window extraction: {e}"))?;
+    let out = crate::process_control::output_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::realtime("subtitle window for the playhead"),
+    )
+    .await
+    .map_err(|e| format!("spawning subtitle window extraction: {e}"))?;
     if !out.status.success() {
         let why = String::from_utf8_lossy(&out.stderr);
         return Err(format!("subtitle window extraction failed: {}", why.trim()));
@@ -2833,9 +2840,12 @@ async fn extract_vtt(tmp: &Path, file: &MediaFile, index: i64) -> Result<(), Str
         .kill_on_drop(true);
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(&source.handle, &input)?;
-    let out = crate::process_control::output_job_owned(&mut command)
-        .await
-        .map_err(|e| format!("spawning subtitle extraction: {e}"))?;
+    let out = crate::process_control::output_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("subtitle extraction"),
+    )
+    .await
+    .map_err(|e| format!("spawning subtitle extraction: {e}"))?;
     if !out.status.success() {
         let why = String::from_utf8_lossy(&out.stderr);
         return Err(format!("subtitle extraction failed: {}", why.trim()));

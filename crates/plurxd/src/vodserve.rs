@@ -7434,6 +7434,7 @@ async fn spawn_generation(
                 progress: crate::producer_spawn::Progress::None,
                 descriptors,
                 env: &[],
+                work: crate::process_control::ChildWork::realtime("VOD transcode"),
             },
         ) {
             Ok(spawned) => spawned,
@@ -8527,6 +8528,7 @@ async fn regenerate_init_head(
             progress: crate::producer_spawn::Progress::None,
             descriptors,
             env: &[],
+            work: crate::process_control::ChildWork::realtime("VOD init segment"),
         },
     )
     .map_err(|error| {

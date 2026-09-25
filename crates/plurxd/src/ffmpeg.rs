@@ -186,12 +186,15 @@ pub(crate) struct BoundedDiagnosticChild {
 }
 
 impl BoundedDiagnosticChild {
-    pub fn spawn(command: &mut tokio::process::Command) -> std::io::Result<Self> {
+    pub fn spawn(
+        command: &mut tokio::process::Command,
+        work: crate::process_control::ChildWork,
+    ) -> std::io::Result<Self> {
         command
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let (mut child, child_job) = crate::process_control::spawn_job_owned(command)?;
+        let (mut child, child_job) = crate::process_control::spawn_job_owned(command, work)?;
         let stderr = child.stderr.take();
         Ok(Self {
             child: Some(child),
@@ -206,12 +209,15 @@ impl BoundedDiagnosticChild {
     /// Spawn a child whose media output is owned by the daemon. The caller
     /// must consume it with [`Self::output_to_bounded_file`]; no subprocess
     /// ever receives a cache pathname it can grow past the enforced bound.
-    pub fn spawn_piped_output(command: &mut tokio::process::Command) -> std::io::Result<Self> {
+    pub fn spawn_piped_output(
+        command: &mut tokio::process::Command,
+        work: crate::process_control::ChildWork,
+    ) -> std::io::Result<Self> {
         command
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let (mut child, child_job) = crate::process_control::spawn_job_owned(command)?;
+        let (mut child, child_job) = crate::process_control::spawn_job_owned(command, work)?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         Ok(Self {
@@ -405,6 +411,7 @@ pub(crate) async fn held_source_probe_json(source: &std::fs::File) -> Result<Str
         ENGINE_PROBE_TIMEOUT,
         ENGINE_PROBE_MAX_BYTES,
         "engine probe",
+        crate::process_control::ChildWork::background("held source probe"),
     )
     .await?;
     Ok(stamped_with_this_reporter(document).await)
@@ -434,6 +441,7 @@ pub(crate) async fn held_source_index_probe_json(source: &std::fs::File) -> Resu
         Duration::from_secs(30),
         1024 * 1024,
         "index metadata probe",
+        crate::process_control::ChildWork::background("fragment index metadata probe"),
     )
     .await?;
     // Stamped for the same reason the engine probe is: the two entry points
@@ -541,10 +549,11 @@ pub(crate) async fn held_source_packet_probe_json(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    let (mut child, _child_job) =
-        crate::process_control::spawn_job_owned(&mut command).map_err(|error| {
-            HeldPacketProbeError::Process(format!("spawning packet probe: {error}"))
-        })?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("fragment index packet probe"),
+    )
+    .map_err(|error| HeldPacketProbeError::Process(format!("spawning packet probe: {error}")))?;
     let stdout = child.stdout.take().ok_or_else(|| {
         HeldPacketProbeError::Process("packet probe started without stdout".to_owned())
     })?;
@@ -627,6 +636,7 @@ async fn held_source_probe_json_with_limits(
     timeout: Duration,
     max_bytes: u64,
     label: &'static str,
+    work: crate::process_control::ChildWork,
 ) -> Result<String, String> {
     #[cfg(windows)]
     {
@@ -653,7 +663,8 @@ async fn held_source_probe_json_with_limits(
             "-show_chapters",
         ]);
         command.arg(&source_path);
-        let output = bounded_command_output_with_limits(command, timeout, max_bytes, label).await?;
+        let output =
+            bounded_command_output_with_limits(command, timeout, max_bytes, label, work).await?;
         if plurx_core::fs_secure::std_file_identity(source)
             .map_err(|error| format!("re-reading held source identity: {error}"))?
             != held_identity
@@ -685,7 +696,8 @@ async fn held_source_probe_json_with_limits(
             "-show_chapters",
             "/dev/fd/3",
         ]);
-        let output = bounded_command_output_with_limits(command, timeout, max_bytes, label).await?;
+        let output =
+            bounded_command_output_with_limits(command, timeout, max_bytes, label, work).await?;
         String::from_utf8(output.stdout)
             .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"))
     }
@@ -2356,6 +2368,10 @@ struct BoundedOutput {
     stderr: Vec<u8>,
 }
 
+/// Every engine probe is a capability probe nobody is waiting on.
+const ENGINE_PROBE: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::background("engine capability probe");
+
 async fn bounded_command_output(command: tokio::process::Command) -> Result<BoundedOutput, String> {
     bounded_command_output_with_timeout(command, ENGINE_PROBE_TIMEOUT).await
 }
@@ -2364,8 +2380,14 @@ async fn bounded_command_output_with_timeout(
     command: tokio::process::Command,
     timeout: Duration,
 ) -> Result<BoundedOutput, String> {
-    bounded_command_output_with_limits(command, timeout, ENGINE_PROBE_MAX_BYTES, "engine probe")
-        .await
+    bounded_command_output_with_limits(
+        command,
+        timeout,
+        ENGINE_PROBE_MAX_BYTES,
+        "engine probe",
+        ENGINE_PROBE,
+    )
+    .await
 }
 
 async fn bounded_command_output_with_limits(
@@ -2373,14 +2395,15 @@ async fn bounded_command_output_with_limits(
     timeout: Duration,
     max_bytes: u64,
     label: &'static str,
+    work: crate::process_control::ChildWork,
 ) -> Result<BoundedOutput, String> {
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, child_job) =
-        crate::process_control::spawn_job_owned(&mut command).map_err(|error| error.to_string())?;
+    let (mut child, child_job) = crate::process_control::spawn_job_owned(&mut command, work)
+        .map_err(|error| error.to_string())?;
     let stdout = child
         .stdout
         .take()
@@ -2788,7 +2811,10 @@ async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
         .kill_on_drop(true);
     tokio::time::timeout(
         Duration::from_secs(20),
-        crate::process_control::status_job_owned(&mut command),
+        crate::process_control::status_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("Dolby Vision reshape capability probe"),
+        ),
     )
     .await
     .is_ok_and(|result| result.is_ok_and(|status| status.success()))
@@ -2901,7 +2927,7 @@ pub async fn has_dovi_passthrough() -> bool {
                 .args(["-f", "null", "-"]);
             let output = tokio::time::timeout(
                 Duration::from_secs(20),
-                crate::process_control::output_job_owned(&mut command),
+                crate::process_control::output_job_owned(&mut command, crate::process_control::ChildWork::background("Dolby Vision passthrough capability probe")),
             )
             .await;
             let Ok(Ok(output)) = output else {
@@ -2977,7 +3003,12 @@ pub async fn has_hdr10_passthrough() -> bool {
                 .args(["-f", "null", "-"]);
             let output = tokio::time::timeout(
                 Duration::from_secs(20),
-                crate::process_control::output_job_owned(&mut command),
+                crate::process_control::output_job_owned(
+                    &mut command,
+                    crate::process_control::ChildWork::background(
+                        "HDR10 passthrough capability probe",
+                    ),
+                ),
             )
             .await;
             let Ok(Ok(output)) = output else {
@@ -3037,7 +3068,12 @@ pub async fn has_hdr10_passthrough_qsv() -> bool {
                 .args(["-f", "null", "-"]);
             let passed = tokio::time::timeout(
                 Duration::from_secs(20),
-                crate::process_control::status_job_owned(&mut command),
+                crate::process_control::status_job_owned(
+                    &mut command,
+                    crate::process_control::ChildWork::background(
+                        "HDR10 QSV passthrough capability probe",
+                    ),
+                ),
             )
             .await
             .is_ok_and(|result| result.is_ok_and(|status| status.success()));
@@ -3092,7 +3128,7 @@ pub async fn has_dovi_passthrough_with(encoder: Encoder) -> bool {
                 .args(["-f", "null", "-"]);
             let passed = tokio::time::timeout(
                 Duration::from_secs(20),
-                crate::process_control::status_job_owned(&mut command),
+                crate::process_control::status_job_owned(&mut command, crate::process_control::ChildWork::background("Dolby Vision passthrough capability probe")),
             )
                 .await
                 .is_ok_and(|result| result.is_ok_and(|status| status.success()));
@@ -3135,7 +3171,10 @@ async fn dovi_probe_output(file: &MediaFile, apply: bool) -> Result<Vec<String>,
         .args(["-f", "framemd5", "-"]);
     let output = tokio::time::timeout(
         Duration::from_secs(30),
-        crate::process_control::output_job_owned(&mut command),
+        crate::process_control::output_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("Dolby Vision pixel probe"),
+        ),
     )
     .await
     .map_err(|_| "Dolby Vision pixel probe timed out".to_owned())?
@@ -3323,7 +3362,12 @@ async fn probe_burst() -> Result<Duration, String> {
     let start = std::time::Instant::now();
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     command.args(args);
-    match crate::process_control::output_job_owned(&mut command).await {
+    match crate::process_control::output_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("ffmpeg read-rate burst probe"),
+    )
+    .await
+    {
         Ok(out) if out.status.success() => Ok(start.elapsed()),
         Ok(out) => Err(format!("exited with {}", out.status)),
         Err(error) => Err(error.to_string()),
@@ -3349,9 +3393,12 @@ mod tests {
             .args(["-hide_banner", "-loglevel", "error"])
             .args(["-f", "lavfi", "-i", "testsrc=size=64x64:rate=1:duration=2"])
             .args(["-frames:v", "2", "-an", "-f", "framemd5", "-"]);
-        let output = crate::process_control::output_job_owned(&mut command)
-            .await
-            .expect("framemd5 probe output");
+        let output = crate::process_control::output_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("test"),
+        )
+        .await
+        .expect("framemd5 probe output");
         assert!(
             output.status.success(),
             "framemd5 probe failed: {}",
@@ -4793,7 +4840,11 @@ mod tests {
             "-c",
             "i=0; while [ $i -lt 4096 ]; do printf '0123456789abcdef0123456789abcdef' >&2; i=$((i + 1)); done; printf 'terminal extractor error' >&2; printf 'discarded stdout'; exit 7",
         ]);
-        let mut owner = BoundedDiagnosticChild::spawn(&mut command).expect("noisy child");
+        let mut owner = BoundedDiagnosticChild::spawn(
+            &mut command,
+            crate::process_control::ChildWork::background("test"),
+        )
+        .expect("noisy child");
         let (reaped_tx, reaped_rx) = tokio::sync::oneshot::channel();
         owner.reaped = Some(reaped_tx);
         let (status, tail) = tokio::time::timeout(Duration::from_secs(5), owner.output())
@@ -4816,8 +4867,11 @@ mod tests {
             "-c",
             "while :; do printf '0123456789abcdef'; printf 'extracting' >&2; done",
         ]);
-        let mut owner =
-            BoundedDiagnosticChild::spawn_piped_output(&mut command).expect("piped child");
+        let mut owner = BoundedDiagnosticChild::spawn_piped_output(
+            &mut command,
+            crate::process_control::ChildWork::background("test"),
+        )
+        .expect("piped child");
         let (reaped_tx, reaped_rx) = tokio::sync::oneshot::channel();
         owner.reaped = Some(reaped_tx);
         let error = tokio::time::timeout(
@@ -4848,8 +4902,11 @@ mod tests {
             "-c",
             "while :; do printf 'blocked stdout'; printf 'extracting' >&2; done",
         ]);
-        let mut owner =
-            BoundedDiagnosticChild::spawn_piped_output(&mut command).expect("piped child");
+        let mut owner = BoundedDiagnosticChild::spawn_piped_output(
+            &mut command,
+            crate::process_control::ChildWork::background("test"),
+        )
+        .expect("piped child");
         let (reaped_tx, reaped_rx) = tokio::sync::oneshot::channel();
         owner.reaped = Some(reaped_tx);
         let error = tokio::time::timeout(
@@ -4868,7 +4925,11 @@ mod tests {
     async fn cancelling_bounded_extraction_transfers_exact_child_to_reaper() {
         let mut command = tokio::process::Command::new("/bin/sh");
         command.args(["-c", "while :; do printf 'waiting extractor' >&2; done"]);
-        let mut owner = BoundedDiagnosticChild::spawn(&mut command).expect("noisy pending child");
+        let mut owner = BoundedDiagnosticChild::spawn(
+            &mut command,
+            crate::process_control::ChildWork::background("test"),
+        )
+        .expect("noisy pending child");
         let pid = owner
             .child
             .as_ref()

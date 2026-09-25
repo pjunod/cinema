@@ -675,11 +675,14 @@ async fn demux_track(file: &MediaFile, index: i64, sup: &Path) -> Result<(), Ove
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(&source.handle, &input)
         .map_err(OverlayError::Unavailable)?;
-    let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn(&mut command)
-        .map_err(|error| OverlayError::Unavailable(format!("starting PGS demux: {error}")))?
-        .output()
-        .await
-        .map_err(|error| OverlayError::Unavailable(format!("waiting for PGS demux: {error}")))?;
+    let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn(
+        &mut command,
+        crate::process_control::ChildWork::background("PGS subtitle track demux"),
+    )
+    .map_err(|error| OverlayError::Unavailable(format!("starting PGS demux: {error}")))?
+    .output()
+    .await
+    .map_err(|error| OverlayError::Unavailable(format!("waiting for PGS demux: {error}")))?;
     if !status.success() {
         return Err(OverlayError::Unavailable(format!(
             "PGS demux failed: {}",

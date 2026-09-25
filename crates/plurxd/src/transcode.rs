@@ -1814,8 +1814,10 @@ impl ObservedFfmpeg {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // the priority class joined seven existing inputs
 fn spawn_ffmpeg(
     args: &[String],
+    work: crate::process_control::ChildWork,
     encoder_label: &'static str,
     session_id: &str,
     progress_observer: FfmpegProgressObserver,
@@ -1838,6 +1840,7 @@ fn spawn_ffmpeg(
             // The muxer's uploads go to a loopback endpoint. An inherited
             // `http_proxy` would send them, token and all, to the proxy.
             env: &[("http_proxy", std::ffi::OsStr::new(""))],
+            work,
         },
     )?;
     // Built before the progress observer is moved into its own task: the sink
@@ -1910,6 +1913,7 @@ fn spawn_ffmpeg(
 /// progress evidence.
 fn spawn_ffmpeg_pipe(
     args: &[String],
+    work: crate::process_control::ChildWork,
     session_id: &str,
     progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
@@ -1929,6 +1933,7 @@ fn spawn_ffmpeg_pipe(
             progress: crate::producer_spawn::Progress::Stderr,
             descriptors,
             env: &[("http_proxy", std::ffi::OsStr::new(""))],
+            work,
         },
     )?;
     let reader = Some({
@@ -4073,6 +4078,7 @@ async fn execute_prepublication_transcode_retry(
             .spawn_and_install_prepublication_child(producer_attempt, || {
                 spawn_ffmpeg(
                     retry.args.as_ref(),
+                    crate::process_control::ChildWork::realtime("playback transcode"),
                     retry.encoder.label(),
                     sid,
                     FfmpegProgressObserver::rolling(
@@ -4224,6 +4230,7 @@ async fn execute_prepublication_copy_retry(
             .spawn_and_install_prepublication_child(producer_attempt, || {
                 spawn_ffmpeg(
                     retry.args.as_ref(),
+                    crate::process_control::ChildWork::realtime("playback copy HLS"),
                     "copy",
                     sid,
                     FfmpegProgressObserver::rolling(
@@ -9589,7 +9596,10 @@ pub(crate) async fn probe_media_origin(source_path: &std::path::Path, start_seco
         tracing::warn!(start_seconds, %error, "media-origin source changed before probe");
         return start_seconds;
     }
-    let probe = crate::process_control::output_job_owned(&mut command);
+    let probe = crate::process_control::output_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::realtime("playback start media probe"),
+    );
     let Ok(Ok(out)) = tokio::time::timeout(MEDIA_ORIGIN_PROBE_TIMEOUT, probe).await else {
         tracing::warn!(
             start_seconds,
@@ -18443,6 +18453,7 @@ impl TranscodeManager {
             let generation = progress.begin_attempt();
             let (mut child, _child_job, diagnostics) = spawn_ffmpeg(
                 &args,
+                crate::process_control::ChildWork::background("pre-transcode cache producer"),
                 encoder.label(),
                 hash,
                 FfmpegProgressObserver::offline(Arc::clone(&progress), generation),
@@ -22223,6 +22234,7 @@ impl TranscodeManager {
             .spawn_and_install_prepublication_child(generation, || {
                 spawn_ffmpeg(
                     &args,
+                    crate::process_control::ChildWork::realtime("playback transcode"),
                     encoder.label(),
                     &session_id,
                     FfmpegProgressObserver::rolling(
@@ -22810,6 +22822,7 @@ impl TranscodeManager {
                 .spawn_and_install_prepublication_pipe_child(generation, || {
                     spawn_ffmpeg_pipe(
                         &initial_args,
+                        crate::process_control::ChildWork::realtime("playback transcode"),
                         &session_id,
                         FfmpegProgressObserver::rolling(
                             Arc::clone(&progress),
@@ -22845,6 +22858,7 @@ impl TranscodeManager {
                 .spawn_and_install_prepublication_child(generation, || {
                     spawn_ffmpeg(
                         &initial_args,
+                        crate::process_control::ChildWork::realtime("playback copy HLS"),
                         "copy",
                         &session_id,
                         FfmpegProgressObserver::rolling(

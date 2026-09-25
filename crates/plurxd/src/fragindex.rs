@@ -1790,7 +1790,10 @@ async fn build_with_args(
     }
     #[cfg(not(windows))]
     let _ = source_handoff;
-    let (mut child, _child_job) = match crate::process_control::spawn_job_owned(&mut command) {
+    let (mut child, _child_job) = match crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("fragment index"),
+    ) {
         Ok(owned) => owned,
         Err(error) => {
             let transient = matches!(

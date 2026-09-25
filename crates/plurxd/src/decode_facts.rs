@@ -2310,16 +2310,30 @@ impl ProbeExecutionSupervisor {
     }
 }
 
+/// Every held decode-fact probe: a capability probe nobody is waiting on.
+const DECODE_FACT_PROBE: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::background("decode-fact probe");
+
 #[cfg(unix)]
 async fn spawn_configured_probe(
     mut command: tokio::process::Command,
     mut supervisor: ProbeExecutionSupervisor,
-) -> Result<(tokio::process::Child, ProbeExecutionSupervisor), DecodeFactError> {
+) -> Result<
+    (
+        tokio::process::Child,
+        crate::process_control::ChildJob,
+        ProbeExecutionSupervisor,
+    ),
+    DecodeFactError,
+> {
     tokio::task::spawn_blocking(move || {
-        let spawned = command.spawn();
+        // `configure_probe_execution` already registered the priority ahead
+        // of its own exec-from-`pre_exec`; the launcher's second registration
+        // lands after that closure and never runs.
+        let spawned = crate::process_control::spawn_job_owned(&mut command, DECODE_FACT_PROBE);
         supervisor.parent_after_spawn();
         match spawned {
-            Ok(child) => Ok((child, supervisor)),
+            Ok((child, job)) => Ok((child, job, supervisor)),
             Err(error) => {
                 let _ = supervisor.finish();
                 Err(DecodeFactError::Spawn(error.to_string()))
@@ -2468,6 +2482,9 @@ fn configure_probe_execution(
     let supervisor_receiver_fd = production_supervisor
         .as_ref()
         .map(LinuxProbeExecSupervisor::child_receiver_fd);
+    // Before the closure below: it execs the probe from inside itself, so a
+    // `pre_exec` registered after it (the launcher's) never runs.
+    crate::process_control::priority::apply(command, DECODE_FACT_PROBE.class);
     unsafe {
         command.pre_exec(move || {
             start_probe_session()?;
@@ -3109,7 +3126,8 @@ async fn probe_version_with_deadline_on(
             &configured_path,
             &arguments,
         )?;
-        let (mut child, mut supervisor) = spawn_configured_probe(command, supervisor).await?;
+        let (mut child, _child_job, mut supervisor) =
+            spawn_configured_probe(command, supervisor).await?;
         let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
         let session = ProbeSessionGuard::new(process_group);
         #[cfg(target_os = "linux")]
@@ -3225,8 +3243,9 @@ async fn probe_version(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
+    let (mut child, _child_job) =
+        crate::process_control::spawn_job_owned(&mut command, DECODE_FACT_PROBE)
+            .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
     let stdout = child.stdout.take().ok_or(DecodeFactError::MissingPipe)?;
     let outcome = tokio::time::timeout(VERSION_DEADLINE, async {
         tokio::join!(read_bounded(stdout, MAX_VERSION_BYTES), child.wait())
@@ -3865,7 +3884,8 @@ async fn collect_idet_verdict(
         probe.executable(),
         &arguments,
     )?;
-    let (mut child, mut supervisor) = spawn_configured_probe(command, supervisor).await?;
+    let (mut child, _child_job, mut supervisor) =
+        spawn_configured_probe(command, supervisor).await?;
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
     let session = ProbeSessionGuard::new(process_group);
     #[cfg(target_os = "linux")]
@@ -4035,7 +4055,8 @@ async fn collect(
         probe.executable(),
         &arguments,
     )?;
-    let (mut child, mut supervisor) = spawn_configured_probe(command, supervisor).await?;
+    let (mut child, _child_job, mut supervisor) =
+        spawn_configured_probe(command, supervisor).await?;
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
     let session = ProbeSessionGuard::new(process_group);
     #[cfg(target_os = "linux")]
@@ -4314,8 +4335,9 @@ async fn collect(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
+    let (mut child, _child_job) =
+        crate::process_control::spawn_job_owned(&mut command, DECODE_FACT_PROBE)
+            .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
     let stdout = child.stdout.take().ok_or(DecodeFactError::MissingPipe)?;
     let stderr = child.stderr.take().ok_or(DecodeFactError::MissingPipe)?;
     let remaining = launch_deadline.saturating_duration_since(std::time::Instant::now());
@@ -4531,6 +4553,29 @@ mod tests {
         let film = legacy_ordinal_facts(&json, identity('c'), 7, Some(&catalog)).expect("film");
         assert_eq!(film.input_video_stream(), 7);
         assert_eq!(film.dynamic_range(), Some("dolby_vision"));
+    }
+
+    /// Plan P-02 §3.2: the probe execs from inside its own `pre_exec`, so a
+    /// closure registered after it never runs. The child priority must be
+    /// registered first; the launcher's own registration lands after it.
+    /// (The exec-ordering test in `process::priority` shows both outcomes.)
+    #[test]
+    fn the_child_priority_is_registered_before_the_probe_execs_from_pre_exec() {
+        let source = include_str!("decode_facts.rs");
+        let configure = source
+            .find("fn configure_probe_execution(")
+            .expect("configure_probe_execution");
+        let body = &source[configure..];
+        let apply = body
+            .find("priority::apply(command, DECODE_FACT_PROBE.class)")
+            .expect("configure_probe_execution registers the child priority");
+        let exec = body
+            .find("command.pre_exec(move ||")
+            .expect("the closure that execs the probe");
+        assert!(
+            apply < exec,
+            "the priority must be registered before the closure that execs"
+        );
     }
 
     #[test]

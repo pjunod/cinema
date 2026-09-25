@@ -2028,8 +2028,11 @@ async fn run_chapter_probe(path: &Path) -> Result<Vec<serde_json::Value>, Chapte
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(&source, &input)
         .map_err(|_| ChapterProbeFailure::Failed)?;
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|_| ChapterProbeFailure::Failed)?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::realtime("chapter list probe"),
+    )
+    .map_err(|_| ChapterProbeFailure::Failed)?;
     let stdout = child.stdout.take().ok_or(ChapterProbeFailure::Failed)?;
     let mut bytes = Vec::new();
     stdout
@@ -3457,6 +3460,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
             },
             descriptors,
             env: &[],
+            work: crate::process_control::ChildWork::realtime("playback remux"),
         },
     )
     .map_err(ApiError::Internal)?;

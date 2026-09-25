@@ -3488,9 +3488,15 @@ async fn install_decoder_diagnostic_policy(ffmpeg: &str) {
 /// First line of `ffmpeg -version` (e.g. "ffmpeg version 6.1.1 …"), if the
 /// binary runs at all. Purely informational, for the settings page.
 async fn ffmpeg_version(bin: &str) -> Option<String> {
-    let out = crate::bounded_process::output(bin, &["-version"], Duration::from_secs(5), 64 * 1024)
-        .await
-        .ok()?;
+    let out = crate::bounded_process::output(
+        bin,
+        &["-version"],
+        Duration::from_secs(5),
+        64 * 1024,
+        crate::process_control::ChildWork::background("ffmpeg version probe"),
+    )
+    .await
+    .ok()?;
     if !out.status.success() {
         return None;
     }
