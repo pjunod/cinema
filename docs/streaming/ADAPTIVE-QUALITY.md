@@ -30,7 +30,7 @@ not a rebuild.
 | Piece | Where | State |
 |---|---|---|
 | Rung parameter | `POST /files/:id/hls/sessions` body `height` (clamped 144–2160); omitted = Auto, resolved server-side | done |
-| Height → bitrate ladder | `bitrate_for_height()` in `plurxd/src/transcode.rs` (2160→20 Mb/s, 1080→8, 720→4, 480→2, else 1.2) | done |
+| Height → bitrate ladder | `bitrate_for_height()` in `plurxd/src/transcode.rs` (2160→20 Mb/s, 1080→8, 720→4, 480→2, 360→1.2, 240→0.5, 144→0.1) | done |
 | Segment-aligned keyframes | `-force_key_frames expr:gte(t,n_forced*SEGMENT_SECONDS)` + `hls_time SEGMENT_SECONDS` in `hls_args` (2 s since PERF-PLAN §4.4) | done |
 | Mid-stream session restart | the seek and audio-switch paths already call `hls/start?start=…` and re-attach via `attachHls()` | done |
 | Never upscale | `video_filters()` refuses to scale above source height | done |
@@ -59,6 +59,8 @@ rungs, and the player builds both its menu and Auto policy from those rows.
 | 720p | 720 | 4 Mb/s | AAC 160 kb/s | 4.2 Mb/s |
 | 480p | 480 | 2 Mb/s | AAC 160 kb/s | 2.2 Mb/s |
 | 360p | 360 | 1.2 Mb/s | AAC 160 kb/s | 1.4 Mb/s |
+| 240p | 240 | 500 kb/s | AAC 160 kb/s | 660 kb/s |
+| 144p | 144 | 100 kb/s | AAC 160 kb/s | 260 kb/s |
 
 Rungs above the source height are dropped (a 720p file offers 720p and below).
 Direct play or remux remains the first choice at 4K, but codec incompatibility
@@ -95,7 +97,7 @@ ladder with nominal and advertised-peak kb/s. The advertised per-rung
 bandwidth covers the *measured* peak, not the nominal target.
 
 *Client*: complete. The player consumes the server ladder instead of a
-hardcoded quality list, so 360p and any later server rung appear without a
+hardcoded quality list, so 360p, 240p, 144p and any later server rung appear without a
 second client edit. The menu, persistence, restart machinery, active rung, and
 switch reason all use that one response.
 
@@ -276,10 +278,10 @@ track change resets the budget; a 400 (bad request) fires an unbound retry
 with a fresh request id; and `quality_auto: true` is sent for an Auto viewer
 with a burned subtitle so the server does not make that session sticky).
 
-The floor is the predecessor's own rung, not 360. Auto is not
-ladder-constrained below 360 — a sub-360 source resolves there, and a starved
-network prior deliberately settles at `MIN_HEIGHT` — so a way *down* must never
-answer such a session with a higher rung.
+The adaptive ladder now reaches the enforced `MIN_HEIGHT` of 144p. At that
+floor, a stall reopen repeats 144p; at 240p, it can step to 144p. An unprobed
+height of `0` normalizes to `MIN_HEIGHT`. The client-owned retry budget still
+decides when repeated floor attempts end.
 
 **Stepping follows the viewer's quality choice, not the presence of `height`.**
 The two are different questions: a subtitle burn and Quality = Original both

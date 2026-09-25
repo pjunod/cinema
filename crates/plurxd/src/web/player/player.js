@@ -435,6 +435,9 @@ function createHlsStartupLoader(StockLoader,episode){
           const player=episode.player;
           if(!hlsStartupCurrent(player,episode)
             ||this.plurxIntentGeneration!==(player.controlIntentGeneration||0)) return;
+          // Error bodies can also arrive in several progress chunks. A 503
+          // must never become the bandwidth evidence for an Auto downshift.
+          if(!(xhr.status>=200&&xhr.status<300)) return;
           const loaded=Number(event&&event.loaded),now=performance.now();
           if(!(loaded>0)) return;
           const previous=this.plurxMediaProgress;

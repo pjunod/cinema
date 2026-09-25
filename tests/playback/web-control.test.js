@@ -6408,14 +6408,14 @@ async function vendoredHlsStartupTests(){
       "let PLAYER={hls,mediaAttachment:attachment,controlIntentGeneration:1,abr:{recentEstimateKbps:null,recentEstimateAtMs:null}};",
       "const episode={player:PLAYER,attachment,mediaAttachment:attachment,hls,state:'presenting',loaders:new Set()};PLAYER.hlsStartup=episode;",
       "class StockLoader{constructor(){}load(context,config,callbacks){this.context=context;this.callbacks=callbacks;return this.openAndSendXhr(context.xhr,context,config);}openAndSendXhr(xhr){xhr.onprogress=()=>{xhr.stockProgress=(xhr.stockProgress||0)+1;};}abort(){}destroy(){}}",
-      "class FakeXHR{constructor(){this.listeners={};}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});if(this.listeners.progress)this.listeners.progress({loaded});}}",
+      "class FakeXHR{constructor(status=200){this.status=status;this.listeners={};}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});if(this.listeners.progress)this.listeners.progress({loaded});}}",
       shippedSource("playbackAttemptTerminallyStopped"),
       shippedSource("hlsStartupCurrent"),
       shippedSource("hlsStartupManifestRequest"),
       shippedSource("createHlsStartupLoader"),
       "const Loader=createHlsStartupLoader(StockLoader,episode);const loader=new Loader({});",
       "const xhr=new FakeXHR();loader.load({xhr,frag:{type:'main',duration:2}}, {}, {});",
-      "return {xhr,player:PLAYER,setNow:value=>{now=value;},manifest(){const x=new FakeXHR();loader.load({xhr:x,type:'manifest',url:'/index.m3u8'}, {}, {});return x;}};",
+      "return {xhr,player:PLAYER,setNow:value=>{now=value;},rejected(status){const x=new FakeXHR(status);loader.load({xhr:x,frag:{type:'main',duration:2}}, {}, {});return x;},manifest(){const x=new FakeXHR();loader.load({xhr:x,type:'manifest',url:'/index.m3u8'}, {}, {});return x;}};",
     ].join("\n"))(require("../../crates/plurxd/src/web/playback-policy.js"));
     sample.xhr.progress(20_000);
     sample.setNow(1_000);
@@ -6427,8 +6427,16 @@ async function vendoredHlsStartupTests(){
     assert.equal(sample.player.abr.recentEstimateAtMs,1_600);
     assert.equal(sample.player.abr.recentEstimateSource,'progress');
     assert.equal(sample.xhr.stockProgress,3,"hls.js keeps its own progress accounting");
+    for(const status of [0,503]){
+      const rejected=sample.rejected(status);
+      rejected.progress(20_000);
+      sample.setNow(status===0?3_200:4_800);
+      rejected.progress(140_000);
+      assert.equal(sample.player.abr.recentEstimateAtMs,1_600,
+        `HTTP ${status} progress must not become bandwidth evidence`);
+    }
     sample.player.controlIntentGeneration=2;
-    sample.setNow(3_300);
+    sample.setNow(5_000);
     sample.xhr.progress(200_000);
     assert.equal(sample.player.abr.recentEstimateKbps,300,"a superseded intent cannot overwrite throughput");
     assert.equal(sample.manifest().listeners.progress,undefined,"manifest bytes are not media throughput");
