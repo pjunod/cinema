@@ -1,8 +1,20 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-24 · Kept current by the working agent in the same
+**Updated:** 2026-09-25 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## P-02 M3: a priority class for every child process
+
+**Branch `plan/P-02-m3`, draft pull request; not merged, nothing deployed.**
+Paul's go of 2026-09-25: every child starts through one launcher, playback,
+VOD and Live TV as realtime (nice 5) and scans, probes and extraction as
+background (nice 15), with Activity → Processes and a pidfd-safe Stop for
+admins, and `/metrics` counts children by class. A source census and
+clippy's `disallowed-methods` keep every spawn on the launcher. Outstanding:
+the realtime cadence measurement on a busy media host (post-merge), and M4
+(unit hardening plus `OOMScoreAdjust=-500`), whose steps are written.
+Record: §3.2.2 of [the P-02 plan](docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md).
 
 ## Watch view: menus and Playback info escape the picture; the picture goes under the header
 
@@ -313,29 +325,6 @@ example: `live_tv.rs:7403` already pipes stderr; `bounded_process::output` is
 the better primitive for scan probes than the one the review named; the guide
 is cloned three times per DVR tick, not two). Astra reviews the plans next.
 
-## Architecture review, revision 3 — Astra's review merged
-
-**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-revised in place again.** Astra's independent review was written against the
-first draft; revision 3 keeps revision 2's corrected remedies and merges
-everything Astra added that the first draft had not found, each re-verified in
-the tree: an unbounded, unkillable scan probe (`scan/probe.rs:190-215`, C12);
-decode-fact lookups that hash three executable-sized inputs under a one-permit
-gate before consulting the cache and fall back to catalogue facts on any error
-(C13); item-detail badges that unpack whole fragment indexes and `stat` every
-media path with no deadline (C14); telemetry that spawns a task and a
-consistent settings read per event with no bounded queue (C15); DVR fan-out
-that writes sinks sequentially with the lock outside the timeout (L10); HDR10
-HEVC output limited to software and QSV by design (Q12); no native adaptive
-quality and dormant stall-ticket plumbing (§3.8); and two policy tests red on
-`main` — `web-policy.test.js:6007` (a stale call count) and
-`web-control.test.js:3164` under Node 22 — both reproduced here (§4.8).
-Astra's interlace experiment was re-run on this container's ffmpeg 6.1.1 with
-identical counts: the current CPU chain emits 90/90 combed frames tagged
-progressive. The seek-scratch reservation finding (C16) is a tracking item
-for the existing repair. §9 records what was run and what was not. No code
-changed.
-
 ## Older efforts — where each one now lives
 
 Sections older than those above moved verbatim on 2026-09-24 into the
@@ -343,6 +332,7 @@ status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-20 | Architecture review, revision 3 — Astra's review merged | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-20 | Architecture review, revision 2 — after the adversarial assessment | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-20 | End-to-end architecture review — ten verified do-first items, ranked | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-19 | The web app is a tree, and the bytes are the same ones | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |

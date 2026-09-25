@@ -336,6 +336,12 @@ Rules with reasons:
 
 ### 3.2.1 Flagged, not taken: the child priorities need a decision first
 
+**M3 decided by Paul 2026-09-25: go.** The seam is (b), one launcher, with
+the rows below migrated onto it first and an audit over every production
+spawn, as this section asked; the classification in §3.2.2 was accepted with
+it. What follows is the flag as it was written, kept because §3.2.2 answers
+it point by point.
+
 The standing instruction at the head of this plan says that a step which
 seems to require changing the process-supervision contract must be stopped
 and flagged rather than decided by the executing session, and the work
@@ -461,6 +467,110 @@ What the next session needs, in order:
 2. For (b), where the registration goes relative to a caller's own
    `pre_exec` (the decode-facts path above), pinned by a test.
 3. §3.2's measurement, on a host running real sessions.
+
+### 3.2.2 As built — one launcher, a class on every child (M3, 2026-09-25)
+
+[PR #518](http://192.168.4.7:3000/noirr/plurx/pulls/518), branch `plan/P-02-m3`. Where §3.2's sketch and the code
+differ, the code is right and the reason is here.
+
+**One launcher, and a spawn cannot skip the class.**
+`plurx_core::process::spawn_job_owned(command, work)` takes a `ChildWork`
+(a `ChildClass` plus a few words of purpose) on every call, and so do
+`output_job_owned`, `status_job_owned` and `process::bounded::output`, which
+go through it. The one synchronous caller (the PGS ride-along verdict probe,
+already inside `spawn_blocking`) has `output_job_owned_blocking`, the same
+policy and registration without the async runtime. All eleven rows of
+§3.2.1's second table now start through the launcher, and so do the three
+Windows-only probes (`decode_facts.rs` `probe_version` and `collect`,
+`dv_disk.rs` `probe_bound`) that no Linux build compiles.
+
+**Two classes, not one policy.** §3.2 proposed one value for every child
+(nice 10, BE/7, `+500`). A single value would put the copy-HLS producer a
+viewer is watching at the same priority as a library-scan thumbnail, so the
+launcher has two:
+
+| Class | Who waits | `nice` | I/O | `oom_score_adj` |
+|---|---|---:|---|---:|
+| `realtime` | a viewer or a recording | 5 | best-effort 4 | 500 |
+| `background` | nobody | 15 | best-effort 7 | 800 |
+
+Realtime starts at §3.2's own fallback (5, BE/4), so playback is not the
+child that falls behind while the measurement is outstanding; background
+takes the lowest best-effort level and the higher OOM score, so the killer's
+order is background child, then playback child, then the daemon (0 on every
+observed node, §3.1.1). `nice` is a floor: a class never raises a child
+above what it would have inherited. The measurement in §3.2 still decides
+whether these values stay (§7 question 2).
+
+Realtime: playback transcode, copy HLS and remux producers, the VOD
+transcode and its init segment, the Live TV stream and its source probe, the
+playhead subtitle window, and the session-start probes a viewer waits on
+(the playback-start media probe, the chapter list, `ffprobe -version` for
+the reporter identity). Background: whole-track subtitle, burn-in and PGS
+extraction, the PGS ride-along self-test and verdict probe, decode-fact
+probes, the pre-transcode producer, encoder, decoder, Dolby Vision, HDR and
+engine capability probes, scan thumbnails, luminance probes and book covers,
+chapter thumbnails and artwork derivatives, fragment indexing, Dolby Vision
+conversion and its source probes, Live TV readiness and caption probes, and
+the library-root `find`.
+
+**The `pre_exec`.** `process::priority::apply_policy` registers one closure
+that makes raw syscalls on values computed before the fork: `getpriority` /
+`setpriority`, `ioprio_set`, and `open` / `write` / `close` of
+`/proc/self/oom_score_adj` with the decimal text formatted into a fixed
+buffer beforehand. Every result is ignored
+(`a_priority_the_kernel_refuses_never_fails_the_spawn` asks for nice −20 and
+`oom_score_adj` −1000 and still gets a running child). Linux applies all
+three, other Unix `nice` only, Windows none; the Job Object path is
+untouched and a Windows child is still listed.
+
+**Registration order.** The launcher registers its closure when it is
+called, so after any `pre_exec` the caller registered while configuring the
+command. Every such closure returns, except the decode-fact probe's, which
+installs seccomp and `execveat`s from inside itself; that caller calls
+`priority::apply` in `configure_probe_execution` before registering its
+closure, and the launcher's own registration, which lands after it, never
+runs (registering twice is harmless). The priority is
+therefore set before the seccomp filter, which needs none of those syscalls
+afterwards. `a_priority_registered_before_a_closure_that_execs_still_applies`
+shows both outcomes on a real exec (applied first: the class's nice; applied
+after: the daemon's), and
+`the_child_priority_is_registered_before_the_probe_execs_from_pre_exec` pins
+the order in `decode_facts.rs`.
+
+**The census, in two halves.**
+`process::census::every_production_spawn_goes_through_the_launcher` reads
+every source file of `plurx-core`, `plurxd`, `plurx-pgs` and
+`plurx-compat-plex`, blanks comments and literals, drops `#[cfg(test)]` items
+and every file a test-only module declares or `include!`s, and fails on a
+zero-argument `.spawn()` / `.output()` / `.status()` on a command, the same
+called as `Command::spawn(…)`, a job attached by hand, or a raw
+`fork`/`vfork`/`posix_spawn`; the only exemptions are the launcher's two
+`.spawn()`s. The typed half is root `clippy.toml`'s `disallowed-methods` for
+`Command::{spawn, output, status}` in tokio and std: each daemon crate root
+allows them under `cfg(test)` only, and the harness crate, integration
+tests, examples and `build.rs` allow them with a line saying why.
+`clippy_refuses_every_spawning_method_outside_tests` pins both.
+
+**Seen and stopped from inside the product.** Each child is registered with
+its class, purpose, program and start time until its owner drops the job.
+`/api/v1/activity/detail` carries `processes` for an admin, each row with the
+requested and the kernel-reported `nice`, I/O class and level and
+`oom_score_adj`, whether the class was applied, and whether it can be
+stopped. `DELETE /api/v1/activity/processes/{pid}` (admin) kills a listed
+child through the pidfd opened at spawn, so a reused pid cannot be hit
+(`404` unlisted, `409` without a pidfd); its owner sees an ordinary exit.
+The web Activity page draws a **Processes** table with a **Stop** per
+stoppable row (`tests/web/activity-processes.test.js`). `/metrics` adds
+`plurx_child_processes`, `plurx_child_spawns_total` and
+`plurx_child_priority_unapplied_total`, each by class (OPERATIONS.md,
+Health & metrics).
+
+**Not in M3.** `OOMScoreAdjust=-500` in `deploy/plurxd.service` (and any
+Compose `oom_score_adj`) is M4's; §4's guardrail no longer blocks it, since
+the child `pre_exec` exists, but nothing here set or validated it. §3.2's
+realtime measurement on a busy media host is outstanding; its steps are in
+the execution log.
 
 ### 3.3 Raise soft `NOFILE` at startup
 
@@ -773,6 +883,16 @@ $(pgrep ffmpeg); do cat /proc/$p/oom_score_adj; done` prints the child
 value and `/proc/$(pidof plurxd)/oom_score_adj` the daemon's; the segment
 cadence table before/after is in the PR.
 
+**Built 2026-09-25** (`claude-opus-5-5`, [PR #518](http://192.168.4.7:3000/noirr/plurx/pulls/518)), as §3.2.2
+describes, after Paul's go. The acceptance test is
+`cargo test -p plurx-core process::priority`
+(`each_class_runs_its_child_at_the_class_nice_ionice_and_oom_score` reads
+each class's child back from `/proc/<pid>/stat`, `ioprio_get` and
+`/proc/<pid>/oom_score_adj`, and checks the test process kept its own), not
+`-p plurxd child_priority`: the launcher lives in `plurx-core`. The
+`OOMScoreAdjust` half moved to M4. The media1 readback and the cadence table
+are **post-merge** evidence; the steps are in the execution log.
+
 ### 5.4 M4 — `TasksMax`/`pids_limit`, `PrivateTmp`, hardening trio
 
 The remaining table rows, each with its validation run on lab1 (the
@@ -784,6 +904,12 @@ in the PR; lab1 plays direct, copy HLS, transcode with burned text
 subtitles, and records one DVR programme under the new unit; `make
 operations-check` green with an updated unit-file text contract if one
 exists.
+
+**Not started (2026-09-25), with `OOMScoreAdjust=-500` added to it.** No
+node runs `deploy/plurxd.service` (§7 question 1), and every row's
+acceptance is a playback matrix or a GPU selection under the new unit on a
+lab VM, which a transient unit on nuc3 cannot stand in for; `TasksMax` also
+still lacks its observed peak. The steps are in the execution log.
 
 ### 5.5 M5 — jellyfin-ffmpeg 8 in CI
 
@@ -859,6 +985,8 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
    anticipated. Hosts outside those three are unchecked.
 2. **`nice`/`ioprio` values.** 10 and BE/7 are proposals; §3.2's
    measurement may settle on 5 and BE/4 or on none.
+   **As built (M3):** two classes, realtime 5 / BE 4 / `+500` and
+   background 15 / BE 7 / `+800` (§3.2.2); the measurement still decides.
 3. **Runner provisioning ownership.** The Ansible runner role lives in
    `plurx-agent`; M5's provisioning half is a PR there, referenced from the
    `ci.yml` PR.
@@ -887,3 +1015,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — **flagged, not implemented** | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | §3.2.1. §3.2's prescribed wiring (each `Command::new(ffmpeg_bin())` site plus a grep test) does not reach the producers that carry realtime playback, which spawn through a value; the seam that does is `spawn_job_owned`, which the plan's standing instruction says to stop and flag rather than change. §3.2's realtime measurement is also unreachable from here, so the `OOMScoreAdjust` row stays out under §4's guardrail. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4, M7, M8 — not started | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | M4 needs a lab VM playback matrix and a GPU-selection check under the new unit; M7's three PRs are each gated on a measurement; M8's four fuzz targets need the nightly toolchain and generated corpora. None was attempted, and nothing in the branch pretends otherwise. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review of #457 (M2, M3 flag, M6) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | Three findings, all addressed on the branch after merging main. (1) §3.2.1's claim that every child reaches `spawn_job_owned` was false. It has been re-surveyed across `plurx-core` and `plurxd`: eleven production sites spawn without it, including scan thumbnails, cover extraction, the encoder/decoder inventory, `media_pool.rs`'s `find`, the PGS ride-along self-test and the held decode-fact probes. Both M3 options now carry a migration list, and the decision stays open. `pre_exec` composition is answered: std runs every closure in registration order, checked on rustc 1.97.1. §2.2's "only `pre_exec`" claim is corrected to five. (2) The open-file raise now clamps to `kern.maxfilesperproc` on Apple targets. On `mba` (macOS 27.0) the review's `EINVAL` did not reproduce: the old code set and reported an infinite soft limit that the kernel does not enforce. `an_unlimited_hard_limit_is_clamped_to_the_platform_ceiling` fails on Linux without the clamp, and `the_soft_limit_is_raised_as_far_as_the_platform_allows` fails on `mba` without the Apple ceiling (`9223372036854775807` vs `122880`). (3) The drift step is `if: ${{ !cancelled() }}`, and `test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` fails without it. M3 is still not implemented. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — built (Paul 2026-09-25: go) | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | §3.2.2. One launcher with a `ChildWork` on every call; realtime 5 / BE 4 / `+500`, background 15 / BE 7 / `+800`; the eleven §3.2.1 rows and three Windows-only probes migrated; the decode-fact probe registers its priority before its exec-from-`pre_exec`; a source census plus clippy `disallowed-methods` over every production spawn; `processes` on `/activity/detail`, admin `DELETE /activity/processes/{pid}` through a pidfd, the web Processes table and three `/metrics` families. Built on `origin/main` @ `448e803d`; kept apart from [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) (M6 profile, M8), which it does not touch. Each behavioural hunk was reverted and its test seen to fail: the `pre_exec` (three priority tests), the pidfd kill (the stop test times out), a spawn site put back to `cmd.spawn()` (the census names `metadata/local.rs:419`), the decode-facts `apply` (its order test), the `processes` field, the `/metrics` families and the DELETE route (the HTTP test, each at its own assertion), the painter line (the web suite), and the census's lexical path resolution (without it the census reads `vodencode_tests.rs`, `include!`d from a test chunk, as production). Gate results are in the PR body. **Outstanding, post-merge (GPT):** §3.2's measurement — on media1, with three concurrent transcodes, a 4K direct play and a DVR recording, `for p in $(pgrep ffmpeg); do echo $p $(awk '{print $19}' /proc/$p/stat) $(cat /proc/$p/oom_score_adj); done` inside the container (realtime children read 5 / 500, background 15 / 800, `/proc/1` its own), the Activity page's Processes table and `curl -s localhost:32400/metrics \| grep plurx_child_` (`plurx_child_priority_unapplied_total` 0 for both classes), then each session's `http_wait_count` and the journal's segment materialisation interval with the build before this PR and with this PR; if a copy-HLS or transcode producer that kept up now falls behind, report it — the values move, not the launcher. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 — not started | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | Not separable from its evidence: no node runs the unit, and each row's acceptance needs a lab VM's playback matrix or GPU selection under the new unit. `OOMScoreAdjust=-500` joins M4. **Steps (GPT, lab VM running `deploy/install`):** (1) at peak (two transcodes, a direct play, a DVR recording) record `systemctl show plurxd -p TasksCurrent -p MemoryCurrent` and `cat /proc/$(pidof plurxd)/oom_score_adj`; (2) add `TasksMax=4096` (only if the peak is ≤ 25 % of it), `PrivateTmp=true`, `ProtectKernelTunables=true`, `RestrictSUIDSGID=true`, `LockPersonality=true` and `OOMScoreAdjust=-500` to the unit, `systemctl daemon-reload && systemctl restart plurxd`; (3) paste `systemd-analyze security plurxd` before and after; (4) play direct, copy HLS, a transcode with burned text subtitles, record one DVR programme, and confirm the GPU probe still selects QSV/VAAPI; (5) confirm `/proc/$(pidof plurxd)/oom_score_adj` is -500 while every ffmpeg reads 500 or 800. Any row that breaks playback stays out and is recorded. |
