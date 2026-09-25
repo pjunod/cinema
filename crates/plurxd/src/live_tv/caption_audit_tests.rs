@@ -16,10 +16,12 @@
 //! * the real live argv (`live_ffmpeg_command_for_input`, tuner input, fed
 //!   the fixture on stdin) run end to end into HLS segments.
 //!
-//! The software graph and the H.264 copy route run in `make unit`. Hardware
-//! encoders need the hardware and the fleet's FFmpeg; they run through the
-//! ignored `live_caption_audit_on_this_node`, which
-//! `scripts/live-tv-caption-audit` drives. What this cannot prove — the
+//! The boot probe reuses this fixture, decoder, and production graph path,
+//! publishing proof only for the exact FFmpeg build and graph that preserves
+//! both caption formats. The software graph and H.264 copy route also run in
+//! `make unit`. Hardware audits remain available through the ignored
+//! `live_caption_audit_on_this_node` driven by
+//! `scripts/live-tv-caption-audit`. What this cannot prove — the
 //! service ids real broadcasts use, and what each client shows — is the
 //! execution log's GPT prompt.
 
@@ -331,6 +333,7 @@ async fn captioned_fixture(system: &SystemInfo, directory: &Path) -> PathBuf {
     ])
     .arg(&fixture);
     media_command(&mut mux).await;
+    #[cfg(test)]
     if let Some(copy) = std::env::var_os("PLURX_CAPTION_FIXTURE_OUT") {
         tokio::fs::copy(&fixture, &copy)
             .await
@@ -626,7 +629,7 @@ async fn run_live_graph(
     a53cc_override: Option<&str>,
 ) -> GraphRun {
     let bytes = tokio::fs::read(source).await.expect("source bytes");
-    let root = crate::test_tempdir().expect("graph root");
+    let root = tempfile::tempdir().expect("graph root");
     let facts = probe_live_source(
         system,
         root.path(),
@@ -661,9 +664,14 @@ async fn run_live_graph(
         delivery.video_action, delivery.reasons
     );
     delivery.packaging = case.packaging;
-    let mut system = system.clone();
-    system.encoders.forced_idr.qsv = true;
-    system.encoders.forced_idr.nvenc = true;
+    let system = system.clone();
+    #[cfg(test)]
+    let mut system = system;
+    #[cfg(test)]
+    {
+        system.encoders.forced_idr.qsv = true;
+        system.encoders.forced_idr.nvenc = true;
+    }
     let plan = LiveTvTranscodePlan::new(&system, delivery, case.encoder, None)
         .expect("live transcode plan");
     let output = root.path().join("live");
@@ -685,6 +693,7 @@ async fn run_live_graph(
         argv[position + 1] = value.to_owned();
     }
     let mut command = tokio::process::Command::new(built.as_std().get_program());
+    #[cfg(test)]
     command.env_clear();
     for (name, value) in built.as_std().get_envs() {
         if let Some(value) = value {
@@ -772,6 +781,83 @@ async fn run_live_graph(
     }
 }
 
+/// A proof belongs to this process's FFmpeg build and this exact live graph.
+/// The startup caller publishes it only after both independent decoders match
+/// the fixture's known text and timing.
+#[derive(Clone, Debug)]
+pub(super) struct CaptionProof {
+    pub(super) encoder: String,
+    pub(super) packaging: LivePackaging,
+    pub(super) deinterlace: LiveDeinterlaceOutput,
+    pub(super) output_height: u16,
+    pub(super) services: Vec<&'static str>,
+}
+
+pub(super) async fn probe_available_graphs(system: Arc<SystemInfo>) -> Vec<CaptionProof> {
+    let root = tempfile::tempdir().expect("caption probe root");
+    let fixture = captioned_fixture(&system, root.path()).await;
+    let (cc1_truth, service1_truth) = fixture_truth();
+    let mut proofs = Vec::new();
+    for encoder in [
+        Encoder::Software,
+        Encoder::Qsv,
+        Encoder::Vaapi,
+        Encoder::Nvenc,
+        Encoder::VideoToolbox,
+    ] {
+        if !system.encoders.available(encoder) {
+            continue;
+        }
+        for packaging in [LivePackaging::Mpegts, LivePackaging::Fmp4] {
+            for deinterlace in [LiveDeinterlaceOutput::Field, LiveDeinterlaceOutput::Frame] {
+                for output_height in [720, 1080] {
+                    let case = GraphCase {
+                        encoder: Some(encoder),
+                        packaging,
+                        deinterlace,
+                        max_height: output_height,
+                    };
+                    let system = Arc::clone(&system);
+                    let fixture = fixture.clone();
+                    let result =
+                        tokio::spawn(
+                            async move { run_live_graph(&system, &fixture, case, None).await },
+                        )
+                        .await;
+                    let Ok(run) = result else {
+                        tracing::warn!(
+                            ?encoder,
+                            ?packaging,
+                            ?deinterlace,
+                            output_height,
+                            "caption graph probe failed"
+                        );
+                        continue;
+                    };
+                    let Some(track) = run.track else {
+                        tracing::warn!(?encoder, ?packaging, ?deinterlace, output_height, diagnostic = ?run.diagnostic, failure = ?run.failure, "caption graph did not publish decodable output");
+                        continue;
+                    };
+                    let cc1 = verdict(&track.cc1, &cc1_truth);
+                    let service1 = verdict(&track.service1, &service1_truth);
+                    tracing::info!(?encoder, ?packaging, ?deinterlace, output_height, frames_with_cc = track.frames_with_cc, exit = %run.status, argv = %run.argv.join(" "), cc1 = cc1.as_str(), service1 = service1.as_str(), "caption graph proof");
+                    if cc1 == CaptionVerdict::Preserved && service1 == CaptionVerdict::Preserved {
+                        proofs.push(CaptionProof {
+                            encoder: encoder.label().to_owned(),
+                            packaging,
+                            deinterlace,
+                            output_height,
+                            services: vec!["CC1", "SERVICE1"],
+                        });
+                    }
+                }
+            }
+        }
+    }
+    proofs
+}
+
+#[cfg(test)]
 fn report(label: &str, case: GraphCase, run: &GraphRun) -> (CaptionVerdict, CaptionVerdict) {
     let (cc1_truth, service1_truth) = fixture_truth();
     let (cc1, service1) = run.track.as_ref().map_or(
@@ -812,6 +898,7 @@ fn report(label: &str, case: GraphCase, run: &GraphRun) -> (CaptionVerdict, Capt
 /// FFmpeg builds before the deinterlacers learned to split `cc_data` between
 /// fields copy it onto both (measured on 5.1), which would make the copy
 /// route's *source* the defect under test.
+#[cfg(test)]
 async fn h264_captioned_source(system: &SystemInfo, fixture: &Path, directory: &Path) -> PathBuf {
     let source = directory.join("captioned-h264.ts");
     let mut encode = tokio::process::Command::new(&system.ffmpeg);
@@ -840,6 +927,7 @@ async fn h264_captioned_source(system: &SystemInfo, fixture: &Path, directory: &
     source
 }
 
+#[cfg(test)]
 fn test_system() -> SystemInfo {
     SystemInfo {
         ffmpeg: plurx_core::testfixtures::ffmpeg(),
@@ -1063,6 +1151,7 @@ fn caption_args_per_encoder_match_the_audit_table() {
 }
 
 /// The audit's and the status table's name for an encoder family.
+#[cfg(test)]
 fn audit_name(encoder: Encoder) -> &'static str {
     match encoder {
         Encoder::Software => "software",
@@ -1073,6 +1162,7 @@ fn audit_name(encoder: Encoder) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn audit_encoder(name: &str) -> Option<Option<Encoder>> {
     match name {
         "copy" => Some(None),

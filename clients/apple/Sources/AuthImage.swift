@@ -59,7 +59,7 @@ struct AuthImage: View {
             image = nil
             return
         }
-        let key = AuthImageCache.key(origin: Session.shared.origin, path: path,
+        let key = AuthImageCache.key(origin: Session.shared.credentials.origin, path: path,
                                      maxPixelSize: maxPixelSize)
         // Read memory and disk before touching the network. An expired disk
         // entry is still painted first, then refreshed in place below: launch
@@ -219,7 +219,7 @@ final class AuthImageCache: @unchecked Sendable {
     /// be decoded appropriately for both a grid card and a full-screen hero.
     func localImage(path: String, maxPixelSize: CGFloat, key: String) async -> AuthImageCacheHit? {
         if let hit = memoryHit(key) { return hit }
-        let source = Self.sourceKey(origin: Session.shared.origin, path: path)
+        let source = Self.sourceKey(origin: Session.shared.credentials.origin, path: path)
         guard let entry = await diskCache.entry(for: source) else { return nil }
         guard let decoded = Self.downsample(entry.data, maxPixelSize: maxPixelSize) else {
             await diskCache.remove(source)
@@ -254,7 +254,7 @@ final class AuthImageCache: @unchecked Sendable {
         var authorizedRequest = URLRequest(url: url)
         Session.shared.authorize(&authorizedRequest)
         let request = authorizedRequest
-        let source = Self.sourceKey(origin: Session.shared.origin, path: path)
+        let source = Self.sourceKey(origin: Session.shared.credentials.origin, path: path)
         let diskGeneration = await diskCache.currentGeneration()
         let session = session
         let downloaded = await downloads.download(source) {

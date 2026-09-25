@@ -74,8 +74,9 @@ async function liveTvAttachSession(info,index,serial,generation){
     // it or the owner did when it handed the session back.
     LIVE_TV.selected=(channel&&channel.id)||(info.channel&&info.channel.id)||LIVE_TV.selected;
     if(onPage()) liveTvShowHost(); else liveTvSetMode("dock");
-    // Ignore the wire URL: the capability only grants same-origin live resources.
-    const playlist=API+`/live-tv/sessions/${encodeURIComponent(info.session_id)}/index.m3u8`;
+    // Rebuild the same-origin master URL from the capability; its caption
+    // declarations must reach both native HLS and hls.js players.
+    const playlist=API+`/live-tv/sessions/${encodeURIComponent(info.session_id)}/master.m3u8`;
     const play=()=>{ if(owned()) video.play().then(()=>{ if(owned()) liveTvMessage("Playing live"); }).catch(()=>{ if(owned()) liveTvMessage("Ready — press Play live within 30 seconds to start audio and video."); }); };
     const failed=async (error,compatibility=null,retryFresh=false)=>{
       if(!owned()) return;
@@ -276,4 +277,3 @@ document.addEventListener("visibilitychange",()=>{
     stopLiveTv().catch(()=>{}); liveTvMessage("Live TV stopped while the page was in the background. Select a channel to resume.");
   }
 });
-

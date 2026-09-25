@@ -1289,7 +1289,8 @@ test_anchor = "testLibraryChannelExecutesPlaybackDecision"
 [[fixes]]
 id = "apple.library-channel-notification-error"
 commits = ["fbddb917"]
-source = "clients/apple/Sources/LibraryChannels.swift"
+# A-02 moved the finite notification callback into the shared item observer.
+source = "clients/apple/Sources/PlayerItemObserver.swift"
 source_anchor = "notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey]"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testLibraryChannelCapturesFailureNotificationError"
@@ -2512,6 +2513,149 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.k
 source_anchor = "fun presentedVideoProgress(positionMs: Long, sequence: Long): Boolean"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
 test_anchor = "remuxPrerollSettlesOnlyAfterRenderedVideoCrossesTheTarget"
+
+# Architecture-review integration: concrete code and existing regression anchors.
+[[fixes]]
+id = "android.library-pager-profile-isolation"
+commits = ["22e9bf66"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
+source_anchor = "private data class LibraryPagerProfile("
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/LibraryPagerProfileTest.kt"
+test_anchor = "anInvalidatedPagerCannotPublishAnOldProfilesLatePage"
+
+[[fixes]]
+id = "android.live-tv-caption-master-playback"
+commits = ["dc26817d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvApi.kt"
+source_anchor = "internal fun playbackUrl(started: LiveTvStarted): String"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
+test_anchor = "playbackUsesReturnedMasterPlaylistAndRejectsOtherOrigins"
+
+[[fixes]]
+id = "server.live-tv-caption-master-resume"
+commits = ["676b6239"]
+source = "crates/plurxd/src/live_tv.rs"
+source_anchor = "\"/api/v1/live-tv/sessions/{}/master.m3u8\","
+test = "tests/web/live-tv.test.js"
+test_anchor = "assert.equal(video.src, `/api/live-tv/sessions/${session.session_id}/master.m3u8`"
+
+# The existing test covers the initial page budget. It does not simulate a
+# filter arriving while that first fetch is suspended.
+[[fixes]]
+id = "apple.library-paging-target-merge"
+commits = ["12331fb3"]
+source = "clients/apple/Sources/LibraryView.swift"
+source_anchor = "requestedThrough = max(requestedThrough, through)"
+test = "clients/apple/Tests/LibraryMergeTests.swift"
+test_anchor = "testFirstPaintNeedsOnePagePerLibrary"
+
+[[fixes]]
+id = "apple.live-tv-validated-capability-playlist"
+commits = ["dafb4bb5"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "func playlistURL(_ playlistUrl: String, sessionId: String) throws -> URL"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testCapabilityPlaylistUsesOnlyTheServerIssuedPathForThisSession"
+
+[[fixes]]
+id = "android.video-lifecycle-retains-viewer-intent"
+commits = ["84fbc5af"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun effectivePlayWhenReady(): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackLifecycleTest.kt"
+test_anchor = "videoBackgroundPauseRetainsViewerIntentForForegroundResume"
+
+# The existing deadline regression covers the bound. It does not prove the
+# new AsyncStream waiter wakes immediately for every control answer.
+[[fixes]]
+id = "apple.control-ask-event-wakeup"
+commits = ["fe204f78"]
+source = "clients/apple/Sources/PlaybackControlSession.swift"
+source_anchor = "private static func waitForAnswerChange("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testRecoveryMonitorWakesAtTheAbsoluteControlDeadline"
+
+# The evidence sampler regression exercises the callback's ownership rule;
+# targeted strict-concurrency compilation is separately established by build.
+[[fixes]]
+id = "apple.player-targeted-concurrency"
+commits = ["3c8edc19"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func makePeriodicPlaybackObservation() -> @MainActor @Sendable () -> Void"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent"
+
+# Live input routing is covered; the new command-center owner stack still
+# needs a focused multi-player command arbitration regression.
+[[fixes]]
+id = "apple.live-remote-command-owner"
+commits = ["d40e4a40"]
+source = "clients/apple/Sources/RemoteCommandOwner.swift"
+source_anchor = "func isCurrent(_ token: UUID) -> Bool"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLiveInputRoutingMatchesTheSharedContract"
+
+[[fixes]]
+id = "apple.item-readiness-and-recovery-cadence"
+commits = ["91ffebd7"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func startRecoveryEvidencePoll()"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testRecoveryMonitorWakesAtTheAbsoluteControlDeadline"
+
+[[fixes]]
+id = "apple.shared-live-item-observation"
+commits = ["d13fbbac"]
+source = "clients/apple/Sources/LibraryChannels.swift"
+source_anchor = "private func observeItem(_ item: AVPlayerItem, channel: LibraryChannel, sequence: UInt64)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLibraryChannelProgressCallbacksFollowCurrentAttachment"
+
+[[fixes]]
+id = "android.offline-recovery-latest-network-policy"
+commits = ["a5d60db1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/offline/OfflineDownloads.kt"
+source_anchor = "val current = recovery.networkPolicy()"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/offline/OfflineDownloadsTest.kt"
+test_anchor = "uidtJobAndGrantedNetworkFollowBothPolicyTransitions"
+
+# The existing finite-HLS recovery test covers the one-attempt invariant;
+# Live TV's own HEAD liveness probe is not exercised by that test.
+[[fixes]]
+id = "android.live-tv-live-edge-recovery"
+commits = ["0bf2bc0e"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"
+source_anchor = "internal class LiveEdgeRecovery"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/BehindLiveWindowRecoveryTest.kt"
+test_anchor = "theSecondOneOnTheSameAttachDoesNothingAtAll"
+
+# Lifecycle tests establish video versus audio background behavior, not the
+# new view's keepScreenOn flag on a physical device.
+[[fixes]]
+id = "android.video-screen-awake-ownership"
+commits = ["bfb24591"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "playerView?.keepScreenOn = !plan.isAudioOnly &&"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackLifecycleTest.kt"
+test_anchor = "audioOnlyContinuesWhenActivityStops"
+
+# The fixture pins the first-paint page budget. It does not run Compose's
+# DisposableEffect that cancels a filter drive on screen exit.
+[[fixes]]
+id = "android.library-filter-drive-exit"
+commits = ["25cf70fd"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryScreen.kt"
+source_anchor = "DisposableEffect(pager) { onDispose { pager.setDriveToCompletion(false) } }"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/LibraryMergeFixtureTest.kt"
+test_anchor = "firstPaintRequestsOnePagePerLibrary"
+
+[[fixes]]
+id = "android.audio-sink-route-recovery"
+commits = ["38ece806"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackPolicy.kt"
+source_anchor = "internal fun audioSinkAction("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioSinkPolicyTest.kt"
+test_anchor = "changedRouteGetsOneNewDecisionBeforeAnyTranscodeRescue"
 
 [[fixes]]
 # 2026-09-24: the watch slot's player host outranked the sticky header and
