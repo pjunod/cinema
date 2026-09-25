@@ -149,8 +149,7 @@ docker exec plurxd grep 'Max open files' /proc/1/limits
 
 The 2026-09-25 [fleet readout](ARCHITECTURE-REVIEW-FLEET-READOUT-2026-09-25.md)
 adds C-05 marker counts, P-02 idle process limits and starting K-02/C-08/S-11
-metric samples. Its bounded 24-hour and seven-day collectors are in progress;
-none of those windows is complete yet.
+metric samples. The first 24-hour and seven-day collector windows later broke on gaps and the nuc3 outage; their exact processes were stopped with hashes retained. A new four-node current-main window remains owed after learner recovery.
 
 The 2026-09-25 [fleet/client baselines appendix](ARCHITECTURE-REVIEW-FLEET-CLIENT-BASELINES-2026-09-25.md)
 records bounded read-only observations for L-01, L-02, C-03, S-04, S-05
