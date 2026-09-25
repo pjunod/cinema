@@ -4,6 +4,23 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Watch view: menus and Playback info escape the picture; the picture goes under the header
+
+**Branch `fix/watch-popovers-escape-picture`, pull request open as a draft;
+not merged, nothing deployed.** Paul's report of 2026-09-24 on the new web
+watch view: the Playback info readout ran past the bottom of the picture and
+was cut off there, the subtitle menu ran past its top so half of it could not
+be chosen, and scrolling the page slid the picture over the main navigation.
+One cause: the slot player's host was fixed at z-index 90 with a clip-path to
+its own box. It now sits under the page's chrome (z-index 10) and clips
+nothing; `positionMenu` / `positionStats` bound each popover to the viewport
+minus the stuck chrome (`watchPopoverBounds`) and re-run on every scroll
+frame. Record: [docs/clients/WATCH-VIEW-LAYOUT.md](docs/clients/WATCH-VIEW-LAYOUT.md)
+(“The picture under the page; the menus and the readout over it”). Browser
+acceptance extended with a thirty-track menu, the Diagnostics readout and a
+scrolled-under-the-header check; passes on fine and coarse pointers.
+Native clients untouched.
+
 ## Live TV: direct play first, 5.1 stays 5.1
 
 **Branch `fix/live-tv-direct-play`, draft pull request; not merged, nothing
