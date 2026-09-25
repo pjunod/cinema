@@ -20,6 +20,16 @@ ownership, media identity, authorization, and artifact verification. If a
 change needs to weaken one of those contracts, resolve that design explicitly
 instead of treating the queue as permission to bypass it.
 
+**Build directive, 2026-09-25:** implement in an independent clone, batch proper
+commits into substantial main-bound draft PRs, and keep the linked status page
+current. M1–M3 form the first batched PR. Once a PR is complete, obtain one
+adversarial agent review, address its findings, run the fast lane, fix its
+failures and merge when green. Do not run construction-time unit suites or
+add a separate full-qualification wrapper. This explicit direction supersedes
+the older task-PR and pre-push test cadence described below. Existing compiler,
+lint and regression-declaration requirements still apply. E0–E3 remain in scope
+after the durable core; production deployment is separate from merging code.
+
 ## 1. Outcome and limits — finish a product, not a scheduler platform
 
 The first release gives every eligible worker access to one durable work

@@ -2,7 +2,7 @@
 
 **Status:** M1 foundation in progress · **Updated:** 2026-09-25 ·
 **Branch:** `codex/durable-cluster-work` ·
-**Base:** `9f9786b2e` · **PR:** not opened
+**Base:** `9f9786b2e` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -32,8 +32,9 @@ implementation is claimed; “compiled” does not mean tests passed.
 2. Keep the existing queue behavior until its replacement is complete; do not
    temporarily route accepted work to an unfinished adapter.
 3. Do not run tests during construction. The user requested final review,
-   fixes, then the fast lane. Clarification is pending because AGENTS.md
-   also requires pre-push focused tests and an older qualification receipt.
+   fixes, then the fast lane. This build follows that explicit 2026-09-25 instruction over the older
+   pre-push focused-test requirement. The dated pipeline amendment already
+   supersedes automatic full qualification; no receipt wrapper is planned.
 4. Compile and lint locally with the pinned toolchain; these do not execute
    unit tests. Keep build outputs inside this clone.
 5. No product certification flags. Developer settings display prerequisites
@@ -56,8 +57,8 @@ implementation is claimed; “compiled” does not mean tests passed.
 - 2026-09-25: foundation commit `346f4241a` passed the normal tracked hook.
   Follow-up adds independent waiter cancellation, candidate keyset pages,
   expired-cancellation cleanup and bounded attempt compaction. Ten queue
-  regression contracts are written, with no test execution yet. No PR has
-  been opened, no branch pushed, and no production node changed.
+  regression contracts are written, with no test execution yet. At that checkpoint no PR had been opened or branch pushed; no production
+  node has been changed.
 
 - 2026-09-25: bounded cleanup now preserves seven-day request receipts and
   compact domain identities independently of retired job details. Added
@@ -69,3 +70,8 @@ implementation is claimed; “compiled” does not mean tests passed.
   backend contract covers acknowledgement replay, source replacement and
   cancellation before publication. Worker integration and legacy migration
   are still outstanding; the new queue does not yet execute production work.
+
+- 2026-09-25: upkeep and publication committed as `00c5e6bac`; normal tracked
+  hook passed. Three commits pushed to draft PR #532, confirmed `draft: true`
+  through Forgejo. The draft deliberately has no final review or test receipt.
+  Scope remains the full requested programme, with the durable core first.
