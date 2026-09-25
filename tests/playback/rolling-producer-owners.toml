@@ -2014,7 +2014,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # owns a process, a recipe or a recovery decision. Seven are test fixtures:
 # four `spawn_blocking` calls that run a finite FFmpeg encode or remux to
 # completion, and three request senders joined before their tests end.
-expected_occurrences = 600
+# +5 VOD successor handoff: one production task, the handoff expiry wake (one
+# sleep-then-kick per parked predecessor, bounded by the 2 s window), and four in its tests.
+expected_occurrences = 605
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2105,7 +2107,8 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # `kill_on_drop`, its stdin is written and closed in the same `join!` that
 # awaits `wait_with_output` under a 180 s timeout, so it cannot outlive the
 # test. No producer, no session, nothing registered.
-expected_occurrences = 48
+# +1 VOD successor handoff test fixture (a running predecessor child).
+expected_occurrences = 49
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2731,7 +2734,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # playback-progress watchdog or chooses a recipe. The other ten are test-only
 # and awaited: the receiver tests' sleeps and timeouts, and in `copyseg.rs`
 # the bounded grant-wait and starvation-signal checks.
-expected_occurrences = 921
+# +8 VOD successor handoff: the 2 s handoff/reservation deadlines, the 250 ms
+# successor poll, the expiry wake instant, and test deadlines.
+expected_occurrences = 929
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2956,7 +2961,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # through the upload endpoint, so the tests can compare the objects byte for
 # byte. Each runs to completion inside `spawn_blocking` before its fixture is
 # dropped.
-expected_occurrences = 163
+# +1 VOD successor handoff test: a real sleeping child stands in for the running
+# predecessor encoder, so yielding is observed as an actual reap.
+expected_occurrences = 164
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3304,7 +3311,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 372 -> 374: the `.status()` on those two test-only FFmpeg commands,
 # inventoried under `process-command-construction` above. Same children,
 # counted once in each sentinel.
-expected_occurrences = 374
+# +1 the same VOD successor handoff test child.
+expected_occurrences = 375
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3420,7 +3428,8 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # `std::sync::Barrier::wait` calls in `live_tv::dvr::tests`
 # (`retirement_is_atomic_against_a_consumer_attaching` lines its two threads
 # up each round). The pattern matches the method name; neither is a process.
-expected_occurrences = 381
+# +3 the same test child is killed and waited on at teardown.
+expected_occurrences = 384
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -3547,7 +3556,8 @@ pattern = "kill_on_drop\\s*\\("
 # of one that exits before registration). Once per host, `kill_on_drop`,
 # bounded by a 120 s `tokio::time::timeout`, awaited to completion through
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
-expected_occurrences = 85
+# +1 the same test child, so a failing assertion cannot leak it.
+expected_occurrences = 86
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
