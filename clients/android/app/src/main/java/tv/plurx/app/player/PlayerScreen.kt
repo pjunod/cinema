@@ -826,13 +826,6 @@ private fun PlayerContent(
                 activity?.isInPictureInPictureMode == true,
         )
     }
-    // The panel, its quality chip, and the wait overlay consume session status.
-    // Prepared replacement is also checked by the controller itself.
-    SideEffect {
-        controller.statusPollingVisible = {
-            !isInPip && (panel != null || controlsVisible || findingNext || progressFault != null)
-        }
-    }
     var pipAspectRatio by remember(plan) {
         mutableStateOf(calculatePipAspectRatio(plan.videoWidth ?: 0, plan.videoHeight ?: 0))
     }
@@ -853,6 +846,13 @@ private fun PlayerContent(
         java.util.UUID.randomUUID().toString()
     }
     var findingNext by remember { mutableStateOf(false) }
+    // The panel, its quality chip, and the wait overlay consume session status.
+    // Prepared replacement is also checked by the controller itself.
+    SideEffect {
+        controller.statusPollingVisible = {
+            !isInPip && (panel != null || controlsVisible || findingNext || progressFault != null)
+        }
+    }
 
     fun poke() {
         controlsVisible = true
