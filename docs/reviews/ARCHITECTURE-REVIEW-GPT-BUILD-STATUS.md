@@ -66,7 +66,7 @@ PR #512 records the rollout and baselines and repairs the caption-audit wrapper.
   signed APK artifact, so no signed versionCode 125 release can be made from
   the available identity. A new key would change the app's update identity.
 - `nuc3` is stopped with its original data intact. A copy at `/srv/plurx.forensic-20260925T131450Z` was inspected read-only with the old image; metadata CRC was valid, but `metadata_ahead_of_wal` requires a clean learner rejoin from the healthy quorum. No Plurx admin credential was found in the initial node/local inventory. The WAL report SHA-256 is `0531738625437b4f925dc0985a94a345c12fccef7768d06d2350d837423c2282`.
-- The seven-day read-only fleet collector restarted after a 337 s gap, then the `44cdfccc7` window broke when `nuc3` became unreachable at 07:04:41 UTC. The other three nodes now run `e2dfc6b77`; the four-node 24-hour/seven-day windows must start again after rejoin. A restartable compressed collector is prepared but has not been launched.
+- The seven-day read-only fleet collector restarted after a 337 s gap, then the `44cdfccc7` window broke when `nuc3` became unreachable at 07:04:41 UTC. The other three nodes now run `e2dfc6b77`; the four-node 24-hour/seven-day windows must start again after rejoin. The two broken legacy collectors were stopped after preserving their receipts (stop receipt SHA-256 `65bd4403223d3d72d8ea168c826aebdea76110830fc24c98bbe6094d010ca7d0`). A restartable compressed collector is prepared but has not been launched.
 
 ## Update rule
 
