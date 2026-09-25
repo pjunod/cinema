@@ -901,7 +901,7 @@ pub use fragment_index_cluster::{
     SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
-pub use sqlite::{SqliteStore, SQLITE_SCHEMA_VERSION};
+pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};
 
 use async_trait::async_trait;
 

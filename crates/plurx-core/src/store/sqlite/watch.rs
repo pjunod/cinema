@@ -48,6 +48,17 @@ fn watch_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<Watc
     })
 }
 
+/// rarray would need a feature; a temp-free IN via json_each keeps the query
+/// parameter-count bounded regardless of list length. CROSS JOIN fixes the
+/// loop order: one `(user_id, item_id)` key lookup per requested id. Left to
+/// the planner, the join walked every watch row the user has through
+/// `idx_watch_updated` and scanned the id list for each (K-05 M0: 15.6 ms
+/// warm for a 50-id page of a user with 7,000 rows).
+const WATCH_MAP_SQL: &str =
+    "SELECT w.item_id, w.position_ms, w.duration_ms, w.watched, w.updated_at
+     FROM json_each(?2) j
+     CROSS JOIN watch_state w ON w.user_id = ?1 AND w.item_id = j.value";
+
 fn watch_map_on(
     conn: &rusqlite::Connection,
     user_id: i64,
@@ -56,16 +67,10 @@ fn watch_map_on(
     if item_ids.is_empty() {
         return Ok(Vec::new());
     }
-    // rarray would need a feature; a temp-free IN via json_each keeps
-    // the query parameter-count bounded regardless of list length.
     let ids_json =
         serde_json::to_string(item_ids).map_err(|e| StoreError::Database(e.to_string()))?;
-    let mut stmt = conn.prepare(
-        "SELECT w.item_id, w.position_ms, w.duration_ms, w.watched, w.updated_at
-         FROM watch_state w
-         JOIN json_each(?2) j ON j.value = w.item_id
-         WHERE w.user_id = ?1",
-    )?;
+    super::trace_statement("watch_map", WATCH_MAP_SQL);
+    let mut stmt = conn.prepare(WATCH_MAP_SQL)?;
     let rows = stmt
         .query_map(params![user_id, ids_json], |row| {
             Ok((row.get::<_, i64>(0)?, watch_from_row(row, 1)?))
@@ -92,7 +97,7 @@ fn watch_rollups_on(
     // terminates — and a (root, id) pair is unique per root, so two
     // containers on the same page never contaminate each other's
     // count.
-    let mut stmt = conn.prepare(&format!(
+    let sql = format!(
         "WITH RECURSIVE tree(root, id) AS (
                  SELECT id, id FROM items WHERE id IN ({list})
                  UNION
@@ -104,7 +109,9 @@ fn watch_rollups_on(
              LEFT JOIN watch_state w ON w.item_id = i.id AND w.user_id = ?1
              WHERE i.kind IN ({PLAYABLE_KINDS})
              GROUP BY t.root"
-    ))?;
+    );
+    super::trace_statement("watch_rollups", &sql);
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(params![user_id], |row| {
             Ok((
@@ -139,6 +146,28 @@ impl SqliteStore {
         crate::store::record_http_watch_read();
         self.with_conn(read).await
     }
+
+    /// [`Self::watch_read`] on a read connection (K-05 M1 moved these reads
+    /// off the writer), counted the same way.
+    async fn watch_read_pooled<T, F>(&self, read: F) -> Result<T, StoreError>
+    where
+        F: FnOnce(&rusqlite::Connection) -> Result<T, StoreError> + Send + 'static,
+        T: Send + 'static,
+    {
+        crate::store::record_http_watch_read();
+        self.with_read(read).await
+    }
+
+    /// [`Self::watch_read_pooled`] inside one read transaction, for a closure
+    /// whose statements must describe the same watch state.
+    async fn watch_read_snapshot<T, F>(&self, read: F) -> Result<T, StoreError>
+    where
+        F: FnOnce(&rusqlite::Connection) -> Result<T, StoreError> + Send + 'static,
+        T: Send + 'static,
+    {
+        crate::store::record_http_watch_read();
+        self.with_read_txn(read).await
+    }
 }
 
 #[async_trait]
@@ -170,7 +199,7 @@ impl WatchStore for SqliteStore {
             return Ok(Vec::new());
         }
         let item_ids = item_ids.to_vec();
-        self.watch_read(move |conn| watch_map_on(conn, user_id, &item_ids))
+        self.watch_read_pooled(move |conn| watch_map_on(conn, user_id, &item_ids))
             .await
     }
 
@@ -182,9 +211,9 @@ impl WatchStore for SqliteStore {
     ) -> Result<WatchSummary, StoreError> {
         let item_ids = item_ids.to_vec();
         let container_ids = container_ids.to_vec();
-        // One closure on the one connection: nothing can write between the
-        // two statements, so both halves describe the same watch state.
-        self.watch_read(move |conn| {
+        // One closure in one read transaction: both statements read the same
+        // WAL snapshot, so both halves describe the same watch state.
+        self.watch_read_snapshot(move |conn| {
             Ok(WatchSummary {
                 watch: watch_map_on(conn, user_id, &item_ids)?,
                 rollups: watch_rollups_on(conn, user_id, &container_ids)?,
@@ -194,7 +223,7 @@ impl WatchStore for SqliteStore {
     }
 
     async fn progress_rails(&self, user_id: i64, limit: i64) -> Result<ProgressRails, StoreError> {
-        self.watch_read(move |conn| {
+        self.watch_read_pooled(move |conn| {
             let sql =
                 super::super::sql_source::progress_rails(&item_cols("i"), &item_cols("e")).sqlite();
             let mut stmt = conn.prepare(&sql)?;
@@ -491,7 +520,7 @@ impl WatchStore for SqliteStore {
     }
 
     async fn watch_rollup(&self, user_id: i64, item_id: i64) -> Result<WatchRollup, StoreError> {
-        self.watch_read(move |conn| {
+        self.watch_read_pooled(move |conn| {
             let (leaves, watched) = conn.query_row(
                 &format!(
                     "WITH RECURSIVE tree(id) AS (
@@ -520,7 +549,7 @@ impl WatchStore for SqliteStore {
         ids: &[i64],
     ) -> Result<std::collections::HashMap<i64, WatchRollup>, StoreError> {
         let ids = ids.to_vec();
-        self.watch_read(move |conn| watch_rollups_on(conn, user_id, &ids))
+        self.watch_read_pooled(move |conn| watch_rollups_on(conn, user_id, &ids))
             .await
     }
 
@@ -529,10 +558,10 @@ impl WatchStore for SqliteStore {
         user_id: i64,
         limit: i64,
     ) -> Result<Vec<InProgressItem>, StoreError> {
-        self.watch_read(move |conn| {
+        self.watch_read_pooled(move |conn| {
             // In-progress = has a position, not finished. Episodes carry their
             // show's title so a card can read "Severance · S1E3".
-            let mut stmt = conn.prepare(&format!(
+            let sql = format!(
                 "SELECT {i}, show.title,
                         w.position_ms, w.duration_ms, w.watched, w.updated_at,
                         season.poster_path
@@ -545,7 +574,9 @@ impl WatchStore for SqliteStore {
                    AND i.kind IN ('movie','episode','video','audiobook')
                  ORDER BY w.updated_at DESC LIMIT ?2",
                 i = item_cols("i")
-            ))?;
+            );
+            super::trace_statement("continue_watching", &sql);
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
                 .query_map(params![user_id, limit], |row| {
                     Ok(InProgressItem {
@@ -562,12 +593,13 @@ impl WatchStore for SqliteStore {
     }
 
     async fn next_up(&self, user_id: i64, limit: i64) -> Result<Vec<RecentItem>, StoreError> {
-        self.watch_read(move |conn| {
+        self.watch_read_pooled(move |conn| {
             // Episode ordering key = season*100000 + episode. Next-up per show
             // is the smallest-ordering episode that is unwatched and not in
             // progress, strictly after the last watched episode of that show.
             // One row per show (bare columns alongside MIN() pick that row).
             let sql = super::super::sql_source::next_up(&item_cols("e")).sqlite();
+            super::trace_statement("next_up", &sql);
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
                 .query_map(params![user_id, limit], |row| {
@@ -588,6 +620,34 @@ impl WatchStore for SqliteStore {
 mod tests {
     use crate::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, WatchRollup};
     use crate::store::{LibraryStore, MediaStore, SqliteStore, UserStore, WatchStore};
+
+    /// K-05: the page's watch map is one `(user_id, item_id)` key lookup per
+    /// requested id, driven from the id list, never a walk of every watch
+    /// row the user has.
+    #[tokio::test]
+    async fn watch_map_looks_up_each_requested_id() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let plan = store
+            .with_conn(|conn| {
+                let mut stmt =
+                    conn.prepare(&format!("EXPLAIN QUERY PLAN {}", super::WATCH_MAP_SQL))?;
+                let details = stmt
+                    .query_map(rusqlite::params![1, "[1,2,3]"], |row| {
+                        row.get::<_, String>(3)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(details)
+            })
+            .await
+            .expect("plan");
+        assert_eq!(plan.len(), 2, "{plan:?}");
+        assert!(plan[0].starts_with("SCAN j VIRTUAL TABLE"), "{plan:?}");
+        assert_eq!(
+            plan[1],
+            "SEARCH w USING INDEX sqlite_autoindex_watch_state_1 (user_id=? AND item_id=?)",
+            "{plan:?}"
+        );
+    }
 
     #[tokio::test]
     async fn progress_marks_watched_and_drives_continue_row() {

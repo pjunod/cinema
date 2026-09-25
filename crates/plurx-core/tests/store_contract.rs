@@ -31362,6 +31362,247 @@ async fn watch_summary_and_progress_rails_match_the_separate_reads_on_every_back
     .await;
 }
 
+/// The calls K-05's query-plan protocol measures, shared with the
+/// `query_plans` example so both backends are planned for the same requests.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "../examples/query_plans/calls.rs"]
+mod k05_query_plan_calls;
+
+/// K-05 M0 (plan section 3.4 step 5): capture the replicated statements the
+/// measured calls execute, and the state machine's schema as a bootstrapped
+/// three-voter cluster created it, for `query_plans build-hiqlite`/`measure`.
+/// A measurement tool, not a contract, so it is ignored by default:
+///
+/// `K05_HIQLITE_CAPTURE=hiqlite.json cargo test -p plurx-core --features
+/// cluster-read-cost-validation,hiqlite-contract-tests --test store_contract
+/// -- --ignored k05_capture_hiqlite_statements`
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+#[ignore = "K-05 measurement capture: writes the file named by K05_HIQLITE_CAPTURE"]
+async fn k05_capture_hiqlite_statements() {
+    let out = std::env::var_os("K05_HIQLITE_CAPTURE").expect("set K05_HIQLITE_CAPTURE");
+    let capture = k05_query_plan_calls::StatementCapture::default();
+    tracing::subscriber::set_global_default(capture.clone()).expect("capture subscriber");
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let statements = k05_query_plan_calls::drive(&store, "hiqlite", &capture).await;
+    assert!(!statements.is_empty(), "no replicated statement events");
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect schema client");
+    let schema = client
+        .query_raw(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master \
+             WHERE sql IS NOT NULL ORDER BY rowid",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read state-machine schema")
+        .into_iter()
+        .map(|mut row| {
+            serde_json::json!({
+                "kind": row.get::<String>("type"),
+                "name": row.get::<String>("name"),
+                "table": row.get::<String>("tbl_name"),
+                "sql": row.get::<String>("sql"),
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        out,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "backend": "hiqlite",
+            "schema": schema,
+            "statements": statements,
+        }))
+        .expect("encode capture"),
+    )
+    .expect("write capture");
+}
+
+/// The catalogue-wide Recently Added rail leaves out Recordings libraries on
+/// every backend, as the standalone store and the replicated local read
+/// always have; a Recordings library's own rail still lists its recordings.
+/// The replicated Authority read (the consistent path the bounded reader
+/// falls back to) used to include them, so the Home rail changed with the
+/// read path that served it.
+#[tokio::test]
+async fn catalogue_recently_added_leaves_out_recordings_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let mut ids = Vec::new();
+        for (kind, item_kind) in [
+            (LibraryKind::Movies, ItemKind::Movie),
+            (LibraryKind::Recordings, ItemKind::Video),
+        ] {
+            let library = store
+                .create_library(&NewLibrary {
+                    name: format!("{kind:?}"),
+                    kind,
+                    paths: vec![],
+                    anime: false,
+                })
+                .await
+                .expect("library");
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: item_kind,
+                    parent_id: None,
+                    title: format!("{kind:?} item"),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            ids.push((library.id, item));
+        }
+        let [(_, movie), (recordings, recording)] = ids[..] else {
+            unreachable!("two libraries")
+        };
+        let rail = |library_id: Option<i64>| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .recently_added(library_id, 20)
+                    .await
+                    .expect("recently added")
+                    .into_iter()
+                    .map(|card| card.item.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(rail(None).await, [movie], "{backend}: catalogue-wide rail");
+        assert_eq!(
+            rail(Some(recordings)).await,
+            [recording],
+            "{backend}: the Recordings library's own rail"
+        );
+    })
+    .await;
+}
+
+/// K-05 M3 (plan section 3.6): search hides an item's `items_fts` hit only
+/// while it has a *current* classification index entry, which is membership
+/// of `classification_fts`, never existence of a `media_classifications`
+/// row. A rename deletes the item's `classification_fts` row through
+/// `classification_source_changed` and keeps the classification for the
+/// classifier to regenerate, so the renamed title must be found by its new
+/// title (through `items_fts`), not by its old one, while the classification
+/// row survives. The withdrawn `NOT EXISTS (… media_classifications …)`
+/// predicate would hide the renamed title from both branches.
+#[tokio::test]
+async fn search_renamed_title_is_found_by_its_new_title_only() {
+    use plurx_core::metadata::classification::classify;
+    use plurx_core::store::classification::Record;
+
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let movie = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Harbor Lights".into(),
+                year: Some(1999),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("movie");
+        let entry = store
+            .classification_page(0, 10)
+            .await
+            .expect("classification inventory")
+            .into_iter()
+            .find(|entry| entry.input().expect("input").id == movie)
+            .expect("the movie is in the classification inventory");
+        let record = Record {
+            classification: classify(
+                &entry.input().expect("input").metadata(),
+                vec!["lighthouse keeper".into()],
+            ),
+            source_json: entry.source_json,
+            overrides: Default::default(),
+            revision: 0,
+        };
+        assert!(store
+            .write_classification(movie, &record)
+            .await
+            .expect("classify"));
+        let found = |query: &'static str| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .search_items(query, 10)
+                    .await
+                    .expect("search")
+                    .into_iter()
+                    .map(|hit| hit.item.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(
+            found("harbor lights").await,
+            [movie],
+            "{backend}: classified title"
+        );
+        assert_eq!(
+            found("lighthouse").await,
+            [movie],
+            "{backend}: classification terms"
+        );
+
+        store
+            .apply_metadata(
+                movie,
+                &MetadataPatch {
+                    title: Some("Night Tide".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("rename");
+        assert_eq!(found("night tide").await, [movie], "{backend}: new title");
+        assert!(
+            found("harbor lights").await.is_empty(),
+            "{backend}: the old title must not find the renamed item"
+        );
+        assert!(
+            found("lighthouse").await.is_empty(),
+            "{backend}: stale classification terms are not searchable"
+        );
+        let entry = store
+            .classification_page(0, 10)
+            .await
+            .expect("classification inventory")
+            .into_iter()
+            .find(|entry| entry.input().expect("input").id == movie)
+            .expect("renamed movie still inventoried");
+        assert!(
+            entry.record.is_some(),
+            "{backend}: the classification row survives the rename for regeneration"
+        );
+    })
+    .await;
+}
+
 fn subtitle_source_stamp(file_id: i64) -> plurx_core::store::SubtitleSourceStamp {
     plurx_core::store::SubtitleSourceStamp {
         file_id,
