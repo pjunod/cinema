@@ -1146,6 +1146,9 @@
         tokio::fs::copy(&shared_fixture, &file.path)
             .await
             .expect("copy source fence fixture");
+        // Copying creates a new object with its own mtime. Index that object
+        // before deliberately changing it under the admitted rendition.
+        file = media_file_at(file.path, 12_000);
         let (serve, file) = serve_on_file(base.path(), file).await;
         create(&serve, &file, "sess-a", "play-a", &settings()).await;
 

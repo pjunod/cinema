@@ -369,7 +369,11 @@
             .expect("selected converting artifact hydrates")
             .expect("source is already attested");
         assert_eq!(hydrated_key, cache_key);
-        assert_eq!(hydrated_version, object_version);
+        assert_eq!(
+            hydrated_version,
+            crate::fragment_index_cluster::local_object_version(&object_version),
+            "hydration returns the local fence identity, not the full-attestation memo key"
+        );
         assert_eq!(hydrated.promotion.dolby_vision, Some(record));
         assert_eq!(hydrated.rows, index.rows);
 
