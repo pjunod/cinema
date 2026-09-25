@@ -246,3 +246,45 @@ The pinned Rust 1.97.1 isolated-server traces on draft PR #527 remained failed t
 A shorter successor start lead on source `26b0e0c6b` did not repeat that result: cliff 1 had a 100.1 ms video gap and cliff 2 took 10.957 seconds to downshift. The change was reverted. The earlier `b9b1c3ca3`, `8ec815136`, `f801f0ca4`, `1c1d002f5` and `de7fdadcd` runs showed why nominal bitrate selection, preparation timing and first-frame exposure mattered, but none passed both scored cliffs. Their exact build stamps, cliff metrics, raw and normalized SHA-256 hashes and JUnit reports are retained in `/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/pr527-iterations-20260925/`; manifest SHA-256 `45c1719667fb545eef254335b572f061c78b8c483fc4eefd71815fe8ee18a575`. All client/server/shaper sessions were cleaned after each complete run.
 
 The A-04 row stays **blocked: incomplete D3 matrix**. Safari, Firefox, Apple TV, iPhone, four Android devices, HDR and the remaining six-metric acceptance matrix are still owed. Draft PR #527 received one adversarial review; no second review is planned. Its branch merged then-current main `1781e8e2d` at `1051831b3`, but the source-exact trace above predates that merge. Final integration and qualification wait for PR #524 to reach main.
+
+## Draft PR #527 Chrome D3 pass on source-exact `ca7ec94db` — 2026-09-25
+
+The prior 240p successor did not install the attached player's fragment
+observers. A diagnostic trace showed its last 1,097 kb/s transfer sample
+aging beyond 70 seconds through the second cliff; hls.js EWMA fell, but the
+emergency policy correctly required a fresh media transfer. The controller
+therefore waited for two mild-pressure samples. Commit `ca7ec94db` records
+progress and completed-fragment throughput on an attached prepared successor
+only. Staging, non-2xx and retired-successor traffic cannot change the
+incumbent's estimate. The focused web-control regression passed.
+
+An isolated Chrome SDR run on pinned Rust 1.97.1 binary
+`v0.3.0-4266-gca7ec94db` (SHA-256
+`32e54a21c485c9e06b4dca9ed78a3f9e5181dc9fd91ec9992fa4878915e7e08b`)
+passed the unmodified 8→1.1→0.35 Mb/s two-cliff scorer. The first shaped
+stage held 11.989 s at 7,999.9 kb/s measured media delivery; the next two
+held 74.895 s at 1,099.2 kb/s and 74.659 s at 349.2 kb/s. The shaper
+reported zero transport errors.
+
+| Scored cliff | Baseline clock | First downshift | Maximum video gap | Restarts · waits · stalls · hitches | First target frame |
+|---|---:|---:|---:|---:|---:|
+| 8→1.1 Mb/s | 0.995× | 720p→240p in 6.950 s | 100 ms | 0 · 0 · 0 · 0 | 0.048 s from boundary |
+| 1.1→0.35 Mb/s | 1.000× | 240p→144p in 7.773 s | 100 ms | 0 · 0 · 0 · 0 | 0.063 s from boundary |
+
+The raw report SHA-256 is
+`44d57cd3ec225c757f47a9c3aa6bb99dec305c82e4dbc80484ebb91b419413ec`;
+normalized SHA-256 is
+`78ef88f3e4ca2629936e6fc967b0eb01342e650eac5202580903e6362ba6746a`;
+JUnit SHA-256 is
+`e7b126137c4e9284eb3575fad3a9ccbbae7f5f32f9dfaba92e3f39f94b1a3258`.
+The private evidence directory is
+`/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/pr527-source-exact-ca7ec94db/`;
+its manifest SHA-256 is
+`5de44b0b0778ccee07698d944f17cca37d7daa3657c5521bb9ec59c4d94e597a`.
+The isolated browser, server and shaper exited after the run.
+
+This is one passing Chrome SDR candidate trace on draft PR #527. PR #524
+has not yet merged into its base, so it is not a current-main or final
+qualification claim. Safari, Firefox, Apple TV, iPhone, Android devices, HDR
+and the remaining §5.3 platform matrix remain owed. PR #527 received its
+sole adversarial review already; no second review is planned.
