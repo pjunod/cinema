@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** exact-tree compile and focused contracts green; fast lane pending · **Updated:** 2026-09-25 03:33 UTC · **Base:** `dafadf043`
+**Status:** fast-lane #2944 web contract repaired locally; fresh gate pending · **Updated:** 2026-09-25 03:40 UTC · **Base:** `dafadf043`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -38,7 +38,7 @@ corrected at `cf5a74a61`, `9301cae1c`, and `39e40d10d`, with their focused
 checks green. New main `dafadf043` was merged into the PR at `47338f39d`;
 its one conflict retained both client-anchor rows. The current-main merged tree passed pinned Rust check and Clippy, iOS/tvOS
 application build, Android app/test-source compilation, and 95 focused
-operations and ownership tests. Its final `make history-check` passed before the next fast-lane run.
+operations and ownership tests. Its final `make history-check` passed before fast-lane #2944. That gate passed all 505 Linux operations checks, then stopped on a web policy source assertion that still looked inside `play()` after the 5.5 split. Commit `9bf0425f9` follows the shipped `play()` → `presentPlayerChrome()` wiring; the focused web policy suite passed locally. A fresh gate is pending.
 
 ## Current impediments
 
