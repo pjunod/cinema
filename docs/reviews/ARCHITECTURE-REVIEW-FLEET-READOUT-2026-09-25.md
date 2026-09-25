@@ -165,3 +165,9 @@ The b47 three-voter read-only sample spanned 0.585 seconds. Each node had exact 
 | S-11 | QSV available 1 / 0 / 1; NVENC and VideoToolbox zero. Accepted encoder counters 3 / 0 / 0; tone-map zero. | Seven reset-aware days and controlled usage, with build/uptime continuity. |
 
 These are point readings. Nonzero process-local counters have no controlled start/end boundary, and zero counters do not prove absence across a duration.
+
+## L-03 current-main Chrome caption baseline — 14:00 UTC
+
+An isolated Chrome session displayed server build `v0.3.0-4087-gb47c5ff88` and played 6.1 WTVR-HD at 1920×1080 H264/AAC for 86 seconds. At media times 12.3, 42.6 and 85.9 seconds, `#live-tv-video.textTracks` held one `{kind: captions, label: English 708, language: en, mode: hidden, cues: null}` track. The picture inspected near 42 seconds showed no caption text; Playback info said Subtitles Off, and no caption control was visible. The agent stopped the stream and verified `paused=true`, `readyState=0`, empty `src` and `currentTime=0`. Local receipt `/Users/pjunod/code/plurx-agent/codex-l03-caption-evidence-20260925/l03-b47-chrome-6-1-20260925.json` has SHA-256 `90d7e32ad640fec0b5955abaa62210102e3414ec93a1c60a12a0c669a66067f7`.
+
+Earlier source proof on 6.1 at `44cdfccc7` recorded CC1/SERVICE1, receipt SHA-256 `40d52c38f861c064b370c5f0e6eebb87192b338d259a4726d50bbd079237825a`. Because that proof was neither concurrent nor on the same build, the b47 browser observation cannot distinguish absent live source captions from client rendering failure. L-03 M4 web and physical caption acceptance remain open.
