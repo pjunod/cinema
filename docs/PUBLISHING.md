@@ -450,10 +450,16 @@ Keep the old keystore and lineage until every installation has rotated; keep
 the durable release key and lineage for future updates. The signing helper
 uses `--rotation-min-sdk-version 28` so Android 9–12 also adopts the new key.
 
-Enrol in **Play App Signing** so Google holds the distribution key — losing an
-upload key is recoverable, losing a distribution key without Play App Signing
-means the app can never be updated again. The key generated here should be the
-one enrolled later, so the sideload fleet and Play share a signing lineage.
+For Play distribution, enrol this durable release identity as the **Play app
+signing key**, and register a separate upload key for App Bundle uploads. If
+Google generates a different app signing key, Play-delivered APKs cannot update
+the existing sideload fleet in place. Play App Signing holds the distribution
+key; a lost upload key can be reset, while a lost self-held distribution key
+would strand sideload updates. Verify the enrolled app signing certificate
+against `PLURX_ANDROID_RELEASE_CERT_SHA256` before publishing a bundle. The
+current `bundleRelease` path still signs with the durable app key; configure a
+separate upload-key signing path before sending a bundle to Play. See
+[Android's Play App Signing guidance](https://developer.android.com/studio/publish/app-signing).
 
 On Android 9+ devices whose installed certificate matches the audited old
 signer, install the lineage-signed APK with `adb install -r`; **do not
@@ -461,9 +467,10 @@ uninstall**. Capture the installed certificate and app-data baseline first,
 canary one device, verify the new effective signer and preserved sign-in and
 offline data, then deploy the remaining devices serially. An incompatible
 signature is a stop condition. Android 8.1 and older cannot rotate an
-installed signing key; release APKs now require API 28 rather than silently
-continuing to trust the debug key on those platforms. This is an explicit
-compatibility decision for the current physical fleet, which is API 34+.
+installed signing key. The Android app now requires API 28 in every build
+variant, including debug and tests, rather than silently retaining an insecure
+release path on API 23–27. This explicit compatibility decision covers the
+current physical fleet, which is API 34+.
 
 ### 5.2 Build and upload
 
@@ -507,8 +514,9 @@ Ordered by what blocks a submission soonest.
 - [ ] Simulator screenshots at the three required sizes (§3)
 - [ ] Privacy policy + support URLs published (§3, §5.3)
 - [ ] **One name chosen** across bundle, web UI `APP_NAME`, and brand (§3)
-- [ ] Android `targetSdk` 35 → **36** before 2026-08-31 (§5.1)
-- [ ] Android release signing config + upload keystore (§5.1)
+- [x] Android `targetSdk` 37 (§5.1)
+- [ ] Verify the release key and lineage in a physical data-preserving canary,
+      then enrol that key as the Play app signing key (§5.1)
 - [ ] Auth token moves from `UserDefaults` (Apple) to the **Keychain**, and from
       plaintext DataStore (Android) to a **Keystore-encrypted** value — note
       `EncryptedSharedPreferences` is deprecated and is not the answer. Not a

@@ -268,6 +268,14 @@ xcodebuild -project plurx.xcodeproj -scheme plurx-tvOS -configuration Release \
   -destination 'generic/platform=tvOS Simulator' build
 ```
 
+The `plurx-tvOS-physical` XCUIRemote scheme uses a signed **Debug** app because
+its file/item fixture launch arguments are compiled only under `DEBUG`. A
+physical pass proves the remote interaction path in that configuration. It
+does not prove the shipped Release archive behaved identically. Reinstall the
+exact-source signed Release archive after the physical test and verify its
+bundle/build and launch; keep Release interaction acceptance open until it has
+an observable input path.
+
 Four green runs mean the shared Swift source and both platforms' conditional
 branches compile in **both** configurations, the app launches in each simulator,
 and the client contracts above still hold. It does not replace real-device

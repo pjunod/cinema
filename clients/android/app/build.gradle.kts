@@ -86,8 +86,8 @@ android {
     defaultConfig {
         applicationId = "tv.plurx.app"
         // Certificate rotation preserves existing data only on Android 9+.
-        // A release APK with minSdk 23 would still trust the old debug signer
-        // on 23-27, so do not offer that insecure distribution path.
+        // All variants require API 28 so release distribution and development
+        // builds share an explicit supported-platform policy.
         minSdk = 28
         targetSdk = 37
         versionCode = 126
@@ -130,7 +130,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // The upload key, never the debug key. `release` already clears
+            // The durable app signing key, never the debug key. `release` already clears
             // `debuggable`, which is what `adb shell run-as` follows; the
             // signer is a separate property and this is it.
             signingConfig = signingConfigs.getByName("release")

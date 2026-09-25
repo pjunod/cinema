@@ -72,6 +72,38 @@ def cert_digest(apksigner: str, apk: Path, api: int) -> str:
     return digests[0].lower()
 
 
+def validate_lineage(apksigner: str, lineage: Path, expected_new: str) -> None:
+    report = run(
+        apksigner, "lineage", "--in", str(lineage), "--print-certs", output=True,
+    ).decode("utf-8", "replace")
+    sections = [
+        section for section in re.split(
+            r"(?=^Signer #\d+ in lineage certificate DN:)", report, flags=re.MULTILINE,
+        ) if section.startswith("Signer #")
+    ]
+    if len(sections) != 2:
+        fail(f"signing lineage must contain exactly two certificates; got {len(sections)}")
+    for number, (section, digest) in enumerate(
+        zip(sections, (OLD_CERT_SHA256, expected_new), strict=True), start=1,
+    ):
+        match = re.search(
+            rf"^Signer #{number} in lineage certificate SHA-256 digest:\s*([0-9a-fA-F]{{64}})$",
+            section, flags=re.MULTILINE,
+        )
+        if not match or match.group(1).lower() != digest:
+            fail(f"signing lineage certificate {number} does not match the audited key")
+        if not re.search(
+            r"^Has installed data capability\s*:\s*true$", section,
+            flags=re.MULTILINE,
+        ):
+            fail(f"signing lineage certificate {number} cannot preserve installed data")
+    if not re.search(
+        r"^Has rollback capability\s*:\s*false$", sections[0],
+        flags=re.MULTILINE,
+    ):
+        fail("signing lineage unexpectedly grants rollback to the old certificate")
+
+
 def main() -> None:
     os.umask(0o077)
     new_store = Path(required("PLURX_ANDROID_KEYSTORE")).resolve()
@@ -102,6 +134,7 @@ def main() -> None:
     )
     if hashlib.sha256(old_der).hexdigest() != OLD_CERT_SHA256:
         fail("old keystore does not match the signer installed on the audited fleet")
+    validate_lineage(apksigner, lineage, expected_new)
     if cert_digest(apksigner, APK, 28) != expected_new:
         fail("Gradle output does not carry the expected durable release signer")
 
