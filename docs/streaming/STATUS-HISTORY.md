@@ -34,6 +34,44 @@ progressive. The seek-scratch reservation finding (C16) is a tracking item
 for the existing repair. §9 records what was run and what was not. No code
 changed.
 
+## 2026-09-20 · Implementation plans for the architecture review, and one work board for every vendor
+
+**46 handoff plans** under `docs/{streaming,server,cluster,features,clients,ci}/`
+(index rows in [docs/README.md](../README.md)), one per finding or per
+shared mechanism, each executing named ids of
+[the review](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md) with the
+adversarial assessment's dispositions as guardrails, the current code copied
+into a contract section, and a runnable acceptance check per milestone.
+The remaining twelve landed in a second pass the same day, so **all 46
+board rows have a document**. The second pass corrected the review in
+several places worth knowing before Astra reviews: the encoded-VOD master
+already emits output geometry (only the rolling path does not) and the
+hard-coded codec string is `avc1.640034`, not `.640028`; `publish_main` is
+unreachable on `ci.yml`'s current triggers, so no `sha-` rollback image has
+been produced automatically since 2026-09-10; half the clock-skew exchange
+already exists (`x-plurx-cluster-time-ms`) and the peer-auth windows already
+assume ≤5 s; there are 29 discarded store results, not 13; removing the
+cryptr `s3` edge does not remove the second `reqwest`, and renaming the fork
+is actively expensive because the patch stack substitutes by registry name;
+`files_for_items` does not exist and there are no recorded Kodi fixtures;
+there is no HTTP access log at all; and the review's "unreplicated SQLite
+mode" is the one recovery boot, so ARCHITECTURE's 1-voter sentence is
+incomplete rather than wrong.
+
+**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md)
+is the only shared status.** The plans will be executed by Claude, GPT and
+OpenRouter sessions concurrently, so the board defines the claim protocol in
+vendor-neutral terms: a claim is a draft PR that edits the row (the push is
+the atomic step), every row and every commit carries the exact **model
+identifier** and **session id** (`Agent-Model:` / `Agent-Session:` trailers),
+statuses are a fixed vocabulary, stale rows are reclaimable after seven days
+with a note, and every plan ends with an **Execution log** table the
+executing session fills per milestone. Writers' corrections to the review
+found while reading the code are recorded at the top of each plan (for
+example: `live_tv.rs:7403` already pipes stderr; `bounded_process::output` is
+the better primitive for scan probes than the one the review named; the guide
+is cloned three times per DVR tick, not two). Astra reviews the plans next.
+
 ## 2026-09-20 · Architecture review, revision 2 — after the adversarial assessment
 
 **[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
