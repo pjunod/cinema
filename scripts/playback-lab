@@ -112,6 +112,16 @@ function parseNetworkProfile(spec) {
   };
 }
 
+function requireSupportedRunProfile(profile) {
+  if (profile && profile.stages.length > 3) {
+    throw new Error(
+      `browser run cannot score ${profile.stages.length - 1} network cliffs: `
+      + "the browser observer supports at most two independently scored cliffs; "
+      + "use a two- or three-stage profile or device-proxy for a longer trace",
+    );
+  }
+}
+
 function usage() {
   process.stdout.write(`plurx playback lab
 
@@ -441,14 +451,15 @@ function fixtureCommand(fixture, output, directory, fixtures) {
         "-map", "0:v:0", "-map", "1:a:0", "-c:v", "mpeg4", "-q:v", "3",
         "-c:a", "libmp3lame", "-b:a", "192k", "-shortest", output,
       ];
-    // Same forced-transcode shape as above, but long enough that a cliff at
-    // 12 s still leaves a full recovery window — and rate-capped rather than
-    // quality-capped so its size stays predictable.
+    // The two-cliff profile needs a 12 s baseline and two independent 75 s
+    // recovery windows. Leave 48 s of source after those windows so seeking,
+    // restart alignment, and initial presentation cannot exhaust the fixture.
+    // Rate-capping keeps its size predictable.
     case "mpeg4_mp3_avi_long":
       return [
         ...ffmpegPrefix(),
-        "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=120",
-        "-f", "lavfi", "-i", "sine=frequency=330:sample_rate=48000:duration=120",
+        "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=210",
+        "-f", "lavfi", "-i", "sine=frequency=330:sample_rate=48000:duration=210",
         "-map", "0:v:0", "-map", "1:a:0", "-c:v", "mpeg4", "-b:v", "3M",
         "-c:a", "libmp3lame", "-b:a", "192k", "-shortest", output,
       ];
@@ -516,7 +527,7 @@ function verifyFixture(fixture, file) {
     h264_aac_mp4: { video: "h264", audio: ["aac"], width: 1920, height: 1080, minDuration: 20 },
     h264_multitrack_mkv: { video: "h264", audio: ["aac", "ac3"], subtitles: 1, width: 1920, height: 1080, minDuration: 20 },
     mpeg4_mp3_avi: { video: "mpeg4", audio: ["mp3"], width: 1280, height: 720, minDuration: 20 },
-    mpeg4_mp3_avi_long: { video: "mpeg4", audio: ["mp3"], width: 1280, height: 720, minDuration: 110 },
+    mpeg4_mp3_avi_long: { video: "mpeg4", audio: ["mp3"], width: 1280, height: 720, minDuration: 200 },
     vp9_opus_webm: { video: "vp9", audio: ["opus"], width: 1280, height: 720, minDuration: 20 },
     hevc_hdr_open_gop_mkv: { video: "hevc", audio: ["aac"], width: 3840, height: 2160, hdr: true, minBitrate: 40_000_000, minDuration: 16 },
   }[fixture.builder];
@@ -2508,18 +2519,46 @@ async function sampleWindow(driver, seconds, intervalMs, originMs, sink) {
   return last;
 }
 
+/** A sustained media-clock baseline immediately before a later cliff. */
+function tailClockRate(samples, intervalMs, seconds = 10) {
+  const end = samples.at(-1);
+  if (!end || !Number.isFinite(end.at_ms) || !Number.isFinite(end.absolute_time)
+      || end.at_ms < seconds * 1000) return 0;
+  const cutoff = end.at_ms - seconds * 1000;
+  const largestGap = Math.max(intervalMs * 3, 1000);
+  let before = null;
+  let after = null;
+  for (const row of samples) {
+    if (!Number.isFinite(row.at_ms) || !Number.isFinite(row.absolute_time)) return 0;
+    if (row.at_ms <= cutoff) before = row;
+    if (row.at_ms >= cutoff) { after = row; break; }
+  }
+  if (!before || !after || after.at_ms - before.at_ms > largestGap) return 0;
+  let previous = after;
+  for (const row of samples) {
+    if (row.at_ms <= after.at_ms) continue;
+    if (row.at_ms - previous.at_ms > largestGap) return 0;
+    previous = row;
+  }
+  const fraction = after.at_ms === before.at_ms
+    ? 0 : (cutoff - before.at_ms) / (after.at_ms - before.at_ms);
+  const atCutoff = before.absolute_time
+    + (after.absolute_time - before.absolute_time) * fraction;
+  return Math.max(0, (end.absolute_time - atCutoff) / seconds);
+}
+
 /**
- * Hold the link high until the session has proven itself, drop it, then watch.
- * The harness applies the cliff and records the timeline; it deliberately makes
- * no attempt to steer the player, which is N4's job and not this slice's.
+ * Hold the link high until the session has proven itself, then apply every
+ * requested cliff. Each recovery window is timestamped and scored from its
+ * own cliff; the next drop happens only after the previous window closes.
+ * The harness never steers the player, which is N4's job.
  */
 async function observeShapedCliff(driver, shaper, testCase, start) {
   const criteria = testCase.recovery || {};
   const intervalMs = (criteria.sample_interval_seconds ?? 1) * 1000;
   const baseline = [];
-  // Both windows are timestamped from their own start, and the recovery window
-  // from the cliff itself, so every `at_ms` in the artifact reads as "since the
-  // cliff" without the reader having to subtract anything.
+  // The baseline and each recovery window have independent origins; every
+  // timeline at_ms reads as "since this cliff".
   // Reset stage-zero measurement only after the first frame. Browser launch,
   // page assets, and player preparation are not part of the shaped baseline and
   // must not dilute a pre-cliff leak below the ceiling check.
@@ -2528,43 +2567,87 @@ async function observeShapedCliff(driver, shaper, testCase, start) {
   const beforeCliff = await sampleWindow(
     driver, shaper.profile.cliff_after_seconds, intervalMs, baselineStart, baseline,
   );
+  let priorEnd = beforeCliff;
   const baselineElapsed = (performance.now() - baselineStart) / 1000;
-  const baselineAdvanced = beforeCliff.video.absolute_time - start.video.absolute_time;
-  await driver.exec(`
-    { const probe=globalThis.__plurxLabFrameProbe;
-      if(probe){probe.maximum_gap_ms=0;probe.frames=0;}
+  let stageBaseline = baseline;
+  const windows = [];
+  for (let cliffIndex = 1; cliffIndex < shaper.profile.stages.length; cliffIndex += 1) {
+    await driver.exec(`
+      { const probe=globalThis.__plurxLabFrameProbe;
+        if(probe){probe.maximum_gap_ms=0;probe.frames=0;}
+      }
+      return true;
+    `);
+    const transitionStart = await driver.eval(playerSnapshotExpression());
+    const cliffAtMs = shaper.applyCliff();
+    if (cliffAtMs === null || shaper.stageIndex !== cliffIndex) {
+      throw new Error(`the shaper did not apply requested cliff ${cliffIndex}`);
     }
-    return true;
-  `);
-  const transitionStart = await driver.eval(playerSnapshotExpression());
-  const cliffAtMs = shaper.applyCliff();
-  const cliffOrigin = performance.now();
-  const timeline = [sampleFrom(transitionStart, 0)];
-  const afterCliff = await sampleWindow(
-    driver, criteria.recovery_observe_seconds ?? 45, intervalMs, cliffOrigin, timeline,
-  );
-  const observation = {
-    // End the evidence window with the sampled observation. The same immutable
-    // snapshot is reused at the report top level after cleanup, so one artifact
-    // cannot contain two throughput accounts for the same stage.
-    shaping: shaper.freezeTelemetry(),
-    baseline_clock_rate: baselineElapsed > 0 ? baselineAdvanced / baselineElapsed : 0,
-    pre_cliff_runway_seconds: Number(beforeCliff.video.runway || 0),
-    baseline_error: beforeCliff.video.error
-      ? `media error ${beforeCliff.video.error.code}: ${beforeCliff.video.error.message || "unknown"}`
-      : !beforeCliff.started ? "the player never reached a presented frame"
-        : beforeCliff.frame_probe?.supported === true
-          && (beforeCliff.frame_probe.last_frame_at_ms == null
-            || !Number.isFinite(Number(beforeCliff.frame_probe.last_frame_at_ms)))
-          ? "the browser exposed a frame callback but never established an outgoing-frame baseline"
-          : null,
-    transition_start: transitionStart,
-    transition_end: afterCliff,
-    baseline,
-    timeline,
+    const cliffOrigin = performance.now();
+    const timeline = [sampleFrom(transitionStart, 0)];
+    const afterCliff = await sampleWindow(
+      driver, criteria.recovery_observe_seconds ?? 45, intervalMs, cliffOrigin, timeline,
+    );
+    const observation = {
+      // Take an immutable snapshot before advancing. The final window freezes
+      // the shaper, so the report and its last score use one byte account.
+      shaping: cliffIndex === shaper.profile.stages.length - 1
+        ? shaper.freezeTelemetry() : shaper.telemetrySnapshot(),
+      baseline_clock_rate: cliffIndex === 1
+        ? (baselineElapsed > 0
+          ? (beforeCliff.video.absolute_time - start.video.absolute_time) / baselineElapsed : 0)
+        : tailClockRate(stageBaseline, intervalMs),
+      pre_cliff_runway_seconds: Number(priorEnd.video.runway || 0),
+      baseline_error: priorEnd.video.error
+        ? `media error ${priorEnd.video.error.code}: ${priorEnd.video.error.message || "unknown"}`
+        : !priorEnd.started ? "the player never reached a presented frame"
+          : priorEnd.frame_probe?.supported === true
+            && (priorEnd.frame_probe.last_frame_at_ms == null
+              || !Number.isFinite(Number(priorEnd.frame_probe.last_frame_at_ms)))
+            ? "the browser exposed a frame callback but never established an outgoing-frame baseline"
+            : null,
+      transition_start: transitionStart,
+      transition_end: afterCliff,
+      baseline: stageBaseline,
+      timeline,
+    };
+    windows.push({
+      cliff_index: cliffIndex,
+      from_kbps: shaper.profile.stages[cliffIndex - 1].kbps,
+      to_kbps: shaper.profile.stages[cliffIndex].kbps,
+      cliff_applied_at_ms: cliffAtMs,
+      observation,
+      score: scoreRecovery(criteria, observation, cliffIndex),
+    });
+    priorEnd = afterCliff;
+    stageBaseline = timeline;
+  }
+  const failed = windows.find((window) => window.score.errors.length);
+  const first = windows[0];
+  return {
+    windows,
+    observation: first.observation,
+    score: {
+      outcome: failed ? failed.score.outcome : "passed",
+      errors: windows.flatMap((window) => window.score.errors.map((error) =>
+        `cliff ${window.cliff_index} (${window.from_kbps}→${window.to_kbps} kb/s): ${error}`)),
+      metrics: {
+        ...first.score.metrics,
+        shaping: windows.at(-1).observation.shaping,
+        cliffs: windows.map((window) => ({
+          cliff_index: window.cliff_index,
+          from_kbps: window.from_kbps,
+          to_kbps: window.to_kbps,
+          cliff_applied_at_ms: window.cliff_applied_at_ms,
+          outcome: window.score.outcome,
+          errors: window.score.errors,
+          metrics: window.score.metrics,
+        })),
+      },
+    },
+    cliffAtMs: first.cliff_applied_at_ms,
+    end: priorEnd,
   };
-  const score = scoreRecovery(criteria, observation);
-  return { observation, score, cliffAtMs, end: afterCliff };
 }
 
 function scoreCase(
@@ -2965,14 +3048,16 @@ function shapingGates(stage) {
   return gates;
 }
 
-function scoreRecovery(criteria, observation) {
+function scoreRecovery(criteria, observation, cliffIndex = 1) {
   const errors = [];
   const shaping = observation.shaping;
-  const after = shaping.stages[1];
-  const before = shaping.stages[0];
+  const after = shaping.stages?.[cliffIndex];
+  const before = shaping.stages?.[cliffIndex - 1];
 
-  if (shaping.cliff_applied_at_ms === null || shaping.cliff_applied_at_ms === undefined) {
-    return { outcome: "shaping", errors: ["the shaper never applied the cliff"], metrics: { shaping } };
+  if (!before || !after || (cliffIndex === 1
+      ? shaping.cliff_applied_at_ms === null || shaping.cliff_applied_at_ms === undefined
+      : after.entered_at_ms === null || after.entered_at_ms === undefined)) {
+    return { outcome: "shaping", errors: [`the shaper never applied cliff ${cliffIndex}`], metrics: { shaping } };
   }
   if (shaping.transport_errors?.length) {
     return {
@@ -3396,13 +3481,30 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
       duration_ms: Date.now() - startedAt,
       playback_request_unix_ms: startedAt,
       errors: shaped.score.errors,
-      warnings: shaped.observation.shaping.transport_errors.length
-        ? [`shaper reported ${shaped.observation.shaping.transport_errors.length} transport errors`] : [],
+      warnings: shaped.score.metrics.shaping.transport_errors.length
+        ? [`shaper reported ${shaped.score.metrics.shaping.transport_errors.length} transport errors`] : [],
       metrics: shaped.score.metrics,
-      operation_detail: { cliff_applied_at_ms: shaped.cliffAtMs },
-      shaping: shaped.observation.shaping,
+      operation_detail: {
+        cliff_applied_at_ms: shaped.cliffAtMs,
+        cliffs: shaped.windows.map((window) => ({
+          cliff_index: window.cliff_index,
+          from_kbps: window.from_kbps,
+          to_kbps: window.to_kbps,
+          cliff_applied_at_ms: window.cliff_applied_at_ms,
+          outcome: window.score.outcome,
+        })),
+      },
+      shaping: shaped.score.metrics.shaping,
       baseline: shaped.observation.baseline,
       timeline: shaped.observation.timeline,
+      cliff_windows: shaped.windows.map((window) => ({
+        cliff_index: window.cliff_index,
+        cliff_applied_at_ms: window.cliff_applied_at_ms,
+        baseline: window.observation.baseline,
+        baseline_clock_rate: window.observation.baseline_clock_rate,
+        timeline: window.observation.timeline,
+        score: window.score,
+      })),
       decision,
       start,
       end: shaped.end,
@@ -3674,6 +3776,7 @@ async function runSuite(manifest, options, dependencies = {}) {
   // Parsed before the corpus is built: a typo in the profile should cost a
   // second, not the 195 MB fixture build and a server boot.
   const profile = parseNetworkProfile(options.network_profile);
+  requireSupportedRunProfile(profile);
   const plan = printPlan(manifest, suite, options.case, options.exclude_case);
   if (preparationMeasurement && (suite !== "vod" || plan.cases.length !== 1)) {
     throw new Error("--preparation-measurement requires --suite vod and a --case filter selecting exactly one case");
@@ -3689,6 +3792,18 @@ async function runSuite(manifest, options, dependencies = {}) {
   process.stdout.write("\n");
   const wanted = new Set(plan.cases.map((testCase) => testCase.fixture));
   const corpus = await (dependencies.buildFixtures || buildFixtures)(manifest, options, wanted);
+  for (const testCase of shapedCases) {
+    const available = corpus.metadata[testCase.fixture]?.duration_seconds;
+    const required = profile.cliff_after_seconds
+      + (profile.stages.length - 1) * (testCase.recovery?.recovery_observe_seconds ?? 45)
+      + 15;
+    if (!Number.isFinite(available) || available < required) {
+      throw new Error(
+        `${testCase.fixture} is ${available ?? "unknown"}s long; ${profile.stages.length - 1} cliff(s) `
+        + `need at least ${required}s of source including startup headroom`,
+      );
+    }
+  }
   process.stdout.write("\nSTART   isolated plurx server\n");
   // A shaped-cliff case is evidence for the in-play Auto controller. Starting
   // the isolated server with that controller disabled only exercises the
@@ -3729,8 +3844,9 @@ async function runSuite(manifest, options, dependencies = {}) {
       throw error;
     }
     process.stdout.write(
-      `SHAPE   ${profile.spec}: ${profile.stages[0].kbps} kb/s, cliff to ` +
-      `${profile.stages[1].kbps} kb/s ${profile.cliff_after_seconds}s after the first frame\n`,
+      `SHAPE   ${profile.spec}: ${profile.stages.map((stage) => `${stage.kbps} kb/s`).join(" -> ")} `
+      + `(${profile.cliff_after_seconds}s to first cliff, `
+      + `${shapedCases[0]?.recovery?.recovery_observe_seconds ?? 45}s per recovery window)\n`,
     );
   }
   let driver = null;
@@ -3814,9 +3930,12 @@ async function runSuite(manifest, options, dependencies = {}) {
       results.push(result);
       if (result.status === "passed" && result.operation === "shaped-cliff") {
         const m = result.metrics;
+        const cliffs = m.cliffs || [{ metrics: m }];
         process.stdout.write(
-          `PASS         cliff held · recovered in ${(m.recovered_after_ms / 1000).toFixed(1)}s · ` +
-          `${m.restarts} restarts · ${m.peak_upgrades_per_60s} upgrades/60s\n`,
+          `PASS         ${cliffs.length} cliff(s) held · `
+          + `recovered in ${cliffs.map((cliff) => `${(cliff.metrics.recovered_after_ms / 1000).toFixed(1)}s`).join(", ")} · `
+          + `${cliffs.map((cliff) => cliff.metrics.restarts).join(", ")} restarts · `
+          + `${cliffs.map((cliff) => cliff.metrics.peak_upgrades_per_60s).join(", ")} upgrades/60s\n`,
         );
       } else if (result.status === "passed") {
         const m = result.metrics;
@@ -4209,8 +4328,10 @@ module.exports = {
   loadArtifact,
   loadManifest,
   normalizeTrace,
+  observeShapedCliff,
   parseApiJson,
   parseNetworkProfile,
+  requireSupportedRunProfile,
   playbackServerConfig,
   peakUpgradeRate,
   performOperation,
@@ -4219,6 +4340,7 @@ module.exports = {
   scoreRecovery,
   scoreCase,
   sampledVideoGap,
+  tailClockRate,
   shaperBurstBoundKbps,
   shaperClaimBoundBytes,
   timeToSustained,
