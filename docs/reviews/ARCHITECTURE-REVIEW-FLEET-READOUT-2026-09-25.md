@@ -330,3 +330,29 @@ A bounded read-only audit found the same old b47 `nuc3` Plurxd container running
 Docker's service had been active since September 20 without a restart, and the container restart policy was `unless-stopped`. No active `ansible-playbook`/Compose build process, Plurxd/deploy systemd service or matching user crontab entry was found at the audit. SSH sessions from `192.168.4.143` opened at 17:24:47 and 17:24:54 UTC around the Docker start event, but the caller command was not logged. An external one-shot is a plausible explanation, not a proven cause. Changing the container restart policy would not block an explicit `docker start` or `compose up`, so it was left unchanged. Sanitized receipt `/Users/pjunod/code/plurx-agent/codex-final-main-fleet-receipts-20260925/nuc3-repeat-restart-stop-20260925T1736Z.json` SHA-256 `8a0efb33d49e77ba87477ed997445f26980973a1b33c5f71ee43ac177a4c02f9`.
 
 The old learner remains quarantined. Its repeated startup does not count as an authenticated clean rejoin or four-node continuity evidence; the source of the external start command must be identified to prevent recurrence.
+
+## Bedroom Apple TV physical Debug input — 17:29–17:43 UTC
+
+A separate agent-owned clone at app-source base `e3195ad85` built the
+`plurx-tvOS-physical` scheme as a signed Debug build 184 for the paired,
+booted Bedroom Apple TV 4K (3rd generation), tvOS 27.0. Its first launch
+failed because the device was asleep; XCUIRemote's Menu press woke it in
+the bounded harness fix `09e8d7d69`. The fixture used item/file 12/12,
+an H.264 movie with one indexed English SubRip track. The Movies category
+used the app's `category:movie` collection ID; read-only catalog metadata
+counted 457 top-level movies across its two shares.
+
+| Physical Debug case | Observation | Scope limit |
+|---|---|---|
+| Playback remote | One XCUIRemote case passed: Play/Pause changed the transport label and Forward 10 seconds appeared. | The case did not assert decoded moving frames, seek accuracy or Release behavior. |
+| Library paging | One XCUIRemote case passed after using the correct category ID: remote navigation increased the loaded count beyond the first page. | Request count, frame time, Android paging and Release behavior remain unmeasured. |
+| VOD subtitle choice | Bounded attempts failed to select a track. The initial harness treated SwiftUI Menu's inaccurate `hasFocus` as a lost focus; a screenshot showed the subtitle icon with the blue tvOS focus ring. A fixed three-right path was also wrong for this launch: its retained screenshot shows Quality focused and Quality's menu open. | No selected subtitle or rendered text was observed. This movie fixture does not test L-03 Live TV captions. |
+
+Private receipt
+`/Users/pjunod/code/plurx-agent/codex-apple-physical-evidence-20260925/receipt.json`
+SHA-256 `347ab4f96d4fce146bdd06f3fa586fb1d38c4e71231ddbf44b89e2c0b5789342`
+hashes retained local test logs and screenshots. The Xcode result bundles remain
+under `/private/tmp/codex-apple-*.xcresult`; they include device diagnostics
+and are not part of the repo. The Debug runner replaced the prior installed
+Release app on this one Apple TV. Exact-main signed Release reinstallation and
+native controller, paging and caption interaction acceptance remain owed.
