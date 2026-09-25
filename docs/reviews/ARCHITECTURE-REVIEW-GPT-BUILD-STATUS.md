@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** PR #506 merged; PR #512 policy repair ready; four nodes and six reachable Apple devices deployed from `44cdfccc7` · **Updated:** 2026-09-25 05:35 UTC · **Main:** `68c29657b`
+**Status:** PR #506 merged; PR #512 policy repair ready; four nodes and six reachable Apple devices deployed from `44cdfccc7` · **Updated:** 2026-09-25 05:42 UTC · **Main:** `68c29657b`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -42,7 +42,7 @@ operations and ownership tests. Its final `make history-check` passed before fas
 
 ## Postmerge evidence PR
 
-PR #512 records the rollout and baselines and repairs the caption-audit wrapper. Its sole adversarial review found an empty-test success path and stale workboard rows; both were fixed. Fast-lane #2947 then stopped in history preflight before unit jobs because the wrapper correction lacked a regression ledger entry. The `8d128e14` ledger entry is committed and local `make history-check` passed. New main `68c29657b` was merged into the PR at `f6df390ec`; the current merged tree is being requalified before a new fast-lane run.
+PR #512 records the rollout and baselines and repairs the caption-audit wrapper. Its sole adversarial review found an empty-test success path and stale workboard rows; both were fixed. Fast-lane #2947 then stopped in history preflight before unit jobs because the wrapper correction lacked a regression ledger entry. The `8d128e14` ledger entry is committed and local `make history-check` passed. New main `68c29657b` was merged into the PR at `f6df390ec`; the current merged tree passed local `make history-check` with all 2,279 corrective commits accounted for; a fresh fast-lane run is pending.
 
 ## Current impediments
 
