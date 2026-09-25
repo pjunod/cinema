@@ -379,7 +379,7 @@
             prepared,
             &plan,
             pacing,
-            dir,
+            &dir.to_string_lossy(),
             fingerprint,
             mgr.admissions.software_pool(),
             mgr.software_budget().await,
@@ -511,7 +511,7 @@
             prepared_again,
             &failed_plan,
             Pacing::unpaced(),
-            dir.path(),
+            &dir.path().to_string_lossy(),
             "alternative-plan-key",
             mgr.admissions.software_pool(),
             mgr.software_budget().await,
@@ -1154,6 +1154,13 @@
             .await
             .expect("complete");
         let hit = look().await.expect("a finished entry serves");
+        assert_eq!(
+            mgr.sessions.lock().await[hit.session_id.as_str()]
+                .delivery
+                .method(),
+            "transcode",
+            "a cache hit serves an encoded rendition: transcode bytes"
+        );
         assert!(
             hit.vod,
             "the whole stream exists; the player may seek freely"
@@ -2312,6 +2319,13 @@
             .expect("start");
         assert_eq!(info.encoder, "software (x264)");
         assert_eq!(mgr.active_sessions().await, 1);
+        assert_eq!(
+            mgr.sessions.lock().await[info.session_id.as_str()]
+                .delivery
+                .method(),
+            "transcode",
+            "a live transcode's bytes are transcode bytes"
+        );
         let sessions = mgr.list_deliveries().await;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].0.user_name, "paul");
@@ -2336,6 +2350,13 @@
             .await
             .expect("start_copy");
         assert_eq!(info.encoder, "copy");
+        assert_eq!(
+            mgr.sessions.lock().await[info.session_id.as_str()]
+                .delivery
+                .method(),
+            "remux",
+            "a live copy-video session's bytes are remux bytes"
+        );
         // The two HLS kinds share a struct and are told apart structurally,
         // never by the encoder label: that label goes to "cached" on a cache
         // hit and is rewritten by the hardware→software fallback, either of

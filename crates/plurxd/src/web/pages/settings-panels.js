@@ -187,14 +187,14 @@ function subtitleStorePanel(settings){
   const d=settings.subtitle_store||{};
   const on=settings.subtitle_stored_sources!==false;
   const gate=d.gate||{open:true};
-  const blocked=on&&gate.open===false;
+  const concern=on&&gate.open===false;
   const fp=d.footprint;
   const plural=(n,word)=>`${n} ${word}${n===1?"":"s"}`;
   const size=fp?`${fmtBytes(fp.bytes)||"0 B"} · ${plural(fp.directories,"file")}`:"not measured yet";
   const pill=!on?`<span class="pill">off</span>`
-    :blocked?`<span class="pill bad">not keeping tracks</span>`
+    :concern?`<span class="pill warn">readiness concern</span>`
     :`<span class="pill ok">${esc(size)}</span>`;
-  const why=blocked?`<div class="setwarn">⚠ <b>The index pass on this node keeps no PGS tracks:</b> ${esc(gate.reason||"a requirement is not met")}. Each requirement is checked on ${SUBSRC_SWITCH_LINK}.</div>`:"";
+  const why=concern?`<div class="setwarn">⚠ <b>Review stored-track readiness:</b> ${esc(gate.reason||"a requirement is not met")}. The observations are advisory on ${SUBSRC_SWITCH_LINK}.</div>`:"";
   const ago=d.footprint_age_ms!=null?` (measured ${fmtDur(d.footprint_age_ms)||"just now"}${d.footprint_age_ms>=1000?" ago":""})`:"";
   const measured=fp
     ? `<p class="hint">On this node the store holds <b>${esc(size)}</b>${esc(ago)}, of a ${fmtBytes(d.cap_bytes)||"—"} cap; the least recently used files go first.</p>`
@@ -573,7 +573,6 @@ function playbackPanel(settings,readiness){
       ${setCardFoot("savePlaybackDefaults")}`);
   const streaming=setCard(`${cardHead("Streaming","Server delivery · Changes apply to new sessions. Existing playback keeps its current settings.",active)}
       ${togRow("pvod","VOD HLS — a fixed, seekable timeline","Preferred. Needs the file's analysis index; schedules and queue health are in Analysis.",settings.vod_presentation)}
-      ${togRow("pabr","Adjust Auto quality while playing","Off keeps the server's first Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Enable it to let Auto respond to changing playback conditions.",settings.playback_auto_abr)}
       <div class="setfields">
         <div><label for="pvws">VOD working set</label><select id="pvws" style="min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
         <div><label for="pvmb">Producer deadline</label><select id="pvmb" style="min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>

@@ -325,6 +325,7 @@ final class LiveTvTests: XCTestCase {
             let code: String?
             let retry: String?
             let ownerDecided: Bool?
+            let watchable: [LiveTvTunerHolder]?
         }
         struct Answer: Decodable {
             let `case`: String
@@ -335,6 +336,7 @@ final class LiveTvTests: XCTestCase {
             let offerRetry: Bool
             let keepHint: Bool
             let replay: Bool?
+            let offerWatchable: [String]?
         }
         struct ResumeBody: Decodable {
             let outcome: String?
@@ -393,6 +395,11 @@ final class LiveTvTests: XCTestCase {
             XCTAssertEqual(verdict.offerRetry, row.offerRetry, row.`case`)
             XCTAssertEqual(verdict.keepHint, row.keepHint, row.`case`)
             XCTAssertEqual(verdict.replay, row.replay ?? false, row.`case`)
+            if let offered = row.offerWatchable {
+                let failure = LiveTvFailure(code: row.body?.code ?? "", watchable: row.body?.watchable ?? [])
+                XCTAssertEqual(failure.watchable.map(\.guideNumber), offered, row.`case`)
+                XCTAssertTrue(failure.errorDescription?.contains("Watch 2.1 instead") == true)
+            }
         }
         // The fixture is the contract, but these two are the point of it: a
         // code nobody has ever heard of is not a verdict, and no answer at all
@@ -840,7 +847,7 @@ final class LiveTvTests: XCTestCase {
     }
 
     private func started(_ capability: String = "one") -> LiveTvStarted {
-        LiveTvStarted(sessionId: capability, channel: channel, live: true)
+        LiveTvStarted(sessionId: capability, playlistUrl: "/api/v1/live-tv/sessions/\(capability)/master.m3u8", channel: channel, live: true)
     }
 
     private func liveTvViewSource() throws -> String {
@@ -1380,14 +1387,38 @@ final class LiveTvTests: XCTestCase {
         XCTAssertEqual(dto.liveTvTransitionFromOwnerNodeId, "old")
     }
 
-    func testCapabilityPlaylistIsLocalAndNeverContainsAccountToken() throws {
+    func testCapabilityPlaylistUsesOnlyTheServerIssuedPathForThisSession() throws {
         let api = LiveTvAPI(origin: "https://media.example", token: "account-secret")
-        let playlist = try api.playlistURL("cap/part?query")
-        XCTAssertEqual(playlist.host, "media.example")
-        XCTAssertNil(playlist.query)
-        XCTAssertTrue(playlist.absoluteString.contains("cap%2Fpart%3Fquery"))
-        XCTAssertFalse(playlist.absoluteString.contains("account-secret"))
-        XCTAssertThrowsError(try api.playlistURL(""))
+        let capability = "cap/part?query"
+        let prefix = "/api/v1/live-tv/sessions/cap%2Fpart%3Fquery/"
+        let master = try api.playlistURL(prefix + "master.m3u8", sessionId: capability)
+        XCTAssertEqual(master.absoluteString, "https://media.example" + prefix + "master.m3u8")
+        XCTAssertNil(master.query)
+        XCTAssertFalse(master.absoluteString.contains("account-secret"))
+        XCTAssertThrowsError(try api.playlistURL(prefix + "index.m3u8", sessionId: capability))
+        for invalid in [
+            "https://elsewhere.example" + prefix + "master.m3u8",
+            "//elsewhere.example" + prefix + "master.m3u8",
+            "/api/v1/live-tv/sessions/other/master.m3u8",
+            prefix + "master.m3u8?token=secret",
+            prefix + "master.m3u8#fragment",
+            prefix + "../master.m3u8",
+            prefix + "master.m3u8\\evil.example"
+        ] {
+            XCTAssertThrowsError(try api.playlistURL(invalid, sessionId: capability), invalid)
+        }
+        XCTAssertThrowsError(try api.playlistURL(prefix + "master.m3u8", sessionId: ""))
+    }
+
+    func testStartedSessionDecodesTheServerPlaylistCapability() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let body = Data(#"{"session_id":"cap","playlist_url":"/api/v1/live-tv/sessions/cap/master.m3u8","live":true,"channel":{"id":"7.1","guide_number":"7.1","guide_name":"Local"}}"#.utf8)
+        let started = try decoder.decode(LiveTvStarted.self, from: body)
+        XCTAssertEqual(started.playlistUrl, "/api/v1/live-tv/sessions/cap/master.m3u8")
+        XCTAssertEqual(try LiveTvAPI(origin: "https://media.example", token: nil)
+            .playlistURL(started.playlistUrl, sessionId: started.sessionId).path,
+            started.playlistUrl)
     }
 
     // ---- the programme guide -------------------------------------------
@@ -2407,6 +2438,7 @@ private final class LiveTvCountingRequests: LiveTvRequests, @unchecked Sendable 
         starts += 1
         return LiveTvStarted(
             sessionId: "cap-\(starts)",
+            playlistUrl: "/api/v1/live-tv/sessions/cap-\(starts)/master.m3u8",
             channel: LiveTvChannel(id: channel, guideNumber: channel, guideName: "Test",
                                    favorite: false, drm: false, support: "ready",
                                    hd: nil, videoCodec: nil, audioCodec: nil),

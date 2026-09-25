@@ -152,7 +152,10 @@ function fullOpenHarness() {
     shippedSource("streamFailureResponseBodyNow"),shippedSource("streamFailureResponseBody"),
     shippedSource("observeStreamFailureResponse"),
     shippedSource("createHlsStartupLoader"),shippedSource("scheduleHlsNetworkRetry"),
-    shippedSource("attachHls"),
+    shippedSource("attachHls"),shippedSource("beginHlsAttachment"),
+    shippedSource("hlsStartupEpisode"),shippedSource("constructHls"),
+    shippedSource("wireHlsObservers"),shippedSource("onHlsError"),
+    shippedSource("attachNativeHls"),
     // The directed-change owner, shipped. Neither of these harnesses has a
     // control reporter, so `awaitPreparedOffer` answers "timed_out" at once
     // and the owner takes its one reopen -- which is what every menu case
@@ -165,7 +168,11 @@ function fullOpenHarness() {
     shippedSource("requestQualityChange"),
     shippedSource("fallBackDirectedChange"),
     shippedSource("settleDirectedChange"),
-    shippedSource("resetMediaSource"), shippedSource("play"), shippedSource("setQuality"),
+    shippedSource("resetMediaSource"),
+    ...["beginPlayAttempt","capturePlayInputs","decideForPlay","preparePlayOutgoing",
+      "buildPlayer","presentPlayerChrome","choosePlayRoute","attachPlayRoute",
+      "finishPlayAttach","play"].map(shippedSource),
+    shippedSource("setQuality"),
     shippedSource("playbackSeekBufferedRangesMs"),
     shippedSource("playbackSeekPublishedRangeMs"),
     shippedSource("playbackSeekBufferCovers"),
@@ -1272,7 +1279,10 @@ async function main() {
       shippedSource("teardownHls"),
       shippedSource("beginPlaybackMediaAttachment"),shippedSource("applyPlaybackAttachmentPosition"),
       shippedSource("playbackAttemptTerminallyStopped"),
-      shippedSource("attachHls"),
+      shippedSource("attachHls"),shippedSource("beginHlsAttachment"),
+      shippedSource("hlsStartupEpisode"),shippedSource("constructHls"),
+      shippedSource("wireHlsObservers"),shippedSource("onHlsError"),
+      shippedSource("attachNativeHls"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {p:PLAYER,video,instances,metadata,attach:()=>attachHls(video,'/session/index.m3u8',30),teardownHls};",
     ].join("\n"))(native);
@@ -2046,7 +2056,7 @@ async function main() {
   assert.doesNotMatch(shippedSource("persistentWait"),/persistent_decode_stall/,
     "elapsed time must never be serialized as a decoder failure");
   assert.match(shippedSource("persistentWait"),/askPlaybackControl\("stalled",controlObservation,began\+CONTROL_STALL_DEFER_DEADLINE_MS\)/);
-  assert.match(shippedSource("attachHls"),/notifyPlaybackControl\("failed",hlsFailure\.observation\)/);
+  assert.match(shippedSource("onHlsError"),/notifyPlaybackControl\("failed",hlsFailure\.observation\)/);
   assert.match(shippedSource("stallDiagnose"),/notifyPlaybackControl\("stalled"\)/);
   assert.match(shippedSource("handleEnded"),/control_trigger:controlTrigger/);
   assert.match(shippedSource("startPlaybackControl"),/p\.controlReporter!==reporter/);
@@ -2060,10 +2070,11 @@ async function main() {
   // question instead: nothing at all may be awaited before the reason is taken.
   const firstAwait=playSource.indexOf("await ");
   assert.notEqual(firstAwait,-1,"play no longer awaits anything");
-  assert.ok(playSource.indexOf("takePlaybackAttemptReason()")<firstAwait,
-    "play captures its one-shot reason before its first await");
-  assert.match(playSource,/PLAY_OPEN_GATE\.current\(openAttempt\)/);
-  assert.match(playSource,/PLAY_OPEN_GATE\.acceptResource\(openAttempt/);
+  assert.ok(playSource.indexOf("capturePlayInputs(")<firstAwait,
+    "play captures its one-shot inputs before its first await");
+  assert.match(shippedSource("capturePlayInputs"),/takePlaybackAttemptReason\(\)/);
+  assert.match(shippedSource("beginPlayAttempt"),/PLAY_OPEN_GATE\.current\(openAttempt\)/);
+  assert.match(shippedSource("attachPlayRoute"),/PLAY_OPEN_GATE\.acceptResource\(openAttempt/);
   assert.match(shippedSource("startCopyHls"),/PLAY_OPEN_GATE\.acceptResource/);
 
   // The action vocabulary. Declaring `hold` is what permits the server to send
@@ -2562,6 +2573,7 @@ async function main() {
         " detach(player){PLAYER=player; stopPlaybackControl(player); PLAYER=null;},",
         " stall(player,video,began,generation){PLAYER=player;",
         "   return persistentWait(video,player,began,generation,player.controlIntentGeneration||0);},",
+        " end(player,resumed){PLAYER=player; return endWait(resumed);},",
         " verdictText:controlVerdictText,",
         " supersede(player){PLAYER=player; return supersedePlaybackControlIntent(player);},",
         " armedVerdict(player){PLAYER=player; return armedPlaybackControlVerdict(player);},",
@@ -2714,6 +2726,34 @@ async function main() {
     assert.notEqual(player.waitTimer,null,"presentation observation keeps the absolute deadline");
     assert.deepEqual(h.stalls[0],{kind:"presentation",startedRunway:0,currentRunway:9.6,
       detail:"presentation-persistent"});
+  }
+  {
+    // Row 3's numerator (C-08 M5). The persistent report goes out while the
+    // picture is still frozen, carrying the eight seconds so far; when the
+    // wait ends, the rest follows as `stall_end` under the same detail, so a
+    // 90 s stall reaches the server as 8 s + 82 s and is still one stall.
+    let now=8_001;
+    const h=stallHarness({clock:{now:()=>now},answer:()=>({type:"none"})});
+    const player=Object.assign(stalledPlayer(),{waitAt:1,waitStartedRunway:0});
+    const video=bufferedVideo(9.6,{play(){return Promise.resolve();}});
+    h.stub.attach(player,video,bootstrap());h.attached.push(player);await flush();
+    const observing=h.stub.stall(player,video,1,3);
+    await settleExchange();await observing;
+    assert.equal(h.stalls.length,1,"one stall report while frozen");
+    assert.notEqual(player.waitTimer,null,"the wait is still open and observed");
+    assert.deepEqual(h.log.filter(entry=>entry.event==="stall_end"),[],
+      "nothing closes before the wait ends");
+    now=90_001;
+    h.stub.end(player,true);
+    assert.deepEqual(h.log.filter(entry=>entry.event==="stall_end")
+      .map(entry=>({detail:entry.detail,ms:entry.ms})),
+      [{detail:"presentation-persistent",ms:82_000}],
+      "the close carries exactly the time after the first report");
+    h.stub.end(player,true);
+    assert.equal(h.log.filter(entry=>entry.event==="stall_end").length,1,
+      "and is sent once");
+    assert.equal(h.stalls.length,1,"the close is not a second stall");
+    h.stub.detach(player);
   }
   {
     const video=bufferedVideo(0);

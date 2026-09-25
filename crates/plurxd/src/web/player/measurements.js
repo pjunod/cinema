@@ -262,7 +262,7 @@ function beginWait(v){
   p.waitAt=performance.now();
   p.waitStartedRunway=bufferRunway(v);
   p.waitNudgedAt=null;
-  p.waitReported=false;
+  p.waitReported=false; p.waitReportedMs=null; p.waitReportedDetail=null;
   const began=p.waitAt;
   const generation=p._seekToken||0;
   const actionGeneration=p.controlIntentGeneration||0;
@@ -306,8 +306,23 @@ function endWait(resumed){
   const ms=Math.round(performance.now()-began);
   const runway=p.waitStartedRunway;
   const reported=!!p.waitReported;
+  const reportedMs=Number(p.waitReportedMs)||0;
+  const reportedDetail=p.waitReportedDetail||"persistent";
   p.waitAt=null; p.waitStartedRunway=null; p.waitNudgedAt=null; p.waitReported=false;
-  if(reported) return;                       // persistentWait already emitted it
+  p.waitReportedMs=null; p.waitReportedDetail=null;
+  if(reported){
+    // persistentWait already reported this stall, while it was still frozen,
+    // with the time up to then. Send the rest now that it has ended, however
+    // it ended (resumed, recovered, or left), or the server's stalled seconds
+    // stop counting every long web stall at that first report. Same detail,
+    // so the same kind; a separate event, so it is still one stall.
+    const rest=ms-reportedMs;
+    if(rest>0) clientLog(Object.assign({level:"info",event:"stall_end",detail:reportedDetail,
+      ms:rest,message:`stall ended after ${(ms/1000).toFixed(1)}s`+
+        ` (${(rest/1000).toFixed(1)}s after its report)${resumed?"":" without resuming"}`},
+      playbackContext()));
+    return;
+  }
   if(!resumed || ms<STALL_MIN_MS) return;    // a hitch, not a stall
   let video=null; try{video=document.getElementById&&document.getElementById("video");}catch(e){}
   const kind=persistentWaitEvidence(video,runway).kind;
@@ -384,6 +399,8 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   let evidence=persistentWaitEvidence(v,currentRunway), kind=evidence.kind;
   const firstReport=!p.waitReported;
   p.waitReported=true;
+  // What this report credits, so endWait can send exactly the rest.
+  if(firstReport){ p.waitReportedMs=ms; p.waitReportedDetail=`${kind}-persistent`; }
   // This exact transition owns the legacy reopen. Cadence alone is too late:
   // the replacement normally stops this reporter before its next scheduled
   // exchange, leaving the server with only the earlier `waiting` fact.

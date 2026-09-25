@@ -3,6 +3,7 @@
 
 package tv.plurx.app.player
 
+import android.Manifest
 import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.graphics.Rect
@@ -10,6 +11,8 @@ import android.os.Build
 import android.util.Log
 import android.util.Rational
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -65,6 +68,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -121,6 +125,7 @@ import java.util.Locale
 import kotlin.math.roundToInt
 import tv.plurx.app.BuildConfig
 import tv.plurx.app.data.AudioTrack
+import tv.plurx.app.data.AudioOutputRoute
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.Decision
 import tv.plurx.app.data.DeviceCaps
@@ -171,6 +176,7 @@ private data class Plan(
     /** Both protocol spellings from the route probe that produced the plan. */
     val legacyCaps: Map<String, String>,
     val decisionCaps: DeviceCaps,
+    override val audioOutputRoute: AudioOutputRoute?,
     /**
      * `delivery.audio` — the audio index this plan already carries. Executed as
      * given rather than re-derived: it is what the server actually applied to
@@ -189,6 +195,7 @@ private data class Plan(
     val progressOffsetMs: Long,
     val itemDurationMs: Long?,
     val nextAudiobookPartId: Long?,
+    override val isAudioOnly: Boolean,
     /** Quality captured by the exact request that produced this plan. */
     override val requestedQuality: PlaybackQuality,
 ) : PlanLike {
@@ -260,6 +267,7 @@ private suspend fun loadPlan(
             deliveredDolbyVisionProfile = decision.delivered_dolby_vision_profile,
             legacyCaps = playbackDecision.capabilities.legacyQuery,
             decisionCaps = playbackDecision.capabilities.document,
+            audioOutputRoute = playbackDecision.capabilities.audioOutputRoute,
             deliveryAudio = decision.delivery?.audio,
             markers = decision.markers,
             reasons = decision.reasons,
@@ -275,6 +283,7 @@ private suspend fun loadPlan(
             nextAudiobookPartId = if (detail.item.isAudiobook) {
                 nextAudiobookPartId(detail.files, fileId)
             } else null,
+            isAudioOnly = detail.item.isAudiobook,
             requestedQuality = requestedQuality,
         )
     }
@@ -741,13 +750,23 @@ private fun PlayerContent(
     val scope = rememberCoroutineScope()
     val displayModeMatcher = remember(activity) { activity?.let(::DisplayModeMatcher) }
     val preferences by vm.preferences.collectAsStateWithLifecycle()
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* Media3 still owns playback if notification permission is denied. */ }
+    LaunchedEffect(plan.isAudioOnly) {
+        if (plan.isAudioOnly && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     val controller = remember(plan) {
         // The decision and its session body must describe the same quality,
         // even if the stored preference changes between request and compose.
         playbackIntent.adoptQuality(plan.requestedQuality)
         Controller(
             context,
-            buildPlayer(context, vm),
+            buildPlayer(context, vm, plan.isAudioOnly),
             plan,
             plan.legacyCaps,
             plan.decisionCaps,
@@ -759,6 +778,7 @@ private fun PlayerContent(
             initialAudioOffsetMs = audioOffsetMs,
             retainedAudio = retainedAudio,
             retainedSubtitle = retainedSubtitle,
+            replan = onReload,
         )
     }
     // The one surface, projected from the player by the presenter.
@@ -839,6 +859,13 @@ private fun PlayerContent(
         java.util.UUID.randomUUID().toString()
     }
     var findingNext by remember { mutableStateOf(false) }
+    // The panel, its quality chip, and the wait overlay consume session status.
+    // Prepared replacement is also checked by the controller itself.
+    SideEffect {
+        controller.statusPollingVisible = {
+            !isInPip && (panel != null || controlsVisible || findingNext || progressFault != null)
+        }
+    }
 
     fun poke() {
         controlsVisible = true
@@ -1092,10 +1119,13 @@ private fun PlayerContent(
     // value instead of being rebuilt for it.
     val autoplayNext by rememberUpdatedState(preferences.autoplayNext)
     val playNext by rememberUpdatedState(onPlayNext)
-    DisposableEffect(controller, playbackLifecycleOwner) {
+    DisposableEffect(controller, playbackLifecycleOwner, componentActivity) {
         val lifecycle = playbackLifecycleOwner.lifecycle
         fun updateForeground() {
-            controller.setPresentationForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+            controller.setPresentationForeground(
+                lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
+                inPictureInPicture = componentActivity?.let(::isInPictureInPicture) == true,
+            )
         }
         val observer = LifecycleEventObserver { _, _ -> updateForeground() }
         lifecycle.addObserver(observer)
@@ -1103,13 +1133,21 @@ private fun PlayerContent(
         onDispose { lifecycle.removeObserver(observer) }
     }
     DisposableEffect(controller) {
+        fun updateScreenOn() {
+            val current = controller.player
+            playerView?.keepScreenOn = !plan.isAudioOnly &&
+                (current.isPlaying ||
+                    (current.playWhenReady && current.playbackState == Player.STATE_BUFFERING))
+        }
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
+                updateScreenOn()
                 isPlaying = playing
                 if (!playing) vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
             }
 
             override fun onPlaybackStateChanged(state: Int) {
+                updateScreenOn()
                 // No screen-held copy of "the player is buffering": that is the
                 // presenter's `media_waiting` now, and one of it is the point.
                 if (state == Player.STATE_ENDED) {
@@ -1126,6 +1164,10 @@ private fun PlayerContent(
                         }
                     }
                 }
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                updateScreenOn()
             }
 
             override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -1168,6 +1210,10 @@ private fun PlayerContent(
         } else {
             val pipModeListener = Consumer<PictureInPictureModeChangedInfo> { info ->
                 isInPip = info.isInPictureInPictureMode
+                controller.setPresentationForeground(
+                    playbackLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
+                    inPictureInPicture = info.isInPictureInPictureMode,
+                )
                 panel = null
                 if (info.isInPictureInPictureMode) {
                     controlsVisible = false
@@ -1324,7 +1370,10 @@ private fun PlayerContent(
                     useController = false
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
-                    keepScreenOn = true
+                    keepScreenOn = !plan.isAudioOnly &&
+                        (controller.player.isPlaying ||
+                            (controller.player.playWhenReady &&
+                                controller.player.playbackState == Player.STATE_BUFFERING))
                     playerView = this
                 }
             },
@@ -1340,6 +1389,10 @@ private fun PlayerContent(
                     // parks the predecessor and waits to be told.
                     controller.collectRetiredPlayer()
                 }
+                val current = controller.player
+                view.keepScreenOn = !plan.isAudioOnly &&
+                    (current.isPlaying ||
+                        (current.playWhenReady && current.playbackState == Player.STATE_BUFFERING))
                 playerView = view
             },
             modifier = Modifier.fillMaxSize(),

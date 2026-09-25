@@ -37,7 +37,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewModelScope
-import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
@@ -49,12 +48,9 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
-import androidx.media3.datasource.okhttp.OkHttpDataSource
-import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.session.MediaSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -70,6 +66,7 @@ import tv.plurx.app.data.HlsStart
 import tv.plurx.app.data.CreateSessionReq
 import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.AudioTrack
+import tv.plurx.app.data.AudioOutputRoute
 import tv.plurx.app.data.SubTrack
 import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.Net
@@ -134,6 +131,7 @@ class Controller internal constructor(
     initialAudioOffsetMs: Long = 0,
     retainedAudio: Long? = null,
     retainedSubtitle: SubtitleChoice? = null,
+    private val replan: (Long, String, PlaybackQuality) -> Unit,
 ) {
     /**
      * The authoritative player — the one on the surface, with the volume up.
@@ -273,6 +271,9 @@ class Controller internal constructor(
     /** One final H.264 compatibility transcode; failure after that is terminal. */
     private var compatibilityTranscodeUsed = false
 
+    /** One route refresh per attached item, separate from the transcode budget. */
+    private var sinkRetryUsed = false
+
     /** A direct DV decoder failure first gets the same video in normalized MP4. */
     private var forceCompatibilityRemux = false
 
@@ -377,6 +378,7 @@ class Controller internal constructor(
         transport: PlaybackMediaTransport = recipe.recipe.desiredTransport,
     ) {
         recipeOwnership.attach(recipe, transport)
+        sinkRetryUsed = false
         selectionRecipe = recipe
         textSelectionArmed = true
         audioSelectionArmed = true
@@ -475,7 +477,10 @@ class Controller internal constructor(
     val currentSessionId: String? get() = sessionId
     val currentSessionIsVod: Boolean get() = sessionIsVod
 
-    private val mediaSession = MediaSession.Builder(context, player).build()
+    private val mediaSession = MediaSession.Builder(context.applicationContext, player).build()
+    init {
+        if (plan.isAudioOnly) PlaybackService.attach(context, mediaSession)
+    }
 
     /** The HLS session this player owns, if the plan opened one. */
     private var sessionId: String? = null
@@ -511,6 +516,21 @@ class Controller internal constructor(
     private val targetPresentationDeadline = playbackIntent.targetPresentationDeadline
     private val targetPresentationOwner = targetPresentationDeadline.claimOwner(monotonicNowMs())
     private var presentationForeground = true
+    private var lifecyclePaused = false
+    private var pendingLifecyclePauseCallback = false
+
+    private fun effectivePlayWhenReady(): Boolean =
+        playbackIntent.playbackRequested && !lifecyclePaused
+
+    /** Keep the viewer's intent untouched while ON_STOP suppresses output. */
+    private fun applyEffectivePlayWhenReady() {
+        val target = effectivePlayWhenReady()
+        if (lifecyclePaused && playbackIntent.playbackRequested && player.playWhenReady != target) {
+            pendingLifecyclePauseCallback = true
+            viewerTransport.ownerStopping()
+        }
+        player.playWhenReady = target
+    }
     private var mediaMutationEpoch = 0L
 
     /**
@@ -555,7 +575,8 @@ class Controller internal constructor(
                     // returned, and that callback is where the owner's own stop
                     // has to be told apart from a viewer's pause.
                     if (!value) viewerTransport.ownerStopping()
-                    player.playWhenReady = value
+                    if (value && lifecyclePaused) applyEffectivePlayWhenReady()
+                    else player.playWhenReady = value
                 }
             override val positionMs: Long get() = realPosition()
             // `playbackParameters.speed` is the requested SETTING and stays
@@ -586,6 +607,8 @@ class Controller internal constructor(
     internal val surfaceHistory: List<SurfaceLedgerRow> get() = surfaceOwner.history
 
     private var statusPollingJob: Job? = null
+    /** Screen visibility for passive status readers. Recovery must supply true if it starts reading status. */
+    var statusPollingVisible: () -> Boolean = { false }
     var playbackStallCount by mutableIntStateOf(0)
         private set
     var lastTimeToFirstFrameMs by mutableStateOf<Long?>(null)
@@ -692,6 +715,98 @@ class Controller internal constructor(
         onFailure = { message -> raiseDegradedNotice(message) },
     )
 
+    /** Audio output faults use their own bounded branch beside the existing ladder. */
+    private fun handleAudioSinkFailure(error: PlaybackException, refusal: MediaRefusal?): Boolean {
+        val failure = audioSinkFailure(error.errorCode)
+        if (failure == AudioSinkFailure.None) return false
+        val currentRoute = Caps.audioOutputRoute(context)
+        val action = audioSinkAction(
+            failure = failure,
+            // A failed route query is unknown, not evidence of disconnection.
+            outputDevicePresent = currentRoute?.present ?: true,
+            routeChangedSinceSnapshot = currentRoute != null && plan.audioOutputRoute != null &&
+                currentRoute != plan.audioOutputRoute,
+            sinkRetryUsed = sinkRetryUsed,
+            // Reopening an existing transcode with the same recipe is not a rescue.
+            transcodeRescueAlreadyUsed = compatibilityTranscodeUsed || deliveryMode == "transcode",
+        )
+        playbackTelemetry.report(
+            event = "playback_audio_sink_failure",
+            level = "error",
+            message = error.errorCodeName,
+            code = error.errorCode,
+            detail = audioSinkDiagnostic(error, failure, action, currentRoute),
+        )
+        when (action) {
+            AudioSinkRecovery.ReSnapshotAndRetry -> {
+                sinkRetryUsed = true
+                // PlayerScreen's ordinary reload asks for a fresh Caps.snapshot
+                // and /decision before attaching its replacement controller.
+                replan(realPosition(), "audio-route", playbackIntent.desiredQuality)
+                raiseRecoveryStep(refusal, "Checking the changed audio output.")
+            }
+            AudioSinkRecovery.TranscodeRescue -> retryAsCompatibilityTranscode(refusal)
+            AudioSinkRecovery.FailDisconnected ->
+                stopAndRaisePlaybackFailure(null, "Audio output disconnected.")
+            AudioSinkRecovery.Fail ->
+                stopAndRaisePlaybackFailure(refusal, "Audio playback stopped (${error.errorCodeName}).")
+        }
+        return true
+    }
+
+    private fun audioSinkDiagnostic(
+        error: PlaybackException,
+        failure: AudioSinkFailure,
+        action: AudioSinkRecovery,
+        route: AudioOutputRoute?,
+    ): String {
+        val causes = generateSequence(error.cause) { it.cause }.take(4).toList()
+        val initialization = causes.filterIsInstance<AudioSink.InitializationException>().firstOrNull()
+        val write = causes.filterIsInstance<AudioSink.WriteException>().firstOrNull()
+        val format = initialization?.format ?: write?.format ?: player.audioFormat
+        val mime = format?.sampleMimeType
+        val passthrough = mime in setOf(
+            "audio/ac3", "audio/eac3", "audio/eac3-joc", "audio/vnd.dts", "audio/vnd.dts.hd",
+            "audio/true-hd",
+        )
+        val outputs = route?.devices?.sortedWith(compareBy({ it.type }, { it.id }))
+            ?.take(8)?.joinToString(",") { "${it.type}:${it.id}" } ?: "unknown"
+        val cause = causes.firstOrNull()
+        return buildString {
+            append("failure=").append(failure)
+            append(" action=").append(action)
+            append(" route=").append(outputs)
+            append(" route_changed=").append(route != null && plan.audioOutputRoute != null &&
+                route != plan.audioOutputRoute)
+            append(" format=").append(mime ?: "unknown")
+            append(" encoding=").append(format?.pcmEncoding ?: -1)
+            append(" channels=").append(format?.channelCount ?: -1)
+            append(" sample_rate=").append(format?.sampleRate ?: -1)
+            append(" passthrough=").append(passthrough)
+            initialization?.let {
+                append(" audio_track_state=").append(it.audioTrackState)
+                append(" recoverable=").append(it.isRecoverable)
+            }
+            write?.let {
+                append(" sink_error_code=").append(it.errorCode)
+                append(" recoverable=").append(it.isRecoverable)
+            }
+            append(" cause=").append(cause?.javaClass?.simpleName?.take(80) ?: "none")
+            cause?.message?.let { message ->
+                append(" message=").append(message.replace('\n', ' ').replace('\r', ' ').take(200))
+            }
+        }
+    }
+
+    private fun retryAsCompatibilityTranscode(refusal: MediaRefusal?) {
+        val position = realPosition()
+        compatibilityTranscodeUsed = true
+        forceCompatibilityTranscode = true
+        subtitleDelivery = routeSubtitle(trackFor(selectedSubtitle), subtitleDelivery).delivery
+        restartAt(position, "fallback")
+        raiseRecoveryStep(refusal, "Switching to a compatible stream.")
+    }
+
     private val listener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
             if (!playbackControlBootstrapFence.isActive()) return
@@ -757,6 +872,7 @@ class Controller internal constructor(
                 raiseRecoveryStep(refusal, "Reloading this stream.")
                 return
             }
+            if (handleAudioSinkFailure(error, refusal)) return
             val action = playbackErrorAction(
                 deliveryMode = deliveryMode,
                 preservesDolbyVision = plan.preserveDolbyVision,
@@ -849,18 +965,7 @@ class Controller internal constructor(
                     raiseRecoveryStep(refusal, "Switching to a compatible copy.")
                 }
                 PlaybackErrorAction.RetryAsCompatibilityTranscode -> {
-                    // Read the position before the mode moves: which timeline
-                    // the player is on depends on the delivery about to change.
-                    val position = realPosition()
-                    compatibilityTranscodeUsed = true
-                    forceCompatibilityTranscode = true
-                    // `planMode` is a transcode now, and that can move the
-                    // selection's route with it: an embedded track on a
-                    // directly-played file has to become a rendition.
-                    subtitleDelivery =
-                        routeSubtitle(trackFor(selectedSubtitle), subtitleDelivery).delivery
-                    restartAt(position, "fallback")
-                    raiseRecoveryStep(refusal, "Switching to a compatible stream.")
+                    retryAsCompatibilityTranscode(refusal)
                 }
                 PlaybackErrorAction.Fail -> stopAndRaisePlaybackFailure(
                     refusal = refusal,
@@ -940,6 +1045,11 @@ class Controller internal constructor(
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
             if (!playbackControlBootstrapFence.isActive()) return
+            if (pendingLifecyclePauseCallback && !playWhenReady) {
+                pendingLifecyclePauseCallback = false
+                sampleTargetPresentationDeadline()
+                return
+            }
             // Includes MediaSession transport controls. Internal replacement
             // writes always apply this same latest value; transient buffering
             // and audio-focus suppression do not replace viewer intent.
@@ -951,6 +1061,12 @@ class Controller internal constructor(
                 // nothing — but the owner's stop-before-raise arrives here too,
                 // and it is the owner deciding rather than the viewer.
                 viewerTransport.report(playWhenReady)?.let(surfaceOwner::playbackRequested)
+                // A notification can ask a stopped video activity to play.
+                // Remember that viewer intent, then keep the owner pause in force.
+                if (playWhenReady && !presentationForeground && !plan.isAudioOnly) {
+                    setPresentationForeground(foreground = false)
+                    applyEffectivePlayWhenReady()
+                }
             }
             sampleTargetPresentationDeadline()
         }
@@ -963,6 +1079,7 @@ class Controller internal constructor(
     /** One actual-output listener carrying the exact mutation it can settle. */
     private var presentationListener: Player.Listener? = null
     private var recipePresentationFrame: Pair<Long, Long>? = null
+    private var firstVideoFrameForSeek: Triple<Long, Long, Int>? = null
 
     /**
      * Registered through [addPlayerListener], not on `player` directly.
@@ -989,14 +1106,20 @@ class Controller internal constructor(
         val captured = object : Player.Listener {
             override fun onRenderedFirstFrame() {
                 if (!playbackIntent.isCurrent(sequence)) return
+                val position = realPosition()
+                firstVideoFrameForSeek = Triple(
+                    sequence,
+                    position,
+                    player.videoDecoderCounters?.renderedOutputBufferCount ?: 0,
+                )
                 if (recipeExecution?.sequence == sequence) {
-                    recipePresentationFrame = sequence to realPosition()
+                    recipePresentationFrame = sequence to position
                     completeRecipeExecution()
                     return
                 }
                 val recipe = selectionRecipe ?: return
                 if (!recipeOwnership.canPresent(recipe)) return
-                if (!playbackIntent.presentedVideoFrame(realPosition(), sequence)) return
+                if (!playbackIntent.presentedVideoFrame(position, sequence)) return
                 playbackControl.playerChanged()
                 removePlayerListener(this)
                 if (presentationListener === this) presentationListener = null
@@ -1014,6 +1137,7 @@ class Controller internal constructor(
         if (recipeOwnership.needsMediaReplacement(recipe) || !playbackIntent.isCurrent(sequence)) return
         recipeExecution = RecipeExecution(sequence, recipe, inPlace)
         recipePresentationFrame = null
+        firstVideoFrameForSeek = null
         playbackIntent.markExecuted(
             sequence,
             observedAtMs = monotonicNowMs(),
@@ -1047,7 +1171,7 @@ class Controller internal constructor(
     }
 
     init {
-        player.playWhenReady = playbackIntent.playbackRequested
+        applyEffectivePlayWhenReady()
         player.addListener(listener)
         player.addAnalyticsListener(preparedSwitchAnalytics(player))
         pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
@@ -1270,7 +1394,7 @@ class Controller internal constructor(
                 markIntentExecuted(sequence, recipe)
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
-                player.playWhenReady = playbackIntent.playbackRequested
+                applyEffectivePlayWhenReady()
                 armTrackSelections()
             }
             // A cached session holds the whole stream: native seeking, no
@@ -1461,9 +1585,12 @@ class Controller internal constructor(
 
     fun playPause() {
         if (!playbackControlBootstrapFence.isActive()) return
+        if (plan.isAudioOnly && !playbackIntent.playbackRequested) {
+            PlaybackService.attach(context, mediaSession)
+        }
         playbackControl.clearVerdict()
         stallGuard.setPlaybackRequested(playbackIntent, !playbackIntent.playbackRequested) {
-            player.playWhenReady = it
+            player.playWhenReady = it && !lifecyclePaused
         }
         playbackControl.playerChanged()
     }
@@ -1514,6 +1641,7 @@ class Controller internal constructor(
         surfaceOwner.retire(mediaMutationEpoch)
         player.removeListener(listener)
         disarmVideoPresentation()
+        if (plan.isAudioOnly) PlaybackService.detach(context, mediaSession)
         mediaSession.release()
         player.release()
     }
@@ -1659,7 +1787,7 @@ class Controller internal constructor(
                 }
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
-                player.playWhenReady = playbackIntent.playbackRequested
+                applyEffectivePlayWhenReady()
                 armTrackSelections()
             }
             PlaybackMediaTransport.ProgressiveRemux -> {
@@ -1675,7 +1803,7 @@ class Controller internal constructor(
                 }
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
-                player.playWhenReady = playbackIntent.playbackRequested
+                applyEffectivePlayWhenReady()
                 armTrackSelections()
             }
             PlaybackMediaTransport.HlsCopy,
@@ -1805,7 +1933,7 @@ class Controller internal constructor(
                     }
                     player.prepare()
                     playbackTelemetry.prepared(attempt)
-                    player.playWhenReady = playbackIntent.playbackRequested
+                    applyEffectivePlayWhenReady()
                     armTrackSelections()
                 }
             } finally {
@@ -2096,7 +2224,7 @@ class Controller internal constructor(
                     attachRecipe(recipe)
                     player.prepare()
                     playbackTelemetry.prepared(attempt)
-                    player.playWhenReady = playbackIntent.playbackRequested
+                    applyEffectivePlayWhenReady()
                     armTrackSelections()
                 }
             } finally {
@@ -2268,16 +2396,18 @@ class Controller internal constructor(
      * Poll only while this controller owns an HLS session. The endpoint does
      * not count as playback activity, so showing Standard or Debug cannot keep
      * an abandoned encoder alive; keeping the last successful sample mirrors
-     * the browser and avoids a useful panel vanishing during teardown.
+     * the browser and avoids a useful panel vanishing during teardown. The
+     * playback-info panel, quality label, wait overlay and prepared replacement
+     * are the current readers. Any future recovery reader must keep [statusPollingVisible]
+     * true while it depends on this sample.
      */
     private fun startStatusPolling(polledSessionId: String) {
         statusPollingJob?.cancel()
         sessionStatus = null
         sessionStatusObservedAtMs = null
         statusPollingJob = scope.launch {
-            // §3.3 row 18 again, and once per polling job: the poll runs every
-            // two seconds, and a session that has gone away fails every one of
-            // them. The first is the event; the rest are the same event.
+            // Report the first failed sample once. A closed panel uses a
+            // bounded ten-second interval; visible readers keep two seconds.
             var reportedFailure = false
             while (isActive && sessionId == polledSessionId) {
                 try {
@@ -2298,7 +2428,9 @@ class Controller internal constructor(
                         )
                     }
                 }
-                delay(2_000)
+                delay(statusPollIntervalMs(
+                    statusPollingVisible() || preparedPlayer != null || preparedPredecessor != null,
+                ))
             }
         }
     }
@@ -2366,7 +2498,7 @@ class Controller internal constructor(
             markIntentExecuted(sequence, recipe)
         }
         player.prepare()
-        player.playWhenReady = playbackIntent.playbackRequested
+        applyEffectivePlayWhenReady()
         armTrackSelections()
         return true
     }
@@ -2685,18 +2817,44 @@ class Controller internal constructor(
         ) playbackControl.playerChanged()
     }
 
-    /** STARTED includes visible PiP; stopped/background activities suspend this deadline. */
-    fun setPresentationForeground(foreground: Boolean) {
+    /** STARTED includes visible PiP; stopped video is owner-paused without changing intent. */
+    fun setPresentationForeground(foreground: Boolean, inPictureInPicture: Boolean = false) {
         if (!playbackControlBootstrapFence.isActive()) return
-        if (presentationForeground != foreground) stallGuard.invalidateObservation()
-        presentationForeground = foreground
+        val visible = foreground || inPictureInPicture
+        if (presentationForeground != visible) stallGuard.invalidateObservation()
+        presentationForeground = visible
+        val lifecycle = lifecyclePlaybackTransition(
+            ownerPaused = lifecyclePaused,
+            foreground = foreground,
+            inPictureInPicture = inPictureInPicture,
+            audioOnly = plan.isAudioOnly,
+            viewerRequested = playbackIntent.playbackRequested,
+        )
+        lifecyclePaused = lifecycle.ownerPaused
+        when (lifecycle.effect) {
+            LifecyclePlaybackEffect.PauseVideo -> {
+                applyEffectivePlayWhenReady()
+                playbackTelemetry.report(
+                    event = "playback_lifecycle_pause",
+                    level = "info",
+                    message = "Video paused when its activity stopped",
+                    detail = "intent=play",
+                )
+            }
+            LifecyclePlaybackEffect.ResumeVideo -> {
+                pendingLifecyclePauseCallback = false
+                player.playWhenReady = true
+            }
+            LifecyclePlaybackEffect.None -> if (visible) pendingLifecyclePauseCallback = false
+        }
         // Android has no hidden page; this is the contract's `hidden`.
-        surfaceOwner.hidden(!foreground)
+        surfaceOwner.hidden(!visible)
         sampleTargetPresentationDeadline()
     }
 
     private fun sampleTargetPresentationDeadline() {
         if (!playbackControlBootstrapFence.isActive()) return
+        settleVideoPlaybackIntentIfPresented()
         val now = monotonicNowMs()
         val event = targetPresentationDeadline.sample(
             pending = playbackIntent.pendingSeek,
@@ -2734,6 +2892,26 @@ class Controller internal constructor(
                 surfaceContext(),
                 "Getting back to the requested position.",
             )
+        }
+    }
+
+    private fun settleVideoPlaybackIntentIfPresented() {
+        val pending = playbackIntent.pendingSeek ?: return
+        val first = firstVideoFrameForSeek ?: return
+        // A progressive remux may start at the preceding keyframe. Its first
+        // rendered frame proves the new surface is live; later rendered output
+        // and a clock that has crossed the target prove arrival at the seek.
+        if (!progressiveTransport || first.first != pending.sequence ||
+            first.second !in (pending.targetMs - 2_000L)..pending.targetMs ||
+            !presentationForeground || !player.isPlaying ||
+            textSelectionArmed || audioSelectionArmed ||
+            selectionRecipe?.let(recipeOwnership::canPresent) != true ||
+            (player.videoDecoderCounters?.renderedOutputBufferCount ?: 0) <= first.third
+        ) return
+        if (playbackIntent.presentedVideoProgress(realPosition(), pending.sequence)) {
+            playbackControl.playerChanged()
+            disarmVideoPresentation()
+            firstVideoFrameForSeek = null
         }
     }
 
@@ -3138,7 +3316,9 @@ class Controller internal constructor(
         sessionlessStallRecoveryPositionMs = null
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
-        stallGuard.setPlaybackRequested(playbackIntent, true) { player.playWhenReady = it }
+        stallGuard.setPlaybackRequested(playbackIntent, true) {
+            player.playWhenReady = it && !lifecyclePaused
+        }
         playbackControl.playerChanged()
     }
 
@@ -3331,7 +3511,7 @@ class Controller internal constructor(
         val playlist = action.playlistUrl ?: return
         val originMs = action.mediaOriginMs ?: return
         val built = try {
-            buildSuccessorPlayer(context, vm)
+            buildSuccessorPlayer(context, vm, plan.isAudioOnly)
         } catch (_: Exception) {
             // A device that cannot stand up a second pipeline at all is the
             // measured Google TV case. It is a `failed`, not a crash.
@@ -3582,7 +3762,9 @@ class Controller internal constructor(
         )
         val previous = player
         val previousVolume = previous.volume
-        val previousPlayWhenReady = playbackIntent.playbackRequested
+        // An ON_STOP owner pause survives the prepared item becoming active;
+        // intent remains Play and foreground entry can resume the new player.
+        val previousPlayWhenReady = effectivePlayWhenReady()
         val previousPlaybackParameters = previous.playbackParameters
         val predecessor = PreparedPredecessor(
             player = previous,
@@ -3992,6 +4174,7 @@ internal fun isTelevision(context: Context): Boolean =
 /** Minimal view of [Plan] so the controller doesn't depend on the screen file. */
 interface PlanLike {
     val title: String
+    val isAudioOnly: Boolean get() = false
     val fileId: Long
     val playUrl: String
     val mode: String // "direct" | "remux" | "transcode"
@@ -3999,6 +4182,8 @@ interface PlanLike {
     val requiresHls: Boolean get() = false
     val durationMs: Long
     val videoCodec: String?
+    /** Active media output captured by the route probe that produced this decision. */
+    val audioOutputRoute: AudioOutputRoute? get() = null
     val requestedQuality: PlaybackQuality
     val audio: List<AudioTrack>
     val subtitles: List<SubTrack>
@@ -4038,8 +4223,8 @@ class BuiltPlayer internal constructor(
 )
 
 @UnstableApi
-fun buildPlayer(context: Context, vm: AppViewModel): BuiltPlayer =
-    buildPipeline(context, vm, tunneling = isTelevision(context))
+fun buildPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean = false): BuiltPlayer =
+    buildPipeline(context, vm, if (audioOnly) PlayerRole.Audio else PlayerRole.Finite)
 
 /**
  * The second pipeline a prepared replacement primes.
@@ -4063,8 +4248,8 @@ fun buildPlayer(context: Context, vm: AppViewModel): BuiltPlayer =
  * (`docs/playback-control/PLAYBACK-CONTROL-STATUS.md:1240-1243`).
  */
 @UnstableApi
-fun buildSuccessorPlayer(context: Context, vm: AppViewModel): BuiltPlayer {
-    val built = buildPipeline(context, vm, tunneling = isTelevision(context))
+fun buildSuccessorPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean = false): BuiltPlayer {
+    val built = buildPipeline(context, vm, if (audioOnly) PlayerRole.Audio else PlayerRole.Successor)
     // Never audible and never visible before the switch. Silence is set here
     // rather than relied on from the composition not rendering it: a prepared
     // successor that is merely off-screen is still an audio stream.
@@ -4075,49 +4260,13 @@ fun buildSuccessorPlayer(context: Context, vm: AppViewModel): BuiltPlayer {
 }
 
 @UnstableApi
-private fun buildPipeline(context: Context, vm: AppViewModel, tunneling: Boolean): BuiltPlayer {
-    val selector = DefaultTrackSelector(context).apply {
-        parameters = buildUponParameters()
-            .setPreferredAudioLanguage(vm.audioLang)
-            // Tunneled playback hands decode and A/V sync to the TV SoC's own
-            // pipeline, which is what 4K HDR on a Shield or a Chromecast is
-            // built around. Requested only on television devices: on a phone it
-            // buys nothing and some handset decoders refuse the mode outright.
-            // Media3 falls back to normal playback when the device says no.
-            .setTunnelingEnabled(tunneling)
-            // Text selection is the server's policy, carried by [Controller] —
-            // not the selector's: a preferred language here re-enables the
-            // "merely the same language" tail that policy deletes, and the
-            // server's own renditions are deliberately DEFAULT=NO/AUTOSELECT=NO
-            // so the client must say which.
-            .setPreferredTextLanguage(null)
-            .setSelectUndeterminedTextLanguage(false)
-            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-            .build()
-    }
+private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole): BuiltPlayer {
     val progressiveMediaOrigin = ProgressiveMediaOrigin()
-    val dataSource: OkHttpDataSource.Factory = Net.dataSourceFactory()
-        .setTransferListener(progressiveMediaOrigin)
-    val renderers = DefaultRenderersFactory(context)
-        // A flaky hardware decoder degrades to software instead of erroring
-        // into the compatibility rescue and costing the viewer a restart.
-        .setEnableDecoderFallback(true)
-    val player = ExoPlayer.Builder(context)
-        .setLoadControl(playbackLoadControl(context))
-        .setTrackSelector(selector)
-        .setRenderersFactory(renderers)
-        .setMediaSourceFactory(DefaultMediaSourceFactory(dataSource))
-        // Duck and pause for other apps rather than talking over them, and
-        // stop when the headphones come out.
-        .setAudioAttributes(
-            AudioAttributes.Builder()
-                .setUsage(C.USAGE_MEDIA)
-                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                .build(),
-            /* handleAudioFocus = */ true,
-        )
-        .setHandleAudioBecomingNoisy(true)
-        .build()
+    val player = PlurxPlayerBuilder(context, role).build(
+        dataSource = Net.dataSourceFactory(),
+        audioLanguage = vm.audioLang,
+        transferListener = progressiveMediaOrigin,
+    )
     return BuiltPlayer(player, progressiveMediaOrigin)
 }
 
@@ -4337,10 +4486,9 @@ internal fun serverSubtitleLabel(track: SubTrack): String = listOfNotNull(
     languageName(track.language),
     track.title,
     if (isForcedSubtitle(track)) "Forced" else null,
-    // "Burn-in" is a warning about cost, so it follows the question that
-    // actually decides cost: can the server serve this as a rendition? ASS/SSA
-    // carry text and still burn, which `text` alone would have hidden.
-    if (!track.isNativeHls) "Burn-in" else null,
+    // Bitmap overlays are composited by the client; only a server-rendered
+    // subtitle should carry the burn-in warning.
+    if (track.isPgsOverlay) "Overlay" else if (!track.isNativeHls) "Burn-in" else null,
 ).distinct().joinToString(" · ").ifBlank { "Subtitle" }
 
 internal fun languageName(code: String?): String? {
@@ -4367,3 +4515,6 @@ internal fun codecShort(mime: String?): String? = when {
     mime.contains("opus", true) -> "Opus"
     else -> null
 }
+
+/** A hidden status panel cannot justify two-second network polling. */
+internal fun statusPollIntervalMs(visible: Boolean): Long = if (visible) 2_000L else 10_000L
