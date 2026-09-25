@@ -1909,14 +1909,10 @@ impl LiveTvRegistry {
         self.retired.retain(|_, (expires_at, _)| *expires_at > now);
     }
 
-    /// Whether the recovery history has room for one more request.
-    ///
-    /// Expired tombstones are pruned first. Nothing else prunes them on a
-    /// quiet owner — only a session ending or a capability lookup did — so a
-    /// burst of `MAX_TERMINAL_TOMBSTONES` ends refused every start until one
-    /// of those happened, however long ago the burst was.
-    fn recovery_history_admits(&mut self) -> bool {
-        self.prune_terminals();
+    /// Whether the recovery history has room for one more request. The start
+    /// path asks this in the same lock hold as, and just after,
+    /// `request_session`, which has already pruned expired tombstones.
+    fn recovery_history_admits(&self) -> bool {
         self.sessions.len() + self.terminals.len() < MAX_TERMINAL_TOMBSTONES
     }
 
@@ -11744,6 +11740,60 @@ exec /bin/cat > {sink}"#,
         manager.shutdown().await.expect("shutdown");
     }
 
+    /// The recovery history through the real start path: a start is refused
+    /// with "recovery history is full" while `MAX_TERMINAL_TOMBSTONES`
+    /// unexpired tombstones fill it, and admitted once they have expired —
+    /// the start's own `request_session` prunes them in the same lock hold as
+    /// the check, so nothing else has to (PR #496 review finding 3).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_full_recovery_history_refuses_a_start_until_its_tombstones_expire() {
+        let root = crate::test_tempdir().expect("root");
+        let (manager, _tuner) =
+            start_path_fixture(root.path(), &publishing_ffmpeg(root.path(), false), 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+        let ended = fixture_request(99);
+        {
+            let mut registry = manager.registry.lock().expect("registry");
+            for index in 0..MAX_TERMINAL_TOMBSTONES {
+                registry.terminals.insert(
+                    format!("ended-{index}"),
+                    LiveTvTerminalTombstone {
+                        error: LiveTvError::CapabilityExpired("ended".into()),
+                        request: ended.clone(),
+                        expires_at: tokio::time::Instant::now() + TERMINAL_TOMBSTONE_TTL,
+                    },
+                );
+            }
+        }
+        match manager.start_local(fixture_request(1)).await {
+            Err(LiveTvError::Capacity(message)) => assert!(
+                message.contains("recovery history is full"),
+                "refused for the wrong reason: {message}"
+            ),
+            other => panic!("a full recovery history must refuse the start: {other:?}"),
+        }
+        {
+            let mut registry = manager.registry.lock().expect("registry");
+            let lapsed = tokio::time::Instant::now() - Duration::from_millis(1);
+            for tombstone in registry.terminals.values_mut() {
+                tombstone.expires_at = lapsed;
+            }
+        }
+        watch_once_cold(&manager).await;
+        assert!(
+            manager
+                .registry
+                .lock()
+                .expect("registry")
+                .terminals
+                .keys()
+                .all(|capability| !capability.starts_with("ended-")),
+            "the start pruned the expired tombstones"
+        );
+        manager.shutdown().await.expect("shutdown");
+    }
+
     fn fixture_request(user_id: i64) -> LiveTvStartRequest {
         let mut request = test_session(PathBuf::from("/unused"), 1).request.clone();
         request.user_id = user_id;
@@ -12769,9 +12819,11 @@ Output #0, hls, to 'index.m3u8':
     }
 
     /// §5.4: failed cleanups used to stay in the registry for ever, counted in
-    /// `sessions + terminals`, so 256 of them refused every start. Now each
-    /// leaves a one-minute tombstone like any other end, and the orphan owner
-    /// is bounded: once that minute has passed, a start is admitted.
+    /// `sessions + terminals`, so 256 of them refused every start. Now each is
+    /// retired and leaves only a one-minute tombstone like any other end, and
+    /// the orphan owner is bounded. That a start is refused only while
+    /// unexpired tombstones fill the history is pinned through the real start
+    /// path by `a_full_recovery_history_refuses_a_start_until_its_tombstones_expire`.
     #[tokio::test(start_paused = true)]
     async fn two_hundred_failed_cleanups_do_not_refuse_starts() {
         let root = crate::test_tempdir().expect("cleanup root");
@@ -12795,53 +12847,6 @@ Output #0, hls, to 'index.m3u8':
                 .sessions
                 .is_empty(),
             "every failed cleanup retired its session"
-        );
-        // Each failed cleanup spent its own five-second removal deadline on
-        // the paused clock; let the last minute of tombstones lapse as well.
-        tokio::time::advance(TERMINAL_TOMBSTONE_TTL + Duration::from_secs(1)).await;
-        assert!(
-            manager
-                .registry
-                .lock()
-                .expect("registry")
-                .recovery_history_admits(),
-            "a start after the minute must not be refused with \"recovery history is full\""
-        );
-    }
-
-    /// A burst of `MAX_TERMINAL_TOMBSTONES` ends fills the recovery history
-    /// for one minute, not until something else happens to prune it: the
-    /// admission check prunes expired tombstones itself.
-    #[tokio::test(start_paused = true)]
-    async fn a_full_recovery_history_admits_again_once_its_minute_is_up() {
-        let root = crate::test_tempdir().expect("root");
-        let manager = test_manager(root.path());
-        let request = test_session(root.path().join("unused"), 1).request.clone();
-        {
-            let mut registry = manager.registry.lock().expect("registry");
-            for index in 0..MAX_TERMINAL_TOMBSTONES {
-                registry.terminals.insert(
-                    format!("ended-{index}"),
-                    LiveTvTerminalTombstone {
-                        error: LiveTvError::CapabilityExpired("ended".into()),
-                        request: request.clone(),
-                        expires_at: tokio::time::Instant::now() + TERMINAL_TOMBSTONE_TTL,
-                    },
-                );
-            }
-            assert!(
-                !registry.recovery_history_admits(),
-                "full inside the minute"
-            );
-        }
-        tokio::time::advance(TERMINAL_TOMBSTONE_TTL + Duration::from_secs(1)).await;
-        assert!(
-            manager
-                .registry
-                .lock()
-                .expect("registry")
-                .recovery_history_admits(),
-            "nothing else pruned the expired tombstones, and the start must not be refused"
         );
     }
 
