@@ -2670,3 +2670,33 @@ source = "crates/plurxd/src/web/player/watch-presentation.js"
 source_anchor = "function watchPopoverBounds(){"
 test = "tests/web/watch-and-browse.browser.cjs"
 test_anchor = "the top of the menu, outside the picture, is reachable"
+
+# The physical tvOS UI run verifies the wake before launch path on a sleeping
+# Apple TV; playback and paging both exercised this helper on hardware.
+[[fixes]]
+id = "apple.physical-tvos-wake-before-launch"
+commits = ["5b0501ad"]
+source = "clients/apple/UITests/TVPhysicalInputTests.swift"
+source_anchor = "private func wakeDevice()"
+test = "clients/apple/UITests/TVPhysicalInputTests.swift"
+test_anchor = "func testPlaybackRemoteControls() throws"
+
+# The lineage capability regression rejects a predecessor certificate that
+# would lose the existing install's data during key rotation.
+[[fixes]]
+id = "android.release-lineage-installed-data-capability"
+commits = ["0967eb15"]
+source = "scripts/sign-android-release"
+source_anchor = "def validate_lineage(apksigner: str, lineage: Path, expected_new: str) -> None:"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "def test_old_signer_without_installed_data_is_rejected(self) -> None:"
+
+# The exact-source reinstall contract prevents equal version numbers from
+# silently leaving stale Apple archives on paired devices.
+[[fixes]]
+id = "apple.physical-exact-archive-reinstall"
+commits = ["2b80c558"]
+source = "scripts/ship-physical"
+source_anchor = "# the just-built exact-main archive on every reachable paired device."
+test = "tests/operations/test_contracts.py"
+test_anchor = "def test_ship_physical_is_a_self_contained_device_path(self):"

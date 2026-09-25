@@ -1303,6 +1303,11 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn(":app:assembleDebug", script)
         self.assertNotIn("app-debug.apk", script)
 
+        # A matching build number cannot prove that the device has this
+        # exact source tree; every reachable Apple device gets the archive.
+        self.assertIn('devicectl device install app --device "$ident" "$app"', script)
+        self.assertNotIn('already on build $APPLE_BUILD', script)
+
         # Neither artifact reaches a device unverified.
         self.assertIn("codesign --verify --deep --strict", script)
         self.assertIn('"$APKSIGNER" verify', script)
