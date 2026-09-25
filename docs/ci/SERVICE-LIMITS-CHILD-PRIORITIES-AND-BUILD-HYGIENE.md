@@ -676,14 +676,25 @@ Rules: filesystem-input seams get a tempfile harness that never reads
 outside it (assessment F-build-13); each crash artefact is promoted to a
 unit test in the parser's own `mod tests` before the fix merges;
 `test_evidence_workflows.py:119`'s assertion extends to all five targets.
-Ten minutes per target is a budget, not coverage evidence — the nightly
-summary prints executions and corpus growth so a target that stops finding
-new edges is visible.
+Fifteen minutes per target (the 900 s budget) is a budget, not coverage
+evidence — each job's summary prints executions and corpus growth so a
+target that stops finding new edges is visible.
 
 **As built, 2026-09-24/25 (`plan/P-02-2`, claude-fable-5-1).** The four
 targets, `scripts/fuzz-seeds`, `scripts/fuzz-campaign`, the nightly
 `parser-fuzz` matrix job and the operations-test extension landed. Where the
 table above and the code differ, the code is right and the reason is here:
+
+- **A second fuzz package.** The four targets are `fuzz/parsers/`
+  (`plurx-parser-fuzz`: its own `Cargo.toml`, lock, `fuzz_targets/`,
+  `corpus/` and `artifacts/`), not `[[bin]]`s beside `inspect_sup` in
+  `fuzz/`. A package's dependencies are built for every one of its bins, so
+  adding `plurx-core` to the PGS package would have put ~240 crates under
+  AddressSanitizer in front of the PGS job's 20-minute step. `inspect_sup`
+  and `fuzz/Cargo.lock` are untouched. A campaign is
+  `cargo +nightly-2026-08-01 fuzz run --fuzz-dir fuzz/parsers <target>
+  fuzz/parsers/corpus/<target>`; `fuzz/parsers/Cargo.lock` was seeded from
+  the root lock so the fuzzer resolves the versions that ship.
 
 - **`rpu_rewrite`'s seam.** `Converter::for_init` / `convert` do not exist;
   the module header of `transcode/dvconvert.rs` explains why the
@@ -713,25 +724,40 @@ table above and the code differ, the code is right and the reason is here:
   build change can move bytes in them, which is why regeneration is a PR
   that names its build and not a nightly step. `scripts/fuzz-seeds --check`
   runs in the job so an emptied corpus fails before the campaign.
-- **The fuzz workspace patches its own `dolby_vision`.** `fuzz/Cargo.toml`
-  is a separate workspace and does not inherit the root `[patch]` table; the
-  first campaign after the fix below was still fuzzing the registry crate
-  until the row was added there too. Keep the two rows in step.
+- **The fuzz workspace patches its own `dolby_vision` and `bitvec_helpers`.**
+  `fuzz/parsers/Cargo.toml` is a separate workspace and does not inherit the
+  root `[patch]` table; the first campaign after the fix below was still
+  fuzzing the registry crate until the rows were added there too. Keep the
+  two tables in step.
+- **Debug assertions are on in the nightly.** `cargo fuzz run` without `-O`
+  builds `--release` and adds `-Cdebug-assertions`, so overflow checks are on
+  in the campaign and off in the shipped binary. That is wanted (an overflow
+  is a finding) and it is why `bitvec_helpers` is vendored too: its `read_ue`
+  shifted `1 << 64` on sixty-four zero bits, a panic under the campaign and a
+  wrong value in production. The local acceptance runs below used `-O`.
 
 **Findings, first hour.** `fmp4_reader`, `nfo_parse` and `epub_facts` ran
 60 s, then 450–300 s, clean (1.1 M / 1.0 M / 21 K executions in the first
 minute; 3.2 M / 76 K in the longer runs). `rpu_rewrite` found three ways for
-an RPU to take the process down inside its first ten thousand executions,
-all in the `dolby_vision` 3.4.0 dependency: an allocation sized from an
-unbounded ue(v) count (`num_ext_blocks` ≈ 4×10⁹ → a ~26 GB
-`Vec::with_capacity` → abort), an `unimplemented!()` two bits away from any
-valid RPU, and an `unreachable!()` reached by any level 8/9/10 block with an
-unlisted length. The crate is now vendored under `vendor/dolby_vision` with
-three refusals in place of those (its `PLURX-PATCH.md` has the table), and
-each input is a fixture under `tests/playback/dv-p7-rpu-hostile-*.hex` with
-a test in `dvconvert`'s own `mod tests`, per the rule above. The vendoring
-follows `vendor/rust_decimal`: workspace exclude, `[patch.crates-io]`,
-`scripts/vendor-audit-lock`, THIRD-PARTY-NOTICES §3.
+a malformed RPU to stop the conversion inside its first ten thousand
+executions, all in the `dolby_vision` 3.4.0 dependency: an allocation sized
+from an unbounded ue(v) count (`num_ext_blocks` in the hundreds of millions
+→ a 0x603c2cfd0-byte, ~25.8 GB `Vec::with_capacity` → the process aborts),
+an `unimplemented!()` two bits away from any valid RPU, and an
+`unreachable!()` reached by any level 8/9/10 block with an unlisted length
+(those two unwind the converting task, not the process). The crate is now
+vendored under `vendor/dolby_vision` with refusals in place of those (its
+`PLURX-PATCH.md` has the table, five patches after the review added capped
+capacity hints and a per-component mapping-method check that closes a
+write-side index panic), `dvconvert` refuses any RPU NAL over 64 KiB before
+parsing, and each fuzz input is a fixture under
+`tests/playback/dv-p7-rpu-hostile-*.hex` with a test in `dvconvert`'s own
+`mod tests`, per the rule above. `bitvec_helpers` 4.0.2, the bit reader
+under it, is vendored for two Exp-Golomb overflows the review found. The
+vendoring follows `vendor/rust_decimal`: workspace exclude,
+`[patch.crates-io]`, `scripts/vendor-audit-lock`, THIRD-PARTY-NOTICES §3.
+After the patches `rpu_rewrite` ran 900 s clean: 11.4 M executions, 5 103
+new corpus units, 523 MiB peak RSS.
 
 ---
 
@@ -866,6 +892,46 @@ no `strip = "none"`, no hidden panic flag, no image-size delta, and no
 `docker build` was run from the pinned Dockerfile. Those are the parts that
 need a release build to mean anything.
 
+**Release-profile half measured 2026-09-25** (`plan/P-02-2`,
+claude-fable-5-1) **and not shipped as written.** The hidden flag landed as
+the subcommand `plurxd diagnostic-panic` (a subcommand is the shape this CLI
+gives every action; `Command::DiagnosticPanic`, `#[command(hide = true)]`).
+Four profiles were built from the same tree (`4dd1cfcc`, identical in
+content to `830d1197`) on nuc3 with the pinned 1.97.1, 16 threads, thin LTO,
+`cargo build --release -p plurxd --bin plurxd` after `cargo clean`, and
+`RUST_BACKTRACE=1 plurxd diagnostic-panic` run on each binary:
+
+| Profile | `plurxd` bytes | vs A | gzip (image-layer proxy) | vs A | Build wall / peak RSS | Backtrace |
+|---|---|---|---|---|---|---|
+| A `strip = "symbols"` (main) | 83 637 528 (79.8 MiB) | — | 31 187 341 | — | 6 m 27 s / 8.9 GB | panic line only; **"stack backtrace:" is empty** |
+| B `debug = "line-tables-only"`, `strip = "none"` (PR 1 as written) | 440 675 232 (420 MiB) | **+427 %** | 103 867 528 | +233 % | 6 m 55 s / 10.6 GB | full: `plurxd::diagnostic_panic at ./crates/plurxd/src/main.rs:372:5`, `{async_fn#0} at ./crates/plurxd/src/main.rs:413:37`, `main at …:363:7`, tokio and std frames with paths |
+| C B + `split-debuginfo = "packed"` (PR 2 as written) | 241 166 712 (230 MiB) + `plurxd.dwp` 185 212 632 (177 MiB) | +188 % (binary alone) | 61 732 532 + 38 458 907 | +98 % (binary alone) | 7 m 12 s / 11.3 GB | full, as B, with the `.dwp` beside the binary |
+| D `debug = "line-tables-only"`, `strip = "debuginfo"` | 113 813 160 (109 MiB) | **+36 %** | 34 786 422 | **+11.5 %** | 6 m 48 s / 11.2 GB | named frames, no lines: `plurxd::diagnostic_panic`, `plurxd::dispatch::{closure#0}`, `plurxd::main` |
+
+`size(1)` shows A and B within 20 KiB of each other in `text` + `data`; the
+whole difference is debug sections. The image delta is the binary delta:
+`Dockerfile` copies `plurxd` and `plurx-cluster-check` into a
+`debian:bookworm-slim` base and nothing else changes, so B's image grows by
+~357 MB uncompressed and ~73 MB as a compressed layer; no `docker build` was
+run because nuc3's disk was at 95 % and the binary is the whole of the delta.
+On the 2-CPU cloud host that measured A first (83 553 536 bytes, an 84 KiB
+path-string difference from nuc3's), the B compile of `plurxd` was killed at
+6 GB RSS by a ~7 GB cgroup where A's had taken 2.7 GB — line tables through
+thin LTO roughly double the linker's peak, a number the §5.7 table wants.
+
+**Outcome.** §3.5's premise, "~+10–20 % binary", is off by an order of
+magnitude for this dependency graph (candle, tokenizers, hiqlite, reqwest
+and the rest carry most of the line tables), and §5.7's own rule — split
+debug only if the delta exceeds 15 % — is met by every option, so PR 1 as
+written is **not** the right thing to ship and `Cargo.toml`'s profile stays
+main's. The choice is Paul's (§7, question 6): D is the cheap step (named
+frames, +11.5 % on the wire, nothing to publish); C is the way to line
+numbers without a 420 MiB binary, at the price of a 177 MiB `.dwp` per
+release that the release cut (P-03's `scripts/release-cut`) would have to
+upload beside the image and an operator would have to fetch to
+symbolicate; B is honest and simple and five times the download. Whichever
+lands, `plurxd diagnostic-panic` on the deployed image is the check.
+
 ### 5.7 M7 — release profile PRs 2–4 (each by its numbers)
 
 Split debug only if M6's delta > 15 %; fat LTO / CGU 1 with the build-time
@@ -884,13 +950,16 @@ runs each target locally without a crash; the next nightly's summary lists
 five campaigns with executions and corpus sizes; `python3 -m unittest
 tests.operations.test_evidence_workflows` green.
 
-**Status (2026-09-25):** built on `plan/P-02-2`. Local 60 s runs: three
-targets clean; `rpu_rewrite` crashed until the three `dolby_vision` refusals
-in §3.6 landed, then ran clean (its run against the vendored crate is in the
-execution log). `tests.operations.test_evidence_workflows` green (15 tests).
-The five-campaign nightly summary is **post-merge** evidence: the job has not
-run on a runner yet, and its first night's summary belongs in the execution
-log through the evidence-only docs PR.
+**Status (2026-09-25):** built on `plan/P-02-2`, in `fuzz/parsers/`. Local
+60 s runs with debug assertions on, as the nightly runs them, against the
+review-round tree: `fmp4_reader` 544 092, `rpu_rewrite` 1 085 140,
+`nfo_parse` 817 151 and `epub_facts` 21 156 executions, no finding, peak
+RSS 428–527 MiB; the three earlier crash inputs run clean through the new
+binary. Before the `dolby_vision` refusals `rpu_rewrite` crashed within its
+first minute (§3.6). `tests.operations.test_evidence_workflows` green. The
+five-campaign nightly summary is **post-merge** evidence: the job has not
+run on a runner yet, and its first night's summaries belong in the
+execution log through the evidence-only docs PR.
 
 ---
 
@@ -928,6 +997,15 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
 5. **`epub_facts` vs `parse_epub`.** Two EPUB parsers exist (metadata facts
    and the reader's publication model); whether both get a target depends
    on the first one's cost.
+   **Answered 2026-09-25:** there is one, `read_epub_facts`; `parse_epub`
+   does not exist. One target (§3.6 as built).
+6. **Which release profile ships** (§5.6's table, 2026-09-25): A (today:
+   empty backtraces), D (`strip = "debuginfo"`: named frames, +36 % binary,
+   +11.5 % compressed), C (packed split debuginfo: file:line frames, 230 MiB
+   binary plus a 177 MiB `.dwp` the release cut must publish), or B (file:line
+   frames, 420 MiB binary). The executing session's recommendation is D now
+   and C when line numbers are worth the artefact plumbing; §5.7's PR 2 is
+   C. **Paul's call.**
 
 ---
 
@@ -948,3 +1026,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — **flagged, not implemented** | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | §3.2.1. §3.2's prescribed wiring (each `Command::new(ffmpeg_bin())` site plus a grep test) does not reach the producers that carry realtime playback, which spawn through a value; the seam that does is `spawn_job_owned`, which the plan's standing instruction says to stop and flag rather than change. §3.2's realtime measurement is also unreachable from here, so the `OOMScoreAdjust` row stays out under §4's guardrail. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4, M7, M8 — not started | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | M4 needs a lab VM playback matrix and a GPU-selection check under the new unit; M7's three PRs are each gated on a measurement; M8's four fuzz targets need the nightly toolchain and generated corpora. None was attempted, and nothing in the branch pretends otherwise. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review of #457 (M2, M3 flag, M6) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | Three findings, all addressed on the branch after merging main. (1) §3.2.1's claim that every child reaches `spawn_job_owned` was false. It has been re-surveyed across `plurx-core` and `plurxd`: eleven production sites spawn without it, including scan thumbnails, cover extraction, the encoder/decoder inventory, `media_pool.rs`'s `find`, the PGS ride-along self-test and the held decode-fact probes. Both M3 options now carry a migration list, and the decision stays open. `pre_exec` composition is answered: std runs every closure in registration order, checked on rustc 1.97.1. §2.2's "only `pre_exec`" claim is corrected to five. (2) The open-file raise now clamps to `kern.maxfilesperproc` on Apple targets. On `mba` (macOS 27.0) the review's `EINVAL` did not reproduce: the old code set and reported an infinite soft limit that the kernel does not enforce. `an_unlimited_hard_limit_is_clamped_to_the_platform_ceiling` fails on Linux without the clamp, and `the_soft_limit_is_raised_as_far_as_the_platform_allows` fails on `mba` without the Apple ceiling (`9223372036854775807` vs `122880`). (3) The drift step is `if: ${{ !cancelled() }}`, and `test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` fails without it. M3 is still not implemented. |
+| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | Claim (second pass: M8, M6 release-profile half) | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | Branch `plan/P-02-2` from `f600d2823`. M3 stays on Paul's seam decision, M4 on the lab1 matrix, M5's lane and M7's PRs 2-4 untouched. |
+| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M8 (targets, seeds, nightly, contract) | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | `d51a11d2`, then `33706bd3` after review: `fuzz/parsers/` with `fmp4_reader`, `rpu_rewrite`, `nfo_parse`, `epub_facts`; `scripts/fuzz-seeds` (13/16/20/17 seeds); `scripts/fuzz-campaign`; the `parser-fuzz` matrix job; `test_parser_fuzzers_are_bounded_seeded_artifacted_and_gating`. §3.6 "as built" records every departure from the table. 60 s runs clean on all four (see §5.8). |
+| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M8 finding: `dolby_vision` 3.4.0 | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | `9024fd63`: `rpu_rewrite` found a ~25.8 GB `Vec::with_capacity` from an unbounded ue(v) (process abort), an `unimplemented!()` and an `unreachable!()` (task unwinds) inside 10 000 executions. Crate vendored at `vendor/dolby_vision` with refusals; fixtures `tests/playback/dv-p7-rpu-hostile-*.hex`; three tests in `dvconvert`; ledger row `9024fd63-dv-rpu-hostile-sizes.toml`. After the patches: 900 s, 11.4 M executions, clean. |
+| 2026-09-25 | claude-opus (subagent adc9b30ebfcfc08d9) | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | Adversarial review | [#510 comment 4575](http://192.168.4.7:3000/noirr/plurx/pulls/510#issuecomment-4575) | 3 P1 (catalog lint, PGS job cost, input-scaled bounds), 5 P2, 8 P3. All folded: `5d18326b` (patches 4-5, `MAX_RPU_NAL_BYTES`, `vendor/bitvec_helpers` for two Exp-Golomb overflows, ledger row `5d18326b-dv-rpu-size-ceiling.toml`) and `33706bd3` (the `fuzz/parsers` split, catalog rows, campaign summary, seeds, audit-lock dedupe, test slices). Disposition on the PR. |
+| 2026-09-25 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M6 release-profile half — measured, profile not shipped | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | `830d1197` adds `plurxd diagnostic-panic`; four profiles built on nuc3 (§5.6 table): PR 1 as written is +427 % binary; `strip = "debuginfo"` is +36 % (+11.5 % gzipped) with named frames; packed split is 230 MiB + a 177 MiB `.dwp`. `Cargo.toml` keeps main's profile; which one ships is §7 question 6, Paul's. |

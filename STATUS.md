@@ -4,32 +4,42 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
-## P-02 M8: four parser fuzz targets, and the first one found a way to abort plurxd
+## P-02: four parser fuzz targets, one of which found a way to abort plurxd; the release profile measured
 
-**Branch `plan/P-02-2`, draft [PR #510](http://192.168.4.7:3000/noirr/plurx/pulls/510); not merged, nothing deployed.**
+**Branch `plan/P-02-2`, [PR #510](http://192.168.4.7:3000/noirr/plurx/pulls/510), merged 2026-09-25; not yet deployed.**
 The second pass of
 [SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md](docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md)
-takes the buildable remainder that needs no lab host and no decision of
-Paul's: **M8**, the four fuzz targets of §3.6 (`fmp4_reader`, `rpu_rewrite`,
-`nfo_parse`, `epub_facts`), each with a generated seed corpus
-(`scripts/fuzz-seeds`), a nightly `parser-fuzz` matrix job on the PGS
-campaign's budget, and `scripts/fuzz-campaign` writing executions and corpus
-growth into the run summary so all five campaigns read from one page.
+took the buildable remainder that needs no lab host and no decision of
+Paul's. **M8:** the four fuzz targets of §3.6 (`fmp4_reader`, `rpu_rewrite`,
+`nfo_parse`, `epub_facts`) in their own package `fuzz/parsers/`, each with a
+generated seed corpus (`scripts/fuzz-seeds`), a nightly `parser-fuzz`
+matrix job on the PGS campaign's budget, and `scripts/fuzz-campaign` writing
+executions and corpus growth into each job's summary so a target that stops
+finding edges shows.
 
-`rpu_rewrite` found three ways for a Dolby Vision RPU to take the daemon
-down within its first ten thousand executions, all in `dolby_vision` 3.4.0:
-an allocation sized from an unbounded ue(v) count (a ~26 GB
-`Vec::with_capacity` from eight changed bytes of the real Profile 7 fixture,
-which aborts the process), an `unimplemented!()` two bits from any valid
-RPU, and an `unreachable!()` on any level 8/9/10 block with an unlisted
-length. The parser runs inside `plurxd` on every sample of a converted disc
-remux. The crate is now vendored under `vendor/dolby_vision` with three
-refusals in place of those ([PLURX-PATCH.md](vendor/dolby_vision/PLURX-PATCH.md)),
-each input is a fixture with a test in `dvconvert`, and refusals now report
-the parse error's whole chain rather than "CM v4.0". M3 stays blocked on
-Paul's spawn-seam decision, M4 on the lab1 matrix; M7's release-profile PR 1
-measurement is in progress on the same branch. Board row P-02 is
-`in-progress`.
+`rpu_rewrite` found, within its first ten thousand executions, one way for
+a Dolby Vision RPU to take the daemon down and two to unwind the converting
+task, all in `dolby_vision` 3.4.0: an allocation sized from an unbounded
+ue(v) count (a ~25.8 GB `Vec::with_capacity` from eight changed bytes of the
+real Profile 7 fixture, which aborts the process), an `unimplemented!()` two
+bits from any valid RPU, and an `unreachable!()` on any level 8/9/10 block
+with an unlisted length. The parser runs inside `plurxd` on every sample of
+a converted disc remux. The crate is now vendored under
+`vendor/dolby_vision` with refusals in place of those
+([PLURX-PATCH.md](vendor/dolby_vision/PLURX-PATCH.md); five patches after
+the adversarial review), its bit reader `bitvec_helpers` beside it for two
+Exp-Golomb overflows, `dvconvert` refuses any RPU over 64 KiB before
+parsing, each fuzz input is a fixture with a test in `dvconvert`, and
+refusals report the parse error's whole chain rather than "CM v4.0".
+
+**M6's release-profile half, measured on nuc3 and not shipped:** PR 1 as
+written (`debug = "line-tables-only"`, `strip = "none"`) makes `plurxd` a
+420 MiB binary (+427 %) for a fully symbolicated backtrace; `strip =
+"debuginfo"` gives named frames without lines at +36 % (+11.5 % gzipped);
+packed split debuginfo is 230 MiB plus a 177 MiB `.dwp`. `plurxd
+diagnostic-panic` (hidden) is the check; `Cargo.toml` keeps main's profile
+and **which one ships is Paul's** (plan §7 Q6). M3 stays blocked on Paul's
+spawn-seam decision, M4 on the lab1 matrix. Board row P-02 records it.
 
 ## Live TV: direct play first, 5.1 stays 5.1
 

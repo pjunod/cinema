@@ -143,14 +143,14 @@ overflow-checks = true
 
 [profile.release]
 lto = "thin"
-# Line tables and symbols stay in the release binary so a panic's backtrace
-# names files and lines (docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md
-# §3.5, release-profile PR 1). `strip = "symbols"` had left `RUST_BACKTRACE=1`
-# with an empty "stack backtrace:" on the shipped binary; the cost is binary
-# size, measured in that plan's §5.6, and no runtime cost. `strip =
-# "debuginfo"` would remove the line tables again, so it is "none".
-debug = "line-tables-only"
-strip = "none"
+# Measured 2026-09-25 on nuc3 (docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md
+# §5.6): `debug = "line-tables-only"` with `strip = "none"` gives a fully
+# symbolicated backtrace and a 420 MiB binary (5.3x); `strip = "debuginfo"`
+# gives named frames without lines at 109 MiB (+36 %, +11.5 % gzipped);
+# packed split debuginfo gives 230 MiB plus a 177 MiB .dwp. Which one ships
+# is Paul's call (that plan's §7); until then the profile is main's, and
+# `plurxd diagnostic-panic` is there to check whichever lands.
+strip = "symbols"
 
 # Patch Hiqlite's sparse-membership, WAL-recovery, and optional-dependency
 # compatibility without advisory ignores. Path packages are
