@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["08b6347a"]
+points = ["web.experience"]
+checks = ["web-static"]
+reason = "The web-static check parses the shipped Developer settings script and executes settings-sections tests that render the Adaptive Auto card, catching this malformed template interpolation."
