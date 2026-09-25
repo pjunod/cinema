@@ -2552,6 +2552,9 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 |---|---|---|---|
 | POST | `/api/v1/cluster/join-tokens` | admin | Mints one single-use **voter** join token |
 | POST | `/api/v1/cluster/learner-join-tokens` | admin | The same, wire-distinct, for a **learner** |
+| GET | `/api/v1/cluster/jobs?state=...&kind=...&cursor=...` | admin | At most 100 durable job summaries, bounded counts and next cursor; payloads, paths and ownership tokens omitted |
+| GET | `/api/v1/cluster/jobs/{id}` | admin | Durable summary, latest 16 attempts and first 100 interests; `more_waiters` identifies truncation |
+| POST | `/api/v1/cluster/jobs/{id}/cancel` | admin | Idempotent cooperative cancellation; running children retain reservations until joined or expired |
 | GET | `/api/v1/cluster/nodes` | admin | Live roster, capacity, protocol range, per-node readiness |
 | GET | `/api/v1/cluster/status` | admin (cache-only ok) | The aggregate: roster + own snapshot + cached peer observations |
 | GET | `/api/v1/cluster/support-bundle` | admin (cache-only ok) | ZIP: the aggregate, a redacted log tail, a README, a manifest |

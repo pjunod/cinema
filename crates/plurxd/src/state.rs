@@ -1425,6 +1425,7 @@ pub struct JobManager {
     /// Queue execution is independent of discovery cadence. This guard keeps
     /// minute scheduler ticks from stacking drain loops on the same node.
     cluster_index_working: std::sync::atomic::AtomicBool,
+    background_upkeep_running: std::sync::atomic::AtomicBool,
     /// Permanent-media conversion is a bounded queue, but one slow disc may
     /// outlive many scheduler ticks. Keep exactly one local drain loop.
     dv_disk_working: std::sync::atomic::AtomicBool,
@@ -2118,6 +2119,15 @@ struct IndexingGuard(Arc<JobManager>);
 impl Drop for IndexingGuard {
     fn drop(&mut self) {
         self.0.indexing.store(false, Ordering::Relaxed);
+    }
+}
+
+struct BackgroundUpkeepGuard(Arc<JobManager>);
+impl Drop for BackgroundUpkeepGuard {
+    fn drop(&mut self) {
+        self.0
+            .background_upkeep_running
+            .store(false, Ordering::Release);
     }
 }
 
@@ -2987,6 +2997,7 @@ impl JobManager {
             producing: std::sync::atomic::AtomicBool::new(false),
             indexing: std::sync::atomic::AtomicBool::new(false),
             cluster_index_working: std::sync::atomic::AtomicBool::new(false),
+            background_upkeep_running: std::sync::atomic::AtomicBool::new(false),
             dv_disk_working: std::sync::atomic::AtomicBool::new(false),
             dv_disk_capabilities: crate::dv_disk::DvDiskCapabilities::default(),
             last_analysis_prune_ms: AtomicI64::new(0),
@@ -5968,10 +5979,29 @@ impl JobManager {
         }
     }
 
+    async fn maintain_background_queue(self: Arc<Self>) {
+        if self.background_upkeep_running.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let _guard = BackgroundUpkeepGuard(Arc::clone(&self));
+        if !self.may_run_cluster_jobs().await {
+            return;
+        }
+        if let Err(error) = self.store.maintain_jobs(clock_ms()).await {
+            tracing::warn!(%error, "durable queue upkeep unavailable");
+        }
+    }
+
     async fn run_due_jobs(
         self: &Arc<Self>,
         transcode: &Arc<TranscodeManager>,
     ) -> Result<(), plurx_core::error::StoreError> {
+        // Receipt expiry and cancelled-owner cleanup continue even when every
+        // background feature preference is off. The Store skips idle writes.
+        let upkeep = Arc::clone(self);
+        tokio::spawn(async move {
+            upkeep.maintain_background_queue().await;
+        });
         let libraries = self.store.list_libraries().await?;
         let global = GlobalSchedule {
             probe_retry_mins: self.job_interval(keys::JOB_PROBE_RETRY_MINS).await,
@@ -9874,9 +9904,6 @@ impl JobManager {
         let mut produced = 0_u64;
         let mut skipped = 0_u64;
         let mut reasons = std::collections::BTreeMap::<&'static str, u64>::new();
-        if let Err(error) = self.store.maintain_jobs(clock_ms()).await {
-            tracing::warn!(%error, "durable queue upkeep unavailable");
-        }
         self.pretranscode_refusals
             .lock()
             .await

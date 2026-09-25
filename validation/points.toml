@@ -427,7 +427,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/dv_conversion.rs",
   "crates/plurx-core/src/store/sqlite/{cache,pretranscode}.rs",
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
-  "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_pretranscode,_fragment,_delivery,_fragment_admission}.rs",
+  "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_pretranscode,_fragment,_delivery,_fragment_admission,_observation}.rs",
   "crates/plurx-core/src/store/background_jobs_schema.sql",
   "crates/plurx-core/src/store/hiqlite_background_jobs.rs",
   "crates/plurx-core/src/store/sqlite/background_jobs.rs",
@@ -501,7 +501,7 @@ paths = [
   "crates/plurx-core/src/store/hiqlite_media.rs",
   "crates/plurx-core/src/store/hiqlite_publication.rs",
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
-  "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_pretranscode,_fragment,_delivery,_fragment_admission}.rs",
+  "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_pretranscode,_fragment,_delivery,_fragment_admission,_observation}.rs",
   "crates/plurx-core/src/store/background_jobs_schema.sql",
   "crates/plurx-core/src/store/hiqlite_background_jobs.rs",
   "crates/plurx-core/src/store/sqlite/background_jobs.rs",
@@ -533,7 +533,7 @@ paths = [
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/shared_cache.rs",
   "crates/plurxd/src/store_result.rs",
-  "crates/plurxd/src/http/{cluster,internal_media_sessions,peer_transport}.rs",
+  "crates/plurxd/src/http/{cluster,background_jobs,internal_media_sessions,peer_transport}.rs",
   "crates/plurxd/src/http/{auth,extract,internal_auth_revocation,users}.rs",
   "crates/plurxd/src/http/file_grants.rs",
   "crates/plurxd/src/http/items.rs",
@@ -652,7 +652,7 @@ paths = [
   # On-request chapter thumbnails: one bounded ffmpeg per chapter, node-local
   # cache, counted for the Developer card. Runtime work with no producer.
   "crates/plurxd/src/http/chapter_thumbs.rs",
-  "crates/plurxd/src/http/{cluster,internal_media_sessions,peer_transport}.rs",
+  "crates/plurxd/src/http/{cluster,background_jobs,internal_media_sessions,peer_transport}.rs",
   "plurx.example.toml",
 ]
 checks = ["rust-gate", "rust-gate-ci", "api-wire", "user-journey", "resource-bounds"]

@@ -7,6 +7,7 @@
 
 mod analysis;
 mod auth;
+mod background_jobs;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
 mod chapter_thumbs;
@@ -427,6 +428,9 @@ fn http_route_group(path: &str) -> usize {
         // Cluster administration and authenticated internal transport.
         "/api/v1/cluster/nodes"
         | "/api/v1/cluster/status"
+        | "/api/v1/cluster/jobs"
+        | "/api/v1/cluster/jobs/{id}"
+        | "/api/v1/cluster/jobs/{id}/cancel"
         | "/api/v1/cluster/backups"
         | "/api/v1/cluster/ingress"
         | "/api/v1/cluster/media"
@@ -1338,6 +1342,8 @@ pub fn router(state: AppState) -> Router {
         .route("/system/playback-events", get(system::playback_events))
         .route("/cluster/nodes", get(cluster::nodes))
         .route("/cluster/status", get(cluster_operations::aggregate))
+        .route("/cluster/jobs", get(background_jobs::list))
+        .route("/cluster/jobs/{id}", get(background_jobs::detail))
         .route("/cluster/ingress", get(cluster::ingress))
         .route("/cluster/media", get(internal_media::directory))
         // Any signed-in user can post a client-side playback error here so it
@@ -1492,6 +1498,7 @@ pub fn router(state: AppState) -> Router {
             post(cluster::enter_maintenance).delete(cluster::exit_maintenance),
         )
         .route("/cluster/election", post(cluster::force_election))
+        .route("/cluster/jobs/{id}/cancel", post(background_jobs::cancel))
         .route("/cluster/backups", post(crate::backup::create))
         .route("/cluster/leave", post(cluster::leave))
         .route(
@@ -8984,6 +8991,116 @@ mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::from(body.to_string())).expect("req")
+    }
+
+    #[tokio::test]
+    async fn durable_job_api_is_admin_only_redacts_ownership_and_cancels_idempotently() {
+        use plurx_core::store::background_jobs::{
+            ClaimJob, EnqueueJob, JobKind, JobPayload, JobRequest,
+        };
+        let (app, state) = test_app_with_state();
+        let (status, _) = call(&app, get("/api/v1/cluster/jobs", None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let admin = setup_admin(&app).await;
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({"username":"viewer", "password":"longenough"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({"username":"viewer", "password":"longenough"}),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer session");
+        let id = uuid::Uuid::new_v4().to_string();
+        let detail = format!("/api/v1/cluster/jobs/{id}");
+        let cancel = format!("{detail}/cancel");
+        for path in ["/api/v1/cluster/jobs", &detail] {
+            let (status, _) = call(&app, get(path, Some(viewer))).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+        let (status, _) = call(&app, post(&cancel, Some(viewer), json!({}))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let now_ms = crate::state::clock_ms();
+        state
+            .store
+            .enqueue_job(EnqueueJob {
+                id: id.clone(),
+                payload: JobPayload::LibraryScan {
+                    library_id: 1,
+                    generation: "private-source-marker".into(),
+                },
+                dedupe_key: "api-job".into(),
+                priority: 1,
+                not_before_ms: now_ms,
+                now_ms,
+                request: JobRequest {
+                    scope: "internal:api-test".into(),
+                    request_id: id.clone(),
+                    request_digest: "a".repeat(64),
+                    consumer_kind: "scan".into(),
+                    consumer_ref: "private-consumer-marker".into(),
+                    target_node_id: None,
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("enqueue");
+        let boot = uuid::Uuid::new_v4().to_string();
+        let claim = uuid::Uuid::new_v4().to_string();
+        state
+            .store
+            .claim_job(ClaimJob {
+                job_id: id.clone(),
+                expected_revision: 0,
+                node_id: "node-a".into(),
+                boot_id: boot.clone(),
+                claim_id: claim.clone(),
+                kind: JobKind::LibraryScan,
+                payload_version: 1,
+                now_ms,
+                dispatched_at_ms: now_ms,
+            })
+            .await
+            .expect("claim");
+        for path in ["/api/v1/cluster/jobs?state=running", &detail] {
+            let (status, body) = call(&app, get(path, Some(&admin))).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let encoded = body.to_string();
+            for secret in [
+                &boot,
+                &claim,
+                "private-source-marker",
+                "private-consumer-marker",
+            ] {
+                assert!(
+                    !encoded.contains(secret),
+                    "operator projection leaked {secret}"
+                );
+            }
+        }
+        for _ in 0..2 {
+            let (status, body) = call(&app, post(&cancel, Some(&admin), json!({}))).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["state"], "cancelling");
+        }
+        let (status, _) = call(
+            &app,
+            get("/api/v1/cluster/jobs?cursor=invalid", Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

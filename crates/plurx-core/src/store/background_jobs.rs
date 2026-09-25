@@ -15,6 +15,8 @@ use super::background_jobs_fragment::PUBLISH_FRAGMENT_SQL;
 pub use super::background_jobs_fragment::{FragmentJobFailure, PublishFragmentJob};
 pub use super::background_jobs_fragment_admission::EnqueueFragmentJob;
 use super::background_jobs_maintenance::{CANCEL_WAITER_SQL, MAINTENANCE_NEEDED, MAINTENANCE_SQL};
+pub use super::background_jobs_observation::{JobAttemptObservation, JobCount, JobLabel};
+use super::background_jobs_observation::{ATTEMPTS_SQL, COUNTS_SQL, LABELS_SQL};
 use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
 pub use super::background_jobs_publication::{
     JobPublishOutcome, PublishTranscodeJob, TranscodeJobOutput,
@@ -834,6 +836,9 @@ pub trait BackgroundJobStore: Send + Sync {
     ) -> Result<EnqueueOutcome, StoreError>;
     async fn claim_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError>;
+    async fn job_labels(&self, ids: &[String]) -> Result<Vec<JobLabel>, StoreError>;
+    async fn job_counts(&self, now_ms: i64) -> Result<Vec<JobCount>, StoreError>;
+    async fn job_attempts(&self, job_id: &str) -> Result<Vec<JobAttemptObservation>, StoreError>;
     async fn list_jobs(&self, query: JobQuery) -> Result<JobPage, StoreError>;
     async fn job_candidates(&self, query: CandidateQuery) -> Result<CandidatePage, StoreError>;
     async fn renew_jobs(&self, request: RenewJobs) -> Result<Vec<RenewOutcome>, StoreError>;
@@ -1561,9 +1566,66 @@ impl<T: QueueSql> BackgroundJobStore for T {
         })
     }
 
+    async fn job_labels(&self, ids: &[String]) -> Result<Vec<JobLabel>, StoreError> {
+        if ids.len() > MAX_PAGE_SIZE || ids.iter().any(|id| uuid::Uuid::parse_str(id).is_err()) {
+            return Err(invalid("invalid job label page"));
+        }
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.queue_sql(
+            LABELS_SQL.into(),
+            encode(&serde_json::json!({"ids": ids}))?,
+            false,
+            false,
+        )
+        .await?
+        .iter()
+        .map(|row| decode(row))
+        .collect()
+    }
+
+    async fn job_counts(&self, now_ms: i64) -> Result<Vec<JobCount>, StoreError> {
+        if now_ms < 0 {
+            return Err(invalid("invalid queue observation time"));
+        }
+        self.queue_sql(
+            COUNTS_SQL.into(),
+            encode(&serde_json::json!({"now_ms": now_ms}))?,
+            false,
+            false,
+        )
+        .await?
+        .iter()
+        .map(|row| decode(row))
+        .collect()
+    }
+
+    async fn job_attempts(&self, job_id: &str) -> Result<Vec<JobAttemptObservation>, StoreError> {
+        if uuid::Uuid::parse_str(job_id).is_err() {
+            return Err(invalid("invalid job identity"));
+        }
+        self.queue_sql(
+            ATTEMPTS_SQL.into(),
+            encode(&serde_json::json!({"job_id": job_id}))?,
+            false,
+            false,
+        )
+        .await?
+        .iter()
+        .map(|row| decode(row))
+        .collect()
+    }
+
     async fn list_jobs(&self, query: JobQuery) -> Result<JobPage, StoreError> {
-        if query.limit == 0 || query.limit > MAX_PAGE_SIZE {
-            return Err(invalid("background job page limit must be 1..=128"));
+        if query.limit == 0
+            || query.limit > MAX_PAGE_SIZE
+            || query
+                .after_id
+                .as_ref()
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_err())
+        {
+            return Err(invalid("invalid background job page or cursor"));
         }
         let rows = self
             .queue_sql(

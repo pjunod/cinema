@@ -202,6 +202,7 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   }
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
   paintActivityBody(d,ACTIVITY_DVR.rows,ACTIVITY_DVR);
+  refreshDurableActivity();
   loadDvrRecent(generation);
   if(DVR_PAGE.pendingId){const id=DVR_PAGE.pendingId;DVR_PAGE.pendingId=null;selectDvrDetail(id);}
   else if(!DVR_PAGE.selectedId&&!DVR_PAGE.closedByUser&&ACTIVITY_DVR.rows.length&&matchMedia("(min-width:961px)").matches)selectDvrDetail(ACTIVITY_DVR.rows[0].recording_id);
@@ -287,6 +288,7 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
       : ""}
     ${d.scans.length? `<h2 class="section">Library scans</h2><table><tbody>${scans}</tbody></table>` : ""}
     <div class="activity-idle">${[!d.scans.length?"No scans running":"",!p?"No media preparation running":"",!offline.length?"No downloads in progress":""].filter(Boolean).join(" · ")}</div>
+    <div id="durable-activity">${durableQueueHtml()}</div>
     <h2 class="section">Trakt</h2>
     <div class="card">${trakt}</div>`;
   dvrRestoreUi(m,dvrUi);

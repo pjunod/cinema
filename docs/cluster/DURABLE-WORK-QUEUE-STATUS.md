@@ -16,7 +16,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | Compiler | Ready | Rust 1.97.1; core + Hiqlite all-target compile and baseline daemon compile passed |
 | M1 durable queue and pre-transcode | In progress | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Legacy cutover and fault-injection coverage remain |
 | M2 fragment analysis and hydration | In progress | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Repair and legacy cutover remain |
-| M3 UI, recovery and migration | Planned | Advisory requirements, admin operations, bounded cutover |
+| M3 UI, recovery and migration | In progress | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; retry, metrics and bounded cutover remain |
 | E0 subtitle and library workers | Planned | Reuse newly landed subtitle extraction implementation |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
@@ -149,3 +149,22 @@ implementation is claimed; “compiled” does not mean tests passed.
   No test has run.
   Legacy migration, remaining old ownership APIs, bounded artifact repair,
   operations/Developer UI and final fault-injection evidence remain open.
+
+- 2026-09-25: shared fragment execution committed and pushed as `d5929a80d`.
+  Pinned workspace Clippy and the normal hook passed. PR #532 is still a draft.
+  The next queue operations batch adds bounded administrator observations and
+  cancellation, Activity paging and attempts, and upkeep independent of feature
+  preferences. New observations omit source paths, payloads and ownership tokens.
+
+- Open correctness work before acceptance: migration must preserve per-interest
+  fragment retry ledgers when old targets have different attempts/deadlines;
+  current shared execution totals alone do not implement that import contract.
+  Missing artifact holders must enqueue bounded canonical repair. Explicit retry,
+  offline-demand joining, legacy execution API removal, fairness and the final
+  recovery/cancellation tests remain required; this draft is not deployable yet.
+
+- 2026-09-25: operations batch passed pinned workspace Clippy with all targets.
+  Added an HTTP regression for administrator-only access, redacted responses and
+  repeated cooperative cancellation. Activity labels are fetched in one bounded
+  read per page; queue refresh does not block the live Activity overview.
+  Test execution remains deferred until the complete PR's adversarial review.

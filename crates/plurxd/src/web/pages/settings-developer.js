@@ -314,6 +314,12 @@ function seekScratchReservationsCard(){
       <p class="devcheck-note">Advisory only. Capacity, authorization and retention rules are unchanged by anything on this card; the global scratch ceiling is still the one on <a href="#/settings/playback">Playback</a>.</p>
       </div></details>`);
 }
+function durableQueueCard(){
+  return setCard(`${cardHead("Durable cluster work","Accepted work survives restarts and can be claimed by an eligible idle worker.",'<span class="pill">Automatic</span>')}
+    <p>Pre-transcoding and fragment indexing share ownership, cancellation and retry history. Their existing preferences still control which work is requested.</p>
+    <p class="hint">Workers need access to the source, compatible tools, writable cache storage and free processing capacity. These observations never prevent saving an enable preference.</p>
+    <p><a href="#/activity">Inspect queued work, owners and attempts in Activity</a>.</p>`);
+}
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner, guide, recording and library channels</span></a>
@@ -326,6 +332,7 @@ function developerPanel(settings,readiness){
       ${directedChangeDeveloperRows()}`,{local:true});
   return `${setHead("Developer","Experimental features still awaiting device qualification.")}
       ${destinations}
+      <div class="setsection"><h2>Cluster work</h2><p>Shared preparation and durable job history.</p></div>${durableQueueCard()}
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
       <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}
       <div class="setsection" id="enable-seek-scratch"><h2>Seek scratch accounting</h2><p>Recently shipped accounting and retention changes with unverified native-device behavior.</p></div>${seekScratchReservationsCard()}
