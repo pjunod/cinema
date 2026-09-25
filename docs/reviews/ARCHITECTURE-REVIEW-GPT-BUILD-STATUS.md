@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — PR #516 merged; three voters and five Apple devices on exact main; draft PR #520 awaiting sole review · **Updated:** 2026-09-25 15:10 UTC · **Main:** `37baf6e0b5`
+**Status:** open — PR #516 merged; three voters and five Apple devices on exact main; PR #520 sole review addressed; fast lane pending · **Updated:** 2026-09-25 15:10 UTC · **Main:** `37baf6e0b5`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
