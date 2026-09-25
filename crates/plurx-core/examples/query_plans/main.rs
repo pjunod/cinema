@@ -30,6 +30,7 @@ mod calls;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -245,13 +246,31 @@ fn evict(database: &Path) -> Result<()> {
             continue;
         };
         file.sync_all()?;
-        // SAFETY: a valid open descriptor; advice only, no memory is touched.
-        let rc = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
-        if rc != 0 {
-            return Err(format!("posix_fadvise({}) = {rc}", path.display()).into());
-        }
+        drop_from_page_cache(&file, &path)?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn drop_from_page_cache(file: &File, path: &Path) -> Result<()> {
+    // SAFETY: a valid open descriptor; advice only, no memory is touched.
+    let rc = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+    if rc != 0 {
+        return Err(format!("posix_fadvise({}) = {rc}", path.display()).into());
+    }
+    Ok(())
+}
+
+/// Cold runs need the kernel to drop the file's cached pages, which this tool
+/// asks for with `posix_fadvise(POSIX_FADV_DONTNEED)` on Linux only. Anywhere
+/// else `measure` refuses rather than report warm reads as cold ones.
+#[cfg(not(target_os = "linux"))]
+fn drop_from_page_cache(_file: &File, path: &Path) -> Result<()> {
+    Err(format!(
+        "cannot evict {} from the page cache: cold runs need Linux's posix_fadvise",
+        path.display()
+    )
+    .into())
 }
 
 fn open_reader(database: &Path) -> Result<Connection> {
