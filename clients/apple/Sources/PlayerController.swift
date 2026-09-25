@@ -1,9 +1,15 @@
 import AVKit
 import Combine
 import Foundation
-#if os(iOS)
 import MediaPlayer
-#endif
+
+private struct NowPlayingState: Equatable {
+    let title: String
+    let durationMs: Int
+    let elapsedMs: Int
+    let rate: Float
+    let isPlaying: Bool
+}
 
 private enum PlaybackPreparationError: LocalizedError {
     case timedOut
@@ -1949,7 +1955,9 @@ final class PlayerController: ObservableObject {
 
     @Published private(set) var currentMs = 0
     @Published private(set) var knownDurationMs = 0
-    @Published private(set) var isPlaying = false
+    @Published private(set) var isPlaying = false {
+        didSet { if isPlaying != oldValue { updateNowPlaying() } }
+    }
     /// An open, a reopen, a failover or a prepared commit is in flight.
     ///
     /// Contract §3.3 row 10: that is a `client_preparing` fault — the staged
@@ -2380,7 +2388,9 @@ final class PlayerController: ObservableObject {
     /// The last rate the player was genuinely playing at, so a viewer paused
     /// at 1.5× resumes at 1.5× rather than at the 0 the transport reports
     /// while paused (P2-5).
-    private var preferredRate: Float = 1
+    private var preferredRate: Float = 1 {
+        didSet { if preferredRate != oldValue { updateNowPlaying() } }
+    }
     /// The viewer's audio language, kept because this controller now performs
     /// media selection itself instead of leaving it to AVPlayer criteria.
     private var audioLanguage = "eng"
@@ -2425,9 +2435,9 @@ final class PlayerController: ObservableObject {
     private var pgsOverlayImageBytes: [String: Int] = [:]
     private var pgsOverlayImageLRU: [String] = []
 
-    #if os(iOS)
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
-    #endif
+    private let remoteOwnerToken = UUID()
+    private var lastNowPlayingState: NowPlayingState?
 
     var subtitles: [SubtitleTrack] { decision?.subtitles ?? [] }
     var audioTracks: [AudioTrack] { decision?.audio ?? [] }
@@ -2688,8 +2698,8 @@ final class PlayerController: ObservableObject {
         // though the item and server are healthy.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
-        installRemoteCommands()
         #endif
+        installRemoteCommands()
         startAudioSessionObservation()
 
         audioLanguage = model.audioLang
@@ -4206,13 +4216,17 @@ final class PlayerController: ObservableObject {
             let model = model
             Task { await model?.endHlsSession(sessionId) }
         }
+        let wasRemoteOwner = RemoteCommandOwner.shared.isCurrent(remoteOwnerToken)
+        removeRemoteCommands()
+        if wasRemoteOwner {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            MPNowPlayingInfoCenter.default().playbackState = .stopped
+        }
+        lastNowPlayingState = nil
         #if os(iOS)
         offlineId = nil
         offlineAssetURL = nil
         if wasStarted {
-            removeRemoteCommands()
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-            MPNowPlayingInfoCenter.default().playbackState = .stopped
             if deactivateAudioSession {
                 try? AVAudioSession.sharedInstance().setActive(
                     false,
@@ -7098,7 +7112,6 @@ final class PlayerController: ObservableObject {
                     self.playbackRecoveryMonitor.takeRecoveredStagnantDurationMs()
                 )
                 self.observeProgressPastEarlyEnd(self.currentMs)
-                self.updateNowPlaying()
                 if self.isPlaying && self.currentMs - self.lastReportedMs >= 10_000 {
                     self.lastReportedMs = self.currentMs
                     self.report(self.currentMs)
@@ -9066,22 +9079,32 @@ final class PlayerController: ObservableObject {
             && decision.source?.hdr?.lowercased() == "dolby_vision"
     }
 
-    #if os(iOS)
     /// Set by the player view while it is on screen. The lock screen and the
     /// control centre are inputs like any other: without this they were a
     /// second answer to "what does skip do", and they answered it during a
     /// pending scrub, where the touch table says `ignore`.
+    #if os(iOS)
     var remoteInput: (@MainActor (PlayerContractInput) -> Bool)?
+    #endif
 
     private func routeRemote(_ input: PlayerContractInput, otherwise fallback: () -> Void) {
+        #if os(iOS)
         if let remoteInput {
             _ = remoteInput(input)
         } else {
             fallback()
         }
+        #else
+        fallback()
+        #endif
     }
 
     private func installRemoteCommands() {
+        RemoteCommandOwner.shared.claim(remoteOwnerToken) { [weak self] in
+            self?.lastNowPlayingState = nil
+            self?.updateNowPlaying()
+        }
+        guard remoteTargets.isEmpty else { return }
         let commands = MPRemoteCommandCenter.shared()
         commands.playCommand.isEnabled = true
         commands.pauseCommand.isEnabled = true
@@ -9093,72 +9116,94 @@ final class PlayerController: ObservableObject {
         commands.skipForwardCommand.preferredIntervals = [10]
 
         remoteTargets.append((commands.playCommand, commands.playCommand.addTarget { [weak self] _ in
+            guard let self, RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken) else {
+                return .commandFailed
+            }
             Task { @MainActor in
-                self?.setPlaybackRequested(true)
+                self.setPlaybackRequested(true)
             }
             return .success
         }))
         remoteTargets.append((commands.pauseCommand, commands.pauseCommand.addTarget { [weak self] _ in
+            guard let self, RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken) else {
+                return .commandFailed
+            }
             Task { @MainActor in
-                self?.setPlaybackRequested(false)
+                self.setPlaybackRequested(false)
             }
             return .success
         }))
         remoteTargets.append((commands.togglePlayPauseCommand,
                               commands.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let self, RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken) else {
+                return .commandFailed
+            }
             Task { @MainActor in
-                guard let self else { return }
                 self.routeRemote(.playPause) { self.togglePlayPause() }
             }
             return .success
         }))
         remoteTargets.append((commands.skipBackwardCommand,
                               commands.skipBackwardCommand.addTarget { [weak self] _ in
+            guard let self, RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken) else {
+                return .commandFailed
+            }
             Task { @MainActor in
-                guard let self else { return }
                 self.routeRemote(.skipBack) { self.skip(seconds: -10) }
             }
             return .success
         }))
         remoteTargets.append((commands.skipForwardCommand,
                               commands.skipForwardCommand.addTarget { [weak self] _ in
+            guard let self, RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken) else {
+                return .commandFailed
+            }
             Task { @MainActor in
-                guard let self else { return }
                 self.routeRemote(.skipForward) { self.skip(seconds: 10) }
             }
             return .success
         }))
         remoteTargets.append((commands.changePlaybackPositionCommand,
                               commands.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let self, RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken) else {
+                return .commandFailed
+            }
             guard let event = event as? MPChangePlaybackPositionCommandEvent else {
                 return .commandFailed
             }
-            Task { @MainActor in self?.seek(toMs: Int(event.positionTime * 1000)) }
+            Task { @MainActor in self.seek(toMs: Int(event.positionTime * 1000)) }
             return .success
         }))
     }
 
     private func removeRemoteCommands() {
+        RemoteCommandOwner.shared.release(remoteOwnerToken)
         for (command, target) in remoteTargets { command.removeTarget(target) }
         remoteTargets = []
     }
 
     private func updateNowPlaying() {
-        guard knownDurationMs > 0 else { return }
-        let rate: Float = isPlaying ? max(player.rate, 1) : 0
+        guard knownDurationMs > 0,
+              RemoteCommandOwner.shared.isCurrent(remoteOwnerToken) else { return }
+        let state = NowPlayingState(
+            title: title,
+            durationMs: knownDurationMs,
+            elapsedMs: realPositionMs(),
+            rate: isPlaying ? (player.rate > 0 ? player.rate : preferredRate) : 0,
+            isPlaying: isPlaying
+        )
+        guard lastNowPlayingState != state else { return }
+        lastNowPlayingState = state
         MPNowPlayingInfoCenter.default().nowPlayingInfo = [
-            MPMediaItemPropertyTitle: title,
-            MPMediaItemPropertyPlaybackDuration: Double(knownDurationMs) / 1000.0,
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: Double(realPositionMs()) / 1000.0,
-            MPNowPlayingInfoPropertyPlaybackRate: rate,
+            MPMediaItemPropertyTitle: state.title,
+            MPMediaItemPropertyPlaybackDuration: Double(state.durationMs) / 1000.0,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: Double(state.elapsedMs) / 1000.0,
+            MPNowPlayingInfoPropertyPlaybackRate: state.rate,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
             MPNowPlayingInfoPropertyIsLiveStream: false,
         ]
-        MPNowPlayingInfoCenter.default().playbackState = isPlaying ? .playing : .paused
+        MPNowPlayingInfoCenter.default().playbackState = state.isPlaying ? .playing : .paused
     }
-    #else
-    private func updateNowPlaying() {}
-    #endif
 }
 
 // MARK: - Passive playback control

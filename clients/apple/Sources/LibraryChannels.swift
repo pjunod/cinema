@@ -335,6 +335,7 @@ final class LibraryChannelPlayerController: ObservableObject {
     private var monotonicBaseMs: Int64 = 0
     private var itemObserver: AVPlayerItemObserver?
     private var itemEventTask: Task<Void, Never>?
+    private let remoteCommands = LiveRemoteCommands()
     private let audioSessionObserver = PlaybackAudioSessionObserver()
     private var progressObserver: Any?
     private let playbackControl = PlaybackControlSession()
@@ -436,6 +437,22 @@ final class LibraryChannelPlayerController: ObservableObject {
             observeItem(item, channel: channel, sequence: expected)
             observeProgress(item, sequence: expected)
             player.play()
+            remoteCommands.start(
+                title: title ?? channel.name,
+                playing: true,
+                play: { [weak self] in
+                    guard let self, self.paused else { return }
+                    Task { await self.togglePause() }
+                },
+                pause: { [weak self] in
+                    guard let self, !self.paused else { return }
+                    Task { await self.togglePause() }
+                },
+                toggle: { [weak self] in
+                    guard let self else { return }
+                    Task { await self.togglePause() }
+                }
+            )
             mediaOriginMs = Int64(started.playback.mediaOriginMs ?? Int(occurrence.positionMs))
             mediaDurationMs = started.playback.durationMs ?? 0
             if let bootstrap = started.playback.control, bootstrap.isValid {
@@ -514,9 +531,11 @@ final class LibraryChannelPlayerController: ObservableObject {
             message = "Paused. Resume rejoins server-now if the programme changes."
         }
         playbackControl.playerChanged()
+        remoteCommands.update(title: title ?? channel.name, playing: !paused && !systemPaused)
     }
 
     func stop() async {
+        remoteCommands.stop()
         tuneSequence &+= 1
         boundary?.cancel()
         boundary = nil
