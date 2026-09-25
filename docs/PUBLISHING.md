@@ -410,8 +410,11 @@ publish a build that has none. Only `/download/plurx-android.apk` is served;
 the mappings are not. To de-obfuscate a device stack trace, run R8's `retrace`
 against the mapping of the versionCode the device reports.
 
-What remains is operational: **generate the durable release key and signed
-lineage, and retain both outside the repository.** The old signer must grant
+A durable release key and signed lineage have been generated outside the
+repository for the agent-owned fleet rollout. Their certificate and lineage
+hashes are in the [dated fleet readout](reviews/ARCHITECTURE-REVIEW-FLEET-READOUT-2026-09-25.md). The signed APK and a data-preserving physical canary remain
+unverified. For a new installation, generate and retain both outside the
+repository. The old signer must grant
 `installed-data` in the lineage or the on-device update loses its data. Stream
 the files and passwords to the build host; never commit them or pass passwords
 as command-line literals. `scripts/sign-android-release` verifies the old
