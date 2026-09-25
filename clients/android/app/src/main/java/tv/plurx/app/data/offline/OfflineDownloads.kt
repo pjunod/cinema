@@ -203,7 +203,7 @@ object OfflineDownloads {
         scope.launch {
             try {
                 val legacyNetwork = SettingsStore(appContext).flow.first().preferences.offlineNetwork
-                val authoritativeNetwork = recovery.migrateNetworkPolicy(legacyNetwork)
+                recovery.migrateNetworkPolicy(legacyNetwork)
                 recovery.intents().forEach { (id, encoded) ->
                     if (catalog.record(id) == null) {
                         runCatching { json.decodeFromString<OfflineRecord>(encoded) }
@@ -224,7 +224,7 @@ object OfflineDownloads {
                     (catalog.records.value.maxOfOrNull(OfflineRecord::transferSequence) ?: 0L) + 1L,
                 )
                 withContext(Dispatchers.Main.immediate) {
-                    manager.requirements = offlineRequirements(authoritativeNetwork)
+                    manager.requirements = offlineRequirements(recovery.networkPolicy())
                     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                         manager.resumeDownloads()
                     }
@@ -325,9 +325,18 @@ object OfflineDownloads {
     fun setNetworkPolicy(policy: OfflineNetwork) {
         val changed = recovery.networkPolicy() != policy
         recovery.setNetworkPolicy(policy)
-        runOnManager { requirements = offlineRequirements(policy) }
-        if (changed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            reconfigureUidtTransfers(policy, networkPolicyGeneration.incrementAndGet())
+        val generation = if (changed) networkPolicyGeneration.incrementAndGet() else null
+        scope.launch {
+            recovered.await()
+            // Startup migration and viewer changes may race. Apply the latest
+            // durable choice, not the value captured before replay completed.
+            val current = recovery.networkPolicy()
+            withManager { requirements = offlineRequirements(current) }
+            if (generation != null && generation == networkPolicyGeneration.get() &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
+            ) {
+                reconfigureUidtTransfers(current, generation)
+            }
         }
     }
 
