@@ -30,14 +30,26 @@ final class TVPhysicalInputTests: XCTestCase {
         let trackLabel = try requiredEnvironment("PLURX_TVOS_CAPTION_LABEL")
         let app = try playbackApp()
         remote.press(.select)
-        let subtitles = app.buttons["player-subtitles"]
+        // SwiftUI's tvOS Menu may be a PopUpButton in the modern accessibility
+        // tree even when the legacy Button query reports its identifier.
+        let subtitles = app.descendants(matching: .any)
+            .matching(identifier: "player-subtitles").firstMatch
         XCTAssertTrue(subtitles.waitForExistence(timeout: 20),
                       "Fixture needs a file with an exposed subtitle track")
 
-        XCTAssertTrue(focus(subtitles, in: app),
-                      "Could not focus Subtitles with remote")
+        let reachedSubtitles = focus(subtitles, in: app)
+        attachScreen(app, name: "caption-control-focus")
+        XCTAssertTrue(reachedSubtitles, "Could not focus Subtitles with remote")
         remote.press(.select)
-        let choice = app.buttons[trackLabel]
+        // Every Subtitles menu has Off; Quality has Auto instead. Check the
+        // menu we actually opened before attributing a missing track to media.
+        let offChoice = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Off")).firstMatch
+        attachScreen(app, name: "caption-menu-open")
+        XCTAssertTrue(offChoice.waitForExistence(timeout: 5),
+                      "Remote did not open the Subtitles menu")
+        let choice = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", trackLabel)).firstMatch
         XCTAssertTrue(choice.waitForExistence(timeout: 10),
                       "Track \(trackLabel) was not exposed by the media item")
         for _ in 0..<12 where !choice.hasFocus { remote.press(.down) }
@@ -132,7 +144,8 @@ final class TVPhysicalInputTests: XCTestCase {
     private func focus(_ target: XCUIElement, in app: XCUIApplication) -> Bool {
         for _ in 0..<80 {
             if target.hasFocus { return true }
-            let current = app.buttons.matching(
+            // Include tvOS Menu/PopUpButton focus nodes, not only Buttons.
+            let current = app.descendants(matching: .any).matching(
                 NSPredicate(format: "hasFocus == true")
             ).firstMatch
             guard current.exists else { remote.press(.up); continue }
