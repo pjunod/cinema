@@ -205,9 +205,11 @@ pub enum QueryWrite {
     Transaction(Vec<Query>),
     Batch(Cow<'static, str>),
     Migration(Vec<Migration>),
-    #[cfg(feature = "backup")]
-    Backup((NodeId, i64)),
     RTT,
+    // Appended after every variant shipped by the no-backup build. This is
+    // deliberately reserved even when the handler is disabled: inserting it
+    // before RTT changed RTT's bincode ordinal during a rolling upgrade.
+    Backup((NodeId, i64)),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1220,6 +1222,11 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
                     Response::Backup(result)
                 }
 
+                #[cfg(not(feature = "backup"))]
+                EntryPayload::Normal(QueryWrite::Backup(_)) => Response::Backup(Err(
+                    Error::Config("backup support is not enabled in this build".into()),
+                )),
+
                 EntryPayload::Normal(QueryWrite::Migration(migrations)) => {
                     let (tx, rx) = oneshot::channel();
                     let req = WriterRequest::Migrate(writer::Migrate {
@@ -1508,8 +1515,23 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
 
 #[cfg(test)]
 mod backup_owner_contracts {
-    use super::committed_backup_owner;
+    use super::{QueryWrite, committed_backup_owner};
     use openraft::{CommittedLeaderId, LogId};
+    use serde::{Deserialize, Serialize};
+
+    /// Exact write enum shipped before the unconditional Backup reservation.
+    ///
+    /// The payloads before RTT are immaterial to this compatibility check;
+    /// their positions are what bincode writes on the wire.
+    #[derive(Debug, Serialize, Deserialize)]
+    enum LegacyQueryWrite {
+        Execute(()),
+        ExecuteReturning(()),
+        Transaction(()),
+        Batch(()),
+        Migration(()),
+        RTT,
+    }
 
     #[test]
     fn backup_owner_follows_the_accepting_leader_after_a_client_handoff() {
@@ -1518,6 +1540,30 @@ mod backup_owner_contracts {
 
         assert_eq!(committed_backup_owner(&accepted), 2);
         assert_ne!(committed_backup_owner(&accepted), stale_client_sample);
+    }
+
+    #[test]
+    fn old_and_reserved_backup_builds_decode_each_others_rtt() {
+        let old_bytes = crate::helpers::serialize(&LegacyQueryWrite::RTT)
+            .expect("serialize deployed RTT");
+        let new_bytes = crate::helpers::serialize(&QueryWrite::RTT)
+            .expect("serialize reserved-variant RTT");
+        assert_eq!(old_bytes, [5, 0, 0, 0]);
+        assert_eq!(new_bytes, old_bytes);
+
+        let (new_from_old, _): (QueryWrite, usize) = bincode::serde::decode_from_slice(
+            &old_bytes,
+            bincode::config::legacy(),
+        )
+        .expect("new build decodes deployed RTT");
+        assert!(matches!(new_from_old, QueryWrite::RTT));
+
+        let (old_from_new, _): (LegacyQueryWrite, usize) = bincode::serde::decode_from_slice(
+            &new_bytes,
+            bincode::config::legacy(),
+        )
+        .expect("deployed build decodes reserved-variant RTT");
+        assert!(matches!(old_from_new, LegacyQueryWrite::RTT));
     }
 }
 

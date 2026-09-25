@@ -1,0 +1,109 @@
+#!/bin/sh
+# Audit closed captions through this node's live-TV graphs (plan L-03 M3).
+#
+#   scripts/live-tv-caption-audit [--image IMAGE [--ffmpeg-dir DIR]] [--a53cc 1] ROUTE...
+#   scripts/live-tv-caption-audit [--image IMAGE [--ffmpeg-dir DIR]] analyze CAPTURE.ts
+#
+# ROUTE is any of: software qsv vaapi nvenc videotoolbox copy
+#
+# Each route runs the production planner and the production live FFmpeg
+# argv (tuner input, fed on stdin) on a generated 10 s 1080i MPEG-2 fixture
+# carrying CEA-608 CC1 and CEA-708 service-1 captions, through both HLS
+# packagings and both deinterlace modes, and decodes the captions back out
+# of the published segments. It prints one `caption-audit:` line per run
+# (preserved / partial / dropped for CC1 and for service 1) and the exact
+# argv. VideoToolbox is expected to drop them (`-a53cc 0`); every other route
+# is expected to preserve both. A mismatch exits nonzero.
+#
+# --a53cc 1 re-runs VideoToolbox with `-a53cc 1` to re-prove, or not, the SEI
+# insertion failure its workaround exists for. That run reports and never
+# fails the audit.
+#
+# analyze prints which 608 channels and 708 services a capture carries and a
+# sample of each one's text -- for a broadcast capture, the service ids an
+# advertised caption rendition may name.
+#
+# --image runs ffmpeg and ffprobe from a plurxd container image (the fleet's
+# exact jellyfin-ffmpeg) with /dev/dri passed through, while the test itself
+# builds and runs on this host. --ffmpeg-dir picks the engine inside the
+# image: /usr/lib/jellyfin-ffmpeg (the default engine, and the default here)
+# or /usr/bin (the distro fallback the Dockerfile documents). Without
+# --image, PLURX_FFMPEG / PLURX_FFPROBE (or ffmpeg / ffprobe on PATH) are
+# used: on a native node, point them at the binaries its plurxd runs.
+#
+# Set PLURX_CAPTION_FIXTURE_OUT=path to keep a copy of the fixture.
+#
+# The test binary comes from cargo, and a CARGO_TARGET_DIR shared between
+# checkouts can hand back another checkout's binary: if the run says
+# "running 0 tests", touch this checkout's sources and run it again.
+set -eu
+
+usage() {
+    sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+}
+
+image=
+ffmpeg_dir=/usr/lib/jellyfin-ffmpeg
+a53cc=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --image) [ $# -ge 2 ] || usage; image=$2; shift 2 ;;
+        --ffmpeg-dir) [ $# -ge 2 ] || usage; ffmpeg_dir=$2; shift 2 ;;
+        --a53cc) [ $# -ge 2 ] || usage; a53cc=$2; shift 2 ;;
+        -h|--help) usage ;;
+        --) shift; break ;;
+        -*) usage ;;
+        *) break ;;
+    esac
+done
+[ $# -ge 1 ] || usage
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/live-tv-caption-audit.XXXXXX")
+trap 'rm -rf "$work"' EXIT INT TERM
+
+if [ -n "$image" ]; then
+    render=$(getent group render 2>/dev/null | cut -d: -f3 || true)
+    group_add=
+    [ -n "$render" ] && group_add="--group-add $render"
+    tmp=$(cd "${TMPDIR:-/tmp}" && pwd -P)
+    for tool in ffmpeg ffprobe; do
+        cat > "$work/$tool" <<EOF
+#!/bin/sh
+exec docker run --rm -i --device /dev/dri --user $(id -u):$(id -g) $group_add \\
+    -v "$tmp:$tmp" -v "$root:$root" -w "\$PWD" \\
+    --entrypoint $ffmpeg_dir/$tool "$image" "\$@"
+EOF
+        chmod +x "$work/$tool"
+    done
+    PLURX_FFMPEG=$work/ffmpeg
+    PLURX_FFPROBE=$work/ffprobe
+    export PLURX_FFMPEG PLURX_FFPROBE
+    echo "caption-audit: ffmpeg from $image: $("$PLURX_FFMPEG" -hide_banner -version | head -n 1)"
+fi
+
+cd "$root"
+if [ "$1" = analyze ]; then
+    [ $# -eq 2 ] || usage
+    PLURX_CAPTION_ANALYZE=$(cd "$(dirname "$2")" && pwd -P)/$(basename "$2")
+    export PLURX_CAPTION_ANALYZE
+    test=live_tv::caption_audit_tests::summarise_the_captions_in_a_capture
+else
+    routes=
+    for route in "$@"; do
+        case "$route" in
+            software|qsv|vaapi|nvenc|videotoolbox|copy) ;;
+            *) echo "unknown route: $route" >&2; usage ;;
+        esac
+        routes=${routes:+$routes,}$route
+    done
+    PLURX_CAPTION_AUDIT_ENCODERS=$routes
+    export PLURX_CAPTION_AUDIT_ENCODERS
+    if [ -n "$a53cc" ]; then
+        PLURX_CAPTION_AUDIT_A53CC=$a53cc
+        export PLURX_CAPTION_AUDIT_A53CC
+    fi
+    test=live_tv::caption_audit_tests::live_caption_audit_on_this_node
+fi
+exec cargo test --locked -p plurxd --bin plurxd "$test" -- --ignored --exact --nocapture

@@ -15,8 +15,11 @@ and never reaches a shipped artifact (§5).
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
 fields, so an audit claiming to read licenses "from Cargo.lock" has not done
-the work. 515 source-bearing crates in the root workspace · verified
-2026-09-17.
+the work. 501 source-bearing crates in the root workspace · license fields
+verified 2026-09-17; the graph itself re-checked against `Cargo.lock`
+on 2026-09-22, when the vendored Hiqlite `backup` feature stopped
+enabling S3 and fourteen crates reached only through it left the
+resolution.
 
 ---
 
@@ -113,10 +116,16 @@ Each carries a `PLURX-PATCH.md` recording what plurx changed and why.
 |---|---|---|---|---|
 | `hiqlite` | 0.14.0 | Apache-2.0 | Sebastian Dobe · [sebadob/hiqlite](https://github.com/sebadob/hiqlite) | [15 clustering patches](vendor/hiqlite/PLURX-PATCH.md) |
 | `hiqlite-wal` | 0.14.0 | Apache-2.0 | Sebastian Dobe · [sebadob/hiqlite](https://github.com/sebadob/hiqlite) | [3 restart-recovery patches](vendor/hiqlite-wal/PLURX-PATCH.md) |
-| `s3-simple` | 0.8.0 | Apache-2.0 | Sebastian Dobe · [sebadob/s3-simple](https://github.com/sebadob/s3-simple) | [quick-xml bump for RUSTSEC-2026-0194/0195](vendor/s3-simple/PLURX-PATCH.md) |
+| `s3-simple` | 0.8.0 | Apache-2.0 | Sebastian Dobe · [sebadob/s3-simple](https://github.com/sebadob/s3-simple) | [quick-xml bump for RUSTSEC-2026-0194/0195 and four unreferenced edges dropped](vendor/s3-simple/PLURX-PATCH.md) |
 | `rust_decimal` | 1.42.1 | MIT | Paul Mason · [paupino/rust-decimal](https://github.com/paupino/rust-decimal) | [rkyv 0.7 removal for RUSTSEC-2026-0235](vendor/rust_decimal/PLURX-PATCH.md) |
 
 Each directory carries its upstream license at `vendor/<crate>/LICENSE`.
+
+`s3-simple` is vendored but is not part of the default resolution: plurx
+builds hiqlite without `backup`/`s3`, so it reaches no shipped binary and
+carries no row in the resolved-dependency table below. It is attributed here
+because the repository redistributes the modified source. See
+[vendor/s3-simple/PLURX-PATCH.md](vendor/s3-simple/PLURX-PATCH.md).
 
 For the three Apache-2.0 crates, §4(b) asks that modified files carry
 prominent notices of the change. `PLURX-PATCH.md` records every change at the
@@ -194,8 +203,6 @@ distribution, but they are not covered by the table above.
 | `aead` | 0.5.2 | MIT OR Apache-2.0 |
 | `ahash` | 0.8.12 | MIT OR Apache-2.0 |
 | `aho-corasick` | 1.1.4 | Unlicense OR MIT |
-| `alloc-no-stdlib` | 2.0.4 | BSD-3-Clause |
-| `alloc-stdlib` | 0.2.4 | BSD-3-Clause |
 | `allocator-api2` | 0.2.21 | MIT OR Apache-2.0 |
 | `android_system_properties` | 0.1.6 | MIT OR Apache-2.0 |
 | `anstream` | 1.0.0 | MIT OR Apache-2.0 |
@@ -211,14 +218,12 @@ distribution, but they are not covered by the table above.
 | `asn1-rs` | 0.7.2 | MIT OR Apache-2.0 |
 | `asn1-rs-derive` | 0.6.0 | MIT OR Apache-2.0 |
 | `asn1-rs-impl` | 0.2.0 | MIT/Apache-2.0 |
-| `async-compression` | 0.4.43 | MIT OR Apache-2.0 |
 | `async-stream` | 0.3.6 | MIT |
 | `async-stream-impl` | 0.3.6 | MIT |
 | `async-trait` | 0.1.91 | MIT OR Apache-2.0 |
 | `atomic-waker` | 1.1.2 | Apache-2.0 OR MIT |
 | `autocfg` | 1.5.1 | Apache-2.0 OR MIT |
 | `aws-lc-rs` | 1.17.3 | ISC AND (Apache-2.0 OR ISC) |
-| `aws-lc-sys` | 0.39.1 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) |
 | `aws-lc-sys` | 0.43.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) |
 | `axum` | 0.8.9 | MIT |
 | `axum-core` | 0.5.6 | MIT |
@@ -242,8 +247,6 @@ distribution, but they are not covered by the table above.
 | `borrow-or-share` | 0.2.4 | MIT-0 |
 | `borsh` | 1.8.0 | MIT OR Apache-2.0 |
 | `borsh-derive` | 1.8.0 | Apache-2.0 |
-| `brotli` | 8.0.4 | BSD-3-Clause AND MIT |
-| `brotli-decompressor` | 5.0.3 | BSD-3-Clause/MIT |
 | `bumpalo` | 3.20.3 | MIT OR Apache-2.0 |
 | `byte-unit` | 5.2.5 | MIT |
 | `bytecount` | 0.6.9 | Apache-2.0/MIT |
@@ -271,8 +274,6 @@ distribution, but they are not covered by the table above.
 | `colorchoice` | 1.0.5 | MIT OR Apache-2.0 |
 | `combine` | 4.6.7 | MIT |
 | `compact_str` | 0.9.1 | MIT |
-| `compression-codecs` | 0.4.38 | MIT OR Apache-2.0 |
-| `compression-core` | 0.4.32 | MIT OR Apache-2.0 |
 | `const-oid` | 0.10.2 | Apache-2.0 OR MIT |
 | `core-foundation` | 0.10.1 | MIT OR Apache-2.0 |
 | `core-foundation-sys` | 0.8.7 | MIT OR Apache-2.0 |
@@ -327,7 +328,6 @@ distribution, but they are not covered by the table above.
 | `fallible-streaming-iterator` | 0.1.9 | MIT/Apache-2.0 |
 | `fancy-regex` | 0.18.0 | MIT |
 | `fancy-regex` | 0.19.0 | MIT |
-| `fastbloom` | 0.17.0 | MIT OR Apache-2.0 |
 | `fastrand` | 2.5.0 | Apache-2.0 OR MIT |
 | `fastwebsockets` | 0.10.0 | Apache-2.0 |
 | `find-msvc-tools` | 0.1.9 | MIT OR Apache-2.0 |
@@ -429,7 +429,6 @@ distribution, but they are not covered by the table above.
 | `maplit` | 1.0.2 | MIT/Apache-2.0 |
 | `matchers` | 0.2.0 | MIT |
 | `matchit` | 0.8.4 | MIT AND BSD-3-Clause |
-| `md5` | 0.8.1 | Apache-2.0 OR MIT |
 | `mdns-sd` | 0.20.3 | Apache-2.0 OR MIT |
 | `memchr` | 2.8.3 | Unlicense OR MIT |
 | `memmap2` | 0.9.11 | MIT OR Apache-2.0 |
@@ -477,7 +476,6 @@ distribution, but they are not covered by the table above.
 | `pin-project-lite` | 0.2.17 | Apache-2.0 OR MIT |
 | `pkg-config` | 0.3.33 | MIT OR Apache-2.0 |
 | `poly1305` | 0.8.0 | Apache-2.0 OR MIT |
-| `portable-atomic` | 1.14.0 | Apache-2.0 OR MIT |
 | `potential_utf` | 0.1.5 | Unicode-3.0 |
 | `powerfmt` | 0.2.0 | MIT OR Apache-2.0 |
 | `ppv-lite86` | 0.2.21 | MIT OR Apache-2.0 |
@@ -564,7 +562,6 @@ distribution, but they are not covered by the table above.
 | `simd-adler32` | 0.3.10 | MIT |
 | `simd_cesu8` | 1.2.0 | Apache-2.0 OR MIT |
 | `simdutf8` | 0.1.5 | MIT OR Apache-2.0 |
-| `siphasher` | 1.0.3 | MIT/Apache-2.0 |
 | `slab` | 0.4.12 | MIT |
 | `smallvec` | 1.15.2 | MIT OR Apache-2.0 |
 | `socket-pktinfo` | 0.4.1 | MIT |
@@ -618,6 +615,7 @@ distribution, but they are not covered by the table above.
 | `tracing-core` | 0.1.36 | MIT |
 | `tracing-futures` | 0.2.5 | MIT |
 | `tracing-log` | 0.2.0 | MIT |
+| `tracing-serde` | 0.2.0 | MIT |
 | `tracing-subscriber` | 0.3.23 | MIT |
 | `try-lock` | 0.2.5 | MIT |
 | `typed-path` | 0.12.3 | MIT OR Apache-2.0 |
@@ -630,7 +628,6 @@ distribution, but they are not covered by the table above.
 | `unicode-xid` | 0.2.6 | MIT OR Apache-2.0 |
 | `unicode_categories` | 0.1.1 | MIT OR Apache-2.0 |
 | `universal-hash` | 0.5.1 | MIT OR Apache-2.0 |
-| `untrusted` | 0.7.1 | ISC |
 | `untrusted` | 0.9.0 | ISC |
 | `unty` | 0.0.4 | MIT OR Apache-2.0 |
 | `url` | 2.5.8 | MIT OR Apache-2.0 |
@@ -656,7 +653,6 @@ distribution, but they are not covered by the table above.
 | `wasm-bindgen-macro-support` | 0.2.126 | MIT OR Apache-2.0 |
 | `wasm-bindgen-shared` | 0.2.126 | MIT OR Apache-2.0 |
 | `wasm-streams` | 0.4.2 | MIT OR Apache-2.0 |
-| `wasm-streams` | 0.5.0 | MIT OR Apache-2.0 |
 | `web-sys` | 0.3.103 | MIT OR Apache-2.0 |
 | `web-time` | 1.1.0 | MIT OR Apache-2.0 |
 | `webpki-root-certs` | 1.0.9 | CDLA-Permissive-2.0 |

@@ -60,6 +60,37 @@ const ABORT_DEADLINE: Duration = Duration::from_secs(5);
 /// deadline before headers exist; every admitted local or relayed body then
 /// gets this one bounded lifetime.
 pub(crate) const MAX_ADMITTED_MEDIA_BODY_LIFETIME: Duration = Duration::from_secs(300);
+/// Bytes requested from storage per read while streaming a media body.
+///
+/// Tokio's file reader performs one blocking-pool hop per read and caps an
+/// individual read at 2 MiB. Every file-backed media body shares it: direct
+/// play and ranges (`serve_file_range`), both HLS pumps, offline transfers
+/// and the internal fragment-index blob endpoint.
+///
+/// 128 KiB, not 256 KiB, on measurement (docs/streaming/MEDIA-BODY-BUFFERS.md
+/// Decision 1, §5.1.1). The two sizes were indistinguishable on direct-play
+/// throughput and HLS latency, and both cut storage reads 32-64x against the
+/// 4 KiB default, but `ReaderStream::with_capacity` reserves the buffer
+/// eagerly and tokio sizes its blocking read to match, so the size is paid by
+/// every open body whatever it carries: 256 KiB cost about 1.8 MiB per
+/// concurrent large body over 4 KiB, 128 KiB about 1.1 MiB.
+///
+/// This is a storage-efficiency number only. It is deliberately *not* the
+/// unit the HLS pump proves delivery in; see `MEDIA_BODY_ACK_GRANULARITY`.
+pub(crate) const MEDIA_BODY_READ_BUFFER: usize = 128 * 1024;
+/// Bytes of a media body proved delivered per downstream acknowledgement.
+///
+/// The HLS pump counts bytes, renews the playback lease and completes an
+/// object only after the body side has acknowledged a chunk, so this constant
+/// *is* the resolution of that proof: the most a response can over-credit,
+/// and the smallest object for which a single body poll can look like a
+/// complete delivery. Keeping it at 4 KiB bounds both at 4 KiB no matter how
+/// large `MEDIA_BODY_READ_BUFFER` grows -- one storage read is split into
+/// this many-byte pieces, which is a refcount bump on the buffer the read
+/// already filled, not a copy. Raising the read size without this split would
+/// raise the proof granularity with it and let any object at or below the
+/// read size commit on one poll.
+pub(crate) const MEDIA_BODY_ACK_GRANULARITY: usize = 4 * 1024;
 /// Longest authenticated public/relay resource envelope before response
 /// headers, including accepted inter-node clock disagreement. This is the
 /// playlist ceiling; segment and short-control envelopes are smaller.
@@ -545,6 +576,12 @@ impl TakeoverWorkerGuard {
 
     fn spawn_teardown(&mut self, reason: &'static str) -> Option<tokio::task::JoinHandle<()>> {
         let replacement = self.replacement.take()?;
+        // From here this hold is a teardown, not a start. Nothing is waiting on
+        // it, and what it is about to await — `stop_session_until` moves the
+        // guard into an inner task whose `stop_session` is unbounded — is
+        // exactly the shape that wedged a player before. A later open may
+        // reclaim the key instead of queueing behind it.
+        replacement.mark_abandoned();
         let manager = Arc::clone(&self.manager);
         let session_id = self.local_session_id.clone();
         let settlement = self.settlement.take();
@@ -4937,6 +4974,10 @@ async fn supervise_takeover_settlement(
         .transcode
         .acquire_cluster_takeover_replacement(&request, original.user_id, creation_deadline)
         .await?;
+    // The takeover id is predetermined, so it can be fenced from the moment the
+    // gate is held — including by a later open that has to reclaim the key
+    // because this supervisor never finished.
+    replacement.publish_fenceable(&provisional_id);
     let worker = TakeoverWorkerGuard::new(
         Arc::clone(&state.transcode),
         provisional_id.clone(),

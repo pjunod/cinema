@@ -147,6 +147,11 @@ class PlaybackSurfaceReducerTest {
                 row.codes,
             )
             assertEquals(id, stringOrNull(raw["then_when_stopped"]), row.thenWhenStopped?.wire)
+            assertEquals(
+                "$id: a source's own retired_by override",
+                raw["retired_by"]?.jsonArray?.map { it.jsonPrimitive.content }?.sorted(),
+                row.retiredBy?.map { it.wire }?.sorted(),
+            )
         }
     }
 
@@ -363,6 +368,8 @@ class PlaybackSurfaceReducerTest {
             event.getValue("playback_requested").jsonPrimitive.boolean,
         )
         event.containsKey("hidden") -> SurfaceEvent.Hidden(event.getValue("hidden").jsonPrimitive.boolean)
+        event.containsKey("system_paused") ->
+            SurfaceEvent.SystemPaused(event.getValue("system_paused").jsonPrimitive.boolean)
         event.containsKey("tick") -> SurfaceEvent.Tick
         else -> throw AssertionError("unmapped fixture event: $event")
     }
@@ -401,6 +408,43 @@ class PlaybackSurfaceReducerTest {
     private fun longOrNull(element: JsonElement?): Long? {
         if (element == null || element is JsonNull) return null
         return element.jsonPrimitive.long
+    }
+
+    @Test
+    fun aSystemResumeRetiresOnlyTheSystemHold() {
+        // `system_resumed` is a SOURCE override, not a class rule: the server's
+        // own `control_hold` is a `hold` too and must outlive the system's
+        // suspension ending, and must still time out on its own clock.
+        val reducer = PlaybackSurfaceReducer()
+        var state = reducer.apply(SurfaceState(), SurfaceEvent.Attach(1), 0).state
+        state = reducer.apply(
+            state,
+            SurfaceEvent.Raise(SurfaceSources.CONTROL_HOLD, SurfaceContext.Attached, attached = 1),
+            1_000,
+        ).state
+        state = reducer.apply(state, SurfaceEvent.SystemPaused(true), 2_000).state
+        val resumed = reducer.apply(state, SurfaceEvent.SystemPaused(false), 3_000)
+        assertEquals(
+            listOf(SurfaceSources.SYSTEM_INTERRUPTION),
+            resumed.log.filter { it.event == SurfaceLogEvents.CLEARED }.map { it.source },
+        )
+        assertEquals("system_resumed", resumed.log.single().by)
+        assertEquals(SurfaceSources.CONTROL_HOLD, resumed.surface.fault?.source)
+        val later = reducer.apply(resumed.state, SurfaceEvent.Tick, 1_000 + SurfaceTimings.HOLD_NOTICE_MS)
+        assertEquals("the server hold keeps its own timer", PlaybackSurface.None, later.surface)
+    }
+
+    @Test
+    fun aRepeatedSystemPauseDrawsOneNoticeAndNeedsAnAttachment() {
+        val reducer = PlaybackSurfaceReducer()
+        // Nothing attached: a suspension is about no picture and raises nothing.
+        val bare = reducer.apply(SurfaceState(), SurfaceEvent.SystemPaused(true), 0)
+        assertEquals(PlaybackSurface.None, bare.surface)
+        assertTrue(bare.log.isEmpty())
+        var state = reducer.apply(bare.state, SurfaceEvent.Attach(1), 10).state
+        state = reducer.apply(state, SurfaceEvent.SystemPaused(true), 20).state
+        state = reducer.apply(state, SurfaceEvent.SystemPaused(true), 30).state
+        assertEquals(1, state.faults.count { it.source == SurfaceSources.SYSTEM_INTERRUPTION })
     }
 
     @Test

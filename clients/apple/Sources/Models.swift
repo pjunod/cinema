@@ -55,6 +55,7 @@ struct Item: Codable, Identifiable, Hashable {
     var libraryId: Int?
     let kind: String
     let title: String
+    var sortTitle: String? = nil
     var year: Int?
     var overview: String?
     var poster: String?
@@ -623,6 +624,12 @@ struct OpenPublicationResponse: Codable, Hashable {
     let limits: PublicationLimits
 }
 
+struct FileGrantResponse: Codable, Hashable {
+    let url: String
+    let expiresAt: Int
+    let grantId: String
+}
+
 struct ReadingState: Codable, Hashable {
     let fileId: Int
     let revision: ReadingRevision
@@ -877,6 +884,10 @@ struct PlaybackSessionStatus: Codable {
     let id: String
     var targetHeight: Int?
     var encoder: String?
+    /// Explicit CPU tone-map input. `default` provenance is policy, not source
+    /// metadata; both stay optional for older servers and non-CPU routes.
+    var toneMapPeakNits: Int?
+    var toneMapPeakSource: String?
     var speed: Double?
     var recentSpeed: Double?
     var outTimeMs: Int?

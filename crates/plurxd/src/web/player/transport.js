@@ -241,9 +241,22 @@ function playbackProgressTick(v,p){
   if(moved){
     watch.clock=clock; watch.frames=frames; watch.at=now;
     p.presentationAdvancedAt=now;
+    // The progress watch has already established clock advancement and,
+    // where available, a newly presented frame. Keep that proof on this
+    // intent even if the stricter control-settlement path is still waiting
+    // for `seeking` to clear or has no usable frame sequence.
+    if(p.controlSeek===pending&&pending?.localVodSeek){
+      const positionMs=Math.round(((p.offset||0)+clock)*1000);
+      const playedMs=Math.max(0,Number(pending.playedSampleMs)||0);
+      if(positionMs>=pending.targetMs-250
+         &&positionMs<=pending.targetMs+playedMs+250){
+        pending.localVodPresented=true;
+        pending.localVodSeekCleanup?.();
+      }
+    }
     if(pending) settlePlaybackControlSeek(v,p,clock,frames);
     completeHlsStartup(p);
-    if(!p.controlSeek){
+    if(!p.controlSeek||(p.controlSeek===pending&&pending?.localVodPresented)){
       watch.fired=false;
       if(p.waitAt!=null){
         endWait(true);
@@ -254,12 +267,30 @@ function playbackProgressTick(v,p){
   }
   // Exclude time spent paused or backgrounded. A new active watch starts a
   // fresh observation window, while an active replacement cannot reset it.
+  if(p.controlSeek===pending&&pending?.localVodSeek&&pending.executed
+     &&pending.localVodSeekFallbackPending){
+    if(!playbackSeekBufferCovers(v,p,pending.targetMs)){
+      watch.vodTargetCoveredAt=null;
+      if(p.waitAt!=null) endWait(false);
+      return;
+    }
+    // Buffer coverage is the first point at which failure to present can be
+    // a decoder stall. Do not charge the preceding fragment wait to it.
+    if(watch.vodTargetCoveredAt==null){
+      watch.vodTargetCoveredAt=now;
+      watch.at=now;
+      return;
+    }
+  }
   const age=now-watch.at;
   const landingAge=pending?.executed
     ? now-Math.max(pending.executedAt??now,watch.startedAt) : 0;
-  if(watch.fired||p.waitAt!=null||Math.max(age,landingAge)<PERSISTENT_STALL_MS) return;
+  const pendingLandingAge=pending?.localVodPresented ? 0
+    : pending?.localVodSeek&&watch.vodTargetCoveredAt!=null
+      ? now-Math.max(watch.vodTargetCoveredAt,watch.startedAt) : landingAge;
+  if(watch.fired||p.waitAt!=null||Math.max(age,pendingLandingAge)<PERSISTENT_STALL_MS) return;
   watch.fired=true;
-  p.waitAt=now-Math.max(age,landingAge);
+  p.waitAt=now-Math.max(age,pendingLandingAge);
   p.waitStartedRunway=bufferRunway(v);
   p.waitReported=false;
   persistentWait(v,p,p.waitAt,p._seekToken||0,p.controlIntentGeneration||0).catch(()=>{});
@@ -346,6 +377,19 @@ function replayEnded(){
   });
   return true;
 }
+// What the viewer wants, which is exactly what `togglePlay` flips: the pending
+// open's intent while one is current, else the player's. An ended element
+// reads as not playing, because `togglePlay` answers it with a replay. Never
+// the element's `paused` alone — a pending open and every reattach (a
+// transcode seek's reopen, a quality or audio switch, stall recovery) leave
+// the element paused until `applyPlaybackTransportIntent` plays it again.
+function playerWantsPlayback(v){
+  const pending=typeof play==='function'&&play.pendingIntent;
+  if(pending&&PLAY_OPEN_GATE.current(pending.attempt)) return !!pending.wantsPlayback;
+  if(!v||v.ended) return false;
+  if(PLAYER&&typeof PLAYER.wantsPlayback==="boolean") return PLAYER.wantsPlayback;
+  return !v.paused;
+}
 function togglePlay(){
   const v=document.getElementById("video"); if(!v) return;
   if(PLAYER&&PLAYER.libraryChannel&&v.paused
@@ -367,6 +411,15 @@ function togglePlay(){
     applyPlaybackTransportIntent(v,PLAYER);
   }
   if(PLAYER)playerActivity();
+  // The pause EDGE beats (F-web-12), so the server hears where the viewer
+  // stopped now rather than on the next five-second sample. It is prompt, not
+  // load-bearing: `reportProgress` drops a paused beat only when its position
+  // equals the last ACCEPTED one, and that one was taken while the film was
+  // playing, so the first paused sample differs and would post the stop
+  // position within five seconds without this. This is the viewer's own pause
+  // and nothing else: a teardown's internal pause is followed by
+  // `closePlayer`'s final report, which owns that moment.
+  if(PLAYER&&PLAYER.fileId!=null&&PLAYER.wantsPlayback===false) reportProgress(PLAYER.fileId);
   notifyPlaybackControl();
 }
 // Pointer nudges coalesce after a short quiet. Keyboard arrows use physical
@@ -770,8 +823,37 @@ function skipMarker(m,automatic=false){
   PLAYER._lastMarkerSkipEndMs=m.end_ms;
   seekTo(m.end_ms/1000);
 }
-// Seek that works for every method: direct play seeks natively; remux/transcode
-// restart the server-side stream at the new offset (the stream is one-directional).
+function playbackSeekBufferedRangesMs(v,p){
+  const ranges=[];
+  const offsetMs=(Number(p&&p.offset)||0)*1000;
+  try{
+    for(let index=0;v&&v.buffered&&index<v.buffered.length;index+=1){
+      const from=offsetMs+v.buffered.start(index)*1000;
+      const through=offsetMs+v.buffered.end(index)*1000;
+      if(Number.isFinite(from)&&Number.isFinite(through)&&through>=from)
+        ranges.push({from,through});
+    }
+  }catch(e){}
+  return ranges;
+}
+function playbackSeekPublishedRangeMs(p){
+  if(!p||!p.hls||!p.hls.levels) return null;
+  const level=p.hls.levels[p.hls.currentLevel];
+  const details=level&&level.details, fragments=details&&details.fragments;
+  if(!details||!fragments||!fragments.length) return null;
+  const offsetMs=(Number(p.offset)||0)*1000;
+  const from=offsetMs+Number(fragments[0].start)*1000;
+  const through=offsetMs+Number(details.edge)*1000;
+  const targetdurationMs=Math.max(0,Number(details.targetduration)||0)*1000;
+  if(!Number.isFinite(from)||!Number.isFinite(through)||through<from) return null;
+  return {range:{from,through},holdbackMs:targetdurationMs};
+}
+function playbackSeekBufferCovers(v,p,targetMs){
+  return playbackSeekBufferedRangesMs(v,p).some(range=>
+    targetMs>=range.from&&targetMs<=range.through);
+}
+// Seek that works for every method: direct/VOD and safe rolling/progressive
+// destinations seek the attached element; everything else reopens at film time.
 async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true,
   recoveryEpisode=null){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
@@ -835,11 +917,56 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   // issued two media mutations and let their completion events race.
   await new Promise(done=>setTimeout(done,100));
   if(!PLAYER||PLAYER.controlSeek!==seekIntent||hasPendingPlaybackOpen(PLAYER)) return;
-  // Direct play and film-addressed VOD seek without opening a new session.
-  if(!forceReopen && (PLAYER.method==='direct_play' || PLAYER.vod)){
-    try{ v.currentTime=Math.max(0,targetSec-(PLAYER.offset||0)); }catch(e){}
-    markPlaybackControlSeekExecuted(PLAYER,targetSec);
-    playerActivity(); return;
+  const me=PLAYER;
+  const bufferedMs=playbackSeekBufferedRangesMs(v,me);
+  const published=playbackSeekPublishedRangeMs(me);
+  const route=PlaybackPolicy.seekRoute({
+    method:me.method,copyHls:!!me.copyHls,vod:!!me.vod,forceReopen,
+    changing:!!me.pendingMediaChange,targetMs:targetSec*1000,bufferedMs,
+    publishedMs:published&&published.range,
+    holdbackMs:published&&published.holdbackMs,
+  });
+  if(route.route==='local'){
+    const attachment=me.mediaAttachment, atMs=route.atMs;
+    const vod=route.basis==='vod';
+    let settled=false, timer=null;
+    const current=()=>PLAYER===me&&me.mediaAttachment===attachment&&me.controlSeek===seekIntent;
+    const cleanup=()=>{
+      if(timer!=null) clearTimeout(timer);
+      if(vod) seekIntent.localVodSeekFallbackPending=false;
+      try{v.removeEventListener('seeked',onSeeked);}catch(e){}
+    };
+    const onSeeked=()=>{ if(!current()) return; settled=true; cleanup(); };
+    // A `waiting` event may have armed an old 8 s timer during the 100 ms
+    // scrub coalescing above. The committed seek replaces that observation.
+    endWait(false);
+    if(!vod) try{v.addEventListener('seeked',onSeeked,{once:true});}catch(e){}
+    if(vod){
+      seekIntent.localVodSeek=true;
+      seekIntent.localVodSeekFallbackPending=true;
+      seekIntent.localVodSeekCleanup=cleanup;
+    }
+    try{ v.currentTime=Math.max(0,atMs/1000-(me.offset||0)); }catch(e){}
+    markPlaybackControlSeekExecuted(me,targetSec);
+    clientLog({level:'info',event:'seek_local',
+      detail:`${me.copyHls?'copy_hls':me.method||'unknown'}:${route.basis}`,
+      message:'seek stayed on the attached media'});
+    armStall(targetSec,PlaybackPolicy.HLS_STARTUP.seek_deadline_ms);
+    playerActivity();
+    if(route.basis==='direct') { cleanup(); return; }
+    if(vod&&seekIntent.localVodPresented) { cleanup(); return; }
+    timer=setTimeout(()=>{
+      if(settled||!current()||vod&&seekIntent.localVodPresented) { cleanup(); return; }
+      if(playbackSeekBufferCovers(v,me,atMs)) { cleanup(); return; }
+      cleanup();
+      clientLog({level:'warn',event:'seek_local_fallback',
+        detail:me.copyHls?'copy_hls':me.method||'unknown',
+        message:'local seek did not settle; reopening at the same target'});
+      Promise.resolve(seekTo(
+        targetSec,true,autoHeightOverride,viewerInitiated,recoveryEpisode
+      )).catch(()=>{});
+    },vod?PlaybackPolicy.HLS_STARTUP.seek_deadline_ms:PlaybackPolicy.SEEK_LOCAL_SETTLE_MS);
+    return;
   }
   // A retry must reconnect, not repeat the local seek that ordinary direct and
   // cached-VOD navigation uses. The old Try again button did exactly that: it

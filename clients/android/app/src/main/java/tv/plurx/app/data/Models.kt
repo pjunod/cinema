@@ -17,6 +17,7 @@ data class Server(
     val name: String? = null,
     val version: String? = null,
     val instance_id: String? = null,
+    val display_mode_match: Boolean = false,
 )
 
 @Serializable
@@ -70,6 +71,7 @@ data class Item(
     val kind: String,
     val parent_id: Long? = null,
     val title: String,
+    val sort_title: String? = null,
     val year: Int? = null,
     val overview: String? = null,
     val poster: String? = null,
@@ -334,6 +336,19 @@ data class OpenPublicationResponse(
 )
 
 @Serializable
+data class FileGrantRequest(
+    val purpose: String = "open_in",
+    val ttl_secs: Int = 900,
+)
+
+@Serializable
+data class FileGrantResponse(
+    val url: String,
+    val expires_at: Long,
+    val grant_id: String,
+)
+
+@Serializable
 data class ReadingState(
     val file_id: Long,
     val revision: ReadingRevision,
@@ -423,7 +438,7 @@ data class SubTrack(
         get() = native ?: (text && codec.lowercase().trim() !in STYLED_SUBTITLE_CODECS)
 
     val isPgsOverlay: Boolean
-        get() = overlay == "pgs-v1"
+        get() = overlay == tv.plurx.app.player.PGS_OVERLAY_PROTOCOL
 
     private companion object {
         val STYLED_SUBTITLE_CODECS = setOf("ass", "ssa")
@@ -546,6 +561,8 @@ data class SourceSummary(
     val hdr_format: String? = null,
     val bitrate: Long? = null,
     val duration_ms: Long? = null,
+    /** ffprobe rational, e.g. `24000/1001`; kept exact on the wire. */
+    val frame_rate: String? = null,
 )
 
 /**
@@ -689,6 +706,9 @@ data class PlaybackSessionStatus(
     val file_id: Long? = null,
     val target_height: Long? = null,
     val encoder: String? = null,
+    /** Explicit CPU tone-map input; `default` is policy, not source truth. */
+    val tone_map_peak_nits: Long? = null,
+    val tone_map_peak_source: String? = null,
     val speed: Double? = null,
     val recent_speed: Double? = null,
     val out_time_ms: Long? = null,

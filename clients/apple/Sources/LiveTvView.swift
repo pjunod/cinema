@@ -1,4 +1,5 @@
 import AVKit
+import Combine
 import SwiftUI
 
 /// Kept for the app lifetime: leaving and reopening a tab cannot forget an
@@ -30,6 +31,7 @@ final class LiveTvPlayerController: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var playing = false
     @Published private(set) var paused = false
+    @Published private(set) var systemPaused = false
     /// True only for a sustained mid-stream stall. AVPlayer's ordinary
     /// buffering-rate evaluation at startup is not something the viewer
     /// should be told about.
@@ -61,12 +63,20 @@ final class LiveTvPlayerController: ObservableObject {
     private var heartbeat: Task<Void, Never>?
     private var guideRefresh: Task<Void, Never>?
     private var channelChange: Task<Void, Never>?
-    private var timeControlObservation: NSKeyValueObservation?
+    private var itemObserver: AVPlayerItemObserver?
+    private var itemEventTask: Task<Void, Never>?
+    private var itemFailure: NSError?
+    private var itemDidFail = false
+    private let remoteCommands = LiveRemoteCommands()
+    #if os(tvOS)
+    private var displayCriteriaObservation: NSKeyValueObservation?
+    #endif
     private var waitingDebounce: Task<Void, Never>?
+    private let audioSessionObserver = PlaybackAudioSessionObserver()
     private var ownsAudioSession = false
     private var activateAudioSession: () -> Void = {
 #if os(iOS)
-        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
 #endif
     }
@@ -168,31 +178,60 @@ final class LiveTvPlayerController: ObservableObject {
         expected: Int,
         compatibilityRetry: Bool
     ) throws {
-        let item = AVPlayerItem(url: try api.playlistURL(info.sessionId))
+        let item = AVPlayerItem(url: try api.playlistURL(info.playlistUrl, sessionId: info.sessionId))
         item.preferredForwardBufferDuration = 12
         player.replaceCurrentItem(with: item)
+        #if os(tvOS)
+        observeDisplayCriteriaReadiness(of: item, expected: expected)
+        #endif
         // Live TV owns a separate AVPlayer from finite-media playback, so
         // it must establish the same playback audio session itself. The
         // default category follows the iPhone silent switch: video moves,
         // but the AAC track is inaudible.
         beginAudioSession()
+        startAudioSessionObservation()
         title = channel.title
         watching = info.channel
         delivery = info.delivery
         attachedAt = Date()
         playing = true
         player.play()
+        remoteCommands.start(
+            title: channel.title,
+            playing: true,
+            play: { [weak self] in
+                guard let self, self.paused else { return }
+                self.togglePause()
+            },
+            pause: { [weak self] in
+                guard let self, !self.paused else { return }
+                self.togglePause()
+            },
+            toggle: { [weak self] in self?.togglePause() }
+        )
         surfaceMessage = nil
         message = "Playing live"
-        timeControlObservation = player.observe(
-            \.timeControlStatus,
-            options: [.initial, .new]
-        ) { [weak self] player, _ in
-            let status = player.timeControlStatus
-            let reason = player.reasonForWaitingToPlay
-            Task { @MainActor [weak self] in
-                guard let self, self.serial == expected else { return }
-                self.applyTimeControl(status: status, reason: reason)
+        let observer = AVPlayerItemObserver(item: item, player: player)
+        itemObserver = observer
+        itemEventTask = Task { @MainActor [weak self, weak observer] in
+            guard let observer else { return }
+            for await event in observer.events {
+                guard let self, self.serial == expected,
+                      self.itemObserver === observer, self.player.currentItem === item
+                else { return }
+                switch event {
+                case .timeControl(let status, let reason):
+                    self.applyTimeControl(status: status, reason: reason)
+                case .status(.failed):
+                    self.itemDidFail = true
+                    self.itemFailure = item.error as NSError?
+                case .failedToPlayToEnd(let error):
+                    self.itemDidFail = true
+                    self.itemFailure = error ?? (item.error as NSError?)
+                case .playbackStalled, .newErrorLogEntry, .playedToEnd,
+                     .interruption, .routeLost, .status:
+                    break
+                }
             }
         }
         heartbeat = Task { @MainActor [weak self] in
@@ -201,10 +240,12 @@ final class LiveTvPlayerController: ObservableObject {
                 do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
                 guard let self, self.serial == expected else { return }
                 do {
-                    if item.status == .failed { throw Self.playerFailure(item.error) }
+                    if self.itemDidFail || item.status == .failed {
+                        throw Self.playerFailure(self.itemFailure ?? (item.error as NSError?))
+                    }
                     let position = self.player.currentTime().seconds
                     self.sampleLiveEdge(item: item, position: position)
-                    if !self.paused && progress.observe(position: position) {
+                    if !self.paused && !self.systemPaused && progress.observe(position: position) {
                         try await api.keepalive(info.sessionId)
                         guard self.serial == expected else { return }
                         // The other half of the keepalive: the hint's
@@ -397,6 +438,10 @@ final class LiveTvPlayerController: ObservableObject {
         let expected = serial
         waitingDebounce?.cancel()
         waitingDebounce = nil
+        guard !systemPaused else {
+            waiting = false
+            return
+        }
         guard Self.waitingDecision(status: status, reason: reason) else {
             waiting = false
             return
@@ -450,7 +495,31 @@ final class LiveTvPlayerController: ObservableObject {
             message = "Playing live"
             surfaceMessage = nil
         }
+        remoteCommands.update(title: title ?? "", playing: !paused && !systemPaused)
     }
+
+    #if os(tvOS)
+    private func observeDisplayCriteriaReadiness(of item: AVPlayerItem, expected: Int) {
+        displayCriteriaObservation?.invalidate()
+        displayCriteriaObservation = item.observe(\.status, options: [.initial, .new]) {
+            [weak self, weak item] observed, _ in
+            guard observed.status == .readyToPlay, let item else { return }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.serial == expected,
+                      self.player.currentItem === item
+                else { return }
+                _ = PlaybackDisplayCriteria.apply(
+                    item: item,
+                    itemIsCurrent: true,
+                    openIsCurrent: true
+                )
+                self.displayCriteriaObservation?.invalidate()
+                self.displayCriteriaObservation = nil
+            }
+        }
+    }
+    #endif
 
     func stop(clearProfile: Bool = false) async {
         if clearProfile { loadId = UUID(); channels = [] }
@@ -472,6 +541,44 @@ final class LiveTvPlayerController: ObservableObject {
         ownsAudioSession = true
     }
 
+    private func startAudioSessionObservation() {
+        audioSessionObserver.start(
+            wantsPlayback: { [weak self] in self?.playing == true && self?.paused == false },
+            receive: { [weak self] event in self?.handleAudioSessionEvent(event) }
+        )
+    }
+
+    func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {
+        switch event {
+        case .interruption(.suspend):
+            systemPaused = true
+            waitingDebounce?.cancel()
+            waiting = false
+            player.pause()
+            surfaceMessage = "Paused — audio interrupted"
+        case .interruption(.resume):
+            systemPaused = false
+            surfaceMessage = nil
+            if playing && !paused { player.play() }
+        case .interruption(.stay):
+            let wasSystemPaused = systemPaused
+            systemPaused = false
+            surfaceMessage = nil
+            if wasSystemPaused && playing {
+                paused = true
+                player.pause()
+                message = "Paused — press Play to resume"
+            }
+        case .routeChange(let revokesIntent):
+            guard revokesIntent else { return }
+            systemPaused = false
+            paused = true
+            player.pause()
+            message = "Paused — audio route disconnected"
+            surfaceMessage = "Paused — audio route disconnected"
+        }
+    }
+
     private func endAudioSession() {
         guard ownsAudioSession else { return }
         ownsAudioSession = false
@@ -479,15 +586,26 @@ final class LiveTvPlayerController: ObservableObject {
     }
 
     private func detach() {
+        remoteCommands.stop()
         heartbeat?.cancel()
         heartbeat = nil
         channelChange?.cancel()
         channelChange = nil
-        timeControlObservation?.invalidate()
-        timeControlObservation = nil
+        itemObserver?.cancel()
+        itemObserver = nil
+        itemEventTask?.cancel()
+        itemEventTask = nil
+        itemFailure = nil
+        itemDidFail = false
+        #if os(tvOS)
+        displayCriteriaObservation?.invalidate()
+        displayCriteriaObservation = nil
+        #endif
         waitingDebounce?.cancel()
         waitingDebounce = nil
         waiting = false
+        audioSessionObserver.stop()
+        systemPaused = false
         behindEdgeSeconds = nil
         bufferedSeconds = nil
         pausedAt = nil
@@ -497,6 +615,9 @@ final class LiveTvPlayerController: ObservableObject {
         delivery = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
+        #if os(tvOS)
+        PlaybackDisplayCriteria.activeManager()?.preferredDisplayCriteria = nil
+        #endif
         title = nil
         playing = false
         paused = false
@@ -1809,8 +1930,8 @@ struct LiveTvView: View {
         #endif
         .background(Palette.bg)
 
-        .task { await live.load(origin: model.origin, token: Session.shared.token) }
-        .task { await dvr.load(origin: model.origin, token: Session.shared.token) }
+        .task { await live.load(origin: model.origin, token: Session.shared.credentials.token) }
+        .task { await dvr.load(origin: model.origin, token: Session.shared.credentials.token) }
         // One read of the schedule and the reminders per guide load, and none
         // in between. A plan changes when somebody changes it — every mutation
         // re-reads for itself — so a page that polled would spend a
@@ -2102,7 +2223,7 @@ struct LiveTvView: View {
             #endif
             Button("Refresh channels") {
                 showingMore = false
-                Task { await live.load(origin: model.origin, token: Session.shared.token) }
+                Task { await live.load(origin: model.origin, token: Session.shared.credentials.token) }
             }
             #if os(tvOS)
             .buttonStyle(TVReadableButtonStyle(prominent: false))
@@ -2421,7 +2542,7 @@ struct LiveTvView: View {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 Button("Refresh channels") {
-                    Task { await live.load(origin: model.origin, token: Session.shared.token) }
+                    Task { await live.load(origin: model.origin, token: Session.shared.credentials.token) }
                 }
                 Button(hideProtected ? "Show protected" : "Hide protected") { hideProtected.toggle() }
                 if live.message.contains("Cleanup is unconfirmed") {
@@ -3685,16 +3806,26 @@ struct LiveTvView: View {
         .onChange(of: showingMore) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: showingLayout) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: live.paused) { _, _ in overlayGeneration &+= 1 }
-        .onChange(of: live.playing) { _, playing in
-            if !playing && !live.busy {
-                fullscreen = false
-                temporaryGuide = false
-            }
-        }
+        // Only a session that has actually finished closes the surface, and
+        // it can finish on either edge. `watch()` detaches before it awaits
+        // the new lease, so `playing` goes false mid-tune while `busy` is
+        // true — closing on `playing` alone dismissed the cover, ran
+        // `onDismiss` and released the tuner being granted. A stop ends with
+        // `playing` falling while `busy` stays false; a tune that fails ends
+        // with `busy` falling while `playing` is already false. Observing only
+        // one of the two leaves the other stranded on a black cover.
+        .onChange(of: live.playing) { _, _ in closeSurfaceIfSessionFinished() }
+        .onChange(of: live.busy) { _, _ in closeSurfaceIfSessionFinished() }
         // Outside the remote adapter on purpose: a press that lands on one of
         // the reminder's buttons is the button's, and the routing table never
         // sees it. Back and Menu still leave the cover through the platform.
         .overlay(alignment: .bottomLeading) { reminderOverlay }
+    }
+
+    private func closeSurfaceIfSessionFinished() {
+        guard !live.playing && !live.busy else { return }
+        fullscreen = false
+        temporaryGuide = false
     }
 
     /// Every ten-foot press lands here, already decided by the shared table.

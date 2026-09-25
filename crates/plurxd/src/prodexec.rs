@@ -146,6 +146,61 @@ pub enum Termination {
     /// Held on a bound that only another rendition can clear, so the codec
     /// session it is sitting on has no scheduled end.
     IndefiniteHold,
+    /// A clearing hold would keep the process, but a live start is waiting for
+    /// the encoder permit it owns. Kill and reap before returning capacity.
+    YieldToWaiter,
+}
+
+/// Shared-pool contention observed once by the driver for this decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Contention {
+    pub live_waiting: bool,
+    pub holds_permit: bool,
+    /// This producer's own viewer has a prepared successor that cannot start
+    /// until this permit comes back, and nothing else is waiting ahead of it.
+    ///
+    /// Stronger than `live_waiting` on purpose. An ordinary live waiter is
+    /// another viewer, so a producer still writing towards its own reader
+    /// keeps its permit. Here the reader *is* that viewer, the media it is
+    /// producing is the rendition they have asked to leave, and the segments
+    /// already published stay servable after the process is gone. Holding on
+    /// until the ahead window fills is minutes of encode during which the
+    /// switch the viewer asked for cannot begin.
+    pub handoff_waiting: bool,
+}
+
+/// Let a stopped or about-to-stop encoder return its permit to a live waiter.
+/// All other operations already move the producer and remain untouched.
+pub fn yield_step(producer: Producer, step: Step, contention: Contention) -> Step {
+    if !contention.holds_permit {
+        return step;
+    }
+    if contention.handoff_waiting {
+        // Any live process, whatever it was about to do next. A move that
+        // replaces the process (`Restart`) or a reclaim is left alone: the
+        // driver retires those itself and does not re-admit during a handoff.
+        if let (
+            Producer::Running { .. } | Producer::Stopped { .. },
+            Step::Nothing | Step::Stop | Step::Resume,
+        ) = (producer, step)
+        {
+            return Step::Terminate {
+                why: Termination::YieldToWaiter,
+            };
+        }
+        return step;
+    }
+    if !contention.live_waiting {
+        return step;
+    }
+    match (producer, step) {
+        (Producer::Running { .. }, Step::Stop) | (Producer::Stopped { .. }, Step::Nothing) => {
+            Step::Terminate {
+                why: Termination::YieldToWaiter,
+            }
+        }
+        _ => step,
+    }
 }
 
 /// Which holds are worth keeping a process — and a codec session — for.
@@ -370,6 +425,181 @@ mod tests {
             ),
             Step::Stop
         );
+    }
+
+    fn contention(live_waiting: bool, holds_permit: bool) -> Contention {
+        Contention {
+            live_waiting,
+            holds_permit,
+            handoff_waiting: false,
+        }
+    }
+
+    fn handoff() -> Contention {
+        Contention {
+            live_waiting: false,
+            holds_permit: true,
+            handoff_waiting: true,
+        }
+    }
+
+    #[test]
+    fn a_running_encoder_yields_to_its_own_viewers_prepared_successor() {
+        for (producer, step) in [
+            (running(40), Step::Nothing),
+            (running(40), Step::Stop),
+            (stopped(40, ahead()), Step::Nothing),
+            (stopped(40, ahead()), Step::Resume),
+        ] {
+            assert_eq!(
+                yield_step(producer, step, handoff()),
+                Step::Terminate {
+                    why: Termination::YieldToWaiter
+                },
+                "{producer:?} {step:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_handoff_never_starts_or_rewrites_a_move() {
+        for (producer, step) in [
+            (absent(Some(40)), Step::Start { at: 41 }),
+            (running(40), Step::Restart { at: 12 }),
+            (running(40), Step::MakeRoom { wanted: 1_000 }),
+            (
+                running(40),
+                Step::Terminate {
+                    why: Termination::Idle,
+                },
+            ),
+        ] {
+            assert_eq!(yield_step(producer, step, handoff()), step);
+        }
+        let copy = Contention {
+            holds_permit: false,
+            ..handoff()
+        };
+        assert_eq!(yield_step(running(40), Step::Nothing, copy), Step::Nothing);
+    }
+
+    #[test]
+    fn a_stopped_encoder_yields_when_a_live_start_is_waiting() {
+        assert_eq!(
+            yield_step(stopped(40, ahead()), Step::Nothing, contention(true, true)),
+            Step::Terminate {
+                why: Termination::YieldToWaiter
+            }
+        );
+    }
+
+    #[test]
+    fn an_encoder_about_to_stop_yields_instead() {
+        assert_eq!(
+            yield_step(running(40), Step::Stop, contention(true, true)),
+            Step::Terminate {
+                why: Termination::YieldToWaiter
+            }
+        );
+    }
+
+    #[test]
+    fn a_copy_producer_never_yields() {
+        for (producer, step) in [
+            (running(40), Step::Stop),
+            (stopped(40, ahead()), Step::Nothing),
+        ] {
+            assert_eq!(yield_step(producer, step, contention(true, false)), step);
+        }
+    }
+
+    #[test]
+    fn nobody_waiting_means_no_yield() {
+        for (producer, step) in [
+            (running(40), Step::Stop),
+            (stopped(40, ahead()), Step::Nothing),
+        ] {
+            assert_eq!(yield_step(producer, step, contention(false, true)), step);
+        }
+    }
+
+    #[test]
+    fn a_yield_never_replaces_a_move() {
+        for (producer, step) in [
+            (stopped(40, ahead()), Step::Resume),
+            (stopped(40, ahead()), Step::Restart { at: 12 }),
+            (running(40), Step::Nothing),
+            (running(40), Step::MakeRoom { wanted: 1_000 }),
+        ] {
+            assert_eq!(yield_step(producer, step, contention(true, true)), step);
+        }
+    }
+
+    #[test]
+    fn a_second_viewer_arriving_after_the_first_stopped_gets_the_permit() {
+        let stopped = after(running(40), Step::Stop);
+        let yielded = yield_step(stopped, Step::Nothing, contention(true, true));
+        assert_eq!(
+            yielded,
+            Step::Terminate {
+                why: Termination::YieldToWaiter
+            }
+        );
+        let absent = after(stopped, yielded);
+        let still_ahead = Action::Suspend {
+            produced_through: 40,
+            reason: ahead(),
+        };
+        assert_eq!(next_step(absent, still_ahead), Step::Nothing);
+    }
+
+    #[test]
+    fn a_yielded_producer_re_admits_only_when_its_reader_needs_it() {
+        let absent = Producer::Absent {
+            produced_through: Some(40),
+        };
+        assert_eq!(
+            next_step(
+                absent,
+                Action::Suspend {
+                    produced_through: 40,
+                    reason: ahead(),
+                }
+            ),
+            Step::Nothing
+        );
+        assert_eq!(
+            next_step(absent, Action::Produce { next: 41 }),
+            Step::Start { at: 41 }
+        );
+    }
+
+    #[test]
+    fn a_blocked_request_outranks_the_latch_for_a_yielded_producer() {
+        let absent = Producer::Absent {
+            produced_through: Some(40),
+        };
+        assert_eq!(
+            next_step(absent, Action::Reposition { to: 12 }),
+            Step::Start { at: 12 }
+        );
+    }
+
+    #[test]
+    fn every_yield_step_is_a_fixed_point_when_repeated() {
+        for producer in [running(40), stopped(40, ahead())] {
+            let base = match producer {
+                Producer::Running { .. } => Step::Stop,
+                Producer::Stopped { .. } => Step::Nothing,
+                Producer::Absent { .. } => unreachable!(),
+            };
+            let first = yield_step(producer, base, contention(true, true));
+            let settled = after(producer, first);
+            assert_eq!(
+                yield_step(settled, Step::Nothing, contention(true, true)),
+                Step::Nothing
+            );
+        }
     }
 
     #[test]

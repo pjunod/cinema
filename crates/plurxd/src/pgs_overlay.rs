@@ -17,7 +17,9 @@ use std::time::Duration;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use plurx_core::domain::MediaFile;
-use plurx_pgs::{NormalizedTrack, ParserLimits};
+#[cfg(test)]
+use plurx_pgs::NormalizedTrack;
+use plurx_pgs::{NormalizedComposition, ParserLimits};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -30,6 +32,9 @@ const PREPARE_TIMEOUT: Duration = Duration::from_secs(600);
 const NEGATIVE_TTL: Duration = Duration::from_secs(120);
 const MAX_NEGATIVE_ENTRIES: usize = 128;
 const MAX_TRACK_BYTES: u64 = 256 * 1024 * 1024;
+// The streaming normalizer can produce many cues that reuse a small PNG set.
+// Bound the in-memory snapshots before cloning them into the manifest.
+const MAX_SNAPSHOT_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_CACHE_TRACKS: usize = 128;
 
@@ -38,7 +43,13 @@ pub enum OverlayError {
     Malformed(String),
     Limit(String),
     SourceChanged,
+    /// The preparation itself failed: demux, I/O, cancellation, a timeout, a
+    /// source without a duration. Remembered for `NEGATIVE_TTL`, so asking
+    /// again inside that window gets the same answer, never a new attempt.
     Unavailable(String),
+    /// Both preparation slots are busy. The only overlay failure a client
+    /// should wait out: nothing about this track went wrong.
+    Capacity,
     Internal(String),
 }
 
@@ -49,6 +60,7 @@ impl std::fmt::Display for OverlayError {
             Self::Limit(why) => write!(f, "PGS safety limit exceeded: {why}"),
             Self::SourceChanged => f.write_str("source changed while overlay was preparing"),
             Self::Unavailable(why) => f.write_str(why),
+            Self::Capacity => f.write_str("PGS overlay preparation capacity is full"),
             Self::Internal(why) => f.write_str(why),
         }
     }
@@ -133,7 +145,7 @@ fn try_capacity(
 ) -> Result<tokio::sync::OwnedSemaphorePermit, OverlayError> {
     semaphore
         .try_acquire_owned()
-        .map_err(|_| OverlayError::Unavailable("PGS overlay preparation capacity is full".into()))
+        .map_err(|_| OverlayError::Capacity)
 }
 
 type PrepareFuture = Pin<Box<dyn Future<Output = Result<(), OverlayError>> + Send>>;
@@ -199,13 +211,24 @@ pub async fn record_access(generation_dir: &Path) {
 }
 
 /// Return current readiness, registering one detached preparation on a miss.
+///
+/// `stored` is where a stored copy of the track may be read from instead of
+/// the source; see [`crate::subtitle_source`].
 pub async fn prepare(
     subs_dir: &Path,
     file: &MediaFile,
     index: i64,
+    stored: crate::subtitle_source::StoreAccess,
 ) -> Result<PrepareState, OverlayError> {
-    let runner: PrepareRunner = Arc::new(|root, final_dir, file, index, generation| {
-        Box::pin(prepare_once(root, final_dir, file, index, generation))
+    let runner: PrepareRunner = Arc::new(move |root, final_dir, file, index, generation| {
+        Box::pin(prepare_once(
+            root,
+            final_dir,
+            file,
+            index,
+            generation,
+            stored.clone(),
+        ))
     });
     prepare_with(subs_dir, file, index, runner, PREPARE_TIMEOUT, true).await
 }
@@ -387,6 +410,7 @@ async fn prepare_once(
     file: MediaFile,
     index: i64,
     generation: String,
+    stored: crate::subtitle_source::StoreAccess,
 ) -> Result<(), OverlayError> {
     tokio::fs::create_dir_all(&root)
         .await
@@ -397,7 +421,7 @@ async fn prepare_once(
     })?;
     let mut staging = StagingDir::new(stage);
 
-    prepare_stage(staging.path(), &file, index, &generation).await?;
+    prepare_stage_with(staging.path(), &file, index, &generation, &stored).await?;
 
     match tokio::fs::rename(staging.path(), &final_dir).await {
         Ok(()) => {
@@ -494,55 +518,36 @@ impl Drop for StagingDir {
     }
 }
 
+/// [`prepare_stage_with`] with the store ignored.
+#[cfg(test)]
 async fn prepare_stage(
     stage: &Path,
     file: &MediaFile,
     index: i64,
     generation: &str,
 ) -> Result<(), OverlayError> {
+    prepare_stage_with(
+        stage,
+        file,
+        index,
+        generation,
+        &crate::subtitle_source::StoreAccess::off(),
+    )
+    .await
+}
+
+async fn prepare_stage_with(
+    stage: &Path,
+    file: &MediaFile,
+    index: i64,
+    generation: &str,
+    stored: &crate::subtitle_source::StoreAccess,
+) -> Result<(), OverlayError> {
     let mut cancellation = CancellationFlag::new();
     source_is_current(file).await?;
-    let source = crate::fragment_index_cluster::open_source_fence(file, None)
-        .await
-        .map_err(OverlayError::Unavailable)?;
-    #[cfg(unix)]
-    let input = PathBuf::from("/dev/fd/3");
-    #[cfg(windows)]
-    let input =
-        crate::ffmpeg::windows_source_path(&source.handle).map_err(OverlayError::Unavailable)?;
     let sup = stage.join("track.sup");
-    let maximum_demux_bytes = MAX_TRACK_BYTES.to_string();
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
-    command
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-        .arg(&input)
-        .args([
-            "-map",
-            &format!("0:s:{index}"),
-            "-c:s",
-            "copy",
-            "-f",
-            "sup",
-            "-fs",
-            &maximum_demux_bytes,
-        ])
-        .arg(&sup)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    crate::ffmpeg::verify_windows_source_path(&source.handle, &input)
-        .map_err(OverlayError::Unavailable)?;
-    let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn(&mut command)
-        .map_err(|error| OverlayError::Unavailable(format!("starting PGS demux: {error}")))?
-        .output()
-        .await
-        .map_err(|error| OverlayError::Unavailable(format!("waiting for PGS demux: {error}")))?;
-    if !status.success() {
-        return Err(OverlayError::Unavailable(format!(
-            "PGS demux failed: {}",
-            diagnostics.trim()
-        )));
+    if !stored_track_into_stage(stored, file, index, &sup).await {
+        demux_track(file, index, &sup).await?;
     }
 
     let sup_for_worker = sup.clone();
@@ -551,18 +556,13 @@ async fn prepare_stage(
     let generation_for_worker = generation.to_owned();
     let worker_cancellation = cancellation.worker();
     tokio::task::spawn_blocking(move || {
-        let track = plurx_pgs::normalize_sup_cancellable(
+        compile_generation_streamed(
             &sup_for_worker,
-            &ParserLimits::default(),
-            &worker_cancellation,
-        )?;
-        compile_generation(
             &stage_for_worker,
             &file_for_worker,
             index,
             &generation_for_worker,
-            track,
-            Some(&worker_cancellation),
+            &worker_cancellation,
         )
     })
     .await
@@ -581,6 +581,112 @@ async fn prepare_stage(
         cancellation.disarm();
     }
     result
+}
+
+/// Use a current stored copy of the track as this stage's `track.sup`, in
+/// place of the demux. `false` means there is none, and the caller demuxes.
+///
+/// Byte-identical to what the demux writes (§6.2 fact 9 of the design), so
+/// everything after it — the normaliser, the PNG compile, the
+/// `source_is_current` re-check and the generation validation — runs on it
+/// unchanged. Only `kept` is used; every other state is today's demux.
+async fn stored_track_into_stage(
+    stored: &crate::subtitle_source::StoreAccess,
+    file: &MediaFile,
+    index: i64,
+    sup: &Path,
+) -> bool {
+    let hydrate = async {
+        if !stored.cluster_enabled().await {
+            return false;
+        }
+        crate::subtitle_source::hydrate_from_peers(
+            stored,
+            file,
+            index,
+            crate::subtitle_source::RepresentationFormat::Sup,
+        )
+        .await
+    };
+    stored_track_into_stage_with_hydration(stored, file, index, sup, hydrate).await
+}
+
+async fn stored_track_into_stage_with_hydration(
+    stored: &crate::subtitle_source::StoreAccess,
+    file: &MediaFile,
+    index: i64,
+    sup: &Path,
+    hydrate: impl Future<Output = bool>,
+) -> bool {
+    use crate::subtitle_source::{copy_verified, lookup, Consumer, Live, Lookup};
+    // The switch and the manifest are asked before the media mount is
+    // stated; the lookup takes the live `fstat` last.
+    let copy_local = || async {
+        match lookup(
+            stored,
+            Consumer::Overlay,
+            file,
+            index,
+            Live::Path(&file.path),
+        )
+        .await
+        {
+            Lookup::Kept(kept) => copy_verified(&kept, sup).await,
+            Lookup::Empty(_) | Lookup::Miss(_) => false,
+        }
+    };
+    if copy_local().await {
+        return true;
+    }
+    // Peer I/O occurs only in prepare_once's detached flight. A segment or
+    // session-start handler observes Preparing and never waits on the fetch.
+    hydrate.await && copy_local().await
+}
+
+/// Today's overlay extraction: one full read of the source into `sup`.
+async fn demux_track(file: &MediaFile, index: i64, sup: &Path) -> Result<(), OverlayError> {
+    let source = crate::fragment_index_cluster::open_source_fence(file, None)
+        .await
+        .map_err(OverlayError::Unavailable)?;
+    #[cfg(unix)]
+    let input = PathBuf::from("/dev/fd/3");
+    #[cfg(windows)]
+    let input =
+        crate::ffmpeg::windows_source_path(&source.handle).map_err(OverlayError::Unavailable)?;
+    let maximum_demux_bytes = MAX_TRACK_BYTES.to_string();
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
+    command
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&input)
+        .args([
+            "-map",
+            &format!("0:s:{index}"),
+            "-c:s",
+            "copy",
+            "-f",
+            "sup",
+            "-fs",
+            &maximum_demux_bytes,
+        ])
+        .arg(sup)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    crate::ffmpeg::verify_windows_source_path(&source.handle, &input)
+        .map_err(OverlayError::Unavailable)?;
+    let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn(&mut command)
+        .map_err(|error| OverlayError::Unavailable(format!("starting PGS demux: {error}")))?
+        .output()
+        .await
+        .map_err(|error| OverlayError::Unavailable(format!("waiting for PGS demux: {error}")))?;
+    if !status.success() {
+        return Err(OverlayError::Unavailable(format!(
+            "PGS demux failed: {}",
+            diagnostics.trim()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -618,6 +724,18 @@ struct Snapshot {
 }
 
 impl Snapshot {
+    fn metadata_bytes(&self) -> Result<u64, OverlayError> {
+        self.objects.iter().try_fold(
+            (std::mem::size_of::<Self>()
+                + self.objects.len() * std::mem::size_of::<OverlayObject>()) as u64,
+            |total, object| {
+                total
+                    .checked_add(object.image.len() as u64)
+                    .ok_or_else(|| OverlayError::Limit("snapshot metadata size overflowed".into()))
+            },
+        )
+    }
+
     fn same_composition(&self, other: &Self) -> bool {
         self.canvas_width == other.canvas_width
             && self.canvas_height == other.canvas_height
@@ -625,50 +743,64 @@ impl Snapshot {
     }
 }
 
-fn compile_generation(
-    stage: &Path,
-    file: &MediaFile,
-    index: i64,
-    generation: &str,
-    track: NormalizedTrack,
-    cancelled: Option<&AtomicBool>,
-) -> Result<(), OverlayError> {
-    check_worker_cancelled(cancelled)?;
-    let duration_ms = file
-        .duration_ms
-        .filter(|duration| *duration > 0)
-        .ok_or_else(|| {
-            OverlayError::Unavailable("media duration is required for a PGS manifest".into())
-        })?;
-    let objects_dir = stage.join("objects");
-    std::fs::create_dir(&objects_dir)
-        .map_err(|error| OverlayError::Internal(format!("creating PGS object cache: {error}")))?;
+struct GenerationCompiler<'a> {
+    stage: &'a Path,
+    generation: &'a str,
+    cancelled: Option<&'a AtomicBool>,
+    unique_bytes: u64,
+    snapshot_metadata_bytes: u64,
+    snapshot_metadata_limit: u64,
+    published: HashSet<String>,
+    snapshots: Vec<Snapshot>,
+}
 
-    let mut unique_bytes = 0u64;
-    let mut published = HashSet::new();
-    let mut snapshots: Vec<Snapshot> = Vec::with_capacity(track.compositions.len());
-    for composition in track.compositions {
+impl<'a> GenerationCompiler<'a> {
+    fn new(
+        stage: &'a Path,
+        generation: &'a str,
+        cancelled: Option<&'a AtomicBool>,
+    ) -> Result<Self, OverlayError> {
         check_worker_cancelled(cancelled)?;
+        std::fs::create_dir(stage.join("objects")).map_err(|error| {
+            OverlayError::Internal(format!("creating PGS object cache: {error}"))
+        })?;
+        Ok(Self {
+            stage,
+            generation,
+            cancelled,
+            unique_bytes: 0,
+            snapshot_metadata_bytes: 0,
+            snapshot_metadata_limit: MAX_SNAPSHOT_METADATA_BYTES,
+            published: HashSet::new(),
+            snapshots: Vec::new(),
+        })
+    }
+
+    fn push(&mut self, composition: NormalizedComposition) -> Result<(), OverlayError> {
+        check_worker_cancelled(self.cancelled)?;
         let mut objects = Vec::with_capacity(composition.objects.len());
         for object in composition.objects {
-            check_worker_cancelled(cancelled)?;
+            check_worker_cancelled(self.cancelled)?;
             let png = encode_rgba_png(object.width, object.height, &object.rgba)?;
             let hash = hex::encode(Sha256::digest(&png));
-            if published.insert(hash.clone()) {
-                unique_bytes = unique_bytes
+            if self.published.insert(hash.clone()) {
+                self.unique_bytes = self
+                    .unique_bytes
                     .checked_add(png.len() as u64)
                     .ok_or_else(|| OverlayError::Limit("PNG byte count overflowed".into()))?;
-                if unique_bytes > MAX_TRACK_BYTES {
+                if self.unique_bytes > MAX_TRACK_BYTES {
                     return Err(OverlayError::Limit(format!(
                         "overlay objects exceed the {MAX_TRACK_BYTES} byte track cap"
                     )));
                 }
-                write_durable(&objects_dir.join(format!("{hash}.png")), &png).map_err(|error| {
-                    OverlayError::Internal(format!("writing PGS object: {error}"))
-                })?;
+                write_durable(
+                    &self.stage.join("objects").join(format!("{hash}.png")),
+                    &png,
+                )
+                .map_err(|error| OverlayError::Internal(format!("writing PGS object: {error}")))?;
             }
             objects.push(OverlayObject {
-                image: format!("overlay/{generation}/objects/{hash}.png"),
+                image: format!("overlay/{}/objects/{hash}.png", self.generation),
                 x: object.x,
                 y: object.y,
                 width: object.width,
@@ -681,73 +813,160 @@ fn compile_generation(
             canvas_height: composition.canvas_height,
             objects,
         };
-        if snapshots
+        if self
+            .snapshots
             .last()
             .is_some_and(|previous| previous.start_ms == snapshot.start_ms)
         {
-            let replacement_index = snapshots.len() - 1;
-            snapshots[replacement_index] = snapshot;
+            let replacement_index = self.snapshots.len() - 1;
+            self.snapshot_metadata_bytes -= self.snapshots[replacement_index].metadata_bytes()?;
+            self.snapshot_metadata_bytes = self
+                .snapshot_metadata_bytes
+                .checked_add(snapshot.metadata_bytes()?)
+                .ok_or_else(|| OverlayError::Limit("snapshot metadata size overflowed".into()))?;
+            self.snapshots[replacement_index] = snapshot;
             if replacement_index > 0
-                && snapshots[replacement_index - 1].same_composition(&snapshots[replacement_index])
+                && self.snapshots[replacement_index - 1]
+                    .same_composition(&self.snapshots[replacement_index])
             {
-                snapshots.pop();
+                self.snapshot_metadata_bytes -=
+                    self.snapshots[replacement_index].metadata_bytes()?;
+                self.snapshots.pop();
             }
-            continue;
+            self.check_snapshot_metadata_limit()?;
+            return Ok(());
         }
-        if snapshots
+        if self
+            .snapshots
             .last()
             .is_some_and(|previous| previous.same_composition(&snapshot))
         {
-            continue;
+            return Ok(());
         }
-        snapshots.push(snapshot);
+        self.snapshot_metadata_bytes = self
+            .snapshot_metadata_bytes
+            .checked_add(snapshot.metadata_bytes()?)
+            .ok_or_else(|| OverlayError::Limit("snapshot metadata size overflowed".into()))?;
+        self.check_snapshot_metadata_limit()?;
+        self.snapshots.push(snapshot);
+        Ok(())
     }
 
-    let mut cues = Vec::new();
-    for (position, snapshot) in snapshots.iter().enumerate() {
+    fn check_snapshot_metadata_limit(&self) -> Result<(), OverlayError> {
+        if self.snapshot_metadata_bytes > self.snapshot_metadata_limit {
+            Err(OverlayError::Limit(format!(
+                "PGS cue metadata exceeds the {} byte track cap",
+                self.snapshot_metadata_limit
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn finish(self, file: &MediaFile, index: i64) -> Result<(), OverlayError> {
+        let Self {
+            stage,
+            generation,
+            cancelled,
+            snapshots,
+            ..
+        } = self;
         check_worker_cancelled(cancelled)?;
-        if snapshot.objects.is_empty() || snapshot.start_ms >= duration_ms {
-            continue;
+        let duration_ms = file
+            .duration_ms
+            .filter(|duration| *duration > 0)
+            .ok_or_else(|| {
+                OverlayError::Unavailable("media duration is required for a PGS manifest".into())
+            })?;
+        let mut cues = Vec::new();
+        for (position, snapshot) in snapshots.iter().enumerate() {
+            check_worker_cancelled(cancelled)?;
+            if snapshot.objects.is_empty() || snapshot.start_ms >= duration_ms {
+                continue;
+            }
+            let end_ms = snapshots
+                .get(position + 1)
+                .map(|next| next.start_ms)
+                .unwrap_or(duration_ms)
+                .min(duration_ms);
+            if end_ms <= snapshot.start_ms {
+                continue;
+            }
+            cues.push(OverlayCue {
+                id: format!("c{:08}", cues.len() + 1),
+                start_ms: snapshot.start_ms.max(0),
+                end_ms,
+                canvas_width: snapshot.canvas_width,
+                canvas_height: snapshot.canvas_height,
+                objects: snapshot.objects.clone(),
+            });
         }
-        let end_ms = snapshots
-            .get(position + 1)
-            .map(|next| next.start_ms)
-            .unwrap_or(duration_ms)
-            .min(duration_ms);
-        if end_ms <= snapshot.start_ms {
-            continue;
+        let manifest = OverlayManifest {
+            schema: SCHEMA,
+            generation: generation.to_owned(),
+            file_id: file.id,
+            track_index: index,
+            kind: "pgs".into(),
+            timebase: "source_ms".into(),
+            duration_ms,
+            cues,
+        };
+        let bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| OverlayError::Internal(format!("encoding PGS manifest: {error}")))?;
+        write_durable(&stage.join("manifest.json"), &bytes)
+            .map_err(|error| OverlayError::Internal(format!("writing PGS manifest: {error}")))?;
+        let total_bytes = directory_size_sync(stage, cancelled)?;
+        if total_bytes > MAX_TRACK_BYTES {
+            return Err(OverlayError::Limit(format!(
+                "overlay generation is {total_bytes} bytes, above the {MAX_TRACK_BYTES} byte track cap"
+            )));
         }
-        cues.push(OverlayCue {
-            id: format!("c{:08}", cues.len() + 1),
-            start_ms: snapshot.start_ms.max(0),
-            end_ms,
-            canvas_width: snapshot.canvas_width,
-            canvas_height: snapshot.canvas_height,
-            objects: snapshot.objects.clone(),
-        });
+        validate_generation_sync(stage, file, index, generation, cancelled)
     }
+}
 
-    let manifest = OverlayManifest {
-        schema: SCHEMA,
-        generation: generation.to_owned(),
-        file_id: file.id,
-        track_index: index,
-        kind: "pgs".into(),
-        timebase: "source_ms".into(),
-        duration_ms,
-        cues,
-    };
-    let bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(|error| OverlayError::Internal(format!("encoding PGS manifest: {error}")))?;
-    write_durable(&stage.join("manifest.json"), &bytes)
-        .map_err(|error| OverlayError::Internal(format!("writing PGS manifest: {error}")))?;
-    let total_bytes = directory_size_sync(stage, cancelled)?;
-    if total_bytes > MAX_TRACK_BYTES {
-        return Err(OverlayError::Limit(format!(
-            "overlay generation is {total_bytes} bytes, above the {MAX_TRACK_BYTES} byte track cap"
-        )));
+fn compile_generation_streamed(
+    sup: &Path,
+    stage: &Path,
+    file: &MediaFile,
+    index: i64,
+    generation: &str,
+    cancelled: &AtomicBool,
+) -> Result<(), OverlayError> {
+    let mut compiler = GenerationCompiler::new(stage, generation, Some(cancelled))?;
+    let mut compilation_error = None;
+    let parsed = plurx_pgs::normalize_sup_cancellable_into(
+        sup,
+        &ParserLimits::default(),
+        cancelled,
+        &mut |composition| {
+            compiler.push(composition).map_err(|error| {
+                compilation_error = Some(error);
+                plurx_pgs::AdapterError::Io(std::io::Error::other("PGS object compilation failed"))
+            })
+        },
+    );
+    if let Some(error) = compilation_error {
+        return Err(error);
     }
-    validate_generation_sync(stage, file, index, generation, cancelled)
+    parsed?;
+    compiler.finish(file, index)
+}
+
+#[cfg(test)]
+fn compile_generation(
+    stage: &Path,
+    file: &MediaFile,
+    index: i64,
+    generation: &str,
+    track: NormalizedTrack,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), OverlayError> {
+    let mut compiler = GenerationCompiler::new(stage, generation, cancelled)?;
+    for composition in track.compositions {
+        compiler.push(composition)?;
+    }
+    compiler.finish(file, index)
 }
 
 fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -1029,6 +1248,7 @@ mod tests {
 
     fn file(path: PathBuf) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 7,
             item_id: 1,
             path,
@@ -1038,12 +1258,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: None,
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(10),
             hdr: Some("dolby_vision".into()),
             hdr_format: Some("Dolby Vision".into()),
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: None,
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -1089,6 +1314,39 @@ mod tests {
             rgba: vec![255, 255, 255, 255],
             rgba_sha256: "unused-by-publisher".into(),
         }
+    }
+
+    #[test]
+    fn streamed_cue_metadata_is_bounded_even_when_pngs_are_reused() {
+        let dir = crate::test_tempdir().expect("cache");
+        let mut compiler = GenerationCompiler::new(dir.path(), "fixture", None).expect("compiler");
+        let composition = |pts_90khz, x| {
+            let mut object = object();
+            object.x = x;
+            NormalizedComposition {
+                pts_90khz,
+                start_ms: pts_90khz as f64 / 90.0,
+                canvas_width: 1920,
+                canvas_height: 1080,
+                objects: vec![object],
+            }
+        };
+
+        compiler.push(composition(90_000, 10)).expect("first cue");
+        compiler.snapshot_metadata_limit = compiler.snapshot_metadata_bytes + 1;
+        // Replacement at the same timestamp must release its predecessor.
+        compiler
+            .push(composition(90_000, 20))
+            .expect("same-timestamp replacement");
+        assert!(matches!(
+            compiler.push(composition(180_000, 30)),
+            Err(OverlayError::Limit(message)) if message.contains("cue metadata")
+        ));
+        assert_eq!(
+            compiler.published.len(),
+            1,
+            "PNG reuse does not bypass the metadata cap"
+        );
     }
 
     async fn publish_empty_manifest(
@@ -1669,7 +1927,7 @@ mod tests {
         let _second = try_capacity(Arc::clone(&capacity)).expect("second producer");
         assert!(matches!(
             try_capacity(capacity),
-            Err(OverlayError::Unavailable(_))
+            Err(OverlayError::Capacity)
         ));
     }
 
@@ -1709,5 +1967,283 @@ mod tests {
         })
         .await
         .expect("staging cleanup");
+    }
+}
+
+/// The overlay consumer of the subtitle-source store.
+#[cfg(test)]
+mod stored_source_tests {
+    use super::*;
+    use crate::subtitle_source::testing::{kept, stamp_of, write_manifest};
+    use crate::subtitle_source::{self as store, StoreAccess};
+    use plurx_core::store::SubtitleSourcePublication;
+
+    fn run(command: &mut std::process::Command, what: &str) {
+        let output = command
+            .output()
+            .unwrap_or_else(|error| panic!("{what}: {error}"));
+        assert!(
+            output.status.success(),
+            "{what} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The deterministic PGS fixture `ffmpeg_demux_to_published_manifest_…`
+    /// uses, with the authored track delayed by `offset` seconds.
+    fn source(dir: &Path, offset: &str) -> PathBuf {
+        let sup = dir.join(format!("authored-{offset}.sup"));
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/mkpgs");
+        run(
+            std::process::Command::new(script)
+                .args(["1920", "1080"])
+                .arg(&sup),
+            "author the PGS track",
+        );
+        let source = dir.join(format!("source-{offset}.mkv"));
+        run(
+            std::process::Command::new(ffmpeg_bin())
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=320x180:r=1:d=16",
+                    "-itsoffset",
+                    offset,
+                    "-i",
+                ])
+                .arg(&sup)
+                .args([
+                    "-map", "0:v:0", "-map", "1:s:0", "-c:v", "mpeg4", "-c:s", "copy", "-t", "16",
+                ])
+                .arg(&source),
+            "mux the fixture",
+        );
+        source
+    }
+
+    /// The producer's `.sup` for a source: `-c:s copy -f sup`, no `-copyts`.
+    fn ride_along(dir: &Path, source: &Path) -> Vec<u8> {
+        let sup = dir.join("ride-along.sup");
+        let _ = std::fs::remove_file(&sup);
+        run(
+            std::process::Command::new(ffmpeg_bin())
+                .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+                .arg(source)
+                .args(["-map", "0:s:0", "-c:s", "copy", "-f", "sup"])
+                .arg(&sup),
+            "the ride-along extraction",
+        );
+        std::fs::read(sup).expect("ride-along bytes")
+    }
+
+    fn media(id: i64, path: PathBuf) -> MediaFile {
+        let metadata = std::fs::metadata(&path).expect("source metadata");
+        MediaFile {
+            downloaded_subtitles: Vec::new(),
+            id,
+            item_id: 1,
+            size: metadata.len() as i64,
+            mtime: metadata_mtime(&metadata),
+            path,
+            duration_ms: Some(16_000),
+            container: Some("mkv".into()),
+            video_codec: Some("mpeg4".into()),
+            video_codec_tag: None,
+            field_order: None,
+            video_profile: None,
+            width: Some(320),
+            height: Some(180),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
+            bitrate: None,
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 0,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        }
+    }
+
+    async fn cues(
+        dir: &Path,
+        name: &str,
+        file: &MediaFile,
+        stored: &StoreAccess,
+    ) -> Vec<(i64, i64)> {
+        let stage = dir.join(name);
+        tokio::fs::create_dir(&stage).await.expect("stage");
+        prepare_stage_with(&stage, file, 0, &generation(file, 0), stored)
+            .await
+            .expect("overlay preparation");
+        assert!(
+            tokio::fs::metadata(stage.join("track.sup")).await.is_err(),
+            "the staged track is consumed either way"
+        );
+        let manifest: OverlayManifest = serde_json::from_slice(
+            &tokio::fs::read(stage.join("manifest.json"))
+                .await
+                .expect("manifest"),
+        )
+        .expect("manifest schema");
+        manifest
+            .cues
+            .iter()
+            .map(|cue| (cue.start_ms, cue.end_ms))
+            .collect()
+    }
+
+    /// A kept track stands in for the demux, and everything after it — the
+    /// normaliser, the compile, the validation — runs on it unchanged.
+    ///
+    /// The route is proved by content: the stored copy is a *different*
+    /// valid track, two seconds later than the source's own, so the cue
+    /// times say which one the overlay read. Off, a hash mismatch and a
+    /// stale source all read the source's own again.
+    #[tokio::test]
+    async fn a_kept_stored_track_replaces_the_overlay_demux() {
+        crate::transcode::require_ffmpeg();
+        let base = crate::test_tempdir().expect("fixture");
+        let own = source(base.path(), "1");
+        let later = source(base.path(), "2");
+        let file = media(92_001, own.clone());
+        let root = base.path().join("runtime").join(store::STORE_DIR);
+        let dir = store::file_dir(&root, file.id);
+        let on = StoreAccess::new(root.clone(), true);
+
+        let demuxed = vec![(1000, 7000), (9000, 15000)];
+        assert_eq!(
+            cues(base.path(), "baseline", &file, &StoreAccess::off()).await,
+            demuxed,
+            "today's demux of the fixture"
+        );
+
+        // The source's own ride-along is byte-identical to the demux (§6.2
+        // fact 9), so a hit changes nothing a viewer can see.
+        let entry = kept(&dir, 0, &ride_along(base.path(), &own));
+        write_manifest(&root, file.id, stamp_of(&own), vec![entry]);
+        let before = store::hits_for_test(store::Consumer::Overlay);
+        assert_eq!(cues(base.path(), "identical", &file, &on).await, demuxed);
+        assert!(store::hits_for_test(store::Consumer::Overlay) > before);
+
+        // A different stored track proves which one was read.
+        let entry = kept(&dir, 0, &ride_along(base.path(), &later));
+        let stored_name = entry.file.clone().expect("name");
+        write_manifest(&root, file.id, stamp_of(&own), vec![entry]);
+        assert_eq!(
+            cues(base.path(), "stored", &file, &on).await,
+            vec![(2000, 8000), (10000, 16000)],
+            "the overlay read the stored track, not the source"
+        );
+
+        // Off ignores the same valid store entirely.
+        assert_eq!(
+            cues(
+                base.path(),
+                "off",
+                &file,
+                &StoreAccess::new(root.clone(), false)
+            )
+            .await,
+            demuxed
+        );
+
+        // The store's word for a different source identity is not taken.
+        let mut moved = stamp_of(&own);
+        moved.mtime += 1;
+        write_manifest(
+            &root,
+            file.id,
+            moved,
+            vec![kept(&dir, 0, &ride_along(base.path(), &later))],
+        );
+        assert_eq!(cues(base.path(), "stale", &file, &on).await, demuxed);
+
+        // Bytes that no longer hash to the manifest are a miss, not an error.
+        write_manifest(
+            &root,
+            file.id,
+            stamp_of(&own),
+            vec![kept(&dir, 0, &ride_along(base.path(), &later))],
+        );
+        std::fs::write(dir.join(&stored_name), b"PG tampered").expect("tamper");
+        let before =
+            store::misses_for_test(store::Consumer::Overlay, store::MissReason::HashMismatch);
+        assert_eq!(cues(base.path(), "tampered", &file, &on).await, demuxed);
+        assert!(
+            store::misses_for_test(store::Consumer::Overlay, store::MissReason::HashMismatch)
+                > before
+        );
+    }
+
+    /// The overlay's detached flight retries its local verified SUP after a
+    /// remote holder publishes and node B hydrates the representation. This
+    /// substitutes the peer transport at the boundary so the consumer test
+    /// isolates the choice between the fetched track and inline demux.
+    #[tokio::test]
+    async fn node_a_publication_hydrates_node_b_overlay_before_demux() {
+        crate::transcode::require_ffmpeg();
+        let base = crate::test_tempdir().expect("fixture");
+        let own = source(base.path(), "1");
+        let later = source(base.path(), "2");
+        let file = media(92_002, own.clone());
+        let runtime = base.path().join("node-b-runtime");
+        let root = runtime.join(store::STORE_DIR);
+        let catalog: Arc<dyn plurx_core::store::Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
+        let access =
+            StoreAccess::from_setting(Arc::clone(&catalog), &runtime).on_node(Some("node-b"));
+        let bytes = ride_along(base.path(), &later);
+        let publication = SubtitleSourcePublication {
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_attestation: hex::encode(Sha256::digest(std::fs::read(&own).expect("source"))),
+            node_id: "node-a".into(),
+            ordinal: 0,
+            kind: "pgs".into(),
+            format: "sup".into(),
+            verdict: "kept".into(),
+            attempts: 1,
+            origin: "extracted".into(),
+            sha256: hex::encode(Sha256::digest(&bytes)),
+            bytes: bytes.len() as i64,
+            published_at_ms: 1,
+        };
+        catalog
+            .upsert_subtitle_source_publication(&publication)
+            .await
+            .expect("node A publication");
+        let sup = base.path().join("node-b-track.sup");
+        assert!(!store::file_dir(&root, file.id).exists());
+        let hydrated = async {
+            let rows = catalog
+                .list_subtitle_source_publications(file.id, file.size, file.mtime)
+                .await
+                .expect("peer publication");
+            assert_eq!(rows, vec![publication]);
+            let dir = store::file_dir(&root, file.id);
+            let entry = kept(&dir, 0, &bytes);
+            write_manifest(&root, file.id, stamp_of(&own), vec![entry]);
+            true
+        };
+        assert!(stored_track_into_stage_with_hydration(&access, &file, 0, &sup, hydrated).await);
+        assert_eq!(tokio::fs::read(&sup).await.expect("hydrated SUP"), bytes);
+        assert_eq!(
+            cues(base.path(), "node-b-overlay", &file, &access).await,
+            vec![(2000, 8000), (10000, 16000)],
+            "the overlay compiled node A's hydrated track"
+        );
     }
 }

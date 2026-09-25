@@ -14,8 +14,9 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.9"
+    SWIFT_STRICT_CONCURRENCY: targeted
     MARKETING_VERSION: "0.3.0"
-    CURRENT_PROJECT_VERSION: "173"
+    CURRENT_PROJECT_VERSION: "183"
     CODE_SIGN_STYLE: Automatic
 
 targets:
@@ -116,6 +117,8 @@ targets:
         buildPhase: resources
       - path: ../../tests/contracts/native-api.json
         buildPhase: resources
+      - path: ../../tests/contracts/library-sort-cases.json
+        buildPhase: resources
       - path: ../../tests/playback/player-input-contract.json
         buildPhase: resources
       - path: ../../tests/playback/playback-info-fields.json
@@ -125,6 +128,8 @@ targets:
       - path: ../../tests/playback/live-tv-guide-cases.json
         buildPhase: resources
       - path: ../../tests/playback/live-tv-start-cases.json
+        buildPhase: resources
+      - path: ../../tests/playback/pgs-overlay-cases.json
         buildPhase: resources
       - path: ../../tests/playback/dvr-visibility-cases.json
         buildPhase: resources
@@ -146,6 +151,8 @@ targets:
         buildPhase: resources
       - path: ../../tests/contracts/native-api.json
         buildPhase: resources
+      - path: ../../tests/contracts/library-sort-cases.json
+        buildPhase: resources
       - path: ../../tests/playback/player-input-contract.json
         buildPhase: resources
       - path: ../../tests/playback/playback-info-fields.json
@@ -155,6 +162,8 @@ targets:
       - path: ../../tests/playback/live-tv-guide-cases.json
         buildPhase: resources
       - path: ../../tests/playback/live-tv-start-cases.json
+        buildPhase: resources
+      - path: ../../tests/playback/pgs-overlay-cases.json
         buildPhase: resources
       - path: ../../tests/playback/dvr-visibility-cases.json
         buildPhase: resources

@@ -7,13 +7,200 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use serde::Deserialize;
+use plurx_core::auth::{self, TokenIdlePolicy};
+use plurx_core::error::StoreError;
+use plurx_core::store::{keys, DeleteTokenByPrefixOutcome, Store, TokenSummary};
+use serde::{Deserialize, Serialize};
 
 use super::dto::UserDto;
 use super::error::ApiError;
-use super::extract::{AdminUser, AuthUser};
+use super::extract::{AdminUser, AuthUser, RawToken};
 use super::internal_auth_revocation::ClusterCacheRevocation;
 use crate::state::AppState;
+
+/// Unix seconds, for stamping when sign-in expiry takes effect.
+pub(crate) fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Start the sign-in expiry clock the first time this server runs a build
+/// that has the option, and return when it started.
+///
+/// "Sign-ins expire" defaults to on, so the moment an upgraded server first
+/// starts is the moment expiry takes effect. Every token's idle window is
+/// measured from no earlier than this, which is what keeps the upgrade from
+/// signing out every device that was idle for a while before it. The seed is
+/// written once and the first committed value wins on every voter; later
+/// starts, and every other node, read it back unchanged.
+pub(crate) async fn start_token_expiry_clock(
+    store: &dyn Store,
+    now: i64,
+) -> Result<i64, StoreError> {
+    let stored = store
+        .get_or_init_setting(keys::AUTH_TOKEN_EXPIRY_SINCE, &now.to_string())
+        .await?;
+    Ok(stored.trim().parse().unwrap_or(now))
+}
+
+/// The expiry policy in force, from one settings snapshot.
+pub(crate) fn token_expiry_policy(
+    settings: &std::collections::BTreeMap<String, String>,
+) -> Option<TokenIdlePolicy> {
+    TokenIdlePolicy::from_settings(
+        settings
+            .get(keys::AUTH_TOKEN_EXPIRY_ENABLED)
+            .map(String::as_str),
+        settings.get(keys::AUTH_TOKEN_IDLE_DAYS).map(String::as_str),
+        settings
+            .get(keys::AUTH_TOKEN_EXPIRY_SINCE)
+            .map(String::as_str),
+    )
+}
+
+/// One row of a devices list: the Store's privacy-safe summary plus when the
+/// device will be signed out if it stays unused. `expires_at` is absent while
+/// sign-ins do not expire.
+#[derive(Debug, Serialize)]
+pub struct DeviceDto {
+    #[serde(flatten)]
+    pub token: TokenSummary,
+    pub expires_at: Option<i64>,
+    pub expired: bool,
+}
+
+fn device_dto(token: TokenSummary, policy: Option<TokenIdlePolicy>, now: i64) -> DeviceDto {
+    let expires_at = policy.map(|policy| policy.expires_at(token.last_seen_at));
+    DeviceDto {
+        expired: expires_at.is_some_and(|at| now >= at),
+        expires_at,
+        token,
+    }
+}
+
+/// GET /api/v1/me/devices
+pub async fn list_my_devices(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<DeviceDto>>, ApiError> {
+    list_devices_for_user(&state, user.id).await
+}
+
+/// DELETE /api/v1/me/devices/{prefix}
+pub async fn revoke_my_device(
+    AuthUser(user): AuthUser,
+    RawToken(token): RawToken,
+    State(state): State<AppState>,
+    Path(prefix): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    revoke_device_for_user(&state, user.id, &token, &prefix).await
+}
+
+/// GET /api/v1/users/{id}/devices (admin)
+pub async fn list_user_devices(
+    AdminUser(_admin): AdminUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<DeviceDto>>, ApiError> {
+    state
+        .store
+        .get_user(id)
+        .await?
+        .ok_or(ApiError::NotFound("user"))?;
+    list_devices_for_user(&state, id).await
+}
+
+/// DELETE /api/v1/users/{id}/devices/{prefix} (admin)
+pub async fn revoke_user_device(
+    AdminUser(_admin): AdminUser,
+    RawToken(token): RawToken,
+    State(state): State<AppState>,
+    Path((id, prefix)): Path<(i64, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .store
+        .get_user(id)
+        .await?
+        .ok_or(ApiError::NotFound("user"))?;
+    revoke_device_for_user(&state, id, &token, &prefix).await
+}
+
+async fn list_devices_for_user(
+    state: &AppState,
+    user_id: i64,
+) -> Result<Json<Vec<DeviceDto>>, ApiError> {
+    let tokens = state.store.list_tokens_for_user(user_id).await?;
+    let policy = token_expiry_policy(&state.store.settings_snapshot().await?);
+    let now = unix_now();
+    Ok(Json(
+        tokens
+            .into_iter()
+            .map(|token| device_dto(token, policy, now))
+            .collect(),
+    ))
+}
+
+async fn revoke_device_for_user(
+    state: &AppState,
+    user_id: i64,
+    current_token: &str,
+    prefix: &str,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let prefix = normalize_token_prefix(prefix)?;
+    let matches = state
+        .store
+        .list_tokens_for_user(user_id)
+        .await?
+        .into_iter()
+        .filter(|token| token.token_hash_prefix == prefix)
+        .count();
+    match matches {
+        0 => return Err(ApiError::NotFound("device token")),
+        1 if prefix == token_prefix(current_token) => {
+            return Err(ApiError::BadRequest(
+                "the current device must sign out through /api/v1/auth/logout".into(),
+            ));
+        }
+        1 => {}
+        _ => {
+            return Err(ApiError::Conflict(
+                "device token prefix is ambiguous; refresh the device list".into(),
+            ));
+        }
+    }
+
+    let proof_revocation = ClusterCacheRevocation::begin_user(state, user_id).await?;
+    let outcome = state
+        .store
+        .delete_token_by_prefix_for_user(user_id, &prefix, proof_revocation.mutation_claim())
+        .await?;
+    proof_revocation.finish(state).await?;
+    match outcome {
+        DeleteTokenByPrefixOutcome::Deleted => Ok(Json(serde_json::json!({ "ok": true }))),
+        DeleteTokenByPrefixOutcome::NotFound => Err(ApiError::NotFound("device token")),
+        DeleteTokenByPrefixOutcome::Ambiguous => Err(ApiError::Conflict(
+            "device token prefix is ambiguous; refresh the device list".into(),
+        )),
+        DeleteTokenByPrefixOutcome::ClaimLost => Err(ApiError::ServiceUnavailable(
+            "device revocation lost its cache-revocation exclusion; retry the request".into(),
+        )),
+    }
+}
+
+fn token_prefix(token: &str) -> String {
+    auth::hash_token(token).chars().take(8).collect()
+}
+
+fn normalize_token_prefix(prefix: &str) -> Result<String, ApiError> {
+    if prefix.len() != 8 || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::BadRequest(
+            "device token prefix must be exactly 8 hexadecimal characters".into(),
+        ));
+    }
+    Ok(prefix.to_ascii_lowercase())
+}
 
 /// GET /api/v1/users (admin)
 pub async fn list(
@@ -48,7 +235,7 @@ pub async fn create(
             "a user named `{username}` already exists"
         )));
     }
-    let hash = super::auth::hash_password_bounded(req.password).await?;
+    let hash = super::auth::hash_password_bounded(&state.password_capacity, req.password).await?;
     let user = state
         .store
         .create_user(username, &hash, req.is_admin)
@@ -80,7 +267,10 @@ pub async fn update(
     let password_hash = match req.password.as_deref() {
         Some(password) => {
             super::auth::validate_new_password(password)?;
-            Some(super::auth::hash_password_bounded(password.to_owned()).await?)
+            Some(
+                super::auth::hash_password_bounded(&state.password_capacity, password.to_owned())
+                    .await?,
+            )
         }
         None => None,
     };

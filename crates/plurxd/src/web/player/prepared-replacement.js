@@ -272,7 +272,6 @@ function preparedSelectionText(selection){
 function preparedHlsAttach(p,state,spare){
   const tgt=bufferTargets(p&&p.bufSegSecs);
   const hls=new Hls({
-    enableWorker:false,
     maxBufferLength:tgt.fwd,
     backBufferLength:tgt.back,
     ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
@@ -580,4 +579,3 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   });
   return true;
 }
-

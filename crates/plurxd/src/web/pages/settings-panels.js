@@ -16,8 +16,26 @@ const SET_TABS=SET_GROUPS.flatMap(([,tabs])=>tabs);
 // address bar names the section and the back button walks between them.
 function isSettingsRoute(h){ return h==="#/settings"||h==="#/admin"||(typeof h==="string"&&h.startsWith("#/settings/")); }
 function settingsRouteTab(h){
-  const m=/^#\/settings\/([a-z]+)$/.exec(h||"");
+  const m=/^#\/settings\/([a-z]+)(?:\/[a-z0-9-]+)?$/.exec(h||"");
   return m&&SET_TABS.some(x=>x[0]===m[1])?m[1]:null;
+}
+// A section route may name one element after it —
+// #/settings/developer/enable-subtitle-sources — so a link from another page
+// lands on the card it means rather than the top of a long section.
+function settingsRouteAnchor(h){
+  const m=/^#\/settings\/[a-z]+\/([a-z0-9-]+)$/.exec(h||"");
+  return m?m[1]:null;
+}
+// Once: after the section paints, scroll to the anchor and rewrite the address
+// to the bare section, so a repaint (every refresh timer) does not scroll the
+// page back under the reader.
+function revealSettingsAnchor(tab){
+  const anchor=settingsRouteAnchor(location.hash);
+  if(!anchor) return;
+  const target=document.getElementById(anchor);
+  if(!target) return;
+  try{ history.replaceState(null,"",`#/settings/${tab}`); }catch(e){}
+  if(target.scrollIntoView) target.scrollIntoView({block:"start"});
 }
 function settingsTab(){
   const routed=settingsRouteTab(location.hash);
@@ -48,6 +66,7 @@ function renderSettings(){
   const manifest=SETTINGS_MANIFEST[tab];
   if(!manifest.required.every(key=>SETTINGS_LOADED.has(key))) return;
   document.getElementById("main").innerHTML=`<div class="setlayout"><nav class="settabs" aria-label="Settings sections">${settingsTabsHtml(tab)}</nav><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody">${settingsPanel(tab,d)}</div></div>`;
+  revealSettingsAnchor(tab);
   if(tab==="system") return refreshLogs(); // its initial loading row is part of settled
   if(tab==="cluster"){ applyClusterFolds(); return refreshClusterLogs(); }
 }
@@ -57,7 +76,7 @@ function settingsPanel(tab,d){
   if(tab==="livetv")       return liveTvPanel(d.settings,d.developerReadiness);
   if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis);
   if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions,d.developerReadiness);
-  if(tab==="users")        return usersPanel(d.users);
+  if(tab==="users")        return usersPanel(d.users,d.settings);
   if(tab==="system")       return systemPanel(d.sys,d.playbackEvents);
   if(tab==="cluster")      return clusterPanel(d);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
@@ -138,7 +157,7 @@ function maintenancePanel(settings,dv,readiness){
     ${togRow("job-boot","Scan every library at startup","About 30 seconds after the server starts — a server switched off while files landed doesn't notice them until its next scheduled run.",settings.scan_on_startup)}
     ${setCardFoot("saveMaintenance")}`);
   return `${setHead("Maintenance","Background work this node does on its own: what is scheduled, what it costs, and where to turn it off.")}
-    <div class="setgrid2">${jobs}${precachePanel(settings)}${dvDiskPanel(settings,dv)}${windowsServerCard(settings,readiness)}${telemetryPanel(settings)}</div>`;
+    <div class="setgrid2">${jobs}${precachePanel(settings)}${subtitleStorePanel(settings)}${dvDiskPanel(settings,dv)}${windowsServerCard(settings,readiness)}${telemetryPanel(settings)}</div>`;
 }
 const PRODUCE_EVERY=[[0,"Never"],[360,"6 hours"],[720,"12 hours"],[1440,"Daily"]];
 const CACHE_SIZES=[0,10,25,50,100,250,500,1000];
@@ -156,6 +175,48 @@ function precachePanel(settings){
     </div>
     <div class="hint"><b>It shares the encoder with live playback and always loses:</b> the moment anyone presses play it stops and hands the hardware over, picking up later from where it stopped. Only sources nothing plays natively are worth it (4K, HDR, HEVC); an ordinary 1080p file is skipped. A budget of <b>Off</b> stops production and clears what's stored. What it is doing right now is on Activity.</div>
     ${setCardFoot("savePrecache")}`);
+}
+// Stored subtitle tracks: the subtitle-source store's footprint on this node,
+// and what its producer — the fragment-index pass keeping each PGS track it
+// reads — is doing now. Background work on real disks says here what it is,
+// why it chose the work, what it costs, whether it can run, and where to turn
+// it off. Read-only: the switch lives on Developer beside its readiness rows,
+// and the link lands on it.
+function subtitleStorePanel(settings){
+  const SUBSRC_SWITCH_LINK=`<a href="#/settings/developer/enable-subtitle-sources">Developer → Stored subtitle tracks</a>`;
+  const d=settings.subtitle_store||{};
+  const on=settings.subtitle_stored_sources!==false;
+  const gate=d.gate||{open:true};
+  const concern=on&&gate.open===false;
+  const fp=d.footprint;
+  const plural=(n,word)=>`${n} ${word}${n===1?"":"s"}`;
+  const size=fp?`${fmtBytes(fp.bytes)||"0 B"} · ${plural(fp.directories,"file")}`:"not measured yet";
+  const pill=!on?`<span class="pill">off</span>`
+    :concern?`<span class="pill warn">readiness concern</span>`
+    :`<span class="pill ok">${esc(size)}</span>`;
+  const why=concern?`<div class="setwarn">⚠ <b>Review stored-track readiness:</b> ${esc(gate.reason||"a requirement is not met")}. The observations are advisory on ${SUBSRC_SWITCH_LINK}.</div>`:"";
+  const ago=d.footprint_age_ms!=null?` (measured ${fmtDur(d.footprint_age_ms)||"just now"}${d.footprint_age_ms>=1000?" ago":""})`:"";
+  const measured=fp
+    ? `<p class="hint">On this node the store holds <b>${esc(size)}</b>${esc(ago)}, of a ${fmtBytes(d.cap_bytes)||"—"} cap; the least recently used files go first.</p>`
+    : Number(settings.vod_index_mins)===0
+      ? `<p class="hint">The store's size on this node is not measured: background analysis is paused (Settings → Analysis), and the sweep that measures the store runs with each analysis pass. The store is capped at ${fmtBytes(d.cap_bytes)||"—"}.</p>`
+      : `<p class="hint">The store's size on this node is not measured yet: the next background analysis pass's sweep measures it. The store is capped at ${fmtBytes(d.cap_bytes)||"—"}.</p>`;
+  const riding=d.riding||[];
+  const rideTitle=r=>{
+    const name=esc(r.title||`File ${r.file_id}`);
+    return r.item_id?`<a href="#/item/${esc(r.item_id)}">${name}</a>`:name;
+  };
+  const rides=riding.length
+    ? `<ul class="subsrc-rides">${riding.map(r=>`<li><b>${rideTitle(r)}</b>: keeping ${plural(r.tracks,"PGS track")}, ${fmtBytes(r.bytes_written)||"0 B"} written so far · running ${fmtDur(r.running_ms)||"just now"}</li>`).join("")}</ul>`
+    : `<p class="hint">No index pass on this node is keeping PGS tracks right now.</p>`;
+  const since=`Since this process started: ${plural(d.tracks_attempted||0,"track")} attempted — ${d.kept||0} kept, ${d.empty||0} with no cues, ${d.malformed||0} malformed, ${d.transient||0} to retry — and ${fmtBytes(d.bytes_written)||"0 B"} written${d.files_not_riding?`; ${plural(d.files_not_riding,"file")} indexed without it after a riding pass failed`:""}${d.discarded_switch_off?`; ${d.discarded_switch_off} riding pass${d.discarded_switch_off===1?"":"es"} finished after it was turned off and kept nothing`:""}.`;
+  return setCard(`${cardHead("Stored subtitle tracks","While a file is indexed on this node, the index pass also keeps each PGS subtitle track it reads, so a burned or overlaid PGS subtitle never has to read the whole file again.",pill)}
+    ${why}
+    <div class="hint"><b>Why this work:</b> the index pass already reads every packet of the file, so keeping the subtitle packets costs a few megabytes of disk per film and no extra read.</div>
+    ${measured}
+    ${rides}
+    <p class="hint">${esc(since)}</p>
+    <div class="hint"><b>To turn it off:</b> ${SUBSRC_SWITCH_LINK}. Off takes effect at once: playback stops reading stored tracks, a pass already running finishes its index but publishes none of the tracks it kept, and later passes keep none. What is already stored stays on disk until the size cap or the sweep removes it.</div>`,{id:"subsrcstore"});
 }
 function telemetryPanel(settings){
   return setCard(`${cardHead("Playback telemetry","Bounded, node-local playback measurements behind the Playback (7 days) card on System.")}
@@ -435,7 +496,37 @@ function metadataPanel(settings,readiness){
 // calendar seam; both are the opposite direction of the Metadata providers,
 // which is why they no longer share a page with them.
 function integrationsPanel(settings,trakt){
-  return `${setHead("Integrations","Other services plurx talks to.")}${traktCardHtml(trakt)}${monarrCardHtml()}`;
+  return `${setHead("Integrations","Other services plurx talks to.")}${traktCardHtml(trakt)}${monarrCardHtml()}<div class="card">${cardHead("OpenSubtitles","Find and download missing movie and episode subtitles.")}<div style="padding:16px"><button class="sm" onclick="openSubtitleProvider(this)">Configure OpenSubtitles</button><div id="subtitle-provider-form"></div></div></div>`;
+}
+
+async function openSubtitleProvider(button){
+  const panel=document.getElementById("subtitle-provider-form");
+  button.disabled=true;
+  try{
+    const settings=await api("/subtitle-provider");
+    if(!panel.isConnected)return;
+    panel.innerHTML=`<p>${settings.configured?"OpenSubtitles is configured. Leave secrets blank to keep them.":"Add an OpenSubtitles API key to enable subtitle downloads."} <a href="https://www.opensubtitles.com/consumers" target="_blank" rel="noopener">Create an API key</a>.</p>
+      <label for="os-key">API key</label><input id="os-key" type="password" autocomplete="off">
+      <label for="os-user">Account username (optional)</label><input id="os-user" autocomplete="off" value="${esc(settings.username||"")}">
+      <label for="os-password">Account password (optional)</label><input id="os-password" type="password" autocomplete="new-password">
+      <label><input id="os-auto" type="checkbox"${settings.automatic?" checked":""}> Automatically download missing subtitles when the file matches</label>
+      <label for="os-languages">Automatic languages (up to three codes, separated by commas)</label><input id="os-languages" value="${esc((settings.languages||["en"]).join(", "))}" placeholder="en, fr">
+      <p class="muted">Downloads use the provider’s allowance. An account can provide a higher allowance.</p>
+      <button class="sm" onclick="saveSubtitleProvider(false)">Save</button>
+      <button class="ghost sm" onclick="saveSubtitleProvider(true)">Disable and clear credentials</button><div id="os-status" role="status"></div>`;
+  }catch(e){if(panel.isConnected)panel.textContent=e.message||"Could not load OpenSubtitles settings.";}
+  finally{button.disabled=false;}
+}
+
+async function saveSubtitleProvider(clear){
+  const status=document.getElementById("os-status");
+  const key=document.getElementById("os-key"),password=document.getElementById("os-password");
+  const body=clear?{api_key:"",username:"",password:"",automatic:false}:{username:document.getElementById("os-user").value.trim(),automatic:document.getElementById("os-auto").checked,languages:document.getElementById("os-languages").value.split(",").map(v=>v.trim()).filter(Boolean)};
+  if(!clear&&key.value.trim())body.api_key=key.value.trim();
+  if(!clear&&password.value)body.password=password.value;
+  status.textContent="Saving…";
+  try{await api("/subtitle-provider",{method:"PUT",body});key.value="";password.value="";status.textContent=clear?"OpenSubtitles disabled.":"Saved.";}
+  catch(e){status.textContent=e.message||"Could not save OpenSubtitles settings.";}
 }
 function presetOpts(pairs, cur, label){
   cur=(cur==null?"":String(cur));
@@ -482,7 +573,6 @@ function playbackPanel(settings,readiness){
       ${setCardFoot("savePlaybackDefaults")}`);
   const streaming=setCard(`${cardHead("Streaming","Server delivery · Changes apply to new sessions. Existing playback keeps its current settings.",active)}
       ${togRow("pvod","VOD HLS — a fixed, seekable timeline","Preferred. Needs the file's analysis index; schedules and queue health are in Analysis.",settings.vod_presentation)}
-      ${togRow("pabr","Adjust Auto quality while playing","Off keeps the server's first Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Enable it to let Auto respond to changing playback conditions.",settings.playback_auto_abr)}
       <div class="setfields">
         <div><label for="pvws">VOD working set</label><select id="pvws" style="min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
         <div><label for="pvmb">Producer deadline</label><select id="pvmb" style="min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>

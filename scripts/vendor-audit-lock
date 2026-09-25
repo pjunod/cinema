@@ -12,7 +12,6 @@ from pathlib import Path
 VENDORED = (
     ("hiqlite", "0.14.0"),
     ("hiqlite-wal", "0.14.0"),
-    ("s3-simple", "0.8.0"),
     ("rust_decimal", "1.42.1"),
 )
 PACKAGE_HEADER = re.compile(r"(?m)^\[\[package\]\]\n")
@@ -38,9 +37,29 @@ def registry_fields(block: str, name: str, version: str) -> tuple[str, str]:
     return source.group(1), checksum.group(1)
 
 
+def patch_is_unused(text: str, name: str, version: str) -> bool:
+    """Whether cargo itself recorded this vendored patch as unused.
+
+    A `[[patch.unused]]` entry is the lockfile stating that nothing in the
+    resolved graph depends on the crate, so it is compiled into no artifact
+    and there is no `[[package]]` block to give registry provenance to. That
+    is a different fact from the crate being absent, which stays an error:
+    a vendored dependency that quietly vanished from the lock would
+    otherwise take its advisory coverage with it.
+    """
+
+    pattern = re.compile(
+        rf'(?m)^\[\[patch\.unused\]\]\nname = "{re.escape(name)}"\n'
+        rf'version = "{re.escape(version)}"$'
+    )
+    return pattern.search(text) is not None
+
+
 def synthesize(root_lock: str, registry_lock: str) -> str:
     result = root_lock
     for name, version in VENDORED:
+        if patch_is_unused(result, name, version):
+            continue
         upstream = package_block(registry_lock, name, version)
         source, checksum = registry_fields(upstream, name, version)
         patched = package_block(result, name, version)

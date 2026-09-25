@@ -1,8 +1,34 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries fifteen compatibility patches for clustered
+Apache-2.0. Plurx carries nineteen compatibility patches for clustered
 deployments:
+
+**Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
+still needs a public upstream issue or pull request; it is deliberately not a
+made-up URL and prevents the fork from being declared fully tracked.
+
+| # | Patch | Kind | Upstream | Drop condition |
+|---:|---|---|---|---|
+| 1 | `NodeConfig` duplicate-id rejection | generic bug | pending M6 | Upstream release selects by id and rejects duplicate durable ids. |
+| 2 | Split-brain probe TLS policy | plurx policy | — | Never; self-signed cluster TLS is a Plurx deployment requirement. |
+| 3 | Concurrent TLS key publication | plurx policy | — | Never; shared embedded-node startup is a Plurx lifecycle requirement. |
+| 4 | OpenRaft election trigger | plurx policy | — | Never; graceful voter removal depends on this OpenRaft 0.9 bridge. |
+| 5 | Local Raft metrics wrapper | plurx policy | — | Never; Plurx readiness owns this deliberately bounded view. |
+| 6 | Quorum watermark wrapper | plurx policy | — | Never; bounded local reads require this proof shape and version. |
+| 7 | Snapshot duration metrics | plurx policy | — | Never; fixed-cardinality snapshot observability is a Plurx contract. |
+| 8 | Snapshot `RemoteError` preservation | generic bug | pending M6 | Upstream release preserves mismatch errors on SQLite and cache snapshot RPCs. |
+| 9 | WebSocket write-and-flush budget | generic bug | pending M6 | Upstream release flushes every frame within one bounded write budget. |
+| 10 | Connection-supervisor socket ownership | generic bug | pending M6 | Upstream release owns and joins both socket tasks across every terminal path. |
+| 11 | Retained reset notification | generic bug | pending M6 | Upstream release cannot lose reset behind a saturated request queue. |
+| 12 | Durable snapshot-generation ownership | plurx policy | — | Never; Plurx requires its documented crash-recovery and publication boundary. |
+| 13 | Proxy endpoint trust boundary | plurx policy | — | Never; Plurx remote clients must remain inside the configured proxy set. |
+| 14 | Bounded definitive-forward recovery | plurx policy | — | Never; Plurx owns the attempt and replay limits plus backup leader attribution. |
+| 15 | Validation apply counters and controls | plurx policy | — | Never; Plurx's separate-process validation harness consumes this surface. |
+| 16 | Reserve `QueryWrite::Backup` after the deployed `RTT` ordinal | plurx policy | — | Never; the ordinal is a deployed wire position and moving it would itself be the break this patch prevents. |
+| 17 | Gate `cryptr/s3` behind Hiqlite `s3` | generic bug | pending M6 | Upstream release no longer enables S3 dependencies when backup and S3 are off. |
+| 18 | Scope the vendored `s3-simple` override to this manifest | dependency-only | — | Upstream cryptr accepts `s3-simple` 0.9 or newer, which already carries these dependency-only corrections. |
+| 19 | Install the `ring` rustls provider for the HTTP clients | generic bug | pending M6 | Upstream release installs or declares a rustls crypto provider for its `rustls-no-provider` Reqwest clients. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -129,9 +155,49 @@ deployments:
   additionally logs each applied entry's index and payload to stderr, which
   is how a contaminating entry is identified down to its SQL. Production
   binaries compile none of it.
+- The replicated SQLite write enum always includes `QueryWrite::Backup`, even
+  when the local backup implementation is not compiled, and appends that
+  reservation after the deployed `QueryWrite::RTT` variant. `RTT` therefore
+  remains ordinal 5 in both directions of a rolling deployment; reserving a
+  new variant before it would itself be a wire break. `backup` and `backup,s3`
+  remain independently compilable, and a build without backup returns an
+  explicit feature error if it receives the reserved replicated variant. The S3
+  half of that change is its own patch, described in the next bullet.
+- The optional `cryptr` dependency no longer enables its S3 client
+  unconditionally. Hiqlite's `s3` feature enables `cryptr/s3` instead, so
+  downstream users that select `backup` or `s3` retain the same backend while
+  builds such as Plurx that select neither do not compile an unused S3, QUIC,
+  and second aws-lc stack.
+- This manifest carries its own `[patch.crates-io]` row pointing `s3-simple`
+  at `vendor/s3-simple`. Gating the edge removes S3 from the configuration
+  Plurx builds, but it does not make the configuration Hiqlite still
+  advertises safe: with `backup` or `s3` enabled, registry `s3-simple` 0.8.0
+  resolves `quick-xml` 0.39.4 (RUSTSEC-2026-0194, RUSTSEC-2026-0195) and a
+  retired `aws-lc-sys` 0.39.1 that `deny.toml` forbids. cryptr 0.10.0 requires
+  `s3-simple ^0.8.0`, so upstream 0.9.x cannot be selected instead. The
+  override lives here rather than in the workspace root because the workspace
+  graph contains no `s3-simple` at all, where the same row would be an unused
+  patch. `tests/operations/test_hiqlite_patch_ledger.py` resolves this
+  directory's lockfile against `deny.toml` and the advisory floor, so the
+  advertised backup/S3 graph cannot regress unnoticed.
+- `http_client::ensure_rustls_crypto_provider` installs the `ring` rustls
+  provider once per process, and every `reqwest::Client` this crate builds goes
+  through it. `reqwest` is declared with `rustls-no-provider`, so
+  `ClientBuilder::build` reads the process-wide default and panics when there is
+  none — for any client, TLS or not. Before the patch above dropped
+  `backup -> s3 -> cryptr/s3`, that edge pulled a second `reqwest` whose
+  provider feature Cargo unified onto this one, so the provider was present by
+  accident and no build asked for it. `ring` is what this crate's `rustls`
+  dependency and `axum-server`'s `tls-rustls-no-provider` already select and
+  what `plurx-core`'s `install_default_crypto_provider` installs, so one
+  provider stays in the process. Naming it at client construction rather than in
+  a `main` is deliberate: a test binary or a library consumer runs no `main` of
+  ours, which is how the accidental inheritance went unnoticed.
+  `crates/plurx-core/tests/hiqlite_tls_provider.rs` builds a real client in a
+  binary of its own and fails if the install goes away.
 
-Remove this vendor when an upstream Hiqlite release contains all fifteen patches
-and Plurx has upgraded to it. Until then, the sparse-roster regression in
+Remove this vendor when an upstream Hiqlite release contains all nineteen
+patches and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
 and the snapshot RPC error-boundary plus queue-saturated reset tests above keep
 the transport-recovery patches load-bearing.

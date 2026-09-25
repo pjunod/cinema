@@ -1,6 +1,7 @@
 # Apple display criteria and audio session — Match Content on tvOS, and a player that knows it was interrupted
 
-**Status:** ready for review · **Executes:** §2.8 / A1 / F-apple-1 and
+**Status:** implementation complete; sole adversarial review findings addressed;
+device evidence pending in draft PR #406 · **Executes:** §2.8 / A1 / F-apple-1 and
 §2.10 / A2 / F-apple-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -11,15 +12,15 @@ Companion to [APPLE-CLIENT-PARITY.md](APPLE-CLIENT-PARITY.md) (what the
 Apple client lacks, as a list) and
 [PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md) (who may pause
 or stop the player, and what a viewer pause means) — this is *the two
-platform integrations the Apple player never had*, in three PRs plus two
+platform integrations the Apple player never had*, in one plan PR plus two
 device tests.
 
 Read first: §2.8 and §2.10 of the review, the A1/A2 rows (§3.6), and the
 assessment's 2.8, 2.10, A1, A2, F-apple-1, F-apple-2 rows in
 [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md),
-then the code in §2 in order. Milestone by milestone (§5); each is one
-draft PR into `main` under the fast lane, and each shipped Swift change
-takes `make apple-build-bump`.
+then the code in §2 in order. Milestone by milestone (§5), all in the one
+draft plan PR into `main` under the fast lane; the shipped Swift change takes
+`make apple-build-bump` once.
 
 The standing instruction: **if a step seems to require changing
 `wantsPlayback`'s ownership (`setPlaybackRequested`), the stall detector's
@@ -27,6 +28,15 @@ constants, the recovery ladder, the prepared-commit sequence, or replacing
 `AVPlayerLayer` with `AVPlayerViewController`, stop and flag it.** Both
 integrations are observers and one property assignment each. Line numbers
 are from `88a3957a`; re-verify by function name.
+
+**Execution decisions (2026-09-20).** The current Xcode 27.0 / tvOS 27.0 SDK
+exports `AVDisplayCriteria.initWithRefreshRate:formatDescription:` and does
+not export the review's proposed dynamic-range initializer. The implementation
+therefore follows the plan's asset-owned route and does not construct criteria.
+The current work-board protocol supersedes this document's older three-PR
+wording: M1–M3 stay in one draft PR, with milestone commits/log rows. No plurx
+enablement setting was added because Match Content is the viewer's tvOS setting
+and interruption correctness is unconditional.
 
 **Correction to the review:** none for the code facts. Two things the
 review states as expected behaviour, not observation, stay that way here:
@@ -51,12 +61,13 @@ device tests in §6 are what turn either into a finding.
    state that is distinct from a viewer pause and from background/PiP;
    the stall monitor does not run while it is set; playback resumes only on
    `.ended` with `.shouldResume` *and* `wantsPlayback` still true; an
-   `.oldDeviceUnavailable` route change becomes a viewer pause
-   (`wantsPlayback = false`); the session category is `.playback` with
+   interruption end without `.shouldResume` becomes a visible pause whose
+   next Play resumes once; an `.oldDeviceUnavailable` route change becomes a
+   viewer pause without detaching a Live TV tuner session; the session category is `.playback` with
    mode `.moviePlayback`; the existing iOS-activates / tvOS-does-not split
    is kept.
 
-Done means: three PRs merged, `make apple-test` green, and the two GPT
+Done means: the one plan PR merged, `make apple-test` green, and the two GPT
 device tests in §6 recorded (the Apple TV's actual HDMI mode; the iPhone
 interruption matrix).
 
@@ -165,6 +176,10 @@ nonisolated static func activeDisplayManager() -> AVDisplayManager? {
   is called at `:9377` and **not** when the successor is primed (`:9124`)
   — "a staged prepared successor must not change the display mode before
   it becomes visible" (§2.8 amendment, F-apple-1).
+- **Live TV readiness:** replacing an item installs one status observation;
+  `.unknown` applies nothing, and `.readyToPlay` retries once. The callback
+  rechecks both the tune serial and `player.currentItem === item`, so delayed
+  readiness from an older tune cannot change the visible mode.
 - **Reset** `preferredDisplayCriteria = nil` in `stop()` (beside `:4057`
   `replaceCurrentItem(with: nil)`), in Live TV's `stop()` (`LiveTvView.swift`
   around `:462`), and when the surface releases the layer
@@ -227,9 +242,11 @@ Finite player wiring:
   preferredRate, immediately: …)`), **not** through
   `setPlaybackRequested(true)` — that would flip an intent the viewer
   never changed.
-- `.stay`: `systemPaused = false` and nothing else; the viewer's own
-  Play press (or the lock-screen command, which already routes through
-  `setPlaybackRequested`) resumes.
+- `.stay`: clear `systemPaused` and reconcile the still-paused transport to a
+  visible explicit-pause state. The finite player sets `wantsPlayback = false`;
+  Live TV and Library Channels set `paused = true`. The viewer's next on-screen
+  or remote Play therefore creates one real resume rather than turning the
+  retained pre-interruption intent off or no-oping against it.
 - Route change `.oldDeviceUnavailable` (headphones pulled, AirPods case
   closed): `setPlaybackRequested(false)` — this **is** a viewer-pause
   semantically, and it is what keeps the film off the speaker. Every
@@ -251,9 +268,11 @@ Finite player wiring:
 
 Live TV: same observer; `.suspend` sets a `systemPaused` that the 5 s
 watchdog (`LiveTvPlaybackWatchdog`) and the `.waiting` debounce treat as
-"not a stall"; `.resume` calls `player.play()` only if `playing` (its
-intent flag) is still true; `.oldDeviceUnavailable` → `playing = false;
-player.pause()`.
+"not a stall"; `.resume` calls `player.play()` only if `playing` (the
+attached-session flag) is still true. `.oldDeviceUnavailable` keeps
+`playing = true`, sets `paused = true`, and pauses the player, so the visible
+Play control resumes the retained tuner session instead of being rejected by
+its own attachment guard.
 
 Library channels: add the iOS category set (the file has none, so the
 silent switch mutes it today — a finding of this read, one line to fix),
@@ -331,8 +350,9 @@ same PR and nothing else in the contract moves.
 
 ## 5. Milestones
 
-Each PR: `make apple-build-bump`, fast Apple compile lane, `make
-apple-test`, `WIP:`, review, full suite once, merge.
+The one plan PR takes one build bump, the fast Apple compile lane, focused
+tests while draft, the sole adversarial review, and the full required lane
+before merge.
 
 ### 5.1 SDK check, then display criteria on the finite and Live TV players (A1)
 
@@ -347,7 +367,8 @@ grep -rn "refreshRate" "$sdk/System/Library/Frameworks/AVFoundation.framework/He
 Then §3.1: `applyDisplayCriteria`, `activeDisplayManager`, the four call
 sites, the three resets, the client-log event. Unit test: a
 `DisplayCriteriaDecision` pure function (`matchingEnabled`, `itemIsCurrent`,
-`openIsCurrent`) → apply/skip, four cases.
+`openIsCurrent`, `itemIsReady`) → apply/skip, including nil-before-loaded;
+the Live TV observer supplies the retry after readiness.
 
 **Acceptance:** `make apple-test` green; on the Apple TV in "4K SDR +
 Match Content" the §6 GPT prompt reports the TV's HDMI mode changing to
@@ -457,6 +478,9 @@ claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
 trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
-| Date | Model | Session | Milestone | PR | Outcome / evidence |
+| Date | Model | Session | Milestone | Commit / PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M1 | `b1709dbc` / #406 | Finite and Live TV apply asset-owned criteria only for the current committed item/open; teardown clears the active window at the finite controller, Live TV controller, and layer release. The four-case pure decision test and iOS/tvOS simulator compilation pass. Physical HDMI-mode evidence remains required. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M2 | `b1709dbc` / #406 | One owned observer serves all three player stacks; interruption state remains separate from viewer intent, stall/watchdog sampling is gated, old-route loss revokes intent, and iOS uses `.playback` / `.moviePlayback`. Six focused Swift tests and all 64 shared surface cases pass. The iPhone interruption matrix remains required. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M3 | `3bbe3ea3` / #406 | No second display writer was added beside SwiftUI `VideoPlayer`. APPLE-CLIENT-PARITY records the implementation and explicitly leaves inline/fullscreen HDMI behavior unobserved; needs the §6 Apple TV prompt before this plan can be `done`. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | Review fixes | `c5ca81f7`, `42b631d1` / #406 | Addressed all findings from sole adversarial review #3154: explicit-resume reconciliation on all three stacks, attached Live TV route-loss pause, ready/current/serial-fenced Live TV display matching, and truthful source-level retirement documentation. Five selected iOS simulator tests, tvOS simulator compilation, all 64 surface cases, and docs-index validation pass. Physical HDMI and interruption evidence remains pending. |

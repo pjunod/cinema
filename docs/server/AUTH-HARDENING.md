@@ -1,6 +1,6 @@
 # Auth hardening — queue the fence instead of refusing it, and bound what a stranger can try
 
-**Status:** ready for review · **Executes:** C7 and C8 from
+**Status:** in execution — the sign-in expiry **option** (§3.4.1), which supersedes the M4 decision, is open in draft [PR #486](http://192.168.4.7:3000/noirr/plurx/pulls/486); M1–M3 and the M4 decision merged via [PR #433](http://192.168.4.7:3000/noirr/plurx/pulls/433) · **Executes:** C7 and C8 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (assessment correction 1 and rows C7, F-core-8, C8, F-core-9 in
 [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md))
@@ -10,11 +10,11 @@
 
 Read §2 first — it explains the two-phase revocation fence in the words of
 the code that implements it, because the first draft of the review tried to
-remove it and the assessment refused. Then build §5: M1 (bounded admission
-to the fence) is one PR; M2 (login backoff) is one PR; M3 (devices list)
-is one PR; M4 (token idle expiry) is a **product decision first** and a PR
-only after §7.1 is answered. `?token=` narrowing is not built here — §4
-says why. Every `file:line` is from `88a3957a`; re-verify by function name.
+remove it and the assessment refused. The workboard's one-plan/one-PR rule
+supersedes the original milestone-sized PR language: M1–M3 are logical commits
+in PR #433, and M4 records the delegated product decision in the same PR.
+`?token=` narrowing is not built here — §4 says why. Every `file:line` is from
+`88a3957a`; re-verify by function name.
 
 **If a step seems to require deleting a token without the Begin/End
 peer fanout, answering an admin recovery read from the cache while a
@@ -197,6 +197,13 @@ pub(crate) async fn acquire_revocation_operation(&self)
 }
 ```
 
+**Correction (2026-09-22, review #3378 P2).** The sketch above holds
+`_waiting` for the operation's whole lifetime, which spends one of the eight
+permits on the caller that is no longer waiting and leaves a queue seven
+deep. The implementation drops the permit as soon as the mutex is acquired —
+the mutex is the single active slot — so the depth is the eight waiters this
+section promises. Nothing else in the sketch changed.
+
 Both failures still map to `propagation_error()` — the 503 code and the
 client behaviour on it are unchanged; what changes is how often it
 happens. The three call sites (`:253, 266, 277`) become `.await`s. The
@@ -324,13 +331,102 @@ What the number would do, each read from the code:
 | Bulk expiry is a fanout per token, not one statement | one Begin/End per revocation operation; the queue from M1 bounds concurrency | A nightly sweep that expires 40 tokens is 40 fences; it must be a leader-singleton job under the job lease, paced (one per few seconds), never a `DELETE … WHERE last_seen_at < ?` |
 | Plex façade clients hold `X-Plex-Token` forever | `plex.rs` maps it onto the same tokens | Kodi/PKC has no re-login UI; an expired token is a support call |
 
-**Decision requested (§7.1):** window length, and whether `device`-tagged
-TV/offline sessions get a longer window than browsers. The plan's
-recommendation, if a number is wanted now: **180 days idle** for every
-token, expiry executed as a paced leader-singleton sweep through the M1
-fence, with `devices` (M3) shipped first so a user can see what will expire.
-Ninety days — the number the first draft implied — signs out a monthly
-Apple TV. Not building until answered.
+**Decision (2026-09-21): keep login tokens non-expiring for now.** The delegated
+choice favours recoverability over an arbitrary lifetime: Plex/Kodi has no
+reliable re-login flow, infrequently used TV clients can sleep for months, and
+offline clients may return without network access to repair a session. M3's
+visible inventory and fenced per-device revocation are the immediate safety
+control. Automatic expiry remains follow-up work only after every client has a
+tested refresh or re-login path; no schema, sweep, setting, or hidden gate is
+introduced by this plan.
+
+#### 3.4.1 Superseded 2026-09-24 — expiry as an option, on by default
+
+Paul (2026-09-23): *"can't we add an option to make them expire or not
+expire? Then we can have both and just make it default to expiring."* That
+replaces the 2026-09-21 decision above; the consequence table still stands and
+is what the choices below answer. Built in [PR #486](http://192.168.4.7:3000/noirr/plurx/pulls/486). Every item marked
+**Decision** was taken on Paul's behalf and is his to overturn.
+
+- **Decision — the option.** A server-wide "Sign-ins expire" switch
+  (`auth.token_expiry_enabled`, absent = **on**) and window
+  (`auth.token_idle_days`, default **90**, 1–3650), measured as a **sliding**
+  window from the token's `last_seen_at`. A device in regular use is never
+  signed out; one idle for the whole window is. Off is the old non-expiring
+  behaviour.
+- **Decision — no mass sign-out.** `auth.token_expiry_since` is seeded once at
+  startup with `get_or_init_setting` (the first committed value wins on every
+  voter) and rewritten, in the same `put_settings` commit, whenever an
+  administrator switches expiry from off to on. A token's window is measured
+  from `max(last_seen_at, since)`, so neither the upgrade that makes the
+  default take effect nor turning the option on signs anyone out on the spot.
+  An absent `since` means nothing can expire.
+- **Decision — no new writes.** Expiry reads the `last_seen_at` that
+  authentication already refreshes at most once a minute through the
+  existing coalescing (SQLite's `last_seen_at < unixepoch() - 60` predicate;
+  hiqlite's `ActivityRefreshGate` plus the same predicate,
+  [CLUSTER-PERFORMANCE-PLAN.md](../cluster/CLUSTER-PERFORMANCE-PLAN.md) §2.2),
+  so the option adds **zero** replicated writes, and an expired token adds
+  none (it is not touched — touching would revive it). Widening the touch to
+  once a day was considered and not taken: expiry only needs day resolution,
+  but the same column is the devices list's "last used", and the touch
+  cadence belongs to K-03's write-rate work rather than to this option.
+- **Decision — lazy, no sweep, no deletion.** The policy is read in the same
+  statement / consistent read as the token row on every authentication
+  (hiqlite binds the three keys as `$1..$3` and the digest as `$4`, in
+  first-appearance order), so every node judges by the committed policy with
+  no extra round trip. Nothing is swept: the row stays, listed as `expired`
+  in the devices list and revocable through the M3 fence. That sidesteps the
+  table's "bulk expiry is a fence per token" row entirely.
+- **The cache-only recovery proof cannot outlive expiry** (the table's third
+  row). A proof is published only by a successful ordinary authentication;
+  that authentication refreshes `last_seen_at` whenever it is more than 60 s
+  old, and the minimum window is one day, so a token that just published a
+  proof is at least ~a day from expiry — far beyond the 5-minute proof TTL.
+  An expired token is also answered by dropping the local proof for its
+  digest, exactly as an unknown token is.
+- **Decision — revival on off.** Turning the option off makes every login
+  token valid again until revoked, including ones it had signed out. That is
+  what "off = today's behaviour" means; revoke a device explicitly to end it
+  for good.
+- **Decision — shortening applies at once.** Only switching expiry *on*
+  restarts the clock. Lowering the window from 90 to 30 days signs out, on
+  their next request, devices already idle longer than 30 days — the
+  administrator's explicit choice.
+- **Decision — where it lives.** Settings → **Users**, a "Sign-ins" card
+  beside the accounts it governs, with one line of copy — a real product
+  option, not a Developer experiment, per Paul. No readiness rows and no gate.
+  This supersedes the §4 guardrail line that put a future window in
+  Settings → Developer.
+- **Decision — the error contract.** An expired token is a **401** (so every
+  client that predates the code still signs out) with
+  `{"code":"session_expired","idle_days":N,"message":"Signed out after N days
+  of inactivity. Sign in again to continue."}`. Unknown and revoked tokens
+  keep the bare `{"error":"authentication required"}`.
+- **Scope.** Every login-token path honours it: `AuthUser` (Bearer,
+  `X-Api-Key`, `?token=` media URLs), and — because `user_for_token` is now a
+  provided method over `authenticate_token` — the Plex façade's
+  `X-Plex-Token` and the recovery-read Store fallback. API keys (`plx_`) are
+  not login tokens and do not expire. Offline packages keep playing (their
+  child routes use the package capability); their next lease renewal needs a
+  sign-in, as the table says.
+- **Clients.** What each did on 401 before this, and what changed:
+  web `core/api.js:33-40` ended the session with "Your session ended on the
+  server." and `core/auth.js:127-128` cleared the notice on first paint (boot
+  paints the login screen twice for a dead stored credential, so the reason
+  was lost) — now the server's sentence is the notice and it survives until a
+  sign-in succeeds. Android signed out only in launch validation
+  (`AppViewModel.kt` `validateSavedSession`, 401/403 → `InvalidToken`, no
+  message) and left a mid-session Home 401 as an error string — now
+  `session_expired` becomes `Expired(message)` at launch and signs out to the
+  login screen with it from a Home load. Apple kept every 401 as
+  `.http(401)` (`PlurxAPI.check`) and signed out in `bootstrap`,
+  `retrySavedSession` and `noteAuthFailure` with no reason — the status shape
+  is unchanged and the sentence now rides `Session` to those three sign-outs.
+- **Devices list.** No client had one; the web gains a per-account Devices
+  drawer in Settings → Users showing last use and "Signs out in N days if
+  unused" / "Signed out — unused too long" / "Doesn't expire", from the
+  devices routes' new `expires_at` and `expired` fields.
 
 ## 4. Guardrails (non-goals)
 
@@ -360,11 +456,15 @@ Apple TV. Not building until answered.
 - **Timing uniformity kept** (`auth.rs:52`). The backoff refusal precedes
   the verify and is a distinct response; the ok/bad paths still both hash.
 - **Token expiry is a decision, not a default** (C8; F-core-9 "not
-  unexplained 90-day defaults"). §3.4 and §7.1.
+  unexplained 90-day defaults"). §3.4 and §7.1. *Superseded 2026-09-24 by
+  Paul's request (§3.4.1): expiry is now an option that defaults on, and the
+  90 days is explained there.*
 - **No feature gate.** M1–M3 need none. If M4 ships, its window is a
   replicated setting `auth.token_idle_days` surfaced in Settings →
   Developer with the advisory readiness line "devices list deployed to
-  all clients", per the standing rule.
+  all clients", per the standing rule. *Superseded 2026-09-24 (§3.4.1): it
+  shipped as a product option in Settings → Users, with no readiness rows and
+  no gate.*
 
 ## 5. Milestones
 
@@ -425,15 +525,42 @@ Acceptance: `cargo test -p plurxd http::users::devices` and
 `cargo test -p plurx-core store::` green; `python3 validation/ci_scope.py`
 lists the touched store files under `cluster_auth`.
 
-### 5.4 M4 — token idle expiry (gated on §7.1)
+### 5.4 M4 — token idle expiry decision
 
-Not scheduled. When answered: schema migration adding `expires_at`
-(append-only migration, both backends, per the migration rules), the
-paced leader-singleton sweep through the M1 fence, the setting, the
-readiness line, and the client-facing "signed out because this device was
-idle for N days" message. Acceptance would include an offline-package
-lease renewal after expiry answering the typed 401 the clients already
-handle.
+Decision complete: retain non-expiring tokens. A future expiry proposal must
+first deliver and test client recovery semantics, then add the append-only
+schema, paced leader-singleton fence sweep, advisory Developer readiness, and
+client-facing expiry reason together. M4 intentionally changes no runtime
+behaviour in this PR.
+
+**Superseded 2026-09-24 — M4 option ([PR #486](http://192.168.4.7:3000/noirr/plurx/pulls/486)).** Built as §3.4.1: no schema
+(three settings rows), no sweep (lazy judgement), no Developer readiness (a
+Settings → Users option, per Paul), and the client-facing reason
+(`session_expired`) handled by every client.
+
+1. `TokenIdlePolicy` in `plurx_core::auth`; `UserStore::authenticate_token`
+   on SQLite and hiqlite with the policy read in the token's own read;
+   `user_for_token` as a provided method over it; `AuthUser`'s typed 401;
+   the once-only `start_token_expiry_clock` at startup; the settings fields;
+   the devices `expires_at`/`expired`; web, Android and Apple handling.
+2. Tests: `auth::tests::*` (policy: default on, off, absent clock, bounds,
+   sliding and `since`);
+   `store::sqlite::users::tests::sign_in_expiry_is_a_sliding_idle_window_that_never_starts_before_it_took_effect`
+   and `…::sign_in_expiry_keeps_activity_writes_coalesced` (50 in-window
+   requests change one row, 50 expired requests change none);
+   `store_contract::sign_in_expiry_is_judged_on_every_voter_against_the_replicated_policy`
+   (three voters; 30 in-window requests append one Raft entry, 30 expired
+   requests append none; off never expires; revocation);
+   `http::tests::an_idle_sign_in_is_refused_as_session_expired_and_the_devices_list_says_when`,
+   `…::sign_in_expiry_settings_round_trip_and_enabling_signs_nobody_out`,
+   `…::the_sign_in_expiry_clock_is_started_once`;
+   `tests/web/session-expiry.test.js`; Android
+   `AppViewModelTest.idleExpiredSignInCarriesTheServersReasonToTheLoginScreen`,
+   `…onlyAnUnauthorizedSessionExpiredCountsAsAnIdleExpiry`,
+   `…anotherExplainedUnauthorizedStaysAnOrdinarySignOut`; Apple
+   `testAnIdleExpiredSignInStillSignsOutAndKeepsItsReasonForTheLoginScreen`.
+
+Acceptance (post-merge, device evidence — §6.4).
 
 ## 6. Verification and rollout
 
@@ -468,12 +595,83 @@ signed in as two different users, plus the web app on a laptop as a third.
 Report anything that did not match, with the time of day for log lookup.
 ```
 
+### 6.4 M4 option — what only devices can prove — GPT prompt
+
+Two facts shape this prompt. The web picker offers 7, 30, 90, 180 and 365
+days only (`users-admin.js` `SIGN_IN_DAYS`), so a one-day window has to be set
+through the API. And a device's window runs from the **later** of its last use
+and `auth.token_expiry_since` (the build's first start, or the last off → on
+switch; `plurx_core::auth` `TokenIdlePolicy`), so ageing `last_seen_at` alone
+expires nothing on a build that has run for less than the window — the clock
+has to be moved back as well.
+
+```text
+Server running the build from the sign-in expiry PR (or later), deployed with
+the ansible playbooks. Use a throwaway account, never Paul's. You need an admin
+token (<admin>), the throwaway's username (<throwaway>) and a shell on a node:
+sqlite3 on the node's plurx.db for a single-node server, or the hiqlite client
+on the leader for a cluster (run every SQL statement below there).
+CAUTION: while the window is 1 day and the clock is moved back (steps 3-6),
+ANY account's device that has been unused for more than a day and makes a
+request is signed out. Prefer a standalone lab server nobody else uses; on the
+shared fleet, ask Paul first, keep steps 3-6 to a few minutes, and never skip
+step 8.
+
+1. Record the current clock and settings:
+     curl -s http://<node>:32400/api/v1/settings -H "Authorization: Bearer <admin>" \
+       | jq '{auth_token_expiry,auth_token_idle_days,auth_token_expiry_since}'
+   Expect auth_token_expiry true, auth_token_idle_days 90, and a unix time for
+   auth_token_expiry_since; write that time down as S0.
+2. Web, as an admin: Settings -> Users. Confirm a "Sign-ins" card with
+   "Sign-ins expire" ON and "Sign out after" = 90 days. Sign the throwaway
+   account in on an iPhone, an Apple TV, an Android TV and a second web
+   browser, then click Devices on its row: each of the four rows must say
+   "Signs out in 90 days if unused (<date>)" or 89. Screenshot it. Then leave
+   all four devices alone (do not open them) until step 5.
+3. Age the throwaway's devices AND the clock two days back:
+     UPDATE tokens SET last_seen_at = unixepoch() - 2*86400
+       WHERE user_id = (SELECT id FROM users WHERE username = '<throwaway>');
+     UPDATE settings SET value = CAST(unixepoch() - 2*86400 AS TEXT)
+       WHERE key = 'auth.token_expiry_since';
+   Then set the window to one day (the picker cannot):
+     curl -s -X PUT http://<node>:32400/api/v1/settings -H "Authorization: Bearer <admin>" \
+       -H 'Content-Type: application/json' -d '{"auth_token_idle_days":1}'
+   The GET from step 1 must now show auth_token_idle_days 1, and
+   auth_token_expiry_since about two days ago.
+4. Reload Settings -> Users as the admin (the admin's own sign-in was just
+   used, so it stays valid). "Sign out after" now shows "1 days" (the picker
+   adds the current value). Open Devices on the throwaway's row: all four rows
+   must say "Signed out - unused too long". Screenshot it.
+5. Now open the app on each of the four devices - a cold launch, and an app
+   that was already open brought to the foreground and then used (open Home).
+   Each must land on its sign-in screen reading
+   "Signed out after 1 day of inactivity. Sign in again to continue."
+   Report the exact text per device (iPhone, Apple TV, Android TV, web), and
+   say which of cold launch / foreground produced it.
+6. Back in the Devices drawer, press Sign out on one of the four rows; that
+   row must disappear.
+7. Off, then on: sign the throwaway in again on the Android TV. Switch
+   "Sign-ins expire" OFF in Settings -> Users and Save; age that device again
+   (the tokens UPDATE from step 3) and use it: it must keep working. Switch
+   "Sign-ins expire" back ON and Save; use it again: it must STILL keep
+   working, because switching on restarts every device's clock
+   (auth_token_expiry_since in the step 1 GET is now the time you saved).
+8. Restore: set "Sign out after" to 90 days in the picker and Save, then put
+   the clock back where the deploy left it:
+     UPDATE settings SET value = '<S0>' WHERE key = 'auth.token_expiry_since';
+   Paste the step 1 curl from two different nodes; both must show
+   auth_token_expiry true, auth_token_idle_days 90, auth_token_expiry_since S0.
+Report anything that did not match, with the time of day for log lookup.
+```
+
 ## 7. Open questions
 
-1. **Idle-expiry window** (§3.4). 180 days for all tokens, or a split
-   (browsers 30 days, `device`-tagged TV/offline sessions 180)? And does
-   the Plex façade get an exemption or a documented "sign in again"?
-   Nothing in M4 starts until this is answered.
+1. **Idle-expiry window — resolved 2026-09-21** (§3.4). No automatic expiry
+   until Plex/Kodi, TV, and offline clients have tested recovery semantics.
+   M3 inventory and explicit fenced revocation ship first. *Re-resolved
+   2026-09-24 by Paul (§3.4.1): an option, on by default, 90 idle days,
+   sliding. Plex/Kodi clients in regular use never expire; one idle for 90
+   days needs its token re-entered.*
 2. **`REVOCATION_ADMISSION_WAIT` on a five-voter cluster.** The numbers in
    §3.1 assume three members; a fanout to five is still under 2 s per
    phase but the tail is longer. Revisit if a five-voter lab appears.
@@ -499,4 +697,11 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | Claim | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | Claimed the whole C-04 plan on `plan/C-04`; draft PR preceded implementation. The existing Begin/Store/End revocation fence remains non-negotiable. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | `3c0696eca`: eight-slot admission, 2.5 s timeout, RAII cleanup ownership, and four fixed revocation outcomes. Pinned Rust 1.97.1 `cargo check -p plurxd --all-targets` and the focused queue regression passed; three-node simultaneous-device acceptance remains deployment evidence. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | `1373f1202`: bounded pair/address backoff, trusted-proxy boundary, fixed metrics, and advisory-only System notice. Seven focused throttle/proxy tests passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | `b87ce2554`: bounded prefix-only inventory and uniquely matched fenced revoke on SQLite/Hiqlite, self/admin routes, docs, and cluster-auth validation ownership. Focused Store and real-router regressions passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 decision | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | Retain non-expiring tokens until all clients have tested refresh/re-login recovery. M3 inventory and explicit revocation are the compensating control; no expiry schema, sweep, setting, or feature gate was added. |
+| 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Sole-review fixes | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | Merged `origin/main` (`fec4d1a77`) and addressed both findings of review #3378. P1: `MAX_DEVICE_LABEL_BYTES = 256` refused at `/auth/login` with an explicit 8 KiB route body limit, capped at both Store writes, and capped in SQL plus on a character boundary where the inventory is projected, so a pre-bound row is truncated rather than dropped. P2: the queue permit is released once the operation mutex is held, so the depth is the eight waiters the contract states rather than seven, and the plan's missing end-to-end concurrency proof landed — two queued sign-outs both succeed, and a sign-out that waits out the admission window is refused having changed nothing. §3.1's `RevocationAdmission` sketch is superseded on the `_waiting` field only; `begin`, `finish`, `arm_ambiguity`, guard drop and every timing constant are unchanged. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 option (supersedes the M4 decision) | [#486](http://192.168.4.7:3000/noirr/plurx/pulls/486) (draft) | Paul asked 2026-09-23 for expiry as an option defaulting on; built as §3.4.1, whose **Decision** items were taken on his behalf and are his to overturn. `b5c0381fd` server: `TokenIdlePolicy`, `UserStore::authenticate_token` on SQLite and hiqlite with the policy read in the token's own read, `user_for_token` as a provided method over it, typed 401 `session_expired`, once-only `start_token_expiry_clock` at startup, settings fields, devices `expires_at`/`expired`. `7a622454b` web: the server's sentence on the login screen (kept across boot's double paint), Settings → Users "Sign-ins" card and per-account Devices drawer. `de782aeca` + `1ca4861bf` Android and `33e132c97` Apple: `session_expired` lands on the login screen with the sentence. Evidence on nuc3 / mba: `cargo test --locked --no-fail-fast -p plurx-core -p plurxd` exit 0 (plurx-core lib 1245, store_contract SQLite 123, plurxd 2718 passed); the three-voter hiqlite lane `store_contract sign_in_expiry` exit 0 (30 in-window requests appended 1 Raft entry, 30 expired appended 0), with `token_activity*` and `login_token*` still green; fmt and workspace clippy `-D warnings` exit 0; `make web-check` exit 0; Android `testDebugUnitTest` 740 run, only the 4 known `PlaybackSurfaceReducerTest` failures, `lintDebug` exit 0; Apple iOS 671 and tvOS 657 tests with only the 5 known failing cases each, the new case passing on both. Each new behaviour's test was shown to fail with its production hunk reverted (SQLite and hiqlite expiry checks, the 401 mapping, the enable-restarts-clock write, the once-only seed, the devices expiry field, the web notice and notice retention, the web expiry label, Android `sessionExpiry`, Apple `noteSessionExpiry`). **needs:** device evidence — the §6.4 GPT prompt (every client's login screen after an aged token, Devices drawer, off/on behaviour, cross-node settings). No device or fleet result is claimed here. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 option — sole-review follow-up | [#486](http://192.168.4.7:3000/noirr/plurx/pulls/486) (draft) | Merged `origin/main` `07fe785d3` as `c17e050ad` (docs only, no conflicts; `cargo test -p plurx-core -p plurxd` exit 0 on the merge before any change) and answered the three findings of review [4254](http://192.168.4.7:3000/noirr/plurx/pulls/486#issuecomment-4254). P1: the PR body reported `make operations-check` exit 0, which was false — the status line read as terminal against the index's `open`; the Status is now "in execution" (the option is open in #486), which is what `docs/README.md` says, and `make operations-check` exits 0 (486 tests). P2: `96c76784f` makes `startup_tests::a_measured_node_boots_serves_and_drains` assert that a real boot writes `auth.token_expiry_since` with a time from that boot, and that a second boot on the same data dir keeps an earlier stored start; with the boot-time `start_token_expiry_clock` call removed it fails ("boot must start the sign-in expiry clock"), and with the seed turned into an unconditional `put` it fails ("a second boot keeps the first start", left `1790258873`, right `1000`). P2: §6.4 is rewritten — the picker has no one-day choice and the window never starts before `since`, so the prompt now sets `auth_token_idle_days` to 1 through the API, moves `auth.token_expiry_since` back two days with the tokens, checks the drawer before opening the devices, and restores the recorded clock and 90 days at the end, with a caution that other accounts' idle devices are exposed while the window is one day. The C-04 workboard row gains a note (not a rewrite) that #486 supersedes M4's non-expiring decision on Paul's request. Gates on the final head: history-check, validation-lint, validation unittests (205), operations-check (486), spike-lock-check, fmt, workspace clippy `-D warnings`, `cargo test --locked --no-fail-fast -p plurx-core -p plurxd` (1245 / 123 / 2718 passed), `make web-check` and the four node suites all exit 0; Android 740 run with only the 4 known `PlaybackSurfaceReducerTest` failures, `lintDebug` 0; Apple on mba iOS 671 and tvOS 657 tests, each failing only the 5 known cases, the expiry test passing on both. **needs:** device evidence — §6.4, unchanged in scope. |

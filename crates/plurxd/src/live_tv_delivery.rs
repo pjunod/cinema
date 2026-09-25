@@ -5,6 +5,7 @@
 //! consumes the answer; it does not make another codec, size, or packaging
 //! decision later.
 
+use plurx_core::domain::ScanType;
 use plurx_core::playback::caps::{DeviceCaps, Transfer};
 use serde::{Deserialize, Serialize};
 
@@ -207,13 +208,84 @@ pub(crate) struct LiveSourceFacts {
     pub(crate) audio_channels: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) audio_layout: Option<String>,
+    /// Every audio stream the probe observed, in demuxer order. The flat
+    /// `audio_*` fields above describe the track the plan selected (the first
+    /// one until a plan is resolved). Empty when the probe predates this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) audio_tracks: Vec<LiveSourceAudioTrack>,
+}
+
+/// One audio stream of the tuner programme. `index` is its ordinal among the
+/// audio streams, which is what an FFmpeg `0:a:<index>` map addresses.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct LiveSourceAudioTrack {
+    pub(crate) index: u8,
+    /// The container's own stream id (the PID in MPEG-TS), which the live
+    /// open maps by (`0:i:<id>`) so a stream the runtime demuxer has not yet
+    /// classified cannot shift the ordinal onto another track.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sample_rate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) channels: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) layout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) language: Option<String>,
+    /// Described video, hearing-impaired or commentary audio per the
+    /// container's disposition flags: never the main programme audio.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) described: bool,
+}
+
+impl LiveSourceAudioTrack {
+    /// The FFmpeg input stream specifier for this track.
+    pub(crate) fn map_specifier(&self) -> String {
+        match self.id {
+            Some(id) => format!("0:i:{id:#x}"),
+            None => format!("0:a:{}", self.index),
+        }
+    }
 }
 
 impl LiveSourceFacts {
+    /// The audio tracks a plan may choose from: the probed list, or the flat
+    /// fields as a single track when the probe carried no list.
+    fn candidate_audio_tracks(&self) -> Vec<LiveSourceAudioTrack> {
+        if !self.audio_tracks.is_empty() {
+            return self.audio_tracks.clone();
+        }
+        vec![LiveSourceAudioTrack {
+            index: 0,
+            id: None,
+            codec: self.audio_codec.clone(),
+            sample_rate: self.audio_sample_rate,
+            channels: self.audio_channels,
+            layout: self.audio_layout.clone(),
+            language: None,
+            described: false,
+        }]
+    }
+
+    /// The facts with the flat `audio_*` fields describing `track`.
+    fn with_audio_track(&self, track: &LiveSourceAudioTrack) -> Self {
+        Self {
+            audio_codec: track.codec.clone(),
+            audio_sample_rate: track.sample_rate,
+            audio_channels: track.channels,
+            audio_layout: track.layout.clone(),
+            ..self.clone()
+        }
+    }
+
     fn interlaced(&self) -> bool {
-        self.field_order
-            .as_deref()
-            .is_some_and(|order| !matches!(order, "progressive" | "unknown"))
+        matches!(
+            ScanType::from_field_order(self.field_order.as_deref()),
+            ScanType::Interlaced(_)
+        )
     }
 }
 
@@ -268,9 +340,14 @@ pub(crate) struct LiveDeliveryPlan {
     pub(crate) output: LiveDeliveryOutput,
     pub(crate) video_action: LiveTrackAction,
     pub(crate) audio_action: LiveTrackAction,
+    /// Ordinal of the selected source audio stream (`0:a:<audio_track>`).
+    #[serde(default)]
+    pub(crate) audio_track: u8,
     pub(crate) packaging: LivePackaging,
     pub(crate) reasons: Vec<LiveDeliveryReason>,
     pub(crate) deinterlace: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) deinterlace_output: Option<LiveDeinterlaceOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_bitrate_bps: Option<u64>,
 }
@@ -279,6 +356,32 @@ pub(crate) struct LiveDeliveryPlan {
 pub(crate) struct LiveQualityPolicy {
     pub(crate) max_height: Option<u16>,
     pub(crate) max_bitrate_bps: Option<u64>,
+    pub(crate) deinterlace_output: LiveDeinterlaceOutput,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LiveDeinterlaceOutput {
+    #[default]
+    Field,
+    Frame,
+}
+
+impl LiveDeinterlaceOutput {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Field => "field",
+            Self::Frame => "frame",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "field" => Some(Self::Field),
+            "frame" => Some(Self::Frame),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -299,6 +402,70 @@ fn rate_within(source: Option<LiveRational>, limit: LiveRational) -> bool {
     source.is_none_or(|source| {
         u64::from(source.num) * u64::from(limit.den) <= u64::from(limit.num) * u64::from(source.den)
     })
+}
+
+fn doubled_rate(rate: LiveRational) -> Option<LiveRational> {
+    let numerator = u64::from(rate.num).checked_mul(2)?;
+    let denominator = u64::from(rate.den);
+    let divisor = gcd(numerator, denominator);
+    Some(LiveRational {
+        num: u32::try_from(numerator / divisor).ok()?,
+        den: u32::try_from(denominator / divisor).ok()?,
+    })
+}
+
+fn scaled_output_size(width: u16, height: u16, maximum_height: u16) -> (u16, u16) {
+    let output_height = height.min(maximum_height);
+    let output_width = if output_height < height {
+        let scaled = u32::from(width) * u32::from(output_height) / u32::from(height);
+        u16::try_from(scaled & !1).unwrap_or(width)
+    } else {
+        width
+    };
+    (output_width, output_height)
+}
+
+fn encoded_output_for_request(
+    request: &LivePlaybackRequest,
+    codec: &str,
+    width: u16,
+    height: u16,
+    explicit_height: Option<u16>,
+    output_frame_rate: Option<LiveRational>,
+) -> Option<(u16, u16)> {
+    request
+        .video_limits
+        .iter()
+        .filter(|limit| normalized(&limit.codec) == codec)
+        .filter_map(|limit| {
+            let width_limited_height = if width > limit.max_width {
+                u16::try_from(u32::from(height) * u32::from(limit.max_width) / u32::from(width))
+                    .ok()?
+            } else {
+                height
+            };
+            let maximum_height = [
+                explicit_height.unwrap_or(height),
+                limit.max_height,
+                width_limited_height,
+            ]
+            .into_iter()
+            .min()?;
+            let output = scaled_output_size(width, height, maximum_height);
+            (output.0 <= limit.max_width && rate_within(output_frame_rate, limit.max_frame_rate))
+                .then_some(output)
+        })
+        // Select one complete limit. Taking the maximum of each field across
+        // different limits can invent a 1080p60 capability from a 1080p30 row
+        // and a 720p60 row.
+        .max_by_key(|(width, height)| u32::from(*width) * u32::from(*height))
+}
+
+fn gcd(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left.max(1)
 }
 
 fn video_limit_supports(source: &LiveSourceFacts, limit: &LiveVideoLimit) -> bool {
@@ -352,14 +519,137 @@ fn device_video_supports(source: &LiveSourceFacts, caps: &DeviceCaps) -> bool {
     })
 }
 
-fn audio_limit_supports(source: &LiveSourceFacts, limit: &LiveAudioLimit) -> bool {
-    source.audio_codec.as_deref().is_some_and(|codec| {
+fn audio_limit_supports(track: &LiveSourceAudioTrack, limit: &LiveAudioLimit) -> bool {
+    track.codec.as_deref().is_some_and(|codec| {
         normalized(&limit.codec) == normalized(codec)
-            && source.audio_sample_rate.is_some_and(|rate| rate > 0)
-            && source
-                .audio_channels
+            && track.sample_rate.is_some_and(|rate| rate > 0)
+            && track
+                .channels
                 .is_some_and(|channels| channels > 0 && channels <= limit.max_channels)
     })
+}
+
+/// Whether the active player claims `track` for copy on the resolved video
+/// route: the codec in its capability document, a channel limit that admits
+/// the track, and an HLS packaging that carries the (video, audio) pair.
+fn audio_track_copy_claimed(
+    track: &LiveSourceAudioTrack,
+    request: &LivePlaybackRequest,
+    caps: &DeviceCaps,
+    preferred_packaging: LivePackaging,
+    video_codec: &str,
+) -> bool {
+    let Some(codec) = track.codec.as_deref() else {
+        return false;
+    };
+    if !caps
+        .audio
+        .iter()
+        .any(|claimed| normalized(claimed) == normalized(codec))
+        || !request
+            .audio_limits
+            .iter()
+            .any(|limit| audio_limit_supports(track, limit))
+    {
+        return false;
+    }
+    match claimed_packaging(request, preferred_packaging, video_codec, codec) {
+        None => false,
+        // AC-3 in live fMP4 is converted (the init-file race), so it only
+        // counts as a copy when MPEG-TS carries the pair — the same condition
+        // the container switch applies.
+        Some(LivePackaging::Fmp4) if normalized(codec) == "ac3" => {
+            claimed_packaging(request, LivePackaging::Mpegts, video_codec, codec)
+                == Some(LivePackaging::Mpegts)
+        }
+        Some(_) => true,
+    }
+}
+
+/// Codecs whose live decode is fragile enough that another track of the same
+/// programme is preferred as an encode source: the AC-4 decoder emits nothing
+/// until a global random-access frame arrives, which a broadcast may withhold
+/// for seconds.
+fn fragile_decode(codec: Option<&str>) -> bool {
+    codec.is_some_and(|codec| normalized(codec) == "ac4")
+}
+
+/// A language tag worth comparing: `und` and empty are the same as no tag.
+fn tagged_language(track: &LiveSourceAudioTrack) -> Option<String> {
+    track
+        .language
+        .as_deref()
+        .map(normalized)
+        .filter(|language| !language.is_empty() && language != "und")
+}
+
+/// Choose the audio track for this delivery. Described, hearing-impaired and
+/// commentary tracks are never preferred to the main audio. Then direct play
+/// first: a track the player takes untouched beats every track that needs
+/// conversion. Among equals, prefer the robust decode, then the fuller
+/// layout, then broadcast order. Only tracks in the programme's primary
+/// language are candidates — the first track's tag, or, when the first track
+/// carries none, only the untagged tracks — so the choice never changes what
+/// language is heard.
+fn select_audio_track(
+    tracks: &[LiveSourceAudioTrack],
+    request: Option<&LivePlaybackRequest>,
+    caps: Option<&DeviceCaps>,
+    preferred_packaging: LivePackaging,
+    video_codec: &str,
+    audio_copy_refused: bool,
+) -> LiveSourceAudioTrack {
+    let primary_language = tracks.first().and_then(tagged_language);
+    let same_language =
+        |track: &LiveSourceAudioTrack| match (&primary_language, tagged_language(track)) {
+            (Some(primary), Some(language)) => *primary == language,
+            (None, None) => true,
+            _ => false,
+        };
+    tracks
+        .iter()
+        .filter(|track| same_language(track))
+        .max_by_key(|track| {
+            let copyable = !audio_copy_refused
+                && request.zip(caps).is_some_and(|(request, caps)| {
+                    audio_track_copy_claimed(track, request, caps, preferred_packaging, video_codec)
+                });
+            (
+                !track.described,
+                copyable,
+                !fragile_decode(track.codec.as_deref()),
+                track.channels.unwrap_or(0),
+                std::cmp::Reverse(track.index),
+            )
+        })
+        .or_else(|| tracks.first())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The channel layouts an encoded track may take under `ceiling` channels, as
+/// an FFmpeg `aformat=channel_layouts=` list. FFmpeg picks the listed layout
+/// closest to the decoded one, so a 7.1.4 broadcast becomes 5.1 while a
+/// stereo one stays stereo — and a layout the probe never learned (an AC-4
+/// track before its first random-access frame) is resolved when the first
+/// frame arrives instead of being forced to stereo up front.
+///
+/// Only layouts with an ADTS `channel_configuration` are listed. `5.1(side)`
+/// — the layout every ATSC AC-3 5.1 track decodes to — has none, so the AAC
+/// encoder signals it as configuration 0 plus a PCE, which hls.js and the
+/// browsers' MSE read as an audio track with no channels and never start
+/// (measured 2026-09-24: Safari and Chrome black with 0 decoded frames on
+/// 157.1). `5.1` is configuration 6; the side pair maps onto it 1:1.
+pub(crate) fn encoded_channel_layouts(ceiling: u8) -> String {
+    let mut layouts = Vec::new();
+    if ceiling >= 6 {
+        layouts.push("5.1");
+    }
+    if ceiling >= 2 {
+        layouts.push("stereo");
+    }
+    layouts.push("mono");
+    layouts.join("|")
 }
 
 fn format_supports(
@@ -407,16 +697,6 @@ pub(crate) fn resolve_live_delivery(
         .video_codec
         .as_deref()
         .ok_or_else(|| "source_probe_incomplete: source video codec is unknown".to_owned())?;
-    let source_audio = source
-        .audio_codec
-        .as_deref()
-        .ok_or_else(|| "source_probe_incomplete: source audio codec is unknown".to_owned())?;
-    // A probe can identify AC-4 before the first random-access frame supplies
-    // its layout. Zero means unknown, not a request for `-ac 0`.
-    let source_channels = source
-        .audio_channels
-        .filter(|channels| *channels > 0)
-        .unwrap_or(2);
 
     let caps = request.map(LivePlaybackRequest::validate).transpose()?;
     let compatibility = request.and_then(|request| request.compatibility.as_ref());
@@ -457,6 +737,45 @@ pub(crate) fn resolve_live_delivery(
                 .iter()
                 .any(|limit| video_limit_supports(source, limit))
     });
+    let video_copy_candidate = video_claimed
+        && copy_height_allowed
+        && !compatibility.is_some_and(|hint| hint.failed_video || hint.failed_container)
+        && (!source.interlaced()
+            || request.is_some_and(|request| {
+                request
+                    .video_limits
+                    .iter()
+                    .any(|limit| video_limit_supports(source, limit) && limit.interlaced)
+            }));
+    // The audio track is chosen against the video route it will ride with:
+    // a copied HEVC picture prefers fMP4, an encode is H.264 in MPEG-TS.
+    let tracks = source.candidate_audio_tracks();
+    let copied_video_codec = normalized(source_video);
+    let track = select_audio_track(
+        &tracks,
+        request,
+        caps.as_ref(),
+        if video_copy_candidate && copied_video_codec == "hevc" {
+            LivePackaging::Fmp4
+        } else {
+            LivePackaging::Mpegts
+        },
+        if video_copy_candidate {
+            copied_video_codec.as_str()
+        } else {
+            "h264"
+        },
+        compatibility.is_some_and(|hint| hint.failed_audio || hint.failed_container),
+    );
+    let source = &source.with_audio_track(&track);
+    let source_audio = source
+        .audio_codec
+        .as_deref()
+        .ok_or_else(|| "source_probe_incomplete: source audio codec is unknown".to_owned())?;
+    // A probe can identify AC-4 before the first random-access frame supplies
+    // its layout. Zero means unknown, not a request for `-ac 0`.
+    let known_channels = source.audio_channels.filter(|channels| *channels > 0);
+    let source_channels = known_channels.unwrap_or(2);
     let audio_claimed = request.is_some_and(|request| {
         caps.as_ref().is_some_and(|caps| {
             caps.audio
@@ -465,7 +784,7 @@ pub(crate) fn resolve_live_delivery(
         }) && request
             .audio_limits
             .iter()
-            .any(|limit| audio_limit_supports(source, limit))
+            .any(|limit| audio_limit_supports(&track, limit))
     });
     let complete_copy_claim = request.is_some_and(|request| {
         request
@@ -618,6 +937,22 @@ pub(crate) fn resolve_live_delivery(
     if packaging == LivePackaging::Fmp4
         && audio_action == LiveTrackAction::Copy
         && audio_codec == "ac3"
+        && request.is_some_and(|request| {
+            claimed_packaging(request, LivePackaging::Mpegts, &video_codec, &audio_codec)
+                == Some(LivePackaging::Mpegts)
+        })
+    {
+        // MPEG-TS has no init file to race, so a player that takes this
+        // video/audio pair in MPEG-TS keeps the compressed audio untouched.
+        packaging = LivePackaging::Mpegts;
+        reasons.push(reason(
+            "container_switched",
+            "AC-3 is carried in MPEG-TS instead of fMP4 so the source audio can be copied.",
+        ));
+    }
+    if packaging == LivePackaging::Fmp4
+        && audio_action == LiveTrackAction::Copy
+        && audio_codec == "ac3"
     {
         if !available.audio_encode {
             return Err(
@@ -640,28 +975,50 @@ pub(crate) fn resolve_live_delivery(
         ));
     }
 
-    let client_video_ceiling = request.and_then(|request| {
-        request
-            .video_limits
-            .iter()
-            .filter(|limit| normalized(&limit.codec) == video_codec)
-            .map(|limit| limit.max_height)
-            .max()
-    });
-    let output_height = [Some(height), explicit_height, client_video_ceiling]
-        .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or(height);
-    let output_width = if output_height < height {
-        let scaled = u32::from(width) * u32::from(output_height) / u32::from(height);
-        u16::try_from(scaled & !1).unwrap_or(width)
+    let deinterlace = source.interlaced() && video_action == LiveTrackAction::Encode;
+    // Two cadences, and they are not the same number. `plan.source.frame_rate`
+    // stays exactly as the source reported it — that is what a television
+    // client reads when it picks a display mode. `output.frame_rate` is what
+    // this encode will actually emit, so it has to agree with the bwdif mode
+    // the filter chain builds from `policy.deinterlace_output`: `send_field`
+    // emits one frame per field (doubled), `send_frame` one per frame pair
+    // (unchanged). Declaring the field rate for a `send_frame` chain would
+    // also mis-pick the client video limit chosen from it just below.
+    let output_frame_rate =
+        if deinterlace && policy.deinterlace_output == LiveDeinterlaceOutput::Field {
+            source.frame_rate.and_then(doubled_rate)
+        } else {
+            source.frame_rate
+        };
+    let (output_width, output_height) = if video_action == LiveTrackAction::Encode {
+        if let Some(request) = request {
+            encoded_output_for_request(
+                request,
+                &video_codec,
+                width,
+                height,
+                explicit_height,
+                output_frame_rate,
+            )
+            .ok_or_else(|| {
+                "client_route_unsupported: no single final video limit admits the encoded dimensions and frame rate"
+                    .to_owned()
+            })?
+        } else {
+            scaled_output_size(width, height, explicit_height.unwrap_or(height))
+        }
     } else {
-        width
+        scaled_output_size(width, height, explicit_height.unwrap_or(height))
     };
     let audio_channels = if audio_action == LiveTrackAction::Copy {
         source_channels
     } else {
+        // Native AAC rejects immersive layouts such as AC-4's 7.1.4, so the
+        // ceiling is 5.1, the player's AAC limit, and the source layout when
+        // the probe learned it. An unknown layout keeps the ceiling: the
+        // encode negotiates the real layout from the first decoded frame
+        // (`encoded_channel_layouts`), so this is an upper bound, not a
+        // promise of that many channels.
         request
             .and_then(|request| {
                 request
@@ -672,9 +1029,7 @@ pub(crate) fn resolve_live_delivery(
                     .max()
             })
             .unwrap_or(2)
-            .min(source_channels)
-            // Native AAC rejects immersive layouts such as AC-4's 7.1.4.
-            // Use at most 5.1 while respecting a smaller source/client limit.
+            .min(known_channels.unwrap_or(u8::MAX))
             .min(6)
     };
 
@@ -702,7 +1057,7 @@ pub(crate) fn resolve_live_delivery(
             bit_depth: (video_action == LiveTrackAction::Copy)
                 .then_some(source.bit_depth)
                 .flatten(),
-            frame_rate: source.frame_rate,
+            frame_rate: output_frame_rate,
             hdr: (video_action == LiveTrackAction::Copy)
                 .then_some(source.hdr.clone())
                 .flatten(),
@@ -710,9 +1065,11 @@ pub(crate) fn resolve_live_delivery(
         },
         video_action,
         audio_action,
+        audio_track: track.index,
         packaging,
         reasons,
-        deinterlace: source.interlaced() && video_action == LiveTrackAction::Encode,
+        deinterlace,
+        deinterlace_output: deinterlace.then_some(policy.deinterlace_output),
         max_bitrate_bps,
     })
 }
@@ -739,6 +1096,100 @@ mod tests {
             audio_channels: Some(6),
             ..LiveSourceFacts::default()
         }
+    }
+
+    /// D-01 hands a television the cadence to switch its panel to, so the plan
+    /// has to carry both numbers at once: the source cadence it reports, and
+    /// the cadence this encode will emit. They differ whenever bwdif runs in
+    /// `send_field`, so neither one may be derived from the other at the
+    /// reader.
+    #[test]
+    fn deinterlaced_output_reports_field_rate_for_display_matching() {
+        let mut interlaced = source();
+        interlaced.field_order = Some("tt".into());
+        interlaced.frame_rate = Some(LiveRational {
+            num: 30000,
+            den: 1001,
+        });
+        let mut playback = request("ac3");
+        playback.caps = serde_json::json!({
+            "v": 2,
+            "video": [{"codec":"h264","profiles":[],"max_height":2160,"present":[]}],
+            "audio": ["aac"],
+            "containers": ["mpegts"],
+            "transports": ["hls"]
+        });
+        playback.hls_formats = vec![LiveHlsFormat {
+            container: "mpegts".into(),
+            video: "h264".into(),
+            audio: "aac".into(),
+        }];
+        playback.video_limits = vec![LiveVideoLimit {
+            codec: "h264".into(),
+            profile: None,
+            max_width: 3840,
+            max_height: 2160,
+            max_frame_rate: LiveRational { num: 60, den: 1 },
+            interlaced: false,
+        }];
+        playback.audio_limits = vec![LiveAudioLimit {
+            codec: "aac".into(),
+            max_channels: 2,
+        }];
+        let plan = resolve_live_delivery(
+            &interlaced,
+            Some(&playback),
+            &LiveQualityPolicy::default(),
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: true,
+            },
+        )
+        .expect("interlaced input is converted");
+
+        assert!(plan.deinterlace);
+        assert_eq!(
+            plan.output.frame_rate,
+            Some(LiveRational {
+                num: 60000,
+                den: 1001,
+            }),
+        );
+        // The source cadence is reported unchanged beside it.
+        assert_eq!(
+            plan.source.frame_rate,
+            Some(LiveRational {
+                num: 30000,
+                den: 1001,
+            }),
+        );
+
+        // Under `send_frame` the encode emits the source cadence, and the plan
+        // still reports the same source cadence beside it.
+        let frame = resolve_live_delivery(
+            &interlaced,
+            Some(&playback),
+            &LiveQualityPolicy {
+                deinterlace_output: LiveDeinterlaceOutput::Frame,
+                ..LiveQualityPolicy::default()
+            },
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: true,
+            },
+        )
+        .expect("interlaced input is converted");
+        assert!(frame.deinterlace);
+        assert_eq!(
+            frame.output.frame_rate,
+            Some(LiveRational {
+                num: 30000,
+                den: 1001,
+            }),
+        );
+        assert_eq!(frame.source.frame_rate, frame.output.frame_rate);
     }
 
     fn request(audio: &str) -> LivePlaybackRequest {
@@ -796,6 +1247,27 @@ mod tests {
         assert_eq!(plan.audio_action, LiveTrackAction::Copy);
         assert_eq!(plan.packaging, LivePackaging::Fmp4);
         assert_eq!(plan.output.height, 2160);
+    }
+
+    #[test]
+    fn source_scan_type_is_conservative_for_unknown_and_future_tokens() {
+        let mut source = source();
+        for field_order in [
+            None,
+            Some("unknown"),
+            Some("future-order"),
+            Some("progressive"),
+        ] {
+            source.field_order = field_order.map(str::to_owned);
+            assert!(
+                !source.interlaced(),
+                "unexpected interlace for {field_order:?}"
+            );
+        }
+        for field_order in ["tt", "bb", "tb", "bt"] {
+            source.field_order = Some(field_order.to_owned());
+            assert!(source.interlaced(), "missing interlace for {field_order}");
+        }
     }
 
     #[test]
@@ -872,6 +1344,7 @@ mod tests {
             &LiveQualityPolicy {
                 max_height: Some(2160),
                 max_bitrate_bps: None,
+                ..LiveQualityPolicy::default()
             },
             &LiveExecutionSupport {
                 video_encode: true,
@@ -881,5 +1354,154 @@ mod tests {
         )
         .expect("bounded route");
         assert_eq!(plan.output.height, 720);
+    }
+
+    #[test]
+    fn interlaced_encode_reports_the_selected_output_cadence() {
+        let mut input = source();
+        input.width = Some(1920);
+        input.height = Some(1080);
+        input.field_order = Some("tt".into());
+        input.hdr = None;
+        input.frame_rate = Some(LiveRational {
+            num: 30_000,
+            den: 1_001,
+        });
+        let field = resolve_live_delivery(
+            &input,
+            None,
+            &LiveQualityPolicy::default(),
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: false,
+            },
+        )
+        .expect("field-rate plan");
+        assert!(field.deinterlace);
+        assert_eq!(
+            field.output.frame_rate,
+            Some(LiveRational {
+                num: 60_000,
+                den: 1_001
+            })
+        );
+
+        let frame = resolve_live_delivery(
+            &input,
+            None,
+            &LiveQualityPolicy {
+                deinterlace_output: LiveDeinterlaceOutput::Frame,
+                ..LiveQualityPolicy::default()
+            },
+            &LiveExecutionSupport {
+                video_encode: true,
+                audio_encode: true,
+                tone_map: false,
+            },
+        )
+        .expect("frame-rate plan");
+        assert_eq!(
+            frame.output.frame_rate,
+            Some(LiveRational {
+                num: 30_000,
+                den: 1_001
+            })
+        );
+    }
+
+    #[test]
+    fn interlaced_encode_selects_one_h264_limit_for_dimensions_and_final_cadence() {
+        let mut input = source();
+        input.width = Some(1920);
+        input.height = Some(1080);
+        input.field_order = Some("tt".into());
+        input.hdr = None;
+        input.frame_rate = Some(LiveRational {
+            num: 30_000,
+            den: 1_001,
+        });
+
+        let mut playback = request("aac");
+        playback.caps = serde_json::json!({
+            "v": 2,
+            "video": [{"codec":"h264","profiles":[],"max_height":2160,"present":[]}],
+            "audio": ["aac"],
+            "containers": ["mpegts"],
+            "transports": ["hls"]
+        });
+        playback.hls_formats = vec![LiveHlsFormat {
+            container: "mpegts".into(),
+            video: "h264".into(),
+            audio: "aac".into(),
+        }];
+        playback.video_limits = vec![
+            LiveVideoLimit {
+                codec: "h264".into(),
+                profile: None,
+                max_width: 3840,
+                max_height: 2160,
+                max_frame_rate: LiveRational { num: 30, den: 1 },
+                interlaced: false,
+            },
+            LiveVideoLimit {
+                codec: "h264".into(),
+                profile: None,
+                max_width: 1280,
+                max_height: 720,
+                max_frame_rate: LiveRational { num: 60, den: 1 },
+                interlaced: false,
+            },
+        ];
+        let support = LiveExecutionSupport {
+            video_encode: true,
+            audio_encode: true,
+            tone_map: false,
+        };
+
+        let field = resolve_live_delivery(
+            &input,
+            Some(&playback),
+            &LiveQualityPolicy::default(),
+            &support,
+        )
+        .expect("the 720p60 H.264 limit admits field-rate output");
+        assert_eq!((field.output.width, field.output.height), (1280, 720));
+        assert_eq!(
+            field.output.frame_rate,
+            Some(LiveRational {
+                num: 60_000,
+                den: 1_001
+            })
+        );
+
+        let frame = resolve_live_delivery(
+            &input,
+            Some(&playback),
+            &LiveQualityPolicy {
+                deinterlace_output: LiveDeinterlaceOutput::Frame,
+                ..LiveQualityPolicy::default()
+            },
+            &support,
+        )
+        .expect("the 1080p30 H.264 limit admits frame-rate output");
+        assert_eq!((frame.output.width, frame.output.height), (1920, 1080));
+        assert_eq!(
+            frame.output.frame_rate,
+            Some(LiveRational {
+                num: 30_000,
+                den: 1_001
+            })
+        );
+
+        playback.video_limits.pop();
+        let error = resolve_live_delivery(
+            &input,
+            Some(&playback),
+            &LiveQualityPolicy::default(),
+            &support,
+        )
+        .expect_err("1080p30 must not be treated as 1080p59.94");
+        assert!(error.contains("no single final video limit"), "{error}");
     }
 }

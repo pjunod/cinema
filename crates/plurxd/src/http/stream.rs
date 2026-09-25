@@ -104,9 +104,9 @@ fn parse_readrate(value: &str) -> Option<f64> {
 /// the two delivery paths can't drift on what pacing means. `legacy_realtime_ok`
 /// is false here: a progressive remux is consumed by the browser's own
 /// back-pressure, so an old ffmpeg is better off unpaced than pinned to 1x.
-fn push_pacing(cmd: &mut tokio::process::Command, caps: PacingCaps, rate: f64) {
+fn push_pacing(args: &mut Vec<String>, caps: PacingCaps, rate: f64) {
     for arg in caps.resolve(rate, READRATE_BURST_SECS, false).args() {
-        cmd.arg(arg);
+        args.push(arg);
     }
 }
 
@@ -175,6 +175,10 @@ pub struct Caps {
     pub vcodec: Option<String>,
     /// Audio codecs, e.g. `aac,ac3,eac3,opus,flac`.
     pub acodec: Option<String>,
+    /// Current output-route channel ceiling for the legacy flat capability
+    /// shape. Omission preserves the codec-only behavior older clients use.
+    #[serde(default, deserialize_with = "deserialize_audio_channels")]
+    pub achannels: Option<u8>,
     /// Containers playable via `<video src>` (never mkv), e.g. `mp4,webm`.
     pub container: Option<String>,
     /// Max height to direct-play (omit = uncapped; a decodable 4K stream
@@ -237,6 +241,20 @@ pub struct Caps {
     pub caps_v2: Option<playback::DeviceCaps>,
 }
 
+fn deserialize_audio_channels<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let value = Option::<u8>::deserialize(deserializer)?;
+    match value {
+        Some(value @ 1..=16) => Ok(Some(value)),
+        Some(_) => Err(D::Error::custom("achannels must be between 1 and 16")),
+        None => Ok(None),
+    }
+}
+
 fn csv(s: &Option<String>) -> Vec<String> {
     s.as_deref()
         .map(|v| {
@@ -264,7 +282,10 @@ fn codec_max_heights(s: &Option<String>) -> std::collections::HashMap<String, i6
 impl Caps {
     /// True when the client reported real capabilities (vs. only a named profile).
     fn has_caps(&self) -> bool {
-        self.vcodec.is_some() || self.acodec.is_some() || self.container.is_some()
+        self.vcodec.is_some()
+            || self.acodec.is_some()
+            || self.achannels.is_some()
+            || self.container.is_some()
     }
 
     /// The effective device profile: a runtime-probed one when caps were
@@ -317,6 +338,7 @@ impl Caps {
                 containers,
                 video_codecs: vcodec,
                 audio_codecs: acodec,
+                max_audio_channels: self.achannels,
                 max_height: self.maxheight,
                 codec_max_heights: codec_max_heights(&self.vmaxheight),
                 hdr: self.hdr == Some(1),
@@ -446,6 +468,10 @@ pub struct SourceSummary {
     /// Overall bitrate in bits/sec, if the container reported one.
     pub bitrate: Option<i64>,
     pub duration_ms: Option<i64>,
+    /// First playable video stream cadence, preserving ffprobe's rational so
+    /// clients can distinguish 24000/1001 from 24/1 before they prepare.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_rate: Option<String>,
 }
 
 /// A skippable region of the timeline (opening titles, end credits). Derived
@@ -805,7 +831,35 @@ fn decision_render_caps(
     )
 }
 
-fn source_summary(file: &MediaFile) -> SourceSummary {
+fn source_frame_rate(probe_json: Option<&str>) -> Option<String> {
+    fn valid_fraction(raw: &str) -> bool {
+        let Some((numerator, denominator)) = raw.trim().split_once('/') else {
+            return false;
+        };
+        let Ok(numerator) = numerator.parse::<f64>() else {
+            return false;
+        };
+        let Ok(denominator) = denominator.parse::<f64>() else {
+            return false;
+        };
+        numerator.is_finite() && numerator > 0.0 && denominator.is_finite() && denominator > 0.0
+    }
+
+    let probe: serde_json::Value = serde_json::from_str(probe_json?).ok()?;
+    probe.get("streams")?.as_array()?.iter().find_map(|stream| {
+        (stream.get("codec_type")?.as_str()? == "video")
+            .then(|| {
+                ["avg_frame_rate", "r_frame_rate"]
+                    .into_iter()
+                    .filter_map(|key| stream.get(key)?.as_str())
+                    .find(|rate| valid_fraction(rate))
+                    .map(|rate| rate.trim().to_owned())
+            })
+            .flatten()
+    })
+}
+
+fn source_summary(file: &MediaFile, probe_json: Option<&str>) -> SourceSummary {
     SourceSummary {
         container: file.container.clone(),
         video_codec: file.video_codec.clone(),
@@ -819,6 +873,7 @@ fn source_summary(file: &MediaFile) -> SourceSummary {
         dv_el_present: file.dolby_vision.el_present,
         bitrate: file.bitrate,
         duration_ms: file.duration_ms,
+        frame_rate: source_frame_rate(probe_json),
     }
 }
 
@@ -835,6 +890,21 @@ fn audio_tracks(file: &MediaFile) -> Vec<AudioTrackDto> {
             default: a.default,
         })
         .collect()
+}
+
+/// Whether THIS caller gets the PGS overlay, given that this server serves it.
+///
+/// A caps document is how a client says what it can paint, so a document that
+/// does not claim the protocol is a client that cannot. **No document at all
+/// is not the same answer.** The legacy `GET /decision` query has no slot for
+/// a claim, and that path is a mixed-fleet one rather than an old-client one —
+/// both native clients fall back to it on any 400/404/405, and Android's
+/// fallback has no refusal-code exemption at all. Reading silence as "cannot"
+/// would take a client that can paint the overlay and send it off to re-encode
+/// a whole film, losing the grade on an HDR source on the way. Silence keeps
+/// the answer this server gave before the claim existed: the switch alone.
+fn overlay_for_caller(served: bool, caps: Option<&plurx_core::playback::DeviceCaps>) -> bool {
+    served && caps.is_none_or(|caps| caps.renders_subtitle_overlay(crate::pgs_overlay::PROTOCOL))
 }
 
 fn sub_tracks(file: &MediaFile, overlay_enabled: bool) -> Vec<SubTrackDto> {
@@ -2010,6 +2080,13 @@ pub struct DecisionBody {
 /// Validate the additive packaging claim before any caller can fall through
 /// to a legacy trust path or allocate playback work.
 pub(crate) fn validate_device_caps(caps: &playback::DeviceCaps) -> Result<(), ApiError> {
+    if let Err(message) = caps.validate_audio_sinks() {
+        return Err(ApiError::typed(
+            StatusCode::BAD_REQUEST,
+            "invalid_capabilities",
+            message,
+        ));
+    }
     if let Err(message) = caps.validate_progressive_hevc_sample_entries() {
         return Err(ApiError::typed(
             StatusCode::BAD_REQUEST,
@@ -2106,11 +2183,21 @@ pub async fn decision(
     .audio_index;
     let selected_audio = effective_audio_selection(&file, q.audio, policy_audio)?;
     let selection_requested = q.audio.is_some() || q.subtitle.is_some();
-    // One read for both uses below: whether a PGS track is offered to the
-    // client and whether selecting one forces a burn-in are the same question
-    // asked twice, and answering them from two reads would let a switch flip
-    // between them inside one request.
-    let pgs_overlay = state.pgs_overlay_enabled().await?;
+    // One read, two answers. `overlay_served` is this process: can a PGS track
+    // be delivered as `pgs-v1` here at all. `pgs_overlay` narrows that by the
+    // caller's own claim: will THIS client paint one. Reading the switch twice
+    // would let it flip between the two inside a single request.
+    //
+    // The switch alone used to answer both, which made `/decision` issue a
+    // plan the caller could not execute: a browser — which has no PGS
+    // renderer at all — was offered a PGS default, told the delivery needed
+    // no burn, and had to override the server's plan locally to get a picture.
+    // The narrowed answer governs the two claims a client acts on: it is not
+    // offered the track as a default, and it IS told that selecting it burns
+    // the video. The `overlay` field on the track itself deliberately keeps
+    // the wider answer; see the comment where `sub_tracks` is called.
+    let overlay_served = state.pgs_overlay_enabled().await?;
+    let pgs_overlay = overlay_for_caller(overlay_served, q.caps_v2.as_ref());
     let container_default_audio = container_default_audio_index(&file.audio_streams);
     // The policy subtitle is chosen against the plan, so the plan has to exist
     // first — and the audio rules are what the subtitle rules read, so the
@@ -2122,7 +2209,8 @@ pub async fn decision(
     let container_audio_streams = file.audio_streams.clone();
     set_selected_audio_default(&mut file.audio_streams, selected_audio);
     let node = decision_render_caps(render_caps(&state).await, q.caps_v2.as_ref());
-    let mut decision = q.decide(&file, &node, crate::media_sessions::unix_ms());
+    let decision_now_ms = crate::media_sessions::unix_ms();
+    let mut decision = q.decide(&file, &node, decision_now_ms);
     // The grade of the plan **with no subtitle burn**. Read here, before
     // `apply_selected_subtitle` can rewrite it, because both users below are
     // asking what adding a burn would cost — and a plan that is already SDR
@@ -2179,6 +2267,12 @@ pub async fn decision(
         requested_audio,
         container_default_audio,
     );
+    // Subtitle burn and an explicit non-default track can change the method
+    // after the pure decision ran. Resolve audio again against that final
+    // method. The legacy bool intentionally keeps its old compatibility
+    // meaning until M2 moves every create path to the richer contract.
+    decision.delivered_audio =
+        playback::resolve_audio_for_method(&file, &q.profile(decision_now_ms), decision.method);
     let probe_json = state.store.get_file_probe_json(id).await?;
     let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
@@ -2271,7 +2365,15 @@ pub async fn decision(
 
     // DTO defaults and the verdict now come from the same selection above.
     let audio = audio_tracks(&file);
-    let mut subtitles = sub_tracks(&file, pgs_overlay);
+    // Deliberately the server's switch, not the narrowed answer. `overlay`
+    // describes the track and this process — "could this be delivered as
+    // pgs-v1 here" — and it is the only surface that answers it. A client
+    // that did not claim the protocol simply does not read the field, while
+    // an operator checking the Developer switch, or a client on an older
+    // build, has nowhere else to look. What that client must not be told is
+    // that the delivery needs no burn, and that is `subtitle_requires_burn_in`
+    // and `subtitle_route`, both of which stay narrowed.
+    let mut subtitles = sub_tracks(&file, overlay_served);
     for s in &mut subtitles {
         s.default = selected_subtitle == Some(s.index);
     }
@@ -2284,7 +2386,7 @@ pub async fn decision(
     Ok(Json(DecisionResponse {
         file_id: id,
         vod_indexed,
-        source: source_summary(&file),
+        source: source_summary(&file, probe_json.as_deref()),
         decision,
         play_url,
         delivery,
@@ -2391,14 +2493,19 @@ pub async fn subtitles_vtt(
         ));
     }
 
-    let bytes = crate::subtitles::ensure_vtt_bytes(&state.subs_dir, &file, index)
-        .await
-        .map_err(|why| {
-            // Keep the endpoint's existing diagnostic while sharing the
-            // extraction/cache implementation with text subtitle burns.
-            tracing::warn!(file_id = id, index, "subtitle extraction failed: {why}");
-            ApiError::Internal("subtitle extraction failed".into())
-        })?;
+    let bytes = crate::subtitles::ensure_vtt_bytes_with_store(
+        &state.subs_dir,
+        &file,
+        index,
+        &state.subtitle_source_access(),
+    )
+    .await
+    .map_err(|why| {
+        // Keep the endpoint's existing diagnostic while sharing the
+        // extraction/cache implementation with text subtitle burns.
+        tracing::warn!(file_id = id, index, "subtitle extraction failed: {why}");
+        ApiError::Internal("subtitle extraction failed".into())
+    })?;
     Ok(vtt_response(bytes))
 }
 
@@ -2493,7 +2600,16 @@ pub async fn book_content(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let file = load_file(&state, id).await?;
+    serve_book_content(&state, id, &method, &headers).await
+}
+
+pub(super) async fn serve_book_content(
+    state: &AppState,
+    id: i64,
+    method: &Method,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let file = load_file(state, id).await?;
     let item = state
         .store
         .get_item(file.item_id)
@@ -2502,7 +2618,23 @@ pub async fn book_content(
     if item.kind != ItemKind::Book {
         return Err(ApiError::NotFound("book content"));
     }
-    serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64)).await
+    let mut response =
+        serve_file_range(&file.path, headers, method, Some(file.size.max(0) as u64)).await?;
+    if response.status().is_success() {
+        let name = file
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("book");
+        let safe_name = name.replace(['\\', '"', '\r', '\n'], "_");
+        if let Ok(disposition) = HeaderValue::from_str(&format!("inline; filename=\"{safe_name}\""))
+        {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_DISPOSITION, disposition);
+        }
+    }
+    Ok(response)
 }
 
 // The caps fields are inlined (not `#[serde(flatten)]`ed) because axum's
@@ -2593,6 +2725,7 @@ impl StreamQuery {
             vcodec: self.vcodec.clone(),
             vmaxheight: self.vmaxheight.clone(),
             acodec: self.acodec.clone(),
+            achannels: None,
             container: self.container.clone(),
             maxheight: self.maxheight,
             hdr: self.hdr,
@@ -2749,6 +2882,7 @@ pub async fn stream_mp4(
         have_dovi_bsf: state.system.dovi_rpu,
         preserve_dolby_vision: served.preserve_dolby_vision,
         promote_hevc_parameter_sets,
+        runtime_cache: &state.runtime_cache_dir,
         readrate,
         tracked,
         serving: state.serving.subscribe(),
@@ -2937,7 +3071,10 @@ pub(crate) async fn serve_file_range(
             fh.seek(std::io::SeekFrom::Start(start))
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            let stream = tokio_util::io::ReaderStream::new(fh.take(count));
+            let stream = tokio_util::io::ReaderStream::with_capacity(
+                fh.take(count),
+                crate::media_sessions::MEDIA_BODY_READ_BUFFER,
+            );
             Ok((
                 StatusCode::PARTIAL_CONTENT,
                 [
@@ -2954,7 +3091,10 @@ pub(crate) async fn serve_file_range(
             let body = if method == Method::HEAD {
                 Body::empty()
             } else {
-                Body::from_stream(tokio_util::io::ReaderStream::new(fh))
+                Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+                    fh,
+                    crate::media_sessions::MEDIA_BODY_READ_BUFFER,
+                ))
             };
             Ok((
                 StatusCode::OK,
@@ -2998,6 +3138,7 @@ struct RemuxSpec<'a> {
     /// rewrite the init after muxing, so retain the in-band sets and use the
     /// `hev1`/`dvhe` sample entry that permits them.
     promote_hevc_parameter_sets: bool,
+    runtime_cache: &'a Path,
     readrate: f64,
     /// Telemetry handle and its registration, when the client asked to be able
     /// to watch this stream's health.
@@ -3115,6 +3256,30 @@ fn progressive_hevc_copy_args(
     args
 }
 
+/// Consume the stderr stream shared by progressive-remux diagnostics and
+/// `-progress`. Keeping the complete reader in one function lets the contract
+/// test exercise the same classification, telemetry mutation, and log path as
+/// production rather than testing the classifier in isolation.
+async fn consume_remux_stderr<R>(
+    stderr: R,
+    telemetry: Option<(std::sync::Arc<crate::transcode::Progress>, u64)>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+    let mut lines = BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some((progress, generation)) = &telemetry {
+            if plurx_core::transcode::progress::is_progress_line(&line) {
+                crate::transcode::apply_progress_line(progress, *generation, &line);
+                continue;
+            }
+        }
+        tracing::warn!("remux ffmpeg: {line}");
+    }
+}
+
 async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     let RemuxSpec {
         path,
@@ -3129,6 +3294,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         have_dovi_bsf,
         preserve_dolby_vision,
         promote_hevc_parameter_sets,
+        runtime_cache,
         readrate,
         tracked,
         mut serving,
@@ -3143,25 +3309,23 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         authority.loss_generation
     };
     let pacing = pacing_caps().await;
-    let mut cmd = tokio::process::Command::new(ffmpeg_bin());
-    cmd.arg("-hide_banner").arg("-loglevel").arg("error");
-    // Telemetry goes to stderr, not stdout: stdout is the MP4. The stderr
-    // reader below already exists to surface remux failures, and progress
-    // lines are `key=value` — trivially separable from ffmpeg's prose.
-    if tracked.is_some() {
-        cmd.arg("-progress").arg("pipe:2");
-    }
+    let mut args = vec![
+        "-hide_banner".to_owned(),
+        "-loglevel".to_owned(),
+        "error".to_owned(),
+    ];
     // Input-side seek (fast) for resume. Copied video starts at the preceding
     // keyframe, so retain the matching audio preroll as well; accurate seek
     // would discard it when audio is being encoded and desynchronise the two.
     if let Some(s) = start.filter(|s| *s > 0.0) {
-        cmd.args(plurx_core::transcode::copy_input_seek_args(s));
+        args.extend(plurx_core::transcode::copy_input_seek_args(s));
     }
     // Pace this input (see READRATE_DEFAULT). Every input gets the same
     // treatment, as with -ss: the muxer interleaves them, so an unpaced second
     // input would drag the whole pipeline back to flat-out.
-    push_pacing(&mut cmd, pacing, readrate);
-    cmd.arg("-i").arg(path);
+    push_pacing(&mut args, pacing, readrate);
+    args.push("-i".to_owned());
+    args.push(path.to_string_lossy().into_owned());
     // This playback's A/V sync correction (positive = audio later). Copied audio
     // keeps the second `-itsoffset`'d input of the same file — copy moves
     // packets and filters need frames, so there is no other way in — with
@@ -3172,26 +3336,27 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // again (review §3.4).
     let audio_input = if audio_offset_ms != 0 && !transcode_audio {
         if let Some(s) = start.filter(|s| *s > 0.0) {
-            cmd.args(plurx_core::transcode::copy_input_seek_args(s));
+            args.extend(plurx_core::transcode::copy_input_seek_args(s));
         }
-        push_pacing(&mut cmd, pacing, readrate);
-        cmd.arg("-itsoffset")
-            .arg(format!("{:.3}", audio_offset_ms as f64 / 1000.0));
-        cmd.arg("-i").arg(path);
+        push_pacing(&mut args, pacing, readrate);
+        args.push("-itsoffset".to_owned());
+        args.push(format!("{:.3}", audio_offset_ms as f64 / 1000.0));
+        args.push("-i".to_owned());
+        args.push(path.to_string_lossy().into_owned());
         1
     } else {
         0
     };
     // Optional video + the chosen audio track, no subtitles into the MP4.
     // Audio-only books share this remux path when their source codec needs AAC.
-    cmd.args([
-        "-map",
-        "0:v:0?",
-        "-map",
-        &format!("{audio_input}:a:{audio_index}?"),
-        "-sn",
+    args.extend([
+        "-map".to_owned(),
+        "0:v:0?".to_owned(),
+        "-map".to_owned(),
+        format!("{audio_input}:a:{audio_index}?"),
+        "-sn".to_owned(),
     ]);
-    cmd.args(["-c:v", "copy"]);
+    args.extend(["-c:v".to_owned(), "copy".to_owned()]);
     // Safari only decodes HEVC in MP4 when the sample entry is tagged `hvc1`;
     // MKV HEVC is commonly `hev1`, which Safari renders black. Harmless for a
     // stream that's already hvc1. Video-stream-scoped so H.264 is untouched.
@@ -3199,7 +3364,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // parameter sets (and no dead DV metadata) — same hygiene, same reasons,
     // as the segmented copy path (`hevc_copy_bsf`).
     if hevc {
-        cmd.args(progressive_hevc_copy_args(
+        args.extend(progressive_hevc_copy_args(
             media,
             have_dovi_bsf,
             preserve_dolby_vision,
@@ -3208,11 +3373,19 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     }
     if transcode_audio {
         if let Some(af) = plurx_core::transcode::audio_offset_filter(audio_offset_ms) {
-            cmd.arg("-af").arg(af);
+            args.extend(["-af".to_owned(), af]);
         }
-        cmd.args(["-c:a", "aac", "-ac", "2", "-b:a", "256k"]);
+        args.extend(
+            progressive_audio_args(true)
+                .iter()
+                .map(|argument| (*argument).to_owned()),
+        );
     } else {
-        cmd.args(["-c:a", "copy"]);
+        args.extend(
+            progressive_audio_args(false)
+                .iter()
+                .map(|argument| (*argument).to_owned()),
+        );
     }
     // Fragmented MP4 so it streams without a seekable output.
     // `-avoid_negative_ts make_zero` normalizes the first timestamp to zero: a
@@ -3224,24 +3397,46 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // sample entry needs a packet peek — AC-3/E-AC-3 copy especially — don't
     // fail with "cannot write moov atom before AC3 packets". Harmless for
     // AAC/H.264 (verified: ftyp+moov still lead the stream).
-    cmd.args([
-        "-avoid_negative_ts",
-        "make_zero",
-        "-movflags",
-        "frag_keyframe+empty_moov+default_base_moof+delay_moov",
-        "-f",
-        "mp4",
-        "pipe:1",
-    ]);
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
+    args.extend(
+        [
+            "-avoid_negative_ts",
+            "make_zero",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]
+        .map(str::to_owned),
+    );
 
     #[cfg(windows)]
-    crate::ffmpeg::verify_windows_source_path(source, path).map_err(ApiError::Internal)?;
-    let (mut child, child_job) = crate::process_control::spawn_job_owned(&mut cmd)
-        .map_err(|e| ApiError::Internal(format!("spawning job-owned ffmpeg: {e}")))?;
+    let descriptors = crate::producer_spawn::Descriptors::default()
+        .with_file("media source", source)
+        .map_err(ApiError::Internal)?;
+    #[cfg(not(windows))]
+    let descriptors = crate::producer_spawn::Descriptors::default();
+    let program = ffmpeg_bin();
+    let crate::producer_spawn::Spawned {
+        child,
+        child_job,
+        stdout,
+        stderr,
+    } = crate::producer_spawn::spawn(
+        Path::new(&program),
+        &args,
+        crate::producer_spawn::SpawnOptions {
+            runtime_cache,
+            progress: if tracked.is_some() {
+                crate::producer_spawn::Progress::Stderr
+            } else {
+                crate::producer_spawn::Progress::None
+            },
+            descriptors,
+            env: &[],
+        },
+    )
+    .map_err(ApiError::Internal)?;
 
     // Probe after the remux starts opening the source, matching the HLS copy
     // path: the work overlaps instead of adding its full latency to startup.
@@ -3281,33 +3476,14 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // otherwise yields an empty pipe and a blank player with nothing logged.
     // When tracked, the same pipe carries `-progress` telemetry; progress lines
     // are keyed `key=value` and everything else is still an error worth logging.
-    if let Some(stderr) = child.stderr.take() {
-        let telemetry = tracked_stream.as_ref().map(|s| {
-            let p = std::sync::Arc::clone(&s.progress);
-            // One attempt per stream — a progressive remux never respawns —
-            // so a single generation is taken here and quoted for its life.
-            let generation = p.begin_attempt();
-            (p, generation)
-        });
-        tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Some((progress, generation)) = &telemetry {
-                    if is_progress_line(&line) {
-                        crate::transcode::apply_progress_line(progress, *generation, &line);
-                        continue;
-                    }
-                }
-                tracing::warn!("remux ffmpeg: {line}");
-            }
-        });
-    }
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| ApiError::Internal("ffmpeg stdout unavailable".into()))?;
+    let telemetry = tracked_stream.as_ref().map(|s| {
+        let p = std::sync::Arc::clone(&s.progress);
+        // One attempt per stream — a progressive remux never respawns —
+        // so a single generation is taken here and quoted for its life.
+        let generation = p.begin_attempt();
+        (p, generation)
+    });
+    tokio::spawn(consume_remux_stderr(stderr, telemetry));
 
     let owner_guard = guard.clone();
     let (process_guard, _process_owner) = spawn_remux_process_owner(
@@ -3402,26 +3578,42 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     Ok(response)
 }
 
-/// Is this stderr line one of ffmpeg's `-progress` blocks rather than a
-/// diagnostic? Progress is strictly `lower_snake_key=value`; ffmpeg's own
-/// messages are prose and normally carry a `[component @ 0x…]` prefix, so the
-/// two never collide — and a misfiled line costs a log entry, not correctness.
-fn is_progress_line(line: &str) -> bool {
-    match line.split_once('=') {
-        Some((key, _)) => {
-            let key = key.trim();
-            !key.is_empty()
-                && key
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        }
-        None => false,
+fn progressive_audio_args(transcode_audio: bool) -> &'static [&'static str] {
+    if transcode_audio {
+        &["-c:a", "aac", "-ac", "2", "-b:a", "256k", "-ar", "48000"]
+    } else {
+        &["-c:a", "copy"]
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flat_audio_channel_claim_is_bounded_at_the_request_boundary() {
+        for value in ["0", "17", "255"] {
+            assert!(
+                serde_urlencoded::from_str::<Caps>(&format!("achannels={value}")).is_err(),
+                "achannels={value} must not reach capability translation"
+            );
+        }
+        assert_eq!(
+            serde_urlencoded::from_str::<Caps>("achannels=16")
+                .expect("the documented ceiling is valid")
+                .achannels,
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn progressive_aac_conversion_is_pinned_to_forty_eight_khz() {
+        assert_eq!(
+            progressive_audio_args(true),
+            ["-c:a", "aac", "-ac", "2", "-b:a", "256k", "-ar", "48000"]
+        );
+        assert_eq!(progressive_audio_args(false), ["-c:a", "copy"]);
+    }
 
     /// A fixed clock for every test that builds a device profile.
     ///
@@ -3431,8 +3623,32 @@ mod tests {
     /// re-test window.
     const NOW_MS: i64 = 1_756_400_000_000;
 
+    #[test]
+    fn decision_source_frame_rate_preserves_probe_rational_and_absence() {
+        let average = r#"{"streams":[
+            {"codec_type":"audio","avg_frame_rate":"0/0"},
+            {"codec_type":"video","avg_frame_rate":"24000/1001","r_frame_rate":"24/1"}
+        ]}"#;
+        let fallback = r#"{"streams":[
+            {"codec_type":"video","avg_frame_rate":"0/0","r_frame_rate":"30000/1001"}
+        ]}"#;
+        let absent = r#"{"streams":[{"codec_type":"video"}]}"#;
+
+        assert_eq!(
+            source_frame_rate(Some(average)).as_deref(),
+            Some("24000/1001")
+        );
+        assert_eq!(
+            source_frame_rate(Some(fallback)).as_deref(),
+            Some("30000/1001")
+        );
+        assert_eq!(source_frame_rate(Some(absent)), None);
+        assert_eq!(source_frame_rate(None), None);
+    }
+
     fn hevc_file(hdr: Option<&str>) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 42,
             item_id: 1,
             path: "/movies/hevc.mp4".into(),
@@ -3442,12 +3658,17 @@ mod tests {
             container: Some("mp4".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: Some("hvc1".into()),
+            field_order: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(10),
             hdr: hdr.map(str::to_owned),
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(20_000_000),
             audio_streams: Vec::new(),
             subtitle_streams: Vec::new(),
@@ -3471,7 +3692,8 @@ mod tests {
     /// `Query` extractor uses.
     #[test]
     fn the_legacy_query_and_the_v2_document_build_the_same_profile() {
-        const CAPS_Q: &str = "vcodec=hevc,h264&hdr=1&dv=1&dvprofile=5,8&dvhls=1\
+        const CAPS_Q: &str = "vcodec=hevc,h264&acodec=aac,eac3&achannels=6\
+                              &hdr=1&dv=1&dvprofile=5,8&dvhls=1\
                               &hdr10t=1&maxheight=2160";
 
         let legacy: Caps = serde_urlencoded::from_str(CAPS_Q).expect("CAPS_Q decodes as Caps");
@@ -3488,7 +3710,11 @@ mod tests {
                   { "codec": "h264", "present": ["sdr"] }
                 ],
                 "containers": [],
-                "audio": [],
+                "audio": ["aac", "eac3"],
+                "audio_sinks": [
+                  { "codec": "aac", "max_channels": 6 },
+                  { "codec": "eac3", "max_channels": 6 }
+                ],
                 "dv_transport": "hls",
                 "display": { "hdr": true, "dolby_vision": true },
                 "max_height": 2160
@@ -3520,6 +3746,8 @@ mod tests {
         );
         assert!(from_query.remux_dolby_vision, "dvhls=1");
         assert_eq!(from_query.max_height, Some(2160));
+        assert_eq!(from_query.max_audio_channels.get("aac"), Some(&6));
+        assert_eq!(from_query.max_audio_channels.get("eac3"), Some(&6));
         assert_eq!(
             from_query
                 .presents
@@ -3611,6 +3839,28 @@ mod tests {
             profile.presents["hevc"].contains(&playback::Transfer::Unknown),
             "the unknown curve is carried and grades nothing"
         );
+    }
+
+    #[test]
+    fn ambiguous_audio_sink_claims_are_refused_before_they_can_steer_playback() {
+        let caps = playback::DeviceCaps {
+            audio_sinks: vec![
+                playback::AudioSink {
+                    codec: "eac3".into(),
+                    max_channels: 6,
+                    passthrough: true,
+                    sample_rates_hz: vec![48_000],
+                },
+                playback::AudioSink {
+                    codec: "EAC3".into(),
+                    max_channels: 2,
+                    passthrough: false,
+                    sample_rates_hz: vec![48_000],
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(validate_device_caps(&caps).is_err());
     }
 
     /// The one legacy claim that is deliberately unspellable in v2.
@@ -4003,6 +4253,12 @@ mod tests {
             method,
             reasons: Vec::new(),
             transcode_audio: true,
+            delivered_audio: playback::resolve_audio(
+                None,
+                playback::default_profile(),
+                playback::AudioRoute::RollingHls,
+                0,
+            ),
             preserve_dolby_vision: true,
             container: "mp4",
             delivered_dynamic_range: "dolby_vision",
@@ -4045,6 +4301,7 @@ mod tests {
                     dv_el_present: None,
                     bitrate: None,
                     duration_ms: None,
+                    frame_rate: None,
                 },
                 audio: Vec::new(),
                 subtitles: Vec::new(),
@@ -4060,6 +4317,11 @@ mod tests {
         }
 
         let converted = body(planned(playback::PlaybackMethod::Remux));
+        assert_eq!(
+            converted.pointer("/delivered_audio/action/kind"),
+            Some(&serde_json::json!("none")),
+            "the independently resolved audio contract is flattened beside the verdict: {converted}"
+        );
         assert_eq!(
             converted.get("delivered_dolby_vision_profile"),
             Some(&serde_json::json!(8)),
@@ -4222,6 +4484,7 @@ mod tests {
             index,
             codec: "eac3".into(),
             channels: Some(6),
+            sample_rate: Some(48_000),
             language: Some(language.into()),
             title: None,
             default,
@@ -4245,6 +4508,7 @@ mod tests {
         use plurx_core::domain::AudioStream;
 
         let mut file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 5698,
             item_id: 1,
             path: "/movies/Michael (2026).mkv".into(),
@@ -4254,12 +4518,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(10),
             hdr: Some("dolby_vision".into()),
             hdr_format: Some("Dolby Vision · Profile 7 (HDR10-compatible)".into()),
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(90_892_368),
             // The columns, not only the label. The conversion needs the level
             // and the compatibility id as numbers to build the configuration
@@ -4270,6 +4539,7 @@ mod tests {
                     index: 0,
                     codec: "eac3".into(),
                     channels: Some(8),
+                    sample_rate: Some(48_000),
                     language: Some("fra".into()),
                     title: Some("French E-AC-3".into()),
                     default: true,
@@ -4278,6 +4548,7 @@ mod tests {
                     index: 3,
                     codec: "truehd".into(),
                     channels: Some(8),
+                    sample_rate: Some(48_000),
                     language: Some("eng".into()),
                     title: Some("English TrueHD Atmos".into()),
                     default: false,
@@ -4380,7 +4651,10 @@ mod tests {
             "progress=continue",
             "bitrate=N/A",
         ] {
-            assert!(is_progress_line(line), "progress: {line}");
+            assert!(
+                plurx_core::transcode::progress::is_progress_line(line),
+                "progress: {line}"
+            );
         }
         for line in [
             "[matroska @ 0x55f4] Could not find codec parameters",
@@ -4390,9 +4664,73 @@ mod tests {
             // An ffmpeg message that happens to contain '=' is still prose:
             // the key side has spaces and capitals, which progress keys never do.
             "[out#0/mp4 @ 0x1] Output file is empty, nothing was encoded",
+            "filter_units=remove_types=32-34",
+            "some_future_key=1",
         ] {
-            assert!(!is_progress_line(line), "prose: {line}");
+            assert!(
+                !plurx_core::transcode::progress::is_progress_line(line),
+                "prose: {line}"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn tracked_remux_logs_diagnostics_without_advancing_progress() {
+        use tokio::io::AsyncWriteExt as _;
+        use tracing_subscriber::prelude::*;
+
+        let logs = std::sync::Arc::new(crate::logbuf::LogBuffer::new(8));
+        let subscriber = tracing_subscriber::registry()
+            .with(crate::logbuf::BufferLayer(std::sync::Arc::clone(&logs)));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let progress = std::sync::Arc::new(crate::transcode::Progress::new());
+        let generation = progress.begin_attempt();
+
+        let (mut diagnostic_writer, diagnostic_reader) = tokio::io::duplex(256);
+        diagnostic_writer
+            .write_all(b"filter_units=remove_types=32-34\n")
+            .await
+            .expect("write diagnostic transcript");
+        diagnostic_writer
+            .shutdown()
+            .await
+            .expect("finish diagnostic transcript");
+        consume_remux_stderr(
+            diagnostic_reader,
+            Some((std::sync::Arc::clone(&progress), generation)),
+        )
+        .await;
+
+        assert_eq!(progress.speed(), None);
+        assert_eq!(progress.out_time_ms(), None);
+        let captured = logs.tail("trace", 8);
+        assert_eq!(captured.len(), 1, "{captured:?}");
+        assert!(
+            captured[0]
+                .message
+                .contains("remux ffmpeg: filter_units=remove_types=32-34"),
+            "{}",
+            captured[0].message
+        );
+
+        let (mut progress_writer, progress_reader) = tokio::io::duplex(256);
+        progress_writer
+            .write_all(b"speed=2.50x\nout_time_us=1250000\n")
+            .await
+            .expect("write progress transcript");
+        progress_writer
+            .shutdown()
+            .await
+            .expect("finish progress transcript");
+        consume_remux_stderr(progress_reader, Some((progress.clone(), generation))).await;
+
+        assert_eq!(progress.speed(), Some(2.5));
+        assert_eq!(progress.out_time_ms(), Some(1_250));
+        assert_eq!(
+            logs.tail("trace", 8).len(),
+            1,
+            "progress lines stay out of logs"
+        );
     }
 
     /// This is the response-start budget in isolation: an artificially cold
@@ -5645,6 +5983,7 @@ mod tests {
             }
         }
         let mut file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: "/media/anime.mkv".into(),
@@ -5654,12 +5993,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: None,
             width: Some(1920),
             height: Some(1080),
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(1_000),
             audio_streams: vec![],
             subtitle_streams: vec![
@@ -5693,6 +6037,42 @@ mod tests {
         assert!(!tracks[3].text && !tracks[3].native);
         assert!(subtitle_requires_burn_in(&file, Some(3), false));
         assert!(!subtitle_requires_burn_in(&file, Some(0), false));
+
+        // The three answers the capability governs. A client that posted a
+        // document and did not claim the protocol cannot paint one; a client
+        // that posted no document at all has said nothing, and the legacy GET
+        // path — which both native clients fall back to on any 400/404/405 —
+        // is exactly that case. Reading silence as a refusal is what would
+        // send a capable client off to re-encode a whole film.
+        let capable = plurx_core::playback::DeviceCaps {
+            subtitle_overlays: vec![crate::pgs_overlay::PROTOCOL.to_owned()],
+            ..Default::default()
+        };
+        let silent = plurx_core::playback::DeviceCaps::default();
+        assert!(
+            !silent.renders_subtitle_overlay(crate::pgs_overlay::PROTOCOL),
+            "absent is never a claim"
+        );
+        assert!(capable.renders_subtitle_overlay(crate::pgs_overlay::PROTOCOL));
+        assert!(
+            !capable.renders_subtitle_overlay("pgs-v2"),
+            "claiming one protocol claims nothing about its successor"
+        );
+
+        assert!(overlay_for_caller(true, Some(&capable)));
+        assert!(
+            !overlay_for_caller(true, Some(&silent)),
+            "a document that claims nothing is a client that cannot paint it"
+        );
+        assert!(
+            overlay_for_caller(true, None),
+            "no document at all is silence, not a refusal — the legacy GET \
+             fallback must not turn an overlay into a whole-film burn"
+        );
+        assert!(
+            !overlay_for_caller(false, Some(&capable)),
+            "the client's claim never overrides an operator switch that is off"
+        );
 
         // Default-off and old servers remain wire-compatible: the additive
         // field is absent rather than null.
@@ -5769,6 +6149,7 @@ mod tests {
     #[test]
     fn the_subtitle_route_names_how_the_cues_are_produced() {
         let file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: "/media/routes.mkv".into(),
@@ -5778,12 +6159,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: None,
             width: Some(1920),
             height: Some(1080),
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(1_000),
             audio_streams: vec![],
             subtitle_streams: [

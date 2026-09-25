@@ -39,7 +39,8 @@ jobs:
       mobile_version: ${{ steps.scope.outputs.mobile_version }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check out the candidate
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -82,7 +83,9 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 3
+    # Checkout plus the passing static-contract workload now exceeds three
+    # minutes on a busy self-hosted runner; keep a small deterministic margin.
+    timeout-minutes: 5
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -90,6 +93,25 @@ jobs:
           fetch-depth: 0
       - name: Audit corrective-history evidence
         run: make history-check
+      # docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.1: the pull
+      # request's `Regression-Test:` lines, judged in the tree the merge will
+      # produce. The body and title are payload data on the `pull_request`
+      # event, read from the environment: no API call, no credential, and
+      # nothing interpolated into the script. This checkout is the branch
+      # head, not a merge candidate (the step prints both to keep that
+      # visible), so the module builds the candidate with `git merge-tree`.
+      # Advisory while validation/merge-errata.toml sets no boundary (phase
+      # A); the change that sets the boundary removes `continue-on-error` in
+      # the same diff, and tests/validation/test_regression_field.py refuses
+      # one without the other.
+      - name: Check the pull request's Regression-Test fields
+        continue-on-error: true
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 -m validation.regression_field
       - name: Check validation catalog and static contracts
         run: |
           make validation-lint
@@ -102,7 +124,10 @@ jobs:
       - name: Check the shared player input contract
         run: |
           node tests/playback/player-input-contract.test.js
+          node tests/playback/web-policy.test.js
+          node tests/playback/web-control.test.js
           node tests/web/player-dom.test.js
+          node tests/web/live-tv.test.js
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; compiler surfaces are skipped."
@@ -112,15 +137,34 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    timeout-minutes: 10
+    # The online generic runners currently carry ffmpeg 8. Ubuntu 24.04 is the
+    # pinned ffmpeg 6 environment used by this lane, while the host label keeps
+    # the job on the high-CPU pool.
+    container: ubuntu:24.04
+    timeout-minutes: 30
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Rust gate prerequisites
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get -o Acquire::Retries=3 update
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+            build-essential ca-certificates clang cmake curl git lld llvm \
+            make nasm ninja-build nodejs pkg-config python3
+      - name: Check out the candidate
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - name: Install the pinned Rust toolchain
+        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: rustfmt, clippy
-      - id: cargo-cache
+      - name: Install the pinned FFmpeg
+        uses: ./.github/actions/ffmpeg
+        with:
+          major: "6"
+      - name: Restore the main fast Rust cache
+        id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
           lane: main-fast-rust
@@ -128,6 +172,12 @@ jobs:
         run: |
           make effort-rust-check
           make hiqlite-vendor-clippy
+      - name: Lint the workspace
+        run: |
+          make lint
+      - name: Run the fast Rust unit and SQLite contract lane
+        run: |
+          make unit
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         continue-on-error: true
@@ -136,6 +186,11 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
   windows_compile:
     name: fast Windows compile
     needs: [scope, preflight]
@@ -315,3 +370,32 @@ jobs:
             "+refs/heads/$BASE_REF:refs/plurx/current-base"
           test "$(git rev-parse refs/plurx/current-head)" = "$EVENT_HEAD_SHA"
           test "$(git rev-parse refs/plurx/current-base)" = "$EVENT_BASE_SHA"
+      - name: Publish the qualified Rust lint badge
+        if: needs.rust_compile.result == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          scripts/publish-badge \
+            --branch badges-pr-lint \
+            --alias codex/badges-pr-lint \
+            --filename lint \
+            --label "PR lint" \
+            --message passing \
+            --fill '#4c1' \
+            --json-color brightgreen \
+            --label-width 46 \
+            --message-width 48
+      - name: Publish the qualified PR gate badge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          scripts/publish-badge \
+            --branch badges-pr-ci \
+            --alias codex/badges-pr-ci \
+            --filename ci \
+            --label "PR gate" \
+            --message passing \
+            --fill '#4c1' \
+            --json-color brightgreen \
+            --label-width 48 \
+            --message-width 48

@@ -465,6 +465,12 @@ function retryPlayback(){
 async function stallDiagnose(){
   const v=document.getElementById("video");
   const p=PLAYER;
+  // `armStall` and the VOD local fallback share the 20 s seek clock. If
+  // both timers mature together, only the seek fallback may reopen; this
+  // watchdog must not stop the attachment first.
+  const pending=p&&p.controlSeek;
+  if(pending?.localVodSeekFallbackPending&&pending.executed
+     &&!playbackSeekBufferCovers(v,p,pending.targetMs)) return;
   const hlsStartup=hlsStartupIncomplete(p);
   if(!playbackOwnsAttachedMedia(p) || (!hlsStartup&&p.started)) return;
   if(hlsStartup&&p.hlsStartup.state==='paused') return;

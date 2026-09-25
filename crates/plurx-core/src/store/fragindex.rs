@@ -20,6 +20,7 @@ use crate::error::StoreError;
 use crate::fmp4::CutClass;
 use crate::segplan::{
     FragmentIndex, FragmentIndexOutcome, IndexRefusal, IndexRow, SourceIdentity, SEGPLAN_VERSION,
+    VALIDATION_REVISION,
 };
 
 pub(crate) const FRAGMENT_INDEXES_SCHEMA: &str = "
@@ -50,6 +51,17 @@ CREATE TABLE fragment_indexes (
 pub(crate) const FRAGMENT_INDEXES_PROMOTION_COLUMNS: &str = "
 ALTER TABLE fragment_indexes ADD COLUMN promotion TEXT NOT NULL DEFAULT '';
 ALTER TABLE fragment_indexes ADD COLUMN parameter_sets_constant INTEGER NOT NULL DEFAULT 0;";
+
+/// Publication-time proof for metadata-only detail projections.
+///
+/// Kept as an append-only migration rather than folded into either historical
+/// create/re-key constant: fresh and upgraded databases must traverse the same
+/// schema history. Zero is legacy/unverified. A positive value means the row
+/// passed that revision; a negative value means a bounded backfill checked the
+/// row and refused it at that revision, which prevents one corrupt row from
+/// starving every later legacy row without ever claiming it is ready.
+pub(crate) const FRAGMENT_INDEXES_VALIDATION_COLUMN: &str = "
+ALTER TABLE fragment_indexes ADD COLUMN validated_revision INTEGER NOT NULL DEFAULT 0;";
 
 /// Re-key the table on `(file_id, argv_fingerprint)` — PLAYBACK-CAPS-V2-PLAN
 /// §4.7's M1 migration.
@@ -201,6 +213,11 @@ const MAX_IDENTITIES_PER_FILE: i64 = 12;
 /// cheapest possible integrity check on a blob that came off a disk.
 const ROW_BYTES: usize = 24;
 
+#[cfg(test)]
+pub(crate) fn validation_marker_matches(marker: i64, revision: u32) -> bool {
+    marker == i64::from(revision)
+}
+
 fn pack(rows: &[IndexRow]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rows.len() * ROW_BYTES);
     for row in rows {
@@ -286,6 +303,22 @@ pub(crate) fn put(
     index: &FragmentIndex,
     now_ms: i64,
 ) -> Result<(), StoreError> {
+    let packed = pack(&index.rows);
+    let promotion = serde_json::to_string(&index.promotion)
+        .map_err(|error| StoreError::Migration(error.to_string()))?;
+    // The metadata-only status projection may trust this marker and nothing
+    // else. Prove exactly the two facts it cannot cheaply derive: the packed
+    // bytes decode to the rows being published, and the promotion payload
+    // round-trips through the type `get` later expects.
+    let validated = !index.rows.is_empty()
+        && unpack(&packed)? == index.rows
+        && serde_json::from_str::<crate::fmp4::PromotionInputs>(&promotion)
+            .is_ok_and(|decoded| decoded == index.promotion);
+    let validated_revision = if validated {
+        i64::from(VALIDATION_REVISION)
+    } else {
+        0
+    };
     conn.execute(
         "DELETE FROM fragment_indexes
           WHERE file_id = ?1 AND (source_size <> ?2 OR source_mtime <> ?3)",
@@ -310,8 +343,8 @@ pub(crate) fn put(
         "INSERT INTO fragment_indexes (
              file_id, source_size, source_mtime, argv_fingerprint,
              segplan_version, timescale, init_sha256, fragments, rows_packed,
-             built_at_ms, promotion, parameter_sets_constant
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             built_at_ms, promotion, parameter_sets_constant, validated_revision
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(file_id, argv_fingerprint) DO UPDATE SET
              source_size = excluded.source_size,
              source_mtime = excluded.source_mtime,
@@ -323,7 +356,8 @@ pub(crate) fn put(
              rows_packed = excluded.rows_packed,
              built_at_ms = excluded.built_at_ms,
              promotion = excluded.promotion,
-             parameter_sets_constant = excluded.parameter_sets_constant",
+             parameter_sets_constant = excluded.parameter_sets_constant,
+             validated_revision = excluded.validated_revision",
         params![
             file_id,
             index.source.size as i64,
@@ -333,11 +367,11 @@ pub(crate) fn put(
             i64::from(index.timescale),
             index.init_sha256,
             index.rows.len() as i64,
-            pack(&index.rows),
+            packed,
             now_ms,
-            serde_json::to_string(&index.promotion)
-                .map_err(|error| StoreError::Migration(error.to_string()))?,
+            promotion,
             i64::from(index.parameter_sets_constant),
+            validated_revision,
         ],
     )?;
     conn.execute(
@@ -439,6 +473,73 @@ pub(crate) fn get(
     };
     index.parameter_sets_constant = constant != 0;
     Ok(Some(index))
+}
+
+/// Validate one bounded page of legacy rows without moving their packed bytes
+/// through the async Store boundary.
+///
+/// The whole page runs under the backend's existing node-local connection
+/// lease. A refused row receives the negative current revision: it remains
+/// untrusted to every projection, but it no longer sits at the front of every
+/// pass and starves sound rows behind it. A future revision sees both positive
+/// and negative older markers through the absolute-value predicate.
+pub(crate) fn validate_page(
+    conn: &Connection,
+    limit: u32,
+) -> Result<crate::store::FragmentIndexValidationBackfill, StoreError> {
+    let revision = i64::from(VALIDATION_REVISION);
+    let mut statement = conn.prepare(
+        "SELECT file_id, source_size, source_mtime, argv_fingerprint
+           FROM fragment_indexes
+          WHERE ABS(validated_revision) < ?1
+          ORDER BY file_id, argv_fingerprint
+          LIMIT ?2",
+    )?;
+    let candidates = statement
+        .query_map(params![revision, i64::from(limit)], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+
+    let mut report = crate::store::FragmentIndexValidationBackfill::default();
+    for (file_id, size, mtime, fingerprint) in candidates {
+        let identity = SourceIdentity::new(size.max(0) as u64, mtime, fingerprint.clone());
+        let marker = match get(conn, file_id, &identity) {
+            Ok(Some(_)) => {
+                report.validated = report.validated.saturating_add(1);
+                revision
+            }
+            Ok(None) | Err(StoreError::Migration(_)) => {
+                report.refused = report.refused.saturating_add(1);
+                -revision
+            }
+            Err(error) => return Err(error),
+        };
+        let changed = conn.execute(
+            "UPDATE fragment_indexes
+                SET validated_revision = ?3
+              WHERE file_id = ?1 AND argv_fingerprint = ?2
+                AND ABS(validated_revision) < ?4",
+            params![file_id, fingerprint, marker, revision],
+        )?;
+        if changed == 0 {
+            report.gone = report.gone.saturating_add(1);
+        }
+    }
+    let remaining: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM fragment_indexes
+          WHERE ABS(validated_revision) < ?1",
+        params![revision],
+        |row| row.get(0),
+    )?;
+    report.remaining = u64::try_from(remaining.max(0)).unwrap_or(u64::MAX);
+    Ok(report)
 }
 
 /// Record that this identity could not be indexed, and answer when it may be
@@ -717,6 +818,21 @@ pub(crate) fn vod_row_file_ids(conn: &Connection, limit: i64) -> Result<Vec<i64>
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// [`crate::store::FragmentIndexStore::holds_fragment_index_for_source`].
+pub(crate) fn holds_for_source(
+    conn: &Connection,
+    file_id: i64,
+    source_size: i64,
+    source_mtime: i64,
+) -> Result<bool, StoreError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM fragment_indexes
+                          WHERE file_id = ?1 AND source_size = ?2 AND source_mtime = ?3)",
+        params![file_id, source_size, source_mtime],
+        |row| row.get::<_, bool>(0),
+    )?)
+}
+
 pub(crate) fn forget(conn: &Connection, file_id: i64) -> Result<bool, StoreError> {
     let affected = conn.execute(
         "DELETE FROM fragment_indexes WHERE file_id = ?1",
@@ -772,6 +888,8 @@ mod tests {
             .expect("promotion columns");
         conn.execute_batch(FRAGMENT_INDEXES_IDENTITY_KEY)
             .expect("identity key");
+        conn.execute_batch(FRAGMENT_INDEXES_VALIDATION_COLUMN)
+            .expect("validation column");
         // Both real backends carry this beside the index table, and `put`
         // retracts a refusal through it — a fixture with only one of the pair
         // is a fixture no deployment matches.
@@ -806,6 +924,19 @@ mod tests {
         rows.collect::<rusqlite::Result<Vec<_>>>().expect("collect")
     }
 
+    /// Any pipeline's index for this exact source counts; another source or
+    /// another file does not.
+    #[test]
+    fn holds_for_source_answers_for_any_pipeline_of_that_source() {
+        let conn = conn();
+        assert!(!holds_for_source(&conn, 7, 4_096, 11).expect("empty"));
+        put(&conn, 7, &index_with("strip", 4_096, 11), 1).expect("put");
+        assert!(holds_for_source(&conn, 7, 4_096, 11).expect("held"));
+        assert!(!holds_for_source(&conn, 7, 4_097, 11).expect("another size"));
+        assert!(!holds_for_source(&conn, 7, 4_096, 12).expect("another mtime"));
+        assert!(!holds_for_source(&conn, 8, 4_096, 11).expect("another file"));
+    }
+
     #[test]
     fn an_index_round_trips_exactly() {
         let conn = conn();
@@ -815,6 +946,94 @@ mod tests {
             .expect("get")
             .expect("present");
         assert_eq!(read, stored);
+    }
+
+    fn validation_marker(conn: &Connection, file_id: i64, fingerprint: &str) -> i64 {
+        conn.query_row(
+            "SELECT validated_revision FROM fragment_indexes
+              WHERE file_id = ?1 AND argv_fingerprint = ?2",
+            params![file_id, fingerprint],
+            |row| row.get(0),
+        )
+        .expect("validation marker")
+    }
+
+    #[test]
+    fn put_marks_a_sound_row_validated() {
+        let conn = conn();
+        let stored = index();
+        put(&conn, 7, &stored, 1).expect("put");
+        assert_eq!(
+            validation_marker(&conn, 7, &stored.source.argv_fingerprint),
+            i64::from(VALIDATION_REVISION)
+        );
+    }
+
+    #[test]
+    fn an_empty_row_set_is_never_marked() {
+        let conn = conn();
+        let empty = FragmentIndex::new(
+            16_000,
+            Vec::new(),
+            "abc123",
+            SourceIdentity::new(4_096, 1_700_000_000_000, "empty"),
+        );
+        put(&conn, 7, &empty, 1).expect("put empty");
+        assert_eq!(validation_marker(&conn, 7, "empty"), 0);
+    }
+
+    #[test]
+    fn a_revision_bump_unmarks_without_deleting() {
+        let conn = conn();
+        let stored = index();
+        put(&conn, 7, &stored, 1).expect("put");
+        let marker = validation_marker(&conn, 7, &stored.source.argv_fingerprint);
+        assert!(validation_marker_matches(marker, VALIDATION_REVISION));
+        assert!(!validation_marker_matches(marker, VALIDATION_REVISION + 1));
+        assert_eq!(fingerprints(&conn, 7), vec!["fingerprint"]);
+    }
+
+    #[test]
+    fn backfill_marks_a_legacy_row_and_is_idempotent() {
+        let conn = conn();
+        let stored = index();
+        put(&conn, 7, &stored, 1).expect("put");
+        conn.execute("UPDATE fragment_indexes SET validated_revision = 0", [])
+            .expect("make legacy");
+
+        let first = validate_page(&conn, 64).expect("first backfill");
+        assert_eq!(first.validated, 1);
+        assert_eq!(first.refused, 0);
+        assert_eq!(first.remaining, 0);
+        assert_eq!(
+            validation_marker(&conn, 7, &stored.source.argv_fingerprint),
+            i64::from(VALIDATION_REVISION)
+        );
+
+        assert_eq!(
+            validate_page(&conn, 64).expect("idempotent backfill"),
+            crate::store::FragmentIndexValidationBackfill::default()
+        );
+    }
+
+    #[test]
+    fn backfill_refuses_an_unparsable_promotion_without_deleting() {
+        let conn = conn();
+        let stored = index();
+        put(&conn, 7, &stored, 1).expect("put");
+        conn.execute(
+            "UPDATE fragment_indexes
+                SET promotion = '{', validated_revision = 0
+              WHERE file_id = 7",
+            [],
+        )
+        .expect("corrupt legacy promotion");
+
+        let report = validate_page(&conn, 64).expect("backfill");
+        assert_eq!(report.refused, 1);
+        assert_eq!(report.remaining, 0);
+        assert_eq!(validation_marker(&conn, 7, "fingerprint"), -1);
+        assert_eq!(fingerprints(&conn, 7), vec!["fingerprint"]);
     }
 
     #[test]

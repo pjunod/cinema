@@ -537,9 +537,15 @@ pub(crate) async fn discard_local_blob(
     if let Some(path) = cache_path(root, cache_key) {
         let _ = tokio::fs::remove_file(path).await;
     }
-    let _ = store
-        .forget_cluster_fragment_index_location(cache_key, node_id)
-        .await;
+    // Best-effort: the absent local blob already makes this location
+    // unverifiable, and later reconciliation removes a stale row.
+    crate::store_result::observe(
+        crate::store_result::Operation::ForgetIndexAfterLocalRemoval,
+        crate::store_result::Discard::BestEffort,
+        store
+            .forget_cluster_fragment_index_location(cache_key, node_id)
+            .await,
+    );
 }
 
 pub(crate) async fn install_local_blob(
@@ -792,6 +798,53 @@ fn windows_object_version(file: &std::fs::File) -> Result<String, String> {
     ))
 }
 
+/// A source's identity as the subtitle-source store keys it: size and mtime
+/// for every consumer, and `(dev, ino)` for the burn path.
+///
+/// Deliberately not [`SourceFence::object_version`], which also carries ctime.
+/// A hardlink or `chmod` from an importer moves ctime without touching a
+/// byte, and a store keyed on it would miss on that file for good while
+/// nothing ever re-rode the pass that fills it. `(dev, ino)` is what rejects a
+/// file replaced in place with a new inode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SourceStamp {
+    pub(crate) size: u64,
+    /// Whole seconds, as the scanner records `files.mtime`.
+    pub(crate) mtime: i64,
+    #[serde(default)]
+    pub(crate) dev: Option<u64>,
+    #[serde(default)]
+    pub(crate) ino: Option<u64>,
+}
+
+#[cfg(unix)]
+pub(crate) fn source_stamp(metadata: &std::fs::Metadata) -> SourceStamp {
+    use std::os::unix::fs::MetadataExt;
+    SourceStamp {
+        size: metadata.size(),
+        mtime: metadata.mtime(),
+        dev: Some(metadata.dev()),
+        ino: Some(metadata.ino()),
+    }
+}
+
+/// The Windows port has no `(dev, ino)` in `std::fs::Metadata`, so the store
+/// falls back to size + mtime there, the overlay's rule.
+#[cfg(not(unix))]
+pub(crate) fn source_stamp(metadata: &std::fs::Metadata) -> SourceStamp {
+    SourceStamp {
+        size: metadata.len(),
+        mtime: metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+            .unwrap_or(0),
+        dev: None,
+        ino: None,
+    }
+}
+
 pub(crate) fn pipeline_digest(
     file: &MediaFile,
     engine_sha256: &str,
@@ -853,9 +906,15 @@ pub(crate) async fn hydrate(
             if let Some(path) = cache_path(root, &artifact.cache_key) {
                 let _ = tokio::fs::remove_file(path).await;
             }
-            let _ = store
-                .forget_cluster_fragment_index_location(&artifact.cache_key, node_id)
-                .await;
+            // Best-effort: deleting the corrupt blob already prevents reuse;
+            // reconciliation can retire the stale catalogue location.
+            crate::store_result::observe(
+                crate::store_result::Operation::ForgetCorruptLocalIndex,
+                crate::store_result::Discard::BestEffort,
+                store
+                    .forget_cluster_fragment_index_location(&artifact.cache_key, node_id)
+                    .await,
+            );
         }
     }
     let Some(membership) = membership else {
@@ -897,18 +956,30 @@ pub(crate) async fn hydrate(
             .await;
         let Ok(response) = response else { continue };
         if response.status == reqwest::StatusCode::NOT_FOUND {
-            let _ = store
-                .forget_cluster_fragment_index_location(&artifact.cache_key, &location.node_id)
-                .await;
+            // Best-effort: this peer has already been excluded from the
+            // current hydration attempt; later repair retries stale cleanup.
+            crate::store_result::observe(
+                crate::store_result::Operation::ForgetMissingPeerIndex,
+                crate::store_result::Discard::BestEffort,
+                store
+                    .forget_cluster_fragment_index_location(&artifact.cache_key, &location.node_id)
+                    .await,
+            );
             continue;
         }
         if !response.status.is_success() {
             continue;
         }
         if validate_blob(&response.body, artifact).is_err() {
-            let _ = store
-                .forget_cluster_fragment_index_location(&artifact.cache_key, &location.node_id)
-                .await;
+            // Best-effort: the invalid blob is never installed, and future
+            // reconciliation can remove this peer's stale location row.
+            crate::store_result::observe(
+                crate::store_result::Operation::ForgetCorruptPeerIndex,
+                crate::store_result::Discard::BestEffort,
+                store
+                    .forget_cluster_fragment_index_location(&artifact.cache_key, &location.node_id)
+                    .await,
+            );
             continue;
         }
         install_local_blob(root, artifact, &response.body).await?;
@@ -1104,6 +1175,7 @@ mod tests {
             .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
             .unwrap_or(0);
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 41,
             item_id: 7,
             path,
@@ -1113,12 +1185,17 @@ mod tests {
             container: Some("mkv".to_owned()),
             video_codec: Some("hevc".to_owned()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main 10".to_owned()),
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(10),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             dolby_vision: plurx_core::domain::DolbyVisionFacts::default(),
             bitrate: None,
             audio_streams: vec![],

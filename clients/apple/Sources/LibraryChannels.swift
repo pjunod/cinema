@@ -305,6 +305,12 @@ struct DeveloperReadiness: Codable {
 final class LibraryChannelPlayerController: ObservableObject {
     static let shared = LibraryChannelPlayerController()
 
+    static func testingAttached(to channel: LibraryChannel) -> LibraryChannelPlayerController {
+        let controller = LibraryChannelPlayerController()
+        controller.watching = channel
+        return controller
+    }
+
     @Published private(set) var channels: [LibraryChannel] = []
     @Published private(set) var programmes: [LibraryChannelProgramme] = []
     @Published private(set) var watching: LibraryChannel?
@@ -313,6 +319,7 @@ final class LibraryChannelPlayerController: ObservableObject {
     @Published private(set) var message = "Choose a channel to join its schedule."
     @Published private(set) var busy = false
     @Published private(set) var paused = false
+    @Published private(set) var systemPaused = false
     @Published private(set) var playbackError: String?
 
     let player = AVPlayer()
@@ -326,9 +333,10 @@ final class LibraryChannelPlayerController: ObservableObject {
     private var clockRefresh: Task<Void, Never>?
     private var serverBaseMs: Int64 = 0
     private var monotonicBaseMs: Int64 = 0
-    private var endObserver: NSObjectProtocol?
-    private var failedObserver: NSObjectProtocol?
-    private var itemStatusObservation: NSKeyValueObservation?
+    private var itemObserver: AVPlayerItemObserver?
+    private var itemEventTask: Task<Void, Never>?
+    private let remoteCommands = LiveRemoteCommands()
+    private let audioSessionObserver = PlaybackAudioSessionObserver()
     private var progressObserver: Any?
     private let playbackControl = PlaybackControlSession()
     private var mediaOriginMs: Int64 = 0
@@ -336,8 +344,6 @@ final class LibraryChannelPlayerController: ObservableObject {
 
     deinit {
         if let progressObserver { player.removeTimeObserver(progressObserver) }
-        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
-        if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
     }
 
     func load(model: AppModel) async {
@@ -422,11 +428,31 @@ final class LibraryChannelPlayerController: ObservableObject {
             }
             let item = AVPlayerItem(url: playlistURL)
             item.preferredForwardBufferDuration = 60
+            #if os(iOS)
+            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+            try? AVAudioSession.sharedInstance().setActive(true)
+            #endif
+            startAudioSessionObservation()
             player.replaceCurrentItem(with: item)
-            observeEnd(item, channel: channel, sequence: expected)
-            observeFailure(item, sequence: expected)
+            observeItem(item, channel: channel, sequence: expected)
             observeProgress(item, sequence: expected)
             player.play()
+            remoteCommands.start(
+                title: title ?? channel.name,
+                playing: true,
+                play: { [weak self] in
+                    guard let self, self.paused else { return }
+                    Task { await self.togglePause() }
+                },
+                pause: { [weak self] in
+                    guard let self, !self.paused else { return }
+                    Task { await self.togglePause() }
+                },
+                toggle: { [weak self] in
+                    guard let self else { return }
+                    Task { await self.togglePause() }
+                }
+            )
             mediaOriginMs = Int64(started.playback.mediaOriginMs ?? Int(occurrence.positionMs))
             mediaDurationMs = started.playback.durationMs ?? 0
             if let bootstrap = started.playback.control, bootstrap.isValid {
@@ -505,22 +531,25 @@ final class LibraryChannelPlayerController: ObservableObject {
             message = "Paused. Resume rejoins server-now if the programme changes."
         }
         playbackControl.playerChanged()
+        remoteCommands.update(title: title ?? channel.name, playing: !paused && !systemPaused)
     }
 
     func stop() async {
+        remoteCommands.stop()
         tuneSequence &+= 1
         boundary?.cancel()
         boundary = nil
         clockRefresh?.cancel()
         clockRefresh = nil
-        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
-        endObserver = nil
-        if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
-        failedObserver = nil
-        itemStatusObservation = nil
+        itemObserver?.cancel()
+        itemObserver = nil
+        itemEventTask?.cancel()
+        itemEventTask = nil
         if let progressObserver { player.removeTimeObserver(progressObserver) }
         progressObserver = nil
         playbackError = nil
+        audioSessionObserver.stop()
+        systemPaused = false
         player.pause()
         playbackControl.end()
         player.replaceCurrentItem(with: nil)
@@ -533,6 +562,50 @@ final class LibraryChannelPlayerController: ObservableObject {
         busy = false
         mediaOriginMs = 0
         mediaDurationMs = 0
+        #if os(iOS)
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
+        #endif
+    }
+
+    private func startAudioSessionObservation() {
+        audioSessionObserver.start(
+            wantsPlayback: { [weak self] in self?.paused == false && self?.watching != nil },
+            receive: { [weak self] event in self?.handleAudioSessionEvent(event) }
+        )
+    }
+
+    func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {
+        switch event {
+        case .interruption(.suspend):
+            systemPaused = true
+            player.pause()
+            message = "Paused — audio interrupted"
+        case .interruption(.resume):
+            systemPaused = false
+            if !paused, watching != nil {
+                player.play()
+                message = "Following live · seeking and watch history are off"
+            }
+        case .interruption(.stay):
+            let wasSystemPaused = systemPaused
+            systemPaused = false
+            if wasSystemPaused && watching != nil {
+                paused = true
+                player.pause()
+                message = "Paused — press Play to resume"
+                playbackControl.playerChanged()
+            }
+        case .routeChange(let revokesIntent):
+            guard revokesIntent else { return }
+            systemPaused = false
+            paused = true
+            player.pause()
+            message = "Paused — audio route disconnected"
+            playbackControl.playerChanged()
+        }
     }
 
     func setFavourite(_ channel: LibraryChannel) async {
@@ -592,20 +665,33 @@ final class LibraryChannelPlayerController: ObservableObject {
         }
     }
 
-    private func observeEnd(_ item: AVPlayerItem, channel: LibraryChannel, sequence: UInt64) {
-        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
-        endObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
-            object: item,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.tuneSequence == sequence, !self.paused else { return }
-                self.playbackControl.playerChanged()
-                if let resolved = self.resolved, resolved.endsAtMs > self.serverNowMs() {
-                    self.message = "This programme ended early. Waiting for its scheduled boundary."
-                } else {
-                    await self.tune(channel)
+    private func observeItem(_ item: AVPlayerItem, channel: LibraryChannel, sequence: UInt64) {
+        itemObserver?.cancel()
+        itemEventTask?.cancel()
+        let observer = AVPlayerItemObserver(item: item, player: player)
+        itemObserver = observer
+        itemEventTask = Task { @MainActor [weak self, weak observer] in
+            guard let observer else { return }
+            for await event in observer.events {
+                guard let self, self.tuneSequence == sequence,
+                      self.itemObserver === observer, self.player.currentItem === item
+                else { return }
+                switch event {
+                case .playedToEnd:
+                    guard !self.paused else { continue }
+                    self.playbackControl.playerChanged()
+                    if let resolved = self.resolved, resolved.endsAtMs > self.serverNowMs() {
+                        self.message = "This programme ended early. Waiting for its scheduled boundary."
+                    } else {
+                        await self.tune(channel)
+                    }
+                case .status(.failed):
+                    self.handleItemFailure(item, sequence: sequence)
+                case .failedToPlayToEnd(let error):
+                    self.handleItemFailure(item, sequence: sequence, notificationError: error)
+                case .playbackStalled, .newErrorLogEntry, .timeControl,
+                     .interruption, .routeLost, .status:
+                    break
                 }
             }
         }
@@ -627,34 +713,29 @@ final class LibraryChannelPlayerController: ObservableObject {
     /// progress or the server keeps budgeting production from the join point.
     func makeProgressObservation(
         _ item: AVPlayerItem, sequence: UInt64, notify: @escaping @MainActor () -> Void
-    ) -> @MainActor () -> Void {
+    ) -> @MainActor @Sendable () -> Void {
         { [weak self] in
             guard let self, self.tuneSequence == sequence, self.player.currentItem === item else { return }
             notify()
         }
     }
 
-    func observeFailure(_ item: AVPlayerItem, sequence: UInt64) {
-        itemStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
-            guard item.status == .failed else { return }
-            Task { @MainActor in self?.handleItemFailure(item, sequence: sequence) }
-        }
-        if let failedObserver { NotificationCenter.default.removeObserver(failedObserver) }
-        failedObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
-        ) { [weak self] notification in
-            let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError
-            Task { @MainActor in self?.handleItemFailure(item, sequence: sequence, notificationError: error) }
-        }
-    }
-
     func handleItemFailure(_ item: AVPlayerItem, sequence: UInt64, notificationError: NSError? = nil) {
         guard sequence == tuneSequence, player.currentItem === item else { return }
-        let error = notificationError ?? (item.error as NSError?)
-        let event = item.errorLog()?.events.last
-        if playbackError == nil || error != nil || event != nil {
-            playbackError = Self.playbackFailureDescription(error, eventDomain: event?.errorDomain,
-                                                            eventStatus: event?.errorStatusCode)
+        let itemError = item.error as NSError?
+        let error = notificationError ?? itemError
+        let failedURI = (error?.userInfo[NSURLErrorFailingURLStringErrorKey] as? String)
+            ?? (item.asset as? AVURLAsset)?.url.absoluteString
+        let detail = PlayerItemFailure.classify(
+            fatal: notificationError,
+            item: itemError,
+            log: item.errorLog()?.events.map(PlayerItemFailure.LogEntry.init) ?? [],
+            failedURI: failedURI
+        )
+        if playbackError == nil || detail != nil {
+            playbackError = Self.playbackFailureDescription(
+                detail?.error, eventDomain: detail?.eventDomain, eventStatus: detail?.eventStatus
+            )
         }
         busy = false
         boundary?.cancel()
@@ -692,7 +773,7 @@ final class LibraryChannelPlayerController: ObservableObject {
             rate: Double(player.rate),
             // A decoder waiting for bytes has zero rate too. Reporting that
             // as Hold stops the producer whose next segment would unblock it.
-            isPaused: paused,
+            isPaused: paused || systemPaused,
             isEnded: item.status == .failed || (resolved?.endsAtMs ?? Int64.max) <= serverNowMs(),
             isSeeking: false,
             hasStarted: player.timeControlStatus == .playing,

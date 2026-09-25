@@ -1,7 +1,7 @@
 //! Shared application state and the background job manager.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29,7 +29,7 @@ use plurx_core::store::{
     ArtworkRepairFence, CatalogueReader, ClusterFragmentIndexArtifact,
     ClusterFragmentIndexLocation, DvConversionMode, DvConversionQueueBatch, DvConversionState,
     DvRecoveryGuardState, NewAnalysisRequest, NewClusterFragmentIndexJob, PrometheusStoreSnapshot,
-    PublicationStore, QueueDvConversionOutcome, SeriesHintOutcome, Store,
+    PublicationStore, QueueDvConversionOutcome, SeriesHintOutcome, Store, SubtitleSourceStamp,
     DV_CONVERSION_QUEUE_BATCH_MAX,
 };
 use plurx_core::transcode::EncoderCaps;
@@ -44,6 +44,25 @@ use crate::offline::OfflineManager;
 use crate::schedule::{due_jobs, DueJob, GlobalSchedule};
 use crate::trakt::TraktManager;
 use crate::transcode::{PretranscodeFence, PretranscodeProduceOutcome, TranscodeManager};
+
+const FRAGMENT_INDEX_VALIDATION_PAGE: u32 = 64;
+const FRAGMENT_INDEX_VALIDATION_INTERVAL: Duration = Duration::from_secs(30);
+static FRAGMENT_INDEX_VALIDATED: AtomicU64 = AtomicU64::new(0);
+static FRAGMENT_INDEX_REFUSED: AtomicU64 = AtomicU64::new(0);
+static FRAGMENT_INDEX_GONE: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn fragment_index_validation_prometheus() -> String {
+    format!(
+        "# HELP plurx_index_validation_backfill_total Legacy fragment-index validation attempts by result.\n\
+         # TYPE plurx_index_validation_backfill_total counter\n\
+         plurx_index_validation_backfill_total{{result=\"validated\"}} {}\n\
+         plurx_index_validation_backfill_total{{result=\"refused\"}} {}\n\
+         plurx_index_validation_backfill_total{{result=\"gone\"}} {}\n",
+        FRAGMENT_INDEX_VALIDATED.load(Ordering::Relaxed),
+        FRAGMENT_INDEX_REFUSED.load(Ordering::Relaxed),
+        FRAGMENT_INDEX_GONE.load(Ordering::Relaxed),
+    )
+}
 
 /// Environment facts collected once at startup, shown on the settings page.
 /// Everything here is admin-facing diagnostics — paths, tool versions,
@@ -127,6 +146,14 @@ pub struct SystemInfo {
     /// this exact record, so a missing binary is named before any media work
     /// starts instead of after a 60–80 GB extraction.
     pub dv_disk: crate::dv_disk::DvDiskCapabilities,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SubtitleBackfillStatus {
+    pub(crate) lease_holder: Option<String>,
+    pub(crate) enqueued_process: u64,
+    pub(crate) remaining_files: i64,
+    pub(crate) remaining_bytes: i64,
 }
 
 /// The daemon's managed directories across the configured storage roots.
@@ -618,6 +645,19 @@ pub struct AppState {
     /// Ordinary authentication populates it; cache-only routes never reach
     /// Store on a miss.
     pub(crate) cache_only_admin_proofs: crate::http::CacheOnlyAdminProofCache,
+    /// Process-local, bounded failed-login history. It never enters the Store,
+    /// so a hostile request cannot turn authentication pressure into Raft
+    /// writes or a replicated account lockout.
+    pub(crate) login_throttle: crate::http::LoginThrottle,
+    /// Argon2 admission (workers and queue). Per state, like the throttle:
+    /// one per process in production, one per router in tests (see
+    /// `http::PasswordCapacity`).
+    pub(crate) password_capacity: crate::http::PasswordCapacity,
+    /// C-07's façade census. Per state rather than process-global so each
+    /// router counts only its own requests (see `http::PlexCensus`).
+    pub(crate) plex_census: Arc<crate::http::PlexCensus>,
+    /// Node-local network boundary for security-sensitive forwarding headers.
+    pub(crate) trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
     pub catalogue: CatalogueReader,
     /// Read-only projection of the selected backend's watch-state convergence.
@@ -642,6 +682,11 @@ pub struct AppState {
     pub(crate) media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
     /// Always-compiled HDHomeRun configuration, readiness, and lineup owner.
     pub(crate) live_tv: Arc<crate::live_tv::LiveTvManager>,
+    /// One HTTP client for every Live TV ingress-to-owner exchange, plus a
+    /// five-second memory of the owner's address. Signing, expected-node
+    /// binding and response verification stay per request inside the
+    /// transport; nothing about a credential is held here.
+    pub(crate) live_tv_peers: Arc<crate::http::live_tv::LiveTvPeers>,
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
@@ -667,6 +712,7 @@ pub struct AppState {
     /// fingerprint — see `http::stream::subtitles_vtt`.
     pub subs_dir: PathBuf,
     pub jobs: Arc<JobManager>,
+    pub(crate) backup: Arc<crate::backup::BackupManager>,
     pub transcode: Arc<TranscodeManager>,
     pub offline: Arc<OfflineManager>,
     /// Short-lived, revision-bound EPUB resource capabilities. Publication
@@ -717,6 +763,13 @@ pub struct AppState {
     #[cfg(test)]
     pub(crate) cache_revocation_test_barrier: Option<Arc<tokio::sync::Barrier>>,
     pub started_at: Instant,
+}
+
+fn stored_luminance(probe_json: &str) -> plurx_core::domain::ProbeResult {
+    serde_json::from_str::<serde_json::Value>(probe_json)
+        .ok()
+        .map(|document| plurx_core::scan::probe::parse_probe_json(&document))
+        .unwrap_or_default()
 }
 
 impl AppState {
@@ -773,6 +826,32 @@ impl AppState {
         )
     }
 
+    /// The subtitle-source store as a consumer on this node sees it. Nothing
+    /// is read here: `subtitles.stored_sources` is read by a lookup, and only
+    /// once one is going to consult the store, so a manifest poll for a warm
+    /// overlay generation pays nothing for it.
+    pub(crate) fn subtitle_source_access(&self) -> crate::subtitle_source::StoreAccess {
+        crate::subtitle_source::StoreAccess::from_setting(
+            Arc::clone(&self.store),
+            &self.runtime_cache_dir,
+        )
+        .on_node(Some(&self.node_id))
+        .with_membership(self.membership.clone())
+        .with_jobs(Arc::clone(&self.jobs))
+    }
+
+    pub(crate) async fn subtitle_backfill_status(
+        &self,
+    ) -> Result<SubtitleBackfillStatus, StoreError> {
+        let diagnostics = self.store.subtitle_backfill_diagnostics(clock_ms()).await?;
+        Ok(SubtitleBackfillStatus {
+            lease_holder: diagnostics.lease_holder,
+            enqueued_process: self.jobs.subtitle_backfill_enqueued_process(),
+            remaining_files: diagnostics.remaining_files,
+            remaining_bytes: diagnostics.remaining_bytes,
+        })
+    }
+
     /// `node_id` is this server's stable id — the `node_id` a cache location
     /// is recorded against, so a cluster can tell whose copy is whose.
     #[cfg(test)]
@@ -791,6 +870,7 @@ impl AppState {
                 server_name,
                 node_id,
                 cluster_advertisement: false,
+                trusted_proxies: Vec::new(),
                 scan_prune_percent: plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
                 // Process-lifetime key. Production resolves one from disk in
                 // `open_store`; this constructor is for callers that have no
@@ -804,6 +884,9 @@ impl AppState {
                 shared_cache_id: String::new(),
                 catalogue,
                 snapshot_recovery_budgets: SnapshotRecoveryBudgets::default(),
+                data_dir: PathBuf::new(),
+                credential_key_path: PathBuf::new(),
+                backup_client: None,
             },
             store,
             dirs,
@@ -828,6 +911,7 @@ impl AppState {
             server_name,
             node_id,
             cluster_advertisement,
+            trusted_proxies,
             scan_prune_percent,
             credential_key,
             replication,
@@ -837,6 +921,9 @@ impl AppState {
             shared_cache_id,
             catalogue,
             snapshot_recovery_budgets,
+            data_dir,
+            credential_key_path,
+            backup_client,
         } = config;
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
@@ -861,6 +948,17 @@ impl AppState {
             )
             .with_dv_disk_capabilities(system.dv_disk.clone())
             .with_membership(membership.clone()),
+        );
+        let backup = crate::backup::BackupManager::new(
+            Arc::clone(&store),
+            Arc::clone(&jobs),
+            backup_client,
+            data_dir,
+            credential_key_path,
+            node_id.clone(),
+            credential_key.id().to_owned(),
+            Duration::from_secs(snapshot_recovery_budgets.transfer_secs)
+                .saturating_add(Duration::from_secs(45)),
         );
         let coming_soon = crate::http::ComingSoonCache::new();
         let watched = crate::watched::WatchedNotifier::new(Arc::clone(&store));
@@ -906,6 +1004,7 @@ impl AppState {
                 node_id.clone(),
                 Some(membership.clone()),
             )
+            .with_subtitle_jobs(Arc::clone(&jobs))
             .with_serving_authority(serving.authority())
             .with_shared_cache(Arc::clone(&shared_cache)),
         );
@@ -932,6 +1031,7 @@ impl AppState {
         );
         let cache_only_admin_proofs =
             crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
+        let live_tv_peers = crate::http::live_tv::LiveTvPeers::new(membership.clone());
         let live_tv = crate::live_tv::LiveTvManager::new(
             Arc::clone(&store),
             Arc::clone(&system),
@@ -944,6 +1044,10 @@ impl AppState {
         AppState {
             store,
             cache_only_admin_proofs,
+            login_throttle: Default::default(),
+            password_capacity: Default::default(),
+            plex_census: Default::default(),
+            trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
             replication,
             peer_activity: crate::http::internal_activity::PeerActivityClient::new(
@@ -956,6 +1060,7 @@ impl AppState {
             media_pool,
             media_sessions,
             live_tv,
+            live_tv_peers,
             server_name,
             node_id,
             cluster_advertisement,
@@ -967,6 +1072,7 @@ impl AppState {
             shared_cache,
             subs_dir,
             jobs,
+            backup,
             transcode,
             offline,
             publications: crate::http::publication::PublicationSessions::new(),
@@ -1106,6 +1212,7 @@ pub struct AppConfig {
     pub server_name: String,
     pub node_id: String,
     pub cluster_advertisement: bool,
+    pub trusted_proxies: Vec<ipnet::IpNet>,
     pub scan_prune_percent: u8,
     /// Node-local key for durable credentials plurx replays rather than
     /// verifies. Resolved by `open_store` so a boot that cannot open the
@@ -1119,6 +1226,9 @@ pub struct AppConfig {
     pub shared_cache_id: String,
     pub catalogue: CatalogueReader,
     pub snapshot_recovery_budgets: SnapshotRecoveryBudgets,
+    pub data_dir: PathBuf,
+    pub credential_key_path: PathBuf,
+    pub backup_client: Option<hiqlite::Client>,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.
@@ -1324,6 +1434,10 @@ pub struct JobManager {
     analysis_progress: std::sync::Mutex<HashMap<(String, String), AnalysisProgress>>,
     analysis_progress_epoch: AtomicU64,
     analysis_metrics: Arc<AnalysisRuntimeMetrics>,
+    /// Every progress row as it stood when its pass ended, so a test can see
+    /// what a real pass wrote onto the row it no longer has.
+    #[cfg(test)]
+    finished_analysis_rows: std::sync::Mutex<Vec<AnalysisProgress>>,
     /// Which title the pass is on, for the activity feed.
     ///
     /// The flag above answers "may another pass start"; this answers "what is
@@ -1349,6 +1463,11 @@ pub struct JobManager {
     /// Stable local cursor for the content-addressed index cache. Without a
     /// cursor each bounded pass would revisit the same legitimate head page.
     fragment_index_sweep_cursor: Mutex<Option<String>>,
+    /// The subtitle-source store's own sweep cursor: `f<id>` of the last
+    /// directory examined, or empty once a walk has wrapped.
+    subtitle_source_sweep_cursor: Mutex<Option<String>>,
+    /// Process-local discovery count shown in the Developer backfill item.
+    subtitle_backfill_enqueued_process: AtomicU64,
     /// A genre-backfill pass is running. Same reasoning as `producing`: the
     /// question is "may another one start", not "wait for this one" — two
     /// passes would read the same cursor, fetch the same titles and double
@@ -1396,6 +1515,17 @@ pub struct AnalysisProgress {
     pub media_ms_examined: i64,
     pub total_media_ms: i64,
     pub fragments_indexed: usize,
+    /// PGS tracks the pass is also keeping for the subtitle-source store;
+    /// zero when it is not riding along. Defaulted for a peer that predates
+    /// the field.
+    #[serde(default)]
+    pub pgs_tracks: usize,
+    /// Text tracks (including styled text) this subtitle-source pass maps.
+    #[serde(default)]
+    pub text_tracks: usize,
+    /// Bytes the ride-along has written so far.
+    #[serde(default)]
+    pub pgs_bytes_written: u64,
     pub started_at_ms: i64,
     pub updated_at_ms: i64,
     pub elapsed_ms: i64,
@@ -1421,6 +1551,9 @@ impl AnalysisProgress {
             media_ms_examined: 1,
             total_media_ms: 2,
             fragments_indexed: 1,
+            pgs_tracks: 0,
+            text_tracks: 0,
+            pgs_bytes_written: 0,
             started_at_ms: 1,
             updated_at_ms: 1,
             elapsed_ms: 1,
@@ -1431,9 +1564,10 @@ impl AnalysisProgress {
     }
 }
 
-const ANALYSIS_STAGES: [&str; 6] = [
+const ANALYSIS_STAGES: [&str; 7] = [
     "probing",
     "fragment_index",
+    "subtitle_source",
     "fingerprints",
     "marker_correlation",
     "persisting",
@@ -1767,6 +1901,17 @@ const INDEX_FILE_BUDGET_FLOOR_SECS: u64 = 90;
 const INDEX_FILE_BUDGET_CEILING_SECS: u64 = 30 * 60;
 const INDEX_EXPECTED_MIN_SPEED: u64 = 8;
 const INDEX_FILE_HEADROOM_SECS: u64 = 30;
+
+/// The progress-row key of a local (non-queue) index pass: the file and the
+/// pipeline's argv fingerprint, so a file's identities get a row each, and a
+/// prefix no queue cache key (a hex digest) can take.
+fn local_index_job_id(file_id: i64, identity: &plurx_core::segplan::SourceIdentity) -> String {
+    let fingerprint = identity
+        .argv_fingerprint
+        .get(..12)
+        .unwrap_or(&identity.argv_fingerprint);
+    format!("local-index:{file_id}:{fingerprint}")
+}
 
 fn index_file_budget(duration_ms: Option<i64>) -> Duration {
     let film_secs = duration_ms
@@ -2503,6 +2648,176 @@ pub(crate) fn clock_ms() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+pub(crate) async fn subtitle_source_pipeline_version() -> String {
+    format!(
+        "subtitle-source:{}:{}",
+        crate::subtitle_source::MANIFEST_VERSION,
+        crate::ffmpeg::fragment_index_engine_digest().await
+    )
+}
+
+fn subtitle_source_argv(
+    input: &str,
+    plan: &crate::subtitle_ride_along::RideAlongPlan,
+) -> Vec<String> {
+    let mut args = vec![
+        "-hide_banner".to_owned(),
+        "-loglevel".to_owned(),
+        "error".to_owned(),
+        "-copyts".to_owned(),
+        "-i".to_owned(),
+        input.to_owned(),
+    ];
+    args.extend(plan.args());
+    args
+}
+
+fn subtitle_source_covered(
+    tracks: &[crate::subtitle_ride_along::ProbedTrack],
+    rows: &[plurx_core::store::SubtitleSourcePublication],
+) -> bool {
+    tracks
+        .iter()
+        .all(|track| crate::subtitle_source::extracted_ordinal_covered(rows, track.ordinal))
+}
+
+/// The subtitle worker has no index pipe: the tee's null slave is its sole
+/// stdout destination. A job-owned child and a separate stderr reader ensure
+/// even a noisy decoder cannot deadlock a lease holder.
+async fn run_subtitle_source_pass(
+    plan: crate::subtitle_ride_along::RideAlongPlan,
+    source: &std::fs::File,
+    runtime_cache: &Path,
+    lost: &CancellationToken,
+    preempt_when_busy: Option<&TranscodeManager>,
+    progress: &(dyn Fn() + Sync),
+) -> Result<crate::subtitle_ride_along::PendingRideAlong, AnalysisResolutionError> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+
+    if preempt_when_busy.is_some_and(|manager| !manager.pretranscode_worker_idle()) {
+        return Err(AnalysisResolutionError::Retry {
+            code: "foreground_preempted",
+            charge_attempt: false,
+        });
+    }
+
+    #[cfg(unix)]
+    let input = "/dev/fd/3".to_owned();
+    #[cfg(windows)]
+    let input = crate::ffmpeg::windows_source_path(source)
+        .map_err(|_| AnalysisResolutionError::Terminal("source_unavailable"))?
+        .to_string_lossy()
+        .into_owned();
+    let args = subtitle_source_argv(&input, &plan);
+    let mut command = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+    crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let source_fd = source.as_raw_fd();
+        unsafe {
+            command.pre_exec(move || {
+                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
+                if duplicate == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(duplicate, 3) == -1 {
+                    libc::close(duplicate);
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(duplicate);
+                let flags = libc::fcntl(3, libc::F_GETFD);
+                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    crate::ffmpeg::verify_windows_source_path(source, Path::new(&input))
+        .map_err(|_| AnalysisResolutionError::Terminal("source_unavailable"))?;
+    command
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let (mut child, _child_job) =
+        crate::process_control::spawn_job_owned(&mut command).map_err(|_| {
+            AnalysisResolutionError::Retry {
+                code: "source_process_failed",
+                charge_attempt: true,
+            }
+        })?;
+    let mut stderr = child.stderr.take().ok_or(AnalysisResolutionError::Retry {
+        code: "source_process_failed",
+        charge_attempt: true,
+    })?;
+    let mut scan = plan.stderr_scan();
+    let stderr_task = tokio::spawn(async move {
+        let mut chunk = [0_u8; 8192];
+        loop {
+            match stderr.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(read) => scan.feed(&chunk[..read]),
+                Err(_) => return None,
+            }
+        }
+        scan.finish();
+        Some(scan)
+    });
+    let deadline = tokio::time::sleep(Duration::from_secs(30 * 60));
+    tokio::pin!(deadline);
+    let status = loop {
+        tokio::select! {
+            () = lost.cancelled() => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                stderr_task.abort();
+                return Err(AnalysisResolutionError::ClaimLost);
+            }
+            () = &mut deadline => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                stderr_task.abort();
+                return Err(AnalysisResolutionError::Retry {
+                    code: "source_pass_timeout",
+                    charge_attempt: true,
+                });
+            }
+            status = child.wait() => break status.map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_process_failed",
+                charge_attempt: true,
+            })?,
+            () = tokio::time::sleep(Duration::from_millis(500)) => {
+                progress();
+                if preempt_when_busy.is_some_and(|manager| !manager.pretranscode_worker_idle()) {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    stderr_task.abort();
+                    return Err(AnalysisResolutionError::Retry {
+                        code: "foreground_preempted",
+                        charge_attempt: false,
+                    });
+                }
+            }
+        }
+    };
+    progress();
+    let scan = stderr_task.await.ok().flatten();
+    if !status.success() {
+        return Err(AnalysisResolutionError::Retry {
+            code: "source_process_failed",
+            charge_attempt: true,
+        });
+    }
+    Ok(crate::subtitle_ride_along::PendingRideAlong::new(
+        plan, scan,
+    ))
+}
+
 pub(crate) async fn wait_analysis_deadline(duration: Duration) {
     tokio::time::sleep(duration).await;
 }
@@ -2762,6 +3077,46 @@ impl Drop for ActivePretranscodeJob {
 }
 
 impl JobManager {
+    /// Revalidate one bounded node-local page every interval. This deliberately
+    /// does not take cluster job authority: both SQLite and hiqlite route the
+    /// index rows through this process's local database, never through Raft.
+    pub(crate) async fn fragment_index_validation_loop(
+        self: Arc<Self>,
+        shutdown: CancellationToken,
+    ) {
+        let mut ticker = tokio::time::interval(FRAGMENT_INDEX_VALIDATION_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
+            match self
+                .store
+                .validate_fragment_index_page(FRAGMENT_INDEX_VALIDATION_PAGE)
+                .await
+            {
+                Ok(report) => {
+                    FRAGMENT_INDEX_VALIDATED.fetch_add(report.validated, Ordering::Relaxed);
+                    FRAGMENT_INDEX_REFUSED.fetch_add(report.refused, Ordering::Relaxed);
+                    FRAGMENT_INDEX_GONE.fetch_add(report.gone, Ordering::Relaxed);
+                    if report.validated != 0 || report.refused != 0 || report.gone != 0 {
+                        tracing::info!(
+                            validated = report.validated,
+                            refused = report.refused,
+                            gone = report.gone,
+                            remaining = report.remaining,
+                            "validated a node-local fragment-index page"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "node-local fragment-index validation failed");
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     fn new(store: Arc<dyn Store>, artwork_dir: PathBuf) -> Self {
         Self::new_with_scan_prune_percent(
@@ -2771,6 +3126,11 @@ impl JobManager {
             "test-node".to_owned(),
             Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_new(store: Arc<dyn Store>, artwork_dir: PathBuf) -> Arc<Self> {
+        Arc::new(Self::new(store, artwork_dir))
     }
 
     fn new_with_scan_prune_percent(
@@ -2807,12 +3167,16 @@ impl JobManager {
             analysis_progress: std::sync::Mutex::new(HashMap::new()),
             analysis_progress_epoch: AtomicU64::new(0),
             analysis_metrics: Arc::new(AnalysisRuntimeMetrics::default()),
+            #[cfg(test)]
+            finished_analysis_rows: std::sync::Mutex::new(Vec::new()),
             now_producing: Mutex::new(None),
             stop_producing: std::sync::atomic::AtomicBool::new(false),
             pretranscode_refusals: Mutex::new(HashMap::new()),
             fragment_index_refusals: Mutex::new(HashMap::new()),
             last_pretranscode_cache_sweep_ms: AtomicI64::new(0),
             fragment_index_sweep_cursor: Mutex::new(None),
+            subtitle_source_sweep_cursor: Mutex::new(None),
+            subtitle_backfill_enqueued_process: AtomicU64::new(0),
             backfilling_genres: std::sync::atomic::AtomicBool::new(false),
             retrying_artwork: std::sync::atomic::AtomicBool::new(false),
             book_cover_workers: metadata::book::CoverMaterializationWorkers::default(),
@@ -2836,7 +3200,10 @@ impl JobManager {
         self
     }
 
-    async fn acquire_job(&self, resource: String) -> Result<Option<ActiveJobLease>, StoreError> {
+    pub(crate) async fn acquire_job(
+        &self,
+        resource: String,
+    ) -> Result<Option<ActiveJobLease>, StoreError> {
         acquire_cluster_job(&self.coordinator, self.job_authority.as_ref(), resource).await
     }
 
@@ -3031,16 +3398,27 @@ impl JobManager {
                         )
                         .await?;
                     if !loss.is_cancelled() {
-                        let _ = self
-                            .store
-                            .put_setting(&cursor_key, &library_id.to_string())
-                            .await;
+                        // Best-effort cursor: a failed write repeats bounded
+                        // discovery work; it does not skip a library.
+                        crate::store_result::observe(
+                            crate::store_result::Operation::ResetDvQueueCursorAfterLoss,
+                            crate::store_result::Discard::BestEffort,
+                            self.store
+                                .put_setting(&cursor_key, &library_id.to_string())
+                                .await,
+                        );
                     }
                     batch
                 }
             } else {
                 if cursor != 0 {
-                    let _ = self.store.put_setting(&cursor_key, "0").await;
+                    // Best-effort cursor reset: the next tick safely repeats
+                    // the empty inventory pass if persistence is unavailable.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::ResetDvQueueCursorAfterEmptyPage,
+                        crate::store_result::Discard::BestEffort,
+                        self.store.put_setting(&cursor_key, "0").await,
+                    );
                 }
                 DvConversionQueueBatch::default()
             };
@@ -3100,7 +3478,13 @@ impl JobManager {
         };
         if candidates.is_empty() {
             if cursor != 0 {
-                let _ = self.store.put_setting(&cursor_key, "0").await;
+                // Best-effort cursor reset: repeating the exhausted scan is
+                // bounded and cannot omit conversion candidates.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ResetDvQueueCursorAfterExhaustion,
+                    crate::store_result::Discard::BestEffort,
+                    self.store.put_setting(&cursor_key, "0").await,
+                );
             }
             return;
         }
@@ -3180,10 +3564,15 @@ impl JobManager {
             });
         }
         if last_examined != cursor {
-            let _ = self
-                .store
-                .put_setting(&cursor_key, &last_examined.to_string())
-                .await;
+            // Best-effort cursor advance: failure repeats examined candidates
+            // instead of skipping work, while job claims prevent duplication.
+            crate::store_result::observe(
+                crate::store_result::Operation::AdvanceDvQueueCursor,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .put_setting(&cursor_key, &last_examined.to_string())
+                    .await,
+            );
         }
         while let Some(result) = workers.join_next().await {
             if let Err(error) = result {
@@ -3227,7 +3616,13 @@ impl JobManager {
         }
         let Some(file_id) = candidate else {
             if cursor != 0 {
-                let _ = self.store.put_setting(&cursor_key, "0").await;
+                // Best-effort recovery cursor reset: a failed reset only
+                // repeats the bounded recovery inventory on the next tick.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ResetDvRecoveryCursor,
+                    crate::store_result::Discard::BestEffort,
+                    self.store.put_setting(&cursor_key, "0").await,
+                );
             }
             return;
         };
@@ -3344,7 +3739,13 @@ impl JobManager {
         }
         let Some(guard) = candidates.into_iter().next() else {
             if !cursor.is_empty() {
-                let _ = self.store.put_setting(&cursor_key, "").await;
+                // Best-effort guard cursor reset: failed persistence repeats
+                // a bounded scan and cannot lose a recovery guard.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ResetDvGuardCursor,
+                    crate::store_result::Discard::BestEffort,
+                    self.store.put_setting(&cursor_key, "").await,
+                );
             }
             return;
         };
@@ -3942,13 +4343,50 @@ impl JobManager {
         trigger: &str,
         video_identity: &str,
     ) -> Result<(AnalysisRequest, bool), StoreError> {
-        if !matches!(component, "fragment_index" | "skip_markers") {
+        if !matches!(
+            component,
+            "fragment_index" | "skip_markers" | "subtitle_source"
+        ) {
             return Err(StoreError::Task(
                 "unsupported analysis component".to_owned(),
             ));
         }
-        if !matches!(trigger, "admin" | "background") {
+        if !matches!(trigger, "admin" | "background" | "playback") {
             return Err(StoreError::Task("unsupported analysis trigger".to_owned()));
+        }
+        if component == "subtitle_source" {
+            if force_rebuild || !video_identity.is_empty() {
+                return Err(StoreError::Task(
+                    "subtitle_source has no forced or video-specific generation".to_owned(),
+                ));
+            }
+            let file = self
+                .store
+                .get_file(file_id)
+                .await?
+                .ok_or_else(|| StoreError::Task("analysis file does not exist".to_owned()))?;
+            let stamp = SubtitleSourceStamp {
+                file_id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                pipeline_version: subtitle_source_pipeline_version().await,
+            };
+            let request = self
+                .store
+                .enqueue_or_promote_subtitle_source(
+                    &stamp,
+                    if trigger == "playback" {
+                        "foreground"
+                    } else {
+                        "normal"
+                    },
+                    clock_ms(),
+                )
+                .await?
+                .ok_or_else(|| {
+                    StoreError::Task("subtitle_source repair limit exhausted".to_owned())
+                })?;
+            return Ok((request, true));
         }
         let file = self
             .store
@@ -4000,6 +4438,207 @@ impl JobManager {
         self.cluster_fragment_index_enabled().await
     }
 
+    /// The queue switch is an operator choice. Developer readiness facts are
+    /// advisory; none of them silently overrides an enabled switch.
+    pub(crate) async fn subtitle_source_queue_enabled(&self) -> bool {
+        self.cluster_fragment_index_enabled().await
+            && setting_enabled(
+                self.store
+                    .get_setting(keys::SUBTITLE_CLUSTER_SOURCES)
+                    .await
+                    .unwrap_or(None),
+            )
+    }
+
+    pub(crate) fn subtitle_backfill_enqueued_process(&self) -> u64 {
+        self.subtitle_backfill_enqueued_process
+            .load(Ordering::Relaxed)
+    }
+
+    /// After the bounded claim wait, playback may claim its own queued row.
+    /// The same lease and fence protect it as an idle worker, but this one
+    /// claim bypasses `pretranscode_worker_idle`: it is foreground playback.
+    pub(crate) async fn self_claim_subtitle_source(
+        self: &Arc<Self>,
+        request_id: &str,
+        runtime_cache: &Path,
+    ) -> bool {
+        if !self.may_run_cluster_jobs().await || !self.subtitle_source_queue_enabled().await {
+            return false;
+        }
+        let node_id = self.coordinator.node_id().to_owned();
+        let retry_policy = self.analysis_retry_policy().await;
+        let now = clock_ms();
+        let request = match self
+            .store
+            .claim_analysis_request_foreground(
+                request_id,
+                &node_id,
+                now,
+                now.saturating_add(retry_policy.lease_ms),
+            )
+            .await
+        {
+            Ok(Some(request)) => request,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(%error, request_id, "self-claiming subtitle_source request");
+                return false;
+            }
+        };
+        crate::telemetry::record_subtitle_source(
+            crate::telemetry::SubtitleSourceMetric::ForegroundSelfClaim,
+        );
+        let _progress = self.start_analysis_progress(
+            (&request.request_id, &request.target_node_id),
+            request.file_id,
+            &request.component,
+            "probing",
+            request.source_size.max(0) as u64,
+            0,
+        );
+        let stop = CancellationToken::new();
+        let lost = CancellationToken::new();
+        let heartbeat = {
+            let store = Arc::clone(&self.store);
+            let request_id = request.request_id.clone();
+            let node_id = node_id.clone();
+            let metrics = Arc::clone(&self.analysis_metrics);
+            let stop = stop.clone();
+            let lost = lost.clone();
+            let fence = request.fence;
+            let beat = LeaseHeartbeat {
+                queue: "analysis-request",
+                row: request.request_id.clone(),
+                fence,
+                attempts: request.attempts,
+                known_expiry_ms: request.lease_expires_ms,
+                lease_ms: retry_policy.lease_ms,
+                renew_every: retry_policy.renew_every(),
+                metrics,
+                stop,
+                lost,
+            };
+            tokio::spawn(async move {
+                beat.run(move |now, expires_at| {
+                    let store = Arc::clone(&store);
+                    let request_id = request_id.clone();
+                    let node_id = node_id.clone();
+                    async move {
+                        store
+                            .renew_analysis_request(&request_id, &node_id, fence, now, expires_at)
+                            .await
+                    }
+                })
+                .await;
+            })
+        };
+        let outcome = if !self
+            .store
+            .record_analysis_request_phase(&request, "source_probe", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            Err(AnalysisResolutionError::ClaimLost)
+        } else {
+            match self.store.get_file(request.file_id).await {
+                Ok(Some(file))
+                    if file.size == request.source_size && file.mtime == request.source_mtime =>
+                {
+                    self.set_analysis_progress_totals(
+                        &request.request_id,
+                        &request.target_node_id,
+                        file.size.max(0) as u64,
+                        file.duration_ms.unwrap_or_default(),
+                    );
+                    self.resolve_subtitle_source_request(
+                        &request,
+                        &node_id,
+                        &file,
+                        runtime_cache,
+                        None,
+                        &stop,
+                        &lost,
+                    )
+                    .await
+                }
+                Ok(_) => Err(AnalysisResolutionError::Terminal("source_superseded")),
+                Err(_) => Err(AnalysisResolutionError::Retry {
+                    code: "source_catalog_read_failed",
+                    charge_attempt: true,
+                }),
+            }
+        };
+        stop.cancel();
+        let _ = heartbeat.await;
+        match outcome {
+            Ok(()) => true,
+            Err(AnalysisResolutionError::ClaimLost) => false,
+            Err(AnalysisResolutionError::Retry {
+                code,
+                charge_attempt,
+            }) => {
+                let now = clock_ms();
+                let delay_ms =
+                    retry_policy.backoff_ms(&request.request_id, request.attempts.max(1));
+                match self
+                    .store
+                    .retry_analysis_request(
+                        &request,
+                        code,
+                        now,
+                        now.saturating_add(delay_ms),
+                        charge_attempt,
+                    )
+                    .await
+                {
+                    Ok(true) => {
+                        crate::store_result::observe(
+                            crate::store_result::Operation::RecordAnalysisRetryWaitPhase,
+                            crate::store_result::Discard::BestEffort,
+                            self.store
+                                .record_analysis_request_phase(
+                                    &request,
+                                    "retry_wait",
+                                    Some(code),
+                                    now,
+                                )
+                                .await,
+                        );
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, request_id, "retrying foreground subtitle_source")
+                    }
+                }
+                false
+            }
+            Err(AnalysisResolutionError::Terminal(code)) => {
+                let now = clock_ms();
+                match self
+                    .store
+                    .fail_analysis_request(&request.request_id, &node_id, request.fence, code, now)
+                    .await
+                {
+                    Ok(true) => {
+                        crate::store_result::observe(
+                            crate::store_result::Operation::RecordAnalysisFailedPhase,
+                            crate::store_result::Discard::BestEffort,
+                            self.store
+                                .record_analysis_request_phase(&request, "failed", Some(code), now)
+                                .await,
+                        );
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, request_id, "failing foreground subtitle_source")
+                    }
+                }
+                false
+            }
+        }
+    }
+
     fn start_analysis_progress(
         self: &Arc<Self>,
         identity: (&str, &str),
@@ -4045,6 +4684,9 @@ impl JobManager {
                 media_ms_examined: 0,
                 total_media_ms: total_media_ms.max(0),
                 fragments_indexed: 0,
+                pgs_tracks: 0,
+                text_tracks: 0,
+                pgs_bytes_written: 0,
                 started_at_ms: now,
                 updated_at_ms: now,
                 elapsed_ms: 0,
@@ -4098,6 +4740,74 @@ impl JobManager {
         value.updated_at_ms = now;
     }
 
+    /// The progress callback both index paths hand a pass — the queue worker
+    /// and the local background loop — so their rows read the same: bytes,
+    /// media time and fragments, and for a pass that is also keeping PGS
+    /// tracks, how many and what it has written, so that work is attributable
+    /// from inside the product while it runs.
+    fn index_pass_reporter(
+        self: &Arc<Self>,
+        job_id: &str,
+        target_node_id: &str,
+    ) -> crate::fragindex::SharedIndexProgress {
+        let jobs = Arc::clone(self);
+        let (job_id, target_node_id) = (job_id.to_owned(), target_node_id.to_owned());
+        Arc::new(move |progress: &crate::fragindex::PassProgress| {
+            jobs.update_analysis_progress(
+                &job_id,
+                &target_node_id,
+                "fragment_index",
+                progress.bytes_read,
+                progress.media_ms,
+                progress.fragments,
+            );
+            jobs.update_analysis_ride_along(
+                &job_id,
+                &target_node_id,
+                progress.pgs_tracks,
+                progress.pgs_bytes_written,
+            );
+        })
+    }
+
+    /// Record what a running index pass's PGS ride-along is doing on its
+    /// progress row: how many tracks it keeps and the bytes written so far.
+    fn update_analysis_ride_along(
+        &self,
+        job_id: &str,
+        target_node_id: &str,
+        pgs_tracks: usize,
+        pgs_bytes_written: u64,
+    ) {
+        let mut progress = self
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(value) = progress.get_mut(&(job_id.to_owned(), target_node_id.to_owned())) {
+            value.pgs_tracks = pgs_tracks;
+            value.pgs_bytes_written = pgs_bytes_written;
+        }
+    }
+
+    fn update_analysis_subtitle_tracks(
+        &self,
+        job_id: &str,
+        target_node_id: &str,
+        pgs_tracks: usize,
+        text_tracks: usize,
+        bytes_written: u64,
+    ) {
+        let mut progress = self
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(value) = progress.get_mut(&(job_id.to_owned(), target_node_id.to_owned())) {
+            value.pgs_tracks = pgs_tracks;
+            value.text_tracks = text_tracks;
+            value.pgs_bytes_written = bytes_written;
+        }
+    }
+
     fn set_analysis_progress_totals(
         &self,
         job_id: &str,
@@ -4128,6 +4838,11 @@ impl JobManager {
         {
             if let Some(value) = progress.remove(&(job_id.to_owned(), target_node_id.to_owned())) {
                 self.analysis_metrics.finish(&value);
+                #[cfg(test)]
+                self.finished_analysis_rows
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(value);
             }
         }
     }
@@ -5634,6 +6349,14 @@ impl JobManager {
             let state = Arc::clone(self);
             tokio::spawn(async move { state.backfill_video_codec_tags().await });
         }
+        {
+            let state = Arc::clone(self);
+            tokio::spawn(async move { state.backfill_field_order().await });
+        }
+        {
+            let state = Arc::clone(self);
+            tokio::spawn(async move { state.backfill_luminance_facts().await });
+        }
         Ok(())
     }
 
@@ -6393,6 +7116,402 @@ impl JobManager {
         );
     }
 
+    /// Recover the selected playable video's field-order token from retained
+    /// probe JSON without reopening any media.
+    ///
+    /// Rows whose old probe did not report the key receive the explicit
+    /// `unknown` value. That distinguishes a completed backfill from work not
+    /// yet reached and preserves the normal scan as the only path that can
+    /// improve the fact later.
+    fn field_order_from_stored_probe(probe_json: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(probe_json)
+            .ok()
+            .map(|value| plurx_core::scan::probe::parse_probe_json(&value))
+            .and_then(|probe| probe.field_order)
+            .unwrap_or_else(|| "unknown".to_owned())
+    }
+
+    async fn backfill_field_order(self: Arc<Self>) {
+        const BACKFILL_PER_TICK: i64 = 256;
+
+        match self
+            .store
+            .get_setting(keys::JOB_FIELD_ORDER_BACKFILL_DONE)
+            .await
+        {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "reading the field-order backfill stamp");
+                return;
+            }
+        }
+        let lease = match self.acquire_job("catalogue:field-order".to_owned()).await {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "field-order backfill lease failed");
+                return;
+            }
+        };
+        let _lease = lease;
+        let cursor_key = self.local_job_key(keys::JOB_FIELD_ORDER_BACKFILL_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let pending = match self
+            .store
+            .files_missing_field_order(cursor, BACKFILL_PER_TICK)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the field-order backfill");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            if let Err(error) = self
+                .store
+                .put_setting(keys::JOB_FIELD_ORDER_BACKFILL_DONE, "1")
+                .await
+            {
+                tracing::warn!(%error, "stamping the field-order backfill as complete");
+            } else {
+                tracing::info!("field-order backfill: complete");
+            }
+            return;
+        }
+
+        let mut updated = 0usize;
+        let mut fenced = 0usize;
+        let mut walked = cursor;
+        for candidate in pending {
+            walked = walked.max(candidate.id);
+            let recovered = Self::field_order_from_stored_probe(&candidate.probe_json);
+            match self
+                .store
+                .set_file_field_order(&candidate, &recovered)
+                .await
+            {
+                Ok(true) => updated += 1,
+                Ok(false) => fenced += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        file_id = candidate.id,
+                        %error,
+                        "writing a backfilled field order"
+                    );
+                    walked = walked.min(candidate.id.saturating_sub(1));
+                    break;
+                }
+            }
+        }
+        if walked > cursor {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &walked.to_string())
+                .await
+            {
+                tracing::warn!(%error, "advancing the field-order backfill cursor");
+            }
+        }
+        tracing::info!(
+            updated,
+            fenced,
+            cursor = walked,
+            "field-order backfill: considered stored probe rows"
+        );
+    }
+
+    /// Classify existing HDR rows from their retained stream document. This
+    /// never opens media: SEI-only rows are stamped `none` and the next normal
+    /// scan/decode probe may upgrade them from a bounded first-frame read.
+    async fn backfill_luminance_facts(self: Arc<Self>) {
+        const BACKFILL_PER_TICK: i64 = 256;
+        if !matches!(
+            self.store
+                .get_setting(keys::JOB_LUMINANCE_BACKFILL_DONE)
+                .await,
+            Ok(None)
+        ) {
+            return;
+        }
+        let Ok(Some(_lease)) = self.acquire_job("catalogue:luminance".to_owned()).await else {
+            return;
+        };
+        let cursor_key = self.local_job_key(keys::JOB_LUMINANCE_BACKFILL_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let pending = match self
+            .store
+            .files_missing_luminance(cursor, BACKFILL_PER_TICK)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the luminance backfill");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            match self
+                .store
+                .put_setting(keys::JOB_LUMINANCE_BACKFILL_DONE, "1")
+                .await
+            {
+                Ok(()) => tracing::info!("luminance backfill: complete"),
+                Err(error) => tracing::warn!(%error, "stamping the luminance backfill complete"),
+            }
+            return;
+        }
+        let mut walked = cursor;
+        let mut updated = 0usize;
+        let mut fenced = 0usize;
+        for candidate in pending {
+            walked = walked.max(candidate.id);
+            let recovered = stored_luminance(&candidate.probe_json);
+            let source = if recovered.max_cll.is_some()
+                || recovered.max_fall.is_some()
+                || recovered.mastering_max_luminance.is_some()
+            {
+                "stream"
+            } else {
+                "none"
+            };
+            match self
+                .store
+                .set_file_luminance(
+                    &candidate,
+                    recovered.max_cll,
+                    recovered.max_fall,
+                    recovered.mastering_max_luminance,
+                    source,
+                )
+                .await
+            {
+                Ok(true) => updated += 1,
+                Ok(false) => fenced += 1,
+                Err(error) => {
+                    tracing::warn!(file_id = candidate.id, %error, "writing backfilled luminance facts");
+                    walked = walked.min(candidate.id.saturating_sub(1));
+                    break;
+                }
+            }
+        }
+        if walked > cursor {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &walked.to_string())
+                .await
+            {
+                tracing::warn!(%error, "advancing the luminance backfill cursor");
+            }
+        }
+        tracing::info!(
+            updated,
+            fenced,
+            cursor = walked,
+            "luminance backfill: considered stored probe rows"
+        );
+    }
+
+    /// One bounded page of the subtitle-source store's sweep.
+    ///
+    /// Its own rule and cursor: `sweep_local_orphans` considers only index
+    /// blobs, and the subtitle cache's LRU never sees this directory. A catalog
+    /// read that fails stops the page and keeps the cursor, exactly as the
+    /// index sweep does, so the same directories are asked about next tick.
+    async fn sweep_subtitle_sources(&self, transcode: &TranscodeManager) {
+        let root = crate::subtitle_source::store_root(transcode.runtime_cache_dir());
+        let cursor = self.subtitle_source_sweep_cursor.lock().await.clone();
+        match crate::subtitle_source::sweep(
+            self.store.as_ref(),
+            self.coordinator.node_id(),
+            &root,
+            cursor.as_deref(),
+            crate::subtitle_source::SWEEP_PAGE,
+            crate::subtitle_source::MAX_STORE_BYTES,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                if outcome.removed + outcome.evicted + outcome.deferred + outcome.unnamed > 0 {
+                    tracing::info!(
+                        removed = outcome.removed,
+                        evicted = outcome.evicted,
+                        deferred = outcome.deferred,
+                        unnamed = outcome.unnamed,
+                        "reconciled stored subtitle sources"
+                    );
+                }
+                if let Some(footprint) = outcome.footprint {
+                    crate::subtitle_source::record_footprint(footprint);
+                }
+                *self.subtitle_source_sweep_cursor.lock().await = Some(outcome.next);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "reconciling stored subtitle sources");
+            }
+        }
+        // Stages a crashed or killed pass left behind. A live pass's stage is
+        // minutes old at most; an hour is a leftover.
+        let stale = crate::subtitle_ride_along::sweep_stale_stages(
+            &root,
+            crate::subtitle_ride_along::STALE_STAGE_AGE,
+        )
+        .await;
+        if stale > 0 {
+            tracing::info!(stale, "removed abandoned PGS ride-along stages");
+        }
+    }
+
+    /// Judge and publish a pass's PGS tracks — both paths, cluster and not.
+    ///
+    /// Called after the build future has returned, so a preemption can no
+    /// longer race the verdict, and only after the pass's freshness checks:
+    /// `source_still_matches` is the caller's reading of the held source
+    /// (the cluster worker's `source_still_matches`, the non-cluster fence's
+    /// `unchanged()`), and the catalog check here is the cluster worker's
+    /// `still_current`. A pass that raced a rescan must not recreate a
+    /// directory the store's sweep just removed. A failed publish is logged
+    /// and leaves the store as it was, so the next pass rides again.
+    pub(crate) async fn settle_ride_along(
+        &self,
+        file: &MediaFile,
+        pending: crate::subtitle_ride_along::PendingRideAlong,
+        source_still_matches: bool,
+    ) -> Option<crate::subtitle_source::Manifest> {
+        use crate::subtitle_ride_along::{record_discard, Discard};
+
+        let file_id = pending.file_id();
+        if !source_still_matches {
+            tracing::info!(
+                file_id,
+                "the source moved during the pass; its PGS ride-along is discarded"
+            );
+            record_discard(Discard::SourceMoved);
+            return None;
+        }
+        let still_current = self
+            .store
+            .get_file(file.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
+        if !still_current {
+            tracing::info!(
+                file_id,
+                "the catalog moved during the pass; its PGS ride-along is discarded"
+            );
+            record_discard(Discard::CatalogMoved);
+            return None;
+        }
+        // The gate read the switch when the pass began. Turned off since, the
+        // consumers already ignore the store; publishing now would add tracks
+        // under a switch that says off, so the switch stops the pass it was
+        // turned off during, not only the next one.
+        if !crate::subtitle_source::enabled(self.store.as_ref()).await {
+            tracing::info!(
+                file_id,
+                "stored subtitle tracks were turned off during the pass; its PGS ride-along is discarded"
+            );
+            record_discard(Discard::SwitchOff);
+            return None;
+        }
+        // The publication row must carry a portable sampled digest. The
+        // object version used by the fragment-index source memo includes this
+        // host's device and inode, so it cannot identify bytes on a peer.
+        let memo = match crate::fragment_index_cluster::inspect_source(file).await {
+            Ok(version) => self
+                .store
+                .fragment_index_source(self.coordinator.node_id(), file.id, &version)
+                .await
+                .ok()
+                .flatten(),
+            Err(_) => None,
+        };
+        let attested = match crate::fragment_index_cluster::attest_source(
+            self.coordinator.node_id(),
+            file,
+            memo.as_ref(),
+            &|_| {},
+        )
+        .await
+        {
+            Ok(attested) => attested,
+            Err(reason) => {
+                tracing::warn!(file_id, %reason, "attesting subtitle ride-along source");
+                record_discard(Discard::SourceMoved);
+                return None;
+            }
+        };
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            record_discard(Discard::SourceMoved);
+            return None;
+        }
+        let harvest = pending.judge().await;
+        let verdicts: Vec<_> = harvest
+            .outcomes()
+            .iter()
+            .map(|outcome| (outcome.ordinal, outcome.verdict))
+            .collect();
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            record_discard(Discard::SourceMoved);
+            return None;
+        }
+        match harvest
+            .publish_with_cluster(
+                self.store.as_ref(),
+                self.coordinator.node_id(),
+                &attested.observation.source_sha256,
+                None,
+            )
+            .await
+        {
+            Ok(manifest) => {
+                tracing::info!(file_id, ?verdicts, "published the pass's PGS tracks");
+                Some(manifest)
+            }
+            Err(error) => {
+                tracing::warn!(file_id, %error, "publishing the pass's PGS tracks");
+                None
+            }
+        }
+    }
+
     async fn build_fragment_indexes(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         if self.indexing.swap(true, Ordering::Relaxed) {
             return;
@@ -6404,6 +7523,10 @@ impl JobManager {
         // the node that ran the delete -- and never a node that was down at
         // the time. Each node asking, on its own tick, converges everywhere.
         self.sweep_orphaned_vod_rows().await;
+        // Node-local like the rows above, and on both the cluster and the
+        // non-cluster path: every node reconciles its own store on its own
+        // tick, whether or not it holds a discovery slot.
+        self.sweep_subtitle_sources(&transcode).await;
 
         let cluster_cache_enabled =
             match self.store.get_setting(keys::VOD_INDEX_CLUSTER_CACHE).await {
@@ -6415,6 +7538,7 @@ impl JobManager {
             };
         if cluster_cache_enabled {
             if self.may_run_cluster_jobs().await {
+                self.discover_subtitle_sources(Arc::clone(&transcode)).await;
                 self.discover_cluster_fragment_indexes(transcode).await;
             }
             return;
@@ -6432,6 +7556,7 @@ impl JobManager {
         let convert = transcode.dv_convert_enabled().await;
         let runtime_cache = transcode.runtime_cache_dir().to_path_buf();
         let max_index_attempts = self.analysis_retry_policy().await.max_attempts;
+        let node_id = self.coordinator.node_id().to_owned();
         let libraries = match self.store.list_libraries().await {
             Ok(libraries) => libraries,
             Err(error) => {
@@ -6545,14 +7670,40 @@ impl JobManager {
                     }
                 }
                 attempted += 1;
-                let refusal = match crate::fragindex::build(
+                // Asked per pass, so the switch turning off stops the next
+                // pass from riding without a restart.
+                let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
+                    Arc::clone(&self.store),
+                    &runtime_cache,
+                )
+                .await;
+                // A progress row like the queue worker's, so Content analysis
+                // shows this pass — and what it keeps — on an install that
+                // never turns the queue on. Keyed by file and pipeline, on
+                // this node; dropped when the pass ends.
+                let progress_job = local_index_job_id(file_id, &identity);
+                let _progress = self.start_analysis_progress(
+                    (&progress_job, &node_id),
+                    file_id,
+                    "fragment_index",
+                    "fragment_index",
+                    file.size.max(0) as u64,
+                    file.duration_ms.unwrap_or(0),
+                );
+                let crate::fragindex::IndexBuild {
+                    outcome,
+                    ride_along: harvest,
+                    source_unchanged,
+                } = crate::fragindex::build_riding(
                     &file,
                     video,
                     &runtime_cache,
                     index_file_budget(file.duration_ms),
+                    ride_along.as_ref(),
+                    Some(self.index_pass_reporter(&progress_job, &node_id)),
                 )
-                .await
-                {
+                .await;
+                let refusal = match outcome {
                     crate::fragindex::IndexOutcome::Built(index) => {
                         if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
                             tracing::warn!(file_id, error = %error, "storing a fragment index");
@@ -6561,6 +7712,10 @@ impl JobManager {
                             if built_file_ids.last() != Some(&file_id) {
                                 built_file_ids.push(file_id);
                             }
+                        }
+                        if let Some(pending) = harvest {
+                            self.settle_ride_along(&file, pending, source_unchanged)
+                                .await;
                         }
                         continue;
                     }
@@ -6658,6 +7813,107 @@ impl JobManager {
                 built,
                 built_files = ?built_file_ids,
                 "fragment indexing pass finished"
+            );
+        }
+    }
+
+    /// Fill cold subtitle sources only while this node is idle. The cluster
+    /// lease fences competing discovery passes; the request store still owns
+    /// exact per-stamp de-duplication with a viewer's foreground enqueue.
+    pub(crate) async fn discover_subtitle_sources(
+        self: &Arc<Self>,
+        transcode: Arc<TranscodeManager>,
+    ) {
+        const BACKFILL_PER_TICK: i64 = 8;
+        if !self.subtitle_source_queue_enabled().await
+            || !setting_enabled(
+                self.store
+                    .get_setting(keys::SUBTITLE_BACKFILL)
+                    .await
+                    .unwrap_or(None),
+            )
+            || !transcode.pretranscode_worker_idle()
+            || !self.may_run_cluster_jobs().await
+        {
+            return;
+        }
+        let lease = match self
+            .acquire_job("media:subtitle-source:backfill".to_owned())
+            .await
+        {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "acquiring subtitle-source backfill lease");
+                return;
+            }
+        };
+        let lost = lease.loss_token();
+        let now = clock_ms();
+        let candidates = self
+            .store
+            .subtitle_backfill_candidates(i64::MAX, i64::MAX, now, BACKFILL_PER_TICK)
+            .await;
+        let pipeline_version = subtitle_source_pipeline_version().await;
+        let mut enqueued = 0_i64;
+        let mut considered = 0_i64;
+        match candidates {
+            Ok(candidates) => {
+                for candidate in candidates {
+                    if lost.is_cancelled() || !transcode.pretranscode_worker_idle() {
+                        break;
+                    }
+                    considered += 1;
+                    let file = match self.store.get_file(candidate.file_id).await {
+                        Ok(Some(file))
+                            if file.size == candidate.source_size
+                                && file.mtime == candidate.source_mtime =>
+                        {
+                            file
+                        }
+                        _ => continue,
+                    };
+                    if crate::subtitle_source::is_mpegts_container(&file) {
+                        continue;
+                    }
+                    let stamp = SubtitleSourceStamp {
+                        file_id: file.id,
+                        source_size: file.size,
+                        source_mtime: file.mtime,
+                        pipeline_version: pipeline_version.clone(),
+                    };
+                    match self
+                        .store
+                        .enqueue_or_promote_subtitle_source(&stamp, "normal", clock_ms())
+                        .await
+                    {
+                        Ok(Some(request)) if request.state == "queued" => {
+                            enqueued += 1;
+                            self.subtitle_backfill_enqueued_process
+                                .fetch_add(1, Ordering::Relaxed);
+                            crate::telemetry::record_subtitle_source(
+                                crate::telemetry::SubtitleSourceMetric::RequestBackground,
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(
+                            file_id = file.id,
+                            %error,
+                            "enqueuing subtitle-source backfill"
+                        ),
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error, "discovering subtitle-source backfill"),
+        }
+        if let Err(error) = lease.release().await {
+            tracing::warn!(%error, "releasing subtitle-source backfill lease");
+        }
+        if considered > 0 {
+            tracing::info!(
+                considered,
+                enqueued,
+                "subtitle-source backfill pass finished"
             );
         }
     }
@@ -7066,15 +8322,20 @@ impl JobManager {
                             .await
                         {
                             Ok(true) => {
-                                let _ = self
-                                    .store
-                                    .record_analysis_request_phase(
-                                        &request,
-                                        "retry_wait",
-                                        Some(code),
-                                        now,
-                                    )
-                                    .await;
+                                // Best effort: the retry transition already
+                                // committed; this row is diagnostic history.
+                                crate::store_result::observe(
+                                    crate::store_result::Operation::RecordAnalysisRetryWaitPhase,
+                                    crate::store_result::Discard::BestEffort,
+                                    self.store
+                                        .record_analysis_request_phase(
+                                            &request,
+                                            "retry_wait",
+                                            Some(code),
+                                            now,
+                                        )
+                                        .await,
+                                );
                             }
                             Ok(false) => {}
                             Err(error) => tracing::warn!(
@@ -7097,15 +8358,20 @@ impl JobManager {
                             .await
                         {
                             Ok(true) => {
-                                let _ = self
-                                    .store
-                                    .record_analysis_request_phase(
-                                        &request,
-                                        "failed",
-                                        Some(code),
-                                        now,
-                                    )
-                                    .await;
+                                // Best effort: the failed terminal state is
+                                // durable already; this row explains it.
+                                crate::store_result::observe(
+                                    crate::store_result::Operation::RecordAnalysisFailedPhase,
+                                    crate::store_result::Discard::BestEffort,
+                                    self.store
+                                        .record_analysis_request_phase(
+                                            &request,
+                                            "failed",
+                                            Some(code),
+                                            now,
+                                        )
+                                        .await,
+                                );
                             }
                             Ok(false) => {}
                             Err(error) => tracing::warn!(
@@ -7118,6 +8384,421 @@ impl JobManager {
                 }
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_subtitle_source_request(
+        &self,
+        request: &AnalysisRequest,
+        node_id: &str,
+        file: &MediaFile,
+        runtime_cache: &Path,
+        preempt_when_busy: Option<&TranscodeManager>,
+        stop: &CancellationToken,
+        lost: &CancellationToken,
+    ) -> Result<(), AnalysisResolutionError> {
+        if request.force_rebuild
+            || !request.video_identity.is_empty()
+            || !request.target_node_id.is_empty()
+            || request.pipeline_version != subtitle_source_pipeline_version().await
+        {
+            return Err(AnalysisResolutionError::Terminal(
+                "pipeline_version_unavailable",
+            ));
+        }
+        if !self.subtitle_source_queue_enabled().await
+            || !crate::subtitle_source::enabled(self.store.as_ref()).await
+        {
+            return Err(AnalysisResolutionError::Retry {
+                code: "pipeline_version_unavailable",
+                charge_attempt: false,
+            });
+        }
+        if crate::subtitle_source::is_mpegts_container(file) {
+            return Err(AnalysisResolutionError::Terminal("stored_probe_invalid"));
+        }
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        self.update_analysis_progress(
+            &request.request_id,
+            &request.target_node_id,
+            "hashing",
+            0,
+            0,
+            0,
+        );
+        if !self
+            .store
+            .record_analysis_request_phase(request, "hashing", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        let memo = match crate::fragment_index_cluster::inspect_source(file).await {
+            Ok(version) => self
+                .store
+                .fragment_index_source(node_id, file.id, &version)
+                .await
+                .ok()
+                .flatten(),
+            Err(_) => None,
+        };
+        let progress = |bytes| {
+            self.update_analysis_progress(
+                &request.request_id,
+                &request.target_node_id,
+                "hashing",
+                bytes,
+                0,
+                0,
+            );
+        };
+        let attested = tokio::select! {
+            () = lost.cancelled() => return Err(AnalysisResolutionError::ClaimLost),
+            result = tokio::time::timeout(
+                Duration::from_secs(10 * 60),
+                crate::fragment_index_cluster::attest_source(node_id, file, memo.as_ref(), &progress)
+            ) => match result {
+                Ok(Ok(attested)) => attested,
+                Ok(Err(_)) => return Err(AnalysisResolutionError::Retry {
+                    code: "source_attestation_failed",
+                    charge_attempt: true,
+                }),
+                Err(_) => return Err(AnalysisResolutionError::Retry {
+                    code: "source_attestation_timeout",
+                    charge_attempt: true,
+                }),
+            },
+        };
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            return Err(AnalysisResolutionError::Terminal("source_superseded"));
+        }
+        let raw = tokio::select! {
+            () = lost.cancelled() => return Err(AnalysisResolutionError::ClaimLost),
+            result = crate::ffmpeg::held_source_index_probe_json(&attested.handle) => result
+                .map_err(|_| AnalysisResolutionError::Terminal("stored_probe_invalid"))?,
+        };
+        let tracks = crate::subtitle_ride_along::eligible_tracks_from_probe(&raw);
+        let rows = self
+            .store
+            .list_subtitle_source_publications(file.id, file.size, file.mtime)
+            .await
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_catalog_read_failed",
+                charge_attempt: true,
+            })?;
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|row| row.source_attestation == attested.observation.source_sha256)
+            .collect();
+        let result_key = format!(
+            "subtitle-source:{}:{}:{}:{}",
+            file.id, file.size, file.mtime, request.pipeline_version
+        );
+        if subtitle_source_covered(&tracks, &rows) {
+            tracing::info!(
+                file_id = file.id,
+                "subtitle_source request already covered; no source read"
+            );
+            self.complete_subtitle_source_request(request, node_id, &result_key, stop)
+                .await?;
+            return Ok(());
+        }
+        let gate =
+            crate::subtitle_ride_along::RideAlongGate::open(Arc::clone(&self.store), runtime_cache)
+                .await
+                .ok_or(AnalysisResolutionError::Retry {
+                    code: "source_unavailable",
+                    charge_attempt: true,
+                })?;
+        let plan =
+            crate::subtitle_ride_along::plan_tracks(&gate, file.id, &attested.handle, &tracks)
+                .await;
+        let Some(plan) = plan else {
+            if tracks.is_empty() {
+                self.complete_subtitle_source_request(request, node_id, &result_key, stop)
+                    .await?;
+                return Ok(());
+            }
+            // A local pass may have committed its manifest before the
+            // replicated publication writes, or a migration may introduce
+            // the publication table after that manifest. Reassert only
+            // verified, locally extracted rows instead of rereading media.
+            let root = crate::subtitle_source::store_root(runtime_cache);
+            let _ = crate::subtitle_ride_along::publish_existing_manifest_rows(
+                self.store.as_ref(),
+                node_id,
+                &root,
+                file.id,
+                &attested.handle,
+                &attested.observation.source_sha256,
+            )
+            .await;
+            if let Ok(rows) = self
+                .store
+                .list_subtitle_source_publications(file.id, file.size, file.mtime)
+                .await
+            {
+                let rows: Vec<_> = rows
+                    .into_iter()
+                    .filter(|row| row.source_attestation == attested.observation.source_sha256)
+                    .collect();
+                if subtitle_source_covered(&tracks, &rows) {
+                    self.complete_subtitle_source_request(request, node_id, &result_key, stop)
+                        .await?;
+                    return Ok(());
+                }
+            }
+            // A concurrently running local pass may hold the file claim;
+            // retry after its ordinary backoff. An old failed ride latch or
+            // an unreadable manifest is also possible, so charge the attempt
+            // rather than keeping an immortal queued row.
+            return Err(AnalysisResolutionError::Retry {
+                code: "queue_full_or_busy",
+                charge_attempt: true,
+            });
+        };
+        let stage = plan.stage().to_owned();
+        let track_count = plan.tracks().len();
+        let pgs_count = tracks
+            .iter()
+            .filter(|track| {
+                plan.tracks().contains(&track.ordinal)
+                    && track.kind == crate::subtitle_ride_along::ProbedKind::Pgs
+            })
+            .count();
+        let text_count = track_count.saturating_sub(pgs_count);
+        self.update_analysis_subtitle_tracks(
+            &request.request_id,
+            &request.target_node_id,
+            pgs_count,
+            text_count,
+            0,
+        );
+        self.update_analysis_progress(
+            &request.request_id,
+            &request.target_node_id,
+            "subtitle_source",
+            0,
+            0,
+            0,
+        );
+        if !self
+            .store
+            .record_analysis_request_phase(request, "staged", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        let meter = || {
+            self.update_analysis_subtitle_tracks(
+                &request.request_id,
+                &request.target_node_id,
+                pgs_count,
+                text_count,
+                crate::subtitle_ride_along::stage_bytes(&stage),
+            );
+        };
+        let started = Instant::now();
+        tracing::info!(
+            file_id = file.id,
+            node_id,
+            pgs_count,
+            text_count,
+            "subtitle_source job reading source"
+        );
+        let pending = run_subtitle_source_pass(
+            plan,
+            &attested.handle,
+            runtime_cache,
+            lost,
+            if request.priority == "foreground" {
+                None
+            } else {
+                preempt_when_busy
+            },
+            &meter,
+        )
+        .await?;
+        crate::telemetry::record_subtitle_source(crate::telemetry::SubtitleSourceMetric::JobBytes(
+            file.size.max(0) as u64,
+        ));
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            return Err(AnalysisResolutionError::Terminal("source_superseded"));
+        }
+        let current = self
+            .store
+            .get_file(file.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
+        if !current {
+            return Err(AnalysisResolutionError::Terminal("source_superseded"));
+        }
+        if !self
+            .store
+            .record_analysis_request_phase(request, "publishing", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        let harvest = pending.judge().await;
+        let mut representation_count = 0_usize;
+        for outcome in harvest.outcomes() {
+            for representation in &outcome.representations {
+                representation_count += 1;
+                let event = match representation.verdict {
+                    crate::subtitle_source::Verdict::Kept => {
+                        crate::telemetry::SubtitleSourceMetric::VerdictKept
+                    }
+                    crate::subtitle_source::Verdict::Empty => {
+                        crate::telemetry::SubtitleSourceMetric::VerdictEmpty
+                    }
+                    crate::subtitle_source::Verdict::Malformed => {
+                        crate::telemetry::SubtitleSourceMetric::VerdictMalformed
+                    }
+                    crate::subtitle_source::Verdict::Transient => {
+                        crate::telemetry::SubtitleSourceMetric::VerdictTransient
+                    }
+                };
+                crate::telemetry::record_subtitle_source(event);
+            }
+        }
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            return Err(AnalysisResolutionError::Terminal("source_superseded"));
+        }
+        let published = harvest
+            .publish_guarded_worker(
+                self.store.as_ref(),
+                node_id,
+                &attested.observation.source_sha256,
+                lost,
+                request,
+            )
+            .await;
+        let receipt = match published {
+            Ok(receipt) => receipt,
+            Err(_) if lost.is_cancelled() => return Err(AnalysisResolutionError::ClaimLost),
+            Err(_) => {
+                return Err(AnalysisResolutionError::Retry {
+                    code: "queue_write_failed",
+                    charge_attempt: true,
+                });
+            }
+        };
+        if lost.is_cancelled() {
+            if let Err(error) = receipt.rollback(self.store.as_ref()).await {
+                tracing::error!(file_id = file.id, %error, "compensating lost subtitle-source publication");
+            }
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        if !self
+            .store
+            .record_analysis_request_phase(request, "publishing", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            if let Err(error) = receipt.rollback(self.store.as_ref()).await {
+                tracing::error!(file_id = file.id, %error, "compensating lost subtitle-source publication");
+            }
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        tracing::info!(
+            file_id = file.id,
+            node_id,
+            pgs_count,
+            text_count,
+            representation_count,
+            bytes_read = file.size.max(0),
+            elapsed_ms = started.elapsed().as_millis(),
+            "subtitle_source job published"
+        );
+        match self
+            .complete_subtitle_source_request(request, node_id, &result_key, stop)
+            .await
+        {
+            Ok(()) => {
+                receipt.commit().await;
+                Ok(())
+            }
+            Err(error) => {
+                if let Err(rollback_error) = receipt.rollback(self.store.as_ref()).await {
+                    tracing::error!(file_id = file.id, %rollback_error, "compensating unsettled subtitle-source publication");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn complete_subtitle_source_request(
+        &self,
+        request: &AnalysisRequest,
+        _node_id: &str,
+        result_key: &str,
+        stop: &CancellationToken,
+    ) -> Result<(), AnalysisResolutionError> {
+        stop.cancel();
+        if !self
+            .store
+            .complete_analysis_request(request, result_key, clock_ms())
+            .await
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "queue_write_failed",
+                charge_attempt: true,
+            })?
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        self.analysis_metrics.publication("subtitle_source", false);
+        crate::store_result::observe(
+            crate::store_result::Operation::RecordPublishedAnalysisPhase,
+            crate::store_result::Discard::BestEffort,
+            self.store
+                .record_analysis_request_phase(request, "published", None, clock_ms())
+                .await,
+        );
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7160,6 +8841,19 @@ impl JobManager {
             file.size.max(0) as u64,
             file.duration_ms.unwrap_or_default(),
         );
+        if request.component == "subtitle_source" {
+            return self
+                .resolve_subtitle_source_request(
+                    request,
+                    node_id,
+                    &file,
+                    transcode.runtime_cache_dir(),
+                    Some(transcode),
+                    stop,
+                    lost,
+                )
+                .await;
+        }
         if request.component == "skip_markers" {
             if request.pipeline_version != crate::http::stream::CHAPTER_ANNOTATION_VERSION {
                 return Err(AnalysisResolutionError::Terminal(
@@ -7209,7 +8903,13 @@ impl JobManager {
                         }
                     };
                     if let Ok(json) = serde_json::to_string(&chapters) {
-                        let _ = self.store.merge_file_probe_chapters(file.id, &json).await;
+                        // Lost work: these discovered chapters are otherwise
+                        // discarded when this analysis attempt completes.
+                        crate::store_result::observe(
+                            crate::store_result::Operation::MergeProbeChapters,
+                            crate::store_result::Discard::LostWork,
+                            self.store.merge_file_probe_chapters(file.id, &json).await,
+                        );
                     }
                     chapters
                 }
@@ -7257,10 +8957,15 @@ impl JobManager {
             }
             self.analysis_metrics
                 .publication("skip_markers", request.force_rebuild);
-            let _ = self
-                .store
-                .record_analysis_request_phase(request, "published", None, clock_ms())
-                .await;
+            // Best-effort diagnostic: publication is already committed; a
+            // missing phase row must not undo the durable result.
+            crate::store_result::observe(
+                crate::store_result::Operation::RecordPublishedAnalysisPhase,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .record_analysis_request_phase(request, "published", None, clock_ms())
+                    .await,
+            );
             return Ok(());
         }
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
@@ -7507,7 +9212,13 @@ impl JobManager {
                 charge_attempt: false,
             });
         }
-        let _ = self.store.settle_analysis_requests(now).await;
+        // Best-effort maintenance: unsettled requests remain durable and the
+        // next queue pass retries the same bounded settlement.
+        crate::store_result::observe(
+            crate::store_result::Operation::SettleAnalysisAfterQueueAdmission,
+            crate::store_result::Discard::BestEffort,
+            self.store.settle_analysis_requests(now).await,
+        );
         Ok(())
     }
 
@@ -8065,10 +9776,15 @@ impl JobManager {
                 return false;
             }
         };
-        let _ = self
-            .store
-            .record_fragment_index_source(&attested.observation)
-            .await;
+        // Lost work: this fresh source attestation is required for another
+        // node to use the index being built from it.
+        crate::store_result::observe(
+            crate::store_result::Operation::RecordFragmentIndexSource,
+            crate::store_result::Discard::LostWork,
+            self.store
+                .record_fragment_index_source(&attested.observation)
+                .await,
+        );
         // The job names one pipeline by digest; this node offers one identity
         // per copy pipeline the file can be asked for. Claim the job only if
         // one of them still produces the bytes the job was queued for — a job
@@ -8147,7 +9863,13 @@ impl JobManager {
                 .await
             {
                 Ok(true) => {
-                    let _ = self.store.settle_analysis_requests(now).await;
+                    // Best-effort maintenance: hydration is already durable
+                    // and the next pass retries settlement of pending requests.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::SettleAnalysisAfterHydration,
+                        crate::store_result::Discard::BestEffort,
+                        self.store.settle_analysis_requests(now).await,
+                    );
                     tracing::info!(
                         cache_key = %job.cache_key,
                         built_by = %published.built_by_node_id,
@@ -8202,28 +9924,27 @@ impl JobManager {
             }
         }
 
-        let progress_jobs = Arc::clone(&self);
-        let progress_key = job.cache_key.clone();
-        let progress_target = job.target_node_id.clone();
+        let report_progress = self.index_pass_reporter(&job.cache_key, &job.target_node_id);
+        // Asked per job: the switch, the self-test and the filesystem, now.
+        let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
+            Arc::clone(&self.store),
+            transcode.runtime_cache_dir(),
+        )
+        .await;
+        // A dropped build future — `foreground_preempted`, or the lease lost
+        // — drops the pass's ride-along plan with it, and the plan's guard
+        // removes its stage.
         let (outcome, preempted) = tokio::select! {
-            outcome = crate::fragindex::build_from_attested_file_with_progress(
+            built = crate::fragindex::build_from_attested_file_with_progress(
                 &file,
                 &attested.handle,
                 &attested.observation.object_version,
                 video,
                 transcode.runtime_cache_dir(),
                 index_file_budget(file.duration_ms),
-                move |bytes_read, media_ms, fragments| {
-                    progress_jobs.update_analysis_progress(
-                        &progress_key,
-                        &progress_target,
-                        "fragment_index",
-                        bytes_read,
-                        media_ms,
-                        fragments,
-                    );
-                },
-            ) => (Some(outcome), false),
+                move |progress: &crate::fragindex::PassProgress| report_progress(progress),
+                ride_along.as_ref(),
+            ) => (Some(built), false),
             () = lost.cancelled() => (None, false),
             () = self.wait_for_cluster_fragment_index_stop(
                 transcode.as_ref(),
@@ -8244,7 +9965,12 @@ impl JobManager {
             .await;
             return false;
         }
-        let Some(outcome) = outcome else {
+        let Some(crate::fragindex::IndexBuild {
+            outcome,
+            ride_along: harvest,
+            ..
+        }) = outcome
+        else {
             // The lease was lost mid-build. The row stays `running` until a
             // sweep reclaims it; writing an outcome on a claim we no longer
             // hold is exactly what the fence forbids.
@@ -8296,6 +10022,15 @@ impl JobManager {
             )
             .await;
             return false;
+        }
+        // Both freshness checks passed: the held source is the object the
+        // pass read, and the catalog still describes it. The PGS tracks the
+        // pass kept are a statement about exactly that source, whatever
+        // happens to the index publication below.
+        if let Some(pending) = harvest {
+            // `true`: the `source_still_matches` refusal above has returned
+            // already for a source that moved.
+            self.settle_ride_along(&file, pending, true).await;
         }
         let index = match outcome {
             crate::fragindex::IndexOutcome::Built(index) => index,
@@ -9099,6 +10834,103 @@ mod tests {
         DolbyVisionFacts, ItemEdit, ItemKind, NewItem, NewLibrary, PlaybackEventQuery, ProbeResult,
     };
 
+    #[test]
+    fn subtitle_source_job_argv_has_no_index_pipe_and_ends_in_null_sentinel() {
+        let temp = tempfile::tempdir().expect("stage root");
+        let source = temp.path().join("movie.mkv");
+        std::fs::write(&source, b"source").expect("source");
+        let stamp = crate::fragment_index_cluster::source_stamp(
+            &std::fs::metadata(&source).expect("metadata"),
+        );
+        let plan =
+            crate::subtitle_ride_along::RideAlongPlan::standalone(temp.path(), 7, stamp, vec![0])
+                .expect("plan");
+        let argv = subtitle_source_argv("/dev/fd/3", &plan);
+        assert!(argv.iter().all(|arg| arg != "pipe:1"));
+        assert!(argv.last().is_some_and(|arg| arg.ends_with("[f=null]-")));
+        assert!(argv.windows(2).any(|pair| pair == ["-i", "/dev/fd/3"]));
+    }
+
+    #[test]
+    fn subtitle_source_full_extracted_coverage_is_a_no_op_before_spawning() {
+        use plurx_core::store::SubtitleSourcePublication;
+        let tracks = [
+            crate::subtitle_ride_along::ProbedTrack {
+                ordinal: 0,
+                kind: crate::subtitle_ride_along::ProbedKind::Text,
+                stream_index: 1,
+            },
+            crate::subtitle_ride_along::ProbedTrack {
+                ordinal: 1,
+                kind: crate::subtitle_ride_along::ProbedKind::Pgs,
+                stream_index: 2,
+            },
+        ];
+        let mut row = SubtitleSourcePublication {
+            file_id: 7,
+            source_size: 10,
+            source_mtime: 1,
+            source_attestation: "a".repeat(64),
+            node_id: "peer".to_owned(),
+            ordinal: 0,
+            kind: "text".to_owned(),
+            format: "webvtt".to_owned(),
+            verdict: "kept".to_owned(),
+            attempts: 1,
+            origin: "hydrated".to_owned(),
+            sha256: "b".repeat(64),
+            bytes: 5,
+            published_at_ms: 1,
+        };
+        assert!(!subtitle_source_covered(&tracks, &[row.clone()]));
+        row.origin = "extracted".to_owned();
+        let text_row = row.clone();
+        row.ordinal = 1;
+        row.kind = "pgs".to_owned();
+        row.format = "sup".to_owned();
+        row.verdict = "transient".to_owned();
+        row.attempts = i64::from(crate::subtitle_source::TRANSIENT_ATTEMPTS) - 1;
+        assert!(!subtitle_source_covered(
+            &tracks,
+            &[text_row.clone(), row.clone()]
+        ));
+        row.attempts += 1;
+        assert!(subtitle_source_covered(&tracks, &[text_row, row]));
+    }
+
+    #[test]
+    fn field_order_backfill_recovers_selected_video_and_marks_missing_or_invalid_unknown() {
+        let stored = r#"{
+            "streams": [
+                {"codec_type":"video","codec_name":"mjpeg","field_order":"progressive","disposition":{"attached_pic":1}},
+                {"codec_type":"video","codec_name":"mpeg2video","field_order":"tt"}
+            ]
+        }"#;
+        assert_eq!(JobManager::field_order_from_stored_probe(stored), "tt");
+        assert_eq!(
+            JobManager::field_order_from_stored_probe(
+                r#"{"streams":[{"codec_type":"video","codec_name":"h264"}]}"#
+            ),
+            "unknown"
+        );
+        assert_eq!(
+            JobManager::field_order_from_stored_probe("not-json"),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn luminance_backfill_reads_stream_facts_without_opening_media() {
+        let recovered = stored_luminance(
+            r#"{"streams":[{"codec_type":"video","color_transfer":"smpte2084","side_data_list":[{"side_data_type":"Content light level metadata","max_content":4000,"max_average":1000},{"side_data_type":"Mastering display metadata","max_luminance":"40000000/10000"}]}]}"#,
+        );
+        assert_eq!(recovered.max_cll, Some(4000));
+        assert_eq!(recovered.max_fall, Some(1000));
+        assert_eq!(recovered.mastering_max_luminance, Some(4000));
+        assert_eq!(recovered.luminance_source.as_deref(), Some("stream"));
+        assert_eq!(stored_luminance("not json").luminance_source, None);
+    }
+
     #[tokio::test]
     async fn playback_preparation_is_durable_exact_and_independent_of_discovery() {
         use plurx_core::store::ClusterFragmentIndexStore as _;
@@ -9534,8 +11366,8 @@ mod tests {
         ));
     }
     use plurx_core::store::{
-        DvConversionMode, DvConversionStore, LibraryStore, MediaStore, PlaybackTelemetryStore,
-        SettingsStore, SqliteStore,
+        ClusterFragmentIndexStore, DvConversionMode, DvConversionStore, LibraryStore, MediaStore,
+        PlaybackTelemetryStore, SettingsStore, SqliteStore,
     };
     use plurx_core::transcode::Pipeline;
     use serde_json::json;
@@ -9672,6 +11504,460 @@ mod tests {
 
     fn manager(store: Arc<dyn Store>, artwork: &std::path::Path) -> Arc<JobManager> {
         Arc::new(JobManager::new(store, artwork.to_path_buf()))
+    }
+
+    async fn seed_subtitle_backfill(store: &SqliteStore, media: &Path, count: usize) -> Vec<i64> {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Subtitle backfill".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let mut ids = Vec::new();
+        for n in 0..count {
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("Subtitle movie {n}"),
+                    year: Some(2026),
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            let source = media.join(format!("movie-{n}.mkv"));
+            std::fs::write(&source, b"source").expect("source");
+            let id = store
+                .upsert_file(
+                    item,
+                    source.to_str().expect("path"),
+                    6,
+                    1,
+                    &ProbeResult {
+                        container: Some("mkv".to_owned()),
+                        subtitle_streams: vec![plurx_core::domain::SubtitleStream {
+                            index: 0,
+                            codec: "subrip".to_owned(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("file");
+            ids.push(id);
+        }
+        ids
+    }
+
+    async fn enable_subtitle_backfill(store: &SqliteStore) {
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+            keys::SUBTITLE_BACKFILL,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_workers_allow_one_foreground_self_claim_and_one_subtitle_producer() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(7, &[Sub::Srt]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Foreground subtitles".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: vec![fixture.dir.path().to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Cold subtitle".to_owned(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let file_id = store
+            .upsert_file(
+                item,
+                fixture.source.to_str().expect("source path"),
+                fixture.file.size,
+                fixture.file.mtime,
+                &ProbeResult {
+                    container: Some("mkv".to_owned()),
+                    subtitle_streams: vec![plurx_core::domain::SubtitleStream {
+                        index: 0,
+                        codec: "subrip".to_owned(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("catalog file");
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let _busy = transcode.test_mark_live_waiting();
+        let (request, _) = jobs
+            .request_file_analysis(file_id, false, "subtitle_source", "playback")
+            .await
+            .expect("one durable foreground request");
+        assert_eq!(request.priority, "foreground");
+        let (first, second) = tokio::join!(
+            jobs.self_claim_subtitle_source(&request.request_id, work.path()),
+            jobs.self_claim_subtitle_source(&request.request_id, work.path())
+        );
+        assert_eq!((first as u8) + (second as u8), 1, "one owner runs");
+        let rows = store.analysis_requests(20).await.expect("requests");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, "ready");
+        let publications = store
+            .list_subtitle_source_publications(file_id, fixture.file.size, fixture.file.mtime)
+            .await
+            .expect("publications");
+        assert!(publications.iter().any(|row| {
+            row.origin == "extracted" && row.ordinal == 0 && row.format == "webvtt"
+        }));
+        let directory = crate::subtitle_source::file_dir(
+            &crate::subtitle_source::store_root(work.path()),
+            file_id,
+        );
+        assert!(directory
+            .join(crate::subtitle_source::MANIFEST_NAME)
+            .is_file());
+        let finished = jobs
+            .finished_analysis_rows
+            .lock()
+            .expect("finished progress");
+        let progress = finished
+            .iter()
+            .find(|row| row.job_id == request.request_id)
+            .expect("subtitle progress");
+        assert_eq!((progress.text_tracks, progress.pgs_tracks), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn learner_never_claims_a_foreground_subtitle_source_request() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = tempfile::tempdir().expect("media");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        let file_id = seed_subtitle_backfill(store.as_ref(), media.path(), 1).await[0];
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+        let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
+            store.clone(),
+            artwork.path().to_owned(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "learner".to_owned(),
+            MovableJobAuthority::learner(),
+        ));
+        let (request, _) = jobs
+            .request_file_analysis(file_id, false, "subtitle_source", "playback")
+            .await
+            .expect("request");
+        assert!(
+            !jobs
+                .self_claim_subtitle_source(&request.request_id, work.path())
+                .await
+        );
+        let rows = store.analysis_requests(10).await.expect("requests");
+        assert_eq!(rows[0].state, "queued");
+    }
+
+    #[tokio::test]
+    async fn full_subtitle_coverage_settles_ready_without_spawning_a_pass() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+        use plurx_core::store::SubtitleSourcePublication;
+
+        let fixture = fixture(10, &[Sub::Srt]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        let attestation =
+            crate::fragment_index_cluster::attest_source("test-node", &file, None, &|_| {})
+                .await
+                .expect("sampled source digest")
+                .observation
+                .source_sha256;
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+        store
+            .upsert_subtitle_source_publication(&SubtitleSourcePublication {
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_attestation: attestation,
+                node_id: "peer".to_owned(),
+                ordinal: 0,
+                kind: "text".to_owned(),
+                format: "webvtt".to_owned(),
+                verdict: "empty".to_owned(),
+                attempts: 1,
+                origin: "extracted".to_owned(),
+                sha256: String::new(),
+                bytes: 0,
+                published_at_ms: clock_ms(),
+            })
+            .await
+            .expect("coverage");
+        let jobs = manager(store.clone(), artwork.path());
+        let (request, _) = jobs
+            .request_file_analysis(file.id, false, "subtitle_source", "playback")
+            .await
+            .expect("request");
+        assert!(
+            jobs.self_claim_subtitle_source(&request.request_id, work.path())
+                .await
+        );
+        assert_eq!(
+            store.analysis_requests(10).await.expect("requests")[0].state,
+            "ready"
+        );
+        assert!(
+            !crate::subtitle_source::store_root(work.path()).exists(),
+            "the no-op never opens a stage or ffmpeg child"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_original_complete_publisher_and_request_third_ordinal_recovers_through_repair()
+    {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(9, &[Sub::Srt, Sub::Srt, Sub::Srt]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+        let jobs = manager(store.clone(), artwork.path());
+        let (initial, _) = jobs
+            .request_file_analysis(file.id, false, "subtitle_source", "playback")
+            .await
+            .expect("initial request");
+        assert!(
+            jobs.self_claim_subtitle_source(&initial.request_id, work.path())
+                .await
+        );
+        let stamp = SubtitleSourceStamp {
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            pipeline_version: subtitle_source_pipeline_version().await,
+        };
+        let before = store
+            .list_subtitle_source_publications(file.id, file.size, file.mtime)
+            .await
+            .expect("original publications");
+        assert!(before
+            .iter()
+            .any(|row| row.ordinal == 2 && row.origin == "extracted"));
+        store
+            .delete_subtitle_source_publications(file.id, jobs.coordinator.node_id())
+            .await
+            .expect("publisher removed");
+        let dir = crate::subtitle_source::file_dir(
+            &crate::subtitle_source::store_root(work.path()),
+            file.id,
+        );
+        std::fs::remove_dir_all(dir).expect("publisher files removed");
+        assert!(store
+            .retire_subtitle_source_ready(&stamp, clock_ms())
+            .await
+            .expect("retire lost publication"));
+        let (repair, _) = jobs
+            .request_file_analysis(file.id, false, "subtitle_source", "playback")
+            .await
+            .expect("repair request for missing third ordinal");
+        assert_ne!(repair.request_id, initial.request_id);
+        assert!(
+            jobs.self_claim_subtitle_source(&repair.request_id, work.path())
+                .await
+        );
+        let after = store
+            .list_subtitle_source_publications(file.id, file.size, file.mtime)
+            .await
+            .expect("repaired publications");
+        assert!(after
+            .iter()
+            .any(|row| row.ordinal == 2 && row.origin == "extracted"));
+    }
+
+    #[tokio::test]
+    async fn normal_subtitle_job_yields_uncharged_to_playback_but_foreground_is_not_preempted() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(8, &[Sub::Pgs]);
+        let source = std::fs::File::open(&fixture.source).expect("source");
+        let stamp =
+            crate::fragment_index_cluster::source_stamp(&source.metadata().expect("metadata"));
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let transcode = TranscodeManager::new(
+            store,
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let _busy = transcode.test_mark_live_waiting();
+        let lost = CancellationToken::new();
+        for _ in 0..3 {
+            let plan = crate::subtitle_ride_along::RideAlongPlan::standalone(
+                work.path(),
+                8,
+                stamp,
+                vec![0],
+            )
+            .expect("normal plan");
+            assert!(matches!(
+                run_subtitle_source_pass(
+                    plan,
+                    &source,
+                    work.path(),
+                    &lost,
+                    Some(&transcode),
+                    &|| {},
+                )
+                .await,
+                Err(AnalysisResolutionError::Retry {
+                    code: "foreground_preempted",
+                    charge_attempt: false,
+                })
+            ));
+        }
+        let plan =
+            crate::subtitle_ride_along::RideAlongPlan::standalone(work.path(), 8, stamp, vec![0])
+                .expect("foreground plan");
+        assert!(
+            run_subtitle_source_pass(plan, &source, work.path(), &lost, None, &|| {})
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn subtitle_backfill_enqueues_nothing_when_worker_is_busy() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = tempfile::tempdir().expect("media");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        seed_subtitle_backfill(store.as_ref(), media.path(), 1).await;
+        enable_subtitle_backfill(store.as_ref()).await;
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let _busy = transcode.test_mark_live_waiting();
+        jobs.discover_subtitle_sources(transcode).await;
+        assert!(store
+            .analysis_requests(20)
+            .await
+            .expect("requests")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn subtitle_backfill_lease_is_exclusive_and_pass_enqueues_at_most_eight() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = tempfile::tempdir().expect("media");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        let ids = seed_subtitle_backfill(store.as_ref(), media.path(), 10).await;
+        enable_subtitle_backfill(store.as_ref()).await;
+        let first = Arc::new(JobManager::new_with_scan_prune_percent(
+            store.clone(),
+            artwork.path().to_owned(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "first".to_owned(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+        ));
+        let second = Arc::new(JobManager::new_with_scan_prune_percent(
+            store.clone(),
+            artwork.path().to_owned(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "second".to_owned(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+        ));
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let lease = first
+            .acquire_job("media:subtitle-source:backfill".to_owned())
+            .await
+            .expect("lease")
+            .expect("first holder");
+        second
+            .discover_subtitle_sources(Arc::clone(&transcode))
+            .await;
+        assert!(store
+            .analysis_requests(20)
+            .await
+            .expect("requests")
+            .is_empty());
+        lease.release().await.expect("release");
+        second.discover_subtitle_sources(transcode).await;
+        let requests = store.analysis_requests(20).await.expect("requests");
+        assert_eq!(requests.len(), 8, "one pass admits at most eight sources");
+        let newest: std::collections::HashSet<_> = ids.into_iter().rev().take(8).collect();
+        assert!(requests
+            .iter()
+            .all(|request| newest.contains(&request.file_id)));
+        assert!(requests.iter().all(|request| {
+            request.component == "subtitle_source"
+                && request.priority == "normal"
+                && request.trigger == "background"
+                && !request.force_rebuild
+                && request.target_node_id.is_empty()
+        }));
     }
 
     #[test]
@@ -9908,6 +12194,45 @@ mod tests {
                 .expect("takeover acquire"),
             LeaseClaim::Acquired(_)
         ));
+    }
+
+    /// Provider work runs in the lease owner's task, while renewal runs in the
+    /// independent task owned by `ActiveJobLease`. A provider future that does
+    /// not wake therefore cannot silently let another node take the scan.
+    #[tokio::test]
+    async fn a_hung_provider_does_not_stop_scan_lease_renewal() {
+        let store: Arc<dyn Store> =
+            Arc::new(SqliteStore::open_in_memory().expect("hung provider store"));
+        let first =
+            StoreCoordinator::new(Arc::clone(&store), "provider-owner").expect("coordinator");
+        let successor =
+            StoreCoordinator::new(Arc::clone(&store), "provider-successor").expect("successor");
+        let lease = match first
+            .acquire("scan:library:1", Duration::from_secs(1))
+            .await
+            .expect("first acquire")
+        {
+            LeaseClaim::Acquired(lease) => lease,
+            held => panic!("first owner must acquire, got {held:?}"),
+        };
+        let active = ActiveJobLease::start_with_policy(
+            first,
+            lease,
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+        )
+        .expect("valid test lease policy");
+
+        tokio::time::sleep(Duration::from_millis(1_150)).await;
+        assert!(matches!(
+            successor
+                .acquire("scan:library:1", Duration::from_secs(1))
+                .await
+                .expect("successor acquire"),
+            LeaseClaim::Held { .. }
+        ));
+
+        active.release().await.expect("release renewed lease");
     }
 
     #[tokio::test]
@@ -10286,6 +12611,7 @@ mod tests {
     /// Spelled out rather than derived, so adding a sixth job without deciding
     /// whether a node with no vote may run it fails here.
     const CLUSTER_SINGLETON_RESOURCES: &[&str] = &[
+        "backup:cluster",
         "provider:artwork",
         "provider:genres",
         "scan:library:1",
@@ -10971,6 +13297,362 @@ mod tests {
             "a boot tick before library creation must stay due for the first scan"
         );
         assert!(!jobs.indexing.load(Ordering::Relaxed));
+    }
+
+    /// Catalogue a ride-along fixture: a library, an item and a file row
+    /// whose size and mtime are the fixture's own, so freshness checks pass.
+    async fn catalogued_fixture(
+        store: &Arc<SqliteStore>,
+        fixture: &crate::subtitle_ride_along::testing::Fixture,
+    ) -> MediaFile {
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("Ride {}", fixture.file.id),
+                kind: LibraryKind::Movies,
+                paths: vec![fixture.dir.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Ride along".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let probe = ProbeResult {
+            duration_ms: Some(16_000),
+            container: Some("matroska".into()),
+            video_codec: Some("h264".into()),
+            width: Some(64),
+            height: Some(64),
+            ..Default::default()
+        };
+        let file_id = store
+            .upsert_file(
+                item,
+                &fixture.source.to_string_lossy(),
+                fixture.file.size,
+                fixture.file.mtime,
+                &probe,
+            )
+            .await
+            .expect("file");
+        store.get_file(file_id).await.expect("read").expect("file")
+    }
+
+    /// Review finding 7: the decision both index paths make before a pass's
+    /// PGS tracks reach the store. A pass whose held source moved publishes
+    /// nothing; a pass whose catalog row moved publishes nothing; a current
+    /// pass publishes.
+    #[tokio::test]
+    async fn a_riding_pass_publishes_only_while_its_source_and_its_row_are_current() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(0, &[Sub::Pgs]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let jobs = manager(store.clone(), artwork.path());
+        let cache = crate::test_tempdir().expect("cache");
+        let root = crate::subtitle_source::store_root(cache.path());
+        let gate = crate::subtitle_ride_along::RideAlongGate::for_test(root.clone());
+        let video = plurx_core::transcode::CopyVideoOptions::new(false, false);
+        let dir = crate::subtitle_source::file_dir(&root, file.id);
+        let pass = || async {
+            let source = std::fs::File::open(&fixture.source).expect("held source");
+            crate::fragindex::build_from_attested_file_with_progress(
+                &file,
+                &source,
+                "fixture-object-v1",
+                video,
+                cache.path(),
+                std::time::Duration::from_secs(60),
+                |_: &crate::fragindex::PassProgress| {},
+                Some(&gate),
+            )
+            .await
+            .ride_along
+            .expect("the pass rode along")
+        };
+
+        assert!(
+            jobs.settle_ride_along(&file, pass().await, false)
+                .await
+                .is_none(),
+            "the held source moved"
+        );
+        assert!(!dir.exists());
+
+        let rescanned = ProbeResult {
+            duration_ms: Some(16_000),
+            container: Some("matroska".into()),
+            video_codec: Some("h264".into()),
+            width: Some(64),
+            height: Some(64),
+            ..Default::default()
+        };
+        store
+            .upsert_file(
+                file.item_id,
+                &fixture.source.to_string_lossy(),
+                file.size + 1,
+                file.mtime,
+                &rescanned,
+            )
+            .await
+            .expect("a rescan moves the row");
+        assert!(
+            jobs.settle_ride_along(&file, pass().await, true)
+                .await
+                .is_none(),
+            "the catalog row moved"
+        );
+        assert!(!dir.exists());
+
+        store
+            .upsert_file(
+                file.item_id,
+                &fixture.source.to_string_lossy(),
+                file.size,
+                file.mtime,
+                &rescanned,
+            )
+            .await
+            .expect("and back");
+        let manifest = jobs
+            .settle_ride_along(&file, pass().await, true)
+            .await
+            .expect("a current pass publishes");
+        assert_eq!(manifest.ordinals, vec![0]);
+        assert!(dir.join(crate::subtitle_source::MANIFEST_NAME).is_file());
+    }
+
+    /// Review finding 7, end to end on the non-cluster path: with the gate
+    /// open (on this test's thread only), the background index pass over a
+    /// file with a PGS track builds its index and publishes the track.
+    #[tokio::test]
+    async fn the_non_cluster_index_pass_rides_and_publishes() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+        use plurx_core::store::FragmentIndexStore as _;
+
+        let fixture = fixture(0, &[Sub::Pgs]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let transcode_dir = crate::test_tempdir().expect("transcode");
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            transcode_dir.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let _open = crate::subtitle_ride_along::force_gate_open_on_this_thread();
+
+        Arc::clone(&jobs)
+            .build_fragment_indexes(Arc::clone(&transcode))
+            .await;
+
+        assert!(
+            store
+                .holds_fragment_index_for_source(file.id, file.size, file.mtime)
+                .await
+                .expect("read"),
+            "the index was built"
+        );
+        let dir = crate::subtitle_source::file_dir(
+            &crate::subtitle_source::store_root(transcode.runtime_cache_dir()),
+            file.id,
+        );
+        let manifest = crate::subtitle_source::read_manifest(&dir)
+            .await
+            .expect("the pass published its PGS track");
+        assert_eq!(manifest.ordinals, vec![0]);
+        assert_eq!(
+            manifest.track(0).map(|track| track.verdict),
+            Some(crate::subtitle_source::Verdict::Kept)
+        );
+        // #463 review findings 1 and 6: the local pass — the default one —
+        // has a progress row like the queue's, and the real pass wrote its
+        // ride-along onto it.
+        let row = finished_row_of(&jobs, file.id);
+        assert!(
+            row.job_id.starts_with(&format!("local-index:{}:", file.id)),
+            "{row:?}"
+        );
+        assert_eq!(row.component, "fragment_index");
+        assert!(row.fragments_indexed > 0, "{row:?}");
+        assert_eq!(
+            row.pgs_tracks, 1,
+            "the row names the track it kept: {row:?}"
+        );
+    }
+
+    /// The row a finished pass over `file_id` left behind, as it stood when
+    /// the pass ended.
+    fn finished_row_of(jobs: &JobManager, file_id: i64) -> AnalysisProgress {
+        jobs.finished_analysis_rows
+            .lock()
+            .expect("rows")
+            .iter()
+            .rev()
+            .find(|row| row.file_id == file_id && row.component == "fragment_index")
+            .cloned()
+            .unwrap_or_else(|| panic!("no progress row for file {file_id}"))
+    }
+
+    /// #463 review finding 6: the queue worker's pass writes its ride-along
+    /// onto its progress row through the real wiring — request, resolve,
+    /// claim, build — not only through the row's own update call.
+    #[tokio::test]
+    async fn the_queue_worker_row_carries_its_ride_along() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(0, &[Sub::Pgs]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("the queue on");
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let transcode_dir = crate::test_tempdir().expect("transcode");
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            transcode_dir.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let _open = crate::subtitle_ride_along::force_gate_open_on_this_thread();
+        jobs.request_file_analysis(file.id, false, "fragment_index", "admin")
+            .await
+            .expect("requested");
+        for _ in 0..40 {
+            Arc::clone(&jobs)
+                .work_cluster_fragment_index_queue(Arc::clone(&transcode))
+                .await;
+            let done = jobs
+                .finished_analysis_rows
+                .lock()
+                .expect("rows")
+                .iter()
+                .any(|row| row.file_id == file.id && row.pgs_tracks > 0);
+            if done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let row = finished_row_of(&jobs, file.id);
+        assert!(!row.job_id.starts_with("local-index:"), "{row:?}");
+        assert_eq!(
+            row.pgs_tracks, 1,
+            "the queue's row names the track: {row:?}"
+        );
+        assert!(row.fragments_indexed > 0, "{row:?}");
+    }
+
+    /// #463 review finding 3: the switch turned off while a riding pass runs
+    /// stops that pass's tracks reaching the store, and is counted.
+    #[tokio::test]
+    async fn a_riding_pass_finished_after_the_switch_went_off_publishes_nothing() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+        use crate::subtitle_ride_along::{discarded, Discard};
+
+        let fixture = fixture(0, &[Sub::Pgs]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let jobs = manager(store.clone(), artwork.path());
+        let cache = crate::test_tempdir().expect("cache");
+        let root = crate::subtitle_source::store_root(cache.path());
+        let gate = crate::subtitle_ride_along::RideAlongGate::for_test(root.clone());
+        let source = std::fs::File::open(&fixture.source).expect("held source");
+        let pending = crate::fragindex::build_from_attested_file_with_progress(
+            &file,
+            &source,
+            "fixture-object-v1",
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
+            cache.path(),
+            std::time::Duration::from_secs(60),
+            |_: &crate::fragindex::PassProgress| {},
+            Some(&gate),
+        )
+        .await
+        .ride_along
+        .expect("the pass rode along");
+        // Turned off after the gate let the pass ride.
+        store
+            .put_setting(keys::SUBTITLE_STORED_SOURCES, "0")
+            .await
+            .expect("switch off");
+        let before = discarded(Discard::SwitchOff);
+        assert!(jobs.settle_ride_along(&file, pending, true).await.is_none());
+        assert!(discarded(Discard::SwitchOff) > before, "counted");
+        assert!(
+            crate::subtitle_source::read_manifest(&crate::subtitle_source::file_dir(
+                &root, file.id
+            ))
+            .await
+            .is_none(),
+            "nothing was published"
+        );
+    }
+
+    /// PR 3: the analysis row of a pass that rides along says how many PGS
+    /// tracks it keeps and what it has written.
+    #[tokio::test]
+    async fn an_analysis_row_carries_its_ride_along() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let jobs = manager(store.clone(), artwork.path());
+        let _guard = jobs.start_analysis_progress(
+            ("job-ride", "node-a"),
+            7,
+            "fragment_index",
+            "fragment_index",
+            1_000,
+            60_000,
+        );
+        let row = |jobs: &JobManager| {
+            jobs.analysis_progress_snapshot()
+                .into_iter()
+                .find(|row| row.job_id == "job-ride")
+                .expect("row")
+        };
+        assert_eq!(
+            (row(&jobs).pgs_tracks, row(&jobs).pgs_bytes_written),
+            (0, 0)
+        );
+        jobs.update_analysis_ride_along("job-ride", "node-a", 2, 18_866);
+        assert_eq!(
+            (row(&jobs).pgs_tracks, row(&jobs).pgs_bytes_written),
+            (2, 18_866)
+        );
+        // A peer that predates the fields still parses, as not riding.
+        let mut value = serde_json::to_value(row(&jobs)).expect("json");
+        value.as_object_mut().expect("object").remove("pgs_tracks");
+        value.as_object_mut().expect("object").remove("text_tracks");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("pgs_bytes_written");
+        let parsed: AnalysisProgress = serde_json::from_value(value).expect("old row");
+        assert_eq!(
+            (
+                parsed.pgs_tracks,
+                parsed.text_tracks,
+                parsed.pgs_bytes_written
+            ),
+            (0, 0, 0)
+        );
     }
 
     /// A file the indexer cannot index is asked once, not once per pass.

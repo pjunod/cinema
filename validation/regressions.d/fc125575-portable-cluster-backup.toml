@@ -1,0 +1,63 @@
+version = 1
+
+[[coverage]]
+commits = ["fc125575"]
+points = [
+  "persistence.upgrades",
+  "cluster.operations",
+  "core.media",
+  "server.api",
+]
+checks = ["rust-gate", "rust-gate-ci", "unit-core", "operations-contract"]
+reason = """
+The audit reads this commit as corrective because its subject names `restore`. \
+It is the portable backup and fenced restore itself, and its evidence landed \
+with it.
+
+The archive format lives in `crates/plurx-core/src/cluster/migration.rs`. \
+`cluster_backup_open_descriptor_survives_unlink_and_records_exact_cut` opens a \
+published state-machine snapshot, unlinks that pathname before calling \
+`build_cluster_backup_artifact`, and asserts that the artefact still builds \
+from the held descriptor, that the manifest records exactly the cut it was \
+handed (`raft_cut.term` 3 from the snapshot's own `_metadata` row and \
+`raft_cut.index` 7 from the applied index the caller passed), that the produced \
+image carries a `_metadata` table with zero rows rather than the source's Raft \
+state-machine row, and that `verify_cluster_backup_archive` then accepts the \
+result. A builder that reopens the snapshot path instead of consuming the \
+already-open descriptor fails the first assertion as soon as snapshot cleanup \
+unlinks that generation, which is the ordinary case on a voter that keeps \
+committing. `restore_archive_remaps_paths_resets_fingerprint_and_mints_fence` \
+restores that artefact into an empty target directory and asserts the reported \
+cluster id, one remapped `files` row and one remapped `libraries` row, a node \
+id that is not the source's `old-node`, that fresh `RAFT_SECRET_FILENAME`, \
+`API_SECRET_FILENAME` and `ACTIVITY_SIGNING_KEY_FILENAME` files exist in the \
+target, that `files.path` became `/mnt/nas/media/movie.mkv`, that \
+`library_roots` is empty so the next scan re-fingerprints instead of trusting \
+the source host's roots, and that `cluster.restore_generation` equals the \
+manifest's build timestamp. Dropping the remap, the identity fence, the secret \
+minting or the fingerprint reset each fails a distinct assertion there.
+
+The daemon surface lives in `crates/plurxd/src/backup.rs` and \
+`crates/plurxd/src/http/`. `schedule_is_one_strict_utc_minute` pins \
+`parse_schedule_minute` to strict `HH:MM` UTC and refuses `24:00` and \
+`2:30:00`, so a malformed `backup.schedule_utc` cannot be read as some other \
+minute. In `crates/plurxd/src/http/mod.rs`, \
+`portable_backup_settings_save_without_readiness_gate` asserts that an admin \
+PUT of `backup_destination`, `backup_schedule_utc` and `backup_keep` answers \
+200 with those values echoed and `BACKUP_DESTINATION` durably stored, and that \
+a relative destination is a 400 — the no-feature-gates rule in one test: the \
+control saves on the value's own merits and never on a readiness verdict. \
+`developer_readiness_reports_what_it_reads_and_admits_what_it_cannot` pins \
+`cluster_backup` as the first id of the Developer readiness list, so the \
+advisory card cannot silently disappear.
+
+All of the above are `plurx-core` and `plurxd` unit tests. `make rust-check` \
+runs them under `rust-gate` and `make ci-rust-gate` under `rust-gate-ci`; the \
+`cluster::migration` backup tests are `#[cfg(feature = "hiqlite-store")]` and \
+reach those workspace lanes only through `plurxd`'s feature unification, which \
+is why `unit-core` is claimed as well — it runs `-p plurx-core --features \
+hiqlite-store --lib` and executes that half on its own. `operations-contract` \
+holds the route this commit registered: `tests/operations/test_api_doc_routes.py` \
+fails if `/api/v1/cluster/backups` loses its `docs/API.md` entry or if the \
+document's claimed route count stops matching `http/mod.rs`.
+"""

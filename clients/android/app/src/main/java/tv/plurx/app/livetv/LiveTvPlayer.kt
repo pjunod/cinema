@@ -2,6 +2,7 @@
 
 package tv.plurx.app.livetv
 
+import android.app.Activity
 import android.content.Context
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -9,16 +10,36 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import tv.plurx.app.player.playbackLoadControl
+import kotlinx.coroutines.withContext
+import tv.plurx.app.player.PlayerRole
+import tv.plurx.app.player.PlurxPlayerBuilder
+import tv.plurx.app.player.DisplayModeMatchResult
+import tv.plurx.app.player.DisplayModeMatcher
+import tv.plurx.app.player.PlaybackClientLog
+import tv.plurx.app.player.postPlaybackClientLog
+import tv.plurx.app.player.logDisplayModeResult
+
+/** One live-edge rewind per attached session; a new attach resets the budget. */
+internal class LiveEdgeRecovery {
+    private var used = false
+    fun attached() { used = false }
+    fun reserve(): Boolean {
+        if (used) return false
+        used = true
+        return true
+    }
+}
 
 data class LiveTvPlayerState(
     val channels: List<LiveTvChannel> = emptyList(),
@@ -50,6 +71,10 @@ class LiveTvPlayer private constructor(context: Context) {
     private var heartbeat: Job? = null
     private var guideRefresh: Job? = null
     private var channelChange: Job? = null
+    private var tuneJob: Job? = null
+    private var displayModeActivity: Activity? = null
+    private var displayModeMatcher: DisplayModeMatcher? = null
+    private var displayModeOwner: Long? = null
     /**
      * Set by the screen while, and only while, the activity is genuinely in
      * picture-in-picture — the one case where the video is still on screen and
@@ -134,15 +159,22 @@ class LiveTvPlayer private constructor(context: Context) {
         detach()
         mutableState.value = mutableState.value.copy(busy = true, playing = false, title = channel.title,
             watching = channel, status = null, message = "Starting ${channel.title}…")
-        scope.launch {
+        val launched = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 val started = lease.start(channel.id).await() ?: return@launch
                 if (mine != serial) return@launch
                 attach(channel, started, mine, api, lease, compatibilityRetry)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 if (mine == serial) { fail(error); stopWithMessage(message(error)) }
             }
         }
+        tuneJob = launched
+        launched.invokeOnCompletion {
+            if (tuneJob === launched) tuneJob = null
+        }
+        launched.start()
     }
 
     /**
@@ -153,19 +185,70 @@ class LiveTvPlayer private constructor(context: Context) {
      * "rejoin the session the viewer left" the same thing as "tune it" rather
      * than a second, thinner playback path that drifts.
      */
-    private fun attach(
+    private suspend fun attach(
         channel: LiveTvChannel,
         started: LiveTvStarted,
         mine: Long,
         api: LiveTvApi,
         lease: LiveTvLease,
         compatibilityRetry: Boolean,
-    ) {
-        val output = ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(api.mediaClient)))
-            .setLoadControl(playbackLoadControl(context, live = true))
-            .build()
+    ): Boolean {
+        val delivery = started.delivery
+        val outputIsProgressive = delivery?.deinterlace == true ||
+            delivery?.source?.field_order?.lowercase() in setOf("progressive", "unknown")
+        val rate = delivery?.output?.frame_rate
+            ?.takeIf { outputIsProgressive && it.num > 0 && it.den > 0 }
+            ?.let { it.num.toDouble() / it.den.toDouble() }
+        val matcher = displayModeMatcher
+        val owner = displayModeOwner
+        if (!compatibilityRetry && matcher != null && owner != null) {
+            val result = awaitLiveTvDisplayMode(
+                mine = mine,
+                currentSerial = { serial },
+                ownerIsCurrent = {
+                    matcher === displayModeMatcher && owner == displayModeOwner && matcher.isOwner(owner)
+                },
+                match = { matcher.match(owner, rate, tv.plurx.app.data.Session.displayModeMatch) },
+                cleanup = { lease.stopIfCurrent(started).await() },
+            ) ?: return false
+            logDisplayModeResult(result)
+            postPlaybackClientLog(
+                scope,
+                PlaybackClientLog(
+                    level = "info",
+                    event = "playback_display_mode",
+                    message = "Android Live TV display-mode decision",
+                    method = "live",
+                    detail = result.detail(),
+                    ua = "Android Media3",
+                    sessionId = started.session_id,
+                ),
+            )
+        }
+        if (mine != serial) {
+            lease.stopIfCurrent(started).await()
+            return false
+        }
+        val output = PlurxPlayerBuilder(context, PlayerRole.LiveTv).build(
+            dataSource = OkHttpDataSource.Factory(api.mediaClient),
+        )
         player = output
+        val watchdog = LiveTvWatchdog()
+        val liveEdgeRecovery = LiveEdgeRecovery().also { it.attached() }
+        fun reportLiveEdge(outcome: String) {
+            postPlaybackClientLog(
+                scope,
+                PlaybackClientLog(
+                    level = if (outcome == "recovered") "info" else "warn",
+                    event = "live_tv_behind_live_window",
+                    message = "Android Live TV live-edge recovery",
+                    method = "live",
+                    detail = "outcome=$outcome",
+                    ua = "Android Media3",
+                    sessionId = started.session_id,
+                ),
+            )
+        }
         // Both of these tear the player down, and they arrive from
         // inside ExoPlayer's own listener iteration. Releasing a player
         // re-entrantly from its callback is not a documented-safe
@@ -177,6 +260,22 @@ class LiveTvPlayer private constructor(context: Context) {
                 if (mine != serial) return
                 val code = liveTvPlaybackErrorCode(error.errorCode)
                 scope.launch(Dispatchers.Main) {
+                    if (mine != serial) return@launch
+                    if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
+                        val outcome = when {
+                            lease.current !== started || watchdog.expired -> "lease_lost"
+                            !liveEdgeRecovery.reserve() -> "spent"
+                            !api.playlistIsLive(started.session_id) -> "session_gone"
+                            lease.current !== started || watchdog.expired || mine != serial -> "lease_lost"
+                            else -> "recovered"
+                        }
+                        reportLiveEdge(outcome)
+                        if (outcome == "recovered") {
+                            output.seekToDefaultPosition()
+                            output.prepare()
+                            return@launch
+                        }
+                    }
                     if (mine == serial && code == "codec_unsupported" && !compatibilityRetry) {
                         retryCompatible(channel, api, lease, LiveTvCompatibility(
                             failed_video = true, failed_audio = true, failed_container = true,
@@ -191,14 +290,13 @@ class LiveTvPlayer private constructor(context: Context) {
                 }
             }
         })
-        output.setMediaItem(MediaItem.Builder().setUri(api.playlistUrl(started.session_id))
+        output.setMediaItem(MediaItem.Builder().setUri(api.playbackUrl(started))
             .setMimeType(MimeTypes.APPLICATION_M3U8)
             .setLiveConfiguration(MediaItem.LiveConfiguration.Builder().setMaxOffsetMs(8_000).build())
             .build())
         output.prepare()
         output.play()
         mutableState.value = mutableState.value.copy(playing = true, busy = false, paused = false, muted = false, message = "Playing live")
-        val watchdog = LiveTvWatchdog()
         heartbeat = scope.launch {
             try {
                 while (mine == serial) {
@@ -236,6 +334,7 @@ class LiveTvPlayer private constructor(context: Context) {
                 } else if (mine == serial) stopWithMessage(message(error))
             }
         }
+        return true
     }
 
     /**
@@ -326,9 +425,43 @@ class LiveTvPlayer private constructor(context: Context) {
     fun stop(clearProfile: Boolean = false) {
         stopWithMessage("Live TV stopped. Select a channel to resume.", clearProfile)
     }
+
+    /** Bind only while this activity owns the Live TV surface. */
+    fun bindDisplayMode(activity: Activity) {
+        if (displayModeActivity === activity && displayModeMatcher != null) return
+        displayModeOwner?.let { owner -> displayModeMatcher?.reset(owner) }
+        displayModeActivity = activity
+        displayModeMatcher = DisplayModeMatcher(activity)
+        displayModeOwner = displayModeMatcher?.claimOwner()
+    }
+
+    private fun resetDisplayModeForNextStart() {
+        val matcher = displayModeMatcher ?: return
+        displayModeOwner?.let(matcher::reset)
+        displayModeOwner = matcher.claimOwner()
+    }
+
+    fun unbindDisplayMode(activity: Activity) {
+        if (displayModeActivity !== activity) return
+        if (tuneJob?.isActive == true) {
+            // An unbound window cannot finish a tune it no longer owns. Bump
+            // both generations: cancellation alone would stop the waiter but
+            // could leave the lease's independently scoped start publishing a
+            // capability after this coroutine disappeared.
+            ++serial
+            tuneJob?.cancel()
+            val cleanup = lease?.stop()
+            scope.launch { runCatching { cleanup?.await() } }
+        }
+        displayModeOwner?.let { owner -> displayModeMatcher?.reset(owner) }
+        displayModeOwner = null
+        displayModeMatcher = null
+        displayModeActivity = null
+    }
     private fun stopWithMessage(message: String, clearProfile: Boolean = false) {
         val mine = ++serial
         detach()
+        resetDisplayModeForNextStart()
         mutableState.value = mutableState.value.copy(
             busy = false, playing = false, message = message,
             // A released tuner is not "Watching". Carrying `watching` forward
@@ -374,6 +507,7 @@ class LiveTvPlayer private constructor(context: Context) {
     }
 
     private fun detach() {
+        tuneJob?.cancel(); tuneJob = null
         heartbeat?.cancel(); heartbeat = null
         channelChange?.cancel(); channelChange = null
         val output = player
@@ -476,6 +610,30 @@ class LiveTvPlayer private constructor(context: Context) {
             instance ?: LiveTvPlayer(context).also { instance = it }
         }
     }
+}
+
+/**
+ * The display handshake is allowed to suspend, but ownership is not.
+ * Recheck both the channel serial and window generation before any player is
+ * constructed; cancellation performs the same exact-session cleanup.
+ */
+internal suspend fun awaitLiveTvDisplayMode(
+    mine: Long,
+    currentSerial: () -> Long,
+    ownerIsCurrent: () -> Boolean,
+    match: suspend () -> DisplayModeMatchResult,
+    cleanup: suspend () -> Unit,
+): DisplayModeMatchResult? = try {
+    val result = match()
+    if (mine == currentSerial() && ownerIsCurrent()) {
+        result
+    } else {
+        cleanup()
+        null
+    }
+} catch (cancelled: CancellationException) {
+    withContext(NonCancellable) { cleanup() }
+    throw cancelled
 }
 
 internal fun liveTvPlaybackErrorCode(code: Int): String = when (code) {

@@ -36,6 +36,7 @@ scratch-fault-injection = []
 [dependencies]
 dolby_vision = { workspace = true }
 async-trait = { workspace = true }
+bincode = { version = "2", features = ["serde"] }
 hiqlite = { workspace = true, optional = true }
 # Only to install the process-level provider before a TLS Hiqlite client is
 # built. rustls panics instead of erroring when a process reaches TLS without
@@ -48,6 +49,7 @@ rustls = { version = "0.23", default-features = false, features = [
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ipnet = { workspace = true }
 icu_normalizer = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -78,6 +80,7 @@ libc = { workspace = true }
 # Envelope encryption for the Trakt bearer credential (CLUSTERING-PLAN §3.2).
 # Already in the tree via hiqlite's cryptr, so this adds no new compiled crate.
 chacha20poly1305 = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 zeroize = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
@@ -89,6 +92,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
   "Win32_System_IO",
+  "Win32_System_JobObjects",
   "Win32_System_Threading",
 ] }
 
@@ -96,11 +100,11 @@ windows-sys = { version = "0.61", features = [
 tempfile = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+openraft = { version = "0.9.25", features = ["serde"] }
 # The encoder `hiqlite-wal` writes Raft entries with. Tests only, and only so
 # the import transaction estimate can be checked against the real encoding
 # rather than trusted. Already in the tree via hiqlite, so this adds no new
 # compiled crate; pinned to the version hiqlite 0.14 resolves.
-bincode = { version = "2", features = ["serde"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # `trace` (sqlite3_trace_v2) is how the page-wide lookups prove they are one
 # statement rather than one per item. Tests only — resolver 2 keeps a

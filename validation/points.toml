@@ -117,6 +117,16 @@ missing = "fail"
 timeout_seconds = 1800
 
 [[checks]]
+id = "unit-core"
+title = "plurx-core unit tests with replicated-store feature coverage"
+command = "PLURX_EXPECT_TEST_COUNT_AT_LEAST=1100 make unit-core"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["cargo", "make"]
+missing = "fail"
+timeout_seconds = 1800
+expect_at_least = 1100
+
+[[checks]]
 id = "hiqlite-vendor-clippy"
 title = "Vendored Hiqlite production snapshot transport denied-warning Clippy"
 command = "make hiqlite-vendor-clippy"
@@ -395,6 +405,13 @@ paths = [
   "Cargo.lock",
   "Cargo.toml",
   "crates/plurx-core/Cargo.toml",
+  # The K-05 catalogue fixture generator. It opens a database through
+  # `SqliteStore::open` so production owns the schema, then populates and
+  # censuses the core media model's durable rows — libraries, items, files,
+  # probes, users and watch state — for query-plan evidence. A migration that
+  # adds a newly-required column breaks it, so it belongs with the model whose
+  # persistence it reproduces.
+  "crates/plurx-core/examples/catalogue_fixture.rs",
   "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,testfixtures}.rs",
   "crates/plurx-core/src/content_analysis.rs",
   "crates/plurx-core/src/store/mod.rs",
@@ -426,7 +443,7 @@ paths = [
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "rust-toolchain.toml",
 ]
-checks = ["rust-gate", "rust-gate-ci"]
+checks = ["rust-gate", "rust-gate-ci", "unit-core"]
 
 [[points]]
 id = "persistence.upgrades"
@@ -460,28 +477,47 @@ paths = [
   "crates/plurx-core/src/metadata/**",
   "crates/plurx-core/src/scan/**",
   "crates/plurx-core/src/store/hiqlite.rs",
+  "crates/plurx-core/src/store/mod.rs",
+  "crates/plurx-core/src/store/file_grants.rs",
   "crates/plurx-core/src/store/hiqlite_catalog.rs",
+  "crates/plurx-core/src/store/hiqlite_classification.rs",
   "crates/plurx-core/src/store/hiqlite_coordination.rs",
   "crates/plurx-core/src/store/hiqlite_durable.rs",
+  "crates/plurx-core/src/store/hiqlite_dvr.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
+  "crates/plurx-core/src/store/hiqlite_library_channels.rs",
   "crates/plurx-core/src/store/hiqlite_media.rs",
   "crates/plurx-core/src/store/hiqlite_publication.rs",
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
   "crates/plurx-core/src/store/hiqlite_reading.rs",
   "crates/plurx-core/src/store/hiqlite_sessions.rs",
+  "crates/plurx-core/src/store/sqlite/classification.rs",
   "crates/plurx-core/src/store/sqlite/coordination.rs",
+  "crates/plurx-core/src/store/sqlite/dvr.rs",
+  "crates/plurx-core/src/store/sqlite/file_grants.rs",
+  "crates/plurx-core/src/store/sqlite/library.rs",
+  "crates/plurx-core/src/store/sqlite/library_channels.rs",
+  "crates/plurx-core/src/store/sqlite/outbox.rs",
   "crates/plurx-core/src/store/sqlite/publication.rs",
   "crates/plurx-core/src/store/sqlite/pretranscode.rs",
   "crates/plurx-core/src/store/sqlite/sessions.rs",
+  "crates/plurx-core/src/store/sqlite/trakt.rs",
+  "crates/plurx-core/src/store/sqlite/users.rs",
+  "crates/plurx-core/src/store/sqlite/watch.rs",
   "crates/plurx-core/src/store/publication.rs",
+  "crates/plurx-core/src/store/sql_source.rs",
   "crates/plurx-core/src/transcode/{encoder,manifest}.rs",
+  "crates/plurx-core/tests/hiqlite_tls_provider.rs",
   "crates/plurx-core/tests/store_contract.rs",
   "tests/validation/test_store_shard.py",
   "validation/store_shard.py",
   "crates/plurxd/src/{cachekeep,job_lease,main,manifest_cache,serving_fence,state,transcode}.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/shared_cache.rs",
+  "crates/plurxd/src/store_result.rs",
   "crates/plurxd/src/http/{cluster,internal_media_sessions,peer_transport}.rs",
+  "crates/plurxd/src/http/{auth,extract,internal_auth_revocation,users}.rs",
+  "crates/plurxd/src/http/file_grants.rs",
   "crates/plurxd/src/http/items.rs",
   "scripts/vendor-audit-lock",
   "scripts/cluster-named-runner",
@@ -509,6 +545,7 @@ paths = [
   "crates/plurxd/src/media_pool.rs",
   "crates/plurxd/src/playstart.rs",
   "crates/plurxd/src/transcode.rs",
+  "crates/plurxd/src/transcode/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
@@ -516,8 +553,9 @@ depends_on = ["cluster.auth", "identity.access"]
 [[points]]
 id = "cluster.operations"
 title = "Cluster operations status, guarded restart, and offline WAL evidence"
-contract = "The admin status surface starts from committed membership and directly authenticates one bounded local observation from every committed member under a shared deadline — learners answer that read and originate it, and only membership mutation is voter-scoped — distinguishes a node that answered and refused the proof or returned another error status from one that could not be reached at all, rejects identity mismatches and stale or incomplete evidence, reports live serving, Raft, WAL, snapshot, media, protocol, and build facts, and authorizes at most one drained non-leader restart candidate only when every conservative quorum and durability invariant holds. Restart preparation is bound to the exact responding backend, linearizes new mutable-media admission against one expiring process-local drain, leaves existing work serving, never changes membership or invokes a supervisor, and emits commands only after owned sessions and in-flight admissions reach zero. Support bundles are size-bounded, create-only, credential/path redacted, and checksummed. Offline WAL status and verification prove the real advisory lock and bounded physical invariants without opening the store; backup is additive, private, checksummed, size/space bounded, and outside the source; recovery plans bind a named action to stable node/Raft identity and source fingerprints, while no CLI, API, or web route applies a plan, deletes a lock, truncates a WAL, restores a peer, or forces membership."
+contract = "The admin status surface starts from committed membership and directly authenticates one bounded local observation from every committed member under a shared deadline — learners answer that read and originate it, and only membership mutation is voter-scoped — distinguishes a node that answered and refused the proof or returned another error status from one that could not be reached at all, rejects identity mismatches and stale or incomplete evidence, reports live serving, Raft, WAL, snapshot, media, protocol, and build facts, and authorizes at most one drained non-leader restart candidate only when every conservative quorum and durability invariant holds. Restart preparation is bound to the exact responding backend, linearizes new mutable-media admission against one expiring process-local drain, leaves existing work serving, never changes membership or invokes a supervisor, and emits commands only after owned sessions and in-flight admissions reach zero. Support bundles are size-bounded, create-only, credential/path redacted, and checksummed. Offline WAL status and verification prove the real advisory lock and bounded physical invariants without opening the store; backup is additive, private, checksummed, size/space bounded, and outside the source; recovery plans bind a named action to stable node/Raft identity and source fingerprints, while no CLI, API, or web route applies a plan, deletes a lock, truncates a WAL, restores a peer, or forces membership. Portable cluster backup is the admin-only POST route and the scheduled publisher beside it on a running voter: it refuses a node that has no activated replicated store or is behind its observed Raft log, holds the cluster-wide `backup:cluster` job lease so exactly one voter and never a learner publishes a UTC day's artefact, triggers a database snapshot and waits for that applied index to publish, reads a size-bounded single-component snapshot pointer and opens that generation before any other work, builds the archive off the runtime on a blocking thread, and advances its UTC-day fence only on publication, so a failed attempt stays retriable within its own minute while retention pruning and its setting read are post-publication maintenance that may warn but can never retry a published artefact. Backup metrics are fixed-label outcome totals plus last-success time and last artefact size. The archive format itself, its verification, and the stopped-daemon restore that consumes it are persistence.upgrades; no surface here restores anything."
 paths = [
+  "crates/plurxd/src/backup.rs",
   "crates/plurxd/src/http/cluster_operations.rs",
   "crates/plurxd/src/wal_cli.rs",
 ]
@@ -539,6 +577,7 @@ paths = [
   "crates/plurxd/src/playstart.rs",
   "crates/plurxd/src/state.rs",
   "crates/plurxd/src/transcode.rs",
+  "crates/plurxd/src/transcode/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries"]
 depends_on = ["cluster.membership", "cluster.auth", "identity.access"]
@@ -576,13 +615,16 @@ title = "Native server API and runtime"
 contract = "The single server binary exposes stable native endpoints, coordinates background work safely, carries authenticated cluster media control without widening household credentials, and publishes a permanent Dolby Vision replacement only after exact media verification and a final source-identity fence."
 paths = [
   "crates/plurxd/Cargo.toml",
-  "crates/plurxd/src/{cachekeep,logbuf,main,schedule,state,storeprobe,telemetry}.rs",
+  "crates/plurxd/src/{cachekeep,logbuf,main,panics,redact,schedule,state,storeprobe,telemetry}.rs",
   "crates/plurxd/src/dv_disk.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/reader_formats.rs",
   "crates/plurxd/src/http/{analysis,developer,dto,error,extract,mod,network,publication,reading,system}.rs",
   "crates/plurxd/src/http/scan_identity.rs",
   "crates/plurxd/src/http/dv_disk.rs",
+  # On-request chapter thumbnails: one bounded ffmpeg per chapter, node-local
+  # cache, counted for the Developer card. Runtime work with no producer.
+  "crates/plurxd/src/http/chapter_thumbs.rs",
   "crates/plurxd/src/http/{cluster,internal_media_sessions,peer_transport}.rs",
   "plurx.example.toml",
 ]
@@ -595,6 +637,10 @@ title = "Shared native API wire contract"
 contract = "The server, Apple clients, and Android clients decode the same representative JSON without field-name or type drift."
 paths = [
   "tests/contracts/native-api.json",
+  # The library grid's ORDER BY, pinned from outside the server. The Rust
+  # store replays it; the Apple and Android merges must reproduce it from
+  # per-library cursors, so a change here is a change to all three at once.
+  "tests/contracts/library-sort-cases.json",
   "crates/plurxd/src/http/{dto,mod}.rs",
   "clients/apple/Sources/{PlurxAPI,Models}.swift",
   "clients/android/app/src/main/java/tv/plurx/app/data/**",
@@ -667,10 +713,11 @@ depends_on = ["core.media", "server.api"]
 [[points]]
 id = "playback.pipeline"
 title = "Playback decision, delivery, and presentation"
-contract = "Every supported source reaches a client through the intended direct, remux, copy, or transcode path, follows its durable cluster owner through a streamed relay, and keeps presenting media; a seek storm leaves one playback with at most one live subtitle-window extraction, carrying the destination the client settled on, with abandoned windows publishing nothing and remembering nothing."
+contract = "Every supported source reaches a client through the intended direct, remux, copy, or transcode path, follows its durable cluster owner through a streamed relay, and keeps presenting media; a rolling writer advertises only cumulative playback consumption plus its bounded reserve, preserves the segment covering the viewer's protected back buffer, and cannot turn a faster producer into a forward position discontinuity; a seek storm leaves one playback with at most one live subtitle-window extraction, carrying the destination the client settled on, with abandoned windows publishing nothing and remembering nothing."
 paths = [
   "crates/plurx-core/src/fmp4.rs",
   "crates/plurx-core/src/mediafacts.rs",
+  "crates/plurx-core/src/process/**",
   "crates/plurx-core/src/playback/**",
   "crates/plurx-core/src/tracks.rs",
   "crates/plurx-core/src/segplan.rs",
@@ -678,11 +725,17 @@ paths = [
   "crates/plurx-core/tests/decoder_selection.rs",
   "crates/plurx-pgs/**",
   "fuzz/**",
-  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,progressive,renditiondir,scratch_ledger,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
+  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,scratch_ledger,scratch_put,subtitle_ride_along,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
+  "crates/plurxd/src/transcode/**",
+  "crates/plurxd/src/vod/**",
+  "crates/plurxd/src/online_subtitles.rs",
+  "crates/plurxd/src/http/subtitle_downloads.rs",
+  "crates/plurx-core/src/store/downloaded_subtitles.rs",
   "crates/plurxd/src/manifest_cache.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/http/internal_media_sessions.rs",
   "crates/plurxd/src/http/{hls,network,pgs_overlay,stream}.rs",
+  "crates/plurxd/src/http/hls/**",
   "crates/plurxd/src/web/playback-policy.js",
   "crates/plurxd/src/web/playback-control.js",
   "docs/PLAYBACK.md",
@@ -692,7 +745,9 @@ paths = [
   "docs/streaming/STUTTER-4K.md",
   "docs/streaming/SEEK-SCRATCH-RESERVATIONS-*.md",
   "docs/streaming/SEEK-SCRATCH-RESERVATIONS-STATUS.html",
+  "docs/streaming/APPLE-TV-FORWARD-SKIPS-STATUS.md",
   "docs/evidence/seek-scratch-reservations-*.md",
+  "docs/evidence/ffmpeg-hls-write-boundary-*.md",
   "docs/streaming/WEB-HLS-STARTUP-RECOVERY-STATUS.md",
   "scripts/dv-evidence",
   "scripts/decoder-media-baseline",
@@ -736,6 +791,7 @@ paths = [
   "crates/plurxd/src/live_tv/guide.rs",
   "crates/plurxd/src/live_tv/videotoolbox_tests.rs",
   "crates/plurxd/src/live_tv/atsc_audio_tests.rs",
+  "crates/plurxd/src/live_tv/caption_audit_tests.rs",
   "crates/plurxd/src/http/live_tv.rs",
   "crates/plurxd/src/http/internal_live_tv.rs",
   "crates/plurxd/src/web/live-tv.js",
@@ -744,6 +800,7 @@ paths = [
   "scripts/live-tv-endless",
   "crates/plurxd/tests/live_tv_two_node.rs",
   "scripts/live-tv-hardware",
+  "scripts/live-tv-caption-audit",
   "docs/features/HDHOMERUN-LIVE-TV-*.md",
   "docs/features/LIVE-TV-GUIDE-AND-UI-PLAN.md",
   "docs/features/LIVE-TV-NATIVE-LAYOUTS-*.md",
@@ -927,7 +984,7 @@ depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichm
 [[points]]
 id = "operations.packaging"
 title = "Build, deploy, and release artifacts"
-contract = "Every supported installation path builds the same stamped server and keeps its runtime configuration explicit."
+contract = "Every supported installation path builds the same stamped server and keeps its runtime configuration explicit, from base images pinned by digest rather than by a moving tag, with pin drift reported on a schedule and gating nothing."
 paths = [
   ".dockerignore",
   ".github/actions/**",
@@ -942,18 +999,20 @@ paths = [
   "scripts/ci-execution-mode",
   "scripts/ci-cargo-cache-prepare",
   "scripts/ci-cargo-cache-refresh",
+  "scripts/image-base-drift",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
   "scripts/ci-require-disk",
   "scripts/ci-runner-cache-audit",
   "scripts/release-package-candidate",
   "scripts/package-windows",
-  "scripts/{bench,dv-evidence,gop-census,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
+  "scripts/{bench,dv-evidence,gop-census,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
   "scripts/container-smoke",
   "scripts/windows-smoke.ps1",
   "scripts/decoder-diagnostic-qualification",
   "scripts/validate-docker-startup-budget",
   "scripts/registry-push",
+  "scripts/release-cut",
   "tests/operations/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "operations-contract", "container-runtime", "resource-bounds"]
@@ -986,6 +1045,7 @@ paths = [
   "scripts/prove-fix",
   "scripts/prove-tombstone-offline-fence",
   "scripts/require-test-count",
+  "scripts/split-identity",
   "scripts/validate",
   "tests/client-fixes.toml",
   "tests/validation/**",

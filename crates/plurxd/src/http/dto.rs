@@ -27,6 +27,10 @@ fn image_url(filename: &Option<String>, revision: i64) -> Option<String> {
         .map(|f| format!("/api/v1/images/{f}?v={revision}"))
 }
 
+fn poster_sizes(filename: &Option<String>) -> Option<[&'static str; 3]> {
+    filename.as_ref().map(|_| ["w300", "w500", "w780"])
+}
+
 const JS_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
 
 fn js_id_text_is_redundant(value: &str) -> bool {
@@ -105,6 +109,18 @@ pub struct ItemDto {
     pub kind: ItemKind,
     pub parent_id: Option<i64>,
     pub title: String,
+    /// The server's own sort key: `domain::sort_title_for` applied at write
+    /// time and stored beside the title, which is what every library
+    /// `ORDER BY` sorts on.
+    ///
+    /// It is exposed because the native clients merge several library cursors
+    /// into one grid, and a merge is only the server's order if it uses the
+    /// server's key. Re-deriving it on each client means three lowercasing
+    /// rules in three languages having to agree forever, on accented and
+    /// non-Latin titles included; shipping the key costs a short string per
+    /// row and removes the question. Compare it as UTF-8 bytes — SQLite's
+    /// BINARY collation — not with a locale-aware compare.
+    pub sort_title: String,
     pub year: Option<i32>,
     pub overview: Option<String>,
     pub season_number: Option<i32>,
@@ -136,6 +152,8 @@ pub struct ItemDto {
     pub tmdb_id: Option<i64>,
     pub imdb_id: Option<String>,
     pub poster: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poster_sizes: Option<[&'static str; 3]>,
     pub backdrop: Option<String>,
     /// Best (max) file height for the item, e.g. 2160 / 1080 / 720. Populated
     /// on library grids and playable season children so compact cards can show
@@ -231,6 +249,7 @@ impl From<WatchRollup> for RollupDto {
 
 impl From<Item> for ItemDto {
     fn from(item: Item) -> Self {
+        let poster_sizes = poster_sizes(&item.poster_path);
         ItemDto {
             id: item.id,
             id_text: item.id.to_string(),
@@ -238,6 +257,7 @@ impl From<Item> for ItemDto {
             kind: item.kind,
             parent_id: item.parent_id,
             title: item.title,
+            sort_title: item.sort_title,
             year: item.year,
             overview: item.overview,
             season_number: item.season_number,
@@ -256,6 +276,7 @@ impl From<Item> for ItemDto {
             tmdb_id: item.tmdb_id,
             imdb_id: item.imdb_id,
             poster: image_url(&item.poster_path, item.updated_at),
+            poster_sizes,
             backdrop: image_url(&item.backdrop_path, item.updated_at),
             resolution: None,
             media: None,
@@ -338,6 +359,10 @@ pub struct FileDto {
     pub duration_ms: Option<i64>,
     pub container: Option<String>,
     pub video_codec: Option<String>,
+    /// FFprobe field-order token for the selected video stream. Read-only;
+    /// clients must not infer that every non-progressive token is trustworthy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field_order: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
@@ -345,6 +370,17 @@ pub struct FileDto {
     pub hdr: Option<String>,
     /// Rich HDR label for display ("Dolby Vision · Profile 7 (HDR10-compatible)").
     pub hdr_format: Option<String>,
+    /// Source luminance facts in cd/m². `luminance_source = "none"` means a
+    /// completed probe found no authored value and the server will use its
+    /// documented policy default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cll: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_fall: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mastering_max_luminance: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub luminance_source: Option<String>,
     /// The Dolby Vision profile as a number, from the configuration record
     /// rather than parsed back out of the label above. Absent for a non-DV
     /// file, and for a row the backfill has not reached — which is the state
@@ -468,12 +504,22 @@ fn playback_defaults(
     // bitmap track stays eligible. `/decision` is what the clients act on,
     // and it refines this with the base grade it actually computed.
     //
-    // The overlay is reported as *off*, and not because this surface knows it
-    // is: `FileDto::from_media_file` has no access to the setting, and the
-    // conservative answer is the right one either way. With the overlay off,
-    // claiming a non-forced PGS track as the default is the M1 defect on this
-    // surface. With it on, `/decision` offers the track anyway, so nothing is
-    // lost by not announcing it a step early.
+    // The overlay term is `false` here, and it has to stay that way.
+    //
+    // A previous revision threaded this server's switch in, on the theory that
+    // each client narrows it locally. That is not true of the web player *for
+    // the default*: nothing under `web/detail/` narrows the default by a
+    // renderer, `track-facts.js` stamps the chip "plays by default" straight
+    // from `selected_index`, and the one renderer check there —
+    // `prePlayBurnNeeded` — is reached solely for an explicit viewer pick.
+    // With the switch on, that surface would promise a browser a PGS track it
+    // will never draw, on the exact chip where a viewer takes the server at
+    // its word. Old native builds would read it the same way.
+    //
+    // Since the default became per-client (`/decision` ANDs the switch with
+    // the caller's `subtitle_overlays` claim), the honest answer needs a
+    // capabilities document, and item detail has none. Too narrow for a
+    // capable client is a missing convenience; confidently wrong is a lie.
     let selected = select_tracks_with(
         audio,
         subtitles,
@@ -564,12 +610,17 @@ impl FileDto {
             duration_ms: f.duration_ms,
             container: f.container,
             video_codec: f.video_codec,
+            field_order: f.field_order,
             video_profile: f.video_profile,
             width: f.width,
             height: f.height,
             bit_depth: f.bit_depth,
             hdr: f.hdr,
             hdr_format: f.hdr_format,
+            max_cll: f.max_cll,
+            max_fall: f.max_fall,
+            mastering_max_luminance: f.mastering_max_luminance,
+            luminance_source: f.luminance_source,
             dv_profile: f.dolby_vision.profile,
             bitrate: f.bitrate,
             audio_streams: f.audio_streams,
@@ -671,6 +722,8 @@ mod audiobook_tests {
         );
         assert_ne!(before, after, "changed artwork must get a fresh cache key");
         assert_eq!(image_url(&None, 1_785_733_260), None);
+        assert_eq!(poster_sizes(&filename), Some(["w300", "w500", "w780"]));
+        assert_eq!(poster_sizes(&None), None);
     }
 
     #[test]

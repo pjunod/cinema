@@ -6208,6 +6208,7 @@ mod tests {
     fn media_file(path: PathBuf) -> MediaFile {
         let metadata = std::fs::metadata(&path).expect("source metadata");
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 17,
             item_id: 3,
             path,
@@ -6217,12 +6218,17 @@ mod tests {
             container: Some("mkv".to_owned()),
             video_codec: Some("hevc".to_owned()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main 10".to_owned()),
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(10),
             hdr: Some("dolby_vision".to_owned()),
             hdr_format: Some("Dolby Vision · Profile 7".to_owned()),
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             dolby_vision: DolbyVisionFacts::default(),
             bitrate: None,
             audio_streams: vec![],
@@ -6247,6 +6253,7 @@ mod tests {
                 index: 0,
                 codec: "truehd".to_owned(),
                 channels: Some(8),
+                sample_rate: Some(48_000),
                 language: Some("eng".to_owned()),
                 title: None,
                 default: true,

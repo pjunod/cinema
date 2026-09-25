@@ -8,14 +8,48 @@ import Foundation
 final class Session: @unchecked Sendable {
     static let shared = Session()
 
-    /// Server origin, no trailing slash, e.g. `http://192.168.1.10:32400`.
-    var origin: String = ""
-    /// Bearer token, or nil when signed out.
-    var token: String?
-
     private let nodeLock = NSLock()
+    /// Read and write these together: a bearer must never be paired with the
+    /// origin of another account while a background image or media load reads.
+    private var credentialOrigin = ""
+    private var credentialToken: String?
     private var mediaFailoverOrigins: [String] = []
     private var mediaFailoverIndex = 0
+
+    var credentials: (origin: String, token: String?) {
+        nodeLock.lock()
+        defer { nodeLock.unlock() }
+        return (credentialOrigin, credentialToken)
+    }
+
+    func setCredentials(origin: String, token: String?) {
+        nodeLock.lock()
+        credentialOrigin = origin
+        credentialToken = token
+        nodeLock.unlock()
+    }
+
+    private let noticeLock = NSLock()
+    private var sessionExpiryNotice: String?
+
+    /// Remember the server's sentence for a sign-in it refused as idle-expired
+    /// (`session_expired`). The 401 itself stays `.http(401)` so every status
+    /// matcher keeps signing the viewer out; this only carries the reason to
+    /// the login screen that sign-out lands on.
+    func noteSessionExpiry(_ message: String) {
+        noticeLock.lock()
+        sessionExpiryNotice = message
+        noticeLock.unlock()
+    }
+
+    /// The pending reason, once. Nil when the last refusal was not an expiry.
+    func takeSessionExpiryNotice() -> String? {
+        noticeLock.lock()
+        defer { noticeLock.unlock() }
+        let notice = sessionExpiryNotice
+        sessionExpiryNotice = nil
+        return notice
+    }
 
     /// Install the server-advertised alternatives for this exact instance.
     ///
@@ -59,7 +93,7 @@ final class Session: @unchecked Sendable {
         mediaFailoverIndex += 1
         nodeLock.unlock()
         guard let base = URL(string: candidate + path) else { return nil }
-        guard authenticated, let token else { return base }
+        guard authenticated, let token = credentials.token else { return base }
         var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
         var items = components?.queryItems ?? []
         items.append(URLQueryItem(name: "token", value: token))
@@ -69,7 +103,7 @@ final class Session: @unchecked Sendable {
 
     /// This session's own origin in the same canonical form the failover list
     /// uses, so `https://h` and `https://h:443` do not read as two servers.
-    var canonicalPrimaryOrigin: String? { Self.canonicalOrigin(origin) }
+    var canonicalPrimaryOrigin: String? { Self.canonicalOrigin(credentials.origin) }
 
     /// Scheme and host lowercased, a default port removed, an IPv6 literal
     /// re-bracketed — so two spellings of one address compare equal. Userinfo,
@@ -110,15 +144,16 @@ final class Session: @unchecked Sendable {
     /// Absolute URL for a server-relative path.
     func url(_ path: String) -> URL? {
         if path.hasPrefix("http") { return URL(string: path) }
-        return URL(string: origin + path)
+        return URL(string: credentials.origin + path)
     }
 
     /// Absolute URL with the token inline — for AVPlayer / `<img>`-style loads
     /// that can't set an Authorization header. Capability-authed HLS playlists
     /// (which already carry an unguessable session id) don't need this.
     func mediaURL(_ path: String) -> URL? {
-        guard let base = url(path) else { return nil }
-        guard let token, !path.hasPrefix("http") else { return base }
+        let pair = credentials
+        guard let base = URL(string: path.hasPrefix("http") ? path : pair.origin + path) else { return nil }
+        guard let token = pair.token, !path.hasPrefix("http") else { return base }
         var comps = URLComponents(url: base, resolvingAgainstBaseURL: false)
         var items = comps?.queryItems ?? []
         items.append(URLQueryItem(name: "token", value: token))
@@ -128,7 +163,7 @@ final class Session: @unchecked Sendable {
 
     /// Add the bearer header to an API/image request.
     func authorize(_ request: inout URLRequest) {
-        if let token {
+        if let token = credentials.token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
     }

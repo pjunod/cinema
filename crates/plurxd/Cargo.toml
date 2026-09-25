@@ -30,6 +30,10 @@ tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 toml = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
+# The response-body wrapper that times delivery implements `http_body::Body`
+# directly so it can delegate `size_hint`; the crate is already in the tree
+# under hyper and axum, so this names it rather than adding a build.
+http-body = { workspace = true }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = [
     "server-auto",
@@ -41,11 +45,13 @@ hyper-util = { version = "0.1", features = [
 ] }
 clap = { workspace = true }
 plurx-core = { path = "../plurx-core", features = ["hiqlite-store"] }
+hiqlite = { workspace = true }
 hiqlite-wal = { workspace = true }
 plurx-compat-plex = { path = "../plurx-compat-plex" }
 plurx-pgs = { path = "../plurx-pgs" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ipnet = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tower = { workspace = true }
@@ -95,6 +101,9 @@ uuid = { workspace = true }
 # watchdog's suites run in virtual time instead of sleeping out real grace
 # windows. Dev-only: the shipped binary never compiles with it.
 tokio = { workspace = true, features = ["test-util"] }
+# The discarded-Store-result regression parses production Rust syntax instead
+# of guessing from receiver spelling or a bounded source suffix.
+syn = { version = "2", features = ["full", "visit"] }
 
 [lints]
 workspace = true

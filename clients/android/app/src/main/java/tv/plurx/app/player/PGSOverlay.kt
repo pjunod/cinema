@@ -2,6 +2,7 @@ package tv.plurx.app.player
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import tv.plurx.app.data.parseRefusal
 
 @Serializable
 internal data class PGSOverlayPreparing(
@@ -124,6 +125,50 @@ internal enum class PGSOverlayStatus(val label: String?) {
 
 internal enum class PGSOverlayManifestDisposition { Ready, Preparing, Terminal }
 
+/** What a player event does to the overlay's window. */
+internal enum class PGSOverlaySeekAction {
+    /** Start loading [PGSOverlaySeekPlan.window]. */
+    Load,
+
+    /** The in-flight load covers the position and will publish it. */
+    Await,
+
+    /** The loaded window covers the position: publish from it now. */
+    Publish,
+
+    /** Nothing covers the position and a failure backoff is running. */
+    Hold,
+}
+
+/**
+ * What a seek, or any other player event, does to the overlay.
+ *
+ * [clearNow] is the part a refresh used to get wrong: a load publishes only
+ * once its window has loaded, so whatever is on screen stays there until
+ * then. That was right only when the shown cue is still the one due; after a
+ * forward seek into the loaded window's last 20 s it was usually a cue that
+ * had already ended. [window] is the window that will serve the position:
+ * the one to load, the one loading, or the one loaded.
+ */
+internal data class PGSOverlaySeekPlan(
+    val action: PGSOverlaySeekAction,
+    val clearNow: Boolean,
+    val activeCueId: String?,
+    val window: PGSOverlayTimeWindow?,
+) {
+    val refresh: Boolean
+        get() = action == PGSOverlaySeekAction.Load
+}
+
+/** A non-2xx overlay answer, read for its code rather than its status alone. */
+internal sealed interface PGSOverlayRefusal {
+    data class Wait(val retryAfterMs: Int) : PGSOverlayRefusal
+    data class Terminal(val message: String) : PGSOverlayRefusal
+}
+
+/** The overlay protocol this client implements, named once. */
+const val PGS_OVERLAY_PROTOCOL = "pgs-v1"
+
 internal object PGSOverlayPolicy {
     const val maximumCanvasWidth = 4_096
     const val maximumCanvasHeight = 2_160
@@ -137,11 +182,45 @@ internal object PGSOverlayPolicy {
     const val refreshMarginMs = 20_000L
     const val maximumPrepareMs = 10L * 60 * 1_000
 
-    fun manifestDisposition(statusCode: Int): PGSOverlayManifestDisposition = when (statusCode) {
-        200 -> PGSOverlayManifestDisposition.Ready
-        202, 503 -> PGSOverlayManifestDisposition.Preparing
-        else -> PGSOverlayManifestDisposition.Terminal
+    /** The server remembered a failed preparation; asking again only replays it. */
+    const val PREPARE_FAILED_CODE = "pgs_overlay_prepare_failed"
+
+    /** Both preparation slots are busy: the one refusal worth waiting out. */
+    const val CAPACITY_CODE = "pgs_overlay_capacity"
+
+    /** docs/clients/PGS_OVERLAY_PLAN.md §15.2, the same sentence Apple shows. */
+    const val PREPARE_FAILED_MESSAGE = "That subtitle could not be prepared."
+
+    /**
+     * A typed code outranks the status. A codeless 503 stays a wait so an
+     * older server that still answers a failure that way keeps its behaviour.
+     */
+    fun manifestDisposition(statusCode: Int, code: String? = null): PGSOverlayManifestDisposition =
+        when {
+            code == PREPARE_FAILED_CODE -> PGSOverlayManifestDisposition.Terminal
+            code == CAPACITY_CODE -> PGSOverlayManifestDisposition.Preparing
+            statusCode == 200 -> PGSOverlayManifestDisposition.Ready
+            statusCode == 202 || statusCode == 503 -> PGSOverlayManifestDisposition.Preparing
+            else -> PGSOverlayManifestDisposition.Terminal
+        }
+
+    /** A non-2xx manifest answer: wait on the server's cadence, or stop. */
+    fun manifestRefusal(statusCode: Int, retryAfterHeader: String?, errorBody: String?): PGSOverlayRefusal {
+        val code = parseRefusal(statusCode, errorBody)?.code
+        return when (manifestDisposition(statusCode, code)) {
+            PGSOverlayManifestDisposition.Preparing ->
+                PGSOverlayRefusal.Wait(retryAfterMs(retryAfterHeader))
+            else -> PGSOverlayRefusal.Terminal(
+                refusalMessage(code, "The PGS overlay request failed ($statusCode)."),
+            )
+        }
     }
+
+    fun refusalMessage(code: String?, fallback: String): String =
+        if (code == PREPARE_FAILED_CODE) PREPARE_FAILED_MESSAGE else fallback
+
+    /** Every overlay failure keeps the video exactly as it was (plan §16). */
+    fun failureNotice(message: String): String = "$message Video playback was kept unchanged."
 
     fun retryAfterMs(header: String?): Int =
         ((header?.toIntOrNull() ?: 1) * 1_000).coerceIn(250, 5_000)
@@ -165,6 +244,74 @@ internal object PGSOverlayPolicy {
         loaded == null ||
             sourceTimeMs < loaded.lowerMs ||
             sourceTimeMs >= loaded.upperExclusiveMs - refreshMarginMs
+
+    /** After a failed window: retry after 5 s, then 30 s, then wait for the viewer. */
+    val windowRetryDelaysMs = listOf(5_000L, 30_000L)
+
+    fun windowRetryDelayMs(failures: Int): Long? = windowRetryDelaysMs.getOrNull(failures - 1)
+
+    /**
+     * Whether a player event starts a window load. The same rule as Apple's
+     * `shouldRefresh(sourceTimeMs:loadedRange:loadingRange:windowFailures:msSinceFailure:)`,
+     * held to the shared fixture's `tick_cases` and `seek_cases`: a load that
+     * covers the position is never cancelled, and after a failure only the
+     * bounded backoff retries. A seek passes zero failures.
+     */
+    fun refreshDecision(
+        positionMs: Long,
+        loadedWindow: PGSOverlayTimeWindow?,
+        loadingWindow: PGSOverlayTimeWindow?,
+        windowFailures: Int = 0,
+        msSinceFailure: Long = 0,
+    ): Boolean {
+        if (loadedWindow != null && !shouldRefresh(positionMs, loadedWindow)) return false
+        if (loadingWindow != null && !shouldRefresh(positionMs, loadingWindow)) return false
+        if (windowFailures <= 0) return true
+        val delay = windowRetryDelayMs(windowFailures) ?: return false
+        return msSinceFailure >= delay
+    }
+
+    /**
+     * Held to `tests/playback/pgs-overlay-cases.json` `seek_cases`, the same
+     * rows the Apple suite reads, and driven through the controller by
+     * `PGSOverlayControllerTest`.
+     */
+    fun seekPlan(
+        positionMs: Long,
+        loadedWindow: PGSOverlayTimeWindow?,
+        loadingWindow: PGSOverlayTimeWindow?,
+        shownCueId: String?,
+        cues: List<PGSOverlayCue>,
+        durationMs: Long,
+        windowFailures: Int = 0,
+        msSinceFailure: Long = 0,
+    ): PGSOverlaySeekPlan {
+        val active = activeCueIndex(cues, positionMs)?.let { cues[it].id }
+        val loadedCovers = loadedWindow != null && !shouldRefresh(positionMs, loadedWindow)
+        val loadingCovers = loadingWindow != null && !shouldRefresh(positionMs, loadingWindow)
+        val action = when {
+            loadedCovers -> PGSOverlaySeekAction.Publish
+            loadingCovers -> PGSOverlaySeekAction.Await
+            refreshDecision(positionMs, null, null, windowFailures, msSinceFailure) ->
+                PGSOverlaySeekAction.Load
+            else -> PGSOverlaySeekAction.Hold
+        }
+        return PGSOverlaySeekPlan(
+            action = action,
+            // Publishing replaces whatever is shown at once. A load or an
+            // awaited load publishes only when its window arrives, so a shown
+            // cue that is not the one due at the new position has to go now.
+            clearNow = (action == PGSOverlaySeekAction.Load || action == PGSOverlaySeekAction.Await) &&
+                shownCueId != null && shownCueId != active,
+            activeCueId = active,
+            window = when (action) {
+                PGSOverlaySeekAction.Load -> windowAt(positionMs, durationMs)
+                PGSOverlaySeekAction.Await -> loadingWindow
+                PGSOverlaySeekAction.Publish -> loadedWindow
+                PGSOverlaySeekAction.Hold -> null
+            },
+        )
+    }
 
     fun activeCueIndex(cues: List<PGSOverlayCue>, sourceTimeMs: Long): Int? {
         var low = 0

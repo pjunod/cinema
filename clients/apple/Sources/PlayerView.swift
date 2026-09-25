@@ -1524,6 +1524,16 @@ struct PlayerView: View {
                     .foregroundColor(.white.opacity(0.85))
                     .lineLimit(1)
             }
+            // The indicator used to drop the detail entirely, so a wait over a
+            // picture that was still presenting never showed its reading.
+            if PlaybackWaitPresentation.isWait(surface),
+               let detail = PlaybackWaitPresentation.detail(for: surface, live: controller.waitDetail),
+               !detail.isEmpty {
+                Text(detail)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.65))
+                    .lineLimit(1)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -1547,7 +1557,8 @@ struct PlayerView: View {
                 ProgressView().tint(.white)
                 Text(title)
                     .font(.system(.callout, design: .monospaced).weight(.semibold))
-                if let detail = surface.detail, !detail.isEmpty {
+                if let detail = PlaybackWaitPresentation.detail(for: surface, live: controller.waitDetail),
+                   !detail.isEmpty {
                     Text(detail)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(.white.opacity(0.72))
@@ -2071,6 +2082,20 @@ struct PlayerView: View {
             note = "delivered as \(long)"
         }
         return "\(long) — \(note)"
+    }
+
+    static func toneMapPeakSummary(_ status: PlaybackSessionStatus?) -> String? {
+        guard let nits = status?.toneMapPeakNits, nits > 0,
+              let rawSource = status?.toneMapPeakSource?.lowercased() else { return nil }
+        let provenance: String
+        switch rawSource {
+        case "cll": provenance = "source MaxCLL"
+        case "mdcv": provenance = "source mastering metadata"
+        case "default": provenance = "policy default"
+        default: return nil
+        }
+        let value = NumberFormatter.localizedString(from: NSNumber(value: nits), number: .decimal)
+        return "Tone-map peak \(value) nits · \(provenance)"
     }
 
     static func playbackFacts(
@@ -2733,7 +2758,40 @@ struct PlaybackWaitPresentation: Equatable {
     let title: String
     let detail: String
 
-    static func make(runwaySeconds: Double?, httpWaitCount: Int?) -> Self {
+    /// Before the first frame the wait IS the open; after it, the stream the
+    /// viewer is watching has run dry. Two different screens, two words.
+    static let loadingTitle = "Loading…"
+    static let bufferingTitle = "Buffering…"
+
+    /// The title for the surface source `noteMediaWaiting` raised.
+    static func title(forSource source: String) -> String {
+        source == "client_preparing" ? loadingTitle : bufferingTitle
+    }
+
+    /// Whether a surface is one of the two waits this type describes, and so
+    /// carries a live reading rather than the sentence frozen at its raise.
+    /// A bare `client_preparing` (the staged open, no title) is not one.
+    static func isWait(_ surface: PlaybackSurface) -> Bool {
+        switch surface.source {
+        case "media_waiting": return true
+        case "client_preparing": return surface.title == loadingTitle
+        default: return false
+        }
+    }
+
+    /// The detail to draw: the live reading for a wait, the owner's own
+    /// sentence for everything else, and the raised sentence when no live
+    /// sample exists yet.
+    static func detail(for surface: PlaybackSurface, live: String?) -> String? {
+        guard isWait(surface), let live, !live.isEmpty else { return surface.detail }
+        return live
+    }
+
+    static func make(
+        runwaySeconds: Double?,
+        httpWaitCount: Int?,
+        source: String = "media_waiting"
+    ) -> Self {
         let runway = max(0, runwaySeconds ?? 0)
         let waitText: String
         if let httpWaitCount {
@@ -2747,7 +2805,7 @@ struct PlaybackWaitPresentation: Equatable {
             waitText = "server wait state unavailable"
         }
         return Self(
-            title: "Presentation waiting…",
+            title: title(forSource: source),
             detail: String(format: "%.1f s client loaded · %@", runway, waitText)
         )
     }
@@ -2998,7 +3056,7 @@ struct PlaybackStatsView: View {
                 displayHDR: Caps.displayIsHDR,
                 reasons: controller.decision?.reasons
             ) else { return nil }
-            return ContractFieldValue(value: range)
+            return ContractFieldValue(value: range, note: PlayerView.toneMapPeakSummary(status))
         case "decode_audio":
             return nil
         case "source_read":

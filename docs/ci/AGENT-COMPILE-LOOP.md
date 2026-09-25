@@ -43,8 +43,8 @@ git archive --format=tar.gz -o <shared-path>/_src.tgz HEAD
 
 About 25 MB, no `.git`, no credential in it. Transfer it to the container,
 extract, and `cargo` has everything it needs. Dependencies resolve without
-incident — the awkward ones are vendored (`hiqlite`, `rust_decimal`,
-`s3-simple`) and the rest come from the registry.
+incident — the awkward ones are vendored (`hiqlite` and `rust_decimal`) and
+the rest come from the registry.
 
 ## 3. What it costs
 

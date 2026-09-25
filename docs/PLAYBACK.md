@@ -533,6 +533,15 @@ An older client never reads the field; a newer one treats an absent field as
 
 ## Subtitles — three independent delivery questions
 
+Downloaded OpenSubtitles captions join the same selectable list after the
+embedded ordinals. The catalog retains normalized WebVTT, provider identity,
+language and accessibility flags against the file's size and modification
+time. Subtitle delivery reads these captions locally from the replicated
+catalog; a cold or evicted extraction cache never needs another provider
+download. The existing WebVTT, HLS and text-burn paths consume the acquired
+track with absolute media cue times. Replacing the source invalidates the
+association; rescanning the unchanged source preserves it.
+
 Every subtitle in `/decision` carries `text` and `native` plus an optional
 `overlay` capability. They are not interchangeable claims. A client that reads
 one for another either offers a track the server will refuse, hides a route it
@@ -587,9 +596,44 @@ The server side of `pgs-v1` is implemented behind Settings → Developer →
 off by default while physical-device HDR/Dolby Vision acceptance remains
 incomplete. Apple and Android have automated application renderers, but that
 does not make the server capability production-ready. When off,
-`/decision` omits `overlay` and the
-overlay routes return 404. Enabling the gate changes subtitle delivery only;
-it does not select an overlay automatically and does not alter video bytes.
+`/decision` omits `overlay` and the overlay routes return 404.
+
+Enabling the gate changes subtitle delivery only and never alters video bytes.
+It **does** let `/decision` select a non-forced PGS track as the default — but
+only for a client that claimed it can draw one, **or** for one that sent no
+capabilities document at all. Those are two different absences and the server
+reads them as opposites; the distinction is the contract:
+
+- **The field is absent or empty in a document the client sent.** That is a
+  client saying what it can do and not naming this. It is offered no PGS
+  default *on account of the overlay*, and it is told that selecting a PGS
+  track requires a burn-in — which for that client is true. (A **forced** PGS
+  track on a base delivery that is already SDR remains eligible as a default
+  for every client, gate or no gate. That rule predates the overlay and is
+  unchanged by it: a forced track carries dialogue the picture depends on, and
+  on an SDR base the burn costs no grade.)
+- **No capabilities document at all**, i.e. the legacy `GET /decision` query,
+  which has no slot for the claim. That is silence, not a refusal, and it is a
+  *mixed-fleet* path rather than an old-client one: both native clients fall
+  back to it on any 400/404/405. It gets the answer this server gave before the
+  claim existed — the gate alone. A renderer-less client that reached that path
+  would therefore be offered the overlay; in the fleet today none can, since
+  the web never falls back and the two clients that do both claim the protocol.
+
+A client advertises the claim as `subtitle_overlays: ["pgs-v1"]`.
+
+`overlay` on the track itself is **not narrowed by the caller's claim**, in
+either of those two cases — it is still governed by the gate, which is why it
+is absent entirely while the gate is off. It answers what this process can
+deliver — "could this track be served as `pgs-v1` here" — and it is the only
+surface that answers it, so an operator checking the Developer switch and a
+client on an older build both have somewhere to look. What a client acts on is
+the default, `subtitle_requires_burn_in` and `subtitle_route`, and all three
+are narrowed by the claim.
+
+(The first of those paragraphs said the opposite until 2026-09-22: it claimed
+the gate "does not select an overlay automatically", which `stream.rs` has
+contradicted since the selection landed.)
 
 The manifest route is:
 
@@ -1570,7 +1614,7 @@ explicit enable choice.
   internal index retains duration-only history for native subtitle timing;
   seeking outside the retained window still opens a fresh session at that
   film position.
-- **Apple seeks route by the advertised window first.** The served playlist's
+- **Apple and web seek by the advertised window first.** The served playlist's
   seekable span — everything published and not yet pruned — is a real
   random-access surface, and AVPlayer seeks inside it instantly. The Apple
   client (`PlayerController.seekRoute`) maps a film-time target through the
@@ -1583,9 +1627,18 @@ explicit enable choice.
   replacement is in flight the predecessor item's failures are ignored:
   supersession has already deleted its playlist, so its dying fetches 404 by
   design, and reacting to them raced a second open against the first (the
-  successor's own status is re-checked once the change lands). Web and
-  Android still reopen for every non-VOD seek; adopting the same window
-  routing there is open work.
+  successor's own status is re-checked once the change lands). The web player
+  also keeps rolling HLS targets local when they are in its buffered ranges or
+  in the published range at least one playlist target duration behind the
+  edge; progressive remux uses buffered ranges only. A local seek that neither
+  emits `seeked` nor gains target coverage within three seconds reopens once at
+  the same film target. Immutable VOD seeks stay local even outside the browser
+  buffer: a missing target gets the existing 20-second seek deadline, then one
+  fenced reopen at the same film target. `seeked` alone does not settle a VOD
+  seek; target coverage or presentation does. The generic eight-second stall
+  clock cannot spend recovery while that target is still missing, and target
+  coverage starts a fresh presentation-stall observation. Android still reopens for every non-VOD seek; adopting
+  the same window routing there is open work.
 - **Auto adapts by restarting one encode, not by running a multivariant
   ladder.** The web controller consumes the server ladder and changes the one
   active transcode when bandwidth, runway, or classified supply stalls demand

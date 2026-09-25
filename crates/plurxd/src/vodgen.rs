@@ -1322,6 +1322,7 @@ mod tests {
 
         let src = testfixtures::source("clean-cra");
         let file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: src.clone(),
@@ -1331,12 +1332,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main".into()),
             width: Some(640),
             height: Some(360),
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(1_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],

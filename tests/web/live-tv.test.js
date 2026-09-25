@@ -222,6 +222,7 @@ async function main() {
       title: "Live session expired",
       detail: "The player was idle or disconnected. Start the channel again.",
       retryable: true,
+      offers: [],
     });
     assert.equal(liveTv.errorView({ code: "stream_failed" }).title, "Live stream stopped");
     assert.equal(liveTv.errorView({ code: "owner_unavailable" }).retryable, true);
@@ -407,6 +408,8 @@ async function main() {
       { now: () => clock }, fn => { poll = fn; return null; }, liveTv, routing);
 
     await run(0);
+    assert.equal(video.src, "/api/live-tv/sessions/cap/master.m3u8",
+      "the attached player reads caption declarations from the master playlist");
     clock += 10000; frames += 60; await poll();
     assert.equal(keepalives, 1, "the poll runs on the page");
 
@@ -685,6 +688,17 @@ async function main() {
     }
   });
 
+  await test("capacity offers the shared fixture's watchable channels", () => {
+    const rule = START_CASES.answers.find(row => row.offer_watchable);
+    assert.ok(rule, "the shared fixture needs a watchable capacity case");
+    const error = { code: rule.body.code, status: 503, retry: rule.body.retry,
+      owner_decided: rule.body.owner_decided, answer: { body: rule.body } };
+    assert.deepEqual(liveTv.errorView(error).offers.map(offer => offer.channelId), rule.offer_watchable);
+    assert.deepEqual(liveTv.errorView(error).offers.map(offer => offer.label),
+      ["Watch 2.1 instead", "Watch 4.1 instead"]);
+    assert.deepEqual(liveTv.errorView({ code: "tuner_unavailable", answer: { body: rule.body } }).offers, []);
+  });
+
   await test("an ingress code is only the ingress's verdict when the status is a 4xx", async () => {
     // The same four codes can arrive from either side. A 4xx is the ingress
     // rejecting the request before an owner saw it — nothing to retire. In a
@@ -723,6 +737,10 @@ async function main() {
       const lease = shippedLease({ request: answerRequest(rows, () => thrownFor(rule)) });
       await assert.rejects(lease.LIVE_TV_LEASE.start("7.1"), error => {
         assert.equal(error.code, rule.render, `${rule.case}: rendered code`);
+        if(rule.offer_watchable){
+          assert.deepEqual(liveTv.errorView(error).offers.map(offer => offer.channelId),
+            rule.offer_watchable, `${rule.case}: offers survive the shipped press`);
+        }
         return true;
       });
       const posts = rows.filter(row => row.method === "POST" && row.path.endsWith("/sessions"));
@@ -783,7 +801,7 @@ async function main() {
     const second = shippedResume({
       storage, wall: () => wall, tabs: new Channel(),
       answer: () => ({ outcome: "live", session: { session_id: "cap-a", live: true,
-        playlist_url: "/api/v1/live-tv/sessions/cap-a/index.m3u8", channel: { id: "7.1" } } }),
+        playlist_url: "/api/v1/live-tv/sessions/cap-a/master.m3u8", channel: { id: "7.1" } } }),
     });
     await second.resume(1, "#/live-tv");
     assert.deepEqual(second.asked, [],
@@ -798,7 +816,7 @@ async function main() {
     const later = shippedResume({
       storage, wall: () => wall, tabs: new Channel(),
       answer: () => ({ outcome: "live", session: { session_id: "cap-a", live: true,
-        playlist_url: "/api/v1/live-tv/sessions/cap-a/index.m3u8", channel: { id: "7.1" } } }),
+        playlist_url: "/api/v1/live-tv/sessions/cap-a/master.m3u8", channel: { id: "7.1" } } }),
     });
     watching.LIVE_TV.hint = null; // the watching document is gone
     await later.resume(1, "#/live-tv");
@@ -814,7 +832,7 @@ async function main() {
     const storage = memoryStorage(), wall = 1_000_000;
     storage.setItem("plurx_live_tv_hint_v1:stranded", String(wall - 600_000));
     const session = { session_id: "cap", live: true, channel: { id: "7.1" },
-      playlist_url: "/api/v1/live-tv/sessions/cap/index.m3u8" };
+      playlist_url: "/api/v1/live-tv/sessions/cap/master.m3u8" };
     const run = shippedResume({
       storage, wall: () => wall,
       state: { lineupRead: false, protocols: null },
@@ -898,7 +916,7 @@ async function main() {
     );
     await attach(session, -1, 1, 1);
     assert.equal(state.selected, session.channel.id, "watching is the channel the owner named");
-    assert.equal(video.src, `/api/live-tv/sessions/${session.session_id}/index.m3u8`,
+    assert.equal(video.src, `/api/live-tv/sessions/${session.session_id}/master.m3u8`,
       "the playlist is the capability's own same-origin route, not the wire URL");
     assert.ok(poll, "a resumed session is watched by the same tuner watchdog");
     video.currentTime = 30; await poll();
@@ -1757,6 +1775,18 @@ async function main() {
     // than claiming 0.0 GB, and a finished one never counts backwards.
     assert.equal(liveTv.dvrRecordingDetail(airing({ capture_end: NOW - 600 }), NOW), "7.1 WABC · 0 min left");
     assert.equal(liveTv.dvrRecordingDetail(null, NOW), "");
+  });
+
+  await test("the live envelope claims the audio output's channels for AAC, not a fixed stereo", () => {
+    const ceiling = new Function(`${shipped("liveTvAacChannelCeiling")}; return liveTvAacChannelCeiling;`)();
+    assert.equal(ceiling(undefined), 2);
+    assert.equal(ceiling(1), 2);
+    assert.equal(ceiling(2), 2);
+    assert.equal(ceiling(6), 6);
+    assert.equal(ceiling(8), 6);
+    const envelope = shipped("liveTvPlaybackEnvelope");
+    assert.match(envelope, /max_channels:codec==="aac"\?aacChannels:8/);
+    assert.doesNotMatch(envelope, /max_channels:codec==="aac"\?2:8/);
   });
 }
 

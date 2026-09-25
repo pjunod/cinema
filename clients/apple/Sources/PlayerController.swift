@@ -1,9 +1,15 @@
 import AVKit
 import Combine
 import Foundation
-#if os(iOS)
 import MediaPlayer
-#endif
+
+private struct NowPlayingState: Equatable {
+    let title: String
+    let durationMs: Int
+    let elapsedMs: Int
+    let rate: Float
+    let isPlaying: Bool
+}
 
 private enum PlaybackPreparationError: LocalizedError {
     case timedOut
@@ -89,6 +95,25 @@ private struct ApplePlaybackSurfaceLog: Encodable {
 private struct AppleMarkerPlaybackLog: Encodable {
     let level = "info"
     let event: String
+    let message: String
+    let method: String
+    let title: String
+    let fileId: Int
+    let detail: String
+    let ua = "Apple AVPlayer"
+
+    enum CodingKeys: String, CodingKey {
+        case level, event, message, method, title, detail, ua
+        case fileId = "file_id"
+    }
+}
+
+/// `attempt_stale`: a migrated continuation fence refused the work it was
+/// about to do because an epoch it depends on moved while it was suspended.
+/// `detail` is `PlayerController.attemptStaleDetail(fence:captured:now:)`.
+private struct AppleAttemptStaleLog: Encodable {
+    let level = "info"
+    let event = "attempt_stale"
     let message: String
     let method: String
     let title: String
@@ -626,8 +651,17 @@ struct PlayerRecipeRevision: Equatable {
 /// Why a create body is being posted. Everything a viewer does — a seek, a
 /// quality/audio/subtitle change, a fresh title — is `.normal`. An observed
 /// presentation stall is `.sameDeliveryRepair`: it preserves the recovery
-/// budgets without carrying the legacy server ticket that lowers Auto quality.
-/// `.stallReopen` remains only for explicitly attributed legacy recovery.
+/// budgets without carrying the server ticket that lowers Auto quality.
+///
+/// `.stallReopen` is the bound half of the wire and **nothing in this target
+/// constructs it**. A-04 deleted the `stallReopenIntent` minter that used to
+/// (the repository owner decided on 2026-09-23 to revive the wire and delete
+/// the Apple helper), because one untyped "stall" cause cannot carry the five
+/// evidence classes the adaptive-quality design distinguishes. The case, the
+/// ticket, `applyOpenIntent`'s binding, `unboundStallRetry` and the floor
+/// budget are all retained and still exercised by tests, so the client that
+/// A-04's build plan writes mints onto this, rather than rebuilding it. See
+/// docs/clients/NATIVE-ADAPTIVE-QUALITY-DESIGN.md §7.1.
 enum PlayerOpenIntent: Equatable {
     case normal
     case sameDeliveryRepair
@@ -640,9 +674,10 @@ enum PlayerOpenIntent: Equatable {
 
 /// The bound half of a same-session stall reopen: the exact predecessor the
 /// server reads the resolved rung from, plus the request identity that makes a
-/// transport replay of this one recovery idempotent. Minted once per stall, so
-/// a replayed create returns the predecessor's already-persisted answer
-/// instead of stepping the ladder down a second time.
+/// transport replay of this one recovery idempotent. A ticket is meant to be
+/// minted once per stall, so a replayed create returns the predecessor's
+/// already-persisted answer instead of stepping the ladder down a second time.
+/// No production code in this target mints one today — see `PlayerOpenIntent`.
 struct StallReopenTicket: Equatable {
     let previousSessionId: String
     let requestId: String
@@ -1563,6 +1598,7 @@ enum PlaybackCreateRetry {
         "media_owner_transition",
         "vod_index_pending",
         "vod_engine_unattested",
+        "transcode_capacity_pending",
     ]
 
     enum Step: Equatable {
@@ -1729,7 +1765,7 @@ final class PlayerController: ObservableObject {
             ProcessInfo.processInfo.systemUptime
         },
         waitResumeSample: @escaping @MainActor () async -> Void = {
-            try? await Task.sleep(for: .milliseconds(50))
+            try? await Task.sleep(for: PlayerController.resumeSampleDelay)
         }
     ) {
         self.player = player
@@ -1754,13 +1790,17 @@ final class PlayerController: ObservableObject {
     /// sessions inside that contract while leaving direct and completed-VOD
     /// items under AVPlayer's normal policy.
     static let growingHLSForwardBufferSeconds: TimeInterval = 60
-    static let repeatedEndToleranceMs = 250
-    static let naturalEndToleranceMs = 15_000
+    nonisolated static let repeatedEndToleranceMs = 250
+    nonisolated static let naturalEndToleranceMs = 15_000
     /// How long an attached item may sit at `.unknown` before the wait is
     /// spent. A resume has always been bounded by this because it had to seek;
     /// a fresh start was not bounded at all, which is what let a title AVPlayer
     /// neither readies nor fails hold the open forever behind a black screen.
     static let itemReadinessDeadlineSeconds = 15
+    /// Separate from the observed readiness path: these delays coalesce seek
+    /// intent and sample resume presentation, respectively.
+    private static let seekCoalescingDelay: Duration = .milliseconds(100)
+    private static let resumeSampleDelay: Duration = .milliseconds(50)
     /// Film time that may pass on a black screen before the picture is judged
     /// undecodable. Above `PlayerAttachmentRecoveryState`'s five-second
     /// establishment window on purpose: audio-only progress must not be able
@@ -1770,7 +1810,7 @@ final class PlayerController: ObservableObject {
     /// The observer runs twice a second, so anything past this is a seek or an
     /// item replacement, not playback — and must not be counted as black.
     static let blackFrameSampleCeilingMs = 2_000
-    static let gracefulRepeatedEndFraction = 0.95
+    nonisolated static let gracefulRepeatedEndFraction = 0.95
     static let playbackStartFailureTitle = "Couldn't start playback."
     static let playbackStoppedFailureTitle = "Playback stopped."
     /// The web's sentence for the same row, moved rather than rewritten (§7:
@@ -1919,7 +1959,9 @@ final class PlayerController: ObservableObject {
 
     @Published private(set) var currentMs = 0
     @Published private(set) var knownDurationMs = 0
-    @Published private(set) var isPlaying = false
+    @Published private(set) var isPlaying = false {
+        didSet { if isPlaying != oldValue { updateNowPlaying() } }
+    }
     /// An open, a reopen, a failover or a prepared commit is in flight.
     ///
     /// Contract §3.3 row 10: that is a `client_preparing` fault — the staged
@@ -1997,6 +2039,11 @@ final class PlayerController: ObservableObject {
     /// writer now raises a typed fault; the presenter decides what is drawn
     /// (docs/clients/PLAYBACK-SURFACE-CONTRACT.md §3).
     @Published private(set) var surface = PlaybackSurfaceModel()
+    /// The wait sentence as it is now — runway and the server's parked-request
+    /// count — refreshed on the surface clock. The fault keeps the sentence
+    /// from the instant its wait began, which is always "0.0 s client loaded";
+    /// the view draws this instead for a wait (`PlaybackWaitPresentation`).
+    @Published private(set) var waitDetail: String?
     @Published private(set) var finished = false
     @Published private(set) var pgsOverlayWindow: PGSOverlayWindow?
     @Published private(set) var pgsOverlayStatus: PGSOverlayStatus = .off
@@ -2047,6 +2094,7 @@ final class PlayerController: ObservableObject {
     private var seekPresentationLifecycle: [AnyCancellable] = []
     private var seekPresentationBackgrounded = false
     private var seekVideoOutput: AVPlayerItemVideoOutput?
+    private var seekOutputWakeup: SeekOutputWakeup?
     // MARK: the second pipeline
     //
     //  player          -- authoritative, audible, on the layer --> viewer
@@ -2089,10 +2137,20 @@ final class PlayerController: ObservableObject {
     /// about it, and whether an offered one is a replay. `lazy` because it
     /// holds this controller as its host.
     private(set) lazy var preparedReplacement = PreparedReplacementCoordinator(host: self)
-    private var endObserver: NSObjectProtocol?
-    private var itemStatusObservation: NSKeyValueObservation?
+    private var itemObserver: AVPlayerItemObserver?
+    private var itemEventTask: Task<Void, Never>?
+    private var lastItemFailureDetail: (item: AVPlayerItem, detail: PlayerItemFailure.Detail)?
     private var statusTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?
+    private let audioSessionObserver = PlaybackAudioSessionObserver()
+    /// Interruption state, deliberately NOT `@Published`. Every transition is
+    /// already announced through the one surface as `present(.systemPaused(_))`,
+    /// and nothing outside this controller observes the flag — the only reads
+    /// are here and they are plain conditionals. Publishing it would make the
+    /// player carry a second surface for a fact the first one already states,
+    /// which is exactly what the pinned published-field inventory in
+    /// `tests/operations/test_playback_surface_fence.py` exists to refuse.
+    private(set) var systemPaused = false
     /// Feeds the SURFACE section of the Playback debug ledger and the
     /// `surface_*` client-log events. Fed from the presenter's log entries,
     /// which is the only half of a fault's life the presenter can know.
@@ -2228,6 +2286,21 @@ final class PlayerController: ObservableObject {
         }
     }
     var openGenerationForTesting: Int { openGeneration }
+    /// The `detail` of the last `attempt_stale` event this controller raised,
+    /// or `nil` if no migrated fence has refused a continuation yet. Only
+    /// ever the latest one, so it holds nothing a long session accumulates.
+    private(set) var lastAttemptStaleDetail: String?
+    /// Production-linked overlay seams. Only the decision's track list and the
+    /// selection publication are supplied; the selection, window load, tick,
+    /// seek and failure paths are the production ones.
+    func selectPGSOverlayForTesting(_ index: Int?, tracks: [SubtitleTrack], atMs position: Int) {
+        currentMs = position
+        selectedSubtitle = index
+        updatePGSOverlaySelection(index, tracks: tracks)
+    }
+    /// The viewer's pick is published before the overlay hears of it.
+    func publishSelectedSubtitleForTesting(_ index: Int?) { selectedSubtitle = index }
+    var pgsOverlayLoadingRangeForTesting: Range<Int>? { pgsOverlayLoadingRange }
     /// Every explicit viewer command invalidates recovery work that crossed an
     /// await. Session generation alone cannot see pause/resume or native seek.
     private var viewerActionEpoch = 0
@@ -2320,7 +2393,9 @@ final class PlayerController: ObservableObject {
     /// The last rate the player was genuinely playing at, so a viewer paused
     /// at 1.5× resumes at 1.5× rather than at the 0 the transport reports
     /// while paused (P2-5).
-    private var preferredRate: Float = 1
+    private var preferredRate: Float = 1 {
+        didSet { if preferredRate != oldValue { updateNowPlaying() } }
+    }
     /// The viewer's audio language, kept because this controller now performs
     /// media selection itself instead of leaving it to AVPlayer criteria.
     private var audioLanguage = "eng"
@@ -2339,6 +2414,25 @@ final class PlayerController: ObservableObject {
     private var pgsOverlayManifest: PGSOverlayManifest?
     private var pgsOverlayPrepareTask: Task<Void, Never>?
     private var pgsOverlayWindowTask: Task<Void, Never>?
+    /// The source range the in-flight window load covers, so a periodic tick
+    /// cannot cancel the very load that will cover its position.
+    private var pgsOverlayLoadingRange: Range<Int>?
+    /// Which window load is current; an older load's outcome is not news.
+    private var pgsOverlayLoadGeneration = 0
+    /// Consecutive failed window loads in this failure episode. The first
+    /// raises the notice; ticks then retry silently on
+    /// `PGSOverlayPolicy.windowRetryDelaysMs` and stop when those are spent.
+    /// A success, a seek, a reselection or a new item ends the episode.
+    private var pgsOverlayWindowFailures = 0
+    private var pgsOverlayLastFailureMs = 0
+    /// Monotonic milliseconds for the failure backoff. XCTest replaces it.
+    var pgsOverlayClockMs: @MainActor () -> Int = {
+        Int(ProcessInfo.processInfo.systemUptime * 1_000)
+    }
+    /// Overlay fetches. Nil reads through the model, as production does.
+    var pgsOverlayFetcherForTesting: PGSOverlayFetcher?
+    /// Overlay failure notices this controller raised.
+    private(set) var pgsOverlayNoticeCount = 0
     private var pgsOverlaySelectionGeneration = 0
     private var pgsOverlayItemGeneration = 0
     private var pgsOverlayRevision = 0
@@ -2346,9 +2440,9 @@ final class PlayerController: ObservableObject {
     private var pgsOverlayImageBytes: [String: Int] = [:]
     private var pgsOverlayImageLRU: [String] = []
 
-    #if os(iOS)
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
-    #endif
+    private let remoteOwnerToken = UUID()
+    private var lastNowPlayingState: NowPlayingState?
 
     var subtitles: [SubtitleTrack] { decision?.subtitles ?? [] }
     var audioTracks: [AudioTrack] { decision?.audio ?? [] }
@@ -2607,10 +2701,11 @@ final class PlayerController: ObservableObject {
         // background/PiP behavior. Activating it on tvOS was a regression:
         // Apple TV owns the output route and AVPlayer can remain waiting even
         // though the item and server are healthy.
-        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
-        installRemoteCommands()
         #endif
+        installRemoteCommands()
+        startAudioSessionObservation()
 
         audioLanguage = model.audioLang
         // P2-8, taking the plan's second option: own media selection outright.
@@ -2678,9 +2773,10 @@ final class PlayerController: ObservableObject {
         lastUncorroboratedEndMs = nil
         player.appliesMediaSelectionCriteriaAutomatically = false
         player.automaticallyWaitsToMinimizeStalling = true
-        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
         installRemoteCommands()
+        startAudioSessionObservation()
         installSurfaceLifecycleObservation()
         addPeriodicObserver()
         startPlaybackRecoveryMonitor()
@@ -2754,9 +2850,9 @@ final class PlayerController: ObservableObject {
         Self.configureBuffering(item, growingHLS: false)
         installSeekVideoOutput(on: item)
         item.externalMetadata = [titleMetadata(title)]
-        observeEnd(of: item)
-        observeStatus(of: item)
+        retireItemObserver()
         player.replaceCurrentItem(with: item)
+        installItemObserver(for: item)
         // The attached media generation changed: every fault about the
         // generation this replaces stops being about anything and is dropped.
         present(.attach(generation))
@@ -2779,6 +2875,7 @@ final class PlayerController: ObservableObject {
         guard isCurrentLifecycle(lifecycle), !isSuperseded(generation), player.currentItem === item else { return }
         await reconcileNativeMediaSelections(to: item)
         guard isCurrentLifecycle(lifecycle), !isSuperseded(generation), player.currentItem === item else { return }
+        applyDisplayCriteria(for: item, generation: generation)
         if wantsPlayback { player.play() } else { player.pause() }
         isPlaying = wantsPlayback
         present(.intentSettled(viewerActionEpoch))
@@ -2814,6 +2911,7 @@ final class PlayerController: ObservableObject {
         invalidateResumeAttempt(outcome: "viewer-action")
         let superseded = viewerActionEpoch
         viewerActionEpoch &+= 1
+        playbackControl.viewerActionChanged()
         // The viewer has moved on from whatever was being staged for them, so
         // a fault about that destination is no longer about anything.
         present(.intentSuperseded(superseded))
@@ -3436,26 +3534,27 @@ final class PlayerController: ObservableObject {
         // made tvOS look as though the progress command had not worked.
         currentMs = target
         ttffMeasurement.rebasePosition(at: target)
-        refreshPGSOverlayWindow(at: target, force: true)
+        pgsOverlaySeeked(to: target)
         playbackRecoveryMonitor.reset()
         deliveryStarvation.reset()
         interactiveSeekTask?.cancel()
+        let seekAttempt = snapshotAttempt()
         interactiveSeekTask = Task {
             // Coalesce native and replacement seeks alike. Executing every
             // scrub event makes AVPlayer and the server race old destinations.
             if !intentAlreadyPublished {
-                try? await Task.sleep(for: .milliseconds(100))
+                try? await Task.sleep(for: Self.seekCoalescingDelay)
             }
             guard !Task.isCancelled,
-                  generation == seekState.generation,
-                  actionEpoch == viewerActionEpoch
+                  seekAttempt.seek == generation,
+                  seekAttempt.viewerAction == actionEpoch,
+                  attemptStillCurrent(seekAttempt, fence: .seekIntent)
             else { return }
             if !intentAlreadyPublished {
                 retainControlSequence(await playbackControl.reportIntent())
             }
             guard !Task.isCancelled,
-                  generation == seekState.generation,
-                  actionEpoch == viewerActionEpoch
+                  attemptStillCurrent(seekAttempt, fence: .seekIntentAfterControl)
             else { return }
             if recipeRevision.needsReopen {
                 await reopen(at: target)
@@ -3472,7 +3571,7 @@ final class PlayerController: ObservableObject {
             switch route {
             case .native(let itemMs):
                 let item = player.currentItem
-                let itemGeneration = openGeneration
+                let nativeAttempt = snapshotAttempt()
                 _ = await player.seek(
                     to: CMTime(seconds: Double(itemMs) / 1000.0, preferredTimescale: 600),
                     toleranceBefore: .zero,
@@ -3480,18 +3579,14 @@ final class PlayerController: ObservableObject {
                 )
                 // Only the newest seek may publish or escalate; an older
                 // completion arriving after AVPlayer cancelled it must not.
-                guard generation == seekState.generation,
-                      actionEpoch == viewerActionEpoch,
-                      openGeneration == itemGeneration,
+                guard attemptStillCurrent(nativeAttempt, fence: .nativeSeekCompletion),
                       player.currentItem === item
                 else { return }
                 // A seek or Pause may have invalidated an awaited native
                 // subtitle choice. Reconcile that retained choice on the
                 // same item before acknowledging the new destination.
                 if let item { await reconcileNativeMediaSelections(to: item) }
-                guard generation == seekState.generation,
-                      actionEpoch == viewerActionEpoch,
-                      openGeneration == itemGeneration,
+                guard attemptStillCurrent(nativeAttempt, fence: .nativeSeekAfterSelection),
                       player.currentItem === item
                 else { return }
                 let landed = realPositionMs()
@@ -3982,6 +4077,60 @@ final class PlayerController: ObservableObject {
     }
 
     /// Report the final position and hand any encoder back immediately.
+    private func startAudioSessionObservation() {
+        audioSessionObserver.start(
+            wantsPlayback: { [weak self] in self?.wantsPlayback == true },
+            receive: { [weak self] event in self?.handleAudioSessionEvent(event) }
+        )
+    }
+
+    func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {
+        switch event {
+        case .interruption(.suspend):
+            systemPaused = true
+            player.pause()
+            isPlaying = false
+            invalidateResumeAttempt(outcome: "interrupted")
+            present(.systemPaused(true))
+        case .interruption(.resume):
+            systemPaused = false
+            present(.systemPaused(false))
+            guard wantsPlayback, started, player.currentItem != nil else { return }
+            Self.applyPlaybackCommand(to: player, preferredRate: preferredRate, immediately: false)
+            isPlaying = true
+        case .interruption(.stay):
+            let wasSystemPaused = systemPaused
+            systemPaused = false
+            present(.systemPaused(false))
+            guard wasSystemPaused, wantsPlayback else { return }
+            // iOS declined automatic resume. The system suspension is over,
+            // but the transport is still paused, so make the visible intent
+            // agree: the next on-screen or remote Play is one real resume.
+            wantsPlayback = false
+            isPlaying = false
+            pauseBeganAt = resumeNow()
+            player.pause()
+        case .routeChange(let revokesIntent):
+            guard revokesIntent else { return }
+            systemPaused = false
+            present(.systemPaused(false))
+            setPlaybackRequested(false)
+        }
+    }
+
+    private func applyDisplayCriteria(for item: AVPlayerItem, generation: Int) {
+        #if os(tvOS)
+        let applied = PlaybackDisplayCriteria.apply(
+            item: item,
+            itemIsCurrent: player.currentItem === item,
+            openIsCurrent: !isSuperseded(generation)
+        )
+        if applied {
+            NSLog("plurx display_criteria_applied %@", String(describing: item.asset.preferredDisplayCriteria))
+        }
+        #endif
+    }
+
     func stop(deactivateAudioSession: Bool = true) {
         resetSurface()
         surfaceLifecycleObservation.removeAll()
@@ -4014,18 +4163,22 @@ final class PlayerController: ObservableObject {
         seekPresentationTask?.cancel()
         seekPresentationTask = nil
         seekPresentationLifecycle.removeAll()
+        seekVideoOutput?.setDelegate(nil, queue: nil)
         seekVideoOutput = nil
+        seekOutputWakeup = nil
         viewerActionEpoch &+= 1
         pendingControlSequence = nil
-        if let endObserver {
-            NotificationCenter.default.removeObserver(endObserver)
-            self.endObserver = nil
-        }
-        itemStatusObservation = nil
+        itemObserver?.cancel()
+        itemObserver = nil
+        itemEventTask?.cancel()
+        itemEventTask = nil
+        lastItemFailureDetail = nil
         statusTask?.cancel()
         statusTask = nil
         recoveryTask?.cancel()
         recoveryTask = nil
+        audioSessionObserver.stop()
+        systemPaused = false
         surfaceClockTask?.cancel()
         surfaceClockTask = nil
         clearPGSOverlaySelection()
@@ -4055,6 +4208,9 @@ final class PlayerController: ObservableObject {
         let position = realPositionMs()
         player.pause()
         player.replaceCurrentItem(with: nil)
+        #if os(tvOS)
+        PlaybackDisplayCriteria.activeManager()?.preferredDisplayCriteria = nil
+        #endif
         isPlaying = false
         wantsPlayback = false
         isChangingStream = false
@@ -4068,13 +4224,17 @@ final class PlayerController: ObservableObject {
             let model = model
             Task { await model?.endHlsSession(sessionId) }
         }
+        let wasRemoteOwner = RemoteCommandOwner.shared.isCurrent(remoteOwnerToken)
+        removeRemoteCommands()
+        if wasRemoteOwner {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            MPNowPlayingInfoCenter.default().playbackState = .stopped
+        }
+        lastNowPlayingState = nil
         #if os(iOS)
         offlineId = nil
         offlineAssetURL = nil
         if wasStarted {
-            removeRemoteCommands()
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-            MPNowPlayingInfoCenter.default().playbackState = .stopped
             if deactivateAudioSession {
                 try? AVAudioSession.sharedInstance().setActive(
                     false,
@@ -4096,6 +4256,77 @@ final class PlayerController: ObservableObject {
 
     private func isCurrentLifecycle(_ generation: Int) -> Bool {
         started && lifecycleGeneration == generation
+    }
+
+    /// The nine epochs and the attached item, read in one turn on the main
+    /// actor, so a continuation about to `await` can record which state it
+    /// depends on and compare only that subset when it wakes.
+    ///
+    /// Taking all nine costs nine integer reads and answers the question a
+    /// caller actually has, which is "did the thing *I* depend on move?" —
+    /// `Attempt.stillCurrent(_:scopes:)` is where the subset is named. Reading
+    /// them together also makes the pair of snapshots comparable: both are
+    /// taken with no suspension inside them, so neither can be half of one
+    /// state and half of another.
+    func snapshotAttempt() -> Attempt {
+        Attempt(
+            lifecycle: lifecycleGeneration,
+            open: openGeneration,
+            viewerAction: viewerActionEpoch,
+            initialDecision: initialDecisionGeneration,
+            createRetry: createRetryEpoch,
+            preparedAlignment: preparedAlignmentGeneration,
+            seek: seekState.generation,
+            pgsSelection: pgsOverlaySelectionGeneration,
+            pgsItem: pgsOverlayItemGeneration,
+            item: player.currentItem.map(ObjectIdentifier.init)
+        )
+    }
+
+    /// Whether the work `captured` was taken for still belongs to anyone,
+    /// judged on `fence`'s own scope set and nothing else. Every migrated
+    /// fence goes through here rather than calling `stillCurrent` with a
+    /// literal set, so the set lives in one table (`AttemptFence.scopes`) that
+    /// a test and the census can both hold still.
+    ///
+    /// A refusal is the one moment the controller knows *which* epoch moved
+    /// under a suspended continuation, so it is logged there as the plan's
+    /// `attempt_stale` client-log event (§4) instead of returning silently:
+    /// a late recovery that quietly did nothing is otherwise indistinguishable
+    /// in a device log from one that was never scheduled.
+    func attemptStillCurrent(_ captured: Attempt, fence: AttemptFence) -> Bool {
+        let now = snapshotAttempt()
+        if captured.stillCurrent(now, scopes: fence.scopes) { return true }
+        let detail = Self.attemptStaleDetail(fence: fence, captured: captured, now: now)
+        lastAttemptStaleDetail = detail
+        reportAttemptStale(detail: detail)
+        return false
+    }
+
+    /// The `detail` of an `attempt_stale` event: which fence refused, which of
+    /// its scopes moved (in `Attempt.Scope` declaration order, so the value is
+    /// bounded by the nine scope names), and whether the attached item was
+    /// replaced as well. The item is reported, never compared: it is not a
+    /// scope.
+    static func attemptStaleDetail(fence: AttemptFence, captured: Attempt, now: Attempt) -> String {
+        let scope = captured.staleScopes(now, scopes: fence.scopes)
+            .map(\.rawValue)
+            .joined(separator: ",")
+        let item = captured.hasSameItem(as: now) ? "same" : "replaced"
+        return "fence=\(fence.rawValue) scope=\(scope) item=\(item)"
+    }
+
+    private func reportAttemptStale(detail: String) {
+        #if os(iOS)
+        if offlineId != nil { return }
+        #endif
+        postClientLog(AppleAttemptStaleLog(
+            message: "a suspended continuation was refused because an epoch it depends on moved",
+            method: clientLogMethod,
+            title: title,
+            fileId: fileId,
+            detail: detail
+        ))
     }
 
     private func restartInitialDecision(lifecycle: Int) {
@@ -4576,7 +4807,7 @@ final class PlayerController: ObservableObject {
                 seekAfterAttach = itemPosition
             }
             url = Session.shared.url(hls.playlistUrl)
-            startStatusPolling()
+            startRecoveryEvidencePoll()
         }
 
         guard let url else {
@@ -4611,13 +4842,15 @@ final class PlayerController: ObservableObject {
         // player chrome and does not need item-level external metadata.
         item.externalMetadata = [titleMetadata(title)]
         #endif
-        observeEnd(of: item)
-        observeStatus(of: item)
+        retireItemObserver()
         pgsOverlayItemGeneration &+= 1
         pgsOverlayWindowTask?.cancel()
+        pgsOverlayLoadingRange = nil
+        pgsOverlayWindowFailures = 0
         pgsOverlayWindow = nil
         stallObservation.reset()
         player.replaceCurrentItem(with: item)
+        installItemObserver(for: item)
         // The attached media generation changed: every fault about the
         // generation this replaces stops being about anything and is dropped.
         present(.attach(generation))
@@ -4634,7 +4867,7 @@ final class PlayerController: ObservableObject {
         if seekAfterAttach == nil {
             ttffMeasurement.rebasePosition(at: realPositionMs())
         }
-        refreshPGSOverlayWindow(at: startMs, force: true)
+        refreshPGSOverlayWindow(at: startMs, reason: .force)
         // Start loading/playing immediately. Previously a resume point gated
         // this call behind item readiness and could leave tvOS permanently
         // presenting a stopped transport. That regression is why a paused
@@ -4694,6 +4927,7 @@ final class PlayerController: ObservableObject {
         guard !isSuperseded(generation) else { return }
         await reconcileNativeMediaSelections(to: item)
         guard !isSuperseded(generation) else { return }
+        applyDisplayCriteria(for: item, generation: generation)
         if wantsPlayback {
             player.play()
             // Restore the rate the viewer was last actually playing at (P2-5).
@@ -4760,7 +4994,7 @@ final class PlayerController: ObservableObject {
         // during it there is nothing left to keep watching, and resuming here
         // would restart a player `stop()` has already paused and detached from.
         guard started else { return }
-        if session != nil { startStatusPolling() }
+        if session != nil { startRecoveryEvidencePoll() }
         if wantsPlayback {
             player.play()
             // Restore the rate the viewer was last actually playing at (P2-5).
@@ -4793,13 +5027,15 @@ final class PlayerController: ObservableObject {
         return false
     }
 
-    private func updatePGSOverlaySelection(_ index: Int?) {
-        guard let index, Self.subtitleUsesOverlay(index, in: subtitles) else {
+    private func updatePGSOverlaySelection(_ index: Int?, tracks: [SubtitleTrack]? = nil) {
+        guard let index, Self.subtitleUsesOverlay(index, in: tracks ?? subtitles) else {
             clearPGSOverlaySelection()
             return
         }
         guard pgsOverlayTrackIndex != index else {
-            refreshPGSOverlayWindow(at: positionForPlaybackIntent())
+            // A reselection of the same track is a viewer asking again, so it
+            // is allowed past a failure backoff the way a seek is.
+            refreshPGSOverlayWindow(at: positionForPlaybackIntent(), reason: .seek)
             return
         }
 
@@ -4813,7 +5049,7 @@ final class PlayerController: ObservableObject {
         let selectionGeneration = pgsOverlaySelectionGeneration
 
         pgsOverlayPrepareTask = Task { [weak self] in
-            guard let self, let model = self.model else { return }
+            guard let self, let fetcher = self.pgsOverlayFetcher() else { return }
             do {
                 let clock = ContinuousClock()
                 let deadline = clock.now.advanced(
@@ -4825,10 +5061,7 @@ final class PlayerController: ObservableObject {
                           self.pgsOverlayTrackIndex == index,
                           self.selectedSubtitle == index
                     else { return }
-                    switch try await model.pgsOverlayManifest(
-                        fileId: self.fileId,
-                        trackIndex: index
-                    ) {
+                    switch try await fetcher.manifest(self.fileId, index) {
                     case .ready(let rawManifest):
                         let manifest = try rawManifest.validated(
                             fileId: self.fileId,
@@ -4840,7 +5073,7 @@ final class PlayerController: ObservableObject {
                         self.pgsOverlayManifest = manifest
                         self.refreshPGSOverlayWindow(
                             at: self.positionForPlaybackIntent(),
-                            force: true
+                            reason: .force
                         )
                         return
                     case .preparing(let retryAfterMs):
@@ -4852,11 +5085,9 @@ final class PlayerController: ObservableObject {
                 return
             } catch {
                 guard self.pgsOverlaySelectionGeneration == selectionGeneration else { return }
-                self.pgsOverlayStatus = .failed(error.localizedDescription)
+                self.pgsOverlayStatus = .failed(PGSOverlayPolicy.failureDescription(error))
                 self.pgsOverlayWindow = nil
-                self.showPlaybackNotice(
-                    "\(error.localizedDescription) Video playback was kept unchanged."
-                )
+                self.raisePGSOverlayNotice(error)
             }
         }
     }
@@ -4867,6 +5098,8 @@ final class PlayerController: ObservableObject {
         pgsOverlayPrepareTask = nil
         pgsOverlayWindowTask?.cancel()
         pgsOverlayWindowTask = nil
+        pgsOverlayLoadingRange = nil
+        pgsOverlayWindowFailures = 0
         pgsOverlayTrackIndex = nil
         pgsOverlayManifest = nil
         pgsOverlayWindow = nil
@@ -4877,15 +5110,51 @@ final class PlayerController: ObservableObject {
         player.allowsExternalPlayback = true
     }
 
-    private func refreshPGSOverlayWindow(at sourceTimeMs: Int, force: Bool = false) {
+    /// Why a window refresh was asked for. Only `.force` skips the policy.
+    enum PGSOverlayRefreshReason {
+        /// The 1 s periodic observer: never cancels a covering load, and after
+        /// a failure retries only on the bounded backoff.
+        case tick
+        /// A seek or a reselection: the same coverage rule, but a failure
+        /// backoff is the viewer's to override.
+        case seek
+        /// A new item or a newly prepared manifest: always reload.
+        case force
+    }
+
+    /// The periodic observer's overlay step, separated so XCTest drives the
+    /// same call the observer makes.
+    func pgsOverlayPeriodicTick(currentMs: Int) {
+        if let overlayPosition = PGSOverlayPolicy.periodicRefreshPosition(
+            currentMs: currentMs,
+            overlayIsActive: pgsOverlayIsActive
+        ) {
+            refreshPGSOverlayWindow(at: overlayPosition, reason: .tick)
+        }
+    }
+
+    /// `issueSeek`'s overlay step. A seek inside the published window, or
+    /// inside the one already loading, keeps it: the published window's
+    /// layers are timed to the item, so they are already right for the new
+    /// position, and reloading would only blank them for the round trip.
+    func pgsOverlaySeeked(to target: Int) {
+        refreshPGSOverlayWindow(at: target, reason: .seek)
+    }
+
+    private func refreshPGSOverlayWindow(at sourceTimeMs: Int, reason: PGSOverlayRefreshReason) {
         guard let manifest = pgsOverlayManifest,
               let trackIndex = pgsOverlayTrackIndex,
-              selectedSubtitle == trackIndex,
-              force || PGSOverlayPolicy.shouldRefresh(
-                sourceTimeMs: sourceTimeMs,
-                loadedRange: pgsOverlayWindow?.sourceRange
-              )
+              selectedSubtitle == trackIndex
         else { return }
+        if reason == .seek { pgsOverlayWindowFailures = 0 }
+        guard reason == .force || PGSOverlayPolicy.shouldRefresh(
+            sourceTimeMs: sourceTimeMs,
+            loadedRange: pgsOverlayWindow?.sourceRange,
+            loadingRange: pgsOverlayLoadingRange,
+            windowFailures: pgsOverlayWindowFailures,
+            msSinceFailure: pgsOverlayClockMs() - pgsOverlayLastFailureMs
+        ) else { return }
+        if reason == .force { pgsOverlayWindowFailures = 0 }
 
         let sourceRange = PGSOverlayPolicy.windowRange(
             at: sourceTimeMs,
@@ -4899,9 +5168,16 @@ final class PlayerController: ObservableObject {
         let itemBaseMs = baseMs
         let generation = manifest.generation
         pgsOverlayWindowTask?.cancel()
+        pgsOverlayLoadGeneration &+= 1
+        let loadGeneration = pgsOverlayLoadGeneration
+        pgsOverlayLoadingRange = sourceRange
 
         pgsOverlayWindowTask = Task { [weak self] in
-            guard let self, let model = self.model else { return }
+            // Every exit of the current load gives its range back, whichever
+            // guard it leaves by. A range left behind would tell every later
+            // tick and seek that a load which no longer exists covers them.
+            defer { self?.finishPGSOverlayLoad(loadGeneration) }
+            guard let self, let fetcher = self.pgsOverlayFetcher() else { return }
             do {
                 guard PGSOverlayPolicy.windowFitsDecodedBudget(cues) else {
                     throw PGSOverlayError.memoryLimit
@@ -4920,12 +5196,13 @@ final class PlayerController: ObservableObject {
                         if let cached = self.cachedPGSOverlayImage(object.image) {
                             image = cached
                         } else {
-                            let data = try await model.pgsOverlayObject(
-                                fileId: self.fileId,
-                                trackIndex: trackIndex,
-                                generation: generation,
-                                path: object.image
+                            let data = try await fetcher.object(
+                                self.fileId,
+                                trackIndex,
+                                generation,
+                                object.image
                             )
+                            try Task.checkCancellation()
                             guard let decoded = UIImage(data: data)?.cgImage,
                                   decoded.width == object.width,
                                   decoded.height == object.height
@@ -4951,7 +5228,10 @@ final class PlayerController: ObservableObject {
                 guard self.pgsOverlaySelectionGeneration == selectionGeneration,
                       self.pgsOverlayItemGeneration == itemGeneration,
                       self.pgsOverlayTrackIndex == trackIndex,
-                      self.selectedSubtitle == trackIndex
+                      self.selectedSubtitle == trackIndex,
+                      // A superseded load that finished before it saw its
+                      // cancellation must not publish over its successor.
+                      self.pgsOverlayLoadGeneration == loadGeneration
                 else { return }
                 self.pgsOverlayRevision &+= 1
                 self.pgsOverlayWindow = PGSOverlayWindow(
@@ -4961,18 +5241,42 @@ final class PlayerController: ObservableObject {
                     sourceRange: sourceRange,
                     cues: rendered
                 )
+                self.pgsOverlayWindowFailures = 0
                 self.pgsOverlayStatus = .ready
             } catch is CancellationError {
                 return
             } catch {
-                guard self.pgsOverlaySelectionGeneration == selectionGeneration else { return }
-                self.pgsOverlayStatus = .failed(error.localizedDescription)
+                guard self.pgsOverlaySelectionGeneration == selectionGeneration,
+                      self.pgsOverlayLoadGeneration == loadGeneration
+                else { return }
                 self.pgsOverlayWindow = nil
-                self.showPlaybackNotice(
-                    "\(error.localizedDescription) Video playback was kept unchanged."
-                )
+                self.pgsOverlayWindowFailures += 1
+                self.pgsOverlayLastFailureMs = self.pgsOverlayClockMs()
+                self.pgsOverlayStatus = .failed(PGSOverlayPolicy.failureDescription(error))
+                // Said once per failure episode. The backoff retries that
+                // follow are silent; a success or a seek ends the episode.
+                if self.pgsOverlayWindowFailures == 1 {
+                    self.raisePGSOverlayNotice(error)
+                }
             }
         }
+    }
+
+    private func finishPGSOverlayLoad(_ loadGeneration: Int) {
+        if pgsOverlayLoadGeneration == loadGeneration {
+            pgsOverlayLoadingRange = nil
+        }
+    }
+
+    private func raisePGSOverlayNotice(_ error: Error) {
+        pgsOverlayNoticeCount += 1
+        showPlaybackNotice(PGSOverlayPolicy.failureNotice(error))
+    }
+
+    private func pgsOverlayFetcher() -> PGSOverlayFetcher? {
+        if let pgsOverlayFetcherForTesting { return pgsOverlayFetcherForTesting }
+        guard let model else { return nil }
+        return PGSOverlayFetcher(model: model)
     }
 
     private func cachedPGSOverlayImage(_ key: String) -> CGImage? {
@@ -5008,20 +5312,21 @@ final class PlayerController: ObservableObject {
         pgsOverlayImageLRU.append(key)
     }
 
-    private func startStatusPolling() {
+    /// One server request supplies both recovery evidence and panel state.
+    /// Recovery keeps its two-second cadence regardless of panel visibility.
+    private func startRecoveryEvidencePoll() {
         statusTask?.cancel()
         guard let polledSessionId = sessionId else { return }
-        let generation = openGeneration
+        let pollAttempt = snapshotAttempt()
         statusTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, let model = self.model else { return }
                 let status = try? await model.hlsStatus(polledSessionId)
                 guard !Task.isCancelled,
                       self.started,
-                      self.openGeneration == generation,
+                      self.attemptStillCurrent(pollAttempt, fence: .recoveryEvidencePoll),
                       self.sessionId == polledSessionId
                 else { return }
-                self.sessionStatus = status
                 if status == nil {
                     // Row 18: a stats poll is telemetry. The picture is
                     // untouched and the log line is the only trace.
@@ -5032,18 +5337,30 @@ final class PlayerController: ObservableObject {
                 // only sampler there is outside the commit itself.
                 self.sampleThePreparedSwitch()
                 if let status {
-                    self.diagnosticSessionStatus = status
-                    self.diagnosticSessionStatusObservedAt = Date()
                     // A fired wedge recovery replaces the session — and
                     // `open()` cancels THIS poll task, so the recovery must
                     // not run inside it. `observeDeliveryStarvation` spawns
                     // an unstructured task (immune to this task's
                     // cancellation) and this loop ends; the successor
                     // session starts its own poll.
-                    if self.observeDeliveryStarvation(status) { return }
+                    let recovered = self.observeDeliveryStarvation(status)
+                    self.publishPanelTelemetry(status)
+                    if recovered { return }
+                } else {
+                    self.publishPanelTelemetry(nil)
                 }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
+        }
+    }
+
+    /// Presentation state from the same response used by recovery; no second
+    /// request and no influence on the recovery clock.
+    private func publishPanelTelemetry(_ status: PlaybackSessionStatus?) {
+        sessionStatus = status
+        if let status {
+            diagnosticSessionStatus = status
+            diagnosticSessionStatusObservedAt = Date()
         }
     }
 
@@ -5119,6 +5436,7 @@ final class PlayerController: ObservableObject {
                 guard !Task.isCancelled, let self else { return }
                 let shouldMonitor = self.started
                     && self.wantsPlayback
+                    && !self.systemPaused
                     && !self.finished
                     && !self.isPlaybackBlocked
                     && !self.isChangingStream
@@ -5225,8 +5543,7 @@ final class PlayerController: ObservableObject {
         // spend — so an ask placed after it would let a server `hold`
         // permanently retire the one same-delivery reopen this client had,
         // which is the exact failure a hold exists to avoid.
-        let generation = openGeneration
-        let actionEpoch = viewerActionEpoch
+        let stallAttempt = snapshotAttempt()
         let deferralDeadline = shouldConsultControl
             ? ProcessInfo.processInfo.systemUptime
                 + Double(max(0, Self.controlStallDeferralDeadlineMs - event.durationMs)) / 1_000
@@ -5238,8 +5555,7 @@ final class PlayerController: ObservableObject {
             verdict = nil
         }
         // Everything the caller checked may have changed across that await.
-        guard openGeneration == generation,
-              viewerActionEpoch == actionEpoch,
+        guard attemptStillCurrent(stallAttempt, fence: .stallRecovery),
               started,
               stallRecoveryStillEligible
         else { return }
@@ -5555,7 +5871,7 @@ final class PlayerController: ObservableObject {
 
     /// A deferred delivery stall leaves the poll that found it dead.
     ///
-    /// `startStatusPolling`'s task ends itself the moment
+    /// `startRecoveryEvidencePoll`'s task ends itself the moment
     /// `observeDeliveryStarvation` fires, on the documented assumption that a
     /// reopen follows and `open()` will start a fresh one. A deferral breaks
     /// that assumption: nothing reopens, so the server-truth wedge detector —
@@ -5564,10 +5880,10 @@ final class PlayerController: ObservableObject {
     /// the session, long after the hold lifted.
     private func restartDeliveryPollAfterDeferral(_ event: PlaybackStallEvent) {
         // The task object outlives its own `return`, so there is nothing to
-        // test for. `startStatusPolling` cancels whatever is there first, and
+        // test for. `startRecoveryEvidencePoll` cancels whatever is there first, and
         // for any other stall kind the poll was never the thing that ended.
         guard event.kind == .delivery else { return }
-        startStatusPolling()
+        startRecoveryEvidencePoll()
     }
 
     /// The server's seven hold reasons, in the viewer's words. An unknown
@@ -5654,40 +5970,6 @@ final class PlayerController: ObservableObject {
         return decision
     }
 
-    /// The cause this recovery's create should carry. Only a live growing
-    /// session has a predecessor rung to step down from: direct play holds no
-    /// session at all, and a VOD session is a completed cache entry whose
-    /// bytes are already on disk, so neither is something the ladder can
-    /// answer. Those reopen unbound, exactly as before.
-    ///
-    /// A wedge reopens unbound for a different reason. The server reads a
-    /// ticketed automatic reopen as evidence that this rung is too heavy for
-    /// the link and rewrites it one rung down — right for a slow link, wrong
-    /// for a session whose published bytes were simply never fetched, which
-    /// must come back on the rung it was already serving.
-    nonisolated static func stallReopenIntent(
-        sessionId: String?,
-        isVOD: Bool,
-        // One identity for this one stall. A transport replay of the same
-        // create returns the answer already persisted under it rather than
-        // stepping the ladder a second time.
-        requestId: String,
-        wedge: Bool
-    ) -> PlayerOpenIntent {
-        guard let sessionId, !isVOD, !wedge else { return .normal }
-        return .stallReopen(
-            StallReopenTicket(previousSessionId: sessionId, requestId: requestId)
-        )
-    }
-
-    private func stallReopenIntent(wedge: Bool) -> PlayerOpenIntent {
-        Self.stallReopenIntent(
-            sessionId: sessionId,
-            isVOD: isVOD,
-            requestId: UUID().uuidString,
-            wedge: wedge
-        )
-    }
 
     /// Stamp an open's cause onto its create body.
     ///
@@ -5722,7 +6004,7 @@ final class PlayerController: ObservableObject {
     }
 
     /// The wire value for a typed stall recovery. The server accepts no other.
-    static let stallReopenReason = "stall"
+    nonisolated static let stallReopenReason = "stall"
 
     /// The document says whether HDR10 output is allowed; this echo says the
     /// session create actually requests an HDR10 transcode. Manual quality
@@ -6083,6 +6365,8 @@ final class PlayerController: ObservableObject {
         surfaceHasPresented = false
         streamChangePreparingIntent = nil
         surfaceLogOnlyReasons.removeAll()
+        // The last playback's wait reading is not this one's.
+        waitDetail = nil
     }
 
     /// The ledger ring and the four client-log events of the contract's §3.6.
@@ -6370,7 +6654,8 @@ final class PlayerController: ObservableObject {
         guard !hasLiveSurfaceFault(source: source) else { return }
         let waiting = PlaybackWaitPresentation.make(
             runwaySeconds: bufferedRunwaySeconds(),
-            httpWaitCount: sessionStatus?.httpWaitCount
+            httpWaitCount: sessionStatus?.httpWaitCount,
+            source: source
         )
         raiseSurfaceNotice(
             source: source,
@@ -6435,6 +6720,7 @@ final class PlayerController: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(Self.surfaceClockIntervalMs))
                 guard !Task.isCancelled, let self, self.started else { return }
+                self.refreshWaitDetail()
                 self.noteMediaWaiting()
                 self.present(.tick)
             }
@@ -6442,6 +6728,16 @@ final class PlayerController: ObservableObject {
     }
 
     static let surfaceClockIntervalMs = 500
+
+    /// Resample the wait sentence. Published only on change, so a steady
+    /// reading does not redraw the player twice a second.
+    private func refreshWaitDetail() {
+        let detail = PlaybackWaitPresentation.make(
+            runwaySeconds: bufferedRunwaySeconds(),
+            httpWaitCount: sessionStatus?.httpWaitCount
+        ).detail
+        if waitDetail != detail { waitDetail = detail }
+    }
 
     /// Contract §3.3 row 18: prepared-successor abandonment, `session_gone` on
     /// a successor's first exchange, and telemetry/reporter/stats failures.
@@ -6610,15 +6906,20 @@ final class PlayerController: ObservableObject {
     private func installSeekVideoOutput(on item: AVPlayerItem) {
         seekPresentationTask?.cancel()
         seekPresentationTask = nil
+        seekVideoOutput?.setDelegate(nil, queue: nil)
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
+        let wakeup = SeekOutputWakeup()
+        output.setDelegate(wakeup, queue: .main)
         item.add(output)
         seekVideoOutput = output
+        seekOutputWakeup = wakeup
     }
 
     private func beginSeekPresentationMonitor(generation: Int, targetMs: Int) {
         seekPresentationTask?.cancel()
         guard let item = player.currentItem else { return }
         let output = seekVideoOutput
+        let wakeup = seekOutputWakeup
         let hasVideo = decision?.source?.videoCodec != nil
         seekPresentationBackgrounded = UIApplication.shared.applicationState == .background
         seekPresentationLifecycle = [
@@ -6685,16 +6986,19 @@ final class PlayerController: ObservableObject {
                     // cancels this monitor, so awaiting it here would cancel
                     // the recovery halfway through its own open.
                     self.currentMs = targetMs
-                    let recoveryGeneration = self.openGeneration
-                    let recoveryActionEpoch = self.viewerActionEpoch
+                    // The three epochs this recovery depends on are named by
+                    // `.seekPresentationDeadline`. Its seek scope is this
+                    // monitor's own `generation`: the loop guard above already
+                    // required `seekState.generation == generation` and
+                    // nothing has suspended since, so `recovery.seek` is that
+                    // same value.
+                    let recovery = self.snapshotAttempt()
                     Task { [weak self] in
                         guard let self,
-                              self.openGeneration == recoveryGeneration,
-                              self.viewerActionEpoch == recoveryActionEpoch,
+                              self.attemptStillCurrent(recovery, fence: .seekPresentationDeadline),
                               self.wantsPlayback, !self.isPlaybackBlocked, !self.finished,
                               !(self.seekPresentationBackgrounded && hasVideo),
-                              self.seekState.pendingMs == targetMs,
-                              self.seekState.generation == generation
+                              self.seekState.pendingMs == targetMs
                         else { return }
                         await self.retrySameDeliveryAfterStall(
                             PlaybackStallEvent(
@@ -6708,7 +7012,12 @@ final class PlayerController: ObservableObject {
                     }
                     return
                 }
-                try? await Task.sleep(for: .milliseconds(50))
+                if let output, let wakeup {
+                    output.requestNotificationOfMediaDataChange(withAdvanceInterval: 0.05)
+                    await wakeup.waitOrPoll(afterNanoseconds: 50_000_000)
+                } else {
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
             }
         }
     }
@@ -6741,7 +7050,7 @@ final class PlayerController: ObservableObject {
     /// The actual timer callback owns a title, and only samples an attached
     /// item outside preparation. A no-item clock is not a resume position;
     /// removing an observer does not revoke a callback already queued by AVF.
-    func makePeriodicPlaybackObservation() -> @MainActor () -> Void {
+    func makePeriodicPlaybackObservation() -> @MainActor @Sendable () -> Void {
         let lifecycle = lifecycleGeneration
         return { [weak self] in
                 guard let self, self.isCurrentLifecycle(lifecycle),
@@ -6757,12 +7066,7 @@ final class PlayerController: ObservableObject {
                 // button rather than one tick later.
                 self.autoSkipActiveMarkerIfNeeded()
                 self.playbackControlPlayerChanged()
-                if let overlayPosition = PGSOverlayPolicy.periodicRefreshPosition(
-                    currentMs: self.currentMs,
-                    overlayIsActive: self.pgsOverlayIsActive
-                ) {
-                    self.refreshPGSOverlayWindow(at: overlayPosition)
-                }
+                self.pgsOverlayPeriodicTick(currentMs: self.currentMs)
                 // The last rate the viewer was genuinely playing at, so a
                 // pause at 1.5× is restored as 1.5× and not as the 0 the
                 // transport reports while paused (P2-5).
@@ -6781,11 +7085,17 @@ final class PlayerController: ObservableObject {
                     hasVideoSource: self.decision?.source?.videoCodec != nil,
                     playing: isActuallyPlaying
                 ) {
-                    let actionEpoch = self.viewerActionEpoch
+                    // `started` and `lifecycleGeneration == lifecycle` both
+                    // hold here — the observer's own opening guard is
+                    // `isCurrentLifecycle(lifecycle)` and there has been no
+                    // suspension since — so the lifecycle scope below compares
+                    // against the same generation the old conjunction did.
+                    let attempt = self.snapshotAttempt()
                     Task { @MainActor [weak self] in
-                        guard let self, self.isCurrentLifecycle(lifecycle),
-                              self.player.currentItem === item, !self.isChangingStream,
-                              self.viewerActionEpoch == actionEpoch else { return }
+                        guard let self, self.started,
+                              self.attemptStillCurrent(attempt, fence: .blackFrameDecodeFailure),
+                              self.player.currentItem === item,
+                              !self.isChangingStream else { return }
                         await self.handleBlackFrameDecodeFailure(at: observedPosition)
                     }
                 }
@@ -6820,7 +7130,6 @@ final class PlayerController: ObservableObject {
                     self.playbackRecoveryMonitor.takeRecoveredStagnantDurationMs()
                 )
                 self.observeProgressPastEarlyEnd(self.currentMs)
-                self.updateNowPlaying()
                 if self.isPlaying && self.currentMs - self.lastReportedMs >= 10_000 {
                     self.lastReportedMs = self.currentMs
                     self.report(self.currentMs)
@@ -6905,74 +7214,76 @@ final class PlayerController: ObservableObject {
         finished = true
     }
 
-    private func observeEnd(of item: AVPlayerItem) {
-        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
-        endObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
-            object: item,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self,
-                      self.started,
-                      !self.isChangingStream,
-                      self.player.currentItem === item
-                else { return }
-                let endedAt = self.realPositionMs()
-                let itemDurationSeconds = item.duration.seconds
-                let itemDurationMs = itemDurationSeconds.isFinite && itemDurationSeconds > 0
-                    ? Int(itemDurationSeconds * 1000)
-                    : nil
-                let isGrowingPlaylist = self.sessionId != nil && !self.isVOD
-                switch self.prepareObservedEndAction(
-                    knownDurationMs: self.knownDurationMs,
-                    itemDurationMs: itemDurationMs,
-                    isGrowingPlaylist: isGrowingPlaylist,
-                    endedAt: endedAt
-                ) {
-                case .reopen:
-                    // The viewer did not pause — the playlist merely announced
-                    // its current end — and `wantsPlayback` still says so, so
-                    // this continuation keeps playing. The repeated-position
-                    // guard alone cannot stop a loop whose reopens land a few
-                    // seconds apart each time (observed: nine sessions in
-                    // sixteen seconds); the shared rolling budget can.
-                    guard self.recoveryReopenBudget.admit() else {
-                        let expectedDurationMs = self.knownDurationMs > 0
-                            ? self.knownDurationMs
-                            : itemDurationMs
-                        self.stopAfterRepeatedEarlyEnd(
-                            at: endedAt,
-                            expectedDurationMs: expectedDurationMs,
-                            isGrowingPlaylist: isGrowingPlaylist
-                        )
-                        return
-                    }
-                    await self.reopen(at: endedAt)
-                    return
-                case .stop:
-                    let expectedDurationMs = self.knownDurationMs > 0
-                        ? self.knownDurationMs
-                        : itemDurationMs
-                    self.stopAfterRepeatedEarlyEnd(
-                        at: endedAt,
-                        expectedDurationMs: expectedDurationMs,
-                        isGrowingPlaylist: isGrowingPlaylist
-                    )
-                    return
-                case .finish(let durationMs):
-                    self.finishAfterObservedEnd(at: durationMs)
+    private func retireItemObserver() {
+        itemObserver?.cancel()
+        itemObserver = nil
+        itemEventTask?.cancel()
+        itemEventTask = nil
+        lastItemFailureDetail = nil
+    }
+
+    private func installItemObserver(for item: AVPlayerItem) {
+        let observer = AVPlayerItemObserver(item: item, player: player)
+        itemObserver = observer
+        itemEventTask = Task { @MainActor [weak self, weak observer] in
+            guard let observer else { return }
+            for await event in observer.events {
+                guard let self, self.itemObserver === observer,
+                      self.player.currentItem === item else { return }
+                switch event {
+                case .status(.failed):
+                    await self.handleItemFailure(item)
+                case .failedToPlayToEnd(let error):
+                    await self.handleItemFailure(item, fatalError: error)
+                case .playedToEnd:
+                    await self.handleObservedEnd(item)
+                case .playbackStalled:
+                    // The existing recovery evidence poll owns the stall
+                    // policy; this notification is never a terminal rung.
+                    break
+                case .newErrorLogEntry, .timeControl, .interruption, .routeLost, .status:
+                    break
                 }
             }
         }
     }
 
-    private func observeStatus(of item: AVPlayerItem) {
-        itemStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
-            guard item.status == .failed else { return }
-            Task { @MainActor in
-                await self?.handleItemFailure(item)
+    private func handleObservedEnd(_ item: AVPlayerItem) async {
+        guard started, !isChangingStream, player.currentItem === item else { return }
+        let endedAt = realPositionMs()
+        let itemDurationSeconds = item.duration.seconds
+        let itemDurationMs = itemDurationSeconds.isFinite && itemDurationSeconds > 0
+            ? Int(itemDurationSeconds * 1000)
+            : nil
+        let isGrowingPlaylist = sessionId != nil && !isVOD
+        switch prepareObservedEndAction(
+            knownDurationMs: knownDurationMs,
+            itemDurationMs: itemDurationMs,
+            isGrowingPlaylist: isGrowingPlaylist,
+            endedAt: endedAt
+        ) {
+        case .reopen:
+            // A growing playlist may announce its present end before playback
+            // is finished. Keep the same rolling reopen budget as before.
+            guard recoveryReopenBudget.admit() else {
+                let expectedDurationMs = knownDurationMs > 0 ? knownDurationMs : itemDurationMs
+                stopAfterRepeatedEarlyEnd(
+                    at: endedAt,
+                    expectedDurationMs: expectedDurationMs,
+                    isGrowingPlaylist: isGrowingPlaylist
+                )
+                return
             }
+            await reopen(at: endedAt)
+        case .stop:
+            let expectedDurationMs = knownDurationMs > 0 ? knownDurationMs : itemDurationMs
+            stopAfterRepeatedEarlyEnd(
+                at: endedAt,
+                expectedDurationMs: expectedDurationMs,
+                isGrowingPlaylist: isGrowingPlaylist
+            )
+        case .finish(let durationMs):
+            finishAfterObservedEnd(at: durationMs)
         }
     }
 
@@ -6985,22 +7296,29 @@ final class PlayerController: ObservableObject {
     /// transcode ladder, or stopping playback outright, mid-seek. `open()`
     /// re-checks the successor's own status once the change lands, so a
     /// genuinely failed replacement is still handled.
-    private func handleItemFailure(_ item: AVPlayerItem) async {
+    private func handleItemFailure(_ item: AVPlayerItem, fatalError: NSError? = nil) async {
         guard player.currentItem === item, !isChangingStream else { return }
-        let event = item.errorLog()?.events.last
+        let itemError = item.error as NSError?
+        let detail = PlayerItemFailure.classify(
+            fatal: fatalError,
+            item: itemError,
+            log: item.errorLog()?.events.map(PlayerItemFailure.LogEntry.init) ?? [],
+            failedURI: Self.failedResourceURI(item: item, error: fatalError ?? itemError)
+        )
+        lastItemFailureDetail = detail.map { (item, $0) }
         let isCompatibilityFailure = Self.isCompatibilityPlaybackFailure(
-            error: item.error as NSError?,
-            eventDomain: event?.errorDomain,
-            eventStatus: event?.errorStatusCode,
-            eventComment: event?.errorComment
+            error: detail?.error,
+            eventDomain: detail?.eventDomain,
+            eventStatus: detail?.eventStatus,
+            eventComment: detail?.eventComment
         )
         // Only a transport failure can be answered by another node; see
         // `isTransportPlaybackFailure`. `!isCompatibilityFailure` is not the
         // same question and would walk the whole list for a terminal 404.
         let isTransportFailure = Self.isTransportPlaybackFailure(
-            error: item.error as NSError?,
-            eventDomain: event?.errorDomain,
-            eventStatus: event?.errorStatusCode
+            error: detail?.error,
+            eventDomain: detail?.eventDomain,
+            eventStatus: detail?.eventStatus
         )
         if let attempt = resumeAttempt {
             guard attempt.publicationCompleted else {
@@ -7045,10 +7363,9 @@ final class PlayerController: ObservableObject {
         // govern the compatibility fallback below it, which changes the
         // recipe. A `hold` or a `retry_resource` governs nothing at all: on a
         // dead item they would leave a player with no path forward.
-        let generation = openGeneration
-        let actionEpoch = viewerActionEpoch
+        let failureAttempt = snapshotAttempt()
         _ = await controlVerdictForItemFailure(item)
-        guard openGeneration == generation, viewerActionEpoch == actionEpoch,
+        guard attemptStillCurrent(failureAttempt, fence: .itemFailureLadder),
               player.currentItem === item,
               !isChangingStream else { return }
         var reportedFailure = false
@@ -7122,14 +7439,14 @@ final class PlayerController: ObservableObject {
         // claims a sentence it cannot have.
         raiseOwnerFault(
             source: Self.mediaFailureSurfaceSource(
-                statusCode: event?.errorStatusCode,
+                statusCode: detail?.eventStatus,
                 context: surfaceContext
             ),
             title: currentMs > 0
                 ? Self.playbackStoppedFailureTitle
                 : Self.playbackStartFailureTitle,
             detail: verdict
-                ?? item.error?.localizedDescription
+                ?? detail?.error?.localizedDescription
                 ?? PlaybackPreparationError.failed.localizedDescription,
             positionMs: realPositionMs()
         )
@@ -7171,12 +7488,14 @@ final class PlayerController: ObservableObject {
         #if os(iOS)
         item.externalMetadata = [titleMetadata(title)]
         #endif
-        observeEnd(of: item)
-        observeStatus(of: item)
+        retireItemObserver()
         pgsOverlayItemGeneration &+= 1
         pgsOverlayWindowTask?.cancel()
+        pgsOverlayLoadingRange = nil
+        pgsOverlayWindowFailures = 0
         pgsOverlayWindow = nil
         player.replaceCurrentItem(with: item)
+        installItemObserver(for: item)
         if resumeAttempt?.repairAdmitted == true {
             bindResumeRepairSuccessor(item, generation: generation)
         }
@@ -7187,7 +7506,7 @@ final class PlayerController: ObservableObject {
         // SOURCE time — `resume` is deliberately item-local for a growing
         // session, and passing it would load the window for the wrong part of
         // the film whenever `baseMs` is nonzero.
-        refreshPGSOverlayWindow(at: currentMs, force: true)
+        refreshPGSOverlayWindow(at: currentMs, reason: .force)
         do { try await seekWhenReady(item, ms: resume, owner: seekOwner) }
         catch {
             // The status observer will drive the next node or terminal
@@ -7208,6 +7527,7 @@ final class PlayerController: ObservableObject {
             isChangingStream = false
             return true
         }
+        applyDisplayCriteria(for: item, generation: generation)
         if wantsPlayback { player.play() } else { player.pause() }
         isPlaying = wantsPlayback
         isChangingStream = false
@@ -7247,6 +7567,16 @@ final class PlayerController: ObservableObject {
         return path
     }
 
+    private static func failedResourceURI(item: AVPlayerItem, error: NSError?) -> String? {
+        if let uri = error?.userInfo[NSURLErrorFailingURLStringErrorKey] as? String {
+            return uri
+        }
+        if let url = error?.userInfo[NSURLErrorFailingURLErrorKey] as? URL {
+            return url.absoluteString
+        }
+        return (item.asset as? AVURLAsset)?.url.absoluteString
+    }
+
     private func reportPlaybackFailure(
         _ item: AVPlayerItem,
         step: PlaybackCompatibilityLadderStep
@@ -7254,8 +7584,16 @@ final class PlayerController: ObservableObject {
         #if os(iOS)
         if offlineId != nil { return }
         #endif
-        let failure = item.error as NSError?
-        let event = item.errorLog()?.events.last
+        let itemError = item.error as NSError?
+        let detail = lastItemFailureDetail?.item === item
+            ? lastItemFailureDetail?.detail
+            : PlayerItemFailure.classify(
+                fatal: nil,
+                item: itemError,
+                log: item.errorLog()?.events.map(PlayerItemFailure.LogEntry.init) ?? [],
+                failedURI: Self.failedResourceURI(item: item, error: itemError)
+            )
+        let failure = detail?.error
         let payload = ApplePlaybackFailureLog(
             message: failure?.localizedDescription
                 ?? PlaybackPreparationError.failed.localizedDescription,
@@ -7266,9 +7604,9 @@ final class PlayerController: ObservableObject {
             vcodec: decision?.source?.videoCodec,
             detail: Self.playbackFailureDetail(
                 error: failure,
-                eventDomain: event?.errorDomain,
-                eventStatus: event?.errorStatusCode,
-                eventComment: event?.errorComment,
+                eventDomain: detail?.eventDomain,
+                eventStatus: detail?.eventStatus,
+                eventComment: detail?.eventComment,
                 ladderStep: step
             )
         )
@@ -7981,25 +8319,32 @@ final class PlayerController: ObservableObject {
 
     /// Wait for the attached item to reach `.readyToPlay`, or give up.
     ///
-    /// AVPlayerItem's KVO publisher is not guaranteed to deliver another
-    /// value when a tvOS network request stalls. The old unbounded
-    /// `for await` consequently held the initial `play()` forever and left
-    /// the transport looking paused. Poll the authoritative status with a
-    /// finite deadline so playback either resumes or surfaces a useful
-    /// connection error.
+    /// Subscribe before inspecting the status so a ready transition cannot
+    /// fall between the initial read and observation. A separate timer keeps
+    /// the original finite deadline even when AVFoundation emits nothing.
     private static func awaitItemReady(_ item: AVPlayerItem) async throws {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(Self.itemReadinessDeadlineSeconds))
-        while item.status == .unknown {
-            try Task.checkCancellation()
-            guard clock.now < deadline else { throw PlaybackPreparationError.timedOut }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-
+        let observer = AVPlayerItemObserver(item: item)
+        defer { observer.cancel() }
         if item.status == .failed {
             throw item.error ?? PlaybackPreparationError.failed
         }
-        guard item.status == .readyToPlay else { throw PlaybackPreparationError.failed }
+        if item.status == .readyToPlay { return }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { @MainActor in
+                for await event in observer.events {
+                    guard case .status(let status) = event else { continue }
+                    if status == .readyToPlay { return }
+                    if status == .failed { throw item.error ?? PlaybackPreparationError.failed }
+                }
+                throw PlaybackPreparationError.failed
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(Self.itemReadinessDeadlineSeconds))
+                throw PlaybackPreparationError.timedOut
+            }
+            defer { group.cancelAll() }
+            guard let _ = try await group.next() else { throw PlaybackPreparationError.failed }
+        }
     }
 
     func seekPreparationOwner(at targetMs: Int) -> SeekPreparationOwner {
@@ -8752,22 +9097,32 @@ final class PlayerController: ObservableObject {
             && decision.source?.hdr?.lowercased() == "dolby_vision"
     }
 
-    #if os(iOS)
     /// Set by the player view while it is on screen. The lock screen and the
     /// control centre are inputs like any other: without this they were a
     /// second answer to "what does skip do", and they answered it during a
     /// pending scrub, where the touch table says `ignore`.
+    #if os(iOS)
     var remoteInput: (@MainActor (PlayerContractInput) -> Bool)?
+    #endif
 
     private func routeRemote(_ input: PlayerContractInput, otherwise fallback: () -> Void) {
+        #if os(iOS)
         if let remoteInput {
             _ = remoteInput(input)
         } else {
             fallback()
         }
+        #else
+        fallback()
+        #endif
     }
 
     private func installRemoteCommands() {
+        RemoteCommandOwner.shared.claim(remoteOwnerToken) { [weak self] in
+            self?.lastNowPlayingState = nil
+            self?.updateNowPlaying()
+        }
+        guard remoteTargets.isEmpty else { return }
         let commands = MPRemoteCommandCenter.shared()
         commands.playCommand.isEnabled = true
         commands.pauseCommand.isEnabled = true
@@ -8779,72 +9134,94 @@ final class PlayerController: ObservableObject {
         commands.skipForwardCommand.preferredIntervals = [10]
 
         remoteTargets.append((commands.playCommand, commands.playCommand.addTarget { [weak self] _ in
+            guard let self, RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken) else {
+                return .commandFailed
+            }
             Task { @MainActor in
-                self?.setPlaybackRequested(true)
+                self.setPlaybackRequested(true)
             }
             return .success
         }))
         remoteTargets.append((commands.pauseCommand, commands.pauseCommand.addTarget { [weak self] _ in
+            guard let self, RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken) else {
+                return .commandFailed
+            }
             Task { @MainActor in
-                self?.setPlaybackRequested(false)
+                self.setPlaybackRequested(false)
             }
             return .success
         }))
         remoteTargets.append((commands.togglePlayPauseCommand,
                               commands.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let self, RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken) else {
+                return .commandFailed
+            }
             Task { @MainActor in
-                guard let self else { return }
                 self.routeRemote(.playPause) { self.togglePlayPause() }
             }
             return .success
         }))
         remoteTargets.append((commands.skipBackwardCommand,
                               commands.skipBackwardCommand.addTarget { [weak self] _ in
+            guard let self, RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken) else {
+                return .commandFailed
+            }
             Task { @MainActor in
-                guard let self else { return }
                 self.routeRemote(.skipBack) { self.skip(seconds: -10) }
             }
             return .success
         }))
         remoteTargets.append((commands.skipForwardCommand,
                               commands.skipForwardCommand.addTarget { [weak self] _ in
+            guard let self, RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken) else {
+                return .commandFailed
+            }
             Task { @MainActor in
-                guard let self else { return }
                 self.routeRemote(.skipForward) { self.skip(seconds: 10) }
             }
             return .success
         }))
         remoteTargets.append((commands.changePlaybackPositionCommand,
                               commands.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let self, RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken) else {
+                return .commandFailed
+            }
             guard let event = event as? MPChangePlaybackPositionCommandEvent else {
                 return .commandFailed
             }
-            Task { @MainActor in self?.seek(toMs: Int(event.positionTime * 1000)) }
+            Task { @MainActor in self.seek(toMs: Int(event.positionTime * 1000)) }
             return .success
         }))
     }
 
     private func removeRemoteCommands() {
+        RemoteCommandOwner.shared.release(remoteOwnerToken)
         for (command, target) in remoteTargets { command.removeTarget(target) }
         remoteTargets = []
     }
 
     private func updateNowPlaying() {
-        guard knownDurationMs > 0 else { return }
-        let rate: Float = isPlaying ? max(player.rate, 1) : 0
+        guard knownDurationMs > 0,
+              RemoteCommandOwner.shared.isCurrent(remoteOwnerToken) else { return }
+        let state = NowPlayingState(
+            title: title,
+            durationMs: knownDurationMs,
+            elapsedMs: realPositionMs(),
+            rate: isPlaying ? (player.rate > 0 ? player.rate : preferredRate) : 0,
+            isPlaying: isPlaying
+        )
+        guard lastNowPlayingState != state else { return }
+        lastNowPlayingState = state
         MPNowPlayingInfoCenter.default().nowPlayingInfo = [
-            MPMediaItemPropertyTitle: title,
-            MPMediaItemPropertyPlaybackDuration: Double(knownDurationMs) / 1000.0,
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: Double(realPositionMs()) / 1000.0,
-            MPNowPlayingInfoPropertyPlaybackRate: rate,
+            MPMediaItemPropertyTitle: state.title,
+            MPMediaItemPropertyPlaybackDuration: Double(state.durationMs) / 1000.0,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: Double(state.elapsedMs) / 1000.0,
+            MPNowPlayingInfoPropertyPlaybackRate: state.rate,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
             MPNowPlayingInfoPropertyIsLiveStream: false,
         ]
-        MPNowPlayingInfoCenter.default().playbackState = isPlaying ? .playing : .paused
+        MPNowPlayingInfoCenter.default().playbackState = state.isPlaying ? .playing : .paused
     }
-    #else
-    private func updateNowPlaying() {}
-    #endif
 }
 
 // MARK: - Passive playback control
@@ -9180,8 +9557,40 @@ extension PlayerController: PreparedSuccessorHost {
     private func beginPreparedReadinessMonitor() {
         preparedMonitor?.cancel()
         preparedMonitor = Task { @MainActor [weak self] in
+            guard let self, let item = self.preparedItem,
+                  let successor = self.preparedPlayer else { return }
+            let observer = AVPlayerItemObserver(item: item, player: successor)
+            defer { observer.cancel() }
+            // Subscribe before the initial status read. The timer uses the
+            // coordinator's original open clock, not a fresh six seconds.
+            if item.status == .unknown {
+                let remaining = self.preparedReplacement.readinessRemainingMs() ?? 0
+                let ready = await withTaskGroup(of: Bool.self) { group in
+                    group.addTask { @MainActor in
+                        for await event in observer.events {
+                            guard case .status(let status) = event else { continue }
+                            if status == .readyToPlay { return true }
+                            if status == .failed { return false }
+                        }
+                        return false
+                    }
+                    group.addTask {
+                        try? await Task.sleep(for: .milliseconds(remaining))
+                        return false
+                    }
+                    defer { group.cancelAll() }
+                    return await group.next() ?? false
+                }
+                guard !Task.isCancelled, self.preparedItem === item,
+                      self.preparedPlayer === successor else { return }
+                if !ready {
+                    self.preparedReplacement.abandon(.failed)
+                    return
+                }
+            }
             while !Task.isCancelled {
-                guard let self, let item = self.preparedItem else { return }
+                guard self.preparedItem === item,
+                      self.preparedPlayer === successor else { return }
                 if item.status == .failed {
                     self.preparedReplacement.abandon(.failed)
                     return
@@ -9222,9 +9631,13 @@ extension PlayerController: PreparedSuccessorHost {
                         return
                     }
                 }
-                try? await Task.sleep(
-                    nanoseconds: UInt64(PreparedReplacementBounds.pollMs) * 1_000_000
+                let delayMs = min(
+                    PreparedReplacementBounds.pollMs,
+                    self.preparedReplacement.readinessRemainingMs() ?? PreparedReplacementBounds.pollMs
                 )
+                if delayMs > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+                }
             }
         }
     }
@@ -9364,10 +9777,11 @@ extension PlayerController: PreparedSuccessorHost {
         #if os(iOS)
         item.externalMetadata = [titleMetadata(title)]
         #endif
-        observeEnd(of: item)
-        observeStatus(of: item)
+        retireItemObserver()
         pgsOverlayItemGeneration &+= 1
         pgsOverlayWindowTask?.cancel()
+        pgsOverlayLoadingRange = nil
+        pgsOverlayWindowFailures = 0
         pgsOverlayWindow = nil
         stallObservation.reset()
         // M3. The predecessor's final reading, and then the instant the item
@@ -9375,6 +9789,7 @@ extension PlayerController: PreparedSuccessorHost {
         // window has an endpoint at the commit rather than at the nearest poll.
         sampleThePreparedSwitch()
         player.replaceCurrentItem(with: item)
+        installItemObserver(for: item)
         preparedSwitch.note(commitAtMs: PlaybackControlSession.monotonicMs())
         // The successor is a full session in every respect but its pointer, so
         // everything keyed on "which session am I playing" moves with it.
@@ -9403,11 +9818,12 @@ extension PlayerController: PreparedSuccessorHost {
         if isCurrentLifecycle(reconcileGeneration), player.currentItem === item {
             await reconcileNativeMediaSelections(to: item)
         }
-        startStatusPolling()
+        applyDisplayCriteria(for: item, generation: openGeneration)
+        startRecoveryEvidencePoll()
         player.play()
         if !wantsPlayback { player.pause() }
         isPlaying = wantsPlayback
-        refreshPGSOverlayWindow(at: boundaryMs, force: true)
+        refreshPGSOverlayWindow(at: boundaryMs, reason: .force)
         ttffMeasurement.rebasePosition(at: realPositionMs())
         let exposedAtUnixMs = Int(Date().timeIntervalSince1970 * 1_000)
         let firstFrameUnixMs = await awaitPreparedFirstFrame(boundaryMs: boundaryMs)

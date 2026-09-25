@@ -869,6 +869,9 @@ mod tests {
             addr_raft: "127.0.0.1:1".to_owned(),
             addr_api: address,
         };
+        // `reqwest` here is `rustls-no-provider`; name the provider before
+        // building a client. See `http_client::ensure_rustls_crypto_provider`.
+        crate::http_client::ensure_rustls_crypto_provider();
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -953,6 +956,9 @@ mod tests {
             addr_raft: "127.0.0.1:1".to_owned(),
             addr_api: address,
         };
+        // `reqwest` here is `rustls-no-provider`; name the provider before
+        // building a client. See `http_client::ensure_rustls_crypto_provider`.
+        crate::http_client::ensure_rustls_crypto_provider();
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()

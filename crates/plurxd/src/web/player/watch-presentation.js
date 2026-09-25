@@ -53,13 +53,17 @@ function watchAccept(ticket,owner){
 }
 function watchMount(page){
   const main=document.getElementById("main");
-  main.innerHTML=`<section id="watch-browser" class="watch-browser" aria-label="Watch and browse"><div class="watch-heading"><h1>${esc(page.meta.show||page.item.title)}</h1><button class="ghost" onclick="closePlayer()">Close player</button></div><div class="watch-stage"><div id="watch-slot" class="watch-slot" aria-label="Player space"></div><aside id="watch-title" class="watch-title" aria-label="Now playing"></aside></div><div id="watch-caption" class="watch-caption"></div><section id="watch-lower" class="watch-lower" aria-label="Browse"></section><dialog id="watch-details" class="watch-details"></dialog></section>`;
+  // The player's own ✕ in its bar is the one Close. The heading is the same
+  // breadcrumb the item page shows (rendered by watchRenderTitle, since the
+  // last crumb changes when another episode is played), so the page still
+  // says where it is.
+  main.innerHTML=`<section id="watch-browser" class="watch-browser" aria-label="Watch and browse"><div id="watch-head"></div><div class="watch-stage"><div class="watch-picture"><div id="watch-slot" class="watch-slot" aria-label="Player space"></div><section id="watch-rail" class="watch-rail" aria-label="Chapters" hidden></section></div><aside id="watch-title-panel" class="watch-title" aria-label="Now playing"><div id="watch-title"></div><div id="watch-ledger" class="watch-ledger-host"></div></aside></div><div id="watch-band" class="watch-band"><div id="watch-band-title" class="watch-band-title"></div><div id="watch-band-ledger" class="watch-ledger-host"></div></div><section id="watch-lower" class="watch-lower" aria-label="Browse" hidden></section><dialog id="watch-details" class="watch-details"></dialog></section>`;
   WATCH.slot=document.getElementById("watch-slot");
   WATCH.observer=new ResizeObserver(watchScheduleLayout);
   WATCH.observer.observe(document.getElementById("watch-slot"));
   watchRenderTitle();
+  watchRenderChapters();
   if(page.item.kind==="episode") watchLoadSeasons(page);
-  else watchRenderChapters();
 }
 function watchScheduleLayout(){
   if(!WATCH||WATCH.frame!=null)return;
@@ -85,10 +89,52 @@ function watchLayout(){
   if(full){modal.style.cssText="";}
   else if(slot){
     slot.style.height=narrow?`${slot.getBoundingClientRect().width*9/16+132}px`:"";
+    // The host is the slot's rectangle and nothing more. It sits under the
+    // page's sticky and fixed chrome in the stacking order (app.css, the
+    // `.modal.watch-host` z-index), so a picture scrolled up goes behind the
+    // header the way the rest of the page does; nothing clips the host, so
+    // the menus and the Playback info panel may hang outside the picture.
     const r=slot.getBoundingClientRect();
-    modal.style.cssText=`left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;clip-path:inset(${Math.min(r.height,Math.max(0,-r.top))}px 0 ${Math.min(r.height,Math.max(0,r.bottom-window.innerHeight))}px 0)`;
+    modal.style.cssText=`left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px`;
   }
   renderPlayerInfo();
+  watchPlacePopovers();
+}
+// The part of the viewport a player popover may occupy. The page keeps its
+// chrome above the slot player — the classic sticky header, the theater top
+// bar and chips, the phone tab bars — so anything drawn under that chrome is
+// hidden. A menu or the Playback info panel that escapes the picture therefore
+// stops at the chrome's edge, not the viewport's. A full presentation
+// (fullscreen, or the page-filling player) covers the chrome and gets the
+// whole viewport; so does the ordinary modal player, which has no WATCH.
+function watchPopoverBounds(){
+  const bounds={top:0,bottom:window.innerHeight};
+  if(!WATCH||WATCH.mode==="full")return bounds;
+  const player=document.getElementById("player");
+  const pr=player?player.getBoundingClientRect():null;
+  // The catalog layout's .px-side is its header only under 900 px; wider it
+  // is a full-height column beside the page, which no popover reaches.
+  for(const el of document.querySelectorAll("header.top,.th-top,.th-chips,.th-pills,.px-tabs,.px-side")){
+    const cs=getComputedStyle(el);
+    if(cs.display==="none"||(cs.position!=="fixed"&&cs.position!=="sticky"))continue;
+    const r=el.getBoundingClientRect();
+    if(r.height<=0||r.width<=0||r.height>window.innerHeight/2)continue;
+    if(pr&&(r.right<=pr.left||r.left>=pr.right))continue;
+    if(r.top<window.innerHeight/2){
+      // A sticky bar only counts once it is stuck (or sits at its stuck
+      // offset anyway); scrolled past, it is ordinary page content.
+      if(cs.position==="sticky"&&r.top>(parseFloat(cs.top)||0)+1)continue;
+      bounds.top=Math.max(bounds.top,r.bottom);
+    } else bounds.bottom=Math.min(bounds.bottom,r.top);
+  }
+  return bounds;
+}
+// A menu or Playback info panel open while the page scrolls or the slot
+// resizes is bounded against geometry that just moved.
+function watchPlacePopovers(){
+  if(typeof positionStats==="function")positionStats();
+  const menu=document.getElementById("pmenu");
+  if(menu&&menu.classList.contains("on")&&typeof positionMenu==="function")positionMenu(menu.dataset.kind,menu.classList.contains("low"));
 }
 function watchResize(){
   if(!WATCH)return;

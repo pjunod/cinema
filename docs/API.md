@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 216
+One binary serves everything on one port (`:32400` by default). plurx has 230
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -96,7 +96,7 @@ exactly once, at creation.
 
 | Extractor | Accepts | Rejects with |
 |---|---|---|
-| `AuthUser` | any carrier resolving to a user row | 401 `authentication required` |
+| `AuthUser` | any carrier resolving to a user row | 401 `authentication required`, or 401 `session_expired` for a login token idle past the window (§2.5) |
 | `AdminUser` | `AuthUser` plus `user.is_admin` | 401, or 403 `admin privileges required` |
 | `ScopedKey::require(scope)` | a `plx_` key, not disabled, carrying that exact scope | 401 for the wrong credential *kind*, 403 for a real key missing the scope |
 | `CacheOnlyAdminUser` | a digest with a live admin proof in this process's cache | 401 only |
@@ -180,9 +180,33 @@ tokens do not survive into a span either.
 
 ### 2.5 Revocation and expiry
 
-Login tokens **do not expire**. There is no expiry column and no sweeper;
-`last_seen_at` is an activity signal refreshed at most once a minute. A token
-stops working only when its row is deleted:
+**Idle expiry is a server-wide option, on by default.** "Sign-ins expire"
+(Settings → Users; `auth_token_expiry`, default `true`) signs a device out
+once its login token has gone unused for `auth_token_idle_days` (default
+**90**, 1–3650). It is a sliding window measured from the token's
+`last_seen_at` — the activity timestamp authentication already refreshes at
+most once a minute — so a device in regular use is never signed out and the
+option adds no write of its own. No token's window starts before
+`auth_token_expiry_since`: the moment expiry first took effect (the first start
+of a build with the option) or was last switched back on, so neither an
+upgrade nor turning the option on signs anyone out on the spot. The policy is
+read in the same snapshot as the token on every authentication, so every node
+judges by the committed policy.
+
+An expired token is answered with a typed 401 that clients match to land on
+their sign-in screen with the reason:
+
+```json
+{ "code": "session_expired", "idle_days": 90,
+  "message": "Signed out after 90 days of inactivity. Sign in again to continue." }
+```
+
+Its row is not deleted and its activity is not refreshed (that would revive
+it); it stays in the devices list marked `expired` until revoked. Turning the
+option off makes every login token valid again until revoked — today's
+non-expiring behaviour. API keys (`plx_`) never expire this way.
+
+Otherwise a token stops working only when its row is deleted:
 
 | Trigger | What is deleted |
 |---|---|
@@ -299,10 +323,14 @@ families. No `/api/v1/cluster/*` path matches either.
 | POST | `/api/v1/auth/login` | public | Verifies credentials, mints a token |
 | POST | `/api/v1/auth/logout` | bearer | Deletes this token's digest, cluster-wide |
 | GET | `/api/v1/me` | bearer | The caller's own user record |
+| GET | `/api/v1/me/devices` | bearer | This account's bounded token inventory; eight-hex digest prefixes only, plus `expires_at` (null while sign-ins do not expire) and `expired` |
+| DELETE | `/api/v1/me/devices/{prefix}` | bearer | Revokes one other device through the cluster revocation fence; the current device must use logout |
 | GET | `/api/v1/users` | admin | Every user; never any password hash |
 | POST | `/api/v1/users` | admin | Creates a user |
 | PUT | `/api/v1/users/{id}` | admin | Sets password and/or admin flag |
 | DELETE | `/api/v1/users/{id}` | admin | Deletes a user; tokens and watch state cascade |
+| GET | `/api/v1/users/{id}/devices` | admin | One user's bounded token inventory; eight-hex digest prefixes only, plus `expires_at` and `expired` |
+| DELETE | `/api/v1/users/{id}/devices/{prefix}` | admin | Revokes one uniquely matched device token through the user-wide cluster fence |
 | GET | `/api/v1/keys` | admin | Lists API keys; never the hash or the secret |
 | POST | `/api/v1/keys` | admin | Creates a key, returning the secret **once** |
 | DELETE | `/api/v1/keys/{id}` | admin | Revokes a key |
@@ -317,7 +345,8 @@ stranger should not read. The cluster's other ingress origins are therefore
 Fields: `name`, `version` (bare semver, which is what clients compare), `build`
 (git description), `built_at`, `instance_id`, `node_id`,
 `cluster_advertisement`, `uptime_seconds`, `setup_required`, `android_app`,
-`playback_auto_abr`.
+`playback_auto_abr`, `display_mode_match` (the replicated Android-TV cadence
+switch; missing storage is `false`).
 
 ### 4.2 `POST /api/v1/setup`
 
@@ -332,6 +361,18 @@ user is always an admin.
 Login takes `{"username", "password", "device"?}` and returns
 `{"token", "user"}`. Unknown user, wrong password, and a password changed
 between the read and the token write are all the same 401.
+
+Three sizes are stated rather than inherited. The whole request body is capped
+at **8 KiB** by the route itself, so a large body is refused before it is
+parsed, hashed or read against the Store. `password` is capped at **1024
+bytes**. `device` — the label this session will carry in the inventory above —
+is capped at **256 bytes** and a longer one is a 400 `device label must be at
+most 256 bytes`, with no token minted: the label is bounded where it is
+created, because `/me/devices` bounds rows (256) and not bytes, so an unbounded
+label would make one devices read as large as the account cared to make it. A
+label stored before this bound existed is truncated at a character boundary
+where the inventory is projected, never dropped — a device you cannot see is a
+device you cannot revoke.
 
 Logout takes both the validated user and the raw token — the first so an
 invalid token 401s rather than silently succeeding, the second so there is a
@@ -429,6 +470,9 @@ Refusals worth knowing, each a 400 unless noted:
   playback".
 - 409 when enabling `cluster_media_pool_enabled` before every committed voter
   publishes the protocol. Disabling always succeeds.
+- `sign-in expiry must be between 1 and 3650 days` for `auth_token_idle_days`
+  out of range. Switching `auth_token_expiry` from off to on also writes
+  `auth_token_expiry_since` = now in the same commit (§2.5).
 
 Job intervals (`probe_retry_mins`, `artwork_retry_mins`,
 `transcode_cleanup_mins`, `cache_produce_mins`) take 0 to mean off and
@@ -557,6 +601,7 @@ away.
 | GET, PUT | `/api/v1/search/settings` | bearer for GET; admin for PUT | GET returns `semantic_enabled`, classification progress and semantic status. PUT accepts `{ "semantic_enabled": true }`; readiness remains advisory |
 | GET, PUT | `/api/v1/items/{id}/classification` | bearer for GET; admin for PUT | GET returns the classification record and `pending`. PUT accepts `expected_revision`, `include` and `exclude` label arrays; returns the new revision or 409 on concurrent metadata/correction changes |
 | GET | `/api/v1/images/{filename}` | bearer | Cached artwork, materialized from a peer on miss |
+| GET | `/api/v1/files/{id}/chapters/{index}/thumb` | bearer | One 320 px JPEG for the chapter at `index` (zero-based, the item detail's `chapters` order), made by one bounded ffmpeg seek on first request and kept under the runtime cache; `ETag` + `If-None-Match`; 404 when the `chapter_thumbnails` setting is off or the frame could not be made, 503 + `Retry-After` when both extraction slots are busy |
 
 ### 6.1 Listing a library
 
@@ -576,6 +621,32 @@ as the page, so paging never drifts into empty screens. Every per-row
 decoration — watch state, resolution, `media` facts, child counts, and the
 `{leaves, watched}` rollup on shows, seasons and folders — is a page-wide
 batched query, never an N+1.
+
+**Ordering is total: every sort ends in `id`** — `id DESC` for `added`, which
+already had it, and `id ASC` for the other four. The visible key is not
+unique: three items can all reduce to the sort title `harbor lights`, two can
+share a year, and a whole library can share "no capture date". Without a
+unique final key SQLite may return tied rows in a different order for each
+request, and a client paging by `offset` then reads two adjacent pages of two
+different orderings — showing one item twice and never showing its neighbour.
+
+Each row carries `sort_title`, the server's own key: the title lowercased with
+a leading `the `, `a ` or `an ` removed when something remains (folders keep
+their raw name, because a directory called "The Lake House 2021" is a place,
+not a work). It is there so a native client merging several libraries into one
+grid can merge on the key the server sorted by instead of re-deriving it in
+its own language. **Compare it as UTF-8 bytes** — that is SQLite's BINARY
+collation — and not with a locale-aware or case-insensitive compare, which
+disagrees with the server on accented and non-Latin titles.
+
+`resolution` is carried by movies and home videos only, and the `resolution`
+sort ranks every other kind at -1 — the value a merging client reads from an
+absent `resolution`. That includes a root-level photo in a Home library, which
+is probed and has a real file height: it sorts with the rows that have no
+resolution, not by its pixel count, so the key each row carries is the key the
+server sorted it by.
+`tests/contracts/library-sort-cases.json` pins this order for the server and
+for every client that merges.
 
 `GET /api/v1/search` takes `q` and the same `limit` clamp, and returns
 `{results}` alone — no `total`, no paging. The query is split on every
@@ -797,6 +868,21 @@ natively.
 
 ---
 
+**Chapter thumbnails.** `GET /api/v1/files/{id}/chapters/{index}/thumb` is the
+watch view's chapter rail. `index` is the zero-based position in the item
+detail's `chapters` array for that file. The first request for a chapter
+runs one ffmpeg — an input-side seek to the chapter start plus two seconds
+(never past the chapter midpoint), one decoded frame, scaled to 320 px wide,
+JPEG — and keeps the result under the node's runtime cache at
+`chapter-thumbs/<file id>-<size>-<mtime>/<index>.jpg`; later requests are a
+file read. Two extractions run at once per node, each bounded to 15 s and
+2 MiB; a request that cannot get a slot within 10 s is answered 503 with
+`Retry-After`. A failed extraction leaves a marker and the route answers 404
+for that chapter for an hour without running ffmpeg again. The response
+carries `ETag` (file id, size, mtime, index) and `private, max-age=604800`.
+When Settings → Developer → Chapter thumbnails is off the route answers 404
+and runs nothing. See [clients/WATCH-VIEW-LAYOUT.md](clients/WATCH-VIEW-LAYOUT.md).
+
 ## 7. Playback — the decision
 
 Everything in §7–§11 is under `/api/v1`.
@@ -837,6 +923,12 @@ Everything in §7–§11 is under `/api/v1`.
        ▼                                                ▼
    plays as-is                          POST /files/{id}/hls/sessions  →  §9
 ```
+
+`source.frame_rate`, when present, is the first playable video stream's exact
+ffprobe rational (`avg_frame_rate` preferred, `r_frame_rate` fallback), such
+as `24000/1001`. Keeping the rational lets native clients select a display
+mode before decoder preparation without rounding 23.976 and 24 into the same
+cadence.
 
 | Method | Path | Auth | What it does |
 |---|---|---|---|
@@ -1478,8 +1570,21 @@ the client inferring it from `producer_state`.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/api/v1/files/{id}/subs/{subtitle}` | bearer | One subtitle stream as WebVTT, for a `<track>` element |
+| GET | `/api/v1/subtitle-provider` | admin bearer | Configured flags, account username, automatic mode and language codes; never the API key or password |
+| PUT | `/api/v1/subtitle-provider` | admin bearer | Update optional `api_key`, `username`, `password`, `automatic` and `languages`; omitted fields are retained, empty secrets clear them |
+| GET | `/api/v1/files/{id}/subtitles/search` | bearer | Required `language` query (for example `en`); movie/episode candidates with provider file ID, release, language, file match, translation and accessibility flags, plus downloaded IDs |
+| POST | `/api/v1/files/{id}/subtitles/download` | bearer | Accept `{language, provider_file_id}`, revalidate against search results, acquire and return `{subtitle_index, already_downloaded}` |
 | GET | `/api/v1/files/{id}/subs/{index}/overlay.json` | bearer | The `pgs-v1` overlay manifest |
 | GET | `/api/v1/files/{id}/subs/{index}/overlay/{generation}/objects/{object}` | bearer | One immutable overlay PNG, addressed by content hash |
+
+Provider routes use typed errors: `subtitle_provider_disabled`,
+`subtitle_provider_credentials`, `subtitle_provider_quota`,
+`subtitle_provider_unavailable` and `subtitle_invalid`. Quota responses use
+429 and carry `Retry-After`; other provider refusals use 503. A stale source,
+full track list or competing per-file download returns 409. Automatic mode
+defaults to false; `languages` accepts one to three language codes, default
+`["en"]`. A successful acquisition appends an ordinary `webvtt` subtitle
+ordinal. Caption bodies are not included in file metadata responses.
 
 `{subtitle}` accepts **both** spellings: the handler strips a trailing `.vtt`
 if present and parses the remainder as an integer, so `/subs/0` (legacy) and
@@ -1505,6 +1610,25 @@ The overlay routes serve PGS subtitles as an application-drawn overlay rather
 than a burn: `overlay.json` answers `202 {"state":"preparing"}` while the
 build runs, and objects are immutable and addressed by content hash, so they
 cache indefinitely.
+
+A preparation that fails is remembered for 120 s, and asking inside that
+window replays the failure rather than starting another. The answers a client
+must tell apart are typed, so the status alone never decides whether to keep
+polling:
+
+| Code | Status | Retry-After | Means |
+|---|---|---|---|
+| `pgs_overlay_prepare_failed` | 500 | — | The preparation ran and failed: demux, I/O, a timeout, a source without a duration, or the cache could not be created or synced. Terminal; stop polling. Every failed preparation carries this code; a codeless 500 is a store or serving error around it |
+| `pgs_overlay_prepare_failed` | 422 | — | The PGS stream is malformed or exceeds a safety limit. Terminal. The body keeps the older `error` and `detail` fields beside `code` and `message` |
+| `pgs_overlay_capacity` | 503 | 5 | Both preparation slots are busy. The one overlay refusal worth waiting out |
+
+A 409 means the source changed while it was being prepared, a 404 that the
+overlay is switched off or the file, track or generation does not exist, and a
+415 that the track is not PGS. A codeless 503 on the object route means the
+generation vanished and is being rebuilt. Before these codes, a remembered
+failure was a plain 503, which both native clients read as "still preparing"
+and polled for ten minutes while showing nothing. Clients keep treating a
+codeless 503 on `overlay.json` as a wait, for older servers.
 
 ---
 
@@ -1660,6 +1784,9 @@ valid URL, the only way forward is to release and start over.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/api/v1/files/{id}/content` | bearer | Original book bytes, with range support |
+| POST | `/api/v1/files/{id}/grants` | bearer | Mint a fixed-lifetime `open_in` capability for one book; body `{purpose:"open_in",ttl_secs:900}`; returns 201 with `{url,expires_at,grant_id}` |
+| GET, HEAD | `/api/v1/grants/{token}/content` | **capability** | Original book bytes with Range and repeat-open support until expiry; unknown 404, expired or revoked 410 `grant_gone` |
+| DELETE | `/api/v1/grants/{id}` | bearer, owner-scoped | Revoke the `grant_id` returned by mint; 204 on success |
 | POST | `/api/v1/files/{id}/publication` | bearer | Parses an EPUB, returns a manifest, mints a session |
 | GET | `/api/v1/publication/{session}/{*resource}` | **capability** | One bounded EPUB archive entry |
 | DELETE | `/api/v1/publication/{session}` | bearer, owner-scoped | Closes a session early |
@@ -1952,7 +2079,8 @@ is `health.verdict == "dead"`, and the fix — once the underlying cause is gone
    │                         │  │ │  5 s                    │ expires in 40 s
    │                         │◀─┴─┘ 200 {session_id,        │ if not activated
    │                         │       playlist_url, …}       │
-   │              ┌─ GET  .../index.m3u8 ──────────────────▶│ ≤6 segments
+   │              ┌─ GET  .../master.m3u8 ─────────────────▶│ captions
+   │              │  GET  .../index.m3u8 ──────────────────▶│ ≤6 segments
    │              │  GET  .../segment-000001.ts ───────────▶│ listed
    │              │  GET  .../status ─────────────────────▶ │ each of these
    │              └─ PUT  .../keepalive ──────────────────▶ │ sets last_touch
@@ -1971,7 +2099,8 @@ is `health.verdict == "dead"`, and the fix — once the underlying cause is gone
 | POST | `/api/v1/live-tv/guide/refresh` | admin | Forces one guide refresh on the owner and returns the new document |
 | GET | `/api/v1/live-tv/guide/readiness` | admin | Advisory: what has to be true for the configured source to work, and whether it is |
 | POST | `/api/v1/live-tv/channels/{channel}/sessions` | bearer | Two-phase start; issues the capability |
-| GET | `/api/v1/live-tv/sessions/{capability}/index.m3u8` | **capability** | Live media playlist |
+| GET | `/api/v1/live-tv/sessions/{capability}/master.m3u8` | **capability** | Caption-advertising master playlist returned by start and resume |
+| GET | `/api/v1/live-tv/sessions/{capability}/index.m3u8` | **capability** | Live media playlist referenced by the master |
 | GET | `/api/v1/live-tv/sessions/{capability}/{segment}` | **capability** | One MPEG-TS segment |
 | GET | `/api/v1/live-tv/sessions/{capability}/status` | **capability** | Session state |
 | PUT | `/api/v1/live-tv/sessions/{capability}/keepalive` | **capability** | 204; renews the idle timer and nothing else |
@@ -2423,6 +2552,7 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 | GET | `/api/v1/cluster/nodes` | admin | Live roster, capacity, protocol range, per-node readiness |
 | GET | `/api/v1/cluster/status` | admin (cache-only ok) | The aggregate: roster + own snapshot + cached peer observations |
 | GET | `/api/v1/cluster/support-bundle` | admin (cache-only ok) | ZIP: the aggregate, a redacted log tail, a README, a manifest |
+| POST | `/api/v1/cluster/backups` | admin | Builds one portable, checksummed backup from this voter's published snapshot; skips with `status: skipped` when another voter holds the lease |
 | POST/DELETE | `/api/v1/cluster/nodes/{node_id}/restart-preparation` | admin | Fences and unfences new mutable media work on **this** process |
 | POST | `/api/v1/cluster/nodes/{node_id}/promote` | admin | Promotes a ready learner to voter |
 | POST/DELETE | `/api/v1/cluster/nodes/{node_id}/maintenance` | admin | Enters and clears the durable maintenance fence on **this** process |
@@ -2781,6 +2911,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/internal/v1/media/offers` | 64 KiB | One placement bid; starts no work |
 | POST | `/api/v1/internal/media/shared-cache-canary` | 1 KiB | Proves shared-cache identity and generation |
 | GET | `/internal/media/fragment-index/{cache_key}` | — | Streams the verified local fragment index |
+| GET | `/internal/media/subtitle-source/{file_id}/{ordinal}/{format}` | — | Streams a verified local subtitle-source representation (`sup`, `webvtt`, or `matroska`) named by this node's manifest. Requires a signed cluster read request and the subtitle-cluster-sources switch; returns 404 for a missing or corrupt object so the caller can try another published holder. The source video is never opened. |
 | POST | `/_internal/v1/live-tv/snapshot` | 16 KiB | Tuner readiness and lineup for the current generation |
 | POST | `/_internal/v1/live-tv/guide` | 16 KiB | The owner's cached programme guide, relayed verbatim. Deliberately not gated on the Live TV protocol capability: an owner that predates the guide answers 404 and the ingress renders "no guide yet" rather than taking Live TV down across a mixed fleet |
 | POST | `/_internal/v1/live-tv/start`, `/_internal/v2/live-tv/start`, `/_internal/v1/live-tv/activate` | 16 KiB | Starts and activates a tuner session on the owner; v2 carries the exact signed live playback envelope |

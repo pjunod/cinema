@@ -87,7 +87,7 @@ CREATE INDEX network_priors_by_updated
     ON network_priors(updated_at_ms, user_id, client_class);";
 
 #[cfg(any(test, feature = "hiqlite-store"))]
-const SIDECAR_SCHEMA_VERSION: i64 = 9;
+const SIDECAR_SCHEMA_VERSION: i64 = 10;
 const MAX_QUERY_ROWS: i64 = 2_000;
 const MAX_PRUNE_ROWS: i64 = 10_000;
 const MAX_PRIORS_PER_USER_CLIENT: i64 = 64;
@@ -130,6 +130,39 @@ pub(crate) fn insert(conn: &Connection, event: &PlaybackEvent) -> Result<i64, St
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Retained rows and folded prior observations in ONE transaction.
+///
+/// The two subjects are separately switchable and stay so: a caller with
+/// retention off passes an empty `events`, one with the prior opt-in off
+/// passes an empty `observations`, and either side alone still costs one
+/// lease. They share the transaction because they share the sidecar's single
+/// `Mutex<Connection>` ([`NodeLocalTelemetry::with_conn`]), which is the
+/// resource a telemetry burst contends for against fragment-index work.
+/// Folding the priors through [`observe_prior`] one observation at a time —
+/// which is what a writer looping over its batch does — reacquires that mutex
+/// once per event and leaves the per-event contention exactly where it was.
+///
+/// An observation that cannot name its key or carries no measurement is
+/// skipped rather than failing the batch: it is upstream's mistake to make,
+/// and the retained events in the same transaction must not be lost to it.
+pub(crate) fn insert_batch_with_priors(
+    conn: &Connection,
+    events: &[PlaybackEvent],
+    observations: &[NetworkPriorObservation],
+) -> Result<u64, StoreError> {
+    let transaction = conn.unchecked_transaction()?;
+    for event in events {
+        insert(&transaction, event)?;
+    }
+    for observation in observations {
+        if prior_observation_is_usable(observation) {
+            fold_prior(&transaction, observation)?;
+        }
+    }
+    transaction.commit()?;
+    Ok(events.len() as u64)
 }
 
 pub(crate) fn prune(conn: &Connection, before_ms: i64, limit: i64) -> Result<u64, StoreError> {
@@ -213,21 +246,39 @@ fn prior_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NetworkPrior> {
     })
 }
 
+fn prior_observation_is_usable(observation: &NetworkPriorObservation) -> bool {
+    !observation.credential_generation.as_str().trim().is_empty()
+        && !observation.client_class.trim().is_empty()
+        && !observation.network_fingerprint.trim().is_empty()
+        && (observation.throughput_kbps.is_some() || observation.starved_rung_height.is_some())
+}
+
 pub(crate) fn observe_prior(
     conn: &Connection,
     observation: &NetworkPriorObservation,
 ) -> Result<NetworkPrior, StoreError> {
-    if observation.credential_generation.as_str().trim().is_empty()
-        || observation.client_class.trim().is_empty()
-        || observation.network_fingerprint.trim().is_empty()
-        || (observation.throughput_kbps.is_none() && observation.starved_rung_height.is_none())
-    {
+    if !prior_observation_is_usable(observation) {
         return Err(StoreError::Task(
             "network prior observation is missing its key or measurement".to_owned(),
         ));
     }
 
     let transaction = conn.unchecked_transaction()?;
+    let prior = fold_prior(&transaction, observation)?;
+    transaction.commit()?;
+    Ok(prior)
+}
+
+/// The prior fold itself, on a connection that already owns a transaction.
+///
+/// Split out of [`observe_prior`] so a batch can fold many observations and
+/// insert its retained events under ONE transaction; `unchecked_transaction`
+/// cannot nest, so the statements had to stop owning their own.
+fn fold_prior(
+    conn: &Connection,
+    observation: &NetworkPriorObservation,
+) -> Result<NetworkPrior, StoreError> {
+    let transaction = conn;
     // The starvation verdict is still the stronger signal while it is fresh —
     // a `min` that a later stall can only lower — but it now expires. Past
     // `NETWORK_PRIOR_STARVED_TTL_MS` from the starvation that set it, the next
@@ -310,7 +361,6 @@ pub(crate) fn observe_prior(
         ],
         prior_from_row,
     )?;
-    transaction.commit()?;
     Ok(prior)
 }
 
@@ -386,6 +436,15 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreError> {
 #[cfg(any(test, feature = "hiqlite-store"))]
 pub(crate) struct NodeLocalTelemetry {
     conn: Arc<Mutex<Connection>>,
+    /// How many times [`Self::with_conn`] has taken `conn`.
+    ///
+    /// The mutex is the contended resource this sidecar's batching exists to
+    /// stop reacquiring per event, so "one batch, one lease" is only a claim
+    /// until something counts. One relaxed add per lease is cheaper than the
+    /// `spawn_blocking` hop it accompanies, so it is always on rather than
+    /// behind `cfg(test)` — a hook that only exists in tests proves the test
+    /// build, not this one.
+    leases: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg(any(test, feature = "hiqlite-store"))]
@@ -508,6 +567,15 @@ impl NodeLocalTelemetry {
                 migration.push_str(crate::store::fragindex::FRAGMENT_INDEX_TYPED_OUTCOMES_SCHEMA);
                 migration.push('\n');
             }
+            // v10: publication-time structural validation for metadata-only
+            // detail status. The historical create/re-key constants remain
+            // frozen, so a fresh sidecar needs the ALTER in this same batch
+            // just like an upgraded one.
+            if creating_indexes || !column_exists(&conn, "fragment_indexes", "validated_revision")?
+            {
+                migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_VALIDATION_COLUMN);
+                migration.push('\n');
+            }
             migration.push_str(&format!(
                 "PRAGMA user_version = {SIDECAR_SCHEMA_VERSION};\nCOMMIT;"
             ));
@@ -520,6 +588,7 @@ impl NodeLocalTelemetry {
         }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            leases: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -529,7 +598,9 @@ impl NodeLocalTelemetry {
         F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
     {
         let conn = Arc::clone(&self.conn);
+        let leases = Arc::clone(&self.leases);
         tokio::task::spawn_blocking(move || {
+            leases.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let guard = conn
                 .lock()
                 .map_err(|_| StoreError::Task("telemetry sidecar mutex poisoned".to_owned()))?;
@@ -539,8 +610,26 @@ impl NodeLocalTelemetry {
         .map_err(|error| StoreError::Task(error.to_string()))?
     }
 
+    /// Connection leases taken so far. See [`Self::leases`]. The count is
+    /// kept in every build; only this reader is test-only.
+    #[cfg(test)]
+    pub(crate) fn leases_taken(&self) -> u64 {
+        self.leases.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(crate) async fn record(&self, event: PlaybackEvent) -> Result<i64, StoreError> {
         self.with_conn(move |conn| insert(conn, &event)).await
+    }
+
+    /// One lease, one transaction, both subjects. See
+    /// [`insert_batch_with_priors`].
+    pub(crate) async fn record_batch_with_priors(
+        &self,
+        events: Vec<PlaybackEvent>,
+        observations: Vec<NetworkPriorObservation>,
+    ) -> Result<u64, StoreError> {
+        self.with_conn(move |conn| insert_batch_with_priors(conn, &events, &observations))
+            .await
     }
 
     pub(crate) async fn prune(&self, before_ms: i64, limit: i64) -> Result<u64, StoreError> {
@@ -623,6 +712,14 @@ impl NodeLocalTelemetry {
             .await
     }
 
+    pub(crate) async fn validate_fragment_index_page(
+        &self,
+        limit: u32,
+    ) -> Result<crate::store::FragmentIndexValidationBackfill, StoreError> {
+        self.with_conn(move |conn| crate::store::fragindex::validate_page(conn, limit))
+            .await
+    }
+
     pub(crate) async fn vod_row_file_ids(&self, limit: i64) -> Result<Vec<i64>, StoreError> {
         self.with_conn(move |conn| crate::store::fragindex::vod_row_file_ids(conn, limit))
             .await
@@ -631,6 +728,18 @@ impl NodeLocalTelemetry {
     pub(crate) async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
         self.with_conn(move |conn| crate::store::fragindex::forget(conn, file_id))
             .await
+    }
+
+    pub(crate) async fn holds_fragment_index_for_source(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+    ) -> Result<bool, StoreError> {
+        self.with_conn(move |conn| {
+            crate::store::fragindex::holds_for_source(conn, file_id, source_size, source_mtime)
+        })
+        .await
     }
 
     pub(crate) async fn record_fragment_index_outcome(
@@ -763,6 +872,178 @@ mod tests {
             starved_rung_height,
             observed_at_ms: at_ms,
         }
+    }
+
+    #[tokio::test]
+    async fn a_batch_persists_every_event_in_one_transaction() {
+        let root = tempfile::tempdir().expect("sidecar root");
+        let sidecar =
+            NodeLocalTelemetry::open(&root.path().join("telemetry.db")).expect("open sidecar");
+        let events = (0..64)
+            .map(|index| event("sample", index))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            sidecar
+                .record_batch_with_priors(events, Vec::new())
+                .await
+                .expect("batch"),
+            64
+        );
+        assert_eq!(
+            sidecar
+                .events(PlaybackEventQuery {
+                    limit: 64,
+                    ..PlaybackEventQuery::default()
+                })
+                .await
+                .expect("events")
+                .len(),
+            64
+        );
+    }
+
+    /// One batch is one lease even when the network-prior opt-in is on.
+    ///
+    /// The mutex this counts is the one a telemetry burst shares with
+    /// fragment-index work, so "we batch the writes" is worth nothing if the
+    /// priors are then folded one observation at a time behind the same
+    /// mutex: 64 events with priors enabled would cost 65 acquisitions, which
+    /// is the per-event contention the batch exists to remove. The assertion
+    /// is on the lease count, not on the row counts, because the row counts
+    /// pass either way.
+    #[tokio::test]
+    async fn a_batch_folds_its_priors_in_the_same_connection_lease() {
+        let root = tempfile::tempdir().expect("sidecar root");
+        let sidecar =
+            NodeLocalTelemetry::open(&root.path().join("telemetry.db")).expect("open sidecar");
+        let events = (0..64)
+            .map(|index| event("sample", 1_700_000_000_000 + index))
+            .collect::<Vec<_>>();
+        let observations = (0..64)
+            .map(|index| {
+                observation(
+                    &format!("192.0.2.{index}/32"),
+                    Some(4_000 + index as u32),
+                    None,
+                    1_700_000_000_000 + index,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let before = sidecar.leases_taken();
+        assert_eq!(
+            sidecar
+                .record_batch_with_priors(events, observations)
+                .await
+                .expect("batch with priors"),
+            64
+        );
+        assert_eq!(
+            sidecar.leases_taken() - before,
+            1,
+            "64 events and 64 prior folds must cost one sidecar lease, not one per event"
+        );
+
+        assert_eq!(
+            sidecar
+                .events(PlaybackEventQuery {
+                    limit: 128,
+                    ..PlaybackEventQuery::default()
+                })
+                .await
+                .expect("events")
+                .len(),
+            64
+        );
+        for index in [0_i64, 17, 63] {
+            let prior = sidecar
+                .prior(
+                    "test-gen".to_owned(),
+                    "safari".to_owned(),
+                    format!("192.0.2.{index}/32"),
+                )
+                .await
+                .expect("prior read")
+                .expect("folded prior");
+            assert_eq!(prior.sustained_kbps, Some(4_000 + index as u32));
+        }
+    }
+
+    /// Retention off and priors on still costs one lease, and writes only the
+    /// prior. The two switches are independent; the lease is shared.
+    #[tokio::test]
+    async fn a_prior_only_batch_writes_no_rows_and_still_takes_one_lease() {
+        let root = tempfile::tempdir().expect("sidecar root");
+        let sidecar =
+            NodeLocalTelemetry::open(&root.path().join("telemetry.db")).expect("open sidecar");
+        let observations = (0..8)
+            .map(|index| {
+                observation(
+                    &format!("198.51.100.{index}/32"),
+                    Some(2_000),
+                    None,
+                    1_700_000_000_000 + index,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let before = sidecar.leases_taken();
+        assert_eq!(
+            sidecar
+                .record_batch_with_priors(Vec::new(), observations)
+                .await
+                .expect("prior-only batch"),
+            0
+        );
+        assert_eq!(sidecar.leases_taken() - before, 1);
+        assert!(sidecar
+            .events(PlaybackEventQuery {
+                limit: 8,
+                ..PlaybackEventQuery::default()
+            })
+            .await
+            .expect("events")
+            .is_empty());
+        assert!(sidecar
+            .prior(
+                "test-gen".to_owned(),
+                "safari".to_owned(),
+                "198.51.100.3/32".to_owned(),
+            )
+            .await
+            .expect("prior read")
+            .is_some());
+    }
+
+    /// An unusable observation is skipped, not allowed to discard the
+    /// retained events that share its transaction.
+    #[tokio::test]
+    async fn an_unusable_observation_does_not_take_the_batch_down_with_it() {
+        let root = tempfile::tempdir().expect("sidecar root");
+        let sidecar =
+            NodeLocalTelemetry::open(&root.path().join("telemetry.db")).expect("open sidecar");
+        let mut broken = observation("203.0.113.0/24", None, None, 1_700_000_000_000);
+        broken.client_class = String::new();
+
+        assert_eq!(
+            sidecar
+                .record_batch_with_priors(vec![event("sample", 1)], vec![broken])
+                .await
+                .expect("batch survives an unusable observation"),
+            1
+        );
+        assert_eq!(
+            sidecar
+                .events(PlaybackEventQuery {
+                    limit: 8,
+                    ..PlaybackEventQuery::default()
+                })
+                .await
+                .expect("events")
+                .len(),
+            1
+        );
     }
 
     fn prior_connection() -> Connection {
@@ -1080,7 +1361,7 @@ mod tests {
         // `SIDECAR_SCHEMA_VERSION`, so an assertion built from the same
         // constant can never fail on a bump. Update it by hand, deliberately,
         // exactly as the single-node backend's `assert_eq!(version, 37)` is.
-        assert!(error.to_string().contains("only knows v9"), "{error}");
+        assert!(error.to_string().contains("only knows v10"), "{error}");
     }
 
     #[tokio::test]
@@ -1361,6 +1642,11 @@ mod tests {
             SIDECAR_SCHEMA_VERSION
         );
         assert!(table_exists(&conn, "fragment_index_outcomes").expect("table check"));
+        assert!(
+            column_exists(&conn, "fragment_indexes", "validated_revision")
+                .expect("validation-column check"),
+            "an upgraded sidecar must gain the M1 validation marker"
+        );
     }
 
     #[tokio::test]

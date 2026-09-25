@@ -73,7 +73,7 @@ seconds."
 
 ### 2.1 Consensus & storage — embed the store, don't run a database
 
-**Decided (Phase 3 spike): embed the maintained hiqlite 0.14 fork** —
+**Decided: embed the maintained hiqlite 0.14 fork** —
 raft-replicated SQLite built on openraft for the exact "1 node or 3+ nodes, no
 external infra" shape. The spike confirmed its `execute`/`query_map`/`txn` API
 maps onto the existing rusqlite row mappers, and the shipped fork now carries
@@ -475,7 +475,7 @@ source of truth for "how does this file play," not two.
 | Discovery | mDNS `_plurx._tcp` + Plex GDM responder | LAN only |
 | Passwords / tokens | Argon2id (at rest) · SHA-256 (token lookup) | §5 |
 | Observability | `tracing` + Prometheus exporter | REQ-OPS-1 |
-| Web app | embedded static app, `` `WEB_ASSETS` = 65 `` files, no bundler or framework | [shell layout](clients/WEB-SHELL-LAYOUT.md), [source table](../crates/plurxd/src/http/web.rs) |
+| Web app | embedded static app, `` `WEB_ASSETS` = 66 `` files, no bundler or framework | [shell layout](clients/WEB-SHELL-LAYOUT.md), [source table](../crates/plurxd/src/http/web.rs) |
 | Avoided | sled (stalled), rocksdb (C++ dep), external DBs, ffmpeg linking | — |
 
 The web app is a deliberate non-choice: a hand-written shell loads the checked
@@ -547,6 +547,15 @@ never version-skew against the API it talks to.
    `` `DVR_TICK` = 15 `` seconds as defined in
    [`dvr.rs`](../crates/plurxd/src/live_tv/dvr.rs). §8's read-only rule is
    unchanged: plurx still never writes into media storage.
+10. **Own the tested Hiqlite patch stack and upstream generic repairs; do not
+    rename the crate, decided 2026-09-21.** Paul Junod owns the fork. The
+    `hiqlite` and `hiqlite-wal` ledgers name every patch, its kind, and its
+    tested exit condition; the existing vendor lane keeps that stack
+    buildable. A package rename would break Cargo's patch-by-name replacement
+    without adding ownership, so the upstream name remains while generic bugs
+    receive public upstream links. Plurx-policy rows intentionally have no
+    upstream exit and say `never` rather than promising a release that cannot
+    satisfy them.
 
 ## 8. Non-goals (what the architecture deliberately refuses)
 
@@ -582,7 +591,7 @@ one of these is a door we're keeping shut on purpose:
 
 | Risk | Mitigation |
 |---|---|
-| hiqlite is a small project (bus factor) | The maintained fork and its fifteen patches are explicit in `PLURX-PATCH.md`; `Store` isolates callers, while carrying the fork is now the accepted cost |
+| hiqlite is a small project (bus factor) | Paul Junod owns the maintained fork. Sixteen Hiqlite and three Hiqlite-WAL patches have kinds and tested exit conditions in their `PLURX-PATCH.md` ledgers; the vendor lane compiles them, and `Store` isolates callers. Carrying the fork is the accepted cost; generic repairs remain until their upstream links and releases satisfy the ledger. |
 | Deterministic-segment failover has sharp edges (VFR, keyframe drift) | Spiked at the Phase 3 gate; worst case = session restart-at-position, still ahead of everyone |
 | Plex-compat drift / client quirks | Tier 1 targets a small, testable client set; contract tests against recorded Composite/PKC traffic; official API docs exist now |
 | DV/HDR correctness is genuinely hard | Profiles are data; a test-file corpus per DV profile (P5/P8) from day one; HDR10 base-layer + tone-map fallbacks |

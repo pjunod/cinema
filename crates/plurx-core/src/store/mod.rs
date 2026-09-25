@@ -17,7 +17,13 @@
 
 pub mod classification;
 pub use classification::ClassificationStore;
+mod downloaded_subtitles;
 mod dv_conversion;
+mod file_grants;
+pub use downloaded_subtitles::{
+    valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
+};
+pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEMA};
 mod fragindex;
 mod fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
@@ -29,6 +35,7 @@ mod timeline_annotations;
 
 mod publication;
 mod scan_identity_repair;
+mod sql_source;
 pub use scan_identity_repair::{
     plan_identity_repair, IdentityRepairBlocker, IdentityRepairCounts, IdentityRepairFile,
     IdentityRepairFileMove, IdentityRepairItem, IdentityRepairItemMove, IdentityRepairOutcome,
@@ -40,6 +47,9 @@ pub use scan_identity_repair::{
 
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite;
+#[cfg(feature = "hiqlite-store")]
+#[doc(hidden)]
+pub use hiqlite::validation_time_http_store_operation;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_catalog;
 #[cfg(feature = "hiqlite-store")]
@@ -100,6 +110,89 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheAdminMutationClaim(String);
 
+pub const TOKEN_SUMMARY_MAX: usize = 256;
+
+/// Largest device label, in bytes, that a login may persist.
+///
+/// The label is the one field in `tokens` a caller both chooses and can
+/// repeat: every successful login appends a row carrying whatever string the
+/// client sent. `TOKEN_SUMMARY_MAX` bounds the device inventory to 256 rows
+/// but says nothing about bytes, so without a byte bound one account can mint
+/// hundreds of sessions whose labels are each as large as the login body
+/// limit allows and turn a single `GET /api/v1/me/devices` into hundreds of
+/// MiB of allocation and response — and, on a cluster, replicate each of
+/// those labels to every member.
+///
+/// 256 bytes is the number because a device label is a short human display
+/// string: "Paul's iPhone", "Chrome on Windows", "Apple TV (Living Room)", or
+/// at the long end a model name derived from a user agent, which runs to
+/// roughly 150 bytes. 256 leaves room above every real client while making
+/// the worst case arithmetic rather than a hope: 256 rows x 256 bytes is a
+/// 64 KiB ceiling on the labels in one inventory response, the same order as
+/// the rest of that JSON body. A smaller bound would clip legitimate names in
+/// non-Latin scripts, where one character costs three bytes; a larger one buys
+/// nothing a client needs and multiplies by 256.
+///
+/// A label over the bound is **rejected at the write**, not dropped at the
+/// read: `POST /api/v1/auth/login` answers `400` and mints no token, so the
+/// caller learns immediately rather than discovering later that a device it
+/// believes is named is anonymous. Rows an older build already stored are
+/// capped by [`bounded_device_label`] where the inventory is projected, so a
+/// database that predates this bound still serves a bounded response and
+/// still shows every device the user can revoke.
+pub const MAX_DEVICE_LABEL_BYTES: usize = 256;
+
+/// Cap a stored label for projection at [`MAX_DEVICE_LABEL_BYTES`].
+///
+/// Truncation stops at the nearest character boundary at or below the bound,
+/// so the result is always valid UTF-8 and never longer than the bound. This
+/// runs on read for legacy rows only — new writes are refused above the bound
+/// — and it truncates rather than omitting the row, because a device the user
+/// cannot see is a device the user cannot revoke.
+pub fn bounded_device_label(label: Option<String>) -> Option<String> {
+    label.map(|mut label| {
+        if label.len() <= MAX_DEVICE_LABEL_BYTES {
+            return label;
+        }
+        let mut end = MAX_DEVICE_LABEL_BYTES;
+        while end > 0 && !label.is_char_boundary(end) {
+            end -= 1;
+        }
+        label.truncate(end);
+        label
+    })
+}
+
+/// Privacy-safe login-token metadata for account device management. The full
+/// digest remains inside the Store; eight hex characters identify one row
+/// only after the Store has proved the prefix is unique for that user.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TokenSummary {
+    pub token_hash_prefix: String,
+    pub device: Option<String>,
+    pub created_at: i64,
+    pub last_seen_at: i64,
+}
+
+/// What a login-token lookup found. `Expired` is distinct from `Unknown` so
+/// the HTTP layer can tell a client "you were signed out after N idle days"
+/// instead of a bare 401; an expired token's activity is never refreshed, so
+/// presenting it cannot slide it back to life.
+#[derive(Clone, Debug)]
+pub enum TokenAuthentication {
+    Authenticated(User),
+    Expired { idle_days: i64 },
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteTokenByPrefixOutcome {
+    Deleted,
+    NotFound,
+    Ambiguous,
+    ClaimLost,
+}
+
 #[cfg(feature = "hiqlite-store")]
 impl CacheAdminMutationClaim {
     pub(crate) fn new(claim_id: String) -> Self {
@@ -149,6 +242,28 @@ ALTER TABLE files ADD COLUMN dv_rpu_present INTEGER;";
 /// Nullable with no default: rows scanned before this column existed remain
 /// explicitly unknown until the bounded stored-probe backfill reaches them.
 const FILES_VIDEO_CODEC_TAG_COLUMN: &str = "ALTER TABLE files ADD COLUMN video_codec_tag TEXT;";
+
+/// The selected playable video's field-order token.
+///
+/// Nullable with no default so the bounded stored-probe backfill can
+/// distinguish rows it has not considered from rows it resolved to the
+/// explicit `unknown` token.
+const FILES_FIELD_ORDER_COLUMN: &str = "ALTER TABLE files ADD COLUMN field_order TEXT;";
+/// Source luminance facts used by the CPU tone-map recipe. Nullable values
+/// distinguish unknown rows from a completed probe whose `luminance_source`
+/// is `none`.
+pub(crate) const FILES_LUMINANCE_COLUMNS: &[&str] = &[
+    "ALTER TABLE files ADD COLUMN max_cll INTEGER",
+    "ALTER TABLE files ADD COLUMN max_fall INTEGER",
+    "ALTER TABLE files ADD COLUMN mastering_max_luminance INTEGER",
+    "ALTER TABLE files ADD COLUMN luminance_source TEXT CHECK (luminance_source IN ('stream','frame','none'))",
+];
+
+const FILES_LUMINANCE_COLUMNS_BATCH: &str = "
+ALTER TABLE files ADD COLUMN max_cll INTEGER;
+ALTER TABLE files ADD COLUMN max_fall INTEGER;
+ALTER TABLE files ADD COLUMN mastering_max_luminance INTEGER;
+ALTER TABLE files ADD COLUMN luminance_source TEXT CHECK (luminance_source IN ('stream','frame','none'));";
 
 /// The staged-generation ledger, shared verbatim by both backends.
 ///
@@ -768,13 +883,15 @@ pub use fragment_index_cluster::{
     AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
     ClusterFragmentIndexArtifact, ClusterFragmentIndexFailure, ClusterFragmentIndexJob,
     ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, CONTENT_ANALYSIS_REPAIR_HEADROOM,
-    CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES, CONTENT_ANALYSIS_REPAIR_REVISION,
-    DEFAULT_ANALYSIS_BACKOFF_BASE_SECS, DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
-    DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS, DEFAULT_SUBTITLE_WINDOW_SECS,
-    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
-    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
-    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, SubtitleBackfillCandidate,
+    SubtitleBackfillDiagnostics, SubtitleSourcePublication, SubtitleSourceStamp,
+    CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
+    CONTENT_ANALYSIS_REPAIR_REVISION, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
+    DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
+    DEFAULT_SUBTITLE_WINDOW_SECS, MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS,
+    MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS,
+    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
+    SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -817,6 +934,19 @@ pub struct ArtworkInventoryItem {
 /// overwritten by facts parsed from an older file revision.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MissingVideoCodecTag {
+    pub id: i64,
+    pub path: String,
+    pub size: i64,
+    pub mtime: i64,
+    pub probe_json: String,
+}
+
+/// One exact stored-probe snapshot eligible for the field-order backfill.
+///
+/// The source identity fields fence the update against a concurrent rescan in
+/// exactly the same way as [`MissingVideoCodecTag`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MissingFieldOrder {
     pub id: i64,
     pub path: String,
     pub size: i64,
@@ -928,7 +1058,8 @@ pub struct PrometheusStoreSnapshot {
     pub analysis: AnalysisStoreMetrics,
 }
 
-pub const ANALYSIS_METRIC_COMPONENTS: [&str; 2] = ["fragment_index", "skip_markers"];
+pub const ANALYSIS_METRIC_COMPONENTS: [&str; 3] =
+    ["fragment_index", "skip_markers", "subtitle_source"];
 pub const ANALYSIS_METRIC_STATES: [&str; 8] = [
     "queued",
     "claimed",
@@ -940,7 +1071,7 @@ pub const ANALYSIS_METRIC_STATES: [&str; 8] = [
     "stale",
 ];
 pub const ANALYSIS_METRIC_PRIORITIES: [&str; 3] = ["normal", "forced", "foreground"];
-pub const ANALYSIS_METRIC_TRIGGERS: [&str; 3] = ["admin", "background", "foreground"];
+pub const ANALYSIS_METRIC_TRIGGERS: [&str; 4] = ["admin", "background", "foreground", "playback"];
 pub const ANALYSIS_MARKER_KINDS: [&str; 4] = ["intro", "recap", "credits", "preview"];
 pub const ANALYSIS_MARKER_PROVENANCE: [&str; 4] = ["estimated", "detected", "authored", "manual"];
 pub const ANALYSIS_MARKER_CONFIDENCE: [&str; 3] = ["low", "medium", "high"];
@@ -1465,6 +1596,15 @@ pub(crate) fn persistable_credential(value: &SealedSecret) -> Result<String, Sto
 /// Well-known settings keys. Keys are dotted, lowercase, and owned by the
 /// module that writes them.
 pub mod keys {
+    /// Existing absolute directory for portable cluster backup artefacts.
+    /// Empty or absent means the schedule performs no work.
+    pub const BACKUP_DESTINATION: &str = "backup.destination";
+    /// One daily UTC wall-clock minute in `HH:MM` form.
+    pub const BACKUP_SCHEDULE_UTC: &str = "backup.schedule_utc";
+    /// Number of complete artefact directories retained at the destination.
+    pub const BACKUP_KEEP: &str = "backup.keep";
+    /// Lineage marker written only by offline restore.
+    pub const CLUSTER_RESTORE_GENERATION: &str = "cluster.restore_generation";
     /// Runtime Library-channel playback switch. The feature is always compiled;
     /// absence is off so an upgrade never starts scheduled playback implicitly.
     pub const LIBRARY_CHANNELS_ENABLED: &str = "library_channels.enabled";
@@ -1479,6 +1619,9 @@ pub mod keys {
     /// legacy output height remains separate for mixed-version sessions.
     pub const LIVE_TV_MAX_OUTPUT_HEIGHT: &str = "live_tv.max_output_height";
     pub const LIVE_TV_OUTPUT_HEIGHT: &str = "live_tv.output_height";
+    /// Operator-selected deinterlace cadence. This is an advisory Developer
+    /// choice, not part of the tuner ownership/generation tuple.
+    pub const LIVE_TV_DEINTERLACE_OUTPUT: &str = "live_tv.deinterlace_output";
     pub const LIVE_TV_CONFIG_GENERATION: &str = "live_tv.config_generation";
     /// Persisted owner-handoff safety barrier. These are internal state, not
     /// operator-editable settings: a replacement owner admits only after the
@@ -1523,6 +1666,18 @@ pub mod keys {
     /// Human-visible name of the logical server. Configuration supplies only
     /// the first value; thereafter this replicated key is authoritative.
     pub const SERVER_NAME: &str = "server.name";
+    /// "Sign-ins expire": whether a login token that goes unused for
+    /// `AUTH_TOKEN_IDLE_DAYS` stops authenticating. Absent is ON — the
+    /// product default — and `0` restores non-expiring tokens.
+    pub const AUTH_TOKEN_EXPIRY_ENABLED: &str = "auth.token_expiry_enabled";
+    /// The sliding idle window in whole days (1..=3650). Absent is 90.
+    pub const AUTH_TOKEN_IDLE_DAYS: &str = "auth.token_idle_days";
+    /// Unix seconds at which expiry last took effect: seeded once at startup
+    /// and rewritten whenever an administrator switches expiry back on. No
+    /// token's idle clock starts before it, so turning expiry on — including
+    /// the default taking effect on upgrade — never signs anyone out at once.
+    /// Absent means the clock has not started and nothing can expire.
+    pub const AUTH_TOKEN_EXPIRY_SINCE: &str = "auth.token_expiry_since";
     /// TMDB API key (set by the admin; empty/absent disables the agent).
     pub const TMDB_API_KEY: &str = "tmdb.api_key";
     /// OMDb API key — powers review-site ratings (Rotten Tomatoes / Metacritic /
@@ -1592,6 +1747,9 @@ pub mod keys {
     /// Opt-in web Auto controller. Missing and every value other than `"1"`
     /// are off, leaving the server's initial Auto choice in place.
     pub const PLAYBACK_AUTO_ABR: &str = "playback.auto_abr";
+    /// Opt-in Android TV refresh-rate matching. Missing and every value other
+    /// than `"1"` are off; readiness observations are advisory only.
+    pub const PLAYBACK_DISPLAY_MODE_MATCH: &str = "playback.display_mode_match";
     /// Last successful bounded telemetry-prune pass, in unix seconds.
     pub const JOB_LAST_TELEMETRY_PRUNE: &str = "jobs.last_telemetry_prune";
     pub const TELEMETRY_RETAIN_DEFAULT_DAYS: i64 = 30;
@@ -1668,10 +1826,8 @@ pub mod keys {
     /// first response; this value cannot change their presentation contract.
     pub const HLS_TYPELESS_SLIDING: &str = "playback.hls_typeless_sliding";
     /// How often, in minutes, to build fragment indexes for files that have
-    /// none. `0` is off, and off is the default until M0-P1's media1 numbers
-    /// say what a full read of a library costs over NFS — the whole point of
-    /// that probe is to size this job, and turning it on before the numbers
-    /// return would be guessing with the operator's disks.
+    /// none. Absent is every 15 minutes — the default the settings API
+    /// reports — and `0` is an explicit pause.
     ///
     /// Nothing reads an index yet; a file without one keeps today's
     /// presentation, so this job is invisible to every client either way.
@@ -1701,6 +1857,17 @@ pub mod keys {
     /// observed per engine before this can flip. The Developer tab reports
     /// what has been observed, advisory only; it never blocks the switch.
     pub const SUBTITLE_NOT_READY_503: &str = "playback.subtitle_not_ready_503";
+    /// Let the two PGS consumers — the overlay's stage and the burn sidecar —
+    /// read a track the subtitle-source store kept, instead of demuxing the
+    /// whole source. On when absent. Off makes both ignore the store entirely,
+    /// so a wrong artifact a producer published is taken out of service with
+    /// one switch and no redeploy.
+    pub const SUBTITLE_STORED_SOURCES: &str = "subtitles.stored_sources";
+    pub const SUBTITLE_CLUSTER_SOURCES: &str = "subtitles.cluster_sources";
+    pub const SUBTITLE_BACKFILL: &str = "subtitles.backfill";
+    /// Make a chapter thumbnail on request and keep it in the runtime
+    /// cache. On by default; off answers the route 404 and extracts nothing.
+    pub const CHAPTER_THUMBNAILS: &str = "playback.chapter_thumbnails";
     /// VOD availability kill switch. Absent/on accepts immutable VOD session
     /// creation; `0` refuses it. It never selects the removed live HLS path.
     pub const VOD_PRESENTATION: &str = "playback.vod_presentation";
@@ -1853,6 +2020,13 @@ pub mod keys {
     pub const JOB_VIDEO_CODEC_TAG_BACKFILL_DONE: &str = "jobs.video_codec_tag_backfilled";
     /// Node-local strictly-after cursor for the bounded sample-entry walk.
     pub const JOB_VIDEO_CODEC_TAG_BACKFILL_CURSOR: &str = "jobs.video_codec_tag_backfill_cursor";
+    /// Set after the bounded stored-probe walk has assigned every pre-column
+    /// file either its reporter token or the explicit `unknown` value.
+    pub const JOB_FIELD_ORDER_BACKFILL_DONE: &str = "jobs.field_order_backfilled";
+    /// Node-local strictly-after cursor for the field-order backfill.
+    pub const JOB_FIELD_ORDER_BACKFILL_CURSOR: &str = "jobs.field_order_backfill_cursor";
+    pub const JOB_LUMINANCE_BACKFILL_DONE: &str = "jobs.luminance_backfilled";
+    pub const JOB_LUMINANCE_BACKFILL_CURSOR: &str = "jobs.luminance_backfill_cursor";
     /// Per-library permanent Profile 7 conversion policy, encoded as a JSON
     /// object from decimal library id to `off`, `manual`, or `auto`. Missing
     /// libraries are always off: an upgrade must never rewrite media by
@@ -2029,8 +2203,21 @@ pub trait UserStore: Send + Sync + 'static {
         device: Option<&str>,
         expected_password_hash: &str,
     ) -> Result<bool, StoreError>;
-    /// Resolve a token hash to its user (touching `last_seen_at`).
-    async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError>;
+    /// Resolve a token hash under the server's sign-in expiry policy, read in
+    /// the same snapshot as the token row. A live token's coalesced
+    /// `last_seen_at` is refreshed exactly as before; an expired one is
+    /// reported and left untouched.
+    async fn authenticate_token(&self, token_hash: &str)
+        -> Result<TokenAuthentication, StoreError>;
+    /// Resolve a token hash to its user (touching `last_seen_at`). An expired
+    /// token resolves to nobody, so every caller that predates expiry — the
+    /// Plex facade, recovery reads — honours the policy without knowing it.
+    async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError> {
+        Ok(match self.authenticate_token(token_hash).await? {
+            TokenAuthentication::Authenticated(user) => Some(user),
+            TokenAuthentication::Expired { .. } | TokenAuthentication::Unknown => None,
+        })
+    }
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError>;
     /// Delete a login token only while the exact clustered cache-revocation
     /// exclusion claim is still live. Standalone SQLite passes no claim.
@@ -2039,6 +2226,18 @@ pub trait UserStore: Send + Sync + 'static {
         token_hash: &str,
         claim: Option<&CacheAdminMutationClaim>,
     ) -> Result<bool, StoreError>;
+    /// List a bounded, oldest-first inventory without exposing full token
+    /// digests to the HTTP layer.
+    async fn list_tokens_for_user(&self, user_id: i64) -> Result<Vec<TokenSummary>, StoreError>;
+    /// Delete exactly one token selected by an eight-hex prefix. Ambiguous
+    /// prefixes are never accepted, and clustered writes retain the exact
+    /// cache-admin mutation claim.
+    async fn delete_token_by_prefix_for_user(
+        &self,
+        user_id: i64,
+        prefix: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<DeleteTokenByPrefixOutcome, StoreError>;
 }
 
 #[async_trait]
@@ -2755,6 +2954,18 @@ pub trait MediaStore: Send + Sync + 'static {
         probe: &ProbeResult,
     ) -> Result<i64, StoreError>;
     async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError>;
+    /// False means duplicate, full, or a source revision replaced during download.
+    async fn add_downloaded_subtitle(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+    ) -> Result<bool, StoreError>;
+    /// Bounded, ordered catalog walk for optional subtitle acquisition.
+    async fn subtitle_candidate_file_ids(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<i64>, StoreError>;
     /// A census of what the libraries actually hold, in transcoder terms.
     ///
     /// Aggregated in SQL rather than by walking files: a library of a few
@@ -2817,6 +3028,36 @@ pub trait MediaStore: Send + Sync + 'static {
         &self,
         candidate: &MissingVideoCodecTag,
         video_codec_tag: &str,
+    ) -> Result<bool, StoreError>;
+    /// Rows whose retained probe document can populate the additive field
+    /// order column, strictly after `after_id` and bounded.
+    async fn files_missing_field_order(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingFieldOrder>, StoreError>;
+    /// Write the recovered token only while every source and probe identity
+    /// field still matches the snapshot returned above.
+    async fn set_file_field_order(
+        &self,
+        candidate: &MissingFieldOrder,
+        field_order: &str,
+    ) -> Result<bool, StoreError>;
+    /// HDR rows whose additive luminance columns have not been classified.
+    /// The same identity projection as the codec-tag backfill keeps the
+    /// subsequent write fenced to this exact stored probe snapshot.
+    async fn files_missing_luminance(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError>;
+    async fn set_file_luminance(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        max_cll: Option<i64>,
+        max_fall: Option<i64>,
+        mastering_max_luminance: Option<i64>,
+        source: &str,
     ) -> Result<bool, StoreError>;
     /// Write one file's Dolby Vision columns, and the display label derived
     /// from them.
@@ -2898,6 +3139,49 @@ pub trait MediaStore: Send + Sync + 'static {
 pub(crate) const TOP_LEVEL_ITEM_PREDICATE: &str =
     "(kind IN ('movie','show','book','audiobook') OR \
      (kind IN ('folder','video','photo') AND parent_id IS NULL))";
+
+/// The `ORDER BY` for a library grid page, for every backend and every sort.
+///
+/// **Every clause ends in `id`, and that is the point.** `sort_title` is not
+/// unique — "Harbor Lights" the 1947 film and "Harbor Lights" the 1971 film
+/// reduce to the same key — and neither are `year`, a resolution or a capture
+/// date. Without a unique final key SQLite is free to return equal rows in
+/// any order it likes, and it does not have to pick the same one twice. A
+/// client paging by `offset` then asks for rows 0..199 and rows 200..399 of
+/// two different orderings, so an item on the seam is shown twice and its
+/// neighbour is never shown at all. That is invisible on a small library and
+/// certain on a large one, and it is why a client cannot be asked to merge
+/// several of these pages into one grid until the order is total.
+///
+/// `Added` already ended in `id DESC` and keeps it: giving it `id ASC` for
+/// symmetry would reorder equal-`added_at` rows that viewers see today, for
+/// nothing. The four that gain `id ASC` had no tie-break at all.
+///
+/// One function rather than one per backend because the SQLite and Hiqlite
+/// media stores each spelled this out, three copies in total, and a merge
+/// order that differs between backends is a bug no single-backend test can
+/// see. Native clients merge library cursors against this exact order, so it
+/// is also pinned from the outside by `tests/contracts/library-sort-cases.json`.
+pub(crate) fn item_sort_order_by(sort: ItemSort) -> &'static str {
+    match sort {
+        ItemSort::Title => "sort_title ASC, id ASC",
+        ItemSort::Added => "added_at DESC, id DESC",
+        ItemSort::Year => "year IS NULL, year DESC, sort_title ASC, id ASC",
+        // Best (max) file height per item, highest first; no-height items
+        // last. Only the kinds that carry a `resolution` on the DTO
+        // (`ItemKind::carries_resolution`) are ranked by height: a root photo
+        // has a real file height but no `resolution`, and ranking it by one
+        // would hand a merging client a cursor that is not sorted under the
+        // key it was given.
+        ItemSort::Resolution => {
+            "CASE WHEN kind IN ('movie','video') \
+             THEN COALESCE((SELECT MAX(f.height) FROM files f WHERE f.item_id = items.id), -1) \
+             ELSE -1 END DESC, \
+             sort_title ASC, id ASC"
+        }
+        ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC, id ASC",
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootFingerprintStatus {
@@ -3908,6 +4192,23 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
 #[async_trait]
 pub trait PlaybackTelemetryStore: Send + Sync + 'static {
     async fn record_playback_event(&self, event: &PlaybackEvent) -> Result<i64, StoreError>;
+    /// Persist retained events AND fold network-prior observations using one
+    /// node-local connection lease and transaction.
+    ///
+    /// Both subjects live in the same node-local sidecar behind the same
+    /// `Mutex<Connection>`, so a writer that batched its events and then
+    /// called [`NetworkPriorStore::observe_network_prior`] once per event
+    /// would take one lease for the batch and another for every event in it.
+    /// The two opt-ins stay independent: retention off is an empty `events`,
+    /// the prior opt-in off is an empty `observations`, and either alone
+    /// still costs one lease. Returns the number of retained rows written,
+    /// which is `events.len()` — folded observations update at most one prior
+    /// row each and are not rows this count describes.
+    async fn record_playback_batch(
+        &self,
+        events: &[PlaybackEvent],
+        observations: &[NetworkPriorObservation],
+    ) -> Result<u64, StoreError>;
     async fn prune_playback_events(&self, before_ms: i64, limit: i64) -> Result<u64, StoreError>;
     async fn playback_events(
         &self,
@@ -3968,6 +4269,13 @@ pub trait CoordinationStore: Send + Sync + 'static {
 /// transaction as the mutation.
 #[async_trait]
 pub trait FencedPublicationStore: Send + Sync + 'static {
+    async fn add_downloaded_subtitle_fenced(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
     /// Apply exactly the server-generated repair plan while the library scan
     /// lease and the preview preimage are both current.
     async fn apply_identity_repair_fenced(
@@ -4700,6 +5008,14 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 /// where a repositioned producer landed. One node's answer governing another
 /// node's bytes would put a viewer in the wrong part of the film with nothing
 /// to report it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FragmentIndexValidationBackfill {
+    pub validated: u64,
+    pub refused: u64,
+    pub gone: u64,
+    pub remaining: u64,
+}
+
 #[async_trait]
 pub trait FragmentIndexStore: Send + Sync + 'static {
     /// Store or replace one file's index.
@@ -4720,8 +5036,28 @@ pub trait FragmentIndexStore: Send + Sync + 'static {
         identity: &crate::segplan::SourceIdentity,
     ) -> Result<Option<crate::segplan::FragmentIndex>, StoreError>;
 
+    /// Validate one bounded page of legacy rows in this node's local store.
+    /// The pass marks structural refusals but never deletes an index.
+    async fn validate_fragment_index_page(
+        &self,
+        limit: u32,
+    ) -> Result<FragmentIndexValidationBackfill, StoreError>;
+
     /// Drop one file's index. `true` when a row was there.
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError>;
+
+    /// Whether this node's own index table holds any index — for any video
+    /// pipeline — for the file's source at `source_size`/`source_mtime`.
+    ///
+    /// Node-local, like every row here. The subtitle-source store reads it to
+    /// say why a lookup found no directory: an index built on this node means
+    /// the pass that keeps PGS tracks ran here.
+    async fn holds_fragment_index_for_source(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+    ) -> Result<bool, StoreError>;
 
     /// Record that this identity could not be indexed, and answer when it may
     /// be attempted again.
@@ -4896,6 +5232,7 @@ pub trait Store:
     + SharedCacheStore
     + PretranscodeJobStore
     + OfflinePackageStore
+    + FileGrantStore
     + PlaybackTelemetryStore
     + NetworkPriorStore
     + FragmentIndexStore
@@ -4931,6 +5268,7 @@ impl<T> Store for T where
         + SharedCacheStore
         + PretranscodeJobStore
         + OfflinePackageStore
+        + FileGrantStore
         + PlaybackTelemetryStore
         + NetworkPriorStore
         + FragmentIndexStore
@@ -4944,6 +5282,69 @@ impl<T> Store for T where
         + Sync
         + 'static
 {
+}
+
+/// Reopen the immutable fragment-index generation selected by the daemon
+/// after every advertised holder failed to supply a valid blob.
+///
+/// This named boundary is the exact transition used by the VOD no-holder
+/// arm. Keeping it in `plurx-core` lets the backend-neutral contract execute
+/// that production transition against both SQLite and the three-voter store,
+/// instead of testing only the lower-level primitive and assuming the daemon
+/// calls it the same way.
+pub async fn requeue_cluster_fragment_index_after_no_holder(
+    store: &dyn Store,
+    replacement: &NewClusterFragmentIndexJob,
+) -> Result<bool, StoreError> {
+    store.requeue_cluster_fragment_index(replacement).await
+}
+
+/// Per-request replicated Store operation counts populated by `TimedClient`.
+///
+/// The HTTP daemon installs one of these around a matched request. Background
+/// work and SQLite requests have no scope, so recording remains a cheap no-op.
+/// Keeping the scope here, at the Store boundary, prevents route handlers from
+/// having to guess how many physical local, authority, or write operations a
+/// high-level Store method performed.
+#[derive(Clone, Default)]
+pub struct HttpStoreOperationCounts {
+    counts: std::sync::Arc<[std::sync::atomic::AtomicU64; 3]>,
+}
+
+impl HttpStoreOperationCounts {
+    #[must_use]
+    pub fn snapshot(&self) -> [u64; 3] {
+        use std::sync::atomic::Ordering;
+
+        std::array::from_fn(|index| self.counts[index].load(Ordering::Relaxed))
+    }
+
+    fn record(&self, class_index: usize) {
+        use std::sync::atomic::Ordering;
+
+        let _ = self.counts[class_index].fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| (current != u64::MAX).then(|| current.saturating_add(1)),
+        );
+    }
+}
+
+tokio::task_local! {
+    static HTTP_STORE_OPERATION_COUNTS: HttpStoreOperationCounts;
+}
+
+/// Scope one HTTP request so replicated Store operations can be attributed
+/// after its response is ready without putting route labels in `plurx-core`.
+pub async fn scope_http_store_operations<T>(
+    counts: HttpStoreOperationCounts,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    HTTP_STORE_OPERATION_COUNTS.scope(counts, future).await
+}
+
+pub(super) fn record_http_store_operation(class_index: usize) {
+    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index));
 }
 
 /// The only application-facing boundary for catalogue consistency choices.
@@ -5178,6 +5579,22 @@ impl CatalogueReader {
         self.authority.recently_added(library_id, limit).await
     }
 
+    /// Search is explicitly `NodeLocal`: Hiqlite's FTS tables are derived
+    /// state and its Store implementation already uses `query_map`. Keeping
+    /// the call on this named reader makes the classification visible to HTTP
+    /// handlers without incorrectly applying the bounded-replica permit.
+    pub async fn search_items(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<RecentItem>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(bounded) = &self.bounded {
+            return bounded.store.search_items(query, limit).await;
+        }
+        self.authority.search_items(query, limit).await
+    }
+
     pub async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {
         #[cfg(feature = "hiqlite-store")]
         if let Some(result) = self
@@ -5305,5 +5722,124 @@ mod producer_recovery_schema_tests {
                 .contains(&format!("<= {MAX_DECODE_RESTRICTION_BYTES}")),
             "the ledger's CHECK must name MAX_DECODE_RESTRICTION_BYTES exactly"
         );
+    }
+}
+
+#[cfg(test)]
+mod item_sort_order_tests {
+    use super::item_sort_order_by;
+    use crate::domain::ItemSort;
+
+    /// Every library sort ends in a unique key.
+    ///
+    /// This is a text assertion on the clause, and it is deliberately not the
+    /// fixture replay in `tests/store_contract.rs`. With movies alone that
+    /// replay did not detect the tie-break's removal: SQLite returned the tied
+    /// rows in rowid order, which is the order the fixture expects. It now
+    /// does — the fixture's photo/movie pair ties on every visible key, and
+    /// the grid query reads through `idx_items_library_kind`, which yields
+    /// them in kind order — but that is still an observation of today's query
+    /// plan. What SQLite does with tied rows is not promised by anything; it
+    /// can change with the plan, the schema, an added index or the backend,
+    /// and when it changes the symptom is a client paging by `offset` that
+    /// reads two adjacent pages of two different orderings: an item on the
+    /// seam shown twice and its neighbour never shown at all. A property
+    /// nothing guarantees cannot be pinned by observing that it currently
+    /// holds; it has to be pinned by requiring the clause that makes it true.
+    ///
+    /// `Added` ends in `id DESC` and the other four in `id ASC`. `Added` is
+    /// not made symmetric on purpose: it already had a tie-break, and flipping
+    /// it would reorder equal-`added_at` rows that viewers see today for
+    /// nothing.
+    #[test]
+    fn every_sort_ends_in_a_unique_key() {
+        for sort in [
+            ItemSort::Title,
+            ItemSort::Added,
+            ItemSort::Year,
+            ItemSort::Resolution,
+            ItemSort::Recorded,
+        ] {
+            let clause = item_sort_order_by(sort);
+            let last = clause
+                .rsplit(',')
+                .next()
+                .expect("a non-empty ORDER BY")
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                last.first().copied(),
+                Some("id"),
+                "{sort:?} ends in {clause:?}, which has no unique final key"
+            );
+            assert!(
+                matches!(last.get(1).copied(), Some("ASC") | Some("DESC")),
+                "{sort:?} ends in {clause:?}, whose final key has no explicit direction"
+            );
+        }
+        assert!(item_sort_order_by(ItemSort::Added).ends_with("id DESC"));
+    }
+
+    /// The `resolution` sort ranks by height exactly the kinds whose DTO
+    /// carries a `resolution`, and every other kind at -1.
+    ///
+    /// The clause and `ItemKind::carries_resolution` are two spellings of one
+    /// rule — SQL cannot call the Rust predicate — so this reads the kind list
+    /// out of the clause and compares it with the predicate for every kind. A
+    /// kind added to one and not the other is a row the server ranks by a key
+    /// the client never receives.
+    #[test]
+    fn resolution_ranks_exactly_the_kinds_that_carry_one() {
+        use crate::domain::ItemKind;
+
+        let clause = item_sort_order_by(ItemSort::Resolution);
+        let list = clause
+            .strip_prefix("CASE WHEN kind IN (")
+            .and_then(|rest| rest.split_once(')'))
+            .map(|(list, _)| list)
+            .unwrap_or_else(|| panic!("{clause:?} does not rank by kind first"));
+        let ranked: std::collections::BTreeSet<&str> = list
+            .split(',')
+            .map(|kind| kind.trim().trim_matches('\''))
+            .collect();
+        for kind in [
+            ItemKind::Movie,
+            ItemKind::Show,
+            ItemKind::Season,
+            ItemKind::Episode,
+            ItemKind::Book,
+            ItemKind::Audiobook,
+            ItemKind::Folder,
+            ItemKind::Video,
+            ItemKind::Photo,
+        ] {
+            assert_eq!(
+                ranked.contains(kind.as_str()),
+                kind.carries_resolution(),
+                "{kind:?}: the resolution sort and the DTO disagree about whether it has a resolution"
+            );
+        }
+        assert!(clause.contains("ELSE -1 END DESC"), "{clause:?}");
+    }
+
+    /// The clause is one function, and every backend's page and count use it.
+    ///
+    /// Three copies of this `match` is how the SQLite and Hiqlite stores would
+    /// drift apart, and a merge order that differs between backends is a
+    /// defect no single-backend test can see — `for_each_backend` runs the
+    /// Hiqlite voters only under `hiqlite-contract-tests`, so on an ordinary
+    /// run the fixture replay never compares them at all.
+    #[test]
+    fn the_stores_do_not_carry_their_own_copies_of_the_order() {
+        for source in [
+            include_str!("sqlite/media.rs"),
+            include_str!("hiqlite_media.rs"),
+        ] {
+            assert!(
+                !source.contains("ItemSort::Title =>"),
+                "a media store spells the library ORDER BY itself again"
+            );
+            assert!(source.contains("item_sort_order_by(sort)"));
+        }
     }
 }

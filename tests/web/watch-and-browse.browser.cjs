@@ -12,6 +12,9 @@ const episodes=[1,2,3,4].map(id=>({id:String(id),title:`Episode ${id}: Across th
 const show={id:'10',title:'The distant shore',kind:'show',library_id:'1'},season={id:'11',title:'Season 1',kind:'season',library_id:'1'};
 const movie={id:'20',title:'Beyond the horizon',kind:'movie',library_id:'1',year:2026,runtime_ms:120000,overview:'Two travellers set out across an unfamiliar coastline, discovering stories in the places they thought they knew.',watch:{position_ms:0,watched:false}};
 const file=id=>({id:String(100+Number(id)),filename:'Coast.mp4',available:true,duration_ms:120000,size:media.length,video_codec:'h264',width:640,height:360,chapters:[{index:0,title:'Departure',start_ms:0},{index:1,title:'Open water',start_ms:40000},{index:2,title:'Arrival',start_ms:80000}]});
+// A disc remux's worth of subtitle tracks: the menu that opens from CC is
+// taller than a compact picture, which is the case the popover checks need.
+const manySubtitles=Array.from({length:30},(_,i)=>({index:i,language:['eng','spa','fre','ger','ita','por','jpn','kor','chi','nld'][i%10],title:i%3===2?'Forced':'Full',forced:i%3===2,text:i%2===0,codec:i%2===0?'subrip':'hdmv_pgs_subtitle'}));
 const data=id=>id==='10'?{item:show,files:[],children:[season],ancestors:[]}:id==='11'?{item:season,files:[],children:episodes,ancestors:[show]}:{item:id==='20'?movie:episodes.find(e=>e.id===id),files:[file(id)],children:[],ancestors:id==='20'?[]:[show,season]};
 (async()=>{
  const browser=await chromium.launch({headless:true});
@@ -35,7 +38,7 @@ const data=id=>id==='10'?{item:show,files:[],children:[season],ancestors:[]}:id=
   else if(k==='/libraries')answer=[{id:'1',name:'Cinema',kind:'movie'}];
   else if(/^\/items\/\d+$/.test(k)){const id=k.split('/')[2];if(delayItem?.id===id){delayItem.entered?.();await delayItem.wait;}answer=data(id);}
   else if(k.endsWith('/progress')){const body=route.request().postDataJSON(),id=k.split('/')[2];posts.push({id,...body});onProgress?.();(id==='20'?movie:episodes.find(e=>e.id===id)).watch={position_ms:body.position_ms,watched:false};if(blockedSave)await blockedSave.wait;}
-  else if(k.includes('/decision')){const id=k.split('/')[2];decisions.push(id);if(id===failedFile)return route.fulfill({status:400,contentType:'application/json',body:JSON.stringify({message:'Fixture refused'})});answer={method:'direct_play',play_url:'/fixture.mp4',source:{video_codec:'h264',width:640,height:360,duration_ms:120000},audio:[],subtitles:[],ladder:[],reasons:[],delivered_dynamic_range:'sdr'};}
+  else if(k.includes('/decision')){const id=k.split('/')[2];decisions.push(id);if(id===failedFile)return route.fulfill({status:400,contentType:'application/json',body:JSON.stringify({message:'Fixture refused'})});answer={method:'direct_play',play_url:'/fixture.mp4',source:{video_codec:'h264',width:640,height:360,duration_ms:120000},audio:[],subtitles:id==='120'?manySubtitles:[],ladder:[],reasons:[],delivered_dynamic_range:'sdr'};}
   else if(k==='/activity')answer={streams:0,scanning:0};
   else if(k==='/dvr/overview')answer={counts:{},active:[],availability:'complete'};
   else if(k==='/dvr/reminders')answer={rows:[]};
@@ -109,6 +112,15 @@ const data=id=>id==='10'?{item:show,files:[],children:[season],ancestors:[]}:id=
   await page.evaluate(()=>reportProgress(PLAYER.fileId,false,PLAYER));
   assert.ok(posts.some(p=>p.id==='2'&&p.position_ms>=14000));
   await page.evaluate(()=>playNextEpisode());await page.waitForFunction(()=>WATCH.accepted==='3');
+  // The final save at Close is a zero-position beat until this episode has
+  // played, and a zero beat needs a witness: the current attachment must have
+  // reached a timeline (readyState >= 1) or reportProgress suppresses it, so
+  // the resume point of an unplayable start is never overwritten with 0.
+  // A failed preparation below swaps the element under this player, so the
+  // witness has to be recorded on the player now, by a beat taken while the
+  // element is ready — the same beat the periodic heartbeat would take.
+  await page.waitForFunction(()=>document.getElementById('video').readyState>=1);
+  await page.evaluate(()=>reportProgress(PLAYER.fileId,false,PLAYER));
   failedFile='104';await page.evaluate(()=>watchPlayEpisode('4'));
   assert.equal(await page.evaluate(()=>WATCH.accepted),'3');assert.equal(new URL(page.url()).hash,'#/item/3');
   failedFile=null;
@@ -133,6 +145,48 @@ const data=id=>id==='10'?{item:show,files:[],children:[season],ancestors:[]}:id=
   await page.waitForFunction(()=>document.getElementById('video').currentTime>=39);
   await page.locator('#toast.on').waitFor({state:'hidden'});
   if(output)await page.screenshot({path:path.join(output,'movie-1440.png'),fullPage:!process.env.WATCH_COARSE});
+  // Popovers escape the picture and the picture goes under the header
+  // (2026-09-24). A compact picture at 1440×1000 is ~500 px tall; a
+  // thirty-track subtitle menu and the Diagnostics readout are both taller.
+  // Both used to be clipped to the picture, and the picture scrolled over the
+  // sticky header because the host outranked it.
+  const settle=()=>page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+  await page.evaluate(()=>window.scrollTo(0,0));await settle();
+  await page.evaluate(()=>{playerActivity();toggleMenu('subs',1);});await settle();
+  const hit=(x,y,sel)=>page.evaluate(([x,y,sel])=>!!document.elementFromPoint(x,y)?.closest(sel),[x,y,sel]);
+  const menu=await page.evaluate(()=>{const m=document.getElementById('pmenu');return {rect:m.getBoundingClientRect().toJSON(),items:m.querySelectorAll('button').length,scrolls:m.scrollHeight>m.clientHeight+1,player:document.getElementById('player').getBoundingClientRect().toJSON(),header:document.querySelector('header.top').getBoundingClientRect().toJSON(),vh:innerHeight};});
+  assert.equal(menu.items,31,'Off + thirty tracks');
+  assert.ok(menu.rect.top<menu.player.top,`the menu reaches above the picture (${JSON.stringify(menu)})`);
+  assert.ok(menu.rect.top>=menu.header.bottom+11,`and stops under the header (${JSON.stringify(menu)})`);
+  assert.ok(menu.scrolls,'more entries than room: the menu scrolls');
+  assert.equal(await hit(menu.rect.left+10,menu.rect.top+6,'#pmenu'),true,'the top of the menu, outside the picture, is reachable');
+  assert.equal(await hit(menu.rect.left+10,menu.player.top+24,'#pmenu'),true,'the menu paints over the player bar it reaches into');
+  if(output)await page.screenshot({path:path.join(output,'movie-1440-menu.png')});
+  // The entry that took focus is in the part that shows, and a tap on the
+  // page beside the picture closes a menu hanging over it.
+  const focused=await page.evaluate(()=>{const m=document.getElementById('pmenu'),f=document.activeElement,mr=m.getBoundingClientRect(),fr=f.getBoundingClientRect();return {inMenu:m.contains(f),visible:fr.top>=mr.top&&fr.bottom<=mr.bottom};});
+  assert.deepEqual(focused,{inMenu:true,visible:true});
+  await page.locator('#watch-title h2').click();await settle();
+  assert.equal(await page.locator('#pmenu').evaluate(m=>m.classList.contains('on')),false,'a tap on the page closes the menu');
+  await page.evaluate(()=>{playerActivity();toggleMenu('subs',1);});await settle();
+  await page.keyboard.press('Escape');
+  await page.evaluate(()=>{toggleStats();setStatsMode('debug');});await settle();
+  const info=await page.evaluate(()=>({rect:document.getElementById('statsov').getBoundingClientRect().toJSON(),body:document.getElementById('statsbody').scrollHeight,player:document.getElementById('player').getBoundingClientRect().toJSON(),vh:innerHeight}));
+  assert.ok(info.rect.bottom>info.player.bottom,`the readout hangs below a compact picture (${JSON.stringify(info)})`);
+  assert.ok(info.rect.bottom<=info.vh-8,`and stays inside the viewport (${JSON.stringify(info)})`);
+  assert.ok(info.rect.left>=0&&info.rect.right<=info.player.right,`and inside the picture's width (${JSON.stringify(info)})`);
+  assert.equal(await hit(info.rect.left+info.rect.width/2,info.rect.bottom-6,'#statsov'),true,'the bottom of the readout, outside the picture, is visible');
+  if(output)await page.screenshot({path:path.join(output,'movie-1440-popovers.png')});
+  // Scroll the picture up under the header: the header wins, the readout
+  // follows the picture and is re-bounded to the viewport.
+  await page.evaluate(()=>{document.getElementById('main').style.minHeight='2400px';window.scrollTo(0,260);});await settle();await settle();
+  const under=await page.evaluate(()=>({modal:document.getElementById('modal').getBoundingClientRect().toJSON(),header:document.querySelector('header.top').getBoundingClientRect().toJSON(),info:document.getElementById('statsov').getBoundingClientRect().toJSON(),vh:innerHeight}));
+  assert.ok(under.modal.top<under.header.bottom,`scrolled: the picture starts under the header (${JSON.stringify(under)})`);
+  assert.equal(await hit(under.modal.left+under.modal.width/2,under.header.bottom-6,'header.top'),true,'the header paints over the picture');
+  assert.equal(await hit(under.modal.left+under.modal.width/2,under.header.bottom-6,'#modal'),false,'not the picture over the header');
+  assert.ok(under.info.bottom<=under.vh-8,`the readout is still inside the viewport (${JSON.stringify(under)})`);
+  if(output)await page.screenshot({path:path.join(output,'movie-1440-scrolled.png')});
+  await page.evaluate(()=>{toggleStats();window.scrollTo(0,0);document.getElementById('main').style.minHeight='';});await settle();
   await page.evaluate(()=>closePlayer({routeLeave:true}));
   await page.evaluate(()=>{history.replaceState(null,"","#/library-channels");const p=WATCH_ITEM_PAGE;return play(p.playable.id,p.item.title,0,p.playable.duration_ms,playbackMetaFor(p,p.playable));});
   assert.equal(await page.evaluate(()=>WATCH.mode),'full');

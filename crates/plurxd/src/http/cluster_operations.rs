@@ -35,6 +35,7 @@ use super::peer_transport::{
     deadline_after, exact_auth_from_headers, PeerAuthMode, PeerTransport, PeerTransportError,
 };
 use super::{ReadinessEvaluation, ReadinessFailure};
+use crate::redact::redact_operator_text;
 use crate::serving_fence::PlannedOutageFenceToken;
 use crate::state::AppState;
 
@@ -105,6 +106,8 @@ pub(crate) struct WalStatus {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SnapshotStatus {
     pub available: bool,
+    #[serde(default)]
+    pub db_bytes: Option<u64>,
     pub build_ok_count: u64,
     pub build_error_count: u64,
     pub install_ok_count: u64,
@@ -1163,7 +1166,8 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
     let sample = view.sample;
     let valid_sample = view.valid.then_some(sample).flatten();
     let valid_watermark = view.watermark_valid.then_some(view.watermark).flatten();
-    let snapshot = SnapshotStatus::from(view.snapshot_metrics);
+    let mut snapshot = SnapshotStatus::from(view.snapshot_metrics);
+    snapshot.db_bytes = view.state_machine_bytes.map(|bytes| bytes.db);
     let active_sessions = local_owned_media_sessions(state).await;
     let drain = state.serving.restart_drain_status(active_sessions).await;
     let mut wal_snapshot = state.replication.wal_status_snapshot();
@@ -1294,6 +1298,7 @@ impl From<Option<DbSnapshotMetricsSnapshot>> for SnapshotStatus {
         match snapshot {
             Some(snapshot) => Self {
                 available: true,
+                db_bytes: None,
                 build_ok_count: snapshot.build_ok.count,
                 build_error_count: snapshot.build_error.count,
                 install_ok_count: snapshot.install_ok.count,
@@ -1313,6 +1318,7 @@ impl From<Option<DbSnapshotMetricsSnapshot>> for SnapshotStatus {
             },
             None => Self {
                 available: false,
+                db_bytes: None,
                 build_ok_count: 0,
                 build_error_count: 0,
                 install_ok_count: 0,
@@ -2490,30 +2496,6 @@ fn observation_error_class(state: ObservationState) -> &'static str {
         ObservationState::Unavailable => "unavailable",
         ObservationState::PeerLimit => "peer_limit",
     }
-}
-
-fn redact_operator_text(value: &str) -> String {
-    let lower = value.to_ascii_lowercase();
-    let sensitive = [
-        "authorization",
-        "bearer ",
-        "token",
-        "secret",
-        "password",
-        "signature",
-        "api_key",
-        "apikey",
-        "username",
-        "plxjoin:",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-        || value.contains('/')
-        || value.contains('\\');
-    if sensitive {
-        return "[redacted potentially sensitive operator text]".to_owned();
-    }
-    value.chars().take(512).collect()
 }
 
 fn private_no_store_headers() -> HeaderMap {

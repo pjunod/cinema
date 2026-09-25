@@ -1,6 +1,8 @@
 package tv.plurx.app.data
 
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
+import tv.plurx.app.player.PGS_OVERLAY_PROTOCOL
 
 /**
  * The pure half of [Caps] — what the device's probes *mean*, with no Android
@@ -30,6 +32,12 @@ data class DeviceCaps(
     val transports: List<String>,
     val display: DisplayCaps,
     val learned_limits: List<LearnedLimit> = emptyList(),
+    // ALWAYS, because kotlinx omits a property equal to its default and an
+    // omitted claim reads as "cannot draw an overlay" on the server. The list
+    // is constant — `AndroidPGSOverlay` is compiled in — so without this the
+    // claim would never reach the wire at all.
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS)
+    val subtitle_overlays: List<String> = listOf(PGS_OVERLAY_PROTOCOL),
 )
 
 @Serializable
@@ -207,11 +215,14 @@ internal fun shouldFallBackToLegacyDecision(statusCode: Int): Boolean =
  * while unknown codecs and non-positive limits are not capability evidence.
  */
 internal fun videoCodecCaps(limits: Iterable<VideoDecoderLimit>): VideoCodecCaps {
-    val supported = setOf("h264", "hevc", "av1", "vp9")
+    val supported = setOf("h264", "hevc", "av1", "vp9", "mpeg2video")
     val maxima = mutableMapOf<String, Int>()
     for (limit in limits) {
         val codec = limit.codec.lowercase()
         if (codec !in supported || limit.maxHeight <= 0) continue
+        // Android's software MPEG-2 component neither deinterlaces nor keeps
+        // up with a 1080i broadcast; only a hardware decoder earns the claim.
+        if (codec == "mpeg2video" && !limit.hardwareAccelerated) continue
         val effectiveHeight = if (limit.hardwareAccelerated) {
             limit.maxHeight
         } else {
@@ -219,8 +230,21 @@ internal fun videoCodecCaps(limits: Iterable<VideoDecoderLimit>): VideoCodecCaps
         }
         maxima[codec] = maxOf(maxima[codec] ?: 0, effectiveHeight)
     }
-    val ordered = listOf("h264", "hevc", "av1", "vp9").filter(maxima::containsKey)
+    val ordered = listOf("h264", "hevc", "av1", "vp9", "mpeg2video").filter(maxima::containsKey)
     return VideoCodecCaps(ordered, ordered.associateWith(maxima::getValue))
+}
+
+/** Sink facts the Live TV envelope carries beside the codec claims. */
+data class LiveSinkFacts(
+    /** Whether interlaced video may be copied to this device untouched. */
+    val deinterlaces: Boolean = false,
+    /** Channels the sink's AAC decode reaches, between stereo and 5.1. */
+    val aacChannels: Int = MIN_AAC_CHANNELS,
+) {
+    companion object {
+        const val MIN_AAC_CHANNELS = 2
+        const val MAX_AAC_CHANNELS = 6
+    }
 }
 
 /**

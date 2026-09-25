@@ -312,6 +312,24 @@ impl<'a> PublicationStore<'a> {
         .await
     }
 
+    pub async fn add_downloaded_subtitle(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+    ) -> Result<bool, StoreError> {
+        if self.fence.is_none() {
+            return self.store.add_downloaded_subtitle(file_id, track).await;
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .add_downloaded_subtitle_fenced(file_id, track, &lease, &replacement)
+                    .await
+            })
+        })
+        .await
+    }
+
     pub async fn put_setting_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError> {
         if self.fence.is_none() {
             return self.store.put_setting_if_absent(key, value).await;

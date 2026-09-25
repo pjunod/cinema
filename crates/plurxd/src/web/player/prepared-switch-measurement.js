@@ -148,7 +148,7 @@ function adoptPlaybackMediaElement(p,v){
   armHitchDetector(v);
   setupAirplay(v);
   clearInterval(p.progressTimer);
-  p.progressTimer=setInterval(()=>playbackProgressTick(v,p),500);
+  p.progressTimer=setInterval(()=>playbackSamplingTick(v,p),500);
   // The subtitle selection is element state — a `<track>`, a script cue list,
   // or an hls.js rendition index — and none of it followed the switch, so it
   // has to be re-applied to the element that now owns the picture.

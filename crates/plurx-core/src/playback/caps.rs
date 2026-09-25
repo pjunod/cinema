@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use super::DeviceProfile;
+use super::{AudioSink, DeviceProfile};
 
 /// A transfer function a client can *present* — decode and put on the
 /// attached display as the grade it is, rather than merely accept.
@@ -176,6 +176,10 @@ pub struct DeviceCaps {
     pub video: Vec<VideoCaps>,
     #[serde(default)]
     pub audio: Vec<String>,
+    /// Codecs and channel ceilings proved on the client's current output
+    /// route. Empty preserves the legacy codec-only behavior.
+    #[serde(default)]
+    pub audio_sinks: Vec<AudioSink>,
     #[serde(default)]
     pub containers: Vec<String>,
     #[serde(default)]
@@ -185,6 +189,34 @@ pub struct DeviceCaps {
     /// `Some([])` is an explicit claim that no progressive label is admitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progressive_hevc_sample_entries: Option<Vec<String>>,
+    /// Bitmap-subtitle overlay protocols this client can draw, by name —
+    /// `pgs-v1` today.
+    ///
+    /// A list rather than a boolean, for the same reason `transports` is one:
+    /// it names the protocol, so a later `pgs-v2` is a new entry rather than a
+    /// second flag, and it lines up with `SubTrackDto.overlay`, which already
+    /// carries that string rather than a yes.
+    ///
+    /// Empty is the conservative answer and the only one an older client can
+    /// give: absent *within a document* is never a claim, so a client that has
+    /// not been taught to draw bitmaps is told a PGS track needs burning in,
+    /// which is true for it. An absent *document* is a different answer
+    /// entirely — see `overlay_for_caller` in `http/stream.rs`, which reads
+    /// silence as the server's own answer rather than as a refusal, because
+    /// the legacy query path is a mixed-fleet one.
+    ///
+    /// Getting that backwards is cheap in one direction and expensive in the
+    /// other. A claim that is dropped — misspelled, or lost to a key strategy
+    /// — costs a needless burn: the viewer still sees subtitles, but an HDR
+    /// source has been re-encoded to SDR to draw pictures the device could
+    /// have drawn itself. A refusal read as a claim is what leaves a viewer
+    /// with no subtitles at all.
+    ///
+    /// Whether the *server* can serve the protocol is a separate question held
+    /// by the `subtitles.pgs_overlay` setting; a track is only offered as an
+    /// overlay when both are yes.
+    #[serde(default)]
+    pub subtitle_overlays: Vec<String>,
     /// `hls` when preserved Dolby Vision has to ride the copy-video HLS
     /// envelope rather than a progressive MP4. Apple's AVPlayer can report a
     /// healthy Profile 8 pipeline, advance the raw file's timeline, and still
@@ -226,6 +258,7 @@ pub struct LegacyCaps {
     pub containers: Vec<String>,
     pub video_codecs: Vec<String>,
     pub audio_codecs: Vec<String>,
+    pub max_audio_channels: Option<u8>,
     pub max_height: Option<i64>,
     pub codec_max_heights: HashMap<String, i64>,
     pub hdr: bool,
@@ -278,10 +311,30 @@ impl DeviceCaps {
             })
             .collect();
         Self {
+            // A legacy query has no slot for an overlay claim, so this is
+            // empty — but a reader must not take that as a refusal. The
+            // legacy path is a MIXED-FLEET path, not an old-client one: both
+            // native clients fall back to it on any 400/404/405, so a client
+            // that can paint the overlay arrives here routinely. `/decision`
+            // distinguishes "no document at all" from "a document claiming
+            // nothing"; see the binding in `stream.rs`.
+            subtitle_overlays: Vec::new(),
             v: Self::VERSION,
             client: None,
             video,
             audio: legacy.audio_codecs.clone(),
+            audio_sinks: legacy
+                .max_audio_channels
+                .into_iter()
+                .flat_map(|max_channels| {
+                    legacy.audio_codecs.iter().map(move |codec| AudioSink {
+                        codec: codec.clone(),
+                        max_channels,
+                        passthrough: false,
+                        sample_rates_hz: Vec::new(),
+                    })
+                })
+                .collect(),
             containers: legacy.containers.clone(),
             transports: Vec::new(),
             progressive_hevc_sample_entries: None,
@@ -297,12 +350,23 @@ impl DeviceCaps {
         }
     }
 
+    /// Whether this client claims it can draw `protocol` itself.
+    ///
+    /// Deliberately an exact match on the protocol name. A client that says
+    /// `pgs-v1` has not claimed anything about a future revision, and reading
+    /// it as though it had is how a viewer ends up staring at a subtitle track
+    /// their player cannot paint.
+    pub fn renders_subtitle_overlay(&self, protocol: &str) -> bool {
+        self.subtitle_overlays.iter().any(|named| named == protocol)
+    }
+
     /// True when this document claims nothing at all — the shape a client
     /// that sent only a named profile produces, which must keep taking the
     /// named-profile path rather than being read as "decodes nothing".
     pub fn is_empty(&self) -> bool {
         self.video.is_empty()
             && self.audio.is_empty()
+            && self.audio_sinks.is_empty()
             && self.containers.is_empty()
             && self.progressive_hevc_sample_entries.is_none()
     }
@@ -325,6 +389,45 @@ impl DeviceCaps {
             }
             if !seen.insert(entry.as_str()) {
                 return Err("progressive_hevc_sample_entries contains a duplicate entry");
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the bounded, unambiguous audio-sink vocabulary before it can
+    /// influence a playback decision.
+    pub fn validate_audio_sinks(&self) -> Result<(), &'static str> {
+        if self.audio_sinks.len() > 16 {
+            return Err("audio_sinks must contain at most 16 entries");
+        }
+        let mut seen = BTreeSet::new();
+        for sink in &self.audio_sinks {
+            let codec = sink.codec.trim().to_ascii_lowercase();
+            if codec.is_empty()
+                || codec.len() > 16
+                || !codec
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            {
+                return Err("audio_sinks contains an invalid codec");
+            }
+            if !(1..=16).contains(&sink.max_channels) {
+                return Err("audio_sinks max_channels must be between 1 and 16");
+            }
+            if sink.sample_rates_hz.len() > 16 {
+                return Err("audio_sinks sample_rates_hz must contain at most 16 entries");
+            }
+            let mut rates = BTreeSet::new();
+            for rate in &sink.sample_rates_hz {
+                if !(8_000..=768_000).contains(rate) {
+                    return Err("audio_sinks contains an invalid sample rate");
+                }
+                if !rates.insert(*rate) {
+                    return Err("audio_sinks contains a duplicate sample rate");
+                }
+            }
+            if !seen.insert(codec) {
+                return Err("audio_sinks contains a duplicate codec");
             }
         }
         Ok(())
@@ -353,6 +456,27 @@ impl DeviceProfile {
         } else {
             caps.audio.clone()
         };
+        let claimed_audio_decoders = caps
+            .audio
+            .iter()
+            .map(|codec| codec.trim().to_ascii_lowercase())
+            .filter(|codec| !codec.is_empty())
+            .collect();
+        let max_audio_channels = caps
+            .audio_sinks
+            .iter()
+            .map(|sink| (sink.codec.trim().to_ascii_lowercase(), sink.max_channels))
+            .collect();
+        let audio_sink_claims = caps
+            .audio_sinks
+            .iter()
+            .map(|sink| {
+                let codec = sink.codec.trim().to_ascii_lowercase();
+                let mut sink = sink.clone();
+                sink.codec.clone_from(&codec);
+                (codec, sink)
+            })
+            .collect();
         let mut video_codecs: Vec<String> = Vec::new();
         // Membership is a set lookup rather than a scan of `video_codecs`.
         // The document arrives from the network with no per-field bound, and
@@ -445,6 +569,9 @@ impl DeviceProfile {
             containers,
             video_codecs,
             audio_codecs,
+            max_audio_channels,
+            claimed_audio_decoders,
+            audio_sink_claims,
             max_height: caps.max_height,
             video_max_heights,
             max_bitrate,

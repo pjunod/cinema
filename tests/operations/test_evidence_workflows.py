@@ -19,6 +19,13 @@ class EvidenceWorkflowCase(unittest.TestCase):
             self.assertIn("workflow_dispatch:", triggers)
             self.assertNotIn("  pull_request:", triggers)
             self.assertNotIn("branches: [main]", triggers)
+            if name == "release-readiness":
+                # The one scheduled runtime sweep, and only once a week: Paul
+                # chose weekly release tags cut from a green scheduled run on
+                # 2026-09-23 (docs/RELEASING.md "The weekly release tag").
+                self.assertEqual(triggers.count("- cron:"), 1)
+                self.assertIn('  schedule:\n    - cron: "0 6 * * 1"\n', triggers)
+                continue
             self.assertNotIn("  schedule:", triggers)
         fast = self.read(".github/workflows/main-fast-lane.yml")
         self.assertIn(
@@ -178,11 +185,17 @@ class EvidenceWorkflowCase(unittest.TestCase):
         apple = self.read("clients/apple/Sources/PlayerController.swift")
         server = self.read("crates/plurxd/src/pgs_overlay.rs")
         self.assertIn("PGSOverlayPolicy.periodicRefreshPosition", apple)
-        self.assertIn("self.refreshPGSOverlayWindow(at: overlayPosition)", apple)
+        # The observer hands its position to the overlay step XCTest drives,
+        # and that step asks for a tick refresh, never a forced one.
+        self.assertIn("self.pgsOverlayPeriodicTick(currentMs: self.currentMs)", apple)
+        self.assertIn("refreshPGSOverlayWindow(at: overlayPosition, reason: .tick)", apple)
         self.assertEqual(server.count("prune(&root).await;"), 1)
 
     def test_media_origin_and_contract_routing_remain_wired(self) -> None:
         android = self.read("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt")
+        android_builder = self.read(
+            "clients/android/app/src/main/java/tv/plurx/app/player/PlurxPlayerBuilder.kt"
+        )
         android_screen = self.read(
             "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
         )
@@ -200,7 +213,8 @@ class EvidenceWorkflowCase(unittest.TestCase):
 
         self.assertIn("return realMediaPositionMs(", android)
         self.assertIn("val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)", android)
-        self.assertIn(".setTransferListener(progressiveMediaOrigin)", android)
+        self.assertIn("transferListener = progressiveMediaOrigin,", android)
+        self.assertIn("dataSource.setTransferListener(transferListener)", android_builder)
         self.assertIn(".playerInputAdapter(", android_screen)
         self.assertIn("PlayerInputPolicy.route(surface, state(), input)", android_adapter)
         self.assertIn("PlayerInputState.Hidden ->", android_policy)
@@ -275,7 +289,7 @@ class EvidenceWorkflowCase(unittest.TestCase):
         apple_model = self.read("clients/apple/Sources/AppModel.swift")
         apple_api = self.read("clients/apple/Sources/PlurxAPI.swift")
         self.assertIn("let capturedOrigin = origin", apple_model)
-        self.assertIn("Session.shared.token == token", apple_model)
+        self.assertIn("Session.shared.credentials.token == token", apple_model)
         self.assertIn("where code == 401", apple_model)
         self.assertIn(
             "PlurxAPI(origin: capturedOrigin).logout(token: token)", apple_model

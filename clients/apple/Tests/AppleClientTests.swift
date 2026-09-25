@@ -204,11 +204,13 @@ private struct PlaybackSurfaceContractFixture: Decodable {
         let thenWhenStopped: String?
         let carries: [String]?
         let retryable: Bool?
+        let retiredBy: [String]?
 
         enum CodingKeys: String, CodingKey {
             case id, context, codes, actions, requires, carries, retryable
             case cls = "class"
             case thenWhenStopped = "then_when_stopped"
+            case retiredBy = "retired_by"
         }
     }
 
@@ -253,6 +255,7 @@ private struct PlaybackSurfaceContractFixture: Decodable {
         let ownerSuccess: String?
         let userAction: String?
         let playbackRequested: Bool?
+        let systemPaused: Bool?
         let tick: Bool?
 
         enum CodingKeys: String, CodingKey {
@@ -266,6 +269,7 @@ private struct PlaybackSurfaceContractFixture: Decodable {
             case ownerSuccess = "owner_success"
             case userAction = "user_action"
             case playbackRequested = "playback_requested"
+            case systemPaused = "system_paused"
         }
     }
 
@@ -451,8 +455,7 @@ private struct DetailNavigationTestHost<Content: View>: View {
 final class AppleClientTests: XCTestCase {
     func testClusterMediaFailoverUsesEachValidatedNodeWithoutMovingAccountOrigin() {
         let session = Session()
-        session.origin = "http://primary.local:32400"
-        session.token = "bearer"
+        session.setCredentials(origin: "http://primary.local:32400", token: "bearer")
         session.configureNodeOrigins(
             [
                 "http://primary.local:32400",
@@ -462,7 +465,7 @@ final class AppleClientTests: XCTestCase {
                 "http://node-b.local:32400",
                 "https://node-c.local:443",
             ],
-            primary: session.origin
+            primary: session.credentials.origin
         )
 
         XCTAssertEqual(
@@ -474,7 +477,7 @@ final class AppleClientTests: XCTestCase {
             "token=bearer"
         )
         XCTAssertNil(session.nextMediaFailoverURL("/api/v1/hls/cap/index.m3u8", authenticated: false))
-        XCTAssertEqual(session.origin, "http://primary.local:32400")
+        XCTAssertEqual(session.credentials.origin, "http://primary.local:32400")
     }
 
     /// A candidate becomes a request authority the moment it is used, and a
@@ -505,8 +508,8 @@ final class AppleClientTests: XCTestCase {
     /// request, so neither may produce a candidate.
     func testOnlyAServerRelativePathIsRebound() {
         let session = Session()
-        session.origin = "http://primary.local:32400"
-        session.configureNodeOrigins(["http://node-b.local:32400"], primary: session.origin)
+        session.setCredentials(origin: "http://primary.local:32400", token: nil)
+        session.configureNodeOrigins(["http://node-b.local:32400"], primary: session.credentials.origin)
 
         XCTAssertNil(session.nextMediaFailoverURL("//evil.example/x", authenticated: false))
         XCTAssertNil(session.nextMediaFailoverURL("http://evil.example/x", authenticated: false))
@@ -522,11 +525,10 @@ final class AppleClientTests: XCTestCase {
     /// downgraded candidate would put it on the wire in cleartext.
     func testAnHTTPSSessionRefusesToFailOverToACleartextNode() {
         let session = Session()
-        session.origin = "https://primary.local"
-        session.token = "bearer"
+        session.setCredentials(origin: "https://primary.local", token: "bearer")
         session.configureNodeOrigins(
             ["http://node-b.local:32400", "https://node-c.local"],
-            primary: session.origin
+            primary: session.credentials.origin
         )
 
         XCTAssertEqual(
@@ -541,10 +543,10 @@ final class AppleClientTests: XCTestCase {
     /// in the same process, and the next one has no node left to try.
     func testAFreshStreamStartsAtTheHeadOfTheNodeList() {
         let session = Session()
-        session.origin = "http://primary.local:32400"
+        session.setCredentials(origin: "http://primary.local:32400", token: nil)
         session.configureNodeOrigins(
             ["http://node-b.local:32400", "http://node-c.local:32400"],
-            primary: session.origin
+            primary: session.credentials.origin
         )
 
         XCTAssertEqual(
@@ -907,8 +909,7 @@ final class AppleClientTests: XCTestCase {
     }
 
     override func tearDown() {
-        Session.shared.origin = ""
-        Session.shared.token = nil
+        Session.shared.setCredentials(origin: "", token: nil)
         super.tearDown()
     }
 
@@ -2330,12 +2331,16 @@ final class AppleClientTests: XCTestCase {
 
     /// A reach expansion the merge created and neither side had on its own:
     /// `main`'s server-truth delivery watchdog funnels into
-    /// `retrySameDeliveryAfterStall`, the exact arm this branch bound to the
-    /// ladder. So a wedge that AVPlayer never reported is bounded by the same
-    /// floor and stops with its own message. It reopens unticketed, though: a
-    /// session whose published bytes were simply never fetched has nothing
-    /// wrong with the rung it was already serving.
-    func testTheDeliveryWatchdogAlsoStepsTheLadderDownAndStopsAtItsFloor() {
+    /// `retrySameDeliveryAfterStall`. So a wedge that AVPlayer never reported
+    /// is bounded by the same floor and stops with its own message.
+    ///
+    /// What intent that reopen carries is no longer asserted here, because
+    /// there is no longer a client function that decides it: A-04 deleted the
+    /// `stallReopenIntent` minter. `retrySameDeliveryAfterStall` reopens with
+    /// `intent: .sameDeliveryRepair`, which keeps the recovery budgets and
+    /// carries no server ticket, so nothing this arm produces is
+    /// `.stallReopen`. The wire it used to mint onto is untouched.
+    func testTheDeliveryWatchdogIsBoundedByItsFloorAndStopsWithItsOwnMessage() {
         var storm = RecoveryReopenBudget()
 
         // With floor budget left, a watchdog-detected starvation reopens, and
@@ -2351,17 +2356,6 @@ final class AppleClientTests: XCTestCase {
             ),
             .reopen
         )
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: "session-a",
-                isVOD: false,
-                requestId: "request-1",
-                wedge: true
-            ),
-            .normal,
-            "the watchdog arm comes back on the rung it was already serving"
-        )
-
         // At the floor it stops with the delivery-specific message rather than
         // the generic buffering one, so the failure screen still names what
         // actually went wrong.
@@ -2391,40 +2385,6 @@ final class AppleClientTests: XCTestCase {
                 now: 202
             ),
             .reopen
-        )
-    }
-
-    /// The legacy typed helper remains narrowly scoped for interoperability;
-    /// timer-only presentation recovery no longer calls it.
-    func testLegacyBoundRecoveryOnlyNamesAGrowingServerSession() {
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: "session-a",
-                isVOD: false,
-                requestId: "request-1",
-                wedge: false
-            ),
-            stallIntent()
-        )
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: "session-a",
-                isVOD: true,
-                requestId: "request-1",
-                wedge: false
-            ),
-            .normal,
-            "a completed cache entry has no ladder answer to give"
-        )
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: nil,
-                isVOD: false,
-                requestId: "request-1",
-                wedge: false
-            ),
-            .normal,
-            "direct play holds no session at all"
         )
     }
 
@@ -3086,6 +3046,7 @@ final class AppleClientTests: XCTestCase {
             return .userAction(PlaybackFault.Action(rawValue: action) ?? .close)
         }
         if let requested = raw.playbackRequested { return .playbackRequested(requested) }
+        if let paused = raw.systemPaused { return .systemPaused(paused) }
         return .tick
     }
 
@@ -3254,6 +3215,7 @@ final class AppleClientTests: XCTestCase {
             XCTAssertEqual(mine.thenWhenStopped?.rawValue, row.thenWhenStopped, row.id)
             XCTAssertEqual(mine.carries, row.carries ?? [], row.id)
             XCTAssertEqual(mine.retryable, row.retryable ?? false, row.id)
+            XCTAssertEqual(mine.retiredBy?.map(\.rawValue), row.retiredBy, row.id)
         }
         XCTAssertEqual(PlaybackSurfaceContract.timings.bufferingMinMs, fixture.timings.bufferingMinMs)
         XCTAssertEqual(PlaybackSurfaceContract.timings.holdNoticeMs, fixture.timings.holdNoticeMs)
@@ -3781,11 +3743,28 @@ final class AppleClientTests: XCTestCase {
         XCTAssertTrue(source.contains("self?.setPlaybackRequested(true)"))
         XCTAssertTrue(source.contains("self?.setPlaybackRequested(false)"))
         // Every remaining writer, named. One is the viewer, one is the end of
-        // the film, one is teardown, and one is the owner's single helper.
+        // the film, one is teardown, one is the owner's single helper, and one
+        // makes the visible intent agree after iOS ends an interruption without
+        // granting automatic resume.
         let writers = source.components(separatedBy: "wantsPlayback = false").count - 1
         XCTAssertEqual(
-            writers, 4,
-            "a fifth writer of the viewer's transport intent wants a reason in this test"
+            writers, 5,
+            "another writer of the viewer's transport intent wants a reason in this test"
+        )
+        let interruption = try XCTUnwrap(source.range(
+            of: "func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {"
+        ))
+        let interruptionEnd = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: interruption.upperBound..<source.endIndex)
+        )
+        XCTAssertTrue(
+            String(source[interruption.upperBound..<interruptionEnd.lowerBound])
+                .contains("case .interruption(.stay):")
+        )
+        XCTAssertTrue(
+            String(source[interruption.upperBound..<interruptionEnd.lowerBound])
+                .contains("wantsPlayback = false"),
+            "declined automatic resume is the fifth, explicitly owned intent transition"
         )
         let start = try XCTUnwrap(source.range(
             of: "private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {"
@@ -4550,6 +4529,40 @@ final class AppleClientTests: XCTestCase {
         XCTAssertThrowsError(try PlurxAPI.check(forbidden, data: body)) { error in
             XCTAssertTrue(AppModel.isSessionExpired(error))
         }
+    }
+
+    func testAnIdleExpiredSignInStillSignsOutAndKeepsItsReasonForTheLoginScreen() throws {
+        _ = Session.shared.takeSessionExpiryNotice()
+        let url = try XCTUnwrap(URL(string: "http://server.local/api/v1/me"))
+        let response = try XCTUnwrap(
+            HTTPURLResponse(url: url, statusCode: 401, httpVersion: "HTTP/1.1", headerFields: nil)
+        )
+        let expired = Data(
+            #"{"code":"session_expired","message":"Signed out after 90 days of inactivity. Sign in again to continue.","idle_days":90}"#.utf8
+        )
+        XCTAssertThrowsError(try PlurxAPI.check(response, data: expired)) { error in
+            XCTAssertTrue(AppModel.isSessionExpired(error), "an expired sign-in is still a sign-out")
+            guard let api = error as? APIError, case .http(401) = api else {
+                XCTFail("a 401 must stay status-shaped")
+                return
+            }
+        }
+        XCTAssertEqual(
+            Session.shared.takeSessionExpiryNotice(),
+            "Signed out after 90 days of inactivity. Sign in again to continue."
+        )
+        XCTAssertNil(Session.shared.takeSessionExpiryNotice(), "the reason is taken once")
+
+        // Any other 401 carries no reason, and neither does a 403.
+        let other = Data(#"{"code":"token_expired","message":"Sign in again."}"#.utf8)
+        XCTAssertThrowsError(try PlurxAPI.check(response, data: other))
+        XCTAssertNil(Session.shared.takeSessionExpiryNotice())
+        let forbidden = try XCTUnwrap(
+            HTTPURLResponse(url: url, statusCode: 403, httpVersion: "HTTP/1.1", headerFields: nil)
+        )
+        XCTAssertThrowsError(try PlurxAPI.check(forbidden, data: expired))
+        XCTAssertNil(Session.shared.takeSessionExpiryNotice())
+        XCTAssertNil(PlurxAPI.sessionExpiryMessage(status: 401, data: nil))
     }
 
     func testRefusalBodiesAreKeptWithoutDisturbingTheMatchersThatPredateThem() throws {
@@ -5356,6 +5369,125 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(detector.sample(positionMs: 12_000, shouldMonitor: true, established: true, waitingRegime: false), .none)
     }
 
+    func testDisplayCriteriaRequiresMatchingCurrentItemAndCurrentOpen() {
+        XCTAssertEqual(
+            DisplayCriteriaDecision.decide(
+                matchingEnabled: true, itemIsCurrent: true, openIsCurrent: true,
+                itemIsReady: true
+            ),
+            .apply
+        )
+        XCTAssertEqual(
+            DisplayCriteriaDecision.decide(
+                matchingEnabled: false, itemIsCurrent: true, openIsCurrent: true,
+                itemIsReady: true
+            ),
+            .skip
+        )
+        XCTAssertEqual(
+            DisplayCriteriaDecision.decide(
+                matchingEnabled: true, itemIsCurrent: false, openIsCurrent: true,
+                itemIsReady: true
+            ),
+            .skip
+        )
+        XCTAssertEqual(
+            DisplayCriteriaDecision.decide(
+                matchingEnabled: true, itemIsCurrent: true, openIsCurrent: false,
+                itemIsReady: true
+            ),
+            .skip
+        )
+        XCTAssertEqual(
+            DisplayCriteriaDecision.decide(
+                matchingEnabled: true, itemIsCurrent: true, openIsCurrent: true,
+                itemIsReady: false
+            ),
+            .skip,
+            "a nil-before-loaded asset is retried from the item-ready observer"
+        )
+    }
+
+    func testAudioInterruptionPolicyKeepsSystemSuspensionSeparateFromIntent() {
+        XCTAssertEqual(
+            PlaybackAudioSessionObserver.interruptionResponse(
+                type: .began, options: [], wantsPlayback: true
+            ),
+            .suspend
+        )
+        XCTAssertEqual(
+            PlaybackAudioSessionObserver.interruptionResponse(
+                type: .ended, options: .shouldResume, wantsPlayback: true
+            ),
+            .resume
+        )
+        XCTAssertEqual(
+            PlaybackAudioSessionObserver.interruptionResponse(
+                type: .ended, options: .shouldResume, wantsPlayback: false
+            ),
+            .stay
+        )
+        XCTAssertEqual(
+            PlaybackAudioSessionObserver.interruptionResponse(
+                type: .ended, options: [], wantsPlayback: true
+            ),
+            .stay
+        )
+    }
+
+    @MainActor
+    func testFiniteInterruptionWithoutResumeNeedsExactlyOnePlay() {
+        let controller = PlayerController()
+        XCTAssertTrue(controller.wantsPlayback)
+        controller.handleAudioSessionEvent(.interruption(.suspend))
+        XCTAssertTrue(controller.systemPaused)
+        XCTAssertTrue(controller.wantsPlayback, "the interruption beginning does not revoke intent")
+
+        controller.handleAudioSessionEvent(.interruption(.stay))
+        XCTAssertFalse(controller.systemPaused)
+        XCTAssertFalse(controller.wantsPlayback, "the UI must now offer Play for the paused transport")
+
+        controller.togglePlayPause()
+        XCTAssertTrue(controller.wantsPlayback, "one Play creates the resume request")
+    }
+
+    func testOnlyLosingTheOldAudioRouteRevokesPlaybackIntent() {
+        XCTAssertTrue(PlaybackAudioSessionObserver.routeChangeRevokesIntent(
+            reason: .oldDeviceUnavailable
+        ))
+        XCTAssertFalse(PlaybackAudioSessionObserver.routeChangeRevokesIntent(
+            reason: .newDeviceAvailable
+        ))
+        XCTAssertFalse(PlaybackAudioSessionObserver.routeChangeRevokesIntent(
+            reason: .categoryChange
+        ))
+    }
+
+    func testSystemSuspensionCannotAccumulateStallRecoveryEvidence() {
+        var detector = PlaybackStallDetector()
+        for _ in 0..<3 {
+            XCTAssertEqual(
+                detector.sample(
+                    positionMs: 10_000,
+                    shouldMonitor: false,
+                    established: true,
+                    waitingRegime: false
+                ),
+                .none
+            )
+        }
+        XCTAssertEqual(
+            detector.sample(
+                positionMs: 10_000,
+                shouldMonitor: true,
+                established: true,
+                waitingRegime: false
+            ),
+            .none,
+            "resuming starts a fresh evidence window rather than nudging immediately"
+        )
+    }
+
     func testPresentationProgressAgeKeepsUnavailableDistinctFromZero() {
         var detector = PlaybackStallDetector()
         XCTAssertNil(detector.progressAgeMs(at: 100))
@@ -6013,14 +6145,14 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(
             PlaybackWaitPresentation.make(runwaySeconds: 0, httpWaitCount: 0),
             PlaybackWaitPresentation(
-                title: "Presentation waiting…",
+                title: "Buffering…",
                 detail: "0.0 s client loaded · no server HTTP waits"
             )
         )
         XCTAssertEqual(
             PlaybackWaitPresentation.make(runwaySeconds: 3.25, httpWaitCount: 1),
             PlaybackWaitPresentation(
-                title: "Presentation waiting…",
+                title: "Buffering…",
                 detail: "3.2 s client loaded · 1 server HTTP wait"
             )
         )
@@ -6028,6 +6160,46 @@ final class AppleClientTests: XCTestCase {
             PlaybackWaitPresentation.make(runwaySeconds: 0, httpWaitCount: nil).detail,
             "0.0 s client loaded · server wait state unavailable"
         )
+        XCTAssertEqual(
+            PlaybackWaitPresentation.make(
+                runwaySeconds: 0, httpWaitCount: nil, source: "client_preparing"
+            ).title,
+            "Loading…",
+            "a wait before the first frame is the open, not a stall"
+        )
+    }
+
+    func testPlaybackWaitDetailIsLiveForWaitsAndOwnedByTheRaiserOtherwise() {
+        func surface(_ source: String, title: String?, detail: String?) -> PlaybackSurface {
+            PlaybackSurface(
+                kind: .blocking,
+                fault: PlaybackFault(
+                    cls: source == "media_waiting" ? .buffering : .preparing,
+                    source: source,
+                    attached: 1,
+                    intent: nil,
+                    raisedAt: ContinuousClock.now,
+                    positionMs: nil,
+                    title: title,
+                    detail: detail,
+                    actions: [],
+                    playerStopped: false
+                )
+            )
+        }
+        let live = "7.5 s client loaded · 1 server HTTP wait"
+        let buffering = surface("media_waiting", title: "Buffering…", detail: "0.0 s client loaded · no server HTTP waits")
+        XCTAssertEqual(PlaybackWaitPresentation.detail(for: buffering, live: live), live)
+        XCTAssertEqual(
+            PlaybackWaitPresentation.detail(for: buffering, live: nil),
+            "0.0 s client loaded · no server HTTP waits",
+            "with no live sample the raised sentence stands"
+        )
+        let loading = surface("client_preparing", title: "Loading…", detail: "0.0 s client loaded · server wait state unavailable")
+        XCTAssertEqual(PlaybackWaitPresentation.detail(for: loading, live: live), live)
+        let stagedOpen = surface("client_preparing", title: nil, detail: nil)
+        XCTAssertFalse(PlaybackWaitPresentation.isWait(stagedOpen), "the bare staged open is not a wait")
+        XCTAssertNil(PlaybackWaitPresentation.detail(for: stagedOpen, live: live))
     }
 
     func testLiveCopyRecoverySeeksPastThePrecedingKeyframe() {
@@ -7442,8 +7614,7 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testRelativeMediaURLCarriesTokenAndPreservesExistingQuery() throws {
-        Session.shared.origin = "http://media-box:32400"
-        Session.shared.token = "secret token"
+        Session.shared.setCredentials(origin: "http://media-box:32400", token: "secret token")
 
         let url = try XCTUnwrap(Session.shared.mediaURL("/api/v1/files/42/direct?download=1"))
         let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
@@ -7457,12 +7628,34 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testAuthorizationHeaderUsesTheCurrentSessionToken() throws {
-        Session.shared.token = "bearer-token"
+        Session.shared.setCredentials(origin: Session.shared.credentials.origin, token: "bearer-token")
         var request = URLRequest(url: try XCTUnwrap(URL(string: "https://media.example.test/api/v1/me")))
 
         Session.shared.authorize(&request)
 
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer bearer-token")
+    }
+
+    func testConcurrentCredentialReadsNeverCombineTwoSessions() {
+        let first = (origin: "https://first.example.test", token: "first-token")
+        let second = (origin: "https://second.example.test", token: "second-token")
+        let mismatchLock = NSLock()
+        var mismatches = 0
+        DispatchQueue.concurrentPerform(iterations: 10_000) { iteration in
+            if iteration.isMultiple(of: 2) {
+                Session.shared.setCredentials(origin: first.origin, token: first.token)
+            } else {
+                Session.shared.setCredentials(origin: second.origin, token: second.token)
+            }
+            let pair = Session.shared.credentials
+            if !((pair.origin == first.origin && pair.token == first.token)
+                || (pair.origin == second.origin && pair.token == second.token)) {
+                mismatchLock.lock()
+                mismatches += 1
+                mismatchLock.unlock()
+            }
+        }
+        XCTAssertEqual(mismatches, 0)
     }
 
     func testAutoHlsRequestLeavesHeightUnsetAndCreatesAnIdempotencyKey() throws {
@@ -8295,6 +8488,26 @@ final class AppleClientTests: XCTestCase {
         ))
     }
 
+    func testToneMapPeakSummaryKeepsPolicyDistinctFromSourceTruth() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let measured = try decoder.decode(PlaybackSessionStatus.self, from: Data(#"""
+        {"id":"s1","tone_map_peak_nits":4000,"tone_map_peak_source":"cll"}
+        """#.utf8))
+        XCTAssertEqual(
+            PlayerView.toneMapPeakSummary(measured),
+            "Tone-map peak 4,000 nits · source MaxCLL"
+        )
+
+        let assumed = try decoder.decode(PlaybackSessionStatus.self, from: Data(#"""
+        {"id":"s2","tone_map_peak_nits":1000,"tone_map_peak_source":"default"}
+        """#.utf8))
+        XCTAssertEqual(
+            PlayerView.toneMapPeakSummary(assumed),
+            "Tone-map peak 1,000 nits · policy default"
+        )
+    }
+
     /// Source grades collapse to the server's own vocabulary so that a source
     /// and `delivered_dynamic_range` compare by string equality. Files probed
     /// before `hdr` existed carry only the rich label, so both fields are read.
@@ -8545,6 +8758,12 @@ final class AppleClientTests: XCTestCase {
     /// The detail page had no dynamic-range badge at all, while Android and the
     /// web both did. It is source-only and stays that way: there is no session
     /// on a detail page to report a downgrade against.
+    ///
+    /// Since a767f5fe5 (docs/clients/CALM-LIBRARY-PAGES.md, "The item header
+    /// describes the selected file") resolution, video codec, dynamic range
+    /// and container are the header's coloured badges for every video file:
+    /// an SDR file is labelled SDR rather than left blank, and the container
+    /// closes the row.
     func testDetailBadgesCarryTheSourceDynamicRangeAfterTheCodec() throws {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -8561,25 +8780,37 @@ final class AppleClientTests: XCTestCase {
         let badges = DetailView.itemMetadataBadges(
             item, file: file, durationMs: file.durationMs, includeSeries: false
         )
-        XCTAssertEqual(badges.map(\.kind), [.year, .runtime, .resolution, .video, .dynamicRange])
-        let range = try XCTUnwrap(badges.last)
+        XCTAssertEqual(
+            badges.map(\.kind),
+            [.year, .runtime, .resolution, .video, .dynamicRange, .container]
+        )
+        let range = try XCTUnwrap(badges.first { $0.kind == .dynamicRange })
         XCTAssertEqual(range.symbol, "sparkles")
         XCTAssertEqual(range.mark, "DV P8")
         XCTAssertEqual(
             range.accessibilityLabel,
             "Dolby Vision · Profile 8 (HDR10-compatible)"
         )
+        let container = try XCTUnwrap(badges.last)
+        XCTAssertEqual(container.kind, .container)
+        XCTAssertEqual(container.mark, "MKV")
 
-        // An SDR file gains nothing, exactly as before.
+        // An SDR file is labelled SDR — never with the source HDR badge's
+        // symbol or mark — and still closes on its container.
         let sdr = try decoder.decode(MediaFile.self, from: Data(#"""
         {"id":12,"duration_ms":8520000,"container":"mp4","video_codec":"h264","height":1080}
         """#.utf8))
-        XCTAssertEqual(
-            DetailView.itemMetadataBadges(
-                item, file: sdr, durationMs: sdr.durationMs, includeSeries: false
-            ).map(\.kind),
-            [.year, .runtime, .resolution, .video]
+        let sdrBadges = DetailView.itemMetadataBadges(
+            item, file: sdr, durationMs: sdr.durationMs, includeSeries: false
         )
+        XCTAssertEqual(
+            sdrBadges.map(\.kind),
+            [.year, .runtime, .resolution, .video, .dynamicRange, .container]
+        )
+        let sdrRange = try XCTUnwrap(sdrBadges.first { $0.kind == .dynamicRange })
+        XCTAssertEqual(sdrRange.mark, "SDR")
+        XCTAssertEqual(sdrRange.symbol, "sun.max")
+        XCTAssertEqual(sdrBadges.last?.mark, "MP4")
     }
 
     func testSeasonEpisodeSummaryKeepsResolutionAndRichHDRCompact() throws {
@@ -10618,6 +10849,370 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
+    // MARK: - PGS overlay: the shared seek, tick and manifest-response fixture
+    //
+    // tests/playback/pgs-overlay-cases.json is the same file the Android JVM
+    // suite reads (PGSOverlayTest), so the two clients cannot drift apart on
+    // when a seek refreshes, which cue is due, or which answers stop a poll.
+
+    private func pgsOverlayCasesData() throws -> Data {
+        let fixtureURL = try XCTUnwrap(
+            Bundle(for: AppleClientTests.self).url(
+                forResource: "pgs-overlay-cases",
+                withExtension: "json"
+            )
+        )
+        return try Data(contentsOf: fixtureURL)
+    }
+
+    private func pgsOverlayCasesFixture() throws -> PGSOverlayCasesFixture {
+        let data = try pgsOverlayCasesData()
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(PGSOverlayCasesFixture.self, from: data)
+    }
+
+    private func pgsOverlayRange(_ bounds: [Int]?) -> Range<Int>? {
+        guard let bounds else { return nil }
+        return bounds[0]..<bounds[1]
+    }
+
+    /// The seek rows as Apple's seek applies them: `pgsOverlaySeeked(to:)`
+    /// asks `shouldRefresh` with the published and in-flight ranges and no
+    /// failure backoff, and keeps a window that already serves the position.
+    /// `clear_now` is Android's alone: Apple's cues are timed layers on an
+    /// `AVSynchronizedLayer` and cannot outlive their interval. The cue due is
+    /// checked twice: in source time against the manifest, and in item time
+    /// through `itemInterval`, the interval the renderer schedules, with a
+    /// non-zero item base so a source/item mix-up cannot cancel out.
+    func testPGSOverlaySeekCasesFromSharedFixture() throws {
+        let fixture = try pgsOverlayCasesFixture()
+        let cues = fixture.manifest.cues.map {
+            pgsOverlayCue(id: $0.id, startMs: $0.startMs, endMs: $0.endMs)
+        }
+        let itemBaseMs = 5_000
+        XCTAssertGreaterThanOrEqual(fixture.seekCases.count, 6)
+        for seek in fixture.seekCases {
+            let loaded = pgsOverlayRange(seek.loadedWindow)
+            let loading = pgsOverlayRange(seek.loadingWindow)
+            let refresh = PGSOverlayPolicy.shouldRefresh(
+                sourceTimeMs: seek.toMs,
+                loadedRange: loaded,
+                loadingRange: loading
+            )
+            XCTAssertEqual(refresh, seek.expect.refresh, seek.name)
+            let serving: Range<Int>?
+            if refresh {
+                serving = PGSOverlayPolicy.windowRange(
+                    at: seek.toMs,
+                    durationMs: fixture.manifest.durationMs
+                )
+            } else if let loaded,
+                      !PGSOverlayPolicy.shouldRefresh(sourceTimeMs: seek.toMs, loadedRange: loaded) {
+                serving = loaded
+            } else {
+                serving = loading
+            }
+            XCTAssertEqual(serving, pgsOverlayRange(seek.expect.window), seek.name)
+
+            let dueInSourceTime = cues.first { $0.startMs <= seek.toMs && seek.toMs < $0.endMs }
+            XCTAssertEqual(dueInSourceTime?.id, seek.expect.activeCue, "\(seek.name) in source time")
+            let itemTimeMs = PGSOverlayPolicy.itemTimeMs(sourceTimeMs: seek.toMs, baseMs: itemBaseMs)
+            XCTAssertEqual(itemTimeMs, seek.toMs - itemBaseMs)
+            let dueInItemTime = cues.first {
+                PGSOverlayPolicy.itemInterval(cue: $0, baseMs: itemBaseMs)?.contains(itemTimeMs) == true
+            }
+            XCTAssertEqual(dueInItemTime?.id, seek.expect.activeCue, "\(seek.name) in item time")
+        }
+    }
+
+    /// The tick rows: a load that covers the position is never replaced, and
+    /// a failed window is retried after 5 s and 30 s and then left for a seek.
+    func testPGSOverlayTickCasesFromSharedFixture() throws {
+        let fixture = try pgsOverlayCasesFixture()
+        XCTAssertGreaterThanOrEqual(fixture.tickCases.count, 8)
+        for tick in fixture.tickCases {
+            XCTAssertEqual(
+                PGSOverlayPolicy.shouldRefresh(
+                    sourceTimeMs: tick.positionMs,
+                    loadedRange: pgsOverlayRange(tick.loadedWindow),
+                    loadingRange: pgsOverlayRange(tick.loadingWindow),
+                    windowFailures: tick.windowFailures,
+                    msSinceFailure: tick.msSinceFailure
+                ),
+                tick.expect.refresh,
+                tick.name
+            )
+        }
+    }
+
+    // MARK: - PGS overlay: the controller's own tick, seek and failure paths
+    //
+    // These drive PlayerController through the calls production makes: the
+    // periodic observer's `pgsOverlayPeriodicTick(currentMs:)`, `issueSeek`'s
+    // `pgsOverlaySeeked(to:)`, and a reselection. Only the bytes (a fetcher)
+    // and the backoff clock are supplied.
+
+    @MainActor
+    private final class PGSOverlayFakeFetch {
+        struct Pending {
+            let path: String
+            let continuation: CheckedContinuation<Data, Error>
+        }
+
+        let manifest: PGSOverlayManifest
+        private(set) var requests: [String] = []
+        private var pending: [Pending] = []
+
+        init(manifest: PGSOverlayManifest) { self.manifest = manifest }
+
+        var fetcher: PGSOverlayFetcher {
+            PGSOverlayFetcher(
+                manifest: { [unowned self] _, _ in .ready(self.manifest) },
+                object: { [unowned self] _, _, _, path in
+                    try await withCheckedThrowingContinuation { continuation in
+                        self.requests.append(path)
+                        self.pending.append(Pending(path: path, continuation: continuation))
+                    }
+                }
+            )
+        }
+
+        var pendingCount: Int { pending.count }
+
+        func succeedAll() {
+            let data = PGSOverlayFakeFetch.png()
+            let all = pending
+            pending = []
+            all.forEach { $0.continuation.resume(returning: data) }
+        }
+
+        func failAll() {
+            let all = pending
+            pending = []
+            all.forEach { $0.continuation.resume(throwing: URLError(.networkConnectionLost)) }
+        }
+
+        static func png() -> Data {
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            return UIGraphicsImageRenderer(
+                size: CGSize(width: 1, height: 1),
+                format: format
+            ).pngData { context in
+                UIColor.white.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+            }
+        }
+    }
+
+    private func pgsOverlayControllerManifest() -> PGSOverlayManifest {
+        let generation = String(repeating: "a", count: 64)
+        func cue(_ id: String, _ start: Int, _ end: Int, _ letter: Character) -> PGSOverlayCue {
+            PGSOverlayCue(
+                id: id,
+                startMs: start,
+                endMs: end,
+                canvasWidth: 1_920,
+                canvasHeight: 1_080,
+                objects: [PGSOverlayObject(
+                    image: "overlay/\(generation)/objects/\(String(repeating: letter, count: 64)).png",
+                    x: 0, y: 0, width: 1, height: 1
+                )]
+            )
+        }
+        return PGSOverlayManifest(
+            schema: 1,
+            generation: generation,
+            fileId: 0,
+            trackIndex: 3,
+            kind: "pgs",
+            timebase: "source_ms",
+            durationMs: 600_000,
+            cues: [cue("c2", 100_000, 104_000, "b"), cue("c6", 300_000, 302_000, "e")]
+        )
+    }
+
+    private let pgsOverlayTracks = [SubtitleTrack(
+        index: 3, codec: "hdmv_pgs_subtitle", language: "eng", title: nil,
+        default: false, forced: false, text: false, overlay: "pgs-v1"
+    )]
+
+    /// Lets the controller's main-actor tasks run until `condition` holds.
+    @MainActor
+    private func pgsOverlaySettle(
+        _ what: String,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        until condition: () -> Bool
+    ) async {
+        for _ in 0..<2_000 {
+            if condition() { return }
+            await Task.yield()
+        }
+        XCTFail("never settled: \(what)", file: file, line: line)
+    }
+
+    @MainActor
+    private func pgsOverlayController(
+        _ fake: PGSOverlayFakeFetch,
+        clock: @escaping () -> Int = { 0 }
+    ) -> PlayerController {
+        let controller = PlayerController()
+        controller.pgsOverlayFetcherForTesting = fake.fetcher
+        controller.pgsOverlayClockMs = clock
+        return controller
+    }
+
+    /// The periodic tick while the window for an out-of-window seek is still
+    /// loading. Before B3 the tick saw a position outside the *published*
+    /// window and cancelled and restarted that load every second.
+    @MainActor
+    func testPGSOverlayTickDoesNotCancelCoveringLoad() async {
+        let fake = PGSOverlayFakeFetch(manifest: pgsOverlayControllerManifest())
+        let controller = pgsOverlayController(fake)
+        controller.selectPGSOverlayForTesting(3, tracks: pgsOverlayTracks, atMs: 101_000)
+        await pgsOverlaySettle("first window requested") { fake.pendingCount == 1 }
+        fake.succeedAll()
+        await pgsOverlaySettle("first window published") { controller.pgsOverlayWindow != nil }
+        XCTAssertEqual(controller.pgsOverlayWindow?.sourceRange, 96_000..<191_000)
+
+        // In-window seek: the published window already serves it.
+        controller.pgsOverlaySeeked(to: 120_000)
+        XCTAssertNil(controller.pgsOverlayLoadingRangeForTesting)
+        XCTAssertEqual(fake.requests.count, 1)
+
+        controller.pgsOverlaySeeked(to: 301_000)
+        await pgsOverlaySettle("second window requested") { fake.pendingCount == 1 }
+        XCTAssertEqual(fake.requests.count, 2)
+        for second in 301...305 {
+            controller.pgsOverlayPeriodicTick(currentMs: second * 1_000)
+            await Task.yield()
+        }
+        XCTAssertEqual(fake.requests.count, 2, "a tick replaced the load that covers it")
+        fake.succeedAll()
+        await pgsOverlaySettle("second window published") {
+            controller.pgsOverlayWindow?.sourceRange == 296_000..<391_000
+        }
+        XCTAssertNil(controller.pgsOverlayLoadingRangeForTesting)
+    }
+
+    /// Review finding: a load that finished after the viewer had moved to
+    /// another track returned early and left its range behind, so reselecting
+    /// the first track was a refresh the stale range said was covered, and
+    /// nothing loaded.
+    @MainActor
+    func testPGSOverlayReselectionAfterAnAbandonedLoadLoadsAgain() async {
+        let fake = PGSOverlayFakeFetch(manifest: pgsOverlayControllerManifest())
+        let controller = pgsOverlayController(fake)
+        controller.selectPGSOverlayForTesting(3, tracks: pgsOverlayTracks, atMs: 101_000)
+        await pgsOverlaySettle("window requested") { fake.pendingCount == 1 }
+
+        controller.publishSelectedSubtitleForTesting(5)
+        fake.succeedAll()
+        await pgsOverlaySettle("abandoned load returned its range") {
+            controller.pgsOverlayLoadingRangeForTesting == nil
+        }
+        XCTAssertNil(controller.pgsOverlayWindow)
+
+        controller.selectPGSOverlayForTesting(3, tracks: pgsOverlayTracks, atMs: 101_000)
+        await pgsOverlaySettle("reselected window published") {
+            controller.pgsOverlayWindow?.sourceRange == 96_000..<191_000
+        }
+    }
+
+    /// One failed window: one notice, no refetch on the next ticks, silent
+    /// retries after 5 s and 30 s, nothing after that until a seek, and the
+    /// seek recovers.
+    @MainActor
+    func testPGSOverlayFailedWindowIsSaidOnceAndRetriedOnABoundedBackoff() async {
+        var now = 0
+        let fake = PGSOverlayFakeFetch(manifest: pgsOverlayControllerManifest())
+        let controller = pgsOverlayController(fake, clock: { now })
+        controller.selectPGSOverlayForTesting(3, tracks: pgsOverlayTracks, atMs: 101_000)
+        await pgsOverlaySettle("window requested") { fake.pendingCount == 1 }
+        fake.failAll()
+        await pgsOverlaySettle("failure noticed") { controller.pgsOverlayNoticeCount == 1 }
+
+        // Every tick is at a position whose window still holds c2, so a
+        // refresh here always needs c2's image; only the clock moves.
+        func tick(atClockMs clockMs: Int) async {
+            now = clockMs
+            controller.pgsOverlayPeriodicTick(currentMs: 101_500)
+            for _ in 0..<20 { await Task.yield() }
+        }
+
+        await tick(atClockMs: 1_000)
+        await tick(atClockMs: 2_000)
+        XCTAssertEqual(fake.requests.count, 1, "a tick inside the backoff refetched")
+
+        await tick(atClockMs: 5_000)
+        await pgsOverlaySettle("first retry") { fake.pendingCount == 1 }
+        XCTAssertEqual(fake.requests.count, 2)
+        fake.failAll()
+        await pgsOverlaySettle("first retry failed") {
+            controller.pgsOverlayLoadingRangeForTesting == nil
+        }
+        await tick(atClockMs: 19_000)
+        XCTAssertEqual(fake.requests.count, 2)
+        await tick(atClockMs: 36_000)
+        await pgsOverlaySettle("second retry") { fake.pendingCount == 1 }
+        fake.failAll()
+        await pgsOverlaySettle("second retry failed") {
+            controller.pgsOverlayLoadingRangeForTesting == nil
+        }
+        await tick(atClockMs: 700_000)
+        XCTAssertEqual(fake.requests.count, 3, "retried past the bounded backoff")
+        XCTAssertEqual(controller.pgsOverlayNoticeCount, 1, "a retry said it again")
+
+        controller.pgsOverlaySeeked(to: 101_500)
+        await pgsOverlaySettle("seek reloads") { fake.pendingCount == 1 }
+        fake.succeedAll()
+        await pgsOverlaySettle("seek recovered") { controller.pgsOverlayWindow != nil }
+        XCTAssertEqual(controller.pgsOverlayNoticeCount, 1)
+    }
+
+    func testPGSOverlayManifestResponsesFromSharedFixture() throws {
+        let fixture = try pgsOverlayCasesFixture()
+        // The bodies go to the reader byte for byte as the server would send
+        // them, so they are taken from the raw file, not from a decoded copy.
+        let raw = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: pgsOverlayCasesData()) as? [String: Any]
+        )
+        let bodies = try XCTUnwrap(raw["manifest_responses"] as? [[String: Any]])
+            .map { $0["body"] as Any }
+        XCTAssertEqual(bodies.count, fixture.manifestResponses.count)
+        XCTAssertGreaterThanOrEqual(fixture.manifestResponses.count, 6)
+        for (answer, rawBody) in zip(fixture.manifestResponses, bodies) {
+            var headers = ["Content-Type": "application/json"]
+            if let retryAfter = answer.retryAfter { headers["Retry-After"] = retryAfter }
+            let http = try XCTUnwrap(HTTPURLResponse(
+                url: try XCTUnwrap(URL(string: "http://plurx.test/api/v1/files/42/subs/3/overlay.json")),
+                statusCode: answer.status,
+                httpVersion: "HTTP/1.1",
+                headerFields: headers
+            ))
+            let body = try JSONSerialization.data(withJSONObject: rawBody)
+            do {
+                switch try PlurxAPI.pgsOverlayManifestFetch(http, data: body) {
+                case .ready(let manifest):
+                    XCTAssertEqual(answer.expect.disposition, "ready", answer.name)
+                    XCTAssertNoThrow(try manifest.validated(fileId: 42, trackIndex: 3), answer.name)
+                case .preparing(let retryAfterMs):
+                    XCTAssertEqual(answer.expect.disposition, "preparing", answer.name)
+                    XCTAssertEqual(retryAfterMs, answer.expect.retryAfterMs, answer.name)
+                }
+            } catch {
+                XCTAssertEqual(answer.expect.disposition, "terminal", answer.name)
+                let notice = PGSOverlayPolicy.failureNotice(error)
+                if let expected = answer.expect.notice {
+                    XCTAssertEqual(notice, expected, answer.name)
+                }
+                XCTAssertTrue(notice.hasSuffix("Video playback was kept unchanged."), answer.name)
+            }
+        }
+    }
+
     private func pgsOverlayManifest(cues: [PGSOverlayCue]) -> PGSOverlayManifest {
         PGSOverlayManifest(
             schema: 1,
@@ -10789,7 +11384,7 @@ final class AppleClientTests: XCTestCase {
 
     func testPGSOverlayUsesSourceTimeWithANonZeroItemBase() {
         XCTAssertEqual(
-            [503, 202, 200].map(PGSOverlayPolicy.manifestDisposition),
+            [503, 202, 200].map { PGSOverlayPolicy.manifestDisposition($0) },
             [.preparing, .preparing, .ready]
         )
         XCTAssertEqual(PGSOverlayPolicy.retryAfterMs("2"), 2_000)
@@ -11525,4 +12120,63 @@ private extension PreferredLanguageStatus {
     /// state to be added without anyone deciding how it should read.
     static let allFive: [PreferredLanguageStatus] =
         [.selected, .available, .missing, .unknown, .noTracks]
+}
+
+// MARK: - tests/playback/pgs-overlay-cases.json
+
+private struct PGSOverlayCasesFixture: Decodable {
+    struct Manifest: Decodable {
+        struct Cue: Decodable {
+            let id: String
+            let startMs: Int
+            let endMs: Int
+        }
+        let durationMs: Int
+        let cues: [Cue]
+    }
+
+    struct SeekCase: Decodable {
+        struct Expect: Decodable {
+            let refresh: Bool
+            let clearNow: Bool
+            let activeCue: String?
+            let window: [Int]?
+        }
+        let name: String
+        let loadedWindow: [Int]?
+        let loadingWindow: [Int]?
+        let shownCue: String?
+        let toMs: Int
+        let expect: Expect
+    }
+
+    struct TickCase: Decodable {
+        struct Expect: Decodable {
+            let refresh: Bool
+        }
+        let name: String
+        let positionMs: Int
+        let loadedWindow: [Int]?
+        let loadingWindow: [Int]?
+        let windowFailures: Int
+        let msSinceFailure: Int
+        let expect: Expect
+    }
+
+    struct ManifestResponse: Decodable {
+        struct Expect: Decodable {
+            let disposition: String
+            let retryAfterMs: Int?
+            let notice: String?
+        }
+        let name: String
+        let status: Int
+        let retryAfter: String?
+        let expect: Expect
+    }
+
+    let manifest: Manifest
+    let seekCases: [SeekCase]
+    let tickCases: [TickCase]
+    let manifestResponses: [ManifestResponse]
 }

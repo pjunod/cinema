@@ -7,7 +7,9 @@
 
 mod analysis;
 mod auth;
+pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
+mod chapter_thumbs;
 mod cluster;
 pub(crate) mod cluster_operations;
 pub mod comingsoon;
@@ -18,6 +20,7 @@ mod dv_disk;
 pub(crate) mod dvr;
 pub(crate) mod error;
 pub(crate) mod extract;
+pub(crate) mod file_grants;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 pub(crate) mod hls;
 pub(crate) mod images;
@@ -30,7 +33,7 @@ mod items;
 mod keys;
 mod libraries;
 pub(crate) mod library_channels;
-mod live_tv;
+pub(crate) mod live_tv;
 mod network;
 mod offline;
 pub(crate) mod peer_transport;
@@ -42,6 +45,7 @@ mod reading;
 mod scan;
 pub(crate) mod scan_identity;
 pub(crate) mod stream;
+pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
 mod trakt;
 
@@ -63,19 +67,20 @@ pub(crate) mod test_agents {
     pub(crate) const ANDROID_NATIVE_UA: &str = "okhttp/5.1.0";
 }
 
-mod users;
+pub(crate) mod users;
 mod watch;
 pub(crate) mod web;
 
-use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, MatchedPath};
 use axum::http::{header, HeaderValue, Method, Request, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 use crate::state::AppState;
 use plurx_core::cluster::membership::LocalServingRole;
@@ -84,6 +89,1125 @@ use serde::{Deserialize, Serialize};
 const JSON_SHORT_DEADLINE: Duration = Duration::from_secs(30);
 const JSON_LONG_DEADLINE: Duration = Duration::from_secs(300);
 static HANDLER_DEADLINES: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+const HTTP_ROUTE_GROUPS: [&str; 9] = [
+    "auth", "home", "library", "item", "search", "playback", "settings", "cluster", "other",
+];
+const HTTP_STORE_CLASSES: [&str; 3] = ["local_read", "authority_read", "write"];
+const HTTP_NODE_ROLES: [&str; 6] = [
+    "standalone",
+    "voter",
+    "learner",
+    "remote_authority",
+    "fenced",
+    "unknown",
+];
+const HTTP_ROUTE_BUCKETS: [(u64, &str); 12] = [
+    (1_000_000, "0.001"),
+    (5_000_000, "0.005"),
+    (10_000_000, "0.01"),
+    (25_000_000, "0.025"),
+    (50_000_000, "0.05"),
+    (100_000_000, "0.1"),
+    (250_000_000, "0.25"),
+    (500_000_000, "0.5"),
+    (1_000_000_000, "1"),
+    (2_500_000_000, "2.5"),
+    (5_000_000_000, "5"),
+    (10_000_000_000, "10"),
+];
+
+#[derive(Default)]
+struct HttpRouteCell {
+    count: AtomicU64,
+    elapsed_nanos: AtomicU64,
+    buckets: [AtomicU64; HTTP_ROUTE_BUCKETS.len()],
+}
+
+struct HttpRouteMetrics {
+    store_reads: [AtomicU64; 9 * 3 * HTTP_NODE_ROLES.len()],
+    routes: [HttpRouteCell; 9 * HTTP_NODE_ROLES.len()],
+}
+
+impl Default for HttpRouteMetrics {
+    fn default() -> Self {
+        Self {
+            store_reads: std::array::from_fn(|_| AtomicU64::new(0)),
+            routes: std::array::from_fn(|_| HttpRouteCell::default()),
+        }
+    }
+}
+
+impl HttpRouteMetrics {
+    fn saturating_add(target: &AtomicU64, amount: u64) {
+        let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            (current != u64::MAX).then(|| current.saturating_add(amount))
+        });
+    }
+
+    fn record(&self, group: usize, role: usize, counts: [u64; 3], elapsed: Duration) {
+        for (class, count) in counts.into_iter().enumerate() {
+            Self::saturating_add(
+                &self.store_reads
+                    [(group * HTTP_STORE_CLASSES.len() + class) * HTTP_NODE_ROLES.len() + role],
+                count,
+            );
+        }
+        let elapsed_nanos = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let cell = &self.routes[group * HTTP_NODE_ROLES.len() + role];
+        Self::saturating_add(&cell.count, 1);
+        Self::saturating_add(&cell.elapsed_nanos, elapsed_nanos);
+        if let Some(index) = HTTP_ROUTE_BUCKETS
+            .iter()
+            .position(|(upper, _)| elapsed_nanos <= *upper)
+        {
+            Self::saturating_add(&cell.buckets[index], 1);
+        }
+    }
+
+    fn render(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = String::from(
+            "# HELP plurx_http_store_reads_total Replicated Store operations attributed to matched HTTP route group and serving role.\n\
+             # TYPE plurx_http_store_reads_total counter\n",
+        );
+        for (group_index, group) in HTTP_ROUTE_GROUPS.iter().enumerate() {
+            for (class_index, class) in HTTP_STORE_CLASSES.iter().enumerate() {
+                for (role_index, role) in HTTP_NODE_ROLES.iter().enumerate() {
+                    let count = self.store_reads[(group_index * HTTP_STORE_CLASSES.len()
+                        + class_index)
+                        * HTTP_NODE_ROLES.len()
+                        + role_index]
+                        .load(Ordering::Relaxed);
+                    let _ = writeln!(
+                        out,
+                        "plurx_http_store_reads_total{{route_group=\"{group}\",class=\"{class}\",role=\"{role}\"}} {count}"
+                    );
+                }
+            }
+        }
+        out.push_str(
+            "# HELP plurx_http_route_seconds Matched HTTP route latency by bounded route group and serving role.\n\
+             # TYPE plurx_http_route_seconds histogram\n",
+        );
+        for (group_index, group) in HTTP_ROUTE_GROUPS.iter().enumerate() {
+            for (role_index, role) in HTTP_NODE_ROLES.iter().enumerate() {
+                let cell = &self.routes[group_index * HTTP_NODE_ROLES.len() + role_index];
+                let mut cumulative = 0_u64;
+                for (bucket_index, (_, upper)) in HTTP_ROUTE_BUCKETS.iter().enumerate() {
+                    cumulative = cumulative
+                        .saturating_add(cell.buckets[bucket_index].load(Ordering::Relaxed));
+                    let _ = writeln!(
+                        out,
+                        "plurx_http_route_seconds_bucket{{route_group=\"{group}\",role=\"{role}\",le=\"{upper}\"}} {cumulative}"
+                    );
+                }
+                let count = cell.count.load(Ordering::Relaxed);
+                let _ = writeln!(
+                    out,
+                    "plurx_http_route_seconds_bucket{{route_group=\"{group}\",role=\"{role}\",le=\"+Inf\"}} {count}"
+                );
+                let seconds = cell.elapsed_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0;
+                let _ = writeln!(
+                    out,
+                    "plurx_http_route_seconds_sum{{route_group=\"{group}\",role=\"{role}\"}} {seconds:.9}"
+                );
+                let _ = writeln!(
+                    out,
+                    "plurx_http_route_seconds_count{{route_group=\"{group}\",role=\"{role}\"}} {count}"
+                );
+            }
+        }
+        out
+    }
+}
+
+static HTTP_ROUTE_METRICS: LazyLock<HttpRouteMetrics> = LazyLock::new(HttpRouteMetrics::default);
+
+fn http_route_group(path: &str) -> usize {
+    // Axum supplies the registered MatchedPath, never the credential-bearing
+    // request URI. Keep this exhaustive and exact: a new route is `other`
+    // until its owner adds one fixed-cardinality entry here and the route
+    // inventory test fails if a registered pattern is left unclassified.
+    match path {
+        // Authentication and identity administration.
+        "/api/v1/me"
+        | "/api/v1/setup"
+        | "/api/v1/auth/login"
+        | "/api/v1/auth/logout"
+        | "/api/v1/users"
+        | "/api/v1/users/{id}"
+        // The device inventory and per-device revocation are account
+        // administration on the same rows as login and logout, so they are
+        // attributed here rather than opening a group of their own.
+        | "/api/v1/me/devices"
+        | "/api/v1/me/devices/{prefix}"
+        | "/api/v1/users/{id}/devices"
+        | "/api/v1/users/{id}/devices/{prefix}"
+        | "/api/v1/keys"
+        | "/api/v1/keys/{id}" => 0,
+
+        // Home projections.
+        "/api/v1/home/previews" | "/api/v1/hubs" | "/hubs/search" => 1,
+
+        // Library management, catalogue pages and schedules.
+        "/api/v1/libraries"
+        | "/api/v1/libraries/{id}"
+        | "/api/v1/libraries/{id}/items"
+        | "/api/v1/libraries/{id}/schedule"
+        | "/api/v1/libraries/{id}/scan"
+        | "/api/v1/libraries/{id}/refresh"
+        | "/api/v1/libraries/{id}/dv-conversion"
+        | "/api/v1/libraries/{id}/dv-conversions"
+        | "/api/v1/libraries/{id}/root-identity/reset"
+        | "/api/v1/libraries/{id}/identity-repairs/preview"
+        | "/api/v1/libraries/{id}/identity-repairs/{plan_id}"
+        | "/api/v1/libraries/{id}/identity-repairs/{plan_id}/apply"
+        | "/api/v1/library-channels"
+        | "/api/v1/library-channels/"
+        | "/api/v1/library-channels/preview"
+        | "/api/v1/library-channels/guide"
+        | "/api/v1/library-channels/{id}"
+        | "/api/v1/library-channels/{id}/rebuild"
+        | "/api/v1/library-channels/{id}/build"
+        | "/api/v1/library-channels/{id}/favourite"
+        | "/api/v1/library-channels/{id}/resolve"
+        | "/api/v1/library-channels/{id}/sessions"
+        | "/library"
+        | "/library/sections"
+        | "/library/sections/{id}/all" => 2,
+
+        // Item metadata, artwork, reading, analysis and DVR catalogue rows.
+        "/api/v1/items/{id}"
+        | "/api/v1/files/{id}/subtitles/search"
+        | "/api/v1/files/{id}/subtitles/download"
+        | "/api/v1/items/{id}/classification"
+        | "/api/v1/items/{id}/photo"
+        | "/api/v1/items/{id}/reanalyze"
+        | "/api/v1/items/{id}/refresh-artwork"
+        | "/api/v1/items/{id}/reading-state"
+        | "/api/v1/files/{id}/analysis"
+        | "/api/v1/files/{id}/dv-conversion"
+        | "/api/v1/files/{id}/timeline-annotations/{kind}"
+        | "/api/v1/dv-conversions"
+        | "/api/v1/analysis/summary"
+        | "/api/v1/analysis/jobs"
+        | "/api/v1/analysis/jobs/{id}"
+        | "/api/v1/analysis/jobs/{id}/retry"
+        | "/api/v1/analysis/reopen"
+        | "/api/v1/dvr/status"
+        | "/api/v1/dvr/overview"
+        | "/api/v1/dvr/recordings"
+        | "/api/v1/dvr/recordings/{id}"
+        | "/api/v1/dvr/recordings/{id}/events"
+        | "/api/v1/dvr/recordings/{id}/attention/ack"
+        | "/api/v1/dvr/recordings/{id}/restore"
+        | "/api/v1/dvr/attention"
+        | "/api/v1/dvr/schedule"
+        | "/api/v1/dvr/rules"
+        | "/api/v1/dvr/rules/order"
+        | "/api/v1/dvr/rules/{id}"
+        | "/api/v1/dvr/reminders"
+        | "/api/v1/dvr/reminders/{id}"
+        | "/api/v1/dvr/reminders/{id}/ack"
+        | "/library/metadata/{key}"
+        | "/library/metadata/{key}/children"
+        | "/library/metadata/{key}/{kind}"
+        | "/api/v1/images/{filename}"
+        | "/api/v1/files/{id}/chapters/{index}/thumb" => 3,
+
+        // Search only; maintenance of the search index is a settings action.
+        "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
+
+        // Playback decisions, control, media bodies and watch state.
+        "/api/v1/items/{id}/progress"
+        | "/api/v1/items/{id}/scrobble"
+        | "/api/v1/items/{id}/unscrobble"
+        | "/api/v1/files/{id}/decision"
+        | "/api/v1/files/{id}/audio-offset"
+        | "/api/v1/files/{id}/offline-options"
+        | "/api/v1/files/{id}/offline-packages"
+        | "/api/v1/files/{id}/publication"
+        | "/api/v1/files/{id}/direct"
+        | "/api/v1/files/{id}/download"
+        | "/api/v1/files/{id}/content"
+        | "/api/v1/files/{id}/grants"
+        | "/api/v1/grants/{id}"
+        | "/api/v1/grants/{token}/content"
+        | "/api/v1/files/{id}/stream.mp4"
+        | "/api/v1/files/{id}/subs/{subtitle}"
+        | "/api/v1/files/{id}/subs/{index}/overlay.json"
+        | "/api/v1/files/{id}/subs/{index}/overlay/{generation}/objects/{object}"
+        | "/api/v1/files/{id}/hls/sessions"
+        | "/api/v1/files/{id}/hls/start"
+        | "/api/v1/offline/packages/{id}"
+        | "/api/v1/offline/packages/{id}/lease"
+        | "/api/v1/offline/packages/{id}/complete"
+        | "/api/v1/offline/media/{token}/master.m3u8"
+        | "/api/v1/offline/media/{token}/index.m3u8"
+        | "/api/v1/offline/media/{token}/subs/{index}/{segment}"
+        | "/api/v1/offline/media/{token}/{segment}"
+        | "/api/v1/publication/{session}"
+        | "/api/v1/publication/{session}/{*resource}"
+        | "/api/v1/stream/{id}/status"
+        | "/api/v1/hls/{session}/master.m3u8"
+        | "/api/v1/hls/{session}/index.m3u8"
+        | "/api/v1/hls/{session}/video.m3u8"
+        | "/api/v1/hls/{session}/subs/{index}/index.m3u8"
+        | "/api/v1/hls/{session}/subs/{index}/{segment}"
+        | "/api/v1/hls/{session}/status"
+        | "/api/v1/hls/{session}/control"
+        | "/api/v1/hls/{session}"
+        | "/api/v1/hls/{session}/{segment}"
+        | "/api/v1/live-tv/readiness"
+        | "/api/v1/live-tv/readiness/refresh"
+        | "/api/v1/live-tv/channels"
+        | "/api/v1/live-tv/channels/{channel}/sessions"
+        | "/api/v1/live-tv/guide"
+        | "/api/v1/live-tv/guide/readiness"
+        | "/api/v1/live-tv/guide/refresh"
+        | "/api/v1/live-tv/sessions/{capability}/master.m3u8"
+        | "/api/v1/live-tv/sessions/{capability}/index.m3u8"
+        | "/api/v1/live-tv/sessions/{capability}/status"
+        | "/api/v1/live-tv/sessions/{capability}/keepalive"
+        | "/api/v1/live-tv/sessions/{capability}/{segment}"
+        | "/api/v1/live-tv/sessions/{capability}"
+        | "/api/v1/live-tv/starts/{request_id}"
+        | "/api/v1/live-tv/starts/{request_id}/resume"
+        | "/library/parts/{file_id}/{mtime}/{name}"
+        | "/photo/:/transcode"
+        | "/:/timeline"
+        | "/:/scrobble"
+        | "/:/unscrobble" => 5,
+
+        // Configuration, diagnostics, scans, public shell and maintenance.
+        "/"
+        | "/api/v1/server"
+        | "/api/v1/settings"
+        | "/api/v1/subtitle-provider"
+        | "/api/v1/developer/readiness"
+        | "/api/v1/scan"
+        | "/api/v1/scan/status"
+        | "/api/v1/scan/requests/{id}"
+        | "/api/v1/activity"
+        | "/api/v1/activity/detail"
+        | "/api/v1/activity/sessions/{id}"
+        | "/api/v1/activity/offline/{id}"
+        | "/api/v1/activity/producer"
+        | "/api/v1/trakt/status"
+        | "/api/v1/trakt/link"
+        | "/api/v1/trakt/sync"
+        | "/api/v1/system"
+        | "/api/v1/system/logs"
+        | "/api/v1/system/playback-events"
+        | "/api/v1/system/library-shape"
+        | "/api/v1/system/storage"
+        | "/api/v1/system/search-index/rebuild"
+        | "/api/v1/client-log"
+        | "/api/v1/coming-soon"
+        | "/api/v1/monarr/status"
+        | "/assets/cluster-panel.js"
+        | "/assets/playback-policy.js"
+        | "/assets/playback-control.js"
+        | "/assets/live-tv.js"
+        | "/assets/library-channels.js"
+        | "/assets/reader.js"
+        | "/assets/reader.css"
+        | "/assets/{*path}"
+        | "/connect.svg"
+        | "/manifest.webmanifest"
+        | "/icons/{file}"
+        | "/healthz"
+        | "/readyz"
+        | "/metrics"
+        | "/download/plurx-android.apk"
+        | "/identity" => 6,
+
+        // Cluster administration and authenticated internal transport.
+        "/api/v1/cluster/nodes"
+        | "/api/v1/cluster/status"
+        | "/api/v1/cluster/backups"
+        | "/api/v1/cluster/ingress"
+        | "/api/v1/cluster/media"
+        | "/api/v1/cluster/media/offers"
+        | "/api/v1/cluster/artwork/{filename}"
+        | "/api/v1/cluster/join-tokens"
+        | "/api/v1/cluster/learner-join-tokens"
+        | "/api/v1/cluster/support-bundle"
+        | "/api/v1/cluster/nodes/{node_id}/restart-preparation"
+        | "/api/v1/cluster/nodes/{node_id}/promote"
+        | "/api/v1/cluster/nodes/{node_id}/maintenance"
+        | "/api/v1/cluster/election"
+        | "/api/v1/cluster/leave"
+        | "/api/v1/cluster/protocol/learner/activate"
+        | "/api/v1/cluster/protocol/learner/deactivate"
+        | "/api/v1/cluster/nodes/{node_id}"
+        | "/api/v1/cluster/join/redeem"
+        | "/api/v1/cluster/join/finalize"
+        | "/api/v1/cluster/learner/join/redeem"
+        | "/api/v1/cluster/learner/join/finalize"
+        | "/internal/media/fragment-index/{cache_key}"
+        | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
+        internal_activity::PATH
+        | cluster_operations::INTERNAL_PATH
+        | internal_auth_revocation::PATH
+        | crate::media_pool::SNAPSHOT_PATH
+        | crate::media_pool::OFFERS_PATH
+        | crate::shared_cache::CANARY_PATH
+        | crate::live_tv::SNAPSHOT_PATH
+        | crate::live_tv::START_PATH
+        | crate::live_tv::START_V2_PATH
+        | crate::live_tv::ACTIVATE_PATH
+        | crate::live_tv::RESOURCE_PATH
+        | crate::live_tv::STOP_PATH
+        | crate::live_tv::RETIRE_PATH
+        | crate::live_tv::RESUME_PATH
+        | crate::live_tv::START_STATE_PATH
+        | crate::live_tv::DRAIN_PATH
+        | crate::live_tv::GUIDE_PATH
+        | crate::media_sessions::START_PATH
+        | crate::media_sessions::ACTIVATE_PATH
+        | crate::media_sessions::PREPARE_PATH
+        | crate::media_sessions::ABORT_PATH
+        | crate::media_sessions::RELAY_PATH
+        | crate::media_sessions::CONTROL_PATH => 7,
+        _ => 8,
+    }
+}
+
+fn http_node_role(
+    local_source: bool,
+    watermark_source: bool,
+    serving_role: Result<LocalServingRole, ()>,
+) -> usize {
+    if !local_source && watermark_source {
+        3
+    } else if !local_source {
+        0
+    } else {
+        match serving_role {
+            Ok(LocalServingRole::Voter) => 1,
+            Ok(LocalServingRole::Learner) => 2,
+            Ok(LocalServingRole::Unclustered) if !watermark_source => 0,
+            Ok(LocalServingRole::Unclustered) => 5,
+            Ok(LocalServingRole::Fenced) => 4,
+            Err(()) => 5,
+        }
+    }
+}
+
+async fn http_store_attribution(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let group = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or(8, |path| http_route_group(path.as_str()));
+    let raft = state.replication.metrics_handle().snapshot();
+    let role = http_node_role(
+        raft.local_source,
+        raft.watermark_source,
+        state.membership.local_serving_role().await.map_err(|_| ()),
+    );
+    let counts = plurx_core::store::HttpStoreOperationCounts::default();
+    let started_at = Instant::now();
+    let response =
+        plurx_core::store::scope_http_store_operations(counts.clone(), next.run(request)).await;
+    HTTP_ROUTE_METRICS.record(group, role, counts.snapshot(), started_at.elapsed());
+    response
+}
+
+pub(crate) fn prometheus_http_store_attribution() -> String {
+    HTTP_ROUTE_METRICS.render()
+}
+
+// ---------------------------------------------------------------------------
+// Plex façade request census (C-07 M0).
+//
+// C-07's board row says the M0 census decides whether the façade gets paging
+// work, and the plan's §5.0 says to read it out of the access log. There is no
+// access log — that is C-08's finding and it is accurate — and no metric
+// separates the façade from the native API either: `http_route_group` folds
+// `/library/sections/{id}/all` in with `/api/v1/libraries` under `library`,
+// and `/library/parts/{file_id}/{mtime}/{name}` in with the native media
+// routes under `playback`. So the question "is any Plex-family client using
+// this" is not answerable from what a node exposes today, and the census
+// cannot be completed by reading harder.
+//
+// This is the instrument that makes it answerable, and it is all this change
+// is: fourteen bounded handler labels times four bounded outcomes, recorded by
+// a layer over the façade sub-router so nothing native can reach it. No
+// handler is touched, no response changes, and no paging is built.
+const PLEX_HANDLERS: [&str; 14] = [
+    "root",
+    "identity",
+    "library_root",
+    "sections",
+    "section_all",
+    "metadata",
+    "children",
+    "image",
+    "part",
+    "photo_transcode",
+    "timeline",
+    "scrobble",
+    "unscrobble",
+    "search",
+];
+/// `unauthorized` is separate from `error` deliberately, and is the plan's
+/// three outcomes plus one. Every façade route but `root` and `identity`
+/// requires a plurx token presented as `X-Plex-Token`, so a Kodi or
+/// PlexKodiConnect box that is configured but not yet paired shows up here and
+/// nowhere else — and for a census "somebody tried" is the single most
+/// interesting thing that can happen.
+const PLEX_OUTCOMES: [&str; 4] = ["ok", "not_found", "unauthorized", "error"];
+
+/// The census cells, one per `(handler, outcome)`.
+///
+/// Held on `AppState` behind an `Arc`, not in a process-wide `static`, so a
+/// router counts only the requests that router served. In production that is
+/// the same thing — one state per process — but it is what lets a test assert
+/// an exact delta: a process-global counter is also moved by every other test
+/// in the binary that sends façade traffic, on libtest's parallel threads, and
+/// the adversarial review of PR #462 measured that race failing 34 runs in
+/// 400.
+pub(crate) struct PlexCensus {
+    cells: [AtomicU64; PLEX_HANDLERS.len() * PLEX_OUTCOMES.len()],
+}
+
+impl Default for PlexCensus {
+    fn default() -> Self {
+        Self {
+            cells: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+/// The façade's registered templates, and nothing else.
+///
+/// `/search` and `/hubs/search` are one label because they are one handler
+/// (`plex::search`) per API.md §20. A template that is not on this list cannot
+/// reach this function: the layer is attached to the façade sub-router, so the
+/// `None` arm means axum matched a façade route this list has not been told
+/// about, which a test asserts cannot happen.
+fn plex_handler_index(template: &str) -> Option<usize> {
+    let name = match template {
+        "/identity" => "identity",
+        "/library" => "library_root",
+        "/library/sections" => "sections",
+        "/library/sections/{id}/all" => "section_all",
+        "/library/metadata/{key}" => "metadata",
+        "/library/metadata/{key}/children" => "children",
+        "/library/metadata/{key}/{kind}" => "image",
+        "/library/parts/{file_id}/{mtime}/{name}" => "part",
+        "/photo/:/transcode" => "photo_transcode",
+        "/:/timeline" => "timeline",
+        "/:/scrobble" => "scrobble",
+        "/:/unscrobble" => "unscrobble",
+        "/search" | "/hubs/search" => "search",
+        _ => return None,
+    };
+    PLEX_HANDLERS.iter().position(|known| *known == name)
+}
+
+fn plex_outcome_index(status: StatusCode) -> usize {
+    match status.as_u16() {
+        401 | 403 => 2,
+        404 => 1,
+        code if (200..400).contains(&code) => 0,
+        _ => 3,
+    }
+}
+
+impl PlexCensus {
+    pub(crate) fn record(&self, handler: usize, status: StatusCode) {
+        self.cells[handler * PLEX_OUTCOMES.len() + plex_outcome_index(status)]
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn prometheus(&self) -> String {
+        let mut out = String::from(
+            "# HELP plurx_plex_requests_total Plex-compat façade requests by handler and outcome, since this process started. The census that decides whether the façade gets further work.\n\
+             # TYPE plurx_plex_requests_total counter\n",
+        );
+        for (handler_index, handler) in PLEX_HANDLERS.iter().enumerate() {
+            for (outcome_index, outcome) in PLEX_OUTCOMES.iter().enumerate() {
+                let count = self.cells[handler_index * PLEX_OUTCOMES.len() + outcome_index]
+                    .load(Ordering::Relaxed);
+                out.push_str(&format!(
+                    "plurx_plex_requests_total{{handler=\"{handler}\",outcome=\"{outcome}\"}} {count}\n"
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// Counts one façade request. Attached to the façade sub-router only, so a
+/// native `/api/v1/...` request never reaches it and cannot be mistaken for
+/// Plex traffic — which is the whole reason this is a separate layer rather
+/// than another label on `http_route_group`.
+async fn plex_facade_census(
+    State(census): State<std::sync::Arc<PlexCensus>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let handler = request
+        .extensions()
+        .get::<MatchedPath>()
+        .and_then(|path| plex_handler_index(path.as_str()));
+    let response = next.run(request).await;
+    if let Some(handler) = handler {
+        census.record(handler, response.status());
+    }
+    response
+}
+
+/// `root` is not a façade route: `/` serves the web app to a browser and the
+/// Plex capabilities container to a Plex client, from one handler. Counting it
+/// by path would count every page load as Plex traffic, so `root_dispatch`
+/// records it itself, on the branch it actually took.
+pub(crate) const PLEX_ROOT_HANDLER: usize = 0;
+
+// ---------------------------------------------------------------------------
+// Request outcome and body delivery (observability baseline, C-08 M1).
+//
+// `http_store_attribution` above already times the matched route by bounded
+// group and serving role. That timer stops when the handler returns its
+// `Response`, so it is response-header latency and nothing else. Two things
+// F-core-12 asks for are absent from it and are added here:
+//
+//   * the outcome of a request — no method and no status class exist anywhere
+//     in the exposition today, so a node answering every request with 503 and
+//     a node answering every request with 200 render identically;
+//   * how long the response body took to deliver, and whether its consumer
+//     stayed to the end. That is the "streaming-body completion" half of
+//     F-core-12's distinction, and on a media route an abandoned body is the
+//     ordinary end of a seek rather than an error, so the two endings are
+//     counted apart.
+//
+// The route label is `http_route_group`, the same bounded classification the
+// Store attribution uses, and not a per-route template. `http_route_group` is
+// this repository's one exhaustive inventory of registered `MatchedPath`
+// patterns, held by `registered_routes_reach_every_non_other_attribution_family`
+// and by the unclassified-pattern assertion in the route inventory test; a
+// second per-template table would be a second spelling of the same fact with
+// no test holding the two together, and it would have to be maintained by
+// hand because axum exposes no route list at runtime. The cost is real and is
+// stated rather than hidden: a 5xx on one item route and a 5xx on another are
+// one series here. The 5xx WARN line below carries the redacted target and the
+// request id, and that is what takes an operator from a series to a request.
+const HTTP_METHODS: [&str; 7] = ["get", "post", "put", "patch", "delete", "head", "other"];
+const HTTP_STATUS_CLASSES: [&str; 5] = ["2xx", "3xx", "4xx", "5xx", "other"];
+const HTTP_BODY_OUTCOMES: [&str; 2] = ["complete", "aborted"];
+/// Body delivery spans two orders of magnitude more than header latency — a
+/// JSON page finishes in milliseconds and a direct play runs for hours — which
+/// is the whole reason it is a separate family from `plurx_http_route_seconds`
+/// rather than more buckets on it.
+const HTTP_BODY_BUCKETS: [(u64, &str); 6] = [
+    (100_000_000, "0.1"),
+    (1_000_000_000, "1"),
+    (10_000_000_000, "10"),
+    (60_000_000_000, "60"),
+    (600_000_000_000, "600"),
+    (3_600_000_000_000, "3600"),
+];
+
+fn add_saturating(target: &AtomicU64, amount: u64) {
+    let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        (current != u64::MAX).then(|| current.saturating_add(amount))
+    });
+}
+
+/// Bounded by construction: an unlisted method is `other`, so no caller can
+/// mint a series by inventing a verb.
+fn http_method_index(method: &Method) -> usize {
+    match method.as_str() {
+        "GET" => 0,
+        "POST" => 1,
+        "PUT" => 2,
+        "PATCH" => 3,
+        "DELETE" => 4,
+        "HEAD" => 5,
+        _ => 6,
+    }
+}
+
+fn http_status_class_index(status: StatusCode) -> usize {
+    match status.as_u16() {
+        200..=299 => 0,
+        300..=399 => 1,
+        400..=499 => 2,
+        500..=599 => 3,
+        _ => 4,
+    }
+}
+
+#[derive(Default)]
+struct HttpBodyCell {
+    complete: AtomicU64,
+    aborted: AtomicU64,
+    elapsed_nanos: AtomicU64,
+    buckets: [AtomicU64; HTTP_BODY_BUCKETS.len()],
+}
+
+struct HttpRequestMetrics {
+    requests: [AtomicU64; HTTP_ROUTE_GROUPS.len() * HTTP_METHODS.len() * HTTP_STATUS_CLASSES.len()],
+    bodies: [HttpBodyCell; HTTP_ROUTE_GROUPS.len()],
+}
+
+impl Default for HttpRequestMetrics {
+    fn default() -> Self {
+        Self {
+            requests: std::array::from_fn(|_| AtomicU64::new(0)),
+            bodies: std::array::from_fn(|_| HttpBodyCell::default()),
+        }
+    }
+}
+
+impl HttpRequestMetrics {
+    fn record_request(&self, group: usize, method: usize, status: usize) {
+        add_saturating(
+            &self.requests
+                [(group * HTTP_METHODS.len() + method) * HTTP_STATUS_CLASSES.len() + status],
+            1,
+        );
+    }
+
+    fn record_body(&self, group: usize, elapsed: Duration, complete: bool) {
+        let cell = &self.bodies[group];
+        add_saturating(
+            if complete {
+                &cell.complete
+            } else {
+                &cell.aborted
+            },
+            1,
+        );
+        let elapsed_nanos = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+        add_saturating(&cell.elapsed_nanos, elapsed_nanos);
+        if let Some(index) = HTTP_BODY_BUCKETS
+            .iter()
+            .position(|(upper, _)| elapsed_nanos <= *upper)
+        {
+            add_saturating(&cell.buckets[index], 1);
+        }
+    }
+
+    fn render(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = String::from(
+            "# HELP plurx_http_requests_total HTTP requests by bounded route group, method and status class.\n\
+             # TYPE plurx_http_requests_total counter\n",
+        );
+        for (group_index, group) in HTTP_ROUTE_GROUPS.iter().enumerate() {
+            for (method_index, method) in HTTP_METHODS.iter().enumerate() {
+                for (status_index, status) in HTTP_STATUS_CLASSES.iter().enumerate() {
+                    let count = self.requests[(group_index * HTTP_METHODS.len() + method_index)
+                        * HTTP_STATUS_CLASSES.len()
+                        + status_index]
+                        .load(Ordering::Relaxed);
+                    let _ = writeln!(
+                        out,
+                        "plurx_http_requests_total{{route_group=\"{group}\",method=\"{method}\",status=\"{status}\"}} {count}"
+                    );
+                }
+            }
+        }
+        out.push_str(
+            "# HELP plurx_http_body_seconds Response body delivery time, from the handler's response to the body's last frame or its drop.\n\
+             # TYPE plurx_http_body_seconds histogram\n",
+        );
+        for (group_index, group) in HTTP_ROUTE_GROUPS.iter().enumerate() {
+            let cell = &self.bodies[group_index];
+            let mut cumulative = 0_u64;
+            for (bucket_index, (_, upper)) in HTTP_BODY_BUCKETS.iter().enumerate() {
+                cumulative =
+                    cumulative.saturating_add(cell.buckets[bucket_index].load(Ordering::Relaxed));
+                let _ = writeln!(
+                    out,
+                    "plurx_http_body_seconds_bucket{{route_group=\"{group}\",le=\"{upper}\"}} {cumulative}"
+                );
+            }
+            let count = cell
+                .complete
+                .load(Ordering::Relaxed)
+                .saturating_add(cell.aborted.load(Ordering::Relaxed));
+            let _ = writeln!(
+                out,
+                "plurx_http_body_seconds_bucket{{route_group=\"{group}\",le=\"+Inf\"}} {count}"
+            );
+            let seconds = cell.elapsed_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0;
+            let _ = writeln!(
+                out,
+                "plurx_http_body_seconds_sum{{route_group=\"{group}\"}} {seconds:.9}"
+            );
+            let _ = writeln!(
+                out,
+                "plurx_http_body_seconds_count{{route_group=\"{group}\"}} {count}"
+            );
+        }
+        out.push_str(
+            "# HELP plurx_http_bodies_total Response bodies by how they ended. An aborted body is a consumer that went away, which on a media route is the ordinary end of a seek and not an error.\n\
+             # TYPE plurx_http_bodies_total counter\n",
+        );
+        for (group_index, group) in HTTP_ROUTE_GROUPS.iter().enumerate() {
+            let cell = &self.bodies[group_index];
+            for outcome in HTTP_BODY_OUTCOMES {
+                let count = if outcome == "complete" {
+                    cell.complete.load(Ordering::Relaxed)
+                } else {
+                    cell.aborted.load(Ordering::Relaxed)
+                };
+                let _ = writeln!(
+                    out,
+                    "plurx_http_bodies_total{{route_group=\"{group}\",outcome=\"{outcome}\"}} {count}"
+                );
+            }
+        }
+        out
+    }
+}
+
+static HTTP_REQUEST_METRICS: LazyLock<HttpRequestMetrics> =
+    LazyLock::new(HttpRequestMetrics::default);
+
+/// At most one 5xx access line per route group per second, carrying how many
+/// it swallowed since the last one.
+///
+/// Without this the line is a hazard rather than a help. A fenced node, a
+/// learner outside its eligible routes, and a node in maintenance each refuse
+/// **every** request with 503, so at any real request rate one WARN per
+/// request would evict the whole bounded ring behind Settings → System → Logs
+/// — the very place an admin goes to find out why the node is refusing. The
+/// counters stay exact; only the prose is sampled, and the line says by how
+/// much.
+const ACCESS_LINE_INTERVAL_NANOS: u64 = 1_000_000_000;
+
+struct AccessLineThrottle {
+    /// Nanoseconds since `started_at` of the last emitted line, per group.
+    /// Zero means none has been emitted yet.
+    last_nanos: [AtomicU64; HTTP_ROUTE_GROUPS.len()],
+    suppressed: [AtomicU64; HTTP_ROUTE_GROUPS.len()],
+    started_at: Instant,
+}
+
+impl Default for AccessLineThrottle {
+    fn default() -> Self {
+        Self {
+            last_nanos: std::array::from_fn(|_| AtomicU64::new(0)),
+            suppressed: std::array::from_fn(|_| AtomicU64::new(0)),
+            started_at: Instant::now(),
+        }
+    }
+}
+
+impl AccessLineThrottle {
+    /// `Some(n)` when a line may be written, `n` being how many were suppressed
+    /// since the last one; `None` when it must not be.
+    fn admit(&self, group: usize) -> Option<u64> {
+        // `max(1)` so the first request of the process, which may land on
+        // nanosecond zero, still counts as "a line has been emitted".
+        let now = (self
+            .started_at
+            .elapsed()
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64)
+            .max(1);
+        let last = self.last_nanos[group].load(Ordering::Relaxed);
+        if last != 0 && now.saturating_sub(last) < ACCESS_LINE_INTERVAL_NANOS {
+            self.suppressed[group].fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        // Two threads can both pass the check at once. The loser writes a
+        // second line rather than a wrong one, which is the safe way to lose
+        // this race.
+        self.last_nanos[group].store(now, Ordering::Relaxed);
+        Some(self.suppressed[group].swap(0, Ordering::Relaxed))
+    }
+}
+
+static ACCESS_LINES: LazyLock<AccessLineThrottle> = LazyLock::new(AccessLineThrottle::default);
+
+/// Times one response body and classifies how it ended.
+///
+/// `size_hint` and `is_end_stream` are delegated to the inner body unchanged.
+/// That is load-bearing rather than tidy: hyper derives `Content-Length` from
+/// the size hint when the handler has not set the header itself, so a wrapper
+/// that reported an unknown length would silently move range responses onto
+/// chunked framing.
+///
+/// A body is `complete` when it handed the connection everything it promised,
+/// and there are two ways to know that because hyper ends bodies two ways:
+///
+/// - a body polled to its end (`Poll::Ready(None)`). A chunked body always
+///   ends like this: hyper has to see the end to write the terminating chunk.
+/// - a body whose response head declared a length and which has yielded that
+///   many data bytes. hyper **does not poll such a body to its end.** Once its
+///   length encoder has written the declared bytes the dispatcher drops the
+///   body unpolled (hyper 1.x `proto/h1/dispatch.rs`, the `!can_write_body()`
+///   branch), and a stream-backed body — every direct play range and every HLS
+///   segment plurx serves — reports `is_end_stream() == false` until it has
+///   been polled to `None`. Without the byte count every fully delivered media
+///   body would be counted as abandoned.
+///
+/// "Handed the connection" is not "acknowledged by the client": a connection
+/// that dies after the last bytes were yielded but before they reached the
+/// socket still counts `complete`. That is the same line the chunked case
+/// draws, and the last point at which a body can observe its own delivery.
+struct MeasuredBody {
+    inner: axum::body::Body,
+    metrics: &'static HttpRequestMetrics,
+    group: usize,
+    started_at: Instant,
+    /// The number of body bytes the response head promised, when it promised
+    /// a number (see `declared_body_length`).
+    declared: Option<u64>,
+    /// Data bytes this body has yielded to the connection so far.
+    delivered: u64,
+    recorded: bool,
+}
+
+impl MeasuredBody {
+    fn new(
+        metrics: &'static HttpRequestMetrics,
+        group: usize,
+        inner: axum::body::Body,
+        declared: Option<u64>,
+    ) -> Self {
+        Self {
+            inner,
+            metrics,
+            group,
+            started_at: Instant::now(),
+            declared,
+            delivered: 0,
+            recorded: false,
+        }
+    }
+
+    /// Whether everything this body promised has been handed over: it is at
+    /// its end, or it has yielded the length its response head declared.
+    fn delivered_everything(&self) -> bool {
+        http_body::Body::is_end_stream(&self.inner)
+            || self
+                .declared
+                .is_some_and(|declared| self.delivered >= declared)
+    }
+
+    fn finish(&mut self, complete: bool) {
+        if self.recorded {
+            return;
+        }
+        self.recorded = true;
+        self.metrics
+            .record_body(self.group, self.started_at.elapsed(), complete);
+    }
+}
+
+impl http_body::Body for MeasuredBody {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        use std::task::Poll;
+
+        let this = self.get_mut();
+        let polled = std::pin::Pin::new(&mut this.inner).poll_frame(cx);
+        match &polled {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    this.delivered = this.delivered.saturating_add(data.len() as u64);
+                }
+            }
+            Poll::Ready(None) => this.finish(true),
+            // A body that ended in an error did not deliver what it promised,
+            // so it is counted beside the abandoned ones rather than as a
+            // completed delivery.
+            Poll::Ready(Some(Err(_))) => this.finish(false),
+            Poll::Pending => {}
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+impl Drop for MeasuredBody {
+    fn drop(&mut self) {
+        // A body dropped short of what it promised is a consumer that went
+        // away. One dropped after handing over everything — at its end, or
+        // with its declared length yielded, which is how hyper lets go of
+        // every fixed-length body — was delivered.
+        let complete = self.delivered_everything();
+        self.finish(complete);
+    }
+}
+
+/// The number of body bytes a response's head promised, if it promised one.
+///
+/// A response to HEAD, and a 1xx, 204 or 304, promises none whatever its
+/// `Content-Length` says: there the header describes the representation, and
+/// hyper writes no body at all. Otherwise the header wins when present,
+/// because it is what hyper frames the response by; when the handler set none,
+/// hyper derives it from the body's exact size hint, so that is the fallback.
+/// Neither means a chunked body, which is `complete` only at its end.
+fn declared_body_length(
+    head_request: bool,
+    status: StatusCode,
+    response: &Response,
+) -> Option<u64> {
+    if head_request
+        || status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED
+    {
+        return Some(0);
+    }
+    response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .or_else(|| http_body::Body::size_hint(response.body()).exact())
+}
+
+/// Counts every request's outcome and times its body.
+///
+/// Layered outside `http_store_attribution`, and therefore outside
+/// `cluster_capacity_gate`, so the 503s the gate produces for a learner, a
+/// fenced node or a node in maintenance are counted. A refusal is a request,
+/// and a node refusing everything with an uncounted 503 is exactly the failure
+/// this family exists to show.
+async fn http_request_metrics(request: Request<axum::body::Body>, next: Next) -> Response {
+    measure_http_request(&HTTP_REQUEST_METRICS, &ACCESS_LINES, request, next).await
+}
+
+/// `http_request_metrics` over a metrics table the caller names, so a test can
+/// own one and read exact counts without racing every other router test in
+/// the binary for the process-wide cells.
+async fn measure_http_request(
+    metrics: &'static HttpRequestMetrics,
+    access_lines: &'static AccessLineThrottle,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    // `other` is the last group, and is what both ways of having no template —
+    // the web fallback and a genuinely unmatched path — resolve to.
+    let group = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or(HTTP_ROUTE_GROUPS.len() - 1, |path| {
+            http_route_group(path.as_str())
+        });
+    let method = http_method_index(request.method());
+    let head_request = request.method() == Method::HEAD;
+    let target = safe_trace_target(request.uri());
+    let request_id = request
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let started_at = Instant::now();
+    let response = next.run(request).await;
+    let status = response.status();
+    metrics.record_request(group, method, http_status_class_index(status));
+    if status.is_server_error() {
+        // Only 5xx, and at most one line per route group per second.
+        // `logbuf::LogBuffer` is a bounded ring and it is the only log the
+        // product itself can show; a line per successful request would evict
+        // everything else on a node serving one HLS segment per second per
+        // viewer, and a line per refusal would do the same on a fenced node.
+        // The counters above carry the volume, this ring carries the
+        // exceptions — and `also_suppressed` says what the sampling cost.
+        if let Some(also_suppressed) = access_lines.admit(group) {
+            tracing::warn!(
+                target: "plurxd::http",
+                route_group = HTTP_ROUTE_GROUPS[group],
+                status = status.as_u16(),
+                latency_ms = started_at.elapsed().as_millis() as u64,
+                request_id = %request_id,
+                path = %target,
+                also_suppressed,
+                "http request failed"
+            );
+        }
+    }
+    let declared = declared_body_length(head_request, status, &response);
+    response.map(|body| axum::body::Body::new(MeasuredBody::new(metrics, group, body, declared)))
+}
+
+pub(crate) fn prometheus_http_request_metrics() -> String {
+    HTTP_REQUEST_METRICS.render()
+}
+
+// ---------------------------------------------------------------------------
+// Request ids (observability baseline, C-08 M2).
+
+pub(crate) const REQUEST_ID_HEADER: &str = "x-request-id";
+const MAX_REQUEST_ID: usize = 64;
+
+/// An id a caller supplied is adopted only if it is a short, boring token.
+///
+/// Anything else is replaced rather than refused: the id is a correlation aid,
+/// and refusing a request over a malformed log field would make a log field
+/// load-bearing for service. The discarded value is never returned, logged or
+/// stored anywhere — a caller that puts a bearer token in this header must not
+/// get it written into journald or into the in-product log ring.
+fn adopt_or_mint_request_id(incoming: Option<&HeaderValue>) -> HeaderValue {
+    match incoming.and_then(|value| value.to_str().ok()) {
+        Some(value)
+            if !value.is_empty()
+                && value.len() <= MAX_REQUEST_ID
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') =>
+        {
+            HeaderValue::from_str(value).unwrap_or_else(|_| mint_request_id())
+        }
+        _ => mint_request_id(),
+    }
+}
+
+fn mint_request_id() -> HeaderValue {
+    let mut buffer = [0_u8; uuid::fmt::Simple::LENGTH];
+    let text = uuid::Uuid::new_v4().simple().encode_lower(&mut buffer);
+    HeaderValue::from_str(text).expect("lowercase hex is a legal header value")
+}
+
+/// Gives every request an id, on the request, on its span, and on the response.
+///
+/// Outermost of all the layers, because everything inside it — the 5xx access
+/// line, the `http_request` span and any handler — reads the id back out of
+/// the request headers, and only this layer is allowed to decide what that
+/// value is. The id is deliberately **not** a metric label: a per-request label
+/// is unbounded, which is the single most common way a metrics system is
+/// destroyed.
+async fn http_request_id(mut request: Request<axum::body::Body>, next: Next) -> Response {
+    let id = adopt_or_mint_request_id(request.headers().get(REQUEST_ID_HEADER));
+    request.headers_mut().insert(REQUEST_ID_HEADER, id.clone());
+    let mut response = next.run(request).await;
+    // A handler that already answered with an id of its own keeps it.
+    response
+        .headers_mut()
+        .entry(REQUEST_ID_HEADER)
+        .or_insert(id);
+    response
+}
 
 #[derive(Clone, Copy)]
 enum DeadlineGroup {
@@ -159,6 +1283,7 @@ pub fn router(state: AppState) -> Router {
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
         .route("/settings", get(system::get_settings))
+        .route("/subtitle-provider", get(subtitle_downloads::settings))
         // Advisory only. The Developer section lists what must be true
         // before each switch is safe; this is the other half — what this
         // process can currently observe. Nothing reads it to decide
@@ -222,6 +1347,10 @@ pub fn router(state: AppState) -> Router {
         // Browse
         .route("/items/{id}", get(browse::item_detail).patch(items::edit))
         .route("/files/{id}/dv-conversion", get(dv_disk::file_status))
+        .route(
+            "/files/{id}/chapters/{index}/thumb",
+            get(chapter_thumbs::serve),
+        )
         .route("/dv-conversions", get(dv_disk::status))
         .route("/analysis/summary", get(analysis::summary))
         .route("/analysis/jobs", get(analysis::jobs))
@@ -268,6 +1397,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/files/{id}/audio-offset", put(stream::set_audio_offset))
         .route("/files/{id}/offline-options", get(offline::options))
+        .route("/files/{id}/grants", post(file_grants::mint))
+        .route("/grants/{id}", delete(file_grants::revoke))
         .route(
             "/offline/packages/{id}",
             get(offline::package_status).delete(offline::delete_package),
@@ -280,13 +1411,35 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(json_short_deadline));
 
     let json_long = Router::new()
+        .route(
+            "/files/{id}/subtitles/search",
+            get(subtitle_downloads::search),
+        )
         // These handlers legitimately coordinate cluster writes, password
         // hashing, scans, or child work. Five minutes stays above their own
         // fences while still making a wedged request finite.
         .route("/setup", post(system::setup))
-        .route("/auth/login", post(auth::login))
+        .route(
+            "/auth/login",
+            post(auth::login).layer(DefaultBodyLimit::max(auth::MAX_LOGIN_BODY_BYTES)),
+        )
         .route("/auth/logout", post(auth::logout))
+        .route("/me/devices", get(users::list_my_devices))
+        .route("/me/devices/{prefix}", delete(users::revoke_my_device))
+        .route("/users/{id}/devices", get(users::list_user_devices))
+        .route(
+            "/users/{id}/devices/{prefix}",
+            delete(users::revoke_user_device),
+        )
         .route("/settings", put(system::update_settings))
+        .route(
+            "/subtitle-provider",
+            put(subtitle_downloads::update_settings),
+        )
+        .route(
+            "/files/{id}/subtitles/download",
+            post(subtitle_downloads::download),
+        )
         .route(
             "/live-tv/readiness/refresh",
             post(live_tv::refresh_readiness),
@@ -318,6 +1471,7 @@ pub fn router(state: AppState) -> Router {
             post(cluster::enter_maintenance).delete(cluster::exit_maintenance),
         )
         .route("/cluster/election", post(cluster::force_election))
+        .route("/cluster/backups", post(crate::backup::create))
         .route("/cluster/leave", post(cluster::leave))
         .route(
             "/cluster/protocol/learner/activate",
@@ -395,6 +1549,10 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/live-tv/sessions/{capability}/master.m3u8",
+            get(live_tv::master),
+        )
+        .route(
             "/live-tv/sessions/{capability}/index.m3u8",
             get(live_tv::playlist),
         )
@@ -438,6 +1596,7 @@ pub fn router(state: AppState) -> Router {
         .route("/files/{id}/direct", get(stream::direct))
         .route("/files/{id}/download", get(stream::download))
         .route("/files/{id}/content", get(stream::book_content))
+        .route("/grants/{token}/content", get(file_grants::content))
         .route("/publication/{session}", delete(publication::close))
         .route(
             "/publication/{session}/{*resource}",
@@ -540,6 +1699,16 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             mutable_media_serving_gate,
+        ))
+        // Outside the serving gate, so a request `mutable_media_serving_gate`
+        // refuses is still counted. That is the only refusal it sees.
+        // `cluster_capacity_gate` is layered outside the whole router (below)
+        // and answers 503 before routing — maintenance, a fenced node, a
+        // learner-ineligible route — so those refusals never reach this layer
+        // and are not counted. The plan's §8.5 closing rule accounts for that.
+        .layer(axum::middleware::from_fn_with_state(
+            std::sync::Arc::clone(&state.plex_census),
+            plex_facade_census,
         ));
 
     let public_short = Router::new()
@@ -664,6 +1833,10 @@ pub fn router(state: AppState) -> Router {
             get(internal_media::fragment_index),
         )
         .route(
+            "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}",
+            get(internal_media::subtitle_source),
+        )
+        .route(
             crate::media_sessions::START_PATH,
             post(internal_media_sessions::start).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
@@ -718,6 +1891,14 @@ pub fn router(state: AppState) -> Router {
                     method = %request.method(),
                     target = %safe_trace_target(request.uri()),
                     version = ?request.version(),
+                    // Written by `http_request_id` outside this layer, so the
+                    // value here is always a short alphanumeric token this
+                    // process vouches for, never the raw header a caller sent.
+                    request_id = request
+                        .headers()
+                        .get(REQUEST_ID_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default(),
                 )
             }),
         )
@@ -725,6 +1906,16 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             cluster_capacity_gate,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            http_store_attribution,
+        ))
+        // Outside the Store attribution, and therefore outside the capacity
+        // gate, so a 503 the gate produces is still counted as a request.
+        .layer(axum::middleware::from_fn(http_request_metrics))
+        // Outermost: every layer inside reads the id back out of the request
+        // headers, so this one has to have written it first.
+        .layer(axum::middleware::from_fn(http_request_id))
         .with_state(state)
 }
 
@@ -890,7 +2081,17 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         && path
             .strip_prefix(crate::fragment_index_cluster::PEER_PATH_PREFIX)
             .is_some_and(|cache_key| !cache_key.is_empty() && !cache_key.contains('/'));
+    let subtitle_source_read = method == Method::GET
+        && path
+            .strip_prefix("/internal/media/subtitle-source/")
+            .is_some_and(|suffix| {
+                let segments = suffix.split('/').collect::<Vec<_>>();
+                matches!(segments.as_slice(), [file_id, ordinal, "sup" | "webvtt" | "matroska"]
+                    if file_id.parse::<i64>().is_ok_and(|value| value > 0)
+                    && ordinal.parse::<i64>().is_ok_and(|value| value >= 0))
+            });
     if fragment_index_read
+        || subtitle_source_read
         || (method == Method::GET && path == crate::media_pool::SNAPSHOT_PATH)
         || (method == Method::POST
             && matches!(
@@ -1075,10 +2276,15 @@ async fn root_dispatch(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     if plex::looks_like_plex(&headers) {
-        match plex::root(state).await {
+        let census = std::sync::Arc::clone(&state.plex_census);
+        let response = match plex::root(state).await {
             Ok(resp) => resp,
             Err(e) => e.into_response(),
-        }
+        };
+        // Only this branch. A browser loading the web app from the same path
+        // is not façade traffic and must not be counted as any.
+        census.record(PLEX_ROOT_HANDLER, response.status());
+        response
     } else {
         web::index().await.into_response()
     }
@@ -1236,6 +2442,1000 @@ mod tests {
         "ok"
     }
 
+    async fn recorded_store_handler() -> &'static str {
+        for class in 0..3 {
+            plurx_core::store::validation_time_http_store_operation(class).await;
+        }
+        "ok"
+    }
+
+    // -- Plex façade census (C-07 M0) ---------------------------------------
+
+    fn plex_cell(exposition: &str, handler: &str, outcome: &str) -> u64 {
+        let prefix =
+            format!("plurx_plex_requests_total{{handler=\"{handler}\",outcome=\"{outcome}\"}} ");
+        exposition
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("a fixed census cell")
+            .parse()
+            .expect("counter")
+    }
+
+    /// The census is only worth reading if its handler list covers every route
+    /// the façade actually registers. This reads the registrations out of
+    /// `router()`'s own source rather than a list somebody kept in step by
+    /// hand, so adding a façade route without a label fails here.
+    #[test]
+    fn every_registered_facade_route_has_a_census_label() {
+        let source = include_str!("mod.rs");
+        let block = source
+            .split_once("    let plex_short = Router::new()")
+            .expect("plex_short")
+            .1
+            .split_once("    let plex_routes = Router::new()")
+            .expect("plex_routes")
+            .0;
+        let templates = block
+            .match_indices(".route(\"")
+            .map(|(index, _)| {
+                let rest = &block[index + ".route(\"".len()..];
+                rest.split_once('"').expect("template").0
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            templates.len(),
+            14,
+            "the façade registers {} routes: {templates:?}",
+            templates.len()
+        );
+        for template in &templates {
+            assert!(
+                plex_handler_index(template).is_some(),
+                "registered façade route has no census label: {template}"
+            );
+        }
+        // `/search` and `/hubs/search` are one handler and share one label, so
+        // fourteen routes map onto thirteen names; `root` is the fourteenth
+        // name and is recorded by `root_dispatch` instead of by a route.
+        let mut labelled = templates
+            .iter()
+            .filter_map(|template| plex_handler_index(template))
+            .collect::<Vec<_>>();
+        labelled.sort_unstable();
+        labelled.dedup();
+        assert_eq!(labelled.len(), 13);
+        assert!(!labelled.contains(&PLEX_ROOT_HANDLER));
+        assert_eq!(PLEX_HANDLERS[PLEX_ROOT_HANDLER], "root");
+    }
+
+    #[test]
+    fn the_census_label_space_is_closed() {
+        let exposition = PlexCensus::default().prometheus();
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_plex_requests_total{"))
+                .count(),
+            PLEX_HANDLERS.len() * PLEX_OUTCOMES.len()
+        );
+        // Nothing outside the façade's own templates can reach a label.
+        assert!(plex_handler_index("/api/v1/libraries").is_none());
+        assert!(plex_handler_index("/library/sections/1/all").is_none());
+        assert_eq!(plex_outcome_index(StatusCode::OK), 0);
+        assert_eq!(plex_outcome_index(StatusCode::NOT_FOUND), 1);
+        assert_eq!(plex_outcome_index(StatusCode::UNAUTHORIZED), 2);
+        assert_eq!(plex_outcome_index(StatusCode::FORBIDDEN), 2);
+        assert_eq!(plex_outcome_index(StatusCode::INTERNAL_SERVER_ERROR), 3);
+        assert_eq!(plex_outcome_index(StatusCode::SERVICE_UNAVAILABLE), 3);
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_facade_request_is_counted_as_a_client_that_tried() {
+        let (app, state) = test_app_with_state();
+        let before = state.plex_census.prometheus();
+        let response = app
+            .oneshot(get("/library/sections", None))
+            .await
+            .expect("response");
+        // No `X-Plex-Token`: the façade refuses, and that refusal is the signal
+        // a census exists to see.
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let after = state.plex_census.prometheus();
+        assert_eq!(
+            plex_cell(&after, "sections", "unauthorized"),
+            plex_cell(&before, "sections", "unauthorized") + 1
+        );
+        assert_eq!(
+            plex_cell(&after, "sections", "ok"),
+            plex_cell(&before, "sections", "ok")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_public_facade_routes_are_counted_and_the_web_app_is_not() {
+        let (app, state) = test_app_with_state();
+        let root_total = |text: &str| {
+            PLEX_OUTCOMES
+                .iter()
+                .map(|outcome| plex_cell(text, "root", outcome))
+                .sum::<u64>()
+        };
+        let before = state.plex_census.prometheus();
+
+        // `/identity` takes no token and is how a Plex client finds a server.
+        let identity = app
+            .clone()
+            .oneshot(get("/identity", None))
+            .await
+            .expect("response");
+        assert_eq!(identity.status(), StatusCode::OK);
+        let after_identity = state.plex_census.prometheus();
+        assert_eq!(
+            plex_cell(&after_identity, "identity", "ok"),
+            plex_cell(&before, "identity", "ok") + 1
+        );
+
+        // `/` from a browser is the web app. `root_dispatch` serves both from
+        // one handler, so the two branches are asserted one at a time: a total
+        // alone cannot tell "the Plex branch counted" from "the web branch
+        // counted instead".
+        let web_root = app.clone().oneshot(get("/", None)).await.expect("response");
+        assert!(web_root.status().is_success());
+        let after_web = state.plex_census.prometheus();
+        assert_eq!(
+            root_total(&after_web),
+            root_total(&after_identity),
+            "a browser page load is not façade traffic"
+        );
+
+        // `/` with Plex headers is the capabilities container.
+        let plex_root = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("x-plex-product", "PlexKodiConnect")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert!(plex_root.status().is_success() || plex_root.status().is_client_error());
+        assert_eq!(
+            root_total(&state.plex_census.prometheus()),
+            root_total(&after_web) + 1,
+            "the Plex branch of root_dispatch is the one that counts"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_native_request_never_reaches_the_census() {
+        let (app, state) = test_app_with_state();
+        let before = state.plex_census.prometheus();
+        for path in ["/api/v1/libraries", "/api/v1/search", "/healthz"] {
+            let _ = app
+                .clone()
+                .oneshot(get(path, None))
+                .await
+                .expect("response");
+        }
+        assert_eq!(
+            state.plex_census.prometheus(),
+            before,
+            "a native request moved a façade counter"
+        );
+    }
+
+    /// The census tests above assert exact deltas, which is only sound if the
+    /// counter they read is moved by nothing but their own requests. With a
+    /// process-global counter every other test in this binary that sends
+    /// façade traffic (`plex_facade_requires_a_valid_token`,
+    /// `plex_facade_serves_seeded_content`, ...) moves it too, on libtest's
+    /// parallel threads. This pins the property deterministically instead of
+    /// by racing: a second router's façade traffic must not reach this one's
+    /// census, and `/metrics` must render this router's census, not another.
+    #[tokio::test]
+    async fn each_router_counts_only_its_own_facade_requests() {
+        let (app, state) = test_app_with_state();
+        let (other_app, _other_state) = test_app_with_state();
+        let before = state.plex_census.prometheus();
+        for _ in 0..3 {
+            let _ = other_app
+                .clone()
+                .oneshot(get("/library/sections", None))
+                .await
+                .expect("response");
+        }
+        assert_eq!(
+            state.plex_census.prometheus(),
+            before,
+            "another router's façade request moved this router's census"
+        );
+
+        let _ = app
+            .clone()
+            .oneshot(get("/library/sections", None))
+            .await
+            .expect("response");
+        let metrics = app.oneshot(get("/metrics", None)).await.expect("response");
+        let body = axum::body::to_bytes(metrics.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let exposition = String::from_utf8(body.to_vec()).expect("utf-8");
+        assert_eq!(
+            plex_cell(&exposition, "sections", "unauthorized"),
+            plex_cell(&before, "sections", "unauthorized") + 1,
+            "/metrics renders the census of the router that served it"
+        );
+    }
+
+    // -- observability baseline (C-08 M1/M2/M3) -----------------------------
+
+    use crate::logbuf::testwriter::CapturedWriter;
+
+    async fn streaming_test_handler() -> Response {
+        // Three frames, 100 ms apart: the response head is available at once
+        // and the body takes a third of a second, which is the whole point of
+        // measuring the two separately.
+        let frames = futures_util::stream::unfold(0_u8, |index| async move {
+            if index >= 3 {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Some((
+                Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"frame")),
+                index + 1,
+            ))
+        });
+        axum::body::Body::from_stream(frames).into_response()
+    }
+
+    /// The two observability layers over three routes with known shapes, in the
+    /// same order `router()` adds them.
+    ///
+    /// The metrics layer records into a table this test owns rather than the
+    /// process-wide one, so its counts are exact: every other router test in
+    /// this binary increments the process-wide cells in parallel, and two of
+    /// these tests share the `search` group.
+    fn observability_probe_router() -> (Router, &'static HttpRequestMetrics) {
+        let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let access_lines: &'static AccessLineThrottle = Box::leak(Box::default());
+        let router = Router::new()
+            .route("/api/v1/items/{id}", axum::routing::get(|| async { "ok" }))
+            .route(
+                "/api/v1/settings",
+                axum::routing::get(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+            )
+            .route(
+                "/api/v1/cluster/status",
+                axum::routing::get(|| async { (StatusCode::SERVICE_UNAVAILABLE, "refused") }),
+            )
+            .route("/api/v1/search", axum::routing::get(streaming_test_handler))
+            .layer(axum::middleware::from_fn(
+                move |request: Request<axum::body::Body>, next: Next| {
+                    measure_http_request(metrics, access_lines, request, next)
+                },
+            ))
+            .layer(axum::middleware::from_fn(http_request_id));
+        (router, metrics)
+    }
+
+    fn request_cell(exposition: &str, group: &str, method: &str, status: &str) -> u64 {
+        let prefix = format!(
+            "plurx_http_requests_total{{route_group=\"{group}\",method=\"{method}\",status=\"{status}\"}} "
+        );
+        exposition
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("a fixed request cell")
+            .parse()
+            .expect("counter")
+    }
+
+    fn body_cell(exposition: &str, group: &str, outcome: &str) -> u64 {
+        let prefix =
+            format!("plurx_http_bodies_total{{route_group=\"{group}\",outcome=\"{outcome}\"}} ");
+        exposition
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("a fixed body cell")
+            .parse()
+            .expect("counter")
+    }
+
+    fn body_seconds_sum(exposition: &str, group: &str) -> f64 {
+        let prefix = format!("plurx_http_body_seconds_sum{{route_group=\"{group}\"}} ");
+        exposition
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("a fixed body sum")
+            .parse()
+            .expect("seconds")
+    }
+
+    #[tokio::test]
+    async fn a_request_is_labelled_by_its_route_group_and_never_by_its_uri() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let response = app
+            .oneshot(get("/api/v1/items/424242", None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let after = metrics.render();
+        assert_eq!(
+            request_cell(&after, "item", "get", "2xx"),
+            request_cell(&before, "item", "get", "2xx") + 1
+        );
+        // The concrete id reached the template but must not have reached a
+        // label. `424242` is distinctive enough that a stray substring match
+        // would be a real leak rather than a coincidence.
+        assert!(
+            !after.contains("424242"),
+            "a request id reached the exposition"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unmatched_path_uses_one_shared_label_and_mints_no_series() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let before_lines = before
+            .lines()
+            .filter(|line| line.starts_with("plurx_http_requests_total{"))
+            .count();
+        for index in 0..100 {
+            let response = app
+                .clone()
+                .oneshot(get(&format!("/nothing/here/{index}"), None))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        let after = metrics.render();
+        assert!(
+            request_cell(&after, "other", "get", "4xx")
+                >= request_cell(&before, "other", "get", "4xx") + 100
+        );
+        assert_eq!(
+            after
+                .lines()
+                .filter(|line| line.starts_with("plurx_http_requests_total{"))
+                .count(),
+            before_lines,
+            "a hundred distinct paths must not mint a single new series"
+        );
+    }
+
+    #[test]
+    fn the_request_label_space_is_closed() {
+        let exposition = prometheus_http_request_metrics();
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_http_requests_total{"))
+                .count(),
+            HTTP_ROUTE_GROUPS.len() * HTTP_METHODS.len() * HTTP_STATUS_CLASSES.len()
+        );
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_http_bodies_total{"))
+                .count(),
+            HTTP_ROUTE_GROUPS.len() * HTTP_BODY_OUTCOMES.len()
+        );
+        // Every label value in the exposition comes from one of the three
+        // fixed arrays, so the arrays are the whole vocabulary.
+        for line in exposition
+            .lines()
+            .filter(|line| line.starts_with("plurx_http_requests_total{"))
+        {
+            let labels = line
+                .split_once('{')
+                .expect("labels")
+                .1
+                .split_once('}')
+                .expect("labels")
+                .0;
+            let values = labels
+                .split(',')
+                .map(|pair| pair.split_once('=').expect("pair").1.trim_matches('"'))
+                .collect::<Vec<_>>();
+            assert!(HTTP_ROUTE_GROUPS.contains(&values[0]), "{line}");
+            assert!(HTTP_METHODS.contains(&values[1]), "{line}");
+            assert!(HTTP_STATUS_CLASSES.contains(&values[2]), "{line}");
+        }
+        assert_eq!(http_method_index(&Method::TRACE), 6);
+        assert_eq!(http_status_class_index(StatusCode::CONTINUE), 4);
+    }
+
+    #[tokio::test]
+    async fn header_latency_and_body_delivery_are_separate_measurements() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let started_at = Instant::now();
+        let response = app
+            .oneshot(get("/api/v1/search", None))
+            .await
+            .expect("response");
+        // `oneshot` resolves when the handler has returned its response; the
+        // body has not been read yet.
+        let to_headers = started_at.elapsed();
+        let drained = Instant::now();
+        let body = response.into_body().collect().await.expect("body");
+        let to_last_frame = drained.elapsed();
+        assert_eq!(body.to_bytes().len(), 15);
+        assert!(
+            to_headers < Duration::from_millis(80),
+            "the response head took {to_headers:?}"
+        );
+        assert!(
+            to_last_frame >= Duration::from_millis(250),
+            "the body took {to_last_frame:?}"
+        );
+        let after = metrics.render();
+        assert_eq!(
+            body_cell(&after, "search", "complete"),
+            body_cell(&before, "search", "complete") + 1
+        );
+        // The body histogram describes delivery, not the handler: it must have
+        // grown by roughly the streaming time, which is an order of magnitude
+        // more than the response head took.
+        let delivered = body_seconds_sum(&after, "search") - body_seconds_sum(&before, "search");
+        assert!(delivered >= 0.25, "body seconds grew by {delivered}");
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_body_counts_aborted_and_not_as_an_error() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let response = app
+            .oneshot(get("/api/v1/search", None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        // The consumer goes away without reading a frame, exactly as a client
+        // that seeks away from a segment does.
+        drop(response);
+        let after = metrics.render();
+        assert_eq!(
+            body_cell(&after, "search", "aborted"),
+            body_cell(&before, "search", "aborted") + 1
+        );
+        assert_eq!(
+            body_cell(&after, "search", "complete"),
+            body_cell(&before, "search", "complete"),
+            "an abandoned body is not a completed one"
+        );
+        assert_eq!(
+            request_cell(&after, "search", "get", "2xx"),
+            request_cell(&before, "search", "get", "2xx") + 1,
+            "and the request itself still succeeded"
+        );
+    }
+
+    /// Four 5-byte frames from a stream, so the body cannot know it has ended
+    /// until it is polled past its last frame — the shape of every direct play
+    /// range and HLS segment plurx serves.
+    fn four_frame_stream_body() -> axum::body::Body {
+        axum::body::Body::from_stream(futures_util::stream::iter(
+            (0..4).map(|_| Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"frame"))),
+        ))
+    }
+
+    /// `/api/v1/items/length` declares `Content-Length: 20` for the stream the
+    /// way `stream.rs` and `hls.rs` do; any other id leaves hyper to frame it
+    /// chunked.
+    async fn framed_stream_handler(
+        axum::extract::Path(framing): axum::extract::Path<String>,
+    ) -> Response {
+        let mut response = four_frame_stream_body().into_response();
+        if framing == "length" {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, HeaderValue::from_static("20"));
+        }
+        response
+    }
+
+    /// One request on a fresh HTTP/1.1 connection, read until the server
+    /// closes it. `connection: close` makes that close the end of the
+    /// exchange, and hyper closes only after its dispatcher has let go of the
+    /// body, so the body's outcome is recorded by the time this returns.
+    async fn raw_http1_exchange(address: std::net::SocketAddr, method: &str, path: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        stream
+            .write_all(
+                format!(
+                    "{method} {path} HTTP/1.1\r\nhost: plurx.test\r\nconnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("request");
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.expect("response");
+        String::from_utf8(raw).expect("a UTF-8 response")
+    }
+
+    /// The #461 review's reproduction, kept as the regression test: through a
+    /// real hyper connection rather than `oneshot` + `collect()`, which always
+    /// polls a body to its end and so can never see how hyper lets go of a
+    /// fixed-length one.
+    #[tokio::test]
+    async fn a_fully_delivered_body_counts_complete_over_a_real_connection_whatever_its_framing() {
+        let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let access_lines: &'static AccessLineThrottle = Box::leak(Box::default());
+        let app = Router::new()
+            .route(
+                "/api/v1/items/{id}",
+                axum::routing::get(framed_stream_handler),
+            )
+            .layer(axum::middleware::from_fn(
+                move |request: Request<axum::body::Body>, next: Next| {
+                    measure_http_request(metrics, access_lines, request, next)
+                },
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let chunked = raw_http1_exchange(address, "GET", "/api/v1/items/chunked").await;
+        let length = raw_http1_exchange(address, "GET", "/api/v1/items/length").await;
+        assert!(
+            chunked
+                .to_ascii_lowercase()
+                .contains("transfer-encoding: chunked"),
+            "{chunked}"
+        );
+        assert!(
+            length.to_ascii_lowercase().contains("content-length: 20"),
+            "{length}"
+        );
+        for response in [&chunked, &length] {
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            assert_eq!(response.matches("frame").count(), 4, "{response}");
+        }
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (2, 0),
+            "both bodies reached the client whole, so neither was abandoned"
+        );
+
+        // HEAD: axum answers it from the GET route with the GET's headers, and
+        // hyper writes no body. Nothing was promised, so nothing was abandoned.
+        let head = raw_http1_exchange(address, "HEAD", "/api/v1/items/length").await;
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(!head.contains("frame"), "{head}");
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (3, 0),
+            "a HEAD response has no body to abandon"
+        );
+    }
+
+    /// The other half of the byte count: a fixed-length body let go of before
+    /// it yielded its declared length is still a consumer that went away, and
+    /// one that yielded all of it is complete without ever being polled to
+    /// `None` — which is exactly what hyper does with it.
+    #[tokio::test]
+    async fn a_fixed_length_body_is_complete_at_its_declared_length_and_aborted_short_of_it() {
+        let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let group = http_route_group("/api/v1/items/{id}");
+
+        let mut short = MeasuredBody::new(metrics, group, four_frame_stream_body(), Some(20));
+        short.frame().await.expect("a frame").expect("data");
+        drop(short);
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (0, 1),
+            "5 of 20 declared bytes is an abandoned body"
+        );
+
+        let mut whole = MeasuredBody::new(metrics, group, four_frame_stream_body(), Some(20));
+        for _ in 0..4 {
+            whole.frame().await.expect("a frame").expect("data");
+        }
+        assert!(
+            !http_body::Body::is_end_stream(&whole),
+            "the stream does not know it has ended, which is the whole problem"
+        );
+        drop(whole);
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (1, 1),
+            "20 of 20 declared bytes is a delivered body"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrapping_a_body_preserves_its_exact_length() {
+        // hyper derives Content-Length from the body's size hint when the
+        // handler has not set the header, so a wrapper that reported an unknown
+        // length would silently move fixed-length responses onto chunked
+        // framing.
+        let (app, _) = observability_probe_router();
+        let response = app
+            .oneshot(get("/api/v1/items/1", None))
+            .await
+            .expect("response");
+        assert_eq!(
+            http_body::Body::size_hint(response.body()).exact(),
+            Some(2),
+            "the wrapped body must still know it is two bytes long"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_error_is_counted_as_five_hundred_and_logged_once_at_warn() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let captured = CapturedWriter::new();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(captured.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let failed = app
+            .clone()
+            .oneshot(get("/api/v1/settings", None))
+            .await
+            .expect("response");
+        assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let ok = app
+            .oneshot(get("/api/v1/items/1", None))
+            .await
+            .expect("response");
+        assert_eq!(ok.status(), StatusCode::OK);
+        drop(guard);
+
+        let after = metrics.render();
+        assert_eq!(
+            request_cell(&after, "settings", "get", "5xx"),
+            request_cell(&before, "settings", "get", "5xx") + 1
+        );
+
+        let logged = captured.text();
+        assert_eq!(
+            logged.matches("http request failed").count(),
+            1,
+            "exactly one access line, and only for the 5xx: {logged}"
+        );
+        assert!(logged.contains("route_group=\"settings\""), "{logged}");
+        assert!(
+            logged.contains("request_id="),
+            "the line must carry the request id: {logged}"
+        );
+        assert!(logged.contains("status=500"), "{logged}");
+        assert!(
+            logged.contains("path=/api/v1/settings"),
+            "the line must name the redacted target: {logged}"
+        );
+        // The ring this line lands in is bounded and is the only log the
+        // product itself can show, so a successful request must stay out of it.
+        assert!(
+            !logged.contains("/api/v1/items/1"),
+            "a 200 was logged: {logged}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_storm_is_counted_exactly_and_logged_at_most_once_a_second() {
+        // A fenced node refuses every request with 503. The counter must see
+        // all of them and the bounded ring must not.
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let captured = CapturedWriter::new();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(captured.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        for _ in 0..25 {
+            let refused = app
+                .clone()
+                .oneshot(get("/api/v1/cluster/status", None))
+                .await
+                .expect("response");
+            assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+        drop(guard);
+
+        let after = metrics.render();
+        assert_eq!(
+            request_cell(&after, "cluster", "get", "5xx"),
+            request_cell(&before, "cluster", "get", "5xx") + 25,
+            "every refusal must be counted"
+        );
+        let lines = captured.text().matches("http request failed").count();
+        assert!(
+            (1..=2).contains(&lines),
+            "twenty-five refusals inside one second produced {lines} log lines"
+        );
+        assert!(
+            captured.text().contains("also_suppressed="),
+            "the line must say how many it stood for: {}",
+            captured.text()
+        );
+    }
+
+    #[test]
+    fn an_inbound_request_id_is_adopted_only_when_it_is_short_and_boring() {
+        let adopt = |value: &str| {
+            adopt_or_mint_request_id(Some(&HeaderValue::from_str(value).expect("header")))
+                .to_str()
+                .expect("ascii")
+                .to_owned()
+        };
+        for good in ["abc123", "a-b_c", &"a".repeat(MAX_REQUEST_ID)] {
+            assert_eq!(adopt(good), good);
+        }
+        for bad in [
+            "",
+            "../../etc/passwd",
+            "has space",
+            "semi;colon",
+            "Bearer abc",
+            &"a".repeat(MAX_REQUEST_ID + 1),
+        ] {
+            let minted = adopt(bad);
+            assert_ne!(minted, bad, "{bad} was adopted");
+            assert_eq!(minted.len(), 32, "a minted id is a simple uuid: {minted}");
+            assert!(minted.chars().all(|c| c.is_ascii_hexdigit()), "{minted}");
+        }
+        assert_eq!(adopt_or_mint_request_id(None).len(), 32);
+    }
+
+    #[tokio::test]
+    async fn every_response_carries_a_request_id_and_a_rejected_one_is_never_echoed() {
+        let app = test_app();
+        let minted = app
+            .clone()
+            .oneshot(get("/healthz", None))
+            .await
+            .expect("response");
+        let id = minted
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .expect("every response carries an id")
+            .to_str()
+            .expect("ascii")
+            .to_owned();
+        assert_eq!(id.len(), 32);
+
+        let adopted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header(REQUEST_ID_HEADER, "kodi-refresh-7")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            adopted
+                .headers()
+                .get(REQUEST_ID_HEADER)
+                .expect("id")
+                .to_str()
+                .expect("ascii"),
+            "kodi-refresh-7"
+        );
+
+        let captured = CapturedWriter::new();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(captured.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let replaced = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header(REQUEST_ID_HEADER, "Bearer sk-live-should-never-be-logged")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        drop(guard);
+        let echoed = replaced
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .expect("id")
+            .to_str()
+            .expect("ascii");
+        assert_ne!(echoed, "Bearer sk-live-should-never-be-logged");
+        assert_eq!(echoed.len(), 32);
+        assert!(
+            !captured.text().contains("sk-live-should-never-be-logged"),
+            "the discarded id reached the log: {}",
+            captured.text()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_id_is_never_a_metric_label() {
+        let app = test_app();
+        let _ = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header(REQUEST_ID_HEADER, "corr-9f8e7d6c5b4a")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert!(!prometheus_http_request_metrics().contains("corr-9f8e7d6c5b4a"));
+        assert!(!prometheus_http_store_attribution().contains("corr-9f8e7d6c5b4a"));
+    }
+
+    #[test]
+    fn the_metrics_layer_is_outside_the_capacity_gate_and_the_id_layer_is_outermost() {
+        // Axum applies `.layer(...)` inner-to-outer in source order, so the
+        // layer named last is the outermost. A metrics layer inside the gate
+        // would count none of the 503s the gate produces for a learner, a
+        // fenced node or a node in maintenance — the exact failure the series
+        // exists to show. The id layer has to be outside everything that reads
+        // the id back out of the request headers.
+        let source = include_str!("mod.rs");
+        let router = source
+            .split_once("pub fn router(state: AppState) -> Router {")
+            .expect("router")
+            .1
+            .split_once("\nconst LEARNER_ROUTE_INELIGIBLE_JSON")
+            .expect("end of router")
+            .0;
+        let gate = router.find("cluster_capacity_gate,").expect("gate layer");
+        let attribution = router
+            .find("http_store_attribution,")
+            .expect("attribution layer");
+        let metrics = router
+            .find("from_fn(http_request_metrics)")
+            .expect("metrics layer");
+        let id = router.find("from_fn(http_request_id)").expect("id layer");
+        assert!(gate < attribution, "gate then attribution");
+        assert!(attribution < metrics, "attribution then request metrics");
+        assert!(metrics < id, "request id is outermost");
+    }
+
+    #[tokio::test]
+    async fn metrics_route_attribution_renders_fixed_labels_and_scoped_store_counts() {
+        let (_, state) = test_app_with_state();
+        let app = Router::new()
+            .route(
+                "/api/v1/home/previews",
+                axum::routing::get(recorded_store_handler),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                http_store_attribution,
+            ))
+            .with_state(state);
+        let before = HTTP_ROUTE_METRICS.render();
+        assert_eq!(
+            app.oneshot(get("/api/v1/home/previews", None))
+                .await
+                .expect("attributed request")
+                .status(),
+            StatusCode::OK
+        );
+        let exposition = HTTP_ROUTE_METRICS.render();
+        assert!(exposition.contains("# TYPE plurx_http_store_reads_total counter"));
+        assert!(exposition.contains("# TYPE plurx_http_route_seconds histogram"));
+        for class in HTTP_STORE_CLASSES {
+            let prefix = format!(
+                "plurx_http_store_reads_total{{route_group=\"home\",class=\"{class}\",role=\"standalone\"}} "
+            );
+            let value = |text: &str| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix(&prefix))
+                    .expect("fixed Store metric cell")
+                    .parse::<u64>()
+                    .expect("counter")
+            };
+            assert_eq!(value(&exposition), value(&before) + 1, "class {class}");
+        }
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_http_store_reads_total{"))
+                .count(),
+            HTTP_ROUTE_GROUPS.len() * HTTP_STORE_CLASSES.len() * HTTP_NODE_ROLES.len()
+        );
+        for (path, expected) in [
+            ("/api/v1/auth/login", 0),
+            ("/api/v1/home/previews", 1),
+            ("/api/v1/libraries", 2),
+            ("/api/v1/items/{id}", 3),
+            ("/api/v1/search", 4),
+            ("/api/v1/files/{id}/decision", 5),
+            ("/api/v1/files/{id}/direct", 5),
+            ("/api/v1/files/{id}/download", 5),
+            ("/api/v1/files/{id}/content", 5),
+            ("/api/v1/files/{id}/subs/{subtitle}", 5),
+            ("/library/parts/{file_id}/{mtime}/{name}", 5),
+            ("/api/v1/system/search-index/rebuild", 6),
+            ("/api/v1/cluster/status", 7),
+        ] {
+            assert_eq!(http_route_group(path), expected, "{path}");
+        }
+        assert_eq!(http_route_group("/unmatched"), 8);
+
+        assert_eq!(http_node_role(true, true, Ok(LocalServingRole::Voter)), 1);
+        assert_eq!(http_node_role(true, true, Ok(LocalServingRole::Learner)), 2);
+        assert_eq!(http_node_role(true, true, Ok(LocalServingRole::Fenced)), 4);
+        assert_eq!(http_node_role(true, true, Err(())), 5);
+        assert_eq!(http_node_role(false, true, Err(())), 3);
+    }
+
+    #[tokio::test]
+    async fn registered_routes_reach_every_non_other_attribution_family() {
+        let app = test_app();
+        for (group, method, path) in [
+            (0, Method::POST, "/api/v1/auth/login"),
+            (1, Method::GET, "/api/v1/home/previews"),
+            (2, Method::GET, "/api/v1/libraries"),
+            (3, Method::GET, "/api/v1/items/1"),
+            (4, Method::GET, "/api/v1/search"),
+            (5, Method::GET, "/api/v1/files/1/direct"),
+            (6, Method::GET, "/api/v1/settings"),
+            (7, Method::GET, "/api/v1/cluster/status"),
+        ] {
+            let before = HTTP_ROUTE_METRICS.routes
+                [group * HTTP_NODE_ROLES.len()..(group + 1) * HTTP_NODE_ROLES.len()]
+                .iter()
+                .map(|cell| cell.count.load(Ordering::Relaxed))
+                .sum::<u64>();
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("request");
+            let _ = app.clone().oneshot(request).await.expect("route response");
+            let after = HTTP_ROUTE_METRICS.routes
+                [group * HTTP_NODE_ROLES.len()..(group + 1) * HTTP_NODE_ROLES.len()]
+                .iter()
+                .map(|cell| cell.count.load(Ordering::Relaxed))
+                .sum::<u64>();
+            assert!(
+                after > before,
+                "registered route did not reach group {group}: {path}"
+            );
+        }
+    }
+
     async fn ten_ms_short_deadline(request: Request<axum::body::Body>, next: Next) -> Response {
         handler_deadline(
             request,
@@ -1389,6 +3589,98 @@ mod tests {
         let _ = test_app();
     }
 
+    fn literal_route_patterns(source: &str) -> Vec<&str> {
+        let mut routes = Vec::new();
+        let mut cursor = 0;
+        while let Some(relative) = source[cursor..].find(".route") {
+            let after_name = cursor + relative + ".route".len();
+            let Some(open_relative) = source[after_name..].find('(') else {
+                break;
+            };
+            let mut value = after_name + open_relative + 1;
+            while source
+                .as_bytes()
+                .get(value)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                value += 1;
+            }
+            if source.as_bytes().get(value) == Some(&b'"') {
+                let value_start = value + 1;
+                let value_end = source[value_start..]
+                    .find('"')
+                    .map(|offset| value_start + offset)
+                    .expect("route literal terminates");
+                routes.push(&source[value_start..value_end]);
+                cursor = value_end + 1;
+            } else {
+                // Constant paths are covered by exact guards in
+                // `http_route_group`; this inventory's job is to make every
+                // newly registered literal fail closed.
+                cursor = value;
+            }
+        }
+        routes
+    }
+
+    #[test]
+    fn every_registered_literal_route_has_an_explicit_group() {
+        let source = include_str!("mod.rs");
+        let router = source
+            .split_once("pub fn router(state: AppState) -> Router {")
+            .expect("router start")
+            .1
+            .split_once("const LEARNER_ROUTE_INELIGIBLE_JSON")
+            .expect("router end")
+            .0;
+        let spans = [
+            ("let json_short", "let json_long", "/api/v1"),
+            ("let json_long", "let media", "/api/v1"),
+            ("let media", "let api", "/api/v1"),
+            ("let plex_short", "let plex_media", ""),
+            ("let plex_media", "let plex_routes", ""),
+            ("let public_short", "let public_media", ""),
+            ("let public_media", "Router::new()", ""),
+        ];
+        for (start, end, prefix) in spans {
+            let block = router
+                .split_once(start)
+                .unwrap_or_else(|| panic!("missing route group {start}"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("missing route group end {end}"))
+                .0;
+            for route in literal_route_patterns(block) {
+                let matched = format!("{prefix}{route}");
+                assert_ne!(
+                    http_route_group(&matched),
+                    8,
+                    "registered MatchedPath is unclassified: {matched}"
+                );
+            }
+        }
+        for (source, prefix) in [
+            (include_str!("dvr.rs"), "/api/v1/dvr"),
+            (
+                include_str!("library_channels.rs"),
+                "/api/v1/library-channels",
+            ),
+        ] {
+            for route in literal_route_patterns(source) {
+                let matched = if route.starts_with("/library-channels") {
+                    format!("/api/v1{route}")
+                } else {
+                    format!("{prefix}{route}")
+                };
+                assert_ne!(
+                    http_route_group(&matched),
+                    8,
+                    "nested registered MatchedPath is unclassified: {matched}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
         for path in [
@@ -1488,6 +3780,7 @@ mod tests {
                 Method::GET,
                 "/internal/media/fragment-index/abc123def456abc123def456abc123de",
             ),
+            (Method::GET, "/internal/media/subtitle-source/7/2/webvtt"),
         ] {
             assert!(learner_route_eligible(&method, path), "{method} {path}");
         }
@@ -1502,6 +3795,19 @@ mod tests {
         assert!(!learner_route_eligible(
             &Method::POST,
             "/internal/media/fragment-index/abc123def456abc123def456abc123de"
+        ));
+        for path in [
+            "/internal/media/subtitle-source/7/2",
+            "/internal/media/subtitle-source/7/2/raw",
+            "/internal/media/subtitle-source/7/2/sup/extra",
+            "/internal/media/subtitle-source/0/2/sup",
+            "/internal/media/subtitle-source/7/-1/sup",
+        ] {
+            assert!(!learner_route_eligible(&Method::GET, path), "{path}");
+        }
+        assert!(!learner_route_eligible(
+            &Method::POST,
+            "/internal/media/subtitle-source/7/2/sup"
         ));
     }
 
@@ -1782,6 +4088,80 @@ mod tests {
         }
     }
 
+    fn async_store_call_inventory(source: &str) -> Vec<String> {
+        let source = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(source);
+        let mut inventory = Vec::new();
+        let mut cursor = 0;
+        while let Some(relative) = source[cursor..].find("async fn ") {
+            let function_start = cursor + relative + "async fn ".len();
+            let name_end = source[function_start..]
+                .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .map(|offset| function_start + offset)
+                .expect("async function name terminates");
+            let name = &source[function_start..name_end];
+            let body_start = source[name_end..]
+                .find('{')
+                .map(|offset| name_end + offset)
+                .expect("async function has a body");
+            let mut depth = 0_u32;
+            let mut body_end = None;
+            for (offset, byte) in source.as_bytes()[body_start..].iter().enumerate() {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            body_end = Some(body_start + offset + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let body_end = body_end.expect("async function braces balance");
+            let compact = source[body_start..body_end]
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            let mut call_cursor = 0;
+            while let Some(relative) = compact[call_cursor..].find("state.") {
+                let start = call_cursor + relative + "state.".len();
+                let Some((owner, method_start)) =
+                    ["store.", "catalogue."].into_iter().find_map(|owner| {
+                        compact[start..]
+                            .starts_with(owner)
+                            .then_some((owner, start + owner.len()))
+                    })
+                else {
+                    call_cursor = start;
+                    continue;
+                };
+                let method_end = compact[method_start..]
+                    .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                    .map_or(compact.len(), |offset| method_start + offset);
+                inventory.push(format!(
+                    "{name}:{}.{method}",
+                    owner.trim_end_matches('.'),
+                    method = &compact[method_start..method_end]
+                ));
+                call_cursor = method_end;
+            }
+            cursor = body_end;
+        }
+        inventory
+    }
+
+    fn assert_exact_store_inventory(source: &str, expected: &[&str]) {
+        assert_eq!(
+            async_store_call_inventory(source),
+            expected,
+            "every Store/Catalogue call must be assigned to an exact handler/helper and consistency role"
+        );
+    }
+
     #[test]
     fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
         let browse = include_str!("browse.rs");
@@ -1826,9 +4206,9 @@ mod tests {
             &compact_handler(browse, "pub async fn hubs", "pub async fn search"),
             &["recently_added", "child_counts", "item_max_heights"],
         );
-        assert!(
-            compact_handler(browse, "pub async fn search", "Ok(Json(SearchResponse")
-                .contains("state.store.search_items")
+        assert_catalogue_methods(
+            &compact_handler(browse, "pub async fn search", "Ok(Json(SearchResponse"),
+            &["search_items"],
         );
 
         let libraries = include_str!("libraries.rs");
@@ -1900,8 +4280,128 @@ mod tests {
         assert!(unscrobble.contains("state.store.set_watched_tree"));
         assert!(!unscrobble.contains("state.catalogue.get_item"));
         let plex_search = compact_handler(plex, "pub async fn search", "fn version");
-        assert!(plex_search.contains("state.store.search_items"));
-        assert!(!plex_search.contains("state.catalogue.search_items"));
+        assert!(plex_search.contains("state.catalogue.search_items"));
+        assert!(!plex_search.contains("state.store.search_items"));
+
+        // Fail closed over the full production async-function boundary for
+        // every M1-added surface. A new Store/Catalogue call, a moved call, a
+        // duplicate call or a consistency-role change all alter this exact
+        // ordered multiset and require an explicit classification here.
+        assert_exact_store_inventory(
+            include_str!("photos.rs"),
+            &["serve:store.get_item", "serve:store.files_for_item"],
+        );
+        assert_exact_store_inventory(
+            include_str!("images.rs"),
+            &[
+                "sweep_content_orphans:store.referenced_artwork_filenames",
+                "sweep_content_orphans:store.artwork_filename_is_referenced",
+                "sweep_content_orphans:store.prune_unreferenced_book_cover_origins",
+                // The derivative sweep's only catalogue call. It is a
+                // background, node-local read of the artwork inventory — the
+                // same eventual read `sweep_orphan_artwork` makes, not an
+                // authority read and not a mutation. It decides retention
+                // only: a source the read has not yet caught up to keeps its
+                // derivatives, so a stale answer costs disk until the next
+                // pass and can never delete a live grid cache.
+                "sweep_derived_orphans:store.items_with_artwork",
+                "materialize_once:store.items_with_artwork_page",
+            ],
+        );
+        assert_exact_store_inventory(
+            include_str!("reading.rs"),
+            &[
+                // `book_file` is shared by GET and mutations: these are
+                // authority pre-mutation/ownership reads, not candidates.
+                "book_file:store.get_item",
+                "book_file:store.get_file",
+                "get_state:store.reading_state",
+                "put_state:store.put_reading_state",
+                "delete_state:store.delete_reading_state",
+            ],
+        );
+        assert_exact_store_inventory(
+            include_str!("dvr.rs"),
+            &[
+                "collect_overview:store.settings_snapshot",
+                "collect_overview:store.dvr_overview_rows",
+                "collect_overview:store.list_dvr_rules",
+                "collect_overview:store.list_dvr_attention",
+                "collect_overview:store.list_dvr_attention",
+                "overview:store.settings_snapshot",
+                "configs:store.settings_snapshot",
+                "status:store.list_dvr_recordings_in",
+                "list_recordings:store.list_dvr_recordings",
+                "create_recording:store.insert_dvr_airing_with_event",
+                "create_recording:store.get_dvr_recording_for_airing",
+                "get_recording:store.get_dvr_recording",
+                "recording_events:store.get_dvr_recording",
+                "recording_events:store.list_dvr_events",
+                "acknowledge_attention:store.acknowledge_dvr_attention",
+                "attention:store.list_dvr_attention",
+                "attention:store.list_dvr_attention",
+                "attention:store.list_dvr_attention",
+                "attention:store.list_dvr_attention",
+                "attention:store.list_dvr_attention",
+                "delete_recording:store.get_dvr_recording",
+                "delete_recording:store.transition_dvr_recording_with_event",
+                "delete_recording:store.request_dvr_stop_with_event",
+                "delete_recording:store.transition_dvr_recording_with_event",
+                "delete_recording:store.get_dvr_recording",
+                "restore_recording:store.get_dvr_recording",
+                "restore_recording:store.transition_dvr_recording_with_event",
+                "restore_recording:store.get_dvr_recording",
+                "schedule:store.list_dvr_schedule_window",
+                "list_rules:store.list_dvr_rules",
+                "create_rule:store.list_dvr_rules",
+                "create_rule:store.put_dvr_rule",
+                "update_rule:store.get_dvr_rule",
+                "update_rule:store.put_dvr_rule",
+                "delete_rule:store.get_dvr_rule",
+                "delete_rule:store.delete_dvr_rule",
+                "reorder_rules:store.reorder_dvr_rules",
+                "reorder_rules:store.list_dvr_rules",
+                "list_reminders:store.list_dvr_reminders",
+                "list_reminders:store.list_dvr_recordings_in",
+                "create_reminder:store.list_dvr_reminders",
+                "create_reminder:store.list_dvr_reminders",
+                "create_reminder:store.put_dvr_reminder",
+                "delete_reminder:store.delete_dvr_reminder",
+                "ack_reminder:store.set_dvr_reminder_state",
+            ],
+        );
+        assert_exact_store_inventory(
+            include_str!("library_channels.rs"),
+            &[
+                "list:store.list_library_channels",
+                "list:store.item_titles",
+                "create:store.create_library_channel",
+                "create:store.get_library_channel",
+                "publish_subject:store.get_user",
+                "update:store.update_library_channel",
+                "delete_one:store.delete_library_channel",
+                "favourite:store.set_library_channel_favourite",
+                "rebuild:store.update_library_channel",
+                "guide:store.item_titles",
+                "start_session:store.item_titles",
+                "cached_generation:store.read_library_channel_generation",
+                "matching_catalogue:store.library_channel_catalog_snapshot",
+                "build_channel_inner:store.read_library_channel_generation",
+                "build_channel_inner:store.complete_library_channel_build_without_publication",
+                "build_channel_inner:store.claim_library_channel_build",
+                "build_channel_inner:store.renew_library_channel_build",
+                "build_channel_inner:store.stage_library_channel_entries",
+                "build_channel_inner:store.publish_library_channel_generation",
+                "reconcile_once:store.prune_library_channel_state",
+                "reconcile_once:store.list_library_channel_refresh_candidates",
+                "reconcile_once:store.get_user",
+                "visible_channel:store.get_library_channel",
+                "editable_channel:store.get_library_channel",
+                "require_runtime_enabled:store.get_setting",
+                "validate_file:store.get_file",
+                "record_build_failure:store.fail_library_channel_build",
+            ],
+        );
 
         let system = include_str!("system.rs");
         assert_catalogue_methods(
@@ -1948,6 +4448,75 @@ mod tests {
 
     fn test_app() -> Router {
         test_app_with_state().0
+    }
+
+    #[tokio::test]
+    async fn subtitle_provider_settings_are_admin_only_and_never_return_secrets() {
+        let app = test_app();
+        assert_eq!(
+            call(&app, get("/api/v1/subtitle-provider", None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let admin = setup_admin(&app).await;
+        let (status, initial) = call(&app, get("/api/v1/subtitle-provider", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(initial["configured"], false);
+        assert_eq!(initial["automatic"], false);
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    "/api/v1/subtitle-provider",
+                    Some(&admin),
+                    json!({"automatic":true})
+                )
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (status,saved)=call(&app,put("/api/v1/subtitle-provider",Some(&admin),json!({"api_key":"fixture-api-key","username":"fixture-user","password":"fixture-password","languages":["en","fr"],"automatic":false}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(saved["configured"], true);
+        assert_eq!(saved["password_configured"], true);
+        assert!(!saved.to_string().contains("fixture-api-key"));
+        assert!(!saved.to_string().contains("fixture-password"));
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    "/api/v1/subtitle-provider",
+                    Some(&admin),
+                    json!({"api_key":"","languages":["en&query=other"]})
+                )
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(&app, get("/api/v1/subtitle-provider", Some(&admin)))
+                .await
+                .1["configured"],
+            true,
+            "invalid updates are atomic"
+        );
+        call(
+            &app,
+            put(
+                "/api/v1/subtitle-provider",
+                Some(&admin),
+                json!({"api_key":"","password":"","automatic":false}),
+            ),
+        )
+        .await;
+        let (status, disabled) = call(
+            &app,
+            get("/api/v1/files/1/subtitles/search?language=en", Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(disabled["code"], "subtitle_provider_disabled");
     }
 
     /// The same app, plus the state behind it — for tests that have to put the
@@ -4482,6 +7051,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn portable_backup_settings_save_without_readiness_gate() {
+        use plurx_core::store::keys;
+
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "backup_destination": "/mnt/nas/plurx-backups",
+                    "backup_schedule_utc": "03:17",
+                    "backup_keep": 9
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["backup_destination"], "/mnt/nas/plurx-backups");
+        assert_eq!(body["backup_schedule_utc"], "03:17");
+        assert_eq!(body["backup_keep"], 9);
+        assert_eq!(
+            state
+                .store
+                .get_setting(keys::BACKUP_DESTINATION)
+                .await
+                .expect("read saved backup destination")
+                .as_deref(),
+            Some("/mnt/nas/plurx-backups")
+        );
+
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "backup_destination": "relative/path" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn developer_playback_switches_persist_and_apply_their_documented_defaults() {
         use plurx_core::store::keys;
 
@@ -4816,6 +7430,37 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT, "{mixed_enable}");
     }
 
+    #[tokio::test]
+    async fn android_display_mode_checkbox_saves_without_live_tv_generation() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+
+        for enabled in [true, false] {
+            // Exact Android checkbox body: this ordinary playback preference
+            // deliberately carries no Live TV tuple generation.
+            let (status, saved) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"playback_display_mode_match": enabled}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{saved}");
+            assert_eq!(saved["playback_display_mode_match"], json!(enabled));
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_MODE_MATCH)
+                    .await
+                    .expect("setting")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+        }
+    }
+
     /// Readiness is advisory (2026-09-07). Structural invariants still refuse:
     /// an enable with no address is a 400 above, and a stale generation is a
     /// 409. But "the tuner did not answer just now" is a thing the operator is
@@ -4988,6 +7633,44 @@ mod tests {
         let (_, unchanged) = call(&app, get("/api/v1/settings", Some(&admin))).await;
         assert_eq!(unchanged["live_tv_guide_source"], json!("hdhomerun"));
         assert_eq!(unchanged["live_tv_config_generation"], json!(3));
+    }
+
+    #[tokio::test]
+    async fn live_tv_deinterlace_output_is_an_independent_advisory_setting() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::LIVE_TV_ENABLED, "1")
+            .await
+            .expect("mark Live TV enabled");
+
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"live_tv_deinterlace_output": "frame"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["live_tv_deinterlace_output"], json!("frame"));
+        assert_eq!(saved["live_tv_enabled"], json!(true));
+        assert_eq!(saved["live_tv_config_generation"], json!(0));
+
+        let (status, invalid) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"live_tv_deinterlace_output": "double"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+        let (_, current) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(current["live_tv_deinterlace_output"], json!("frame"));
     }
 
     #[tokio::test]
@@ -5466,6 +8149,564 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
+    /// The device label is the only caller-chosen, caller-repeatable field in
+    /// `tokens`, and `TOKEN_SUMMARY_MAX` bounds inventory rows but not bytes.
+    /// Bound it where it is created, and refuse the oversized body before the
+    /// handler ever parses it.
+    #[tokio::test]
+    async fn login_bounds_the_device_label_and_caps_its_request_body() {
+        use plurx_core::store::MAX_DEVICE_LABEL_BYTES;
+
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+
+        let at_bound = "d".repeat(MAX_DEVICE_LABEL_BYTES);
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": at_bound }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a label at the bound must log in: {body}"
+        );
+
+        let over_bound = "d".repeat(MAX_DEVICE_LABEL_BYTES + 1);
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": over_bound }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "one byte over the bound must be refused, not stored: {body}"
+        );
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("device label"));
+
+        // A megabyte body is refused by the route's own limit, before the
+        // JSON is parsed, before any password work, and before the Store.
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({
+                    "username": "paul",
+                    "password": "supersecret",
+                    "device": "d".repeat(1024 * 1024)
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+        // Exactly two sessions exist: setup's, and the one at the bound. The
+        // refused attempts minted nothing.
+        let (status, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{devices}");
+        let devices = devices.as_array().expect("device array");
+        assert_eq!(devices.len(), 2);
+        // The label at the bound is stored whole, not silently shortened.
+        assert!(devices
+            .iter()
+            .any(|row| row["device"].as_str() == Some(at_bound.as_str())));
+    }
+
+    /// M1's contract is that a second sign-out queues behind the first rather
+    /// than receiving a 503 while the server still honours its bearer. Hold
+    /// the single active slot the way a live fence does, so the contention is
+    /// a fact of the test rather than a race it hopes to win.
+    #[tokio::test]
+    async fn two_concurrent_logouts_queue_behind_one_operation_and_both_succeed() {
+        let (app, state) = test_app_with_state();
+        let first = setup_admin(&app).await;
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": "Kitchen" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let second = body["token"].as_str().expect("second token").to_owned();
+
+        let held = state
+            .cache_only_admin_proofs
+            .acquire_revocation_operation()
+            .await
+            .expect("the test owns the active revocation slot");
+
+        let mut signouts = Vec::new();
+        for token in [first.clone(), second.clone()] {
+            let app = app.clone();
+            signouts.push(tokio::spawn(async move {
+                call(&app, post("/api/v1/auth/logout", Some(&token), json!({}))).await
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for signout in &signouts {
+            assert!(
+                !signout.is_finished(),
+                "a sign-out behind a running fence must queue, not be refused"
+            );
+        }
+
+        drop(held);
+        for signout in signouts {
+            let (status, body) = signout.await.expect("sign-out task");
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["ok"], true);
+        }
+
+        // Two bearers cleared, two rows gone.
+        for token in [&first, &second] {
+            assert_eq!(
+                call(&app, get("/api/v1/me", Some(token))).await.0,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert!(state
+            .store
+            .list_tokens_for_user(1)
+            .await
+            .expect("inventory")
+            .is_empty());
+    }
+
+    /// The other side of the bound: past the admission wait the caller is
+    /// still refused, and a refused caller leaves nothing behind — no claim,
+    /// no armed fence, no deleted row.
+    #[tokio::test]
+    async fn a_logout_that_waits_out_the_admission_window_is_refused_and_changes_nothing() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": "Kitchen" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let second = body["token"].as_str().expect("second token").to_owned();
+
+        let held = state
+            .cache_only_admin_proofs
+            .acquire_revocation_operation()
+            .await
+            .expect("the test owns the active revocation slot");
+
+        let started = Instant::now();
+        let (status, body) =
+            call(&app, post("/api/v1/auth/logout", Some(&second), json!({}))).await;
+        let waited = started.elapsed();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            waited >= extract::REVOCATION_ADMISSION_WAIT,
+            "the caller must actually wait its admission window, not fail fast: {waited:?}"
+        );
+        drop(held);
+
+        // Nothing was revoked and no fence was armed: both sessions still
+        // authenticate and both rows are still listed.
+        for token in [&admin, &second] {
+            assert_eq!(
+                call(&app, get("/api/v1/me", Some(token))).await.0,
+                StatusCode::OK
+            );
+        }
+        let (_, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert_eq!(devices.as_array().expect("device array").len(), 2);
+    }
+
+    /// A file-backed app plus a second handle on the same database, for the
+    /// one thing a request cannot do: make a token look 91 days idle.
+    fn test_app_with_fixture_store() -> (Router, AppState, SqliteStore) {
+        let base = crate::test_temp_path(format!("plurx-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).expect("test directory");
+        let db = base.join("plurx.db");
+        let store = SqliteStore::open(&db).expect("store");
+        let fixture = SqliteStore::open(&db).expect("fixture handle");
+        let state = AppState::new(
+            "test".into(),
+            Arc::new(store),
+            test_dirs(&base),
+            "test-node".into(),
+            Default::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        (router(state.clone()), state, fixture)
+    }
+
+    async fn login_device(app: &Router, device: &str) -> String {
+        let (status, body) = call(
+            app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": device }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body["token"].as_str().expect("token").to_owned()
+    }
+
+    const EXPIRY_DAY: i64 = 86_400;
+
+    /// The distinct refusal clients land on their sign-in screen with, the
+    /// devices list that says when each device goes, and the revocation that
+    /// still works beside it.
+    #[tokio::test]
+    async fn an_idle_sign_in_is_refused_as_session_expired_and_the_devices_list_says_when() {
+        let (app, state, fixture) = test_app_with_fixture_store();
+        let admin = setup_admin(&app).await;
+        let tv = login_device(&app, "Living room").await;
+        let now = users::unix_now();
+        // The upgrade took effect 200 days ago; the default is on, 90 days.
+        users::start_token_expiry_clock(state.store.as_ref(), now - 200 * EXPIRY_DAY)
+            .await
+            .expect("start the clock");
+        let tv_digest = plurx_core::auth::hash_token(&tv);
+        assert!(fixture
+            .fixture_set_token_last_seen(&tv_digest, now - 91 * EXPIRY_DAY)
+            .await
+            .expect("age the living-room box"));
+
+        let (status, body) = call(&app, get("/api/v1/me", Some(&tv))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["code"], "session_expired");
+        assert_eq!(body["idle_days"], 90);
+        assert!(body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("90 days of inactivity"));
+        // Every authenticated route refuses it the same way, including the
+        // query-credential form media URLs use.
+        let (status, body) = call(&app, get(&format!("/api/v1/libraries?token={tv}"), None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "session_expired");
+        // The device in use is untouched.
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&admin))).await.0,
+            StatusCode::OK
+        );
+
+        let (status, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{devices}");
+        let devices = devices.as_array().expect("device array");
+        let tv_row = devices
+            .iter()
+            .find(|row| row["device"] == "Living room")
+            .expect("tv row");
+        assert_eq!(tv_row["expired"], true);
+        assert_eq!(
+            tv_row["expires_at"].as_i64(),
+            Some(now - 91 * EXPIRY_DAY + 90 * EXPIRY_DAY)
+        );
+        let admin_row = devices
+            .iter()
+            .find(|row| row["device"] != "Living room")
+            .expect("admin row");
+        assert_eq!(admin_row["expired"], false);
+        assert!(admin_row["expires_at"].as_i64().expect("expiry") >= now + 89 * EXPIRY_DAY);
+
+        // Revoking the expired device still goes through the fence.
+        let (status, body) = call(
+            &app,
+            delete(
+                &format!(
+                    "/api/v1/me/devices/{}",
+                    tv_row["token_hash_prefix"].as_str().expect("prefix")
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = call(&app, get("/api/v1/me", Some(&tv))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body["code"],
+            Value::Null,
+            "a revoked token is not an expired one"
+        );
+    }
+
+    /// Settings → Users owns the option: off never expires, switching it back
+    /// on restarts every device's clock instead of signing anyone out, and the
+    /// window is bounded.
+    #[tokio::test]
+    async fn sign_in_expiry_settings_round_trip_and_enabling_signs_nobody_out() {
+        let (app, state, fixture) = test_app_with_fixture_store();
+        let admin = setup_admin(&app).await;
+        let tv = login_device(&app, "Living room").await;
+        let tv_digest = plurx_core::auth::hash_token(&tv);
+        let now = users::unix_now();
+        users::start_token_expiry_clock(state.store.as_ref(), now - 400 * EXPIRY_DAY)
+            .await
+            .expect("start the clock");
+
+        let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["auth_token_expiry"], true, "on by default");
+        assert_eq!(settings["auth_token_idle_days"], 90);
+        assert_eq!(
+            settings["auth_token_expiry_since"].as_i64(),
+            Some(now - 400 * EXPIRY_DAY)
+        );
+
+        fixture
+            .fixture_set_token_last_seen(&tv_digest, now - 150 * EXPIRY_DAY)
+            .await
+            .expect("age");
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&tv))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Off: today's non-expiring behaviour.
+        let (status, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "auth_token_expiry": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["auth_token_expiry"], false);
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&tv))).await.0,
+            StatusCode::OK
+        );
+        let (_, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert!(devices
+            .as_array()
+            .expect("device array")
+            .iter()
+            .all(|row| row["expires_at"].is_null() && row["expired"] == false));
+
+        // Back on: the clock restarts now, so a device idle for 150 days is
+        // not signed out by the switch itself.
+        fixture
+            .fixture_set_token_last_seen(&tv_digest, now - 150 * EXPIRY_DAY)
+            .await
+            .expect("age");
+        let (status, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "auth_token_expiry": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert!(settings["auth_token_expiry_since"].as_i64().expect("since") >= now);
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&tv))).await.0,
+            StatusCode::OK
+        );
+        // On -> on does not keep pushing the clock back.
+        let since = settings["auth_token_expiry_since"].clone();
+        let (_, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "auth_token_expiry": true }),
+            ),
+        )
+        .await;
+        assert_eq!(settings["auth_token_expiry_since"], since);
+
+        for days in [0, -1, 3_651] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({ "auth_token_idle_days": days }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{days}: {body}");
+        }
+        let (status, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "auth_token_idle_days": 30 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["auth_token_idle_days"], 30);
+    }
+
+    /// The first start of a build with the option records when expiry took
+    /// effect; every later start, on any node, keeps that first value.
+    #[tokio::test]
+    async fn the_sign_in_expiry_clock_is_started_once() {
+        let (_, state) = test_app_with_state();
+        assert_eq!(
+            users::start_token_expiry_clock(state.store.as_ref(), 1_000)
+                .await
+                .expect("first start"),
+            1_000
+        );
+        assert_eq!(
+            users::start_token_expiry_clock(state.store.as_ref(), 9_000)
+                .await
+                .expect("restart"),
+            1_000,
+            "a restart must not push every device's clock forward again"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_inventory_and_fenced_revocation_cover_self_and_admin_routes() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let (status, second_login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": "Living room" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{second_login}");
+        let second = second_login["token"].as_str().expect("second token");
+
+        let (status, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{devices}");
+        let devices = devices.as_array().expect("device array");
+        assert_eq!(devices.len(), 2);
+        assert!(devices.iter().all(|row| {
+            row["token_hash_prefix"]
+                .as_str()
+                .is_some_and(|prefix| prefix.len() == 8)
+        }));
+        assert!(!format!("{devices:?}").contains(second));
+        let current_prefix = plurx_core::auth::hash_token(&admin)
+            .chars()
+            .take(8)
+            .collect::<String>();
+        let current = devices
+            .iter()
+            .find(|row| row["token_hash_prefix"] == current_prefix)
+            .expect("current device");
+        let (status, body) = call(
+            &app,
+            delete(
+                &format!(
+                    "/api/v1/me/devices/{}",
+                    current["token_hash_prefix"].as_str().expect("prefix")
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("logout"));
+
+        let other = devices
+            .iter()
+            .find(|row| row["token_hash_prefix"] != current_prefix)
+            .expect("other device");
+        let (status, body) = call(
+            &app,
+            delete(
+                &format!(
+                    "/api/v1/me/devices/{}",
+                    other["token_hash_prefix"].as_str().expect("prefix")
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(second))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&admin))).await.0,
+            StatusCode::OK
+        );
+
+        let (status, user) = call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "kid", "password": "longenough" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{user}");
+        let user_id = user["id"].as_i64().expect("user id");
+        let (status, kid_login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "kid", "password": "longenough", "device": "Tablet" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kid_login}");
+        let kid = kid_login["token"].as_str().expect("kid token");
+        let (status, kid_devices) = call(
+            &app,
+            get(&format!("/api/v1/users/{user_id}/devices"), Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kid_devices}");
+        let prefix = kid_devices[0]["token_hash_prefix"]
+            .as_str()
+            .expect("kid prefix");
+        let (status, body) = call(
+            &app,
+            delete(
+                &format!("/api/v1/users/{user_id}/devices/{prefix}"),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(kid))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
     /// The Settings→login-page bounce, as a request pair.
     ///
     /// `/cluster/status` is guarded by the Store-free proof cache. When the
@@ -5736,7 +8977,7 @@ mod tests {
     /// question) shipped exactly that way in the first draft.
     #[tokio::test]
     async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
         let (status, _) = call(&app, get("/api/v1/developer/readiness", None)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
@@ -5752,7 +8993,12 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "cluster_backup",
                 "windows_server",
+                // D-01 adds the Android TV display-mode card. Its one row is
+                // advisory and reports `unobservable` on a node with no
+                // display-mode telemetry; the enable switch stays available.
+                "android_display_mode_match",
                 "library_channels",
                 "library_channel_subject_matching",
                 "embedded_semantic_search",
@@ -5763,7 +9009,11 @@ mod tests {
                 "content_analysis_repair",
                 "live_hls_recovery",
                 "pgs_overlay",
+                "subtitle_stored_sources",
+                "subtitle_cluster_sources",
+                "subtitle_backfill",
                 "subtitle_not_ready_503",
+                "chapter_thumbnails",
                 "dolby_vision_convert",
                 "source_probe_comparison"
             ],
@@ -5800,12 +9050,51 @@ mod tests {
         // test in this binary may have populated, so it is met on a run that
         // probed FFprobe and unobservable on one that did not. Both are honest;
         // neither belongs in an exact set. It is asserted on its own below.
+        // `stored_source_self_test` reads the process-wide self-test state,
+        // which a ride-along test in this binary may have driven either way.
+        // The local-cache row depends on the host filesystem and whether its
+        // classifier is implemented on this platform.
         let green = seen
             .iter()
             .filter(|(_, status)| status.as_str() == "met")
             .map(|(id, _)| id.as_str())
-            .filter(|id| *id != "probe_reporter_named")
+            .filter(|id| {
+                !matches!(
+                    *id,
+                    "probe_reporter_named"
+                        | "stored_source_self_test"
+                        | "stored_source_local_cache"
+                        | "stored_source_free_space"
+                        | "local_cache"
+                        | "free_space"
+                        | "chapter_thumbs_cache_space"
+                )
+            })
             .collect::<Vec<_>>();
+        // The free-space row reads this host's disk, so it is either.
+        for id in ["stored_source_self_test", "stored_source_free_space"] {
+            assert!(
+                seen.contains_key(id),
+                "the ride-along's {id} row is reported: {seen:?}"
+            );
+        }
+        let store_root = crate::subtitle_source::store_root(&state.runtime_cache_dir);
+        let checked = if store_root.is_dir() {
+            store_root
+        } else {
+            state.runtime_cache_dir.clone()
+        };
+        let expected_cache_status =
+            if crate::subtitle_ride_along::local_filesystem(&checked).is_ok() {
+                "met"
+            } else {
+                "unmet"
+            };
+        assert_eq!(
+            seen.get("stored_source_local_cache").map(String::as_str),
+            Some(expected_cache_status),
+            "the cache row must reflect the host filesystem: {seen:?}"
+        );
         assert!(
             matches!(
                 seen.get("probe_reporter_named").map(String::as_str),
@@ -5817,11 +9106,21 @@ mod tests {
             green,
             vec![
                 "authoritative_store",
+                "backfill_bytes",
+                "backfill_enqueued",
+                "backfill_remaining",
+                // The chapter-thumbnail work counter is a statement of what
+                // ran (nothing yet); cache space depends on the host disk.
+                // The ffmpeg row is absent here because the fixture never
+                // probed a build.
+                "chapter_thumbs_work",
                 "durable_queue",
+                "rolling_contract_built",
                 "runtime",
                 "server_preparation_is_real",
                 "source_fencing",
                 "sources_match_their_scan_whole",
+                "stored_source_producer",
                 "tuner_reserve"
             ]
         );
@@ -6324,6 +9623,17 @@ mod tests {
         assert!(
             body["encoders"]["quality_rc"].is_object(),
             "the fleet census must expose each family's behavioral quality-mode verdict: {body}"
+        );
+        assert_eq!(
+            body["encoders"]["quality_rc"]["default_rate_mode"],
+            serde_json::json!({
+                "software": "bitrate",
+                "nvenc": "bitrate",
+                "qsv": "bitrate",
+                "vaapi": "bitrate",
+                "videotoolbox": "bitrate",
+            }),
+            "each reported family default must remain independently inspectable: {body}"
         );
         assert_eq!(body["replication"]["backend"], "sqlite");
         assert_eq!(body["replication"]["health"], "single_node");
@@ -7035,6 +10345,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_log_accepts_error_reports_with_bounded_stack() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({
+                    "level": "error",
+                    "event": "client_error",
+                    "detail": "error",
+                    "message": "load failed",
+                    "src": "/assets/core/cards.js",
+                    "line": 17,
+                    "col": 9,
+                    "stack": "x".repeat(3_000)
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
     async fn client_telemetry_updates_the_matching_network_prior() {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
@@ -7207,7 +10542,7 @@ mod tests {
         let (status, _) = request.await.expect("request task");
         assert_eq!(status, StatusCode::NO_CONTENT);
 
-        for _ in 0..100 {
+        for _ in 0..3_000 {
             if state
                 .store
                 .network_prior(original_generation.as_str(), "safari", "198.51.100.0/24")
@@ -10275,11 +13610,12 @@ mod tests {
         );
         assert_eq!(audio_only["selection"]["audio_index"], 0, "{audio_only}");
         assert_eq!(
-            audio_only["selection"]["subtitle_index"], 0,
-            "the effective policy subtitle remains visible without changing delivery: {audio_only}"
+            audio_only["selection"]["subtitle_index"],
+            serde_json::Value::Null,
+            "an explicit audio-only request does not implicitly select a subtitle: {audio_only}"
         );
         assert_eq!(
-            audio_only["selection"]["subtitle_requires_burn_in"], true,
+            audio_only["selection"]["subtitle_requires_burn_in"], false,
             "{audio_only}"
         );
     }
@@ -10728,7 +14064,7 @@ mod tests {
 
         // Recording is asynchronous, so poll the wire rather than the store.
         let mut decision = json!({});
-        for _ in 0..200 {
+        for _ in 0..3_000 {
             let (status, body) = call(
                 &app,
                 as_client(get(&decision_url, Some(&admin)), CHROME_WINDOWS_UA),
@@ -10905,6 +14241,118 @@ mod tests {
         }
     }
 
+    /// The `resolution` sort's order is reproducible from the rows it returns.
+    ///
+    /// A native client merging several libraries' cursors compares rows on
+    /// `(resolution ?? -1) DESC, sort_title ASC, id ASC` — the key the row
+    /// carries, not the one the SQL computed. A root photo in a Home library
+    /// is probed and has a real file height but no `resolution` on its DTO, so
+    /// the server has to rank it where an absent `resolution` puts it; ranked
+    /// by its 3024-px height it would lead a cursor the client reads as
+    /// unsorted, and the merge would have to drain every other cursor to
+    /// place it.
+    #[tokio::test]
+    async fn library_resolution_sort_is_ordered_by_the_resolution_each_row_carries() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let lib = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Home".into(),
+                kind: LibraryKind::Home,
+                paths: vec![std::path::PathBuf::from("/home-media")],
+                anime: false,
+            })
+            .await
+            .expect("lib");
+        let mut ids = std::collections::HashMap::new();
+        for (title, kind, height) in [
+            ("Pier at Dusk", ItemKind::Photo, Some(3024)),
+            ("Beach Day", ItemKind::Video, Some(720)),
+            ("Birthday", ItemKind::Video, Some(2160)),
+            ("Zebra Crossing", ItemKind::Video, None),
+        ] {
+            let id = state
+                .store
+                .insert_item(&NewItem {
+                    library_id: lib.id,
+                    kind,
+                    parent_id: None,
+                    title: title.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            if let Some(height) = height {
+                state
+                    .store
+                    .upsert_file(
+                        id,
+                        &format!("/home-media/{title}"),
+                        1_000,
+                        1,
+                        &ProbeResult {
+                            height: Some(height),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("file");
+            }
+            ids.insert(title, id);
+        }
+
+        let (status, body) = call(
+            &app,
+            get(
+                &format!("/api/v1/libraries/{}/items?sort=resolution", lib.id),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows = body["items"].as_array().expect("items");
+        let photo = rows
+            .iter()
+            .find(|row| row["id"] == ids["Pier at Dusk"])
+            .expect("the photo is on the page");
+        assert!(
+            photo.get("resolution").is_none_or(Value::is_null),
+            "a photo carries no resolution: {photo}"
+        );
+
+        // The client's comparator, applied to what the client received.
+        let key = |row: &Value| {
+            (
+                std::cmp::Reverse(row["resolution"].as_i64().unwrap_or(-1)),
+                row["sort_title"].as_str().expect("sort_title").to_owned(),
+                row["id"].as_i64().expect("id"),
+            )
+        };
+        let returned: Vec<_> = rows.iter().map(key).collect();
+        let mut reordered = returned.clone();
+        reordered.sort();
+        assert_eq!(
+            returned, reordered,
+            "the server's order is not the order of the keys it sent"
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["id"].as_i64().expect("id"))
+                .collect::<Vec<_>>(),
+            vec![
+                ids["Birthday"],
+                ids["Beach Day"],
+                ids["Pier at Dusk"],
+                ids["Zebra Crossing"],
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn seeded_read_surface() {
         let (app, state) = test_state();
@@ -11050,6 +14498,7 @@ mod tests {
                         index: 0,
                         codec: "truehd".into(),
                         channels: Some(8),
+                        sample_rate: None,
                         language: Some("eng".into()),
                         default: true,
                         ..Default::default()
@@ -11097,6 +14546,7 @@ mod tests {
                         index: 0,
                         codec: "aac".into(),
                         channels: Some(2),
+                        sample_rate: None,
                         language: Some("eng".into()),
                         default: true,
                         ..Default::default()
@@ -14273,11 +17723,8 @@ mod tests {
             ),
         )
         .await;
-        assert!(
-            status == StatusCode::UNPROCESSABLE_ENTITY
-                || negotiated["code"] == "hdr_subtitle_burn_refused",
-            "an HDR10 transcode is an HDR delivery: {status} {negotiated}"
-        );
+        assert_eq!(status, StatusCode::CONFLICT, "{negotiated}");
+        assert_eq!(negotiated["code"], "vod_source_rescan_required");
 
         // And the population the old guard over-refused: a client asking for
         // a transcode at a height, with no HDR10 negotiated. That body
@@ -14374,6 +17821,69 @@ mod tests {
         assert_eq!(
             still_refused["code"], "hdr_subtitle_burn_refused",
             "a client's word about the grade is not evidence about the grade: {still_refused}"
+        );
+    }
+
+    /// #456's review, findings A and B, reachable once the ride-along fills
+    /// the store: an HDR copy asking to burn a track the store holds as a
+    /// real track with no cues is not refused as an HDR downgrade — there is
+    /// nothing to burn — and it stays the copy it asked for rather than
+    /// becoming a full re-encode. On this fixture the encoded path answers
+    /// `vod_source_rescan_required` (it holds and re-probes the source); the
+    /// copy path does not.
+    #[tokio::test]
+    async fn an_hdr_burn_of_a_track_stored_as_empty_is_the_copy_it_asked_for() {
+        use crate::subtitle_source::testing::{settled, stamp_of, write_manifest};
+
+        crate::transcode::require_ffmpeg();
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+            .await
+            .expect("pin the refusal policy");
+        let file = seed_mixed_subtitles(&state, Some("hdr10")).await;
+        let request = || {
+            post(
+                &format!("/api/v1/files/{file}/hls/sessions"),
+                Some(&admin),
+                json!({
+                    "playback_id": "hdr-burn-of-an-empty-track",
+                    "subtitle_burn": 2,
+                    "copy": true,
+                    "preserve_dolby_vision": true
+                }),
+            )
+        };
+
+        let (status, body) = call(&app, request()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(
+            body["code"], "hdr_subtitle_burn_refused",
+            "without the store's word"
+        );
+
+        let row = state
+            .store
+            .get_file(file)
+            .await
+            .expect("read")
+            .expect("file");
+        write_manifest(
+            &crate::subtitle_source::store_root(&state.runtime_cache_dir),
+            file,
+            stamp_of(&row.path),
+            vec![settled(2, crate::subtitle_source::Verdict::Empty)],
+        );
+        let (status, body) = call(&app, request()).await;
+        assert_ne!(
+            body["code"], "hdr_subtitle_burn_refused",
+            "an empty track has nothing to burn: {status} {body}"
+        );
+        assert_ne!(
+            body["code"], "vod_source_rescan_required",
+            "the copy stays a copy, not an encode: {status} {body}"
         );
     }
 
@@ -15008,6 +18518,7 @@ mod tests {
                         index: 0,
                         codec: "truehd".into(),
                         channels: Some(8),
+                        sample_rate: Some(48_000),
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -15035,6 +18546,7 @@ mod tests {
                         index: 0,
                         codec: "aac".into(),
                         channels: Some(2),
+                        sample_rate: Some(48_000),
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -15066,7 +18578,19 @@ mod tests {
     /// the absence of `media` — is pre-S1's.
     const PRE_S1_LIST_BODY: &str = concat!(
         r#"{"items":[{"id":1,"library_id":1,"kind":"movie","parent_id":null,"#,
-        r#""title":"Neon District 2049","year":2017,"overview":null,"#,
+        r#""title":"Neon District 2049","#,
+        // A-03 landed `sort_title` on ItemDto after this golden was captured,
+        // for the same reason S3's `genres` did: it is additive on its own
+        // terms. It is always present, it is the stored key the library
+        // `ORDER BY` already sorted on rather than anything newly computed,
+        // and the native clients merge library cursors on it. The decoders on
+        // both sides of the fleet skip keys they do not know — Swift's
+        // `JSONDecoder` by default, `Net.kt`'s `Json { ignoreUnknownKeys =
+        // true }` on Android — so an older client reads this body unchanged.
+        // The baseline this test defends therefore moved by exactly one more
+        // field. Anything else appearing here is what it is still watching for.
+        r#""sort_title":"neon district 2049","#,
+        r#""year":2017,"overview":null,"#,
         r#""season_number":null,"episode_number":null,"air_date":null,"#,
         r#""runtime_ms":null,"added_at":{added},"updated_at":{updated},"#,
         // S3 landed `genres` on ItemDto after this golden was captured. It is
@@ -15229,6 +18753,7 @@ mod tests {
                         index: 0,
                         codec: "aac".into(),
                         channels: Some(2),
+                        sample_rate: Some(48_000),
                         language: None,
                         title: None,
                         default: true,

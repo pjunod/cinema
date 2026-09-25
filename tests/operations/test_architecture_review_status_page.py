@@ -102,6 +102,9 @@ class ArchitectureReviewStatusPageCase(unittest.TestCase):
         self.assertIn('mode: snapshot.complete ? "available" : "truncated"', page)
         self.assertIn("complete: snapshot.complete", page)
         self.assertIn("overlayAbsenceText(state.overlay)", page)
+        self.assertIn("effectiveStatus(row.Status, pulls, state.overlay).group", page)
+        self.assertIn("metric(labels.livePlans, livePlans)", page)
+        self.assertGreaterEqual(page.count("renderSummary();"), 3)
         self.assertIn("the canonical board remains complete", page)
         load_board = page[page.index("async function loadBoard()") :]
         self.assertLess(
@@ -156,9 +159,19 @@ console.log(JSON.stringify({
             text=True,
         )
         observed = json.loads(result.stdout)
-        self.assertEqual(46, observed["rowCount"])
+        # 48 board rows: the 46 the review opened with, plus A-05 (the build
+        # plan A-04 produced as its D4) and K-09. A count that moves without a row
+        # being added to the board is the parser having stopped reading it.
+        self.assertEqual(48, observed["rowCount"])
         self.assertEqual([10], observed["cellCounts"])
-        self.assertIn("ldd | grep fontconfig", observed["s04Notes"])
+        # A distinctive phrase from the S-04 row's live Notes cell: this
+        # pins that the parser reads a real row's last column, and it moves
+        # when that row does. Escaped-pipe parsing has its own coverage in
+        # `test_overlay_javascript_contract_executes`.
+        self.assertIn(
+            "folds the encoder executable into the attestation batch",
+            observed["s04Notes"],
+        )
         self.assertTrue(observed["schemaMismatchFailedClosed"])
 
     def test_overlay_javascript_contract_executes(self) -> None:

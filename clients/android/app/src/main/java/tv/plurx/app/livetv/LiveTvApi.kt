@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -220,19 +221,28 @@ data class LiveTvResumeAnswer(val outcome: String, val session: LiveTvStarted? =
     val compatibility: LiveTvCompatibility? = null,
 ) {
     companion object {
-        fun from(caps: DeviceCaps, compatibility: LiveTvCompatibility? = null): LiveTvPlaybackEnvelope {
+        fun from(
+            caps: DeviceCaps,
+            compatibility: LiveTvCompatibility? = null,
+            sink: tv.plurx.app.data.LiveSinkFacts = tv.plurx.app.data.LiveSinkFacts(),
+        ): LiveTvPlaybackEnvelope {
             val liveAudio = caps.audio.filter { it in setOf("aac", "ac3", "eac3") }
             val formats = buildList {
                 add(LiveTvHlsFormat("mpegts", "h264", "aac"))
                 caps.video.forEach { video ->
-                    val container = if (video.codec == "hevc") "fmp4" else "mpegts"
-                    liveAudio.forEach { audio -> add(LiveTvHlsFormat(container, video.codec, audio)) }
+                    // Media3's TS extractor reads HEVC as readily as fMP4 does,
+                    // and MPEG-TS has no init file for late AC-3 to race, so a
+                    // copied HEVC picture with copied AC-3 rides MPEG-TS.
+                    val containers = if (video.codec == "hevc") listOf("fmp4", "mpegts") else listOf("mpegts")
+                    containers.forEach { container ->
+                        liveAudio.forEach { audio -> add(LiveTvHlsFormat(container, video.codec, audio)) }
+                    }
                 }
             }.distinct()
             val limits = caps.video.flatMap { video ->
                 (video.profiles.map { it.lowercase() }.map { it as String? }.ifEmpty { listOf(null) }).map { profile ->
                     LiveTvVideoLimit(video.codec, profile, 3840, video.max_height ?: 2160,
-                        LiveTvRational(60, 1), false)
+                        LiveTvRational(60, 1), sink.deinterlaces)
                 }
             }
             return LiveTvPlaybackEnvelope(
@@ -240,7 +250,7 @@ data class LiveTvResumeAnswer(val outcome: String, val session: LiveTvStarted? =
                 caps = caps,
                 hls_formats = formats,
                 video_limits = limits,
-                audio_limits = liveAudio.map { LiveTvAudioLimit(it, if (it == "aac") 2 else 8) },
+                audio_limits = liveAudio.map { LiveTvAudioLimit(it, if (it == "aac") sink.aacChannels else 8) },
                 compatibility = compatibility,
             )
         }
@@ -258,11 +268,16 @@ data class LiveTvResumeAnswer(val outcome: String, val session: LiveTvStarted? =
     val hdr: String? = null,
     val audio_channels: Int,
 )
+@Serializable data class LiveTvDeliverySource(
+    val field_order: String? = null,
+)
 @Serializable data class LiveTvDelivery(
     val output: LiveTvDeliveryOutput,
     val video_action: String,
     val audio_action: String,
     val packaging: String,
+    val source: LiveTvDeliverySource? = null,
+    val deinterlace: Boolean = false,
 )
 
 @Serializable
@@ -271,6 +286,7 @@ data class LiveTvStarted(
     val channel: LiveTvChannel,
     val live: Boolean = false,
     val delivery: LiveTvDelivery? = null,
+    val playlist_url: String,
 )
 
 @Serializable
@@ -293,6 +309,7 @@ data class LiveTvStatus(
 
 @Serializable
 data class LiveTvSettings(
+    val playback_display_mode_match: Boolean = false,
     val library_channels_enabled: Boolean = false,
     val dvr_enabled: Boolean = false,
     val dvr_root: String = "",
@@ -344,6 +361,10 @@ data class LiveTvGuideReadiness(
  * a refusal minted outside the Live TV module, which is itself the fact that
  * matters.
  */
+data class LiveTvWatchable(val channelId: String, val guideNumber: String) {
+    val offer: String get() = "Watch $guideNumber instead"
+}
+
 class LiveTvFailure(
     val code: String,
     val retry: String? = null,
@@ -355,7 +376,10 @@ class LiveTvFailure(
      * is a server that got as far as trying.
      */
     val status: Int? = null,
-) : Exception(liveTvMessage(code))
+    val watchable: List<LiveTvWatchable> = emptyList(),
+) : Exception(liveTvMessage(code) + if (code == "tuner_capacity" && watchable.isNotEmpty()) {
+    " " + watchable.joinToString(" · ") { it.offer } + "."
+} else "")
 
 /**
  * The copy this client has of its own, or null. Null is a real answer: it is
@@ -412,6 +436,15 @@ internal fun liveTvTypedFailure(body: String, status: Int, starting: Boolean): L
         retry = if (code == null) null else field("retry")?.contentOrNull,
         ownerDecided = if (code == null) null else field("owner_decided")?.booleanOrNull,
         status = status,
+        watchable = if (code == "tuner_capacity") {
+            runCatching { envelope?.get("watchable")?.jsonArray }.getOrNull()
+                ?.mapNotNull { entry ->
+                    val row = entry as? JsonObject ?: return@mapNotNull null
+                    val id = runCatching { row["channel_id"]?.jsonPrimitive?.contentOrNull }.getOrNull()
+                    val number = runCatching { row["guide_number"]?.jsonPrimitive?.contentOrNull }.getOrNull()
+                    if (id.isNullOrBlank() || number.isNullOrBlank()) null else LiveTvWatchable(id, number)
+                }?.distinctBy { it.channelId } ?: emptyList()
+        } else emptyList(),
     )
 }
 
@@ -423,10 +456,17 @@ sealed interface LiveTvSettingsChange {
     data class Enabled(val enabled: Boolean) : LiveTvSettingsChange
     data class LibraryChannelsEnabled(val enabled: Boolean) : LiveTvSettingsChange
     data class DvrEnabled(val enabled: Boolean) : LiveTvSettingsChange
+    data class DisplayModeMatch(val enabled: Boolean) : LiveTvSettingsChange
     data class FencedOwner(val owner: String, val cutoff: Long) : LiveTvSettingsChange
 
     fun body(generation: Long): JsonObject = buildJsonObject {
-        put("live_tv_config_generation", generation)
+        // The display-mode preference is an ordinary playback setting, not
+        // part of the replicated Live TV owner tuple. Sending the tuple's CAS
+        // with it is rejected by the server and would falsely make this
+        // advisory switch depend on unrelated tuner configuration churn.
+        if (this@LiveTvSettingsChange !is DisplayModeMatch) {
+            put("live_tv_config_generation", generation)
+        }
         when (val change = this@LiveTvSettingsChange) {
             is Configure -> {
                 put("live_tv_device_ipv4", change.ipv4)
@@ -438,6 +478,7 @@ sealed interface LiveTvSettingsChange {
             is Enabled -> put("live_tv_enabled", change.enabled)
             is LibraryChannelsEnabled -> put("library_channels_enabled", change.enabled)
             is DvrEnabled -> put("dvr_enabled", change.enabled)
+            is DisplayModeMatch -> put("playback_display_mode_match", change.enabled)
             is FencedOwner -> putJsonObject("live_tv_fenced_owner") {
                 put("owner_node_id", change.owner)
                 put("drain_before_generation", change.cutoff)
@@ -508,6 +549,32 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
         return url("live-tv", "sessions", capability, "index.m3u8").toString()
     }
 
+    /**
+     * The activation chooses the playable playlist. M4 returns a master
+     * playlist with caption renditions. A legacy resume may still return the
+     * media playlist; promote it to the same capability's master so resumed
+     * playback retains captions. Keep it on this origin and exact session path.
+     */
+    internal fun playbackUrl(started: LiveTvStarted): String {
+        val capability = started.session_id
+        if (capability.isEmpty() || capability.length > 1024) throw LiveTvFailure("no_answer")
+        val master = url("live-tv", "sessions", capability, "master.m3u8")
+        val index = url("live-tv", "sessions", capability, "index.m3u8")
+        return when (started.playlist_url) {
+            master.encodedPath -> master.toString()
+            index.encodedPath -> master.toString()
+            else -> throw LiveTvFailure("no_answer")
+        }
+    }
+
+    /** Probe the media playlist for liveness before rewinding a live decoder. */
+    internal suspend fun playlistIsLive(capability: String): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val probe = Request.Builder().url(playlistUrl(capability)).head().build()
+            mediaClient.newCall(probe).execute().use { it.code == 200 }
+        }.getOrDefault(false)
+    }
+
     private suspend fun request(
         target: HttpUrl, method: String = "GET", authenticated: Boolean = false,
         body: JsonObject? = null, timeout: Long = 45, starting: Boolean = false,
@@ -563,7 +630,11 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
             val compatibility = nextCompatibility
             nextCompatibility = null
             Net.json.encodeToJsonElement(
-                LiveTvPlaybackEnvelope.from(Caps.snapshot(current).document, compatibility)
+                LiveTvPlaybackEnvelope.from(
+                    Caps.snapshot(current).document,
+                    compatibility,
+                    Caps.liveSinkFacts(current),
+                )
             )
         }
         val body = buildJsonObject {

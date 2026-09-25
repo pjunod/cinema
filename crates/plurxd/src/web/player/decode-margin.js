@@ -512,13 +512,18 @@ function stopPlayerTimers(){
 function armPlaybackSampling(v,p){
   if(!v||!p) return;
   clearInterval(p.progressTimer);
-  p.progressTimer=setInterval(()=>playbackProgressTick(v,p),500);
+  p.progressTimer=setInterval(()=>playbackSamplingTick(v,p),500);
   clearInterval(p.timer);
   p.timer=setInterval(()=>{
     if(!playbackOwnsAttachedMedia(p)) return;
     reportProgress(p.fileId); reportHitches(); maybeDecodeRescue();
     autoControllerTick().catch(()=>{}); refreshSegTimes(); libraryChannelTick();
   }, PlaybackPolicy.AUTO_DEFAULTS.sampleMs);
+  // The OS transport belongs to whatever stream is attached now, and this is
+  // where a stream that attaches gets its timers. Re-arming re-installs, which
+  // is what a Force transcode out of a stall needs: the same handlers pointing
+  // at the element that is actually playing.
+  installPlayerMediaSession();
   p.samplingStopped=false;
 }
 

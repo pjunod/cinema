@@ -132,6 +132,24 @@ pub struct BlockedGetMetrics {
     cap: AtomicUsize,
     admitted: AtomicU64,
     refused: [AtomicU64; 2],
+    producer_generations: [AtomicU64; 2],
+    producer_terminations: [AtomicU64; 4],
+}
+
+/// Closed producer-generation labels, in exposition order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VodProducerKind {
+    Copy,
+    Encoded,
+}
+
+/// Closed producer-termination labels, in exposition order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VodProducerTermination {
+    Idle,
+    IndefiniteHold,
+    YieldToWaiter,
+    Restart,
 }
 
 impl BlockedGetMetrics {
@@ -155,7 +173,52 @@ impl BlockedGetMetrics {
 
     /// Prometheus text for blocked-GET admission.
     pub fn prometheus(&self) -> String {
-        render_blocked_gets(self.snapshot())
+        let mut out = render_blocked_gets(self.snapshot());
+        use std::fmt::Write;
+        out.push_str(
+            "# HELP plurx_vod_producer_generations_total VOD producer generations spawned, by bounded recipe kind.\n\
+             # TYPE plurx_vod_producer_generations_total counter\n",
+        );
+        for (index, kind) in ["copy", "encoded"].iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "plurx_vod_producer_generations_total{{kind=\"{kind}\"}} {}",
+                self.producer_generations[index].load(Relaxed)
+            );
+        }
+        out.push_str(
+            "# HELP plurx_vod_producer_terminations_total VOD producer generations ended by a driver operation, by bounded reason.\n\
+             # TYPE plurx_vod_producer_terminations_total counter\n",
+        );
+        for (index, why) in ["idle", "indefinite_hold", "yield_to_waiter", "restart"]
+            .iter()
+            .enumerate()
+        {
+            let _ = writeln!(
+                out,
+                "plurx_vod_producer_terminations_total{{why=\"{why}\"}} {}",
+                self.producer_terminations[index].load(Relaxed)
+            );
+        }
+        out
+    }
+
+    pub(crate) fn count_producer_generation(&self, kind: VodProducerKind) {
+        let index = match kind {
+            VodProducerKind::Copy => 0,
+            VodProducerKind::Encoded => 1,
+        };
+        self.producer_generations[index].fetch_add(1, Relaxed);
+    }
+
+    pub(crate) fn count_producer_termination(&self, why: VodProducerTermination) {
+        let index = match why {
+            VodProducerTermination::Idle => 0,
+            VodProducerTermination::IndefiniteHold => 1,
+            VodProducerTermination::YieldToWaiter => 2,
+            VodProducerTermination::Restart => 3,
+        };
+        self.producer_terminations[index].fetch_add(1, Relaxed);
     }
 }
 
@@ -1366,6 +1429,13 @@ mod tests {
         assert!(text.contains("plurx_vod_blocked_gets_admitted_total 1"));
         assert!(text.contains("plurx_vod_blocked_get_refusals_total{reason=\"session_busy\"} 1"));
         assert!(text.contains("plurx_vod_blocked_get_refusals_total{reason=\"pool_full\"} 0"));
+        metrics.count_producer_generation(VodProducerKind::Copy);
+        metrics.count_producer_generation(VodProducerKind::Encoded);
+        metrics.count_producer_termination(VodProducerTermination::YieldToWaiter);
+        let text = metrics.prometheus();
+        assert!(text.contains("plurx_vod_producer_generations_total{kind=\"copy\"} 1"));
+        assert!(text.contains("plurx_vod_producer_generations_total{kind=\"encoded\"} 1"));
+        assert!(text.contains("plurx_vod_producer_terminations_total{why=\"yield_to_waiter\"} 1"));
         assert!(
             !text.contains("distinctive"),
             "session ids and rendition keys must never become labels"

@@ -149,6 +149,20 @@ impl ItemKind {
             _ => None,
         }
     }
+
+    /// Whether an item of this kind carries a `resolution` — the best file
+    /// height, which the grid badges and the `resolution` sort ranks by.
+    ///
+    /// Movies and home videos only. A photo is probed and has a real height,
+    /// but a pixel count on a still is not the playback resolution the badge
+    /// and the sort are about, and no client badges one. The library
+    /// `ORDER BY` (`store::item_sort_order_by`) ranks every other kind at -1,
+    /// the same key a client merging on the DTO reads from an absent
+    /// `resolution`; the two must name the same kinds, and a unit test beside
+    /// the clause holds them together.
+    pub fn carries_resolution(self) -> bool {
+        matches!(self, ItemKind::Movie | ItemKind::Video)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -388,6 +402,10 @@ pub struct AudioStream {
     pub index: i64,
     pub codec: String,
     pub channels: Option<i64>,
+    /// Source sample rate reported by ffprobe. Older catalog rows omit it;
+    /// absence is not proof that a route can reproduce the stream unchanged.
+    #[serde(default)]
+    pub sample_rate: Option<i64>,
     pub language: Option<String>,
     pub title: Option<String>,
     pub default: bool,
@@ -453,6 +471,49 @@ impl DolbyVisionFacts {
     }
 }
 
+/// The ordering FFprobe reports for an interlaced video stream.
+///
+/// The spelling remains separate from [`MediaFile::field_order`]: storage
+/// retains the reporter token verbatim, while consumers make decisions only
+/// through [`ScanType::from_field_order`] so an unfamiliar future token is
+/// never mistaken for proof of interlace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldOrder {
+    Tff,
+    Bff,
+    TffCoded,
+    BffCoded,
+}
+
+/// The typed scan decision shared by catalogue and live-input consumers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanType {
+    Progressive,
+    Interlaced(FieldOrder),
+    #[default]
+    Unknown,
+}
+
+impl ScanType {
+    /// Interpret the finite FFprobe vocabulary conservatively.
+    ///
+    /// Missing, `unknown`, and unfamiliar values stay unknown. In particular,
+    /// this is not a `field_order != progressive` predicate: future reporter
+    /// output must not silently opt media into a destructive filter.
+    pub fn from_field_order(field_order: Option<&str>) -> Self {
+        match field_order {
+            Some("progressive") => Self::Progressive,
+            Some("tt") => Self::Interlaced(FieldOrder::Tff),
+            Some("bb") => Self::Interlaced(FieldOrder::Bff),
+            Some("tb") => Self::Interlaced(FieldOrder::TffCoded),
+            Some("bt") => Self::Interlaced(FieldOrder::BffCoded),
+            Some("unknown") | None | Some(_) => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MediaFile {
     pub id: i64,
@@ -468,6 +529,9 @@ pub struct MediaFile {
     /// stream (`hvc1`, `hev1`, `dvh1`, `dvhe`, `avc1`, …). This is packaging
     /// identity, not a second spelling of the codec family.
     pub video_codec_tag: Option<String>,
+    /// FFprobe's field-order token for the selected playable video stream.
+    /// Decisions must use [`ScanType::from_field_order`], not string inequality.
+    pub field_order: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
@@ -484,6 +548,14 @@ pub struct MediaFile {
     /// out of it any more except as a fallback for rows the backfill has not
     /// reached.
     pub hdr_format: Option<String>,
+    /// Source luminance in cd/m², retained independently of frame side data
+    /// that the tone-map filter chain may discard while linearising.
+    pub max_cll: Option<i64>,
+    pub max_fall: Option<i64>,
+    pub mastering_max_luminance: Option<i64>,
+    /// `stream`, `frame`, or `none`; `none` is an observed absence, not a
+    /// source-authored luminance value.
+    pub luminance_source: Option<String>,
     /// The Dolby Vision configuration record's own facts, as columns. Empty
     /// for a non-DV file, and empty for a DV file whose row predates the
     /// backfill — `hdr_format` is the fallback for those.
@@ -491,6 +563,10 @@ pub struct MediaFile {
     pub bitrate: Option<i64>,
     pub audio_streams: Vec<AudioStream>,
     pub subtitle_streams: Vec<SubtitleStream>,
+    /// Durable acquired captions, appended after the embedded stream ordinals.
+    /// Caption bodies are not part of public media metadata.
+    #[serde(skip)]
+    pub downloaded_subtitles: Vec<DownloadedSubtitle>,
     pub scanned_at: i64,
     /// Manual A/V sync correction, milliseconds; positive delays audio.
     /// Applied server-side at stream time (forces remux for direct-play
@@ -504,6 +580,54 @@ pub struct MediaFile {
     pub probed: bool,
 }
 
+/// A provider subtitle belongs to one exact catalog source revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadedSubtitle {
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub provider_file_id: i64,
+    pub language: String,
+    pub title: String,
+    pub hearing_impaired: bool,
+    pub forced: bool,
+    pub vtt: String,
+}
+
+impl MediaFile {
+    /// Called once by storage decoders. Embedded ordinals remain unchanged.
+    pub(crate) fn with_downloaded_subtitles(
+        mut self,
+        raw: &str,
+    ) -> Result<Self, serde_json::Error> {
+        let tracks: Vec<DownloadedSubtitle> = serde_json::from_str(raw)?;
+        self.downloaded_subtitles = tracks
+            .into_iter()
+            .filter(|track| track.source_size == self.size && track.source_mtime == self.mtime)
+            .collect();
+        for track in &self.downloaded_subtitles {
+            self.subtitle_streams.push(SubtitleStream {
+                index: self.subtitle_streams.len() as i64,
+                codec: "webvtt".into(),
+                language: Some(track.language.clone()),
+                title: Some(track.title.clone()),
+                default: false,
+                forced: track.forced,
+                hearing_impaired: track.hearing_impaired,
+            });
+        }
+        Ok(self)
+    }
+
+    pub fn downloaded_subtitle(&self, index: i64) -> Option<&DownloadedSubtitle> {
+        let index = usize::try_from(index).ok()?;
+        let embedded = self
+            .subtitle_streams
+            .len()
+            .checked_sub(self.downloaded_subtitles.len())?;
+        self.downloaded_subtitles.get(index.checked_sub(embedded)?)
+    }
+}
+
 /// Everything the prober learned about one file.
 #[derive(Debug, Clone, Default)]
 pub struct ProbeResult {
@@ -511,12 +635,17 @@ pub struct ProbeResult {
     pub container: Option<String>,
     pub video_codec: Option<String>,
     pub video_codec_tag: Option<String>,
+    pub field_order: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
     pub bit_depth: Option<i64>,
     pub hdr: Option<String>,
     pub hdr_format: Option<String>,
+    pub max_cll: Option<i64>,
+    pub max_fall: Option<i64>,
+    pub mastering_max_luminance: Option<i64>,
+    pub luminance_source: Option<String>,
     /// The Dolby Vision configuration record, parsed. `hdr_format` is built
     /// from this rather than the other way round.
     pub dolby_vision: DolbyVisionFacts,

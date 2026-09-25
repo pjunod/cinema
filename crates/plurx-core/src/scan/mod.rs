@@ -14,21 +14,263 @@ pub mod probe;
 pub mod recordings;
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::domain::{Item, ItemKind, Library, LibraryKind, MetadataPatch, NewItem, ProbeResult};
-use crate::error::StoreError;
+use crate::error::{ProbeError, StoreError};
 use crate::store::{PublicationStore, ReconcileOutcome, RootFingerprintStatus, Store};
+
+const WALK_PAGE: usize = 256;
+const WALK_PAGES_IN_FLIGHT: usize = 4;
+const SCAN_PHASE_BUCKETS: [(u64, &str); 6] = [
+    (1_000_000_000, "1"),
+    (5_000_000_000, "5"),
+    (15_000_000_000, "15"),
+    (60_000_000_000, "60"),
+    (300_000_000_000, "300"),
+    (900_000_000_000, "900"),
+];
+
+#[derive(Debug)]
+enum WalkEvent {
+    Candidate(PathBuf),
+    Error { at: String, error: String },
+    RootNotDirectory(PathBuf),
+}
+
+#[derive(Clone, Copy)]
+struct WalkFilter {
+    kind: LibraryKind,
+}
+
+impl WalkFilter {
+    fn accepts(self, path: &Path) -> bool {
+        match self.kind {
+            LibraryKind::Books => book_kind_for_path(path).is_some(),
+            LibraryKind::Home => {
+                is_video(path) || (home::is_photo(path) && !home::is_artwork_sidecar(path))
+            }
+            _ => is_video(path),
+        }
+    }
+}
+
+fn spawn_walker(
+    roots: Vec<PathBuf>,
+    filter: WalkFilter,
+) -> (
+    tokio::sync::mpsc::Receiver<Vec<WalkEvent>>,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_walker_with_entry_hook(roots, filter, || {})
+}
+
+fn spawn_walker_with_entry_hook<F>(
+    roots: Vec<PathBuf>,
+    filter: WalkFilter,
+    entry_hook: F,
+) -> (
+    tokio::sync::mpsc::Receiver<Vec<WalkEvent>>,
+    tokio::task::JoinHandle<()>,
+)
+where
+    F: Fn() + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::mpsc::channel(WALK_PAGES_IN_FLIGHT);
+    let handle = tokio::task::spawn_blocking(move || {
+        let mut page = Vec::with_capacity(WALK_PAGE);
+        let mut last_root = None;
+        for root in roots {
+            last_root = Some(root.clone());
+            if !root.is_dir() {
+                page.push(WalkEvent::RootNotDirectory(root.clone()));
+            } else {
+                for entry in WalkDir::new(&root).follow_links(true) {
+                    // Candidate pages are deliberately based on matching media,
+                    // but cancellation is based on every visited entry. A large
+                    // subtitles/documents tree may produce no page at all; only
+                    // checking `blocking_send` would keep walking that tree after
+                    // the scan and its lease were gone.
+                    if tx.is_closed() {
+                        tracing::warn!(
+                            path = %root.display(),
+                            "walker orphaned: consumer gone before walk finished"
+                        );
+                        return;
+                    }
+                    entry_hook();
+                    let event = match entry {
+                        Ok(entry)
+                            if entry.file_type().is_file() && filter.accepts(entry.path()) =>
+                        {
+                            Some(WalkEvent::Candidate(entry.into_path()))
+                        }
+                        Ok(_) => None,
+                        Err(error) => Some(WalkEvent::Error {
+                            at: error
+                                .path()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|| root.display().to_string()),
+                            error: error.to_string(),
+                        }),
+                    };
+                    if let Some(event) = event {
+                        page.push(event);
+                    }
+                    if page.len() == WALK_PAGE {
+                        let next = Vec::with_capacity(WALK_PAGE);
+                        if tx
+                            .blocking_send(std::mem::replace(&mut page, next))
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                path = %root.display(),
+                                "walker orphaned: consumer gone before walk finished"
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        if !page.is_empty() && tx.blocking_send(page).is_err() {
+            let root = last_root
+                .as_deref()
+                .map(Path::display)
+                .map(|path| path.to_string())
+                .unwrap_or_else(|| "<none>".to_owned());
+            tracing::warn!(path = %root, "walker orphaned: consumer gone before walk finished");
+        }
+    });
+    (rx, handle)
+}
+
+#[derive(Default)]
+struct ScanPhaseCell {
+    count: AtomicU64,
+    elapsed_nanos: AtomicU64,
+    buckets: [AtomicU64; SCAN_PHASE_BUCKETS.len()],
+}
+
+#[derive(Default)]
+struct ScanPhaseMetrics {
+    walk: ScanPhaseCell,
+    process: ScanPhaseCell,
+}
+
+static SCAN_PHASE_METRICS: ScanPhaseMetrics = ScanPhaseMetrics {
+    walk: ScanPhaseCell {
+        count: AtomicU64::new(0),
+        elapsed_nanos: AtomicU64::new(0),
+        buckets: [const { AtomicU64::new(0) }; SCAN_PHASE_BUCKETS.len()],
+    },
+    process: ScanPhaseCell {
+        count: AtomicU64::new(0),
+        elapsed_nanos: AtomicU64::new(0),
+        buckets: [const { AtomicU64::new(0) }; SCAN_PHASE_BUCKETS.len()],
+    },
+};
+
+fn saturating_add(target: &AtomicU64, amount: u64) {
+    let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        (current != u64::MAX).then(|| current.saturating_add(amount))
+    });
+}
+
+fn observe_scan_phase(cell: &ScanPhaseCell, elapsed: Duration) {
+    let nanos = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+    saturating_add(&cell.count, 1);
+    saturating_add(&cell.elapsed_nanos, nanos);
+    if let Some(index) = SCAN_PHASE_BUCKETS
+        .iter()
+        .position(|(upper, _)| nanos <= *upper)
+    {
+        saturating_add(&cell.buckets[index], 1);
+    }
+}
+
+/// Render fixed-cardinality scan phase latency metrics without touching a scan.
+pub fn prometheus_scan_walk() -> String {
+    use std::fmt::Write;
+
+    let mut out = String::from(
+        "# HELP plurx_scan_walk_seconds Filesystem scan latency by phase.\n\
+         # TYPE plurx_scan_walk_seconds histogram\n",
+    );
+    for (phase, cell) in [
+        ("walk", &SCAN_PHASE_METRICS.walk),
+        ("process", &SCAN_PHASE_METRICS.process),
+    ] {
+        let mut cumulative = 0_u64;
+        for (index, (_, upper)) in SCAN_PHASE_BUCKETS.iter().enumerate() {
+            cumulative = cumulative.saturating_add(cell.buckets[index].load(Ordering::Relaxed));
+            let _ = writeln!(
+                out,
+                "plurx_scan_walk_seconds_bucket{{phase=\"{phase}\",le=\"{upper}\"}} {cumulative}"
+            );
+        }
+        let count = cell.count.load(Ordering::Relaxed);
+        let _ = writeln!(
+            out,
+            "plurx_scan_walk_seconds_bucket{{phase=\"{phase}\",le=\"+Inf\"}} {count}"
+        );
+        let seconds = cell.elapsed_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0;
+        let _ = writeln!(
+            out,
+            "plurx_scan_walk_seconds_sum{{phase=\"{phase}\"}} {seconds:.9}"
+        );
+        let _ = writeln!(
+            out,
+            "plurx_scan_walk_seconds_count{{phase=\"{phase}\"}} {count}"
+        );
+    }
+    out
+}
 
 /// Container extensions we treat as playable video.
 const VIDEO_EXTS: &[&str] = &[
     "mkv", "mp4", "m4v", "avi", "mov", "ts", "m2ts", "webm", "wmv", "flv", "mpg", "mpeg", "vob",
     "ogv", "3gp",
 ];
+
+static PROBE_OK: AtomicU64 = AtomicU64::new(0);
+static PROBE_FAILED: AtomicU64 = AtomicU64::new(0);
+static PROBE_TRANSIENT: AtomicU64 = AtomicU64::new(0);
+static PROBE_PARSE: AtomicU64 = AtomicU64::new(0);
+
+async fn probe_with_outcome(path: &Path) -> Result<ProbeResult, ProbeError> {
+    let result = probe::probe(path).await;
+    let counter = match &result {
+        Ok(_) => &PROBE_OK,
+        Err(ProbeError::Spawn(_) | ProbeError::Failed { .. }) => &PROBE_FAILED,
+        Err(ProbeError::Transient { .. }) => &PROBE_TRANSIENT,
+        Err(ProbeError::Parse(_)) => &PROBE_PARSE,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+    result
+}
+
+/// Process-lifetime scan probe outcomes. Fixed labels keep the series bounded;
+/// paths and error text belong in the scan report and log, not metric labels.
+pub fn prometheus_probe_outcomes() -> String {
+    format!(
+        "# HELP plurx_scan_probe_outcomes_total Scan ffprobe outcomes by result class.\n\
+         # TYPE plurx_scan_probe_outcomes_total counter\n\
+         plurx_scan_probe_outcomes_total{{outcome=\"ok\"}} {}\n\
+         plurx_scan_probe_outcomes_total{{outcome=\"failed\"}} {}\n\
+         plurx_scan_probe_outcomes_total{{outcome=\"transient\"}} {}\n\
+         plurx_scan_probe_outcomes_total{{outcome=\"parse\"}} {}\n",
+        PROBE_OK.load(Ordering::Relaxed),
+        PROBE_FAILED.load(Ordering::Relaxed),
+        PROBE_TRANSIENT.load(Ordering::Relaxed),
+        PROBE_PARSE.load(Ordering::Relaxed),
+    )
+}
 
 /// Audio containers accepted in a Books library. These are formats ffmpeg's
 /// existing probe/direct-play stack understands on the project's supported
@@ -231,7 +473,7 @@ pub async fn reprobe_files_with_publication(
         let path_str = file.path.to_string_lossy().into_owned();
         // Re-stat rather than trusting the stored size/mtime: if the file has
         // changed since, the fresh values are what belong in the record.
-        let (size, mtime) = match file_stat(&file.path) {
+        let (size, mtime) = match file_stat(&file.path).await {
             Ok(stat) => stat,
             Err(e) => {
                 report.gone += 1;
@@ -243,13 +485,20 @@ pub async fn reprobe_files_with_publication(
                 continue;
             }
         };
-        match probe::probe(&file.path).await {
+        match probe_with_outcome(&file.path).await {
             Ok(probe) => {
                 store
                     .upsert_file(file.item_id, &path_str, size, mtime, &probe)
                     .await?;
                 report.repaired += 1;
                 tracing::info!(path = %path_str, "media details recovered");
+            }
+            Err(e @ ProbeError::Transient { .. }) => {
+                report.still_failing += 1;
+                tracing::error!(path = %path_str, error = %e, "re-probe did not finish");
+                report.problems.push(format!(
+                    "`{path_str}` still has no media details because its probe did not finish: {e}"
+                ));
             }
             Err(e) => {
                 report.still_failing += 1;
@@ -355,8 +604,8 @@ fn recognized_extensions(library: &Library) -> String {
 /// File size and mtime (unix seconds). The `io::Error` is kept rather than
 /// flattened to `None` so a stat failure can tell the operator *why* (denied,
 /// dangling symlink, vanished mid-scan) instead of just incrementing a counter.
-fn file_stat(path: &Path) -> std::io::Result<(i64, i64)> {
-    let meta = std::fs::metadata(path)?;
+async fn file_stat(path: &Path) -> std::io::Result<(i64, i64)> {
+    let meta = tokio::fs::metadata(path).await?;
     let size = meta.len() as i64;
     let mtime = meta
         .modified()
@@ -460,61 +709,72 @@ pub async fn scan_library_with_publication_and_prune_limit(
     // Capture the configured path-set identity before walking. A root that
     // vanishes mid-scan must produce one bounded refusal, not a successful
     // walk followed by a fatal error and an immediate full retry.
-    let fingerprint = match library_root_fingerprint(&library.paths) {
-        Ok(fingerprint) => Some(fingerprint),
-        Err(error) => {
-            report.note(format!(
+    let fingerprint_paths = library.paths.clone();
+    let fingerprint =
+        match tokio::task::spawn_blocking(move || library_root_fingerprint(&fingerprint_paths))
+            .await
+            .map_err(|error| {
+                StoreError::Task(format!("library root fingerprint task failed: {error}"))
+            })? {
+            Ok(fingerprint) => Some(fingerprint),
+            Err(error) => {
+                report.note(format!(
                 "vanished-file cleanup skipped: library root identity could not be read: {error}"
             ));
-            None
-        }
-    };
+                None
+            }
+        };
 
-    // Collect candidate files first (cheap, synchronous), then process each.
+    // Collect candidate files first, then process each.
     // A root that is missing or unreadable is a loud, actionable problem — the
     // most common cause is a container path mix-up (the library was configured
     // with a host path that isn't mounted inside the container) or an
     // unmounted NAS. Either way, silently scanning nothing is the worst
     // possible answer.
+    let walk_started = Instant::now();
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     let mut walk_errors = 0usize;
-    for root in &library.paths {
-        if !root.is_dir() {
-            report.errors += 1;
-            walk_errors += 1;
-            tracing::error!(path = %root.display(), "library path is not a directory");
-            report.note(format!(
-                "library path `{}` does not exist on the server — if plurxd runs in a \
-                 container, use the path as mounted inside the container (e.g. `/media/…`), \
-                 and check the mount is present",
-                root.display()
-            ));
-            continue;
-        }
-        for entry in WalkDir::new(root).follow_links(true) {
-            match entry {
-                Ok(entry) => {
-                    if entry.file_type().is_file() && wanted_file(library, entry.path()) {
-                        candidates.push(entry.into_path());
-                    }
+    if let Some(p) = progress {
+        p.found.store(0, Ordering::Relaxed);
+    }
+    let (mut pages, walker) =
+        spawn_walker(library.paths.clone(), WalkFilter { kind: library.kind });
+    while let Some(page) = pages.recv().await {
+        let mut page_candidates = 0usize;
+        for event in page {
+            match event {
+                WalkEvent::Candidate(path) => {
+                    candidates.push(path);
+                    page_candidates += 1;
                 }
-                Err(e) => {
+                WalkEvent::Error { at, error } => {
                     report.errors += 1;
                     walk_errors += 1;
-                    let at = e
-                        .path()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| root.display().to_string());
-                    tracing::error!(path = %at, error = %e, "cannot read directory entry");
-                    report.note(format!("cannot read `{at}`: {e}"));
+                    tracing::error!(path = %at, error = %error, "cannot read directory entry");
+                    report.note(format!("cannot read `{at}`: {error}"));
+                }
+                WalkEvent::RootNotDirectory(root) => {
+                    report.errors += 1;
+                    walk_errors += 1;
+                    tracing::error!(path = %root.display(), "library path is not a directory");
+                    report.note(format!(
+                        "library path `{}` does not exist on the server — if plurxd runs in a \
+                         container, use the path as mounted inside the container (e.g. `/media/…`), \
+                         and check the mount is present",
+                        root.display()
+                    ));
                 }
             }
         }
+        if let Some(p) = progress {
+            p.found.fetch_add(page_candidates, Ordering::Relaxed);
+        }
     }
+    walker
+        .await
+        .map_err(|error| StoreError::Task(format!("library walker task failed: {error}")))?;
     candidates.sort();
-    if let Some(p) = progress {
-        p.found.store(candidates.len(), Ordering::Relaxed);
-    }
+    observe_scan_phase(&SCAN_PHASE_METRICS.walk, walk_started.elapsed());
 
     if candidates.is_empty() && walk_errors == 0 {
         let (what, exts) = match library.kind {
@@ -534,6 +794,7 @@ pub async fn scan_library_with_publication_and_prune_limit(
         ));
     }
 
+    let process_started = Instant::now();
     let mut placed: Vec<PlacedFile> = Vec::new();
     let skips = record_candidates(
         store,
@@ -545,6 +806,7 @@ pub async fn scan_library_with_publication_and_prune_limit(
         Some(&mut placed),
     )
     .await?;
+    observe_scan_phase(&SCAN_PHASE_METRICS.process, process_started.elapsed());
 
     // Reconcile: anything in the DB for this library but not seen on disk is
     // gone. NEVER reconcile after a partial walk — if a root was missing or a
@@ -799,8 +1061,25 @@ pub async fn scan_path_with_publication(
     // symlink pointing outside the library both pass a string prefix test,
     // which would turn "scan this path" into "read any directory on the
     // host" for anyone holding a scan key.
-    let canonical = match target.canonicalize() {
-        Ok(p) => p,
+    let target_path = target.to_path_buf();
+    let configured_roots = library.paths.clone();
+    let canonicalized = tokio::task::spawn_blocking(move || {
+        let canonical = target_path.canonicalize()?;
+        let is_file = canonical.is_file();
+        let roots = configured_roots
+            .into_iter()
+            .map(|root| root.canonicalize().unwrap_or(root))
+            .collect::<Vec<_>>();
+        Ok::<_, std::io::Error>((canonical, is_file, roots))
+    })
+    .await
+    .map_err(|error| {
+        TargetError::Store(StoreError::Task(format!(
+            "target path canonicalization task failed: {error}"
+        )))
+    })?;
+    let (canonical, target_is_file, canonical_roots) = match canonicalized {
+        Ok(result) => result,
         Err(_) => {
             return Err(TargetError::OutsideRoots {
                 path: target.display().to_string(),
@@ -808,12 +1087,9 @@ pub async fn scan_path_with_publication(
             })
         }
     };
-    let under_root = library.paths.iter().any(|root| {
-        // Compare canonicalized roots too: a library configured through a
-        // symlinked mount would otherwise never match its own files.
-        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+    let under_root = canonical_roots.iter().any(|root| {
         // Component-wise, so `/data` does not match `/database`.
-        canonical == root || canonical.starts_with(&root)
+        canonical == *root || canonical.starts_with(root)
     });
     if !under_root {
         return Err(TargetError::OutsideRoots {
@@ -824,35 +1100,46 @@ pub async fn scan_path_with_publication(
 
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     let mut report = ScanReport::default();
-    if canonical.is_file() {
+    let walk_started = Instant::now();
+    if target_is_file {
         if wanted_file(library, &canonical) {
             candidates.push(canonical.clone());
         }
     } else {
-        for entry in WalkDir::new(&canonical).follow_links(true) {
-            match entry {
-                Ok(entry) => {
-                    if entry.file_type().is_file() && wanted_file(library, entry.path()) {
-                        candidates.push(entry.into_path());
+        let (mut pages, walker) =
+            spawn_walker(vec![canonical.clone()], WalkFilter { kind: library.kind });
+        while let Some(page) = pages.recv().await {
+            for event in page {
+                match event {
+                    WalkEvent::Candidate(path) => candidates.push(path),
+                    WalkEvent::Error { at, error } => {
+                        // A walk error is reported but never fatal, and — unlike
+                        // the full scan — it changes nothing about reconcile,
+                        // because there is no reconcile to change.
+                        report.errors += 1;
+                        tracing::error!(target: "plurxd::integrate", path = %at, error = %error,
+                            "cannot read directory entry during targeted scan");
+                        report.note(format!("cannot read `{at}`: {error}"));
                     }
-                }
-                Err(e) => {
-                    // A walk error is reported but never fatal, and — unlike
-                    // the full scan — it changes nothing about reconcile,
-                    // because there is no reconcile to change.
-                    report.errors += 1;
-                    let at = e
-                        .path()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| canonical.display().to_string());
-                    tracing::error!(target: "plurxd::integrate", path = %at, error = %e,
-                        "cannot read directory entry during targeted scan");
-                    report.note(format!("cannot read `{at}`: {e}"));
+                    WalkEvent::RootNotDirectory(path) => {
+                        let at = path.display().to_string();
+                        let error = "path is not a directory";
+                        report.errors += 1;
+                        tracing::error!(target: "plurxd::integrate", path = %at, error,
+                            "cannot read directory entry during targeted scan");
+                        report.note(format!("cannot read `{at}`: {error}"));
+                    }
                 }
             }
         }
+        walker.await.map_err(|error| {
+            TargetError::Store(StoreError::Task(format!(
+                "targeted walker task failed: {error}"
+            )))
+        })?;
     }
     candidates.sort();
+    observe_scan_phase(&SCAN_PHASE_METRICS.walk, walk_started.elapsed());
 
     if candidates.is_empty() {
         report.note(format!(
@@ -863,6 +1150,7 @@ pub async fn scan_path_with_publication(
         ));
     }
 
+    let process_started = Instant::now();
     let mut seen: HashSet<String> = HashSet::new();
     let mut items: Vec<PlacedFile> = Vec::new();
     let skips = record_candidates(
@@ -875,6 +1163,7 @@ pub async fn scan_path_with_publication(
         Some(&mut items),
     )
     .await?;
+    observe_scan_phase(&SCAN_PHASE_METRICS.process, process_started.elapsed());
     refresh_audiobook_runtimes(store, library, &items).await?;
     report.skip_groups = skips.into_values().collect();
     report.seal_problems();
@@ -954,7 +1243,7 @@ async fn record_candidates(
         let path_str = path.to_string_lossy().into_owned();
         seen.insert(path_str.clone());
 
-        let (size, mtime) = match file_stat(&path) {
+        let (size, mtime) = match file_stat(&path).await {
             Ok(stat) => stat,
             Err(e) => {
                 // The directory walk listed this file, but stat'ing it failed:
@@ -1016,13 +1305,21 @@ async fn record_candidates(
                 // item from the filename and orphan a home video that had been
                 // renamed by an NFO or by hand.
                 if !ex.probed {
-                    match probe::probe(&path).await {
+                    match probe_with_outcome(&path).await {
                         Ok(probe) => {
                             store
                                 .upsert_file(ex.item_id, &path_str, size, mtime, &probe)
                                 .await?;
                             report.repaired += 1;
                             tracing::info!(path = %path_str, "media details recovered on rescan");
+                        }
+                        Err(e @ ProbeError::Transient { .. }) => {
+                            tracing::error!(path = %path_str, error = %e, "probe still did not finish");
+                            report.errors += 1;
+                            report.degraded += 1;
+                            report.note(format!(
+                                "still no media details for `{path_str}` because its probe did not finish: {e} — it will be tried again on the next scan"
+                            ));
                         }
                         Err(e) => {
                             tracing::error!(path = %path_str, error = %e, "probe still failing");
@@ -1119,8 +1416,17 @@ async fn record_candidates(
         {
             text_book_probe(&path)
         } else {
-            match probe::probe(&path).await {
+            match probe_with_outcome(&path).await {
                 Ok(p) => p,
+                Err(e @ ProbeError::Transient { .. }) => {
+                    tracing::error!(path = %path_str, error = %e, "probe did not finish; recording without media detail");
+                    report.errors += 1;
+                    report.degraded += 1;
+                    report.note(format!(
+                        "could not finish reading media details for `{path_str}`: {e} — it was added without codec, duration, or track info and will be tried again on the next scan"
+                    ));
+                    Default::default()
+                }
                 Err(e) => {
                     tracing::error!(path = %path_str, error = %e, "probe failed; recording without media detail");
                     report.errors += 1;
@@ -1627,6 +1933,85 @@ mod tests {
         path.canonicalize().expect("canonicalize")
     }
 
+    #[tokio::test]
+    async fn walker_pages_are_bounded_and_ordered() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let mut expected = Vec::new();
+        for index in (0..1_100).rev() {
+            let path = dir.path().join(format!("Movie {index:04} (2020).mkv"));
+            std::fs::write(&path, b"").expect("write candidate");
+            expected.push(path);
+        }
+        expected.sort();
+
+        let (mut pages, walker) = spawn_walker(
+            vec![dir.path().to_path_buf()],
+            WalkFilter {
+                kind: LibraryKind::Movies,
+            },
+        );
+        let mut candidates = Vec::new();
+        while let Some(page) = pages.recv().await {
+            assert!(page.len() <= WALK_PAGE, "page exceeded its fixed bound");
+            for event in page {
+                if let WalkEvent::Candidate(path) = event {
+                    candidates.push(path);
+                }
+            }
+        }
+        walker.await.expect("walker");
+        candidates.sort();
+
+        assert_eq!(candidates, expected);
+        assert_eq!(candidates.len(), 1_100);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_scan_stops_the_walker() {
+        let dir = tempfile::tempdir().expect("tmp");
+        for index in 0..5_000 {
+            std::fs::write(dir.path().join(format!("Document {index:04}.txt")), b"")
+                .expect("write non-media entry");
+        }
+        let visits = std::sync::Arc::new(AtomicUsize::new(0));
+        let hook_visits = std::sync::Arc::clone(&visits);
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (pages, walker) = spawn_walker_with_entry_hook(
+            vec![dir.path().to_path_buf()],
+            WalkFilter {
+                kind: LibraryKind::Movies,
+            },
+            move || {
+                if hook_visits.fetch_add(1, Ordering::SeqCst) == 0 {
+                    started_tx.send(()).expect("signal first walked entry");
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            },
+        );
+        tokio::task::spawn_blocking(move || started_rx.recv())
+            .await
+            .expect("first-entry waiter")
+            .expect("walker started");
+        drop(pages);
+        tokio::time::timeout(Duration::from_secs(1), walker)
+            .await
+            .expect("sparse orphaned walker should observe the dropped consumer")
+            .expect("walker");
+        assert!(
+            visits.load(Ordering::SeqCst) < 64,
+            "cancellation must not wait for a page of matching media"
+        );
+    }
+
+    #[test]
+    fn scan_phase_metrics_have_bounded_labels() {
+        let metrics = prometheus_scan_walk();
+        assert!(metrics.contains("phase=\"walk\""));
+        assert!(metrics.contains("phase=\"process\""));
+        assert!(metrics.contains("le=\"900\""));
+        assert!(metrics.contains("le=\"+Inf\""));
+    }
+
     // ---- targeted scan (integration plan P2) ---------------------------
 
     async fn movie_library(store: &SqliteStore, dir: &Path) -> Library {
@@ -1671,6 +2056,68 @@ mod tests {
             .expect("episodes");
         assert_eq!(episodes.len(), 1, "expected one episode: {episodes:?}");
         episodes.into_iter().next().expect("episode")
+    }
+
+    #[tokio::test]
+    async fn transient_probe_is_left_unprobed_and_retried_on_the_next_scan() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let directory = tempfile::tempdir().expect("media fixture");
+        let path = write_fake_video(directory.path(), "Heat (1995).mkv").await;
+        let library = movie_library(&store, directory.path()).await;
+        let fixture = probe::tests::install_fixture(
+            &path,
+            probe::tests::FixtureMode::SleepThenJson,
+            std::time::Duration::from_millis(200),
+        );
+
+        let first = scan_library(&store, &library).await.expect("initial scan");
+        assert_eq!(first.added, 1);
+        assert_eq!(first.degraded, 1);
+        let item = store
+            .list_top_items(library.id, ItemSort::Title, 0, 10)
+            .await
+            .expect("movie list")
+            .items
+            .into_iter()
+            .next()
+            .expect("movie item");
+        assert!(
+            !store
+                .files_for_item(item.id)
+                .await
+                .expect("stored files")
+                .into_iter()
+                .next()
+                .expect("file row")
+                .probed
+        );
+
+        let second = scan_library(&store, &library).await.expect("repair scan");
+        assert_eq!(second.unchanged, 1);
+        assert_eq!(second.repaired, 1);
+        assert!(
+            store
+                .files_for_item(item.id)
+                .await
+                .expect("stored files")
+                .into_iter()
+                .next()
+                .expect("file row")
+                .probed
+        );
+        assert_eq!(fixture.calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn probe_outcome_metrics_have_only_the_fixed_result_labels() {
+        let metrics = prometheus_probe_outcomes();
+        for outcome in ["ok", "failed", "transient", "parse"] {
+            assert!(metrics.contains(&format!("outcome=\"{outcome}\"")));
+        }
+        assert_eq!(
+            metrics.matches("plurx_scan_probe_outcomes_total{").count(),
+            4
+        );
     }
 
     #[tokio::test]
@@ -2110,6 +2557,29 @@ mod tests {
             .expect("list");
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].title, "The Matrix");
+    }
+
+    #[tokio::test]
+    async fn root_that_is_not_a_directory_is_reported_by_the_consumer() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        let root_file = write_fake_video(dir.path(), "Not A Root (2020).mkv").await;
+        let mut lib = movie_library(&store, dir.path()).await;
+        lib.paths = vec![root_file.clone()];
+
+        let report = scan_library(&store, &lib).await.expect("scan");
+
+        assert_eq!(report.errors, 1);
+        assert_eq!(report.removed_files, 0);
+        assert!(report.problems.iter().any(|problem| {
+            problem
+                == &format!(
+                    "library path `{}` does not exist on the server — if plurxd runs in a \
+                     container, use the path as mounted inside the container (e.g. `/media/…`), \
+                     and check the mount is present",
+                    root_file.display()
+                )
+        }));
     }
 
     #[tokio::test]

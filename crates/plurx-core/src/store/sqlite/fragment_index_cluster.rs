@@ -5,9 +5,13 @@ use super::SqliteStore;
 use crate::error::StoreError;
 use crate::store::fragment_index_cluster::{
     bounded_analysis_backoff_base_secs, bounded_analysis_backoff_max_secs,
-    bounded_analysis_max_attempts,
+    bounded_analysis_max_attempts, valid_subtitle_source_publication,
 };
 use crate::store::fragment_index_cluster::{ANALYSIS_CANONICAL_CTE, ANALYSIS_SUMMARY_CTE};
+use crate::store::fragment_index_cluster::{
+    SUBTITLE_BACKFILL_CANDIDATES, SUBTITLE_BACKFILL_DIAGNOSTICS,
+    SUBTITLE_BACKFILL_TERMINAL_SETTLE_MS, SUBTITLE_SOURCE_READY_UNCOVERED,
+};
 use crate::store::{
     cluster_fragment_index_generation_key, cluster_fragment_index_key, AnalysisAttempt,
     AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryPage,
@@ -15,7 +19,9 @@ use crate::store::{
     AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
     ClusterFragmentIndexArtifact, ClusterFragmentIndexFailure, ClusterFragmentIndexJob,
     ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, SubtitleBackfillCandidate,
+    SubtitleBackfillDiagnostics, SubtitleSourcePublication, SubtitleSourceStamp,
+    SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 
 const MAX_ACTIVE_JOBS: i64 = 4_096;
@@ -161,6 +167,27 @@ fn request_from_row(row: &Row<'_>) -> rusqlite::Result<AnalysisRequest> {
         cancel_requested: row.get::<_, i64>(21)? != 0,
         created_at_ms: row.get(22)?,
         updated_at_ms: row.get(23)?,
+    })
+}
+
+fn subtitle_source_publication_from_row(
+    row: &Row<'_>,
+) -> rusqlite::Result<SubtitleSourcePublication> {
+    Ok(SubtitleSourcePublication {
+        file_id: row.get(0)?,
+        source_size: row.get(1)?,
+        source_mtime: row.get(2)?,
+        source_attestation: row.get(3)?,
+        node_id: row.get(4)?,
+        ordinal: row.get(5)?,
+        kind: row.get(6)?,
+        format: row.get(7)?,
+        verdict: row.get(8)?,
+        attempts: row.get(9)?,
+        origin: row.get(10)?,
+        sha256: row.get(11)?,
+        bytes: row.get(12)?,
+        published_at_ms: row.get(13)?,
     })
 }
 
@@ -310,22 +337,281 @@ fn valid_request(request: &NewAnalysisRequest) -> bool {
         && request.source_size >= 0
         && matches!(
             request.component.as_str(),
-            "fragment_index" | "skip_markers"
+            "fragment_index" | "skip_markers" | "subtitle_source"
         )
         && !request.pipeline_version.is_empty()
         && request.pipeline_version.len() <= 128
         && !request.requested_generation.is_empty()
         && request.requested_generation.len() <= 128
-        && matches!(request.priority.as_str(), "normal" | "forced")
-        && matches!(request.trigger.as_str(), "admin" | "background")
+        && matches!(
+            request.priority.as_str(),
+            "normal" | "forced" | "foreground"
+        )
+        && matches!(
+            request.trigger.as_str(),
+            "admin" | "background" | "playback"
+        )
         && (request.force_rebuild == (request.priority == "forced"))
+        && !(request.component == "subtitle_source" && request.force_rebuild)
+        && (request.priority != "foreground" || request.component == "subtitle_source")
+        && (request.trigger != "playback" || request.component == "subtitle_source")
         && request.target_node_id.len() <= 128
-        && ((request.component == "skip_markers" && request.target_node_id.is_empty())
+        && ((matches!(
+            request.component.as_str(),
+            "skip_markers" | "subtitle_source"
+        ) && request.target_node_id.is_empty())
             || (request.component == "fragment_index" && !request.target_node_id.is_empty()))
 }
 
 #[async_trait]
 impl ClusterFragmentIndexStore for SqliteStore {
+    async fn subtitle_backfill_diagnostics(
+        &self,
+        now_ms: i64,
+    ) -> Result<SubtitleBackfillDiagnostics, StoreError> {
+        self.with_read(move |conn| {
+            conn.query_row(SUBTITLE_BACKFILL_DIAGNOSTICS, params![now_ms], |row| {
+                Ok(SubtitleBackfillDiagnostics {
+                    lease_holder: row.get(0)?,
+                    remaining_files: row.get(1)?,
+                    remaining_bytes: row.get(2)?,
+                })
+            })
+            .map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn subtitle_backfill_candidates(
+        &self,
+        after_scanned_at: i64,
+        after_id: i64,
+        now_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<SubtitleBackfillCandidate>, StoreError> {
+        self.with_read(move |conn| {
+            let mut stmt = conn.prepare(SUBTITLE_BACKFILL_CANDIDATES)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        after_scanned_at,
+                        after_id,
+                        now_ms.saturating_sub(SUBTITLE_BACKFILL_TERMINAL_SETTLE_MS),
+                        limit.clamp(1, 128)
+                    ],
+                    |row| {
+                        Ok(SubtitleBackfillCandidate {
+                            file_id: row.get(0)?,
+                            source_size: row.get(1)?,
+                            source_mtime: row.get(2)?,
+                            scanned_at: row.get(3)?,
+                            uncovered_ordinals: row.get(4)?,
+                        })
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn enqueue_or_promote_subtitle_source(
+        &self,
+        stamp: &SubtitleSourceStamp,
+        priority: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        if stamp.file_id <= 0
+            || stamp.source_size < 0
+            || stamp.pipeline_version.is_empty()
+            || stamp.pipeline_version.len() > 128
+            || !matches!(priority, "normal" | "foreground")
+        {
+            return Err(StoreError::Task(
+                "invalid subtitle source request".to_owned(),
+            ));
+        }
+        // A completed pass may have published only some ordinals, or a
+        // transient representation may still be below its settled-attempt
+        // threshold. Retire the ready tombstone before computing the next
+        // deterministic generation. This is also the artifact-loss path.
+        self.retire_subtitle_source_ready(stamp, now_ms).await?;
+        let stamp = stamp.clone();
+        let priority = priority.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let existing = tx.query_row(
+                &format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE file_id = ?1 AND source_size = ?2 AND source_mtime = ?3 AND component = 'subtitle_source' AND pipeline_version = ?4 AND state IN ('queued','running','submitted') ORDER BY created_at_ms DESC LIMIT 1"),
+                params![stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version], request_from_row,
+            ).optional()?;
+            if let Some(mut request) = existing {
+                if priority == "foreground" && request.state == "queued" && request.priority == "normal" {
+                    tx.execute("UPDATE analysis_requests SET priority = 'foreground', trigger = 'playback', updated_at_ms = ?1 WHERE request_id = ?2 AND state = 'queued'", params![now_ms, request.request_id])?;
+                    request.priority = "foreground".to_owned();
+                    request.trigger = "playback".to_owned();
+                    request.updated_at_ms = now_ms;
+                }
+                tx.commit()?;
+                return Ok(Some(request));
+            }
+            let (repair_epoch, recent_repairs): (i64, i64) = tx.query_row(
+                "SELECT next_epoch, COALESCE(last_1_ms >= ?5, 0) + COALESCE(last_2_ms >= ?5, 0) + COALESCE(last_3_ms >= ?5, 0) FROM subtitle_source_repair_epochs WHERE file_id = ?1 AND source_size = ?2 AND source_mtime = ?3 AND pipeline_version = ?4",
+                params![stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version, now_ms.saturating_sub(SUBTITLE_SOURCE_REPAIR_WINDOW_MS)], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?.unwrap_or((0, 0));
+            if recent_repairs >= SUBTITLE_SOURCE_REPAIR_LIMIT {
+                tx.commit()?;
+                return Ok(None);
+            }
+            // The counter outlives bounded terminal request history, while
+            // the three timestamps enforce a sliding daily allowance.
+            let generation = stamp.generation(repair_epoch);
+            let terminal = tx.query_row(
+                &format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"),
+                params![generation], request_from_row,
+            ).optional()?;
+            if let Some(request) = terminal {
+                tx.commit()?;
+                return Ok(Some(request));
+            }
+            tx.execute(
+                "INSERT INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT ?1,?2,?3,?4,'subtitle_source',?5,'',?1,'',?6,?7,0,'','queued',NULL,0,NULL,0,?8,NULL,NULL,0,?8,?8 WHERE EXISTS (SELECT 1 FROM files WHERE id = ?2 AND size = ?3 AND mtime = ?4) AND (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')) < ?9",
+                params![generation, stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version, priority, if priority == "foreground" { "playback" } else { "background" }, now_ms, MAX_ANALYSIS_REQUESTS],
+            )?;
+            let result = tx.query_row(&format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"), params![generation], request_from_row).optional()?;
+            tx.commit()?;
+            result.map(Some).ok_or_else(|| StoreError::Task("subtitle source changed or the request queue is full".to_owned()))
+        }).await
+    }
+
+    async fn claim_analysis_request_foreground(
+        &self,
+        request_id: &str,
+        node_id: &str,
+        now_ms: i64,
+        lease_expires_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        if request_id.is_empty()
+            || node_id.is_empty()
+            || node_id.len() > 128
+            || lease_expires_ms <= now_ms
+        {
+            return Err(StoreError::Task("invalid foreground claim".to_owned()));
+        }
+        let request_id = request_id.to_owned();
+        let node_id = node_id.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let changed = tx.execute("UPDATE analysis_requests SET state = 'running', owner_node_id = ?1, fence = fence + 1, lease_expires_ms = ?2, attempts = attempts + 1, last_error_code = NULL, updated_at_ms = ?3 WHERE request_id = ?4 AND component = 'subtitle_source' AND priority = 'foreground' AND state = 'queued' AND not_before_ms <= ?3 AND attempts < ?5 AND EXISTS (SELECT 1 FROM files WHERE files.id = analysis_requests.file_id AND files.size = analysis_requests.source_size AND files.mtime = analysis_requests.source_mtime)", params![node_id, lease_expires_ms, now_ms, request_id, configured_max_attempts(&tx)?])?;
+            let result = if changed == 1 {
+                tx.execute("INSERT INTO analysis_attempts(request_id,attempt,claim_node_id,claim_epoch,claim_expires_at_ms,phase,started_at_ms,phase_updated_at_ms) SELECT request_id,attempts,?1,fence,?2,'claimed',?3,?3 FROM analysis_requests WHERE request_id = ?4", params![node_id, lease_expires_ms, now_ms, request_id])?;
+                tx.query_row(&format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"), params![request_id], request_from_row).optional()?
+            } else { None };
+            tx.commit()?;
+            Ok(result)
+        }).await
+    }
+
+    async fn retire_subtitle_source_ready(
+        &self,
+        stamp: &SubtitleSourceStamp,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let stamp = stamp.clone();
+        self.with_conn(move |conn| {
+            let sql = format!("UPDATE analysis_requests SET state = 'cancelled', last_error_code = CASE WHEN EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.origin = 'extracted') THEN 'coverage_incomplete' ELSE 'artifact_lost' END, owner_node_id = NULL, lease_expires_ms = NULL, updated_at_ms = ?1 WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4 AND component = 'subtitle_source' AND pipeline_version = ?5 AND state = 'ready' AND (NOT EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.origin = 'extracted') OR {SUBTITLE_SOURCE_READY_UNCOVERED})");
+            let changed = conn.execute(&sql, params![now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version])?;
+            Ok(changed > 0)
+        }).await
+    }
+
+    async fn retire_subtitle_source_ready_for_ordinal(
+        &self,
+        stamp: &SubtitleSourceStamp,
+        ordinal: i64,
+        source_attestation: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if ordinal < 0
+            || source_attestation.len() != 64
+            || !source_attestation
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(StoreError::Task(
+                "invalid subtitle source observation".to_owned(),
+            ));
+        }
+        let stamp = stamp.clone();
+        let source_attestation = source_attestation.to_owned();
+        self.with_conn(move |conn| {
+            let changed = conn.execute("UPDATE analysis_requests SET state = 'cancelled', last_error_code = CASE WHEN EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.source_attestation = ?7 AND p.origin = 'extracted') THEN 'coverage_incomplete' ELSE 'artifact_lost' END, owner_node_id = NULL, lease_expires_ms = NULL, updated_at_ms = ?1 WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4 AND component = 'subtitle_source' AND pipeline_version = ?5 AND state = 'ready' AND NOT EXISTS (SELECT 1 FROM subtitle_source_publications p WHERE p.file_id = analysis_requests.file_id AND p.source_size = analysis_requests.source_size AND p.source_mtime = analysis_requests.source_mtime AND p.ordinal = ?6 AND p.source_attestation = ?7 AND p.origin = 'extracted' AND (p.verdict IN ('kept','empty','malformed') OR (p.verdict = 'transient' AND p.attempts >= 3)))", params![now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version, ordinal, source_attestation])?;
+            Ok(changed > 0)
+        }).await
+    }
+
+    async fn upsert_subtitle_source_publication(
+        &self,
+        publication: &SubtitleSourcePublication,
+    ) -> Result<(), StoreError> {
+        if !valid_subtitle_source_publication(publication) {
+            return Err(StoreError::Task(
+                "invalid subtitle source publication".to_owned(),
+            ));
+        }
+        let p = publication.clone();
+        self.with_conn(move |conn| {
+            conn.execute("INSERT INTO subtitle_source_publications(file_id,source_size,source_mtime,source_attestation,node_id,ordinal,kind,format,verdict,attempts,origin,sha256,bytes,published_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(file_id,source_size,source_mtime,node_id,ordinal,format) DO UPDATE SET source_attestation=excluded.source_attestation,kind=excluded.kind,verdict=excluded.verdict,attempts=excluded.attempts,origin=excluded.origin,sha256=excluded.sha256,bytes=excluded.bytes,published_at_ms=excluded.published_at_ms", params![p.file_id,p.source_size,p.source_mtime,p.source_attestation,p.node_id,p.ordinal,p.kind,p.format,p.verdict,p.attempts,p.origin,p.sha256,p.bytes,p.published_at_ms])?;
+            Ok(())
+        }).await
+    }
+
+    async fn list_subtitle_source_publications(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+    ) -> Result<Vec<SubtitleSourcePublication>, StoreError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare("SELECT file_id,source_size,source_mtime,source_attestation,node_id,ordinal,kind,format,verdict,attempts,origin,sha256,bytes,published_at_ms FROM subtitle_source_publications WHERE file_id=?1 AND source_size=?2 AND source_mtime=?3 ORDER BY ordinal,format,node_id LIMIT 2048")?;
+            let rows = stmt.query_map(params![file_id,source_size,source_mtime], subtitle_source_publication_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into);
+            rows
+        }).await
+    }
+
+    async fn delete_subtitle_source_publications(
+        &self,
+        file_id: i64,
+        node_id: &str,
+    ) -> Result<(), StoreError> {
+        let node_id = node_id.to_owned();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "DELETE FROM subtitle_source_publications WHERE file_id=?1 AND node_id=?2",
+                params![file_id, node_id],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn delete_subtitle_source_publication(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        node_id: &str,
+        ordinal: i64,
+        format: &str,
+    ) -> Result<(), StoreError> {
+        let node_id = node_id.to_owned();
+        let format = format.to_owned();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM subtitle_source_publications WHERE file_id=?1 AND source_size=?2 AND source_mtime=?3 AND node_id=?4 AND ordinal=?5 AND format=?6", params![file_id,source_size,source_mtime,node_id,ordinal,format])?;
+            Ok(())
+        }).await
+    }
     async fn enqueue_analysis_request(
         &self,
         request: &NewAnalysisRequest,
@@ -612,10 +898,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     &format!(
                         "SELECT {REQUEST_COLS} FROM analysis_requests
                           WHERE (target_node_id = ?1
-                              OR (component = 'skip_markers' AND target_node_id = ''))
+                              OR (component IN ('skip_markers','subtitle_source') AND target_node_id = ''))
                             AND attempts < ?2
                             AND state = 'queued' AND not_before_ms <= ?3
-                          ORDER BY created_at_ms - CASE WHEN priority = 'forced'
+                          ORDER BY CASE WHEN priority = 'foreground' THEN 0 ELSE 1 END,
+                                   created_at_ms - CASE WHEN priority = 'forced'
                                      THEN ?4 ELSE 0 END,
                                    created_at_ms, request_id LIMIT 1"
                     ),
@@ -3192,6 +3479,40 @@ impl ClusterFragmentIndexStore for SqliteStore {
         .await
     }
 
+    async fn fragment_index_builders_held_by(
+        &self,
+        node_id: &str,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+    ) -> Result<Vec<String>, StoreError> {
+        let node_id = node_id.to_owned();
+        self.with_read(move |conn| {
+            // The locations primary key and the artifacts' file index make
+            // this two keyed reads.
+            let builders = conn
+                .prepare(
+                    "SELECT DISTINCT artifacts.built_by_node_id
+                       FROM cluster_fragment_index_locations AS locations
+                       JOIN cluster_fragment_index_artifacts AS artifacts
+                         ON artifacts.cache_key = locations.cache_key
+                      WHERE locations.node_id = ?1
+                        AND artifacts.file_id = ?2
+                        AND artifacts.source_size = ?3
+                        AND artifacts.source_mtime = ?4
+                      ORDER BY artifacts.built_by_node_id
+                      LIMIT 16",
+                )?
+                .query_map(
+                    params![node_id, file_id, source_size, source_mtime],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(builders)
+        })
+        .await
+    }
+
     async fn forget_cluster_fragment_index_location(
         &self,
         cache_key: &str,
@@ -5412,5 +5733,68 @@ mod tests {
         assert_eq!(receipts, 1);
         assert_eq!(successors, 1);
         assert_eq!(predecessor_state, "failed");
+    }
+
+    /// The subtitle-source store's miss reason reads this: which nodes built
+    /// the artifacts a node holds for one file's current source.
+    #[tokio::test]
+    async fn fragment_index_builders_held_by_names_who_built_what_a_node_holds() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        store
+            .with_conn(|conn| {
+                for (key, file_id, size, mtime, builder) in [
+                    ("k-built-here", 7_i64, 100_i64, 10_i64, "node-a"),
+                    ("k-hydrated", 7, 100, 10, "node-b"),
+                    ("k-older-source", 7, 99, 9, "node-c"),
+                    ("k-other-file", 8, 100, 10, "node-d"),
+                ] {
+                    conn.execute(
+                        "INSERT INTO cluster_fragment_index_artifacts
+                          (cache_key, file_id, source_size, source_mtime, source_sha256,
+                           pipeline_sha256, blob_sha256, bytes, built_by_node_id, built_at_ms)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5, 10, ?6, 10)",
+                        params![key, file_id, size, mtime, "e".repeat(64), builder],
+                    )?;
+                }
+                for (key, node) in [
+                    ("k-built-here", "node-a"),
+                    ("k-hydrated", "node-a"),
+                    ("k-older-source", "node-a"),
+                    ("k-other-file", "node-a"),
+                    ("k-hydrated", "node-z"),
+                ] {
+                    conn.execute(
+                        "INSERT INTO cluster_fragment_index_locations
+                          (cache_key, node_id, bytes, verified_at_ms, last_seen_at_ms)
+                         VALUES (?1, ?2, 10, 10, 10)",
+                        params![key, node],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .expect("seed artifacts and locations");
+
+        assert_eq!(
+            store
+                .fragment_index_builders_held_by("node-a", 7, 100, 10)
+                .await
+                .expect("read"),
+            vec!["node-a".to_owned(), "node-b".to_owned()],
+            "this source only, built here and hydrated from node-b"
+        );
+        assert_eq!(
+            store
+                .fragment_index_builders_held_by("node-z", 7, 100, 10)
+                .await
+                .expect("read"),
+            vec!["node-b".to_owned()],
+            "a node that only hydrated"
+        );
+        assert!(store
+            .fragment_index_builders_held_by("node-q", 7, 100, 10)
+            .await
+            .expect("read")
+            .is_empty());
     }
 }

@@ -250,10 +250,24 @@ struct PlurxAPI {
     ///
     /// Everything else with a legible `{code, message}` body becomes
     /// `.refused`; anything bodiless or unparseable stays `.http(status)`.
+    /// The server's sentence when a 401 is an idle-expired sign-in
+    /// (`session_expired`: "Signed out after 90 days of inactivity."), nil
+    /// for every other answer.
+    static func sessionExpiryMessage(status: Int, data: Data?) -> String? {
+        guard status == 401, let data, data.count <= 16_384,
+              let detail = try? JSONDecoder().decode(Refusal.self, from: data),
+              detail.code == "session_expired", !detail.message.isEmpty
+        else { return nil }
+        return String(detail.message.prefix(512))
+    }
+
     static func check(_ resp: URLResponse, data: Data? = nil) throws {
         guard let http = resp as? HTTPURLResponse,
               !(200..<300).contains(http.statusCode) else { return }
         if http.statusCode == 401 || http.statusCode == 403 {
+            if let message = sessionExpiryMessage(status: http.statusCode, data: data) {
+                Session.shared.noteSessionExpiry(message)
+            }
             throw APIError.http(http.statusCode)
         }
         if let data, data.count <= 16_384,
@@ -317,6 +331,14 @@ struct PlurxAPI {
 
     func openPublication(fileId: Int) async throws -> OpenPublicationResponse {
         try await post("files/\(fileId)/publication")
+    }
+
+    func mintFileGrant(fileId: Int) async throws -> FileGrantResponse {
+        struct GrantRequest: Encodable {
+            let purpose = "open_in"
+            let ttlSecs = 900
+        }
+        return try await post("files/\(fileId)/grants", body: GrantRequest())
     }
 
     func closePublication(sessionId: String) async throws {
@@ -425,11 +447,38 @@ struct PlurxAPI {
         guard let http = response as? HTTPURLResponse else {
             throw APIError.transport("The PGS overlay response was not HTTP.")
         }
+        return try Self.pgsOverlayManifestFetch(http, data: data)
+    }
+
+    /// One manifest answer, read. Held to `tests/playback/pgs-overlay-cases.json`
+    /// `manifest_responses`, the rows Android reads too.
+    ///
+    /// A refusal goes through `check(_:data:)`, so a typed body becomes
+    /// `.refused` with its code instead of a bare `.http(status)`: that code is
+    /// what tells a failed preparation (stop, and say so) from full capacity
+    /// (wait on the server's cadence).
+    static func pgsOverlayManifestFetch(
+        _ http: HTTPURLResponse,
+        data: Data
+    ) throws -> PGSOverlayManifestFetch {
+        if !(200..<300).contains(http.statusCode) {
+            do {
+                try check(http, data: data)
+            } catch let error as APIError {
+                guard PGSOverlayPolicy.manifestDisposition(
+                    http.statusCode,
+                    code: error.refusalCode
+                ) == .preparing else { throw error }
+                return .preparing(retryAfterMs: PGSOverlayPolicy.retryAfterMs(
+                    http.value(forHTTPHeaderField: "Retry-After")
+                ))
+            }
+        }
         switch PGSOverlayPolicy.manifestDisposition(http.statusCode) {
         case .ready:
-            return .ready(try Self.decoder.decode(PGSOverlayManifest.self, from: data))
+            return .ready(try decoder.decode(PGSOverlayManifest.self, from: data))
         case .preparing where http.statusCode == 202:
-            let state = try Self.decoder.decode(PGSOverlayPreparing.self, from: data)
+            let state = try decoder.decode(PGSOverlayPreparing.self, from: data)
             guard state.state == "preparing" else { throw PGSOverlayError.invalidManifest }
             return .preparing(retryAfterMs: min(max(250, state.retryAfterMs), 5_000))
         case .preparing:
@@ -456,7 +505,7 @@ struct PlurxAPI {
         let response: URLResponse
         do { (data, response) = try await session.data(for: request) }
         catch { throw Self.transportError(from: error) }
-        try Self.check(response)
+        try Self.check(response, data: data)
         guard let http = response as? HTTPURLResponse,
               http.value(forHTTPHeaderField: "Content-Type")?
                 .lowercased().hasPrefix("image/png") == true

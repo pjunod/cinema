@@ -58,6 +58,14 @@ function playbackInfoMarkup(mode,rows,healthWord,healthStatus){
 function playbackInfoHelp(id){
   return ({stream_format:"Stream or manifest metadata; not a player picture measurement.",device_audio:"Speaker or HDMI output only when reported; never inferred from track metadata.",decode_resolution:"Attached player measurement; never inferred from source size.",source_resolution:"Original file metadata.",decode_audio:"Selected stream track; not the device's audio output.",client_loaded:"Contiguous media loaded ahead on this device.",server_ready:"Complete media ahead on the server; separate from the device buffer.",delivery_rate:"Server-completed responses; not confirmed client receipt.",observed_rate:"Player estimate during transfers; bursty by design.",stream_rate:"Stream bitrate; not connection speed.",delivered:"Bytes in server-completed responses, not proof of playback.",stalls:"Player interruptions for this playback, excluding intentional pauses.",status:"Server work state; separate from whether the picture is playing.",status_age:"Age of the most recent server response.",production_actual:"Encoder progress ahead of demand; not loaded video.",production_target:"Pacing policy, not a measurement.",http_wait:"Server responses waiting for publication; not player stalls."})[id]||"";
 }
+function statsToneMapPeak(health){
+  if(!health||!Number.isFinite(Number(health.tone_map_peak_nits))||!health.tone_map_peak_source)return null;
+  const nits=Math.round(Number(health.tone_map_peak_nits));
+  if(nits<=0)return null;
+  const source=String(health.tone_map_peak_source).toLowerCase();
+  const provenance=source==="cll"?"source MaxCLL":source==="mdcv"?"source mastering metadata":source==="default"?"policy default":null;
+  return provenance?`Tone-map peak ${nits.toLocaleString("en-US")} nits · ${provenance}`:null;
+}
 function patchPlaybackInfoRows(body,mode,rows,healthWord,healthStatus){
   const schema=`${mode}:`+rows.map(row=>`${row.id}:${row.placement}`).join("|");
   if(body.dataset.statsSchema!==schema){
@@ -142,18 +150,44 @@ function toggleStats(){
 // The top button row wraps to two or three lines on a phone, so the panel's
 // ceiling isn't a constant — measure it, or the readout parks itself over the
 // player's own Close button. Desktop keeps the stylesheet's fixed offset.
+//
+// In the watch slot the picture is a fraction of the page, and the panel is
+// not clipped to it: it may hang below the picture, over the page, as far as
+// the viewport (minus the page's own bottom chrome) allows, then its body
+// scrolls. A picture scrolled up takes the panel with it, and the watch
+// layout re-runs this on every scroll frame. The stylesheet's own bound is
+// against the viewport height, which is the wrong reference for a picture
+// that starts halfway down it.
+// The clamp covers a picture whose top is within a hand's width of the
+// viewport's bottom; the readout then runs past it until the next scroll
+// frame re-bounds it.
+const STATS_MIN_HEIGHT=160;
 function positionStats(){
   const ov=document.getElementById("statsov"); if(!ov||!ov.classList.contains("on")) return;
-  if(!matchMedia("(pointer:coarse)").matches){ ov.style.top=""; ov.style.maxHeight=""; return; }
+  const player=document.getElementById("player");
+  const pr=player? player.getBoundingClientRect() : {top:0};
+  const bounds=(typeof watchPopoverBounds==="function")? watchPopoverBounds() : null;
+  const slotted=!!bounds && typeof WATCH!=="undefined" && !!WATCH && WATCH.mode!=="full";
+  const edge=16;
+  if(!matchMedia("(pointer:coarse)").matches){
+    ov.style.top="";
+    // 64 is the stylesheet's `top` for the panel inside the picture.
+    ov.style.maxHeight = slotted? Math.max(STATS_MIN_HEIGHT, Math.floor(bounds.bottom-edge-(pr.top+64)))+"px" : "";
+    return;
+  }
   const bar=document.getElementById("pbar");
   const y=bar? Math.round(bar.getBoundingClientRect().bottom)+8 : 0;
-  ov.style.top = y>0? y+"px" : "";
+  // `top` is relative to the player, the bar's rectangle to the viewport; in a
+  // full presentation those agree, in the slot they differ by the picture's
+  // own offset.
+  ov.style.top = y>0? Math.round(y-pr.top)+"px" : "";
   // Cap the height against the transport's real top rather than pinning the
   // panel's bottom edge there: a short readout should be a short panel, which
-  // on a tablet is the difference between a card and a wall.
+  // on a tablet is the difference between a card and a wall. In the slot the
+  // floor is the viewport's, as on a mouse.
   const tr=document.getElementById("ptimeline")||document.getElementById("ptransport");
-  const floor=tr? Math.round(tr.getBoundingClientRect().top)-10 : 0;
-  ov.style.maxHeight = (y>0&&floor>y)? (floor-y)+"px" : "";
+  const floor=slotted? bounds.bottom-edge : (tr? Math.round(tr.getBoundingClientRect().top)-10 : 0);
+  ov.style.maxHeight = (y>0&&floor>y)? Math.max(slotted?STATS_MIN_HEIGHT:0, Math.floor(floor-y))+"px" : (slotted? STATS_MIN_HEIGHT+"px" : "");
 }
 window.addEventListener("resize",positionStats,{passive:true});
 window.addEventListener("orientationchange",()=>setTimeout(positionStats,150));
@@ -243,7 +277,39 @@ function playbackWaitCopy(runwaySeconds,httpWaitCount){
   const waits=httpWaitCount==null?null:Math.max(0,Math.trunc(Number(httpWaitCount)||0));
   const waitText=waits==null?"server wait state unavailable":waits===0?"no server HTTP waits":
     `${waits} server HTTP ${waits===1?"wait":"waits"}`;
-  return {title:"Presentation waiting…",detail:`${runway.toFixed(1)} s client loaded · ${waitText}`};
+  return {title:"Buffering…",detail:`${runway.toFixed(1)} s client loaded · ${waitText}`};
+}
+// The wait sentence as it is NOW. The raise can only say what was true the
+// instant the wait began — which is always "0.0 s client loaded", and on a
+// cold open "server wait state unavailable" too — so the sampling tick hands
+// the render a fresh one twice a second. Null when this player does not own
+// the attached element: a predecessor's runway is not this wait's runway.
+//
+// The server count is only a reading while it is fresh: health is polled every
+// two seconds while the Playback info panel is open or a media wait is live,
+// and a sample older than PLAYBACK_WAIT_HEALTH_MAX_AGE_MS says "unavailable"
+// rather than repeating a count from before the wait began.
+const PLAYBACK_WAIT_HEALTH_MAX_AGE_MS=5000;
+function playbackWaitLiveDetail(v,p,now){
+  if(!v||!p||PLAYER!==p||!playbackOwnsAttachedMedia(p)) return null;
+  let runway=0;
+  try{ runway=bufferRunway(v); }catch(e){}
+  const at=now==null?performance.now():now;
+  const fresh=p.health&&p.healthObservedAt!=null&&at-p.healthObservedAt<=PLAYBACK_WAIT_HEALTH_MAX_AGE_MS;
+  return playbackWaitCopy(runway,fresh?p.health.http_wait_count:null).detail;
+}
+// Is a media wait on screen? The health poll runs for it as well as for the
+// panel, so the wait's server count is a current one.
+function playbackWaitSurfaceLive(){
+  const surface=PLAYBACK_SURFACE.surface;
+  return !!(surface&&surface.source==="media_waiting");
+}
+// The half-second sampling tick: resample the wait sentence, then run the
+// presenter step that paints it.
+function playbackSamplingTick(v,p){
+  renderPlaybackSurface.waitDetail=playbackWaitLiveDetail(v,p);
+  playbackProgressTick(v,p);
+  updatePlayerMediaSession(v,p);
 }
 function playbackStatsTelemetry(){
   const p=PLAYER||{},v=playbackOwnsAttachedMedia(PLAYER)?document.getElementById("video"):null,s=p.source||{},h=p.health||null;
@@ -328,6 +394,7 @@ function playbackStatsTelemetry(){
     av_offset:`${p.aoffset||0} ms`,av_offset_note:p.declared&&p.declared!==(p.aoffset||0)?`container ${p.declared>0?"+":""}${p.declared} ms`:null,
     decode_resolution:v&&v.videoWidth>0&&v.videoHeight>0?`${v.videoWidth}×${v.videoHeight}`:"Not reported",
     dynamic_range:range?range.panel:null,dynamic_range_mini:range?range.text:null,
+    dynamic_range_note:statsToneMapPeak(h),
     stream_format:level?[level.width>0&&level.height>0?`${level.width}×${level.height}`:null,level.videoCodec].filter(Boolean).join(" · ")||"Not reported":"Not reported",
     device_audio:"Not reported",decode_audio:null,
     frames,frames_tone:droppedCount==null?"muted":droppedCount===0?"good":droppedCount<3?"warn":"bad",
@@ -416,7 +483,7 @@ async function pollSessionHealth(force){
   const current=()=>playbackOwnsAttachedMedia(p)&&p.sessionId===session&&p.streamId===stream
     &&p.mediaAttachment===attachment;
   const ov=document.getElementById("statsov");
-  if(!force&&(!ov||!ov.classList.contains("on"))) return;
+  if(!force&&(!ov||!ov.classList.contains("on"))&&!playbackWaitSurfaceLive()) return;
   // Two shapes of stream, one question. An HLS session answers from the
   // transcode manager; a progressive remux answers from its own registry (see
   // progressive.rs) — that path is Chrome's whole remux experience, and until
@@ -434,11 +501,10 @@ async function pollSessionHealth(force){
     if(current()) {
       p.health=h;
       p.healthObservedAt=performance.now();
-      // This used to repaint the buffering overlay with the server's wait
-      // count. It is gone: a fault is raised by the event that caused it, not
-      // restated every two seconds by a poll that only runs while the Playback
-      // info panel is open — and that panel's own HTTP wait row is where the
-      // number belongs.
+      // No surface is raised or restated here: a fault is raised by the event
+      // that caused it. A live media wait reads this sample through the
+      // sampling tick (playbackWaitLiveDetail), which is why the poll also
+      // runs while one is on screen.
       updateStats();
     }
   }catch(e){
@@ -460,12 +526,38 @@ async function pollSessionHealth(force){
   }
 }
 setInterval(()=>{ pollSessionHealth().catch(()=>{}); }, 2000);
+// How long a paused player may stay silent before it beats anyway, even with
+// nothing to report. Chosen from the shortest deadline any reader of this route
+// holds: Trakt removes a session whose last beat is older than `IDLE_PAUSE`
+// (150 s, `crates/plurxd/src/trakt.rs`) and its sweep runs once a minute, so a
+// floor of 60 s cannot let a session fall out of that map.
+const PAUSED_BEAT_FLOOR_MS=60000;
 async function reportProgress(fileId, ended, attachedOwner){
   const p=attachedOwner||PLAYER;
   if(!p||p.fileId!==fileId||(!attachedOwner&&!playbackOwnsAttachedMedia(p)))return;
   if(p.libraryChannel)return;
   const video=document.getElementById("video");
   const posMs=Math.round((p.bookOffset||0)+((p.offset||0)+ (video.currentTime||0))*1000);
+  // A zero beat needs a witness; a beat with a position in it does not.
+  //
+  // When a session never publishes a playlist the element sits at readyState 0
+  // with currentTime 0 — and on a VOD or direct timeline `offset` is 0 as well,
+  // so the whole reported position is 0. The server takes it, and the resume
+  // point the viewer earned is gone: every later open starts at the beginning,
+  // for good. Measured on a production node on 2026-09-22, one unplayable
+  // 26-second startup fires five or six of these. The offset routes escaped it
+  // only by accident, because their `offset` carries the position — so the
+  // condition is about the number being reported, not about the route, and a
+  // predecessor's real playhead still reaches the server at close.
+  //
+  // The witness is the CURRENT attachment having reached a timeline, not the
+  // player having played at some point. A stall retry and a quality reopen both
+  // reuse the player object while putting the element back to zero, and both
+  // reset `offset` to 0 on the way, so evidence carried across an attachment
+  // would wave exactly those through — the same bug, one button press later.
+  const attachment=p.mediaAttachment||null;
+  if(attachment&&video&&video.readyState>=1) p.timelineAttachment=attachment;
+  if(posMs<=0&&(!attachment||p.timelineAttachment!==attachment)) return;
   // The file's probed duration is the truth. Only direct play's own
   // video.duration is the whole file: a progressive remux's grows as ffmpeg
   // writes, and an offset HLS stream's covers the tail alone. Reporting either
@@ -476,7 +568,37 @@ async function reportProgress(fileId, ended, attachedOwner){
     || ((p.method==='direct_play' && video.duration && isFinite(video.duration))
         ? Math.round(video.duration*1000) : null);
   if(!ITEM_FOR_FILE[fileId]) return;
-  try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs}}); }catch(e){}
+  // F-web-12. A paused player beats every five seconds for as long as it is
+  // left open, repeating one position nobody has moved. What is dropped here is
+  // the REPEAT, not the beat, because three readers of this route care about
+  // when a beat arrives and not only about the number in it:
+  //
+  //   `crates/plurxd/src/delivery.rs` — a direct play has no session of its own
+  //     anywhere on the server, and `DirectPlays` prunes at `IDLE_TIMEOUT`
+  //     (30 s). A viewer who paused with the film already buffered issues no
+  //     further range requests, so this beat is the only thing keeping them on
+  //     the Activity page. Direct play is exempt and keeps every beat.
+  //   `crates/plurxd/src/trakt.rs` — `sweep_loop` REMOVES a session whose last
+  //     beat is older than `IDLE_PAUSE` (150 s) and scrobbles a pause; a
+  //     removed session never scrobbles its stop, so the watched flip would be
+  //     lost for anyone who paused for three minutes. `PAUSED_BEAT_FLOOR_MS`
+  //     keeps one beat a minute going out so that never happens.
+  //   `crates/plurxd/src/progress.rs` — the ten-second commit coalescer. It
+  //     bounds the STORE write, not the request, and is indifferent to cadence.
+  //
+  // The plan (§3.6 item 3) asked for an unconditional skip on an unchanged
+  // paused position. The Trakt sweep is why this one has a floor instead.
+  const beatAt=performance.now();
+  if(!ended && video && video.paused && p.method!=='direct_play'
+     && p.lastBeatMs===posMs && p.lastBeatAttachment===attachment
+     && p.lastBeatAt!=null && beatAt-p.lastBeatAt<PAUSED_BEAT_FLOOR_MS) return;
+  // Recorded before the await so two beats in one window do not both post, and
+  // UNrecorded if the post failed — a beat the server never received must not
+  // suppress the next one, or a close that follows a failed beat would take the
+  // resume point down with it.
+  p.lastBeatMs=posMs; p.lastBeatAt=beatAt; p.lastBeatAttachment=attachment;
+  try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs}}); }
+  catch(e){ p.lastBeatMs=null; p.lastBeatAt=null; }
 }
 function closePlayer(options={}){
   if(WATCH_CLOSE_PROMISE)return WATCH_CLOSE_PROMISE;
@@ -515,6 +637,9 @@ function closePlayer(options={}){
   // corner, and it reads as the app having hung. Every exit runs through here,
   // including the automatic one when a film ends with nothing queued after it.
   exitPresentationModes();
+  // The lock screen and the media keys belong to a player that is open. Left
+  // installed they would keep offering a transport for a film that is gone.
+  clearPlayerMediaSession();
   supersedePlaybackControlIntent(PLAYER);
   // Bump the generation so a seek or audio switch still awaiting its
   // hls/start finds itself superseded and doesn't attach a stream to a player
@@ -593,6 +718,15 @@ window.addEventListener("keydown",e=>{
 // player-input-adapter:begin — the only place in the player that reads e.key
 function playerContractInput(e,state){
   if(e.key==="Escape") return "back";
+  // Back, as a television sends it. Escape is a keyboard's answer and no TV
+  // remote produces it: Tizen reports 10009, webOS 461, and the Chromium-based
+  // TV browsers (Fire TV Silk, Android TV) name the key `GoBack`, with
+  // `BrowserBack` on desktop Chromium's own back key. Without these the page
+  // navigated away from the player instead of closing it, which on a TV means
+  // leaving the app. The two numeric codes have no `key` name of their own,
+  // which is why both spellings are read.
+  if(e.key==="GoBack"||e.key==="BrowserBack") return "back";
+  if(e.keyCode===10009||e.keyCode===461) return "back";
   if(e.key==="ArrowLeft") return "left";
   if(e.key==="ArrowRight") return "right";
   if(e.key==="ArrowUp") return "up";
@@ -753,12 +887,105 @@ document.getElementById("player").addEventListener("pointerdown",e=>{
   if(e.target===document.getElementById("video")&&PLAYER) PLAYER._menuDismissedByPointer=true;
   closeMenu();
 });
+// In the watch slot the menu hangs over the page beside the picture; a tap on
+// that page closes it the way a tap on the picture does (the player's own
+// listener above decides for taps inside the picture).
+document.addEventListener("pointerdown",e=>{
+  const menu=document.getElementById("pmenu");
+  if(!menu||!menu.classList.contains("on")) return;
+  if(document.getElementById("player").contains(e.target)) return;
+  closeMenu();
+});
 document.getElementById("player").addEventListener("focusin",e=>{
   const target=e.target;
   if(!PLAYER||!target||!target.id||!target.closest("#pbar,#ptimeline,#ptransport,#pskip")) return;
   PLAYER._lastFocusedControl=target.id;
 });
+// The other transport a viewer reaches for: the OS media keys, a headset
+// button, the lock screen, the notification shade. A browser delivers none of
+// those as keys — they arrive as MediaSession actions — so they are decoded
+// here beside the keyboard rather than in a second adapter.
+//
+// Feature-detected twice over: once for `mediaSession` itself, and once per
+// action, because setting a handler a browser does not implement throws
+// `NotSupportedError` and one unknown action would otherwise cost every
+// action after it.
+function setPlayerMediaAction(action,handler){
+  try{ navigator.mediaSession.setActionHandler(action,handler); }catch(e){}
+}
+// A MediaSession command is one more producer of a contract input, so it asks
+// the same table the keys ask (§5): a blocking prompt (`failed`) ignores a
+// headset press, a pending seek (`scrub`) is committed before the play state
+// changes, and an open menu or panel keeps ignoring skips. Calling
+// `togglePlay` or `nudge` directly, whatever state the player was in, is what
+// the table used to be bypassed by.
+//
+// What the OS transport adds is idempotence. `play` and `pause` are separate
+// handlers, and each only toggles when the viewer's INTENT differs from what
+// was asked — `playerWantsPlayback`, never the element's `paused`. A pending
+// open and every reattach leave the element paused while the viewer still
+// wants the film playing; judged on `paused`, a `play` pressed in that window
+// flipped the intent to pause and the stream attached paused.
+function playerMediaPlayPause(wanted){
+  const outcome=watchRouteInput(playerInputState(),"play_pause");
+  if(outcome!=="toggle_play"&&outcome!=="commit_then_toggle_play") return false;
+  if(outcome==="commit_then_toggle_play") commitPendingSeek();
+  if(playerWantsPlayback(document.getElementById("video"))!==wanted) togglePlay();
+  return true;
+}
+function playerMediaSkip(input,seconds){
+  if(watchRouteInput(playerInputState(),input)!=="skip") return false;
+  nudge(input==="skip_back"?-seconds:seconds);
+  return true;
+}
+// Next is the next EPISODE, and the handler exists only while there can be one
+// the viewer asked for: autoplay-next on, and not a title already known to be
+// something other than an episode. A browser draws a Next control for any
+// action that has a handler, so a handler that does nothing is a button that
+// does nothing. `setAutoNext` re-syncs it when the setting changes mid-film.
+function playerNextTrackOffered(){
+  const kind=PLAYER&&PLAYER.meta&&PLAYER.meta.kind;
+  return autoNextOn()&&(!kind||kind==="episode");
+}
+function syncPlayerNextTrack(){
+  if(!installPlayerMediaSession.installed||!("mediaSession" in navigator)) return;
+  setPlayerMediaAction("nexttrack",playerNextTrackOffered()
+    ?()=>{ if(playerNextTrackOffered()) playNextEpisode(); }:null);
+}
+function installPlayerMediaSession(){
+  if(!("mediaSession" in navigator)) return false;
+  setPlayerMediaAction("play",()=>{ playerMediaPlayPause(true); });
+  setPlayerMediaAction("pause",()=>{ playerMediaPlayPause(false); });
+  setPlayerMediaAction("seekbackward",d=>{ playerMediaSkip("skip_back",Math.abs((d&&d.seekOffset)||10)); });
+  setPlayerMediaAction("seekforward",d=>{ playerMediaSkip("skip_forward",Math.abs((d&&d.seekOffset)||10)); });
+  installPlayerMediaSession.installed=true;
+  syncPlayerNextTrack();
+  return true;
+}
+function clearPlayerMediaSession(){
+  installPlayerMediaSession.installed=false;
+  if(!("mediaSession" in navigator)) return;
+  for(const action of ["play","pause","seekbackward","seekforward","nexttrack"])
+    setPlayerMediaAction(action,null);
+  if(navigator.mediaSession.playbackState!==undefined) navigator.mediaSession.playbackState="none";
+}
+// Position, from the sampling tick the player already runs (500 ms). No new
+// timer: a second clock for the lock screen is a second thing to keep in step
+// with the first. Everything here is guarded because `setPositionState` throws
+// on a non-finite duration or a position past it, which a stream whose
+// duration is still growing produces routinely.
+function updatePlayerMediaSession(v,p){
+  if(!v||!p||!("mediaSession" in navigator)) return;
+  // The intent, not `v.paused`: during a reattach the element is paused and the
+  // viewer is not, and the OS would otherwise show Play and send `play` for a
+  // press the viewer meant as pause.
+  if(navigator.mediaSession.playbackState!==undefined)
+    navigator.mediaSession.playbackState=playerWantsPlayback(v)?"playing":"paused";
+  if(!navigator.mediaSession.setPositionState) return;
+  const duration=pbTotalSec(),position=pbShownSec();
+  if(!(duration>0)||!isFinite(duration)||!(position>=0)||position>duration) return;
+  try{ navigator.mediaSession.setPositionState({duration,position,playbackRate:v.playbackRate||1}); }catch(e){}
+}
 // player-input-adapter:end
 // map fileId → itemId, filled by viewItem so progress posts to the right item
 const ITEM_FOR_FILE={};
-

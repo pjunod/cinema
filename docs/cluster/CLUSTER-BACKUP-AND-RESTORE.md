@@ -1,6 +1,6 @@
 # Cluster backup and restore — one consistent cut, restored somewhere else first
 
-**Status:** ready for review · **Executes:** §2.3, S4, F-sc-4,
+**Status:** in progress · **Executes:** §2.3, S4, F-sc-4,
 F-build-ops-codehealth-2 (the brief's "F-build-2") from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -9,7 +9,8 @@ F-build-ops-codehealth-2 (the brief's "F-build-2") from
 
 Read [OPERATIONS.md](../OPERATIONS.md) "Rolling back a deploy" first (it is
 the gap this closes), then §2 here for what the tree already gives you, then
-execute §5 one milestone per draft PR under the fast lane. The deliverable is
+execute §5 as logical milestones in the one whole-plan draft PR required by
+the work board. The deliverable is
 the procedure, not the mechanism: a backup nobody has restored is a file. If a
 step seems to require copying Raft log or snapshot directories between nodes,
 inventing a force-new-cluster command around them, or restoring straight onto
@@ -475,4 +476,9 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | [PR #426](http://192.168.4.7:3000/noirr/plurx/pulls/426) | Wire-stable `QueryWrite::RTT`; `Backup` is reserved *after* the deployed ordinal 5, and the focused old↔new decode regression passes with both `sqlite` and `sqlite,backup`. `backup` builds without S3 and `backup,s3` remains supported. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 | [PR #426](http://192.168.4.7:3000/noirr/plurx/pulls/426) | Implemented the leased snapshot-descriptor builder, schedule/API/CLI, bounded pointer and archive validation, fixed-cardinality metrics, retention, and advisory Developer settings/readiness. Executable acceptance now covers unlink-after-open, integrity-failure cleanup, declared-key disappearance without publication, two-voter lease exclusion, learner refusal, and failure-retriable/success-only schedule fencing. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | [PR #426](http://192.168.4.7:3000/noirr/plurx/pulls/426) | Implemented offline verify/restore, fresh identity and secret fencing, lineage setting, complete media-session coordination cleanup, transactional file/library/DVR remapping, collision refusal, and the operations procedure. Executable acceptance covers byte-for-byte read-only missing-key verification, wrong-key/newer-schema refusal, production-shape cleanup, and a real snapshot restored and started as the only voter. Decisions: carry the owner-only credential key by default; retain by artefact count; never merge newer writes from a surviving minority. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [PR #426](http://192.168.4.7:3000/noirr/plurx/pulls/426) | Pending: the container-smoke extension requires a qualified image and end-to-end daemon start; no container result is inferred from the source-level restore regression. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [PR #426](http://192.168.4.7:3000/noirr/plurx/pulls/426) | Pending fleet-only evidence: no lab1–lab4/NAS drill was run, so no RPO/RTO receipt exists. The exact isolated-first and production fencing procedure is now in `OPERATIONS.md`. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | Sole-review disposition | [PR #426](http://192.168.4.7:3000/noirr/plurx/pulls/426) | Addressed comment #3366 without a second review: preserved deployed wire ordinals; added DVR remap and all session-ledger cleanup; made key verification load-only and publication fail closed; fenced schedule days only after publication; and replaced the hand-shaped acceptance gap with focused real-store/real-snapshot tests. M4/M5 remain pending exactly as before. |

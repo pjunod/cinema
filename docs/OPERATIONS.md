@@ -251,6 +251,26 @@ validation fan-out, builds once on an X64 runner, verifies the immutable
 registry copy, and only then moves the fleet tag. It publishes
 `sha-<12hex>` for rollback and `main` for the newest qualified merge.
 Versioned releases own `latest`; fleet merges never overwrite that alias.
+**No run currently reaches that job:** `ci.yml` runs on `v*` tags and manual
+dispatch only, and the job's condition is a push to `main`, so no new
+`sha-` image has had an automatic producer since `3cd127e2` (2026-09-10)
+([LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
+correction 1, re-verified 2026-09-24; the fix belongs to
+[RUST-TEST-EXECUTION-POLICY.md](ci/RUST-TEST-EXECUTION-POLICY.md) §3.1(b)).
+
+**Two identities, two questions.** The `sha-<12hex>` image is the deploy and
+rollback identity: it is what `deploy/.env`'s `PLURX_IMAGE` names and what a
+voter runs. A `v` release tag ([RELEASING.md](RELEASING.md), cut weekly) is
+the communication identity: it names the `CHANGELOG.md` section. To go from a
+node to its changelog:
+
+```bash
+curl -fsS http://127.0.0.1:32400/api/v1/server | jq '{version, build}'
+# build "v0.3.1"             -> CHANGELOG.md "## [0.3.1]"
+# build "v0.3.1-12-gabc1234" -> "## [0.3.1]" plus `git log v0.3.1..abc1234`
+```
+
+`plurx_build_info{version,build}` is the same pair for every node at once.
 Every external workflow action is resolved to a reviewed 40-character commit,
 and checkout drops its injected repository credential immediately after the
 fetch. Version comments preserve the human update trail without restoring a
@@ -348,11 +368,66 @@ command in its error. Once `<PLURX_DATA>/hiqlite/activation.json` exists, the
 replicated target is authoritative; do not replace `plurx.db` and assume you
 have restored current state.
 
-There is no automated quorum-aware backup, restore, or permanent-majority
-recovery path for an activated cluster. No active milestone owns one. A
-post-activation code rollback therefore means rolling forward with a binary
-that supports the active replicated schema, against the retained Hiqlite
-target. The commands below are only for the pre-activation SQLite case.
+Activated clusters have a portable, consistent-cut backup and an offline
+fresh-cluster restore. It is a disaster-recovery path, not a way to roll back
+one voter or merge writes from a surviving minority. A post-activation code
+rollback still means rolling forward with a binary that supports the active
+replicated schema, against the retained Hiqlite target. The SQLite commands
+below are only for the pre-activation case.
+
+### Backing up and restoring an activated cluster
+
+Set `backup.destination`, `backup.schedule_utc` (UTC `HH:MM`, default `02:30`),
+and `backup.keep` in Settings → Developer. Use a destination on a separately
+protected mount with at least twice the current state-machine image size free.
+The readiness rows are advisory: an empty destination is what disables the
+schedule, and no missing observation prevents an explicit save or backup.
+
+Run an immediate backup through the voter API when validating or before risky
+maintenance:
+
+```bash
+plurxd cluster backup \
+  --server http://127.0.0.1:32400 \
+  --token-file /run/secrets/plurx-admin-token \
+  --output /mnt/nas/plurx-backups
+```
+
+The printed directory contains `manifest.json`, `plurx.db`, `SHA256SUMS`, and,
+when the cluster uses one, owner-only `credentials.key`. Copying a voter's
+`hiqlite/logs` or `state_machine/snapshots` directory is not this backup and is
+not a supported restore source. Verify the archive without writing a target:
+
+```bash
+plurxd restore --verify --archive /mnt/nas/plurx-backups/plurx-backup-...
+```
+
+Restore to an empty, isolated data directory first. If media is mounted at a
+new prefix, repeat `--remap OLD=NEW`; each rewrite is transactional and resets
+the affected library's root fingerprint:
+
+```bash
+plurxd restore \
+  --archive /mnt/nas/plurx-backups/plurx-backup-... \
+  --data-dir /srv/plurx-restore \
+  --advertise-host 10.42.0.14 \
+  --remap /srv/media=/mnt/nas/media
+```
+
+Start that directory on a loopback-bound lab instance. Require `/readyz` 200,
+log in with a restored admin token, open Home and one title, inspect DVR
+schedules and Trakt link status, and run `restore --verify` again. Record the
+archive age at failure as RPO and time from restore start to readiness plus
+rejoin completion as RTO.
+
+Before directing production clients at the restored voter, stop every
+surviving old voter and rename its `hiqlite/` directory to
+`hiqlite.retired-<UTC>`. The restore keeps `instance.id` for clients but mints a
+new node id and new Raft/API/signing secrets; retiring the old directories is
+the procedural half of that fence. Start the restored voter, check `/readyz`,
+then issue fresh join tokens and rejoin the other machines. Never start an old
+directory beside the restored lineage and never restore over a live or
+existing `hiqlite/` target.
 
 ### Upgrading an activated v5, v6, v7, or v8 cluster to v9
 
@@ -395,10 +470,10 @@ of import, so each new snapshot is another copy of the same pre-activation
 state — the redeploy captures nothing written since. Restoring one does not
 roll the node back; it only makes a stale database sit beside the authoritative
 target, and `plurxd` refuses to import it precisely so that mistake cannot pass
-silently (see the refusal below). Capturing current replicated state as a
-portable backup does not exist. Treat each node's
-`<PLURX_DATA>/hiqlite/` directory as evidence to preserve while that daemon is
-stopped; do not treat one copied directory as a supported single-node restore.
+silently (see the refusal below). Use the portable backup procedure above for
+current replicated state. Treat each node's `<PLURX_DATA>/hiqlite/` directory
+as evidence to preserve while that daemon is stopped; do not treat one copied
+directory as a supported single-node restore.
 
 `plurxd` records `<PLURX_DATA>/hiqlite-activated.json` when it activates. If the
 replicated target is missing while that file is present, startup refuses rather
@@ -2396,8 +2471,11 @@ The shared cache, node-local transcode scratch, and session directories are
 rebuildable accelerators and must not be treated as the authoritative backup;
 the media sources remain external inputs. Do not restore one voter's copied
 Raft state as a fresh cluster or start two restored copies with the same node
-identity. Until quorum-aware restore is shipped, disaster recovery means
-restoring enough original voters to recover the original majority.
+identity. When the original majority can be recovered, restoring those
+original voter backups remains the least-loss path. When it cannot, use the
+portable archive procedure above and accept that committed writes newer than
+its recorded Raft cut are outside the recovered lineage; do not attempt to
+merge a surviving minority into it.
 
 **Let artwork converge before relying on a voter for failover.** Item rows name
 poster and backdrop files through Raft, while the image bytes remain in each
@@ -2880,6 +2958,7 @@ membership addresses and token-file paths are intentionally file-only:
 | Env var | TOML | Default | What it does |
 |---|---|---|---|
 | `PLURX_BIND` | `server.bind` | `0.0.0.0:32400` | Address the HTTP API binds to |
+| `PLURX_TRUSTED_PROXIES` | `server.trusted_proxies` | empty | Comma-separated proxy CIDRs whose appended `X-Forwarded-For` hops the login throttle may trust. Keep empty unless those peers overwrite or append the header correctly |
 | `PLURX_SERVER_NAME` | `server.name` | `plurx` | Bootstrap seed for the human-visible server name. The replicated setting is authoritative after first boot; rename it through the admin API |
 | `PLURX_NODE_HOSTNAME` | — | OS hostname | Short physical-machine name shown in Settings → Cluster. Native installs normally leave this unset; containers set it explicitly so a generated container id is not mistaken for the host |
 | `PLURX_DATA_DIR` | `storage.data_dir` | `./data` | Authoritative database, identity, secrets, migration markers, and compatibility root |
@@ -2915,6 +2994,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_MDNS_ADVERTISE` | — | `true` | Run Bonjour inside the server process; Compose sets this to `false` because its host-network companion advertises instead |
 | `PLURX_DISCOVERY_SERVER_URL` | — | `http://127.0.0.1:32400` | Server URL read by `plurxd advertise`; normally only the Compose companion uses it |
 | `PLURX_LOG` | — | `info` | Log filter (`tracing` EnvFilter syntax, e.g. `plurxd=debug`) |
+| `PLURX_LOG_FORMAT` | — | `text` | Console log shape: `text` or `json`. Anything else is `text`. A property of how *this process's* stdout is consumed, not a cluster setting — a node whose journal is scraped by a log pipeline wants `json` and its neighbour may not. Under `json` the ANSI colouring is off whatever the terminal is, because an escape sequence inside a JSON string field is a parse hazard, not a colour |
 | `PLURX_CLUSTER_ACTIVATION_FAILPOINT` | — | — | Test-only activation exit: `after-quiescence` · `after-incoming` · `after-marker` · `after-rename`; each exits `86` |
 | `PLURX_HLS_FORCED_AUTOSELECT` | — | off | **Experiment.** Puts `AUTOSELECT=YES` on forced subtitle renditions. Set `1` to enable |
 | `PLURX_PGS_OVERLAY` | — | off | **Retired as a gate.** The switch is now Settings → Developer → *Serve PGS subtitles as an overlay* (`subtitles.pgs_overlay`). This variable seeds that setting once, on a node that has never been told either way, and does nothing afterwards. Still keep it off until native-client and physical HDR/DV acceptance is complete |
@@ -3333,6 +3413,136 @@ and never gate the switch, so the only evidence is a real title whose
 extraction genuinely fails — confirm the player comes back to the track rather
 than abandoning it.
 
+### Stored PGS tracks
+
+The PGS overlay and the PGS burn path each used to demux the whole source to
+read one subtitle track. Both now look first in a node-local store,
+`<cache>/runtime/subtitle-source-v1/f<file_id>/` — a `manifest.json` and one
+content-named `s<ordinal>-<sha256 prefix>.sup` per kept track — and use a track
+only when the manifest matches a live `fstat` of the source (size and mtime;
+the burn path also its device and inode) and the stored bytes hash to the
+manifest. Anything else is a miss that runs the extraction as before. The burn
+path never uses the store for an MPEG-TS source.
+
+**What fills it.** The fragment-index pass already demuxes every file from
+byte zero. When it runs on a node, it also keeps every PGS track the held-fd
+probe finds: one extra `tee` output after the index pipe — a `sup` and a
+`framecrc` slave per track, each `onfail=ignore`, and a `null` sentinel — so a
+subtitle failure can cost the tracks and never the index. The index's exit
+code, row check and cache key are exactly what they were. After the child is
+reaped, and only when the index was built, each track is judged: **kept** when
+a walk of the `.sup` agrees byte for byte with the `framecrc` total and the PGS
+parser accepts it; **empty** for a track with no cues; **transient** for an OS
+error (disk full, I/O, permissions) or no evidence, retried on up to three
+passes; **malformed** otherwise. Tracks are published — renamed into place,
+then the manifest swapped atomically, then replaced tracks deleted — only after
+the pass's freshness checks. A file rides once per source identity; a node that
+hydrates its index from a peer never runs the pass, so it has no stored tracks
+for that file (`hydrated_only` below). Nothing re-indexes a library to fill the
+store.
+
+The pass keeps tracks only while **all** of these hold, checked per pass:
+
+- the switch below is on;
+- the **startup self-test** passed: once per process, off the startup path,
+  the configured `ffmpeg` runs the index argv plus the tee over a four-second
+  synthetic file with one corrupted PGS track, and must exit 0, leave the index
+  output byte-identical, judge the tracks `kept` and `malformed`, and print the
+  slave-failure line the scan reads — and the `framecrc` byte arithmetic must
+  judge the corrupted track `malformed` on its own, with no stderr line to lean
+  on. It also requires `ffprobe` (`PLURX_FFPROBE`) to report the same version
+  as `ffmpeg` (`PLURX_FFMPEG`): the ordinals come from one and the hard maps are
+  resolved by the other. If it fails, the log line
+  `PGS ride-along self-test failed` carries the reason and the Developer row
+  shows it;
+- `<cache>` is on a **local filesystem** (`statfs`: NFS, SMB/CIFS, FUSE, 9p,
+  Ceph and AFS are refused, and every non-Linux platform is treated as not
+  local), because a blocked stage write would stall the demuxer the index
+  shares;
+- `<cache>` has **free space** of at least 1 GiB or 2% of its filesystem,
+  whichever is larger (`statvfs`), because stage writes share the disk with
+  the index blob the pass is about to publish.
+
+A riding pass that does not build its index is remembered (in memory, per
+file and source) and that file's next pass is a plain index pass, so the
+ride-along can cost a file its stored subtitles but never its index. The
+Developer row counts such files; a restart asks again. The verdict and the
+publication run after the pass's own future has returned, so a preemption can
+no longer discard a finished index while tracks are being judged. A stored
+track whose file has gone missing is re-extracted on the file's next pass.
+An HDR delivery that asks to burn a track the store holds as `empty` is not
+refused (there is nothing to burn): a copy stays a copy, and a transcode
+chooses its grade without the burn.
+
+| Runtime setting | Default | Meaning |
+|---|---:|---|
+| `subtitles.stored_sources` | on | One switch for both halves: the index pass keeps PGS tracks, and both consumers read them. Off makes both consumers ignore what is stored at once, discards the tracks of a pass still running when it finishes, and stops later passes keeping any, so a wrong stored track is taken out of service without a redeploy |
+
+The switch is **Settings → Developer → *Keep PGS tracks during indexing and
+read them instead of the source*** (`subtitle_stored_sources` in the settings
+API); its rows show the self-test result, the filesystem check and the
+counters, and never gate it. The store is swept on each fragment-index tick: a
+directory whose file row is gone or whose size/mtime moved is deleted, a
+catalog read that fails stops the sweep without deleting, a size cap evicts
+whole directories least recently used first, and stage directories
+(`.stage-*`) an interrupted pass left behind are removed after an hour (and all
+of them at startup), and stored tracks a manifest no longer names — what a
+publish interrupted between its steps leaves — are removed once older than an
+hour. Lookups are counted in
+`plurx_subtitle_source_lookups_total{consumer,outcome}`, misses by reason
+(`absent`, `stale`, `disabled`, `mpegts`, `hash_mismatch`, `never_indexed`,
+`hydrated_only`, `empty_track`) in
+`plurx_subtitle_source_misses_total{consumer,reason}` — a lookup that finds no
+directory is answered at once and classified afterwards, off the request
+path, from this node's own index table and the cluster's location rows — burn
+derivations that fell back to the source in
+`plurx_subtitle_source_fallbacks_total{reason}`, and the producer in
+`plurx_subtitle_ride_along_tracks_total`,
+`plurx_subtitle_ride_along_verdicts_total{verdict}`,
+`plurx_subtitle_ride_along_written_bytes_total` and
+`plurx_subtitle_ride_along_published_total`; the store's own size, as its last
+full sweep walk measured it, is in `plurx_subtitle_source_store_bytes` and
+`plurx_subtitle_source_store_directories`.
+
+**Where it shows while it runs.** The work is attributable from inside the
+product, not only from metrics:
+
+- **Content analysis → live progress.** Every fragment-index pass has a
+  progress row: the queue worker's (`playback.vod_index_cluster_cache` on) and,
+  since #463's review, the local background loop's as well — the default on a
+  single-node install — keyed `local-index:<file>:<pipeline>` on this node. A
+  row whose pass is also keeping PGS tracks says *Also keeping N PGS tracks · X
+  written*, with a link that lands on the switch on Developer. The byte count is
+  the stage's size, re-measured at most once a second (the muxer writes a track
+  out in I/O-buffer blocks, so a small track can read 0 B until the pass ends);
+  a pass that is not riding says nothing, and a row from a peer that predates
+  the fields reads as not riding.
+- **Settings → Maintenance → Stored subtitle tracks.** On this node:
+  - whether the next index pass would keep tracks — a red *not keeping tracks*
+    pill with the reason (self-test, filesystem, free space) when the switch is
+    on and the gate is closed, *off* when the switch is off;
+  - what the store occupies (bytes and file count from the last full sweep
+    walk, and how long ago that was), and its cap. Until a sweep has run in
+    this process it says *not measured yet*; with background analysis paused
+    (`vod_index_mins` = 0) it says the sweep does not run;
+  - each ride-along running now, by title (linked to the item), with its track
+    count, bytes written and how long it has run;
+  - since the process started: tracks attempted and their verdicts, bytes
+    written, files indexed without the ride-along after a riding pass failed,
+    and passes that finished after the switch was turned off.
+
+  It says why the pass does this work (it already reads every packet) and
+  links to the switch (`#/settings/developer/enable-subtitle-sources`, which
+  scrolls to it). The same data is `subtitle_store` in `GET /api/v1/settings`.
+
+**What the switch stops.** Off takes effect at once: both consumers stop
+reading the store; a pass already running finishes its index — the index is
+never the price — but publishes none of the tracks it kept
+(`JobManager::settle_ride_along` reads the switch again before publishing,
+counted in `plurx_subtitle_ride_along_discarded_total{reason="switch_off"}`,
+beside `source_moved` and `catalog_moved`); and later passes keep none. What
+is already stored stays on disk until the size cap or the sweep removes it.
+
 ### Playback telemetry
 
 Performance II stores structured playback observations beside the local
@@ -3397,8 +3607,8 @@ and falls back to the log ring when pointed at an older server.
 
 ### Quality-bounded transcodes
 
-N1 adds two admin runtime settings. `transcode.rate_mode` is `bitrate` by
-default and preserves the pre-N1 encoder arguments and cache identity.
+N1 adds two admin runtime settings. An explicit `transcode.rate_mode` of
+`bitrate` preserves the pre-N1 encoder arguments and cache identity.
 `quality` requests the family-specific quality mode below. An optional
 `transcode.quality` integer overrides the family default; JSON `null` clears
 that override. The server validates the complete production argument list on
@@ -3412,6 +3622,21 @@ sessions.
 | VA-API | `-rc_mode QVBR -global_quality q`, with target bitrate and caps |
 | NVIDIA NVENC | `-rc vbr -cq q`, with target bitrate and caps |
 | Apple VideoToolbox | `-q:v q`, with target bitrate and caps |
+
+When no mode is stored, the server resolves the selected encoder's code
+default; this is distinct from an operator explicitly choosing `bitrate`.
+Every family default remains Bitrate as of S-06 PR #414. Admin diagnostics
+report the map at `encoders.quality_rc.default_rate_mode`; the settings form
+keeps presenting `bitrate` for an absent legacy pair.
+
+Read-only census at deployed revision `882862e8` on 2026-09-21 found QSV
+selected on `nynuc`, `nuc4` and `nuc3`, and VA-API selected on `m6`. The fresh
+process counters were zero for QSV, VA-API, software, NVENC and VideoToolbox
+on every node (m6 had three copy sessions and one VOD session). This does not
+qualify a default: QSV and software still need separate n2 corpus captures;
+VA-API now has a selectable node but needs a non-zero week and its own n2
+comparison; NVENC is unusable on the four Linux daemons; VideoToolbox has no
+deployed daemon. Do not infer calibration from the 15-frame boot probe.
 
 The request and the effective result are deliberately different facts. A
 driver that refuses its quality arguments remains usable for bitrate mode; new
@@ -3561,6 +3786,18 @@ halves. Every fixture must have a unique server filename, resolved controller
 path, and pinned SHA-256. Relabeling the same clip as both easy and hard is not
 a corpus. `scripts/perf2-rate-control-smoke-corpus.json` remains VBR-smoke-only
 and is not D5 calibration or full acceptance.
+
+Every fixture a pinned manifest names is generated bit-exactly, from a seeded
+source, with `-threads 1`. All three are needed for `scripts/bench fixtures` to
+reproduce the pinned SHA-256 on a controller that does not already hold the
+bytes: without bit-exact muxing Matroska writes a random SegmentUID, without a
+seed the grain fixture's pixels change on every run, and without a fixed thread
+count libx264 partitions frame threads by the host's core count, so a 16-core
+and a 2-core machine produce different bytes from the same recipe. The pins
+checked in were regenerated on `ffmpeg 8.0.1-3ubuntu2`; a controller on a
+different x264 build will not reproduce them, and re-pinning is a PR that
+states the build it used. `scripts/bench fixtures` skips a file that already
+exists, so delete a fixture before expecting a changed recipe to rebuild it.
 
 Capture server hashes from the exact files in media1's fixture library, then
 produce the same ordered list locally and compare it before running. Replace
@@ -4083,6 +4320,41 @@ Activity without disabling offline work for everyone else. Look for
 `offline package ready`, `offline preparation failed`, and
 `offline expiry sweep failed` in Settings → Logs when diagnosing preparation.
 
+## Download missing subtitles
+
+In the web app, open **Settings → Integrations → OpenSubtitles → Configure
+OpenSubtitles**. Create an API key through the linked OpenSubtitles consumer
+page and save it here. An account username and password are optional; the
+provider determines the download allowance. The form never reads saved
+secrets back into the browser. Empty input boxes keep existing credentials;
+**Disable and clear credentials** removes them and turns automation off.
+
+Open a movie or episode, choose **Find subtitles**, select a language and
+search. Compare the release names: **File match** means OpenSubtitles reports
+a match to this file's hash; another release can have different cue timing.
+**Download** saves captions and selects the returned track for the next web
+playback. Downloaded tracks also appear in the existing subtitle pickers on
+Apple and Android after the title is refreshed. Native clients currently use
+the web app for the search/download action.
+
+For unattended acquisition, enable the automatic checkbox and enter one to
+three language codes, such as `en, fr`. The job only accepts file matches
+with complete captions; forced-only and machine/AI-translated tracks are
+left for manual choice. A full track in the requested language already
+present in the file or catalog prevents another acquisition. The job visits
+up to sixteen catalog files per pass, with a 120-second work budget and a
+persisted three-minute cooldown. After a complete catalog pass it waits
+24 hours before starting again. Playback does not wait for it.
+
+**Reading the result:** no matches means the provider returned no suitable
+subtitles for that search. A credentials error means the administrator must
+check the API key/account. A quota error means the provider allowance is
+exhausted; automatic work pauses for the provider's retry interval, or one
+hour when no interval is supplied. Provider failures leave existing tracks
+available. The caption limit is eight tracks per source revision, each at
+most 256 KiB of normalized WebVTT. Downloaded tracks survive cache cleanup
+and ordinary rescans; replacing the media invalidates its old associations.
+
 ## Pairing another application (Curator) — the runbook
 
 Another application can ask plurx to index exactly the folder it just wrote,
@@ -4465,6 +4737,7 @@ curl -s $HOST/metrics | grep plurx_live_tv
 | `plurx_live_tv_starts_total{outcome="created"\|"recovered"\|"failed"}` | a climbing `failed` with a flat `created` is the shape of a device problem |
 | `plurx_live_tv_session_ends_total{reason="terminal"}` | sessions that ended in a terminal state |
 | `plurx_live_tv_relay_bytes_total` | bytes a non-owner served by relaying from the owner |
+| `plurx_dvr_sink_failures_total{reason="disk_write_failed"\|"disk_write_timeout"\|"disk_write_backlog"}` | capture attempts ended by one sink's disk path; a rising counter does not mean the shared tuner transport failed |
 
 Sessions and starts are **per process**. On a cluster, the owner's numbers are
 the tuner's truth and a relaying node's `relay_bytes` is how much it carried.
@@ -4611,9 +4884,53 @@ Hiqlite operation.
 | `plurx_raft_current_term`, `plurx_raft_leader_known`, `plurx_raft_is_leader` | Local Raft leadership state from the cached watch. A known leader is required but does not by itself prove this node is caught up. |
 | `plurx_raft_applied_index`, `plurx_raft_commit_index`, `plurx_raft_apply_lag_entries` | Local apply progress against the quorum-confirmed commit watermark. Healthy readiness requires zero lag. |
 
+Playback telemetry writer metrics are also node-local and fixed-cardinality;
+they never label a session, file, user, network, or path.
+
+| Metric | How to read it |
+|---|---|
+| `plurx_telemetry_enqueued_total{class="terminal|lifecycle|sample"}` | Jobs admitted to the bounded 1,024-slot writer queue. |
+| `plurx_telemetry_dropped_total{reason="queue_full|coalesced|writer_degraded|writer_panic|shutdown"}` | Work deliberately discarded by the bounded policy, plus the one loss that is not deliberate. A growing `queue_full` or `writer_degraded` series needs the daemon log and sidecar health inspected; `coalesced` is expected snapshot replacement. **Any** `writer_panic` is a batch the node-local store destroyed mid-write and is always worth the daemon log — it is counted so the loss cannot be silent, not because it is normal. `shutdown` carries what a drain that reached its two-second bound gave up on, including the batch the writer was still holding; those rows may or may not have landed, and the counter states the pessimistic answer once. |
+| `plurx_telemetry_written_total{outcome="ok|error"}` | Raw rows offered successfully or unsuccessfully to the node-local Store batch path. |
+| `plurx_telemetry_queue_depth` | Current queue occupancy, never above 1,024. Non-terminal work stops at 896 so 128 slots remain for terminal outcomes, and a terminal arriving at a full queue displaces the oldest non-terminal rather than being refused — so a rise in `queue_full` alongside a flat `enqueued_total{class="terminal"}` is samples losing to terminals, which is the intended trade. |
+| `plurx_telemetry_batch_size`, `plurx_telemetry_batch_seconds` | Fixed-bucket histograms for batch occupancy and processing time. Use them to decide whether a second sidecar connection or different batch constants are warranted; do not infer that from queue depth alone. |
+| `plurx_telemetry_setting_refresh_failures_total` | Paired effective-setting refreshes that failed while the last good values remained active. |
+
 The compact Prometheus alert shape is: membership sample valid · leader known ·
 heartbeat quorum available · apply lag zero. `/readyz` remains the final active
 serving check because the metrics are deliberately passive and cached.
+
+### HTTP requests, bodies and panics
+
+Bounded by construction: the route label is the same nine-value
+`route_group` classification the Store attribution uses, never a URI, an id, a
+session, a title or a path. Nothing here names content.
+
+| Metric | How to read it |
+|---|---|
+| `plurx_http_requests_total{route_group,method,status}` | Every request's outcome, counted outside the cluster capacity gate — so a learner, fenced or maintenance 503 is counted, which is the point. `status` is the class (`2xx`…`5xx`, `other`), not a code: a node that has turned every request into `5xx` or every request into a `503` shows up here and nowhere else. |
+| `plurx_http_route_seconds{route_group,role}` | **Response-header** latency: it stops when the handler returns its response, before a byte of the body is read. This is the number to alert on for JSON pages, and the number a two-hour direct play would otherwise ruin. |
+| `plurx_http_body_seconds{route_group}` | **Body delivery** time, from the handler's response to the body's last frame or its drop. A different scale from the line above — seconds to hours rather than milliseconds — which is why it is a separate family rather than more buckets. It is per **response body**, so a direct play answered as ten range requests is ten observations, not one viewing. |
+| `plurx_http_bodies_total{route_group,outcome="complete\|aborted"}` | How bodies ended. `complete` is a body that handed the connection everything it promised: it reached its end, or — for a response with a `Content-Length`, which is every direct play range and HLS segment — it yielded the declared number of bytes (hyper stops polling a fixed-length body once those are written, so "reached its end" alone would miss every one of them). `aborted` is a body let go of short of that, or one that ended in an error. `complete` means handed to the connection, not acknowledged by the client. A HEAD, 204 or 304 response promises no body and counts `complete`. **`aborted` is not an error rate**: on a media route a consumer that leaves mid-body — a seek, a player that drops a segment it no longer needs — is ordinary. But a body delivered in full is `complete` whatever its framing, so `aborted` counts real departures only. Read it against `complete` on the *same* route group, and read a change in the ratio rather than its level. |
+| `plurx_panics_total{subsystem}` | Panics the process hook saw, by a fixed allowlist of module names with `other` for everything else, including dependencies. Any movement at all is worth the daemon log: the matching line is at ERROR on target `plurxd::panic` with the panic's location and a redacted message. The counter reports a panic; it does not repair whatever the panicking task left behind. |
+
+Every 5xx also writes one `WARN` line on target `plurxd::http` carrying the
+route group, the status, the latency, the redacted target and the request id.
+Successful requests are deliberately **not** logged: the in-memory ring behind
+Settings → System → Logs is bounded, and one line per HLS segment per viewer
+would evict everything else in it inside a minute. The counters carry the
+volume; the ring carries the exceptions.
+
+### Request ids
+
+Every response carries `x-request-id`. An inbound one is adopted when it is at
+most 64 characters of `[A-Za-z0-9_-]`, and otherwise replaced by a minted uuid
+— replaced rather than refused, because a correlation aid must never be able to
+fail a request. **A discarded value is never logged, echoed or stored**: a
+client that puts a bearer token in that header does not get it written into the
+journal. The id is on the `http_request` span, so every log line inside a
+request carries it, and it is deliberately not a metric label.
+
 
 ### Reading the index queue's verdict
 

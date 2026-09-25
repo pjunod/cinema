@@ -251,7 +251,10 @@ function playbackSurfaceHistoryText(){
 function renderPlaybackSurface(surface){
   const kind=(surface&&surface.kind)||"none";
   const title=(surface&&surface.title)||"";
-  const detail=(surface&&surface.detail)||"";
+  // A media wait's sentence is a live reading, refreshed by the sampling tick
+  // into `waitDetail`; every other fault says what its owner said.
+  const live=surface&&surface.source==="media_waiting"?renderPlaybackSurface.waitDetail:null;
+  const detail=live||(surface&&surface.detail)||"";
   const actions=(surface&&surface.actions)||[];
   // The presenter runs on every evidence sample — twice a second while a film
   // plays — and repainting an unchanged surface would rebuild the action
@@ -265,7 +268,7 @@ function renderPlaybackSurface(surface){
     kind==="blocking"?playbackSurfaceActionHtml(actions):"",
     !!(surface&&surface.input_failed));
   renderPlaybackSurfaceNotice(kind==="banner",title,detail,actions);
-  renderPlaybackSurfaceIndicator(kind==="indicator",title);
+  renderPlaybackSurfaceIndicator(kind==="indicator",live?`${title} · ${live}`:title);
 }
 function playbackSurfaceActionHtml(actions){
   return (actions||[]).map(action=>{

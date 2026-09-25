@@ -1270,11 +1270,19 @@ mod tests {
                 // `media_playback_pointers` fails with "no such table" rather
                 // than with anything about this fixture.
                 "DROP TRIGGER IF EXISTS cache_publication_generation_guard;
+                 DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_advance;
+                 DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_delete_source;
+                 DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_supersede_source;
+                 DROP TABLE IF EXISTS subtitle_source_repair_epochs;
+                 DROP TRIGGER IF EXISTS subtitle_source_publications_delete_source;
+                 DROP TRIGGER IF EXISTS subtitle_source_publications_supersede_source;
+                 DROP TABLE IF EXISTS subtitle_source_publications;
                  DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor;
                  DROP INDEX IF EXISTS analysis_requests_one_active_forced_skip_successor;
                  DROP INDEX IF EXISTS analysis_requests_one_active_source;
                  DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source;
                  DROP TABLE IF EXISTS analysis_index_repairs;
+                 DROP TABLE IF EXISTS file_grants;
                  DROP TRIGGER IF EXISTS classification_source_changed;
                  DROP TRIGGER IF EXISTS classification_au;
                  DROP TRIGGER IF EXISTS classification_ad;
@@ -1319,7 +1327,19 @@ mod tests {
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_diagnostic_json;
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_retry_deadline_ms;
                  ALTER TABLE analysis_requests DROP COLUMN video_identity;
+                 ALTER TABLE files DROP COLUMN downloaded_subtitles;
+                 ALTER TABLE files DROP COLUMN luminance_source;
+                 ALTER TABLE files DROP COLUMN mastering_max_luminance;
+                 ALTER TABLE files DROP COLUMN max_fall;
+                 ALTER TABLE files DROP COLUMN max_cll;
+                 ALTER TABLE files DROP COLUMN field_order;
                  ALTER TABLE files DROP COLUMN video_codec_tag;
+                 -- v66's publication proof. `fragment_indexes` itself is v27,
+                 -- so the table stays standing in a v43 database and only the
+                 -- column it gained above the guard goes. Leaving it would
+                 -- make the replayed v66 `ADD COLUMN` fail outright with
+                 -- `duplicate column name`.
+                 ALTER TABLE fragment_indexes DROP COLUMN validated_revision;
                  PRAGMA user_version = 43;",
             )
             .expect("construct unrecoverable v43 commit");
@@ -1409,7 +1429,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 19] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 25] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1434,8 +1454,30 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS dvr_event_heads",
             "ADD COLUMN video_codec_tag",
             "CREATE TABLE IF NOT EXISTS media_classifications",
+            "CREATE TABLE IF NOT EXISTS file_grants",
             "CREATE TABLE analysis_index_repairs",
             "ADD COLUMN typed_code",
+            // v64's field order. Like `video_codec_tag` it is an additive
+            // `files` column, so both fixtures drop it or the replay meets its
+            // own column and fails with `duplicate column name`.
+            "ADD COLUMN field_order",
+            // v65's four luminance columns, appended by the tone-map work. One
+            // migration, so one entry: `max_cll` names it uniquely, exactly as
+            // `dvr_recordings` names v57's three tables. The fixture drops all
+            // four, newest first, because a replay would otherwise meet its own
+            // column.
+            "ADD COLUMN max_cll",
+            // v66's publication proof, an additive `fragment_indexes` column
+            // rather than a `files` one. The two fixtures undo it differently:
+            // the v43 fixture drops the column, because that table is v27 and
+            // survives its wind-back, while the v14 fixture drops the whole
+            // table and takes the column with it.
+            "ADD COLUMN validated_revision",
+            "ADD COLUMN downloaded_subtitles",
+            // v67 rebuilds the request table and adds the subtitle-source
+            // publication and durable repair ledgers. Both tables and their
+            // triggers are dropped by the fixtures above.
+            "CREATE TABLE IF NOT EXISTS subtitle_source_repair_epochs",
         ];
 
         assert!(

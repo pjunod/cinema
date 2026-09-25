@@ -393,6 +393,23 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BranchOnRowsAffected,
     },
+    // Counting the rows an eight-hex prefix matches and deleting the one it
+    // matched are one boundary because the count is the authorization: a
+    // prefix that matched two rows must delete neither, and a prefix that
+    // matched one must delete exactly that one. Split them and a token minted
+    // between the count and the delete can turn a unique prefix ambiguous
+    // under a delete that has already been authorized -- which is revoking a
+    // device the caller never saw.
+    //
+    // `ReadBranchWrite` because the caller is told which of the three
+    // outcomes happened, and the write runs only on the middle one.
+    SqliteTransactionSite {
+        module: "users.rs",
+        method: "delete_token_by_prefix_for_user",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
     SqliteTransactionSite {
         module: "offline.rs",
         method: "invalidate_ready_offline_package",
@@ -490,6 +507,20 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "enqueue_or_promote_subtitle_source",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "claim_analysis_request_foreground",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
@@ -986,6 +1017,7 @@ mod tests {
         ),
         ("coordination.rs", include_str!("sqlite/coordination.rs")),
         ("dv_conversion.rs", include_str!("sqlite/dv_conversion.rs")),
+        ("file_grants.rs", include_str!("sqlite/file_grants.rs")),
         ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
         (
             "fragment_index_cluster.rs",
@@ -1154,11 +1186,21 @@ mod tests {
         // `fragment_index_cluster.rs` boundaries that read a job or a prior
         // repair and write conditionally on what they read.
         //
+        // 98 with C-04's device inventory:
+        // `delete_token_by_prefix_for_user` counts the rows an eight-hex
+        // prefix matches and deletes the one it matched in one boundary,
+        // because the count is the authorization for the delete. Registering
+        // it is this commit's whole change to this list; M3 added the
+        // boundary and left it unnamed.
+        // 100 with subtitle-source enqueue and foreground claim. The enqueue
+        // joins or promotes before inserting; the claim writes its attempt
+        // row only when it wins the conditional request update.
+        //
         // The number is written out rather than derived so that adding a
         // transaction boundary has to be a deliberate edit here. That is the
         // point of the assertion: two of the sites above reached main without
         // one, and ten more did before this correction.
-        assert_eq!(methods.len(), 97);
+        assert_eq!(methods.len(), 100);
     }
 
     #[test]

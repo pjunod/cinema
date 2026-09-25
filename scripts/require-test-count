@@ -2,6 +2,7 @@
 set -euo pipefail
 
 expected="${PLURX_EXPECT_TEST_COUNT:-}"
+minimum="${PLURX_EXPECT_TEST_COUNT_AT_LEAST:-}"
 is_test=false
 is_exact=false
 for argument in "$@"; do
@@ -14,7 +15,7 @@ done
 if [[ -z "$expected" && "$is_test" == true && "$is_exact" == true ]]; then
   expected=1
 fi
-if [[ -z "$expected" ]]; then
+if [[ -z "$expected" && -z "$minimum" ]]; then
   exec "$@"
 fi
 
@@ -41,6 +42,12 @@ actual="$({
   ' "$output"
 })"
 if [[ "$actual" != "$expected" ]]; then
-  printf 'expected %s matching Rust test(s), but %s passed\n' "$expected" "$actual" >&2
+  if [[ -n "$expected" ]]; then
+    printf 'expected %s matching Rust test(s), but %s passed\n' "$expected" "$actual" >&2
+    exit 1
+  fi
+fi
+if [[ -n "$minimum" && "$actual" -lt "$minimum" ]]; then
+  printf 'expected at least %s matching Rust test(s), but %s passed\n' "$minimum" "$actual" >&2
   exit 1
 fi

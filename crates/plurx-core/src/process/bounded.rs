@@ -4,6 +4,7 @@
 //! environment, bounded output and wall time, and one owner that kills and
 //! reaps the complete process group when the future is cancelled.
 
+use std::ffi::OsStr;
 use std::io;
 use std::process::ExitStatus;
 use std::time::Duration;
@@ -12,21 +13,21 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 
 #[derive(Debug)]
-pub(crate) struct Output {
-    pub(crate) status: ExitStatus,
-    pub(crate) stdout: Vec<u8>,
-    pub(crate) stderr: Vec<u8>,
+pub struct Output {
+    pub status: ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
 
 struct OwnedChild {
     child: Option<Child>,
-    _job: crate::process_control::ChildJob,
+    _job: super::ChildJob,
     #[cfg(unix)]
     process_group: Option<i32>,
 }
 
 impl OwnedChild {
-    fn new(child: Child, job: crate::process_control::ChildJob) -> Self {
+    fn new(child: Child, job: super::ChildJob) -> Self {
         Self {
             _job: job,
             #[cfg(unix)]
@@ -83,12 +84,16 @@ impl Drop for OwnedChild {
     }
 }
 
-pub(crate) async fn output(
-    program: &str,
-    args: &[&str],
+pub async fn output<P, A>(
+    program: P,
+    args: &[A],
     wall_time: Duration,
     max_output_bytes: usize,
-) -> io::Result<Output> {
+) -> io::Result<Output>
+where
+    P: AsRef<OsStr>,
+    A: AsRef<OsStr>,
+{
     let mut command = Command::new(program);
     command
         .args(args)
@@ -116,7 +121,7 @@ pub(crate) async fn output(
     #[cfg(unix)]
     command.process_group(0);
 
-    let (mut child, job) = crate::process_control::spawn_job_owned(&mut command)?;
+    let (mut child, job) = super::spawn_job_owned(&mut command)?;
     let stdout = child
         .stdout
         .take()

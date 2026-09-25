@@ -202,6 +202,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             if (recovered != null) {
                                 bindOrigin(recovered.origin, saved.token)
                                 serverName = recovered.info.name
+                                Session.displayModeMatch = recovered.info.display_mode_match
                                 settings.saveServerIdentity(
                                     recovered.origin,
                                     recovered.info.instance_id,
@@ -213,6 +214,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     } ?: SavedSessionValidation.ServerUnavailable
                     when (validation) {
                         is SavedSessionValidation.Authenticated -> {
+                            if (currentUserId != validation.user.id) invalidateLibraryPager()
                             currentUser = validation.user
                             currentUserId = validation.user.id
                             settings.saveSession(
@@ -229,8 +231,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             syncOfflineProgress()
                         }
                         SavedSessionValidation.InvalidToken -> {
+                            invalidateLibraryPager()
                             Session.token = null
                             settings.clearToken()
+                            _phase.value = Phase.NeedLogin
+                        }
+                        is SavedSessionValidation.Expired -> {
+                            invalidateLibraryPager()
+                            // Same sign-out, but the login screen says why:
+                            // "Signed out after 90 days of inactivity."
+                            Session.token = null
+                            settings.clearToken()
+                            _authError.value = validation.message
                             _phase.value = Phase.NeedLogin
                         }
                         SavedSessionValidation.ServerUnavailable -> {
@@ -301,6 +313,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val resp = api().login(LoginReq(username = user.trim(), password = pass))
+                invalidateLibraryPager()
                 Session.token = resp.token
                 currentUser = resp.user
                 currentUserId = resp.user.id
@@ -361,9 +374,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (e: Exception) {
-                _home.value = _home.value.copy(loading = false, error = e.message ?: "Failed to load")
+                val expired = (e as? HttpException)?.let(::sessionExpiry)
+                if (expired != null) {
+                    endExpiredSession(expired.message)
+                } else {
+                    _home.value = _home.value.copy(loading = false, error = e.message ?: "Failed to load")
+                }
             }
         }
+    }
+
+    /**
+     * The server signed this device out for sitting unused past its idle
+     * window. Land on the login screen with its sentence rather than leave a
+     * "HTTP 401" on Home; the saved token is dead, so it goes with it.
+     */
+    private suspend fun endExpiredSession(message: String) {
+        if (Session.token == null) return
+        settings.clearToken()
+        invalidateLibraryPager()
+        Session.token = null
+        currentUser = null
+        currentUserId = null
+        _home.value = HomeState()
+        _authError.value = message
+        _phase.value = Phase.NeedLogin
     }
 
     fun logout() = logout(removeDownloads = false)
@@ -377,6 +412,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val capturedOrigin = Session.origin
             val capturedToken = Session.token
             _busy.value = true
+            invalidateLibraryPager()
             OfflineBooks.interruptProfile(instance, user)
             var cancellation: CancellationException? = null
             val confirmed = try {
@@ -438,8 +474,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * relaunch before the next login must not offer it to a different one.
      */
     fun changeServer() {
+        invalidateLibraryPager()
         OfflineBooks.interruptProfile(serverInstanceId, currentUserId)
         Session.token = null
+        Session.displayModeMatch = false
         currentUser = null
         currentUserId = null
         serverInstanceId = null
@@ -661,6 +699,41 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { settings.saveViewerPreferences(updated) }
     }
 
+    private data class LibraryPagerProfile(
+        val origin: String,
+        val serverInstanceId: String?,
+        val userId: Long?,
+        val token: String?,
+    )
+
+    private var activeLibraryPager: LibraryPager? = null
+    private var activeLibraryPagerProfile: LibraryPagerProfile? = null
+
+    private fun invalidateLibraryPager() {
+        activeLibraryPager?.invalidate()
+        activeLibraryPager = null
+        activeLibraryPagerProfile = null
+    }
+
+    internal fun libraryPager(ids: List<Long>, sort: String): LibraryPager {
+        val profile = LibraryPagerProfile(Session.origin, serverInstanceId, currentUserId, Session.token)
+        val active = activeLibraryPager
+        if (active != null && activeLibraryPagerProfile == profile && active.ids == ids && active.sort == sort) {
+            return active
+        }
+        invalidateLibraryPager()
+        // Never let an in-flight page borrow the next profile's global bearer.
+        val boundApi = profile.token?.let { Net.api(profile.origin, Net.profileClient(it)) }
+        return LibraryPager(ids, sort, viewModelScope) { id, offset, order ->
+            if (activeLibraryPagerProfile != profile) throw CancellationException("Library profile changed")
+            val source = boundApi ?: error("Sign in to load this library")
+            source.libraryItems(id, limit = 200, offset = offset, sort = order)
+        }.also {
+            activeLibraryPager = it
+            activeLibraryPagerProfile = profile
+        }
+    }
+
     // ---- Suspend loaders used by individual screens --------------------------
 
     /**
@@ -844,6 +917,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun connectToOrigin(normalized: String) {
+        invalidateLibraryPager()
         // In memory and on disk, the token travels with the origin: this
         // server has not authenticated us yet, so nothing may be sent as if
         // it had.
@@ -856,11 +930,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         api = candidate
         serverName = info.name
         serverInstanceId = info.instance_id
+        Session.displayModeMatch = info.display_mode_match
         settings.saveOrigin(normalized, info.instance_id)
         _phase.value = Phase.NeedLogin
     }
 
     private fun bindOrigin(value: String, token: String?) {
+        invalidateLibraryPager()
         origin = value
         Session.origin = value
         Session.token = token
@@ -899,7 +975,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun backfillServerIdentity() {
         val info = catchingUnlessCancelled { api().server() }.getOrNull() ?: return
         serverName = info.name
+        if (serverInstanceId != info.instance_id) invalidateLibraryPager()
         serverInstanceId = info.instance_id
+        Session.displayModeMatch = info.display_mode_match
         settings.saveServerIdentity(origin, info.instance_id)
         refreshClusterIngress()
     }
@@ -933,6 +1011,10 @@ private data class RecoveredServer(val origin: String, val info: Server)
 internal sealed interface SavedSessionValidation<out T> {
     data class Authenticated<T>(val user: T) : SavedSessionValidation<T>
     data object InvalidToken : SavedSessionValidation<Nothing>
+    /** The server signed this device out for sitting unused past its idle
+     *  window (`session_expired`); [message] is its sentence for the login
+     *  screen. */
+    data class Expired(val message: String) : SavedSessionValidation<Nothing>
     data object ServerUnavailable : SavedSessionValidation<Nothing>
 }
 
@@ -972,7 +1054,7 @@ internal suspend fun <T> validateSavedSession(
             throw cancelled
         } catch (error: HttpException) {
             if (error.code() == 401 || error.code() == 403) {
-                return SavedSessionValidation.InvalidToken
+                return sessionExpiry(error) ?: SavedSessionValidation.InvalidToken
             }
         } catch (_: Exception) {
             // Connection, timeout, and decoding failures do not invalidate a token.
@@ -983,6 +1065,25 @@ internal suspend fun <T> validateSavedSession(
         retryDelayMs *= 2
     }
     return SavedSessionValidation.ServerUnavailable
+}
+
+/** The server's stable code for a sign-in that sat unused past its idle window. */
+internal const val SESSION_EXPIRED_CODE = "session_expired"
+
+/**
+ * A 401 that explains itself as an idle expiry, or `null` for every other
+ * refusal (which stays an ordinary [SavedSessionValidation.InvalidToken]).
+ * Reading the body can fail; that is an ordinary sign-out too.
+ */
+internal fun sessionExpiry(error: HttpException): SavedSessionValidation.Expired? {
+    if (error.code() != 401) return null
+    val body = runCatching { error.response()?.errorBody()?.string() }.getOrNull()
+    val refusal = parseRefusal(error.code(), body) ?: return null
+    return if (refusal.code == SESSION_EXPIRED_CODE) {
+        SavedSessionValidation.Expired(refusal.message)
+    } else {
+        null
+    }
 }
 
 /** Normalize the manual server field to the same origin contract as Apple. */

@@ -519,6 +519,12 @@ const TABLES: &[TablePlan] = &[
             "dv_el_present",
             "dv_rpu_present",
             "video_codec_tag",
+            "field_order",
+            "max_cll",
+            "max_fall",
+            "mastering_max_luminance",
+            "luminance_source",
+            "downloaded_subtitles",
         ],
         order_by: "id",
         minimum_schema: 5,
@@ -1143,6 +1149,25 @@ const TABLES: &[TablePlan] = &[
         ],
         order_by: "token_hash",
         minimum_schema: 14,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "file_grants",
+        columns: &[
+            "id",
+            "token_hash",
+            "file_id",
+            "user_id",
+            "source_token_hash",
+            "purpose",
+            "created_at",
+            "expires_at",
+            "revoked_at",
+        ],
+        order_by: "id",
+        minimum_schema: 68,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -2523,6 +2548,23 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 // stored probe JSON crosses with the row and the destination's
                 // bounded backfill recovers a valid tag afterward.
                 "NULL".to_owned()
+            } else if table.name == "files" && *column == "downloaded_subtitles" && schema_version < 67 {
+                "'[]'".to_owned()
+            } else if table.name == "files" && *column == "field_order" && schema_version < 64 {
+                // The stored probe document crosses with every legacy row;
+                // the destination's fenced bounded job recovers the token.
+                "NULL".to_owned()
+            } else if table.name == "files"
+                && matches!(
+                    *column,
+                    "max_cll" | "max_fall" | "mastering_max_luminance" | "luminance_source"
+                )
+                && schema_version < 65
+            {
+                // The luminance columns land one step after the field-order
+                // column, so v64 sources still predate them; the stored probe
+                // JSON crosses with the row and the bounded job classifies it.
+                "NULL".to_owned()
             } else if table.name == "cluster_fragment_index_jobs"
                 && *column == "attempt_errors"
                 && schema_version < 46
@@ -2870,13 +2912,17 @@ mod tests {
         let v37 = value_projection(table, 37, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
         assert!(
-            v37.ends_with("hdr_format, audio_offset_ms, NULL, NULL, NULL, NULL, NULL, NULL"),
+            v37.ends_with(
+                "hdr_format, audio_offset_ms, NULL, NULL, NULL, NULL, NULL, NULL, NULL, \
+                 NULL, NULL, NULL, NULL, '[]'"
+            ),
             "{v37}"
         );
         assert!(
             current.ends_with(
                 "hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, \
-                 dv_el_present, dv_rpu_present, video_codec_tag"
+                 dv_el_present, dv_rpu_present, video_codec_tag, field_order, \
+                 max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles"
             ),
             "{current}"
         );
@@ -2892,10 +2938,63 @@ mod tests {
         let v59 = value_projection(table, 59, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
         assert!(
-            v59.ends_with("dv_el_present, dv_rpu_present, NULL"),
+            v59.ends_with(
+                "dv_el_present, dv_rpu_present, NULL, NULL, NULL, NULL, NULL, NULL, '[]'"
+            ),
             "{v59}"
         );
-        assert!(current.ends_with("dv_el_present, dv_rpu_present, video_codec_tag"));
+        assert!(current.ends_with(
+            "dv_el_present, dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, \
+             mastering_max_luminance, luminance_source, downloaded_subtitles"
+        ));
+    }
+
+    #[test]
+    fn pre_v64_file_projection_supplies_null_field_order() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "files")
+            .copied()
+            .expect("files table plan");
+        let v63 = value_projection(table, 63, false);
+        let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
+        assert!(
+            v63.ends_with("dv_rpu_present, video_codec_tag, NULL, NULL, NULL, NULL, NULL, '[]'"),
+            "{v63}"
+        );
+        assert!(current.ends_with(
+            "dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, \
+             mastering_max_luminance, luminance_source, downloaded_subtitles"
+        ));
+    }
+
+    /// The luminance columns append one step after the field-order column, so
+    /// a v64 source predates them and has to project explicit nulls.
+    #[test]
+    fn pre_v65_file_projection_supplies_null_luminance() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "files")
+            .copied()
+            .expect("files table plan");
+        let v64 = value_projection(table, 64, false);
+        let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
+        assert!(
+            v64.ends_with("video_codec_tag, field_order, NULL, NULL, NULL, NULL, '[]'"),
+            "{v64}"
+        );
+        assert!(current.ends_with(
+            "video_codec_tag, field_order, max_cll, max_fall, mastering_max_luminance, \
+             luminance_source, downloaded_subtitles"
+        ));
+    }
+
+    #[test]
+    fn pre_v67_file_projection_supplies_empty_downloaded_subtitles() {
+        let table = files_plan();
+        assert!(value_projection(table, 66, false).ends_with("luminance_source, '[]'"));
+        assert!(value_projection(table, SQLITE_SCHEMA_VERSION, false)
+            .ends_with("luminance_source, downloaded_subtitles"));
     }
 
     /// Every import plan must name the migration that actually creates its
@@ -2983,8 +3082,9 @@ mod tests {
         assert!(names.contains(&"dvr_rules"));
         assert!(names.contains(&"dvr_reminders"));
         assert!(names.contains(&"media_classifications"));
+        assert!(names.contains(&"file_grants"));
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 52, "review every imported durable table");
+        assert_eq!(names.len(), 53, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

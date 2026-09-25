@@ -20,8 +20,21 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `111` — native viewer parity across phone, foldable,
-> and TV. Build 110 executes a server-required copy-HLS remux on initial play,
+> Status: **v0.3.0**, build `125` — native viewer parity across phone, foldable,
+> and TV. Build 124 settles a progressive remux seek after later rendered video
+> crosses the requested position, even if its first frame lands slightly early;
+> background playback cannot settle that pending seek. PGS tracks display as
+> Overlay in the player. Build 121 lands on the login screen with the server's sentence when a
+> sign-in expires after its idle window, instead of leaving an HTTP 401 on Home,
+> and gives a system interruption (a call, another app taking audio) its own
+> hold notice that survives the hold timer and clears when the system resumes.
+> Build 120 stops walking the whole ingress list for playback failures
+> no other node would answer differently: a 4xx on a segment or playlist is
+> terminal, and only a connection-level failure or a 5xx tries a peer. It also
+> excludes the credential DataStore from Auto Backup and from device-to-device
+> transfer, and gives the release variant a signing config that fails rather
+> than falling back to the debug key, so the APK the server serves is
+> release-signed and not `debuggable`. Build 110 executes a server-required copy-HLS remux on initial play,
 > seek, reopen, track change, recovery and prepared handoff, so Profile 7 → 8.1
 > conversion never falls back into the progressive copy path that cannot run
 > it. Older servers omit the requirement and retain progressive behavior.
@@ -345,6 +358,15 @@ it provisions the SDK for you.
 Java 25 while Android source and bytecode stay at Java 17 for device
 compatibility. Outside Docker the SDK location comes from `local.properties`
 (`sdk.dir=…`) or `ANDROID_HOME`.
+
+The release build is **signed with the upload key**: `make android-release`
+bind-mounts the keystore named by `PLURX_ANDROID_KEYSTORE` and passes
+`PLURX_ANDROID_KEYSTORE_PASSWORD`, `PLURX_ANDROID_KEY_ALIAS` and
+`PLURX_ANDROID_KEY_PASSWORD` through to Gradle. Any of the four unset fails the
+build naming it; there is no fallback to the debug key, because a debug-signed
+"release" cannot later be upgraded in place by a properly signed one. `make
+android` still builds the unsigned debug APK for local use, and
+`make android-publish` now serves the release variant.
 
 The release build is **minified and resource-shrunk** (R8 +
 `shrinkResources`), which is what keeps the APK near 3 MB rather than 18: this

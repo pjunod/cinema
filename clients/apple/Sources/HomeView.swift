@@ -97,7 +97,7 @@ struct HomeView: View {
         .tint(Palette.accent)
         .task(id: dvrObservationIdentity) {
             guard scenePhase == .active, model.phase == .ready else { return }
-            await dvr.observe(origin: model.origin, token: Session.shared.token,
+            await dvr.observe(origin: model.origin, token: Session.shared.credentials.token,
                               highFrequency: selectedTab == .liveTv || selectedTab == .recordings)
         }
         .task {
@@ -164,7 +164,7 @@ struct HomeView: View {
         .tint(Palette.accent)
         .task(id: dvrObservationIdentity) {
             guard scenePhase == .active else { return }
-            await dvr.observe(origin: model.origin, token: Session.shared.token,
+            await dvr.observe(origin: model.origin, token: Session.shared.credentials.token,
                               highFrequency: selectedTab == .liveTv || selectedTab == .recordings)
         }
         .task { if model.homeLoading { await model.loadHome() } }
@@ -181,7 +181,7 @@ struct HomeView: View {
     #endif
 
     private var dvrObservationIdentity: String {
-        "\(model.origin)|\(Session.shared.token ?? "signed-out")|\(scenePhase == .active)|\(model.phase)|\(selectedTab)"
+        "\(model.origin)|\(Session.shared.credentials.token ?? "signed-out")|\(scenePhase == .active)|\(model.phase)|\(selectedTab)"
     }
 
     private var recordingsTabLabel: String {

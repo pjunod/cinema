@@ -8,7 +8,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.jsonObject
@@ -18,6 +20,7 @@ import kotlinx.serialization.json.int
 import org.junit.Assert.*
 import org.junit.Test
 import tv.plurx.app.data.Net
+import tv.plurx.app.player.DisplayModeMatchResult
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LiveTvTest {
@@ -56,6 +59,29 @@ class LiveTvTest {
         assertFalse(wire.containsKey("compatibility"))
     }
 
+    @Test fun liveEnvelopeCarriesTheSinkFactsAndBothHevcContainers() {
+        val caps = Net.json.decodeFromString<tv.plurx.app.data.DeviceCaps>("""{
+            "v":2,"client":{"kind":"android","build":"test","ua":"fixture"},
+            "video":[{"codec":"hevc","profiles":["main10"],"present":["sdr"]},{"codec":"mpeg2video","present":["sdr"]}],
+            "audio":["aac","ac3"],"containers":["ts"],"transports":["hls"],
+            "display":{"hdr":false,"dolby_vision":false}
+        }""")
+        val television = LiveTvPlaybackEnvelope.from(
+            caps, sink = tv.plurx.app.data.LiveSinkFacts(deinterlaces = true, aacChannels = 6),
+        )
+        assertTrue(television.video_limits.all { it.interlaced })
+        assertEquals(6, television.audio_limits.single { it.codec == "aac" }.max_channels)
+        assertEquals(8, television.audio_limits.single { it.codec == "ac3" }.max_channels)
+        assertTrue(television.hls_formats.contains(LiveTvHlsFormat("fmp4", "hevc", "ac3")))
+        assertTrue(television.hls_formats.contains(LiveTvHlsFormat("mpegts", "hevc", "ac3")))
+        assertTrue(television.hls_formats.contains(LiveTvHlsFormat("mpegts", "mpeg2video", "ac3")))
+        assertFalse(television.hls_formats.contains(LiveTvHlsFormat("fmp4", "mpeg2video", "ac3")))
+
+        val handset = LiveTvPlaybackEnvelope.from(caps)
+        assertTrue(handset.video_limits.none { it.interlaced })
+        assertEquals(2, handset.audio_limits.single { it.codec == "aac" }.max_channels)
+    }
+
     private val channel = LiveTvChannel("one", "7.1", "Fixture News")
 
     /**
@@ -81,7 +107,7 @@ class LiveTvTest {
         override suspend fun start(channel: String, requestId: String): LiveTvStarted {
             events += "start:$channel"
             error?.let { throw LiveTvFailure(it, ownerDecided = ownerDecided) }
-            return response?.await() ?: LiveTvStarted("cap-$channel", this@LiveTvTest.channel, true)
+            return response?.await() ?: LiveTvStarted("cap-$channel", this@LiveTvTest.channel, true, playlist_url = "/api/v1/live-tv/sessions/cap-$channel/master.m3u8")
         }
         override suspend fun release(capability: String) {
             events += "release:$capability"
@@ -182,7 +208,7 @@ class LiveTvTest {
         val lease = lease(requests, Store(), CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
         val started = lease.start("one")
         val stopped = lease.stop()
-        requests.response!!.complete(LiveTvStarted("late", channel, true))
+        requests.response!!.complete(LiveTvStarted("late", channel, true, playlist_url = "/api/v1/live-tv/sessions/late/master.m3u8"))
         assertNull(started.await())
         stopped.await()
         assertEquals(listOf("start:one", "release:late"), requests.events)
@@ -197,7 +223,7 @@ class LiveTvTest {
         val waiter = launch { started.await() }
         waiter.cancel()
         val stopped = lease.stop()
-        requests.response!!.complete(LiveTvStarted("late", channel, true))
+        requests.response!!.complete(LiveTvStarted("late", channel, true, playlist_url = "/api/v1/live-tv/sessions/late/master.m3u8"))
         stopped.await()
         assertNull(lease.current)
         assertEquals(listOf("start:one", "release:late"), requests.events)
@@ -324,6 +350,9 @@ class LiveTvTest {
         assertEquals("0", configuration.getValue("live_tv_max_output_height").jsonPrimitive.content)
         val enabled = LiveTvSettingsChange.Enabled(true).body(20)
         assertEquals(setOf("live_tv_config_generation", "live_tv_enabled"), enabled.keys)
+        val displayMode = LiveTvSettingsChange.DisplayModeMatch(true).body(20)
+        assertEquals(setOf("playback_display_mode_match"), displayMode.keys)
+        assertEquals("true", displayMode.getValue("playback_display_mode_match").jsonPrimitive.content)
         val recovery = LiveTvSettingsChange.FencedOwner("owner-original", 18).body(21)
         assertEquals(setOf("live_tv_config_generation", "live_tv_fenced_owner"), recovery.keys)
         val tuple = recovery.getValue("live_tv_fenced_owner").jsonObject
@@ -332,9 +361,63 @@ class LiveTvTest {
         assertEquals("true", tuple.getValue("stopped_and_restart_prevented").jsonPrimitive.content)
     }
 
+    @Test fun delayedDisplayMatchCannotOutliveChannelOrWindowOwnership() = runTest {
+        suspend fun overtake(reason: String) {
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val cleanup = mutableListOf<String>()
+            var serial = 1L
+            var owner = true
+            val attach = async {
+                awaitLiveTvDisplayMode(
+                    mine = 1,
+                    currentSerial = { serial },
+                    ownerIsCurrent = { owner },
+                    match = {
+                        entered.complete(Unit)
+                        release.await()
+                        DisplayModeMatchResult("matched")
+                    },
+                    cleanup = { cleanup += "release-exact-start" },
+                )
+            }
+            entered.await()
+            when (reason) {
+                "channel" -> serial = 2
+                "window" -> owner = false
+                "cancel" -> attach.cancel()
+                else -> error("unknown supersession")
+            }
+            if (reason != "cancel") release.complete(Unit)
+            runCurrent()
+            if (reason == "cancel") assertTrue(attach.isCancelled) else assertNull(attach.await())
+            assertEquals(listOf("release-exact-start"), cleanup)
+        }
+
+        overtake("channel") // A newer channel owns the serial.
+        overtake("window") // The activity unbound and reset its matcher.
+        overtake("cancel") // Stop/unbind cancels the pending tune job.
+    }
+
+    @Test fun staleAttachCleanupCannotReleaseTheNewerChannel() = runTest {
+        val requests = Requests()
+        val store = Store()
+        val lease = lease(requests, store, CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
+        val first = requireNotNull(lease.start("one").await())
+        val second = requireNotNull(lease.start("two").await())
+
+        assertFalse(lease.stopIfCurrent(first).await())
+        assertSame(second, lease.current)
+        lease.stop().await()
+        assertEquals(
+            listOf("start:one", "release:cap-one", "start:two", "release:cap-two"),
+            requests.events.filterNot { it.startsWith("retire:") },
+        )
+    }
+
     @Test fun actualSnakeCaseSettingsContractPreservesOldOwnerTuple() {
         val settings = Net.json.decodeFromString<LiveTvSettings>("""{
-            "live_tv_enabled":false,"live_tv_device_ipv4":"10.42.4.20",
+            "live_tv_enabled":false,"playback_display_mode_match":true,"live_tv_device_ipv4":"10.42.4.20",
             "live_tv_owner_node_id":"next","live_tv_max_sessions":2,"live_tv_output_height":720,
             "live_tv_config_generation":23,"live_tv_transition_from_owner_node_id":"original",
             "live_tv_transition_drain_before":21,"unrelated_secret":"ignored"
@@ -342,6 +425,30 @@ class LiveTvTest {
         assertEquals("original", settings.live_tv_transition_from_owner_node_id)
         assertEquals(21L, settings.live_tv_transition_drain_before)
         assertEquals(23L, settings.live_tv_config_generation)
+        assertTrue(settings.playback_display_mode_match)
+    }
+
+    @Test fun playbackUsesReturnedMasterPlaylistAndRejectsOtherOrigins() {
+        val api = LiveTvApi("http://10.42.4.10:32400", "fixture-account-secret")
+        val channel = LiveTvChannel("one", "7.1", "Fixture News")
+        val started = LiveTvStarted(
+            "cap-one", channel, live = true,
+            playlist_url = "/api/v1/live-tv/sessions/cap-one/master.m3u8",
+        )
+        assertEquals(
+            "http://10.42.4.10:32400/api/v1/live-tv/sessions/cap-one/master.m3u8",
+            api.playbackUrl(started),
+        )
+        assertEquals(
+            "http://10.42.4.10:32400/api/v1/live-tv/sessions/cap-one/master.m3u8",
+            api.playbackUrl(started.copy(playlist_url = "/api/v1/live-tv/sessions/cap-one/index.m3u8")),
+        )
+        assertThrows(LiveTvFailure::class.java) {
+            api.playbackUrl(started.copy(playlist_url = "https://other.invalid/cap-one/master.m3u8"))
+        }
+        assertThrows(LiveTvFailure::class.java) {
+            api.playbackUrl(started.copy(playlist_url = "/api/v1/live-tv/sessions/other/master.m3u8"))
+        }
     }
 
     @Test fun playlistStaysAtOriginalOriginAndDoesNotCarryAccountToken() {

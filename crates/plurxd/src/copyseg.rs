@@ -181,9 +181,9 @@ fn hevc_promotion_failure(
 ///
 /// The whole point of the native copy path, for accounting purposes, is that
 /// Rust holds the complete slice before it writes it. That makes an exact
-/// grant possible here and only here: FFmpeg's own `-f hls` output has no
-/// such boundary, and a measurement taken afterwards can only discover an
-/// overrun, never prevent one.
+/// grant possible here. FFmpeg's own `-f hls` output gets the same boundary
+/// from `crate::scratch_put`, which receives its uploads and spends these
+/// grants piece by piece.
 ///
 /// `authorize` is called with the exact length of the next temporary file,
 /// before it is created. A refusal is backpressure on this writer — not on
@@ -198,6 +198,10 @@ pub struct WriteGrants {
     /// Granted alongside each slice so a session that is writing steadily is
     /// not renegotiating the budget on every segment.
     headroom: i64,
+    /// Rung when this allocation becomes starved or stops being starved, so
+    /// the manager can hold or resume the producer without waiting for its
+    /// next scheduled evaluation.
+    starved_signal: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 impl WriteGrants {
@@ -212,10 +216,38 @@ impl WriteGrants {
             key,
             configured,
             headroom,
+            starved_signal: None,
         }
     }
 
-    fn authorize(&self, bytes: usize) -> Option<crate::scratch_ledger::ScratchWrite> {
+    /// Ring `signal` whenever this allocation starts or stops waiting on a
+    /// refused grant.
+    pub fn with_starved_signal(mut self, signal: std::sync::Arc<tokio::sync::Notify>) -> Self {
+        self.starved_signal = Some(signal);
+        self
+    }
+
+    /// Mark this allocation starved until the returned guard is dropped.
+    pub(crate) fn starve(&self) -> Starved<'_> {
+        if self.ledger.starve(self.key) {
+            if let Some(signal) = self.starved_signal.as_ref() {
+                signal.notify_one();
+            }
+        }
+        Starved { grants: self }
+    }
+
+    /// Authorize bytes an exited producer already handed the kernel. They
+    /// are bounded by its socket buffers and still charged; refusing them
+    /// could only turn a finished title into a failed one.
+    pub(crate) fn authorize_after_exit(
+        &self,
+        bytes: i64,
+    ) -> Option<crate::scratch_ledger::ScratchWrite> {
+        self.ledger.authorize_write(self.key, bytes, 0, 0)
+    }
+
+    pub(crate) fn authorize(&self, bytes: usize) -> Option<crate::scratch_ledger::ScratchWrite> {
         self.ledger.authorize_write(
             self.key,
             i64::try_from(bytes).unwrap_or(i64::MAX),
@@ -228,8 +260,29 @@ impl WriteGrants {
     /// parked waiting for a grant that can never be issued is a stall, and a
     /// stall holds the whole conservative producer charge for as long as it
     /// lasts.
-    fn fenced(&self) -> bool {
+    pub(crate) fn fenced(&self) -> bool {
         self.ledger.writers_fenced(self.key)
+    }
+
+    /// Register one writer against this allocation before it can make a
+    /// byte. `None` means retirement already fenced it.
+    pub(crate) fn register_writer(&self) -> Option<crate::scratch_ledger::ScratchWriter> {
+        self.ledger.register_writer(self.key)
+    }
+}
+
+/// One writer waiting on a refused grant. Dropping it ends the wait.
+pub(crate) struct Starved<'a> {
+    grants: &'a WriteGrants,
+}
+
+impl Drop for Starved<'_> {
+    fn drop(&mut self) {
+        if self.grants.ledger.unstarve(self.grants.key) {
+            if let Some(signal) = self.grants.starved_signal.as_ref() {
+                signal.notify_one();
+            }
+        }
     }
 }
 
@@ -344,13 +397,15 @@ impl SessionDir {
             return Ok(Some(authorized));
         }
         // Only a session that has never published can wait forever for
-        // nothing, so only that one gets a deadline.
-        let deadline = self
-            .started
-            .then(|| std::time::Instant::now() + GRANT_WAIT_BUDGET);
+        // nothing, so only that one gets a deadline. Measured in polls, so
+        // the bound is the same on a paused test clock as on a real one.
+        // While it waits the allocation is starved, which the flow
+        // controller turns into a hold: ffmpeg is blocked on the pipe
+        // meanwhile, and its progress deadline must not read that as a stall.
+        let _starved = grants.starve();
         let mut waited = std::time::Duration::ZERO;
         loop {
-            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            if !self.started && waited >= GRANT_WAIT_BUDGET {
                 // Prefixed with the daemon's existing insufficient-capacity
                 // marker, the one `publication_cycle` keys on, so this reads
                 // as what it is rather than as a producer fault. The typed
@@ -1504,6 +1559,7 @@ mod tests {
 
     fn hevc_source(hdr: Option<&str>) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: "/library/film.mkv".into(),
@@ -1513,12 +1569,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(10),
             hdr: hdr.map(str::to_owned),
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(1_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -1673,11 +1734,10 @@ mod tests {
             "a claim a ceiling cut makes false"
         );
 
-        // TARGETDURATION is the client's playlist-reload interval on a live
-        // EVENT playlist (RFC 8216 §6.3.4), so it has to be the real ceiling
-        // of what was published — not a constant far above it, which is how a
-        // player ends up waiting fifteen seconds to learn a second segment
-        // exists and stalls at the end of the first.
+        // TARGETDURATION is fixed before the first response. It covers every
+        // segment rather than following the longest segment published so far,
+        // because a target that grows under a client holding an earlier
+        // snapshot violates the rolling-presentation contract.
         let longest = text
             .lines()
             .filter_map(|l| l.strip_prefix("#EXTINF:"))
@@ -1688,10 +1748,10 @@ mod tests {
             .find_map(|l| l.strip_prefix("#EXT-X-TARGETDURATION:"))
             .and_then(|v| v.trim().parse().ok())
             .expect("a target duration");
-        assert_eq!(
-            declared,
-            longest.ceil().max(1.0) as u32,
-            "TARGETDURATION {declared} against a longest segment of {longest:.3}s"
+        assert_eq!(declared, brisk().target_seconds);
+        assert!(
+            longest <= f64::from(declared),
+            "TARGETDURATION {declared} does not cover a {longest:.3}s segment"
         );
 
         let part = crate::produce::Part::from_playlist(&text);
@@ -2145,6 +2205,7 @@ mod tests {
 
         let src = plurx_core::testfixtures::source("clean-cra");
         let file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: src.clone(),
@@ -2154,12 +2215,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main".into()),
             width: Some(640),
             height: Some(360),
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(1_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -2291,5 +2357,97 @@ mod tests {
         assert_eq!(CutReason::ByteCeiling.label(), "byte-ceiling");
         assert_eq!(CutReason::TimeCeiling.label(), "time-ceiling");
         assert_eq!(CutReason::EndOfStream.label(), "eof");
+    }
+}
+
+#[cfg(test)]
+mod grant_wait_tests {
+    use super::*;
+    use std::sync::atomic::AtomicI64;
+    use std::sync::Arc;
+
+    fn starved(dir: PathBuf, started: bool) -> (SessionDir, crate::scratch_ledger::ScratchPermit) {
+        let ledger = crate::scratch_ledger::ScratchLedger::new();
+        let permit = ledger.reserve(1_000, 1_000).expect("admission");
+        let grants = WriteGrants::new(
+            Arc::clone(&ledger),
+            permit.key(),
+            Arc::new(AtomicI64::new(1_000)),
+            0,
+        );
+        let mut session = SessionDir::new(dir, 0, 16, Some(grants));
+        session.started = started;
+        (session, permit)
+    }
+
+    /// The bounded wait exists for a session with no playlist, which nobody
+    /// can ever drain. It was applied the other way round: a session that
+    /// had published was failed after 120 s of an ordinary hold, and one that
+    /// never could publish waited forever.
+    #[tokio::test(start_paused = true)]
+    async fn scratch_charge_grant_wait_gives_up_only_before_first_publication() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (never, _never_permit) = starved(root.path().to_path_buf(), false);
+        // Bounded, so the inverted deadline fails this test rather than
+        // hanging it: with the deadline on the wrong side, this waits forever.
+        let Ok(Err(error)) = tokio::time::timeout(
+            GRANT_WAIT_BUDGET * 2,
+            never.authorize_write("seg00000.m4s", 5_000),
+        )
+        .await
+        else {
+            panic!("a session that cannot publish stops waiting");
+        };
+        assert!(
+            error
+                .to_string()
+                .starts_with("rolling_insufficient_capacity:"),
+            "{error}"
+        );
+
+        let (published, _published_permit) = starved(root.path().to_path_buf(), true);
+        let waiting = tokio::time::timeout(
+            GRANT_WAIT_BUDGET * 3,
+            published.authorize_write("seg00001.m4s", 5_000),
+        )
+        .await;
+        assert!(
+            waiting.is_err(),
+            "a published session waits out a hold for as long as it lives"
+        );
+    }
+}
+
+#[cfg(test)]
+mod starvation_tests {
+    use super::*;
+    use std::sync::atomic::AtomicI64;
+    use std::sync::Arc;
+
+    /// A writer waiting on a refused grant has blocked its producer on a
+    /// write. The allocation has to read as starved for exactly as long as
+    /// any writer waits, and the manager has to hear both edges, or the
+    /// producer is either never held (its progress deadline reads the wait
+    /// as a stall) or never resumed.
+    #[tokio::test]
+    async fn scratch_charge_a_starved_writer_rings_the_hold_signal_on_both_edges() {
+        let ledger = crate::scratch_ledger::ScratchLedger::new();
+        let permit = ledger.reserve(1_000, 1_000).expect("admission");
+        let key = permit.key();
+        let signal = Arc::new(tokio::sync::Notify::new());
+        let grants = WriteGrants::new(Arc::clone(&ledger), key, Arc::new(AtomicI64::new(1_000)), 0)
+            .with_starved_signal(Arc::clone(&signal));
+        let ring = || tokio::time::timeout(std::time::Duration::from_secs(1), signal.notified());
+
+        let first = grants.starve();
+        assert!(ledger.starved(key));
+        ring().await.expect("becoming starved rings");
+        let second = grants.starve();
+        drop(first);
+        assert!(ledger.starved(key), "one writer is still waiting");
+        drop(second);
+        assert!(!ledger.starved(key));
+        ring().await.expect("the last waiter leaving rings");
+        drop(permit);
     }
 }

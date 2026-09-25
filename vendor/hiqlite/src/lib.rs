@@ -87,7 +87,7 @@ pub use crate::query::rows::Row;
 #[cfg(feature = "sqlite")]
 pub use crate::store::state_machine::sqlite::{
     param::Param,
-    state_machine::Params,
+    state_machine::{Params, StateMachineData},
     transaction_variable::{StmtColumn, StmtIndex},
 };
 #[cfg(feature = "dlock")]

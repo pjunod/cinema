@@ -47,7 +47,6 @@ __profiling = ["dep:console-subscriber"]
 auto-heal = ["hiqlite-wal/auto-heal"]
 backup = [
     "dep:cron",
-    "s3",
     "sqlite",
 ]
 cache = ["openraft/loosen-follower-log-revert"]
@@ -94,7 +93,10 @@ listen_notify_local = [
     "cache",
 ]
 macros = ["dep:hiqlite-derive"]
-s3 = ["backup"]
+s3 = [
+    "backup",
+    "cryptr/s3",
+]
 server = [
     "dep:clap",
     "dep:home",
@@ -112,6 +114,17 @@ sqlite = [
 toml = ["dep:toml"]
 webpki-roots = ["dep:webpki-root-certs"]
 validation-test-helpers = ["sqlite"]
+
+# PLURX PATCH 17: keep the advertised `backup`/`s3` configuration off the
+# advisory-affected XML parser and off the retired second aws-lc build. cryptr
+# 0.10.0 requires `s3-simple ^0.8.0`, so upstream s3-simple 0.9.x -- which
+# moved to quick-xml 0.42 and dropped its unused aws-lc-rs, aws-lc-sys, quinn
+# and quinn-proto edges -- cannot be selected here. `vendor/s3-simple` carries
+# those same dependency-only corrections on top of 0.8.0, and this override is
+# what makes them apply whenever `backup` or `s3` is enabled. See
+# vendor/s3-simple/PLURX-PATCH.md.
+[patch.crates-io]
+s3-simple = { path = "../s3-simple" }
 
 [lib]
 name = "hiqlite"
@@ -189,7 +202,7 @@ version = "0.8.4"
 
 [dependencies.cryptr]
 version = "0.10"
-features = ["s3"]
+default-features = false
 
 [dependencies.ctrlc]
 version = "3.4.4"

@@ -205,12 +205,40 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         cls.catalog = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
         cls.source_path = ROOT / cls.catalog["source"]
         cls.source = cls.source_path.read_text(encoding="utf-8")
-        module_root = ROOT / cls.catalog["module_root"]
-        cls.module_paths = tuple(sorted(module_root.rglob("*.rs")))
+        cls.module_roots = tuple(cls.catalog["module_roots"])
+        cls.module_paths = tuple(
+            path
+            for module_root in cls.module_roots
+            for path in sorted((ROOT / module_root).rglob("*.rs"))
+        )
         cls.module_source = "\n".join(
             path.read_text(encoding="utf-8") for path in cls.module_paths
         )
         cls.module_structural_source = rust_structural_source(cls.module_source)
+
+    @classmethod
+    def read_scope(cls, relative_path: str) -> str:
+        """Read one scope path: a single file, or every `*.rs` under a directory."""
+
+        path = ROOT / relative_path
+        if path.is_dir():
+            return "\n".join(
+                child.read_text(encoding="utf-8")
+                for child in sorted(path.rglob("*.rs"))
+            )
+        return path.read_text(encoding="utf-8")
+
+    @classmethod
+    def symbol_scope(cls, row: dict) -> tuple[str, str]:
+        """Return the text a `[[symbols]]` row counts and the name of that scope.
+
+        A row counts `source`. A row that also carries `also_in` counts the paths
+        it names alongside `source`, so an occurrence that moved out of `source`
+        into an extracted module is still counted by the same entry.
+        """
+
+        paths = [cls.catalog["source"], *row.get("also_in", ())]
+        return "\n".join(cls.read_scope(path) for path in paths), " and ".join(paths)
 
     def test_catalog_has_unique_complete_rows(self) -> None:
         self.assertEqual(self.catalog.get("version"), 1)
@@ -312,25 +340,44 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         self.assertGreaterEqual(len(negative_cases), 3)
         self.assertGreaterEqual(len(entries), 7)
         self.assertGreaterEqual(len(self.module_paths), 20)
-
         self.assertEqual(
-            {"id", "pattern", "expected_occurrences", "kind", "replacement"},
-            set(symbols[0]),
+            self.module_roots,
+            (
+                "crates/plurxd/src",
+                "crates/plurx-core/src/process",
+                "crates/plurx-core/src/scan",
+            ),
         )
+
+        symbol_keys = {
+            "id",
+            "pattern",
+            "expected_occurrences",
+            "kind",
+            "replacement",
+        }
+        self.assertEqual(symbol_keys, set(symbols[0]) - {"also_in"})
         for row in symbols:
             with self.subTest(symbol=row["id"]):
-                self.assertEqual(
-                    {
-                        "id",
-                        "pattern",
-                        "expected_occurrences",
-                        "kind",
-                        "replacement",
-                    },
-                    set(row),
-                )
+                self.assertEqual(symbol_keys, set(row) - {"also_in"})
                 self.assertGreater(row["expected_occurrences"], 0)
                 self.assertTrue(row["replacement"].strip())
+                if "also_in" in row:
+                    self.assertTrue(
+                        row["also_in"],
+                        f"{row['id']} declares an empty also_in scope",
+                    )
+                    for extra in row["also_in"]:
+                        self.assertIsInstance(extra, str)
+                        self.assertNotEqual(
+                            extra,
+                            self.catalog["source"],
+                            f"{row['id']} counts {extra} twice",
+                        )
+                        self.assertTrue(
+                            (ROOT / extra).exists(),
+                            f"{row['id']} names a missing also_in path {extra}",
+                        )
 
         for row in module_symbols:
             with self.subTest(module_symbol=row["id"]):
@@ -379,11 +426,12 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                     pattern = re.compile(row["pattern"])
                 except re.error as error:
                     self.fail(f"invalid pattern for {row['id']}: {error}")
-                actual = len(pattern.findall(self.source))
+                scope, scope_name = self.symbol_scope(row)
+                actual = len(pattern.findall(scope))
                 self.assertEqual(
                     actual,
                     row["expected_occurrences"],
-                    f"{row['id']} changed in {self.catalog['source']}; update the "
+                    f"{row['id']} changed in {scope_name}; update the "
                     "source and ownership ledger together",
                 )
 
@@ -398,7 +446,8 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 self.assertEqual(
                     actual,
                     row["expected_occurrences"],
-                    f"{row['id']} changed anywhere under {self.catalog['module_root']}; "
+                    f"{row['id']} changed anywhere under "
+                    f"{', '.join(self.module_roots)}; "
                     "update the module-wide owner allowlist in the same reviewed change",
                 )
 
@@ -413,7 +462,8 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 self.assertEqual(
                     actual,
                     row["expected_occurrences"],
-                    f"{row['id']} changed anywhere under {self.catalog['module_root']}; "
+                    f"{row['id']} changed anywhere under "
+                    f"{', '.join(self.module_roots)}; "
                     "new task, timer, process, or alias shapes require an explicit "
                     "ownership review and allowlist update",
                 )

@@ -16,6 +16,12 @@
 > dependency audit remains. These rules supersede the older automatic
 > qualification and post-merge instructions below pending their rewrite.
 
+> **Test-lane amendment, 2026-09-20:** The ready main-bound fast Rust job
+> runs workspace Clippy and `make unit` after its compile checks, on the
+> pinned FFmpeg 6 runner surface. Paul selected the blocking PR lane so unit
+> regressions reach the author before merge without spending runner capacity
+> on recurring runtime schedules; no periodic test schedule was added.
+
 
 **Status:** accepted and implemented · **Decider:** Paul · **Written:**
 2026-08-29
@@ -173,7 +179,7 @@ cargo test -p plurxd --bin plurxd
 Add the smallest focused regression for the changed behavior; these commands
 are the broad local backstop, not a substitute for the test that rejects the
 old behavior. Dependencies resolve from the registry, while the awkward
-dependencies (`hiqlite`, `rust_decimal`, and `s3-simple`) are vendored.
+dependencies (`hiqlite` and `rust_decimal`) are vendored.
 
 Measured on the proved session:
 

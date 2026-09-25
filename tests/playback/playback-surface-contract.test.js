@@ -84,7 +84,10 @@ test("case names are unique and every expectation names a declared kind", () => 
 test("every source row is exercised by at least one case", () => {
   const raised = new Set();
   for (const item of contract.cases) {
-    for (const event of item.events) if (event.raise) raised.add(event.raise);
+    for (const event of item.events) {
+      if (event.raise) raised.add(event.raise);
+      if (event.system_paused === true) raised.add("system_interruption");
+    }
   }
   for (const row of contract.sources) {
     assert.ok(raised.has(row.id), `source ${row.id} is never raised by a case`);
@@ -138,6 +141,7 @@ test("every retirement reason a class names is reachable, and none is invented",
     // so: a reason that starts spreading across the class table is a reason
     // somebody has stopped thinking about.
     "playback_not_requested",
+    "system_resumed",
   ]);
   assert.deepEqual(
     Object.entries(contract.classes)
@@ -161,6 +165,21 @@ test("every retirement reason a class names is reachable, and none is invented",
       }
     }
   }
+  for (const row of contract.sources) {
+    for (const reason of row.retired_by || []) {
+      assert.ok(known.has(reason), `source ${row.id} names unknown retirement reason ${reason}`);
+    }
+  }
+});
+
+test("source retirement overrides are explicit and narrowly owned", () => {
+  assert.deepEqual(
+    contract.sources
+      .filter((row) => row.retired_by != null)
+      .map((row) => ({ id: row.id, retired_by: row.retired_by })),
+    [{ id: "system_interruption", retired_by: ["system_resumed"] }],
+    "a source-level retirement must be visible as an intentional exception",
+  );
 });
 
 test("the shipped policy carries the fixture verbatim", () => {

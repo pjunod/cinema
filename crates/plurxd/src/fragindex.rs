@@ -40,6 +40,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::ffmpeg::ffmpeg_bin;
+use crate::subtitle_ride_along::{PendingRideAlong, RideAlongGate, RideAlongPlan, StderrScan};
 
 #[cfg(unix)]
 type SourceFd = std::os::fd::RawFd;
@@ -57,7 +58,23 @@ const PACKET_PROBE_AGGREGATE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const PACKET_PROBE_TAIL_OFFSETS_SECS: [i64; 3] = [128, 512, 2_048];
 
 type IndexProgress = dyn Fn(u64, i64, usize) + Send + Sync;
-type SharedIndexProgress = Arc<IndexProgress>;
+pub(crate) type SharedIndexProgress = Arc<dyn Fn(&PassProgress) + Send + Sync>;
+
+/// One progress report from a running index pass, as its caller sees it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PassProgress {
+    pub(crate) bytes_read: u64,
+    pub(crate) media_ms: i64,
+    pub(crate) fragments: usize,
+    /// PGS tracks this pass is also keeping — zero when it does not ride.
+    pub(crate) pgs_tracks: usize,
+    /// Bytes the ride-along has written into its stage so far, measured at
+    /// most once a second.
+    pub(crate) pgs_bytes_written: u64,
+}
+
+/// How often a running pass re-measures its ride-along stage for progress.
+const RIDE_ALONG_MEASURE_EVERY: Duration = Duration::from_secs(1);
 
 /// How an index build ended.
 #[derive(Debug, Clone, PartialEq)]
@@ -1324,6 +1341,10 @@ struct IndexPass {
     /// filed under another's key, which is the same class of mismatch as the
     /// argv and the record answer disagreeing.
     video: transcode::CopyVideoOptions,
+    /// The PGS tracks this pass also keeps, and the stage it keeps them in.
+    /// Its argv is already at the end of `args`; the plan rides with the pass
+    /// so the verdict and the stage's removal belong to the same owner.
+    ride_along: Option<RideAlongPlan>,
 }
 
 fn index_pass(
@@ -1331,26 +1352,81 @@ fn index_pass(
     video: transcode::CopyVideoOptions,
     input: Option<&str>,
     expectation: VideoCompletionExpectation,
+    ride_along: Option<RideAlongPlan>,
 ) -> Result<IndexPass, String> {
     Ok(IndexPass {
-        args: match input {
-            Some(path) => transcode::copy_index_pipe_args_with_input(file, path, video),
-            None => transcode::copy_index_pipe_args(file, video),
-        },
+        args: index_argv(file, video, input, ride_along.as_ref()),
         dolby_vision: dolby_vision_pass_for(file, video)?,
         expectation,
         video,
+        ride_along,
     })
+}
+
+/// The whole argv of an index pass.
+///
+/// The ride-along's output is appended **after** `pipe:1`, never inside
+/// `copy_index_pipe_args*`: `fragment_index_cluster::pipeline_digest_for_transform`
+/// hashes that function's argv into every cluster cache key, so a subtitle
+/// output there would give every file with a PGS track a new key — and a
+/// second index — for bytes that did not change. The startup self-test runs
+/// exactly this argv.
+pub(crate) fn index_argv(
+    file: &MediaFile,
+    video: transcode::CopyVideoOptions,
+    input: Option<&str>,
+    ride_along: Option<&RideAlongPlan>,
+) -> Vec<String> {
+    let mut args = match input {
+        Some(path) => transcode::copy_index_pipe_args_with_input(file, path, video),
+        None => transcode::copy_index_pipe_args(file, video),
+    };
+    if let Some(plan) = ride_along {
+        args.extend(plan.args());
+    }
+    args
+}
+
+/// What an index build produced: the index outcome, exactly as it always
+/// was, and — only when the index was built and the pass rode along — the
+/// PGS tracks it wrote, not yet judged. The caller judges them after its own
+/// cancellation race and freshness checks, then publishes.
+#[derive(Debug)]
+pub(crate) struct IndexBuild {
+    pub(crate) outcome: IndexOutcome,
+    pub(crate) ride_along: Option<PendingRideAlong>,
+    /// Whether the held source was still the object the pass read when the
+    /// pass ended, as far as this function could tell: [`build_riding`]
+    /// reads its fence; the attested paths leave it to their caller, who
+    /// holds the observation, and say `true`.
+    pub(crate) source_unchanged: bool,
+}
+
+impl IndexBuild {
+    fn plain(outcome: IndexOutcome) -> Self {
+        Self {
+            outcome,
+            ride_along: None,
+            source_unchanged: true,
+        }
+    }
+}
+
+/// What the held-fd probe established before the pass: the completion
+/// expectation, and the file's PGS tracks as subtitle ordinals.
+struct ProbedSource {
+    expectation: VideoCompletionExpectation,
+    subtitle_tracks: Vec<crate::subtitle_ride_along::ProbedTrack>,
 }
 
 async fn probe_completion_expectation(
     source: &std::fs::File,
     source_object_version: &str,
     budget: Duration,
-) -> Result<(VideoCompletionExpectation, Instant), IndexFailure> {
+) -> Result<(ProbedSource, Instant), IndexFailure> {
     let started = Instant::now();
     match probe_completion_expectation_inner(source, source_object_version, budget, started).await {
-        Ok(expectation) => Ok((expectation, started)),
+        Ok(probed) => Ok((probed, started)),
         Err(mut failure) => {
             failure.diagnostic.elapsed_ms =
                 Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
@@ -1366,7 +1442,7 @@ async fn probe_completion_expectation_inner(
     source_object_version: &str,
     budget: Duration,
     started: Instant,
-) -> Result<VideoCompletionExpectation, IndexFailure> {
+) -> Result<ProbedSource, IndexFailure> {
     let mut view = source;
     view.seek(SeekFrom::Start(0)).map_err(|error| {
         IndexFailure::new(
@@ -1423,7 +1499,10 @@ async fn probe_completion_expectation_inner(
         )
         .transient(timeout)
     })?;
-    match completion_expectation_from_probe(&raw, source_object_version) {
+    // The ride-along's ordinals come from this document — the probe of the
+    // very descriptor the pass reads — and never from scan-time facts.
+    let subtitle_tracks = crate::subtitle_ride_along::eligible_tracks_from_probe(&raw);
+    let expectation = match completion_expectation_from_probe(&raw, source_object_version) {
         Ok(expectation) => Ok(expectation),
         Err(CompletionExpectationError::Unsupported(reason)) => {
             Err(IndexFailure::new(IndexFailureCode::Unsupported, reason, 0))
@@ -1461,7 +1540,11 @@ async fn probe_completion_expectation_inner(
                     failure
                 })
         }
-    }
+    }?;
+    Ok(ProbedSource {
+        expectation,
+        subtitle_tracks,
+    })
 }
 
 /// Build a file's index by running the index pipe.
@@ -1469,34 +1552,61 @@ async fn probe_completion_expectation_inner(
 /// `budget` bounds the whole pass. An index is background work; a NAS read
 /// that has gone pathological should give the slot back rather than hold it
 /// until the process restarts.
+///
+/// Never rides along: production indexes through [`build_riding`], and this
+/// is the entry point fixtures and tests use to build an index and nothing
+/// else.
+#[allow(dead_code)]
 pub async fn build(
     file: &MediaFile,
     video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
+    build_riding(file, video, runtime_cache, budget, None, None)
+        .await
+        .outcome
+}
+
+/// [`build`], also keeping the file's PGS tracks when `ride_along` allows.
+///
+/// The non-cluster path's caller. `source_unchanged` reports whether the
+/// held source is still the object the pass read — the same `fstat` identity
+/// the cluster worker's `source_still_matches` compares — and the caller
+/// publishes only when it is (`JobManager::settle_ride_along`).
+pub(crate) async fn build_riding(
+    file: &MediaFile,
+    video: transcode::CopyVideoOptions,
+    runtime_cache: &Path,
+    budget: Duration,
+    ride_along: Option<&RideAlongGate>,
+    progress: Option<SharedIndexProgress>,
+) -> IndexBuild {
     let source = match crate::fragment_index_cluster::open_source_fence(file, None).await {
         Ok(source) => source,
         Err(reason) => {
-            return IndexOutcome::Failed(Box::new(
+            return IndexBuild::plain(IndexOutcome::Failed(Box::new(
                 IndexFailure::new(IndexFailureCode::IndexSourceIo, reason, 0).transient(true),
-            ));
+            )));
         }
     };
-    build_from_attested_file(
+    let mut built = build_attested(
         file,
         &source.handle,
         source.object_version(),
         video,
         runtime_cache,
         budget,
+        progress,
+        ride_along,
     )
-    .await
+    .await;
+    built.source_unchanged = source.unchanged();
+    built
 }
 
 /// Build from the exact file descriptor whose complete digest was observed.
 /// The parent retains ownership; the child receives a duplicate as fd 3.
-#[cfg(unix)]
 #[allow(dead_code)]
 pub async fn build_from_attested_file(
     file: &MediaFile,
@@ -1506,32 +1616,25 @@ pub async fn build_from_attested_file(
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
-    use std::os::fd::AsRawFd;
-
-    let (expectation, started) =
-        match probe_completion_expectation(source, source_object_version, budget).await {
-            Ok(value) => value,
-            Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
-        };
-    let pass = match index_pass(file, video, Some("/dev/fd/3"), expectation) {
-        Ok(pass) => pass,
-        Err(reason) => return IndexOutcome::Unsupported(reason),
-    };
-    build_with_args(
+    build_attested(
         file,
-        pass,
-        Some(source.as_raw_fd()),
-        None,
+        source,
+        source_object_version,
+        video,
         runtime_cache,
         budget,
-        started,
+        None,
         None,
     )
     .await
+    .outcome
 }
 
-#[cfg(unix)]
-pub async fn build_from_attested_file_with_progress<F>(
+/// The cluster worker's build: progress reported, and the file's PGS tracks
+/// kept when `ride_along` allows. The worker publishes the harvest only after
+/// its own `source_still_matches` and `still_current` checks.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_from_attested_file_with_progress<F>(
     file: &MediaFile,
     source: &std::fs::File,
     source_object_version: &str,
@@ -1539,105 +1642,80 @@ pub async fn build_from_attested_file_with_progress<F>(
     runtime_cache: &Path,
     budget: Duration,
     progress: F,
-) -> IndexOutcome
+    ride_along: Option<&RideAlongGate>,
+) -> IndexBuild
 where
-    F: Fn(u64, i64, usize) + Send + Sync + 'static,
+    F: Fn(&PassProgress) + Send + Sync + 'static,
 {
-    use std::os::fd::AsRawFd;
-
-    let (expectation, started) =
-        match probe_completion_expectation(source, source_object_version, budget).await {
-            Ok(value) => value,
-            Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
-        };
-    let pass = match index_pass(file, video, Some("/dev/fd/3"), expectation) {
-        Ok(pass) => pass,
-        Err(reason) => return IndexOutcome::Unsupported(reason),
-    };
-    build_with_args(
+    build_attested(
         file,
-        pass,
-        Some(source.as_raw_fd()),
-        None,
+        source,
+        source_object_version,
+        video,
         runtime_cache,
         budget,
-        started,
         Some(Arc::new(progress)),
+        ride_along,
     )
     .await
 }
 
-#[cfg(windows)]
-#[allow(dead_code)]
-pub async fn build_from_attested_file(
+/// The one place every index build passes through — the cluster worker and
+/// the non-cluster pass alike — after the held-fd probe and before the pass.
+/// That is where the ride-along's latch is checked: the first point at which
+/// the file's PGS ordinals exist, read from the descriptor the pass will read.
+#[allow(clippy::too_many_arguments)]
+async fn build_attested(
     file: &MediaFile,
     source: &std::fs::File,
     source_object_version: &str,
     video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
-) -> IndexOutcome {
+    progress: Option<SharedIndexProgress>,
+    ride_along: Option<&RideAlongGate>,
+) -> IndexBuild {
+    #[cfg(windows)]
     let path = match crate::ffmpeg::windows_source_path(source) {
         Ok(path) => path,
-        Err(reason) => return IndexOutcome::Unsupported(reason),
+        Err(reason) => return IndexBuild::plain(IndexOutcome::Unsupported(reason)),
     };
-    let (expectation, started) =
+    let (probed, started) =
         match probe_completion_expectation(source, source_object_version, budget).await {
             Ok(value) => value,
-            Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
+            Err(failure) => return IndexBuild::plain(IndexOutcome::Failed(Box::new(failure))),
         };
-    let pass = match index_pass(file, video, Some(&path.to_string_lossy()), expectation) {
-        Ok(pass) => pass,
-        Err(reason) => return IndexOutcome::Unsupported(reason),
+    let plan = match ride_along {
+        Some(gate) => {
+            crate::subtitle_ride_along::plan_tracks(gate, file.id, source, &probed.subtitle_tracks)
+                .await
+        }
+        None => None,
     };
+    #[cfg(unix)]
+    let input = "/dev/fd/3".to_owned();
+    #[cfg(windows)]
+    let input = path.to_string_lossy().into_owned();
+    let pass = match index_pass(file, video, Some(&input), probed.expectation, plan) {
+        Ok(pass) => pass,
+        Err(reason) => return IndexBuild::plain(IndexOutcome::Unsupported(reason)),
+    };
+    #[cfg(unix)]
+    let (source_fd, source_handoff) = {
+        use std::os::fd::AsRawFd;
+        (Some(source.as_raw_fd()), None)
+    };
+    #[cfg(windows)]
+    let (source_fd, source_handoff) = (None, Some((source, path.as_path())));
     build_with_args(
         file,
         pass,
-        None,
-        Some((source, &path)),
+        source_fd,
+        source_handoff,
         runtime_cache,
         budget,
         started,
-        None,
-    )
-    .await
-}
-
-#[cfg(windows)]
-pub async fn build_from_attested_file_with_progress<F>(
-    file: &MediaFile,
-    source: &std::fs::File,
-    source_object_version: &str,
-    video: transcode::CopyVideoOptions,
-    runtime_cache: &Path,
-    budget: Duration,
-    progress: F,
-) -> IndexOutcome
-where
-    F: Fn(u64, i64, usize) + Send + Sync + 'static,
-{
-    let path = match crate::ffmpeg::windows_source_path(source) {
-        Ok(path) => path,
-        Err(reason) => return IndexOutcome::Unsupported(reason),
-    };
-    let (expectation, started) =
-        match probe_completion_expectation(source, source_object_version, budget).await {
-            Ok(value) => value,
-            Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
-        };
-    let pass = match index_pass(file, video, Some(&path.to_string_lossy()), expectation) {
-        Ok(pass) => pass,
-        Err(reason) => return IndexOutcome::Unsupported(reason),
-    };
-    build_with_args(
-        file,
-        pass,
-        None,
-        Some((source, &path)),
-        runtime_cache,
-        budget,
-        started,
-        Some(Arc::new(progress)),
+        progress,
     )
     .await
 }
@@ -1652,17 +1730,25 @@ async fn build_with_args(
     budget: Duration,
     started: Instant,
     progress: Option<SharedIndexProgress>,
-) -> IndexOutcome {
+) -> IndexBuild {
     let IndexPass {
         args,
         dolby_vision,
         expectation,
         video,
+        ride_along,
     } = pass;
     let identity = identity_for(file, video);
+    if let Some(plan) = &ride_along {
+        tracing::info!(
+            file_id = file.id,
+            tracks = ?plan.tracks(),
+            "the fragment-index pass is also keeping this file's PGS tracks"
+        );
+    }
 
     let mut command = tokio::process::Command::new(ffmpeg_bin());
-    crate::transcode::configure_ffmpeg_runtime(&mut command, runtime_cache);
+    crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
     #[cfg(unix)]
     if let Some(source_fd) = source_fd {
         unsafe {
@@ -1695,11 +1781,11 @@ async fn build_with_args(
     #[cfg(windows)]
     if let Some((source, path)) = source_handoff {
         if let Err(reason) = crate::ffmpeg::verify_windows_source_path(source, path) {
-            return IndexOutcome::Failed(Box::new(IndexFailure::new(
+            return IndexBuild::plain(IndexOutcome::Failed(Box::new(IndexFailure::new(
                 IndexFailureCode::IndexSourceIo,
                 reason,
                 0,
-            )));
+            ))));
         }
     }
     #[cfg(not(windows))]
@@ -1714,40 +1800,74 @@ async fn build_with_args(
                     | std::io::ErrorKind::WouldBlock
                     | std::io::ErrorKind::OutOfMemory
             );
-            return IndexOutcome::Failed(Box::new(
+            return IndexBuild::plain(IndexOutcome::Failed(Box::new(
                 IndexFailure::new(
                     IndexFailureCode::IndexProcessFailed,
                     format!("spawning the job-owned index pipe: {error}"),
                     0,
                 )
                 .transient(transient),
-            ));
+            )));
         }
     };
     let Some(stdout) = child.stdout.take() else {
-        return IndexOutcome::Failed(Box::new(IndexFailure::new(
+        return IndexBuild::plain(IndexOutcome::Failed(Box::new(IndexFailure::new(
             IndexFailureCode::IndexProcessFailed,
             "the index pipe started without a stdout",
             0,
-        )));
+        ))));
     };
 
     // stderr must be drained on its own task or ffmpeg blocks on a full pipe
     // and the whole build deadlocks — the same discipline `spawn_ffmpeg_pipe`
-    // keeps for a live session.
+    // keeps for a live session. One reader serves both the bounded
+    // diagnostic tail and, when the pass rides along, the full-stream scan
+    // for per-slave failures.
+    let stderr_scan = ride_along.as_ref().map(RideAlongPlan::stderr_scan);
     let stderr_task = child
         .stderr
         .take()
-        .map(|stderr| tokio::spawn(read_stderr_tail(stderr)));
+        .map(|stderr| tokio::spawn(read_stderr_tail(stderr, stderr_scan)));
     let observed = Arc::new(std::sync::Mutex::new((0_u64, 0_i64, 0_usize)));
     let observed_for_progress = Arc::clone(&observed);
     let caller_progress = progress.clone();
+    // What the ride-along adds to each report: its track count, and the
+    // bytes in its stage, re-measured at most once a second — a stage is a
+    // handful of files, and reports arrive per fragment.
+    let ride_meter = ride_along
+        .as_ref()
+        .map(|plan| (plan.tracks().len(), plan.stage().to_owned()));
+    let measured = std::sync::Mutex::new((None::<Instant>, 0_u64));
     let record_progress = move |bytes: u64, media_ms: i64, rows: usize| {
         if let Ok(mut current) = observed_for_progress.lock() {
             *current = (bytes, media_ms, rows);
         }
         if let Some(progress) = caller_progress.as_deref() {
-            progress(bytes, media_ms, rows);
+            let (pgs_tracks, pgs_bytes_written) = match &ride_meter {
+                Some((tracks, stage)) => {
+                    let mut measured = measured
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if measured
+                        .0
+                        .is_none_or(|at| at.elapsed() >= RIDE_ALONG_MEASURE_EVERY)
+                    {
+                        *measured = (
+                            Some(Instant::now()),
+                            crate::subtitle_ride_along::stage_bytes(stage),
+                        );
+                    }
+                    (*tracks, measured.1)
+                }
+                None => (0, 0),
+            };
+            progress(&PassProgress {
+                bytes_read: bytes,
+                media_ms,
+                fragments: rows,
+                pgs_tracks,
+                pgs_bytes_written,
+            });
         }
     };
     let (mut outcome, deadline_fired) = match tokio::time::timeout(
@@ -1829,17 +1949,19 @@ async fn build_with_args(
             Some("exit_grace_exceeded".to_owned())
         }
     };
-    let stderr_tail = match stderr_task {
+    // `scan` is `None` unless the reader ran to the end of the stream: a
+    // scan that did not finish cannot vouch that no slave failed.
+    let (stderr_tail, scan) = match stderr_task {
         Some(mut task) => match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
-            Ok(Ok(lines)) => lines,
-            Ok(Err(error)) => vec![format!("stderr task failed: {error}")],
+            Ok(Ok((lines, scan))) => (lines, scan),
+            Ok(Err(error)) => (vec![format!("stderr task failed: {error}")], None),
             Err(_) => {
                 task.abort();
                 let _ = task.await;
-                Vec::new()
+                (Vec::new(), None)
             }
         },
-        None => Vec::new(),
+        None => (Vec::new(), None),
     };
     if let IndexOutcome::Failed(failure) = &mut outcome {
         let (output_bytes, covered_ms, rows) =
@@ -1868,18 +1990,49 @@ async fn build_with_args(
             "built a fragment index"
         );
     }
-    outcome
+    // The child has been reaped (a `Built` outcome means it exited 0 within
+    // the grace), so no slave can still be flushing; the verdict itself is
+    // the caller's, outside this future. Any other outcome discards the stage
+    // with the plan, and the file's next pass does not ride: a riding pass
+    // that failed must not be able to fail the same way on every retry.
+    let ride_along = match (ride_along, &outcome) {
+        (Some(plan), IndexOutcome::Built(_)) => Some(PendingRideAlong::new(plan, scan)),
+        (Some(plan), _) => {
+            crate::subtitle_ride_along::record_failed_ride(&plan);
+            None
+        }
+        (None, _) => None,
+    };
+    IndexBuild {
+        outcome,
+        ride_along,
+        source_unchanged: true,
+    }
 }
 
-async fn read_stderr_tail(mut input: impl AsyncRead + Unpin) -> Vec<String> {
+/// Drain the index child's stderr: a bounded tail for diagnostics and, when
+/// `scan` is given, every line fed to it. The scan comes back only when the
+/// stream was read to its end; a read error leaves it unfinished, so `None`.
+async fn read_stderr_tail(
+    mut input: impl AsyncRead + Unpin,
+    mut scan: Option<StderrScan>,
+) -> (Vec<String>, Option<StderrScan>) {
     use plurx_core::content_analysis::{MAX_INDEX_STDERR_BYTES, MAX_INDEX_STDERR_LINES};
 
     let mut tail = VecDeque::with_capacity(MAX_INDEX_STDERR_BYTES);
     let mut chunk = [0_u8; 1_024];
+    let mut complete = true;
     loop {
         match input.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            Err(_) => {
+                complete = false;
+                break;
+            }
             Ok(read) => {
+                if let Some(scan) = scan.as_mut() {
+                    scan.feed(&chunk[..read]);
+                }
                 for byte in &chunk[..read] {
                     if tail.len() == MAX_INDEX_STDERR_BYTES {
                         tail.pop_front();
@@ -1898,7 +2051,11 @@ async fn read_stderr_tail(mut input: impl AsyncRead + Unpin) -> Vec<String> {
         .map(str::to_owned)
         .collect();
     lines.reverse();
-    lines
+    let scan = scan.filter(|_| complete).map(|mut scan| {
+        scan.finish();
+        scan
+    });
+    (lines, scan)
 }
 
 fn hex(bytes: impl AsRef<[u8]>) -> String {
@@ -2111,6 +2268,7 @@ mod tests {
         let size = i64::try_from(source.metadata().expect("fixture metadata").len())
             .expect("fixture size");
         let file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 42,
             item_id: 1,
             path: source_path,
@@ -2120,12 +2278,17 @@ mod tests {
             container: Some("matroska".to_owned()),
             video_codec: Some("h264".to_owned()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("High".to_owned()),
             width: Some(160),
             height: Some(90),
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: None,
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -2167,6 +2330,7 @@ mod tests {
 
     fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 77,
             item_id: 1,
             path: std::path::PathBuf::from("/library/film.mkv"),
@@ -2176,12 +2340,17 @@ mod tests {
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),
             bit_depth: Some(10),
             hdr: hdr.map(str::to_owned),
             hdr_format: hdr_format.map(str::to_owned),
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(60_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -2548,6 +2717,7 @@ mod tests {
                                     provenance: CompletionProvenance::StreamSeconds,
                                     source_object_version: "test".to_owned(),
                                 },
+                                None,
                             )
                             .expect("a describable pass");
                             let filter = pass
@@ -3180,5 +3350,310 @@ mod equality_tests {
             }
         }
         (video, wire)
+    }
+}
+
+/// The pass's side of the PGS ride-along: what only `build_with_args` can
+/// show — the stage it is handed, and what happens to it when the build
+/// future is dropped.
+#[cfg(test)]
+mod ride_along_tests {
+    use super::*;
+    use crate::subtitle_ride_along::testing::{fixture, Sub};
+    use crate::subtitle_ride_along::RideAlongPlan;
+    use crate::subtitle_source::testing::stamp_of;
+    use crate::subtitle_source::Verdict;
+
+    const VIDEO: transcode::CopyVideoOptions = transcode::CopyVideoOptions::new(false, false);
+
+    fn expectation() -> VideoCompletionExpectation {
+        VideoCompletionExpectation {
+            stream_index: 0,
+            duration_num: 16,
+            duration_den: 1,
+            provenance: CompletionProvenance::StreamSeconds,
+            source_object_version: "fixture".to_owned(),
+        }
+    }
+
+    fn pass_over(source: &Path, file: &MediaFile, plan: Option<RideAlongPlan>) -> IndexPass {
+        index_pass(
+            file,
+            VIDEO,
+            Some(&source.to_string_lossy()),
+            expectation(),
+            plan,
+        )
+        .expect("a describable pass")
+    }
+
+    /// (f) A regression for the tee's own truncation: a file already sitting
+    /// where a slave will write — a stale `.sup` and a stale `.crc` whose
+    /// packet count would pass for a verdict — is truncated by the slave that
+    /// opens it, so the track is judged on what this pass wrote, and the index
+    /// is the baseline's. The tee opens its slaves itself (`avio_open`), with
+    /// or without `-y`; the index output is `pipe:1`, so the leftover-file
+    /// refusal ffmpeg applies to a named output (§6.2 fact 4) cannot reach it.
+    /// This test therefore does not prove `-y` necessary — it pins the
+    /// truncation the verdict relies on. The fresh stage per attempt is the
+    /// other half: every attempt gets a directory of its own.
+    #[tokio::test]
+    async fn a_leftover_in_the_stage_cannot_empty_the_index() {
+        let fixture = fixture(72_001, &[Sub::Pgs]);
+        let cache = crate::test_tempdir().expect("cache");
+        let started = Instant::now();
+        let baseline = build_with_args(
+            &fixture.file,
+            pass_over(&fixture.source, &fixture.file, None),
+            None,
+            None,
+            cache.path(),
+            Duration::from_secs(60),
+            started,
+            None,
+        )
+        .await;
+        assert!(matches!(baseline.outcome, IndexOutcome::Built(_)));
+
+        let plan = RideAlongPlan::standalone(
+            cache.path(),
+            fixture.file.id,
+            stamp_of(&fixture.source),
+            vec![0],
+        )
+        .expect("plan");
+        let other = RideAlongPlan::standalone(
+            cache.path(),
+            fixture.file.id,
+            stamp_of(&fixture.source),
+            vec![0],
+        )
+        .expect("another plan");
+        assert_ne!(
+            plan.stage(),
+            other.stage(),
+            "every attempt has its own stage"
+        );
+        std::fs::write(plan.stage().join("s0.sup"), b"left over by someone else")
+            .expect("leftover");
+        std::fs::write(
+            plan.stage().join("s0.crc"),
+            b"#left over\n0, 0, 0, 0, 5, 0x0\n",
+        )
+        .expect("leftover");
+        let riding = build_with_args(
+            &fixture.file,
+            pass_over(&fixture.source, &fixture.file, Some(plan)),
+            None,
+            None,
+            cache.path(),
+            Duration::from_secs(60),
+            Instant::now(),
+            None,
+        )
+        .await;
+        assert_eq!(
+            riding.outcome, baseline.outcome,
+            "the same index, not an empty one"
+        );
+        let harvest = riding.ride_along.expect("a harvest").judge().await;
+        assert_eq!(
+            harvest.outcomes()[0].verdict,
+            Verdict::Kept,
+            "{:?}",
+            harvest.outcomes()
+        );
+    }
+
+    /// Review finding 1: a riding pass whose own argv breaks the index — here
+    /// a hard map to a subtitle ordinal the file does not have, as an
+    /// `ffprobe` of another build could produce — is remembered, and the
+    /// file's next attempt is a plain index pass that builds.
+    #[tokio::test]
+    async fn after_a_riding_pass_fails_the_next_attempt_does_not_ride() {
+        let fixture = fixture(72_003, &[Sub::Pgs]);
+        let cache = crate::test_tempdir().expect("cache");
+        let root = crate::subtitle_source::store_root(cache.path());
+        let plan = RideAlongPlan::standalone(
+            &root,
+            fixture.file.id,
+            stamp_of(&fixture.source),
+            vec![0, 5],
+        )
+        .expect("plan");
+        let broken = build_with_args(
+            &fixture.file,
+            pass_over(&fixture.source, &fixture.file, Some(plan)),
+            None,
+            None,
+            cache.path(),
+            Duration::from_secs(60),
+            Instant::now(),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(broken.outcome, IndexOutcome::Failed(_)),
+            "a map to a missing ordinal fails the pass: {:?}",
+            broken.outcome
+        );
+        assert!(broken.ride_along.is_none());
+
+        let gate = crate::subtitle_ride_along::RideAlongGate::for_test(root.clone());
+        let source = std::fs::File::open(&fixture.source).expect("held source");
+        assert!(
+            crate::subtitle_ride_along::plan(&gate, fixture.file.id, &source, &[0])
+                .await
+                .is_none(),
+            "the file does not ride again on the same source"
+        );
+        let retry = build_from_attested_file_with_progress(
+            &fixture.file,
+            &source,
+            "fixture-object-v1",
+            VIDEO,
+            cache.path(),
+            Duration::from_secs(60),
+            |_: &crate::fragindex::PassProgress| {},
+            Some(&gate),
+        )
+        .await;
+        assert!(
+            matches!(retry.outcome, IndexOutcome::Built(_)),
+            "the plain retry builds the index: {:?}",
+            retry.outcome
+        );
+        assert!(retry.ride_along.is_none(), "and did not ride");
+    }
+
+    /// PR 3: a riding pass reports, with its progress, how many PGS tracks
+    /// it keeps and what its stage holds — re-measured at most once a second —
+    /// so the analysis row can say so while the pass runs.
+    ///
+    /// The fixture's track is a few kilobytes, which the `sup` slave holds in
+    /// its I/O buffer until the trailer; a film's track is megabytes and
+    /// reaches the disk as it goes. So the test puts known bytes into the
+    /// stage mid-pass and requires a later report to count them: the meter
+    /// re-measures the stage during the pass rather than once at its start.
+    #[tokio::test]
+    async fn a_riding_pass_reports_its_tracks_and_bytes_with_its_progress() {
+        const MARKER: usize = 1234;
+        let fixture = fixture(72_004, &[Sub::Pgs]);
+        let cache = crate::test_tempdir().expect("cache");
+        let plan = RideAlongPlan::standalone(
+            cache.path(),
+            fixture.file.id,
+            stamp_of(&fixture.source),
+            vec![0],
+        )
+        .expect("plan");
+        let stage = plan.stage().to_owned();
+        let mut pass = pass_over(&fixture.source, &fixture.file, Some(plan));
+        // Read at the media's own pace, so the pass is still running while
+        // the test watches its reports.
+        let input = pass
+            .args
+            .iter()
+            .position(|arg| arg == "-i")
+            .expect("an input");
+        pass.args.insert(input, "-re".to_owned());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<PassProgress>::new()));
+        let recorder = Arc::clone(&seen);
+        let progress: SharedIndexProgress = Arc::new(move |report: &PassProgress| {
+            recorder.lock().expect("seen").push(*report);
+        });
+        let mut build = Box::pin(build_with_args(
+            &fixture.file,
+            pass,
+            None,
+            None,
+            cache.path(),
+            Duration::from_secs(60),
+            Instant::now(),
+            Some(progress),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut marked = false;
+        loop {
+            let reports = seen.lock().expect("seen").clone();
+            if let Some(first) = reports.first() {
+                assert_eq!(first.pgs_tracks, 1, "every report names the track");
+                assert!(reports.iter().all(|report| report.pgs_tracks == 1));
+                if !marked {
+                    std::fs::write(stage.join("meter-marker"), [0_u8; MARKER])
+                        .expect("a marker in the stage");
+                    marked = true;
+                } else if reports
+                    .iter()
+                    .any(|report| report.pgs_bytes_written >= MARKER as u64)
+                {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no report counted the stage's bytes: {reports:?}"
+            );
+            if tokio::time::timeout(Duration::from_millis(50), &mut build)
+                .await
+                .is_ok()
+            {
+                panic!("the paced pass finished before a report counted the stage: {reports:?}");
+            }
+        }
+        drop(build);
+    }
+
+    /// (g) The cluster worker `select!`s the build against lease loss and
+    /// foreground preemption; the losing branch drops the build future. The
+    /// stage must go with it.
+    #[tokio::test]
+    async fn dropping_the_build_future_mid_pass_removes_the_stage() {
+        let fixture = fixture(72_002, &[Sub::Pgs]);
+        let cache = crate::test_tempdir().expect("cache");
+        let plan = RideAlongPlan::standalone(
+            cache.path(),
+            fixture.file.id,
+            stamp_of(&fixture.source),
+            vec![0],
+        )
+        .expect("plan");
+        let stage = plan.stage().to_owned();
+        let mut pass = pass_over(&fixture.source, &fixture.file, Some(plan));
+        // Read at the media's own pace, so sixteen seconds of it are still
+        // being read when the future is dropped.
+        let input = pass
+            .args
+            .iter()
+            .position(|arg| arg == "-i")
+            .expect("an input");
+        pass.args.insert(input, "-re".to_owned());
+        let mut build = Box::pin(build_with_args(
+            &fixture.file,
+            pass,
+            None,
+            None,
+            cache.path(),
+            Duration::from_secs(60),
+            Instant::now(),
+            None,
+        ));
+        // Mid-pass: the tee has opened its slaves in the stage.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !stage.join("s0.crc").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the pass never opened its slaves"
+            );
+            if tokio::time::timeout(Duration::from_millis(20), &mut build)
+                .await
+                .is_ok()
+            {
+                panic!("the paced pass finished before it could be dropped");
+            }
+        }
+        assert!(stage.is_dir());
+        drop(build);
+        assert!(!stage.exists(), "the stage outlived the dropped build");
     }
 }

@@ -36,7 +36,10 @@ internal enum class SurfaceBlocking {
     Always,
 }
 
-/** The reasons a class admits for being retired. A property of the CLASS. */
+/**
+ * The reasons a class admits for being retired. A property of the CLASS,
+ * unless a source row narrows it with its own [SurfaceSourceRow.retiredBy].
+ */
 internal enum class SurfaceRetirement(val wire: String) {
     Presenting("presenting"),
     PresentingAfterRaise("presenting_after_raise"),
@@ -54,6 +57,13 @@ internal enum class SurfaceRetirement(val wire: String) {
      * answered by the viewer rather than by a transport change.
      */
     PlaybackNotRequested("playback_not_requested"),
+
+    /**
+     * The system ended the suspension it imposed (a call, another app taking
+     * audio). Named by no class: only the `system_interruption` source row
+     * declares it, so it retires that hold and never a server `control_hold`.
+     */
+    SystemResumed("system_resumed"),
     Timer("timer"),
     User("user"),
 }
@@ -208,6 +218,13 @@ internal data class SurfaceSourceRow(
     val thenWhenStopped: SurfaceClass? = null,
     val carriesPositionMs: Boolean = false,
     val retryable: Boolean = false,
+    /**
+     * The fixture row's own `retired_by`, when it declares one. It REPLACES the
+     * class's rules for faults from this source: `system_interruption` is a
+     * `hold`, but a system suspension must not time out at `hold_notice_ms`,
+     * and its `system_resumed` must not retire any other hold.
+     */
+    val retiredBy: Set<SurfaceRetirement>? = null,
 ) {
     fun matches(context: SurfaceContext): Boolean =
         contextWire == "any" || contextWire == context.wire
@@ -232,6 +249,7 @@ internal object SurfaceSources {
     const val SEGMENT_503_NOT_YET = "segment_503_not_yet"
     const val MEDIA_OWNER_LOST_410 = "media_owner_lost_410"
     const val CONTROL_HOLD = "control_hold"
+    const val SYSTEM_INTERRUPTION = "system_interruption"
     const val MEDIA_WAITING = "media_waiting"
     const val OWNER_RECOVERY_STEP = "owner_recovery_step"
     const val READINESS_DEADLINE_RUNGS_LEFT = "readiness_deadline_rungs_left"
@@ -321,6 +339,7 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
             "media_owner_transition",
             "vod_index_pending",
             "vod_engine_unattested",
+            "transcode_capacity_pending",
         ),
         retryable = true,
     ),
@@ -368,6 +387,12 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
         carriesPositionMs = true,
     ),
     SurfaceSourceRow(SurfaceSources.CONTROL_HOLD, "attached", SurfaceClass.Hold),
+    SurfaceSourceRow(
+        SurfaceSources.SYSTEM_INTERRUPTION,
+        "attached",
+        SurfaceClass.Hold,
+        retiredBy = setOf(SurfaceRetirement.SystemResumed),
+    ),
     SurfaceSourceRow(SurfaceSources.MEDIA_WAITING, "attached", SurfaceClass.Buffering),
     SurfaceSourceRow(SurfaceSources.OWNER_RECOVERY_STEP, "any", SurfaceClass.Recovering),
     SurfaceSourceRow(SurfaceSources.READINESS_DEADLINE_RUNGS_LEFT, "any", SurfaceClass.Recovering),
@@ -448,6 +473,14 @@ internal fun surfaceRowAdmitsCode(
  */
 private val SURFACE_PROMOTING_SOURCES =
     setOf(SurfaceSources.OWNER_STOPPED, SurfaceSources.OWNER_EXHAUSTED)
+
+/**
+ * The `system_interruption` notice's text, the same two sentences the web and
+ * Apple presenters draw (contract fixture case
+ * `system_interruption_survives_hold_timer_and_clears_on_resume`).
+ */
+internal const val SYSTEM_INTERRUPTION_TITLE = "Paused — call in progress"
+internal const val SYSTEM_INTERRUPTION_DETAIL = "Paused — audio interrupted"
 
 /** The fixture's error ids. The reducer logs these and leaves the surface alone. */
 internal object SurfaceErrors {
@@ -637,6 +670,15 @@ internal sealed interface SurfaceEvent {
     data class PlaybackRequested(val requested: Boolean) : SurfaceEvent
 
     /**
+     * The SYSTEM suspended playback, or ended that suspension — distinct from
+     * the viewer's [PlaybackRequested]. `true` raises one `system_interruption`
+     * hold about the attached generation (replacing any earlier one); `false`
+     * retires it by `system_resumed`, which no class names, so nothing else
+     * moves. The fixture's `system_paused` event.
+     */
+    data class SystemPaused(val paused: Boolean) : SurfaceEvent
+
+    /**
      * The app is hidden. Android has no hidden page: this is
      * `presentationForeground` inverted. While hidden, `presenting` samples are
      * ignored and every timer freezes.
@@ -719,25 +761,26 @@ internal class PlaybackSurfaceReducer {
             is SurfaceEvent.Raise -> applyRaise(next, log, event)
             is SurfaceEvent.IntentSettled -> dropFaults(next, log, "intent_settled") { fault ->
                 fault.intent == event.intent &&
-                    fault.cls.retiredBy.contains(SurfaceRetirement.IntentSettled)
+                    retiredBy(fault).contains(SurfaceRetirement.IntentSettled)
             }
             is SurfaceEvent.IntentSuperseded -> dropFaults(next, log, "intent_superseded") { fault ->
                 fault.intent == event.intent &&
-                    fault.cls.retiredBy.contains(SurfaceRetirement.IntentSuperseded)
+                    retiredBy(fault).contains(SurfaceRetirement.IntentSuperseded)
             }
             // One recovery owner per player: its success retires every
             // `recovering` fault, not only the ones about the generation it
             // replaced.
             is SurfaceEvent.OwnerSuccess -> dropFaults(next, log, "owner_success") { fault ->
-                fault.cls.retiredBy.contains(SurfaceRetirement.OwnerSuccess)
+                retiredBy(fault).contains(SurfaceRetirement.OwnerSuccess)
             }
             is SurfaceEvent.PlaybackRequested -> if (event.requested) {
                 next
             } else {
                 dropFaults(next, log, SurfaceRetirement.PlaybackNotRequested.wire) { fault ->
-                    fault.cls.retiredBy.contains(SurfaceRetirement.PlaybackNotRequested)
+                    retiredBy(fault).contains(SurfaceRetirement.PlaybackNotRequested)
                 }
             }
+            is SurfaceEvent.SystemPaused -> applySystemPaused(next, log, event.paused)
             is SurfaceEvent.UserAction -> applyUserAction(next, log, event.action)
             SurfaceEvent.Tick -> next
             is SurfaceEvent.Inert -> next // returned above; here for exhaustiveness
@@ -920,6 +963,36 @@ internal class PlaybackSurfaceReducer {
         return next
     }
 
+    private fun applySystemPaused(
+        state: SurfaceState,
+        log: MutableList<SurfaceLog>,
+        paused: Boolean,
+    ): SurfaceState {
+        val resumed = SurfaceRetirement.SystemResumed
+        if (!paused) {
+            return dropFaults(state, log, resumed.wire) { fault ->
+                fault.source == SurfaceSources.SYSTEM_INTERRUPTION && retiredBy(fault).contains(resumed)
+            }
+        }
+        // One suspension, one notice: a second `true` replaces the first
+        // rather than stacking two identical holds.
+        val cleared = dropFaults(state, log, resumed.wire) {
+            it.source == SurfaceSources.SYSTEM_INTERRUPTION
+        }
+        val attached = cleared.attached ?: return cleared
+        return applyRaise(
+            cleared,
+            log,
+            SurfaceEvent.Raise(
+                source = SurfaceSources.SYSTEM_INTERRUPTION,
+                context = SurfaceContext.Attached,
+                attached = attached,
+                title = SYSTEM_INTERRUPTION_TITLE,
+                detail = SYSTEM_INTERRUPTION_DETAIL,
+            ),
+        )
+    }
+
     private fun applyUserAction(
         state: SurfaceState,
         log: MutableList<SurfaceLog>,
@@ -982,6 +1055,10 @@ internal class PlaybackSurfaceReducer {
         return state.nowMs - maxOf(since, fault.raisedAtMs)
     }
 
+    /** A source row's own `retired_by` when it declares one, else the class's. */
+    private fun retiredBy(fault: PlaybackFault): Set<SurfaceRetirement> =
+        SURFACE_SOURCES.firstOrNull { it.id == fault.source }?.retiredBy ?: fault.cls.retiredBy
+
     private fun sweep(state: SurfaceState, log: MutableList<SurfaceLog>): SurfaceState {
         // A hidden app samples nothing and expires nothing. The clock it is
         // measured against is rewound when it comes back (see `applyHidden`).
@@ -989,16 +1066,17 @@ internal class PlaybackSurfaceReducer {
         val reasons = HashMap<Long, String>()
         for (fault in state.faults) {
             val cls = fault.cls
+            val retiredBy = retiredBy(fault)
             val timed = cls.timedMs
             if (timed != null &&
-                cls.retiredBy.contains(SurfaceRetirement.Timer) &&
+                retiredBy.contains(SurfaceRetirement.Timer) &&
                 !(cls.timerPausedWhileActions && fault.actions.isNotEmpty()) &&
                 state.nowMs - fault.raisedAtMs >= timed
             ) {
                 reasons[fault.seq] = "timer"
                 continue
             }
-            if (cls.retiredBy.contains(SurfaceRetirement.PresentingContinuousMs)) {
+            if (retiredBy.contains(SurfaceRetirement.PresentingContinuousMs)) {
                 val bound = cls.continuousMs
                 val elapsed = continuousElapsed(state, fault)
                 if (bound != null && elapsed != null && elapsed >= bound) {
@@ -1009,11 +1087,11 @@ internal class PlaybackSurfaceReducer {
             // Evidence never retires a fault about a pending destination.
             if (fault.intent != null) continue
             if (!state.presenting) continue
-            if (cls.retiredBy.contains(SurfaceRetirement.Presenting)) {
+            if (retiredBy.contains(SurfaceRetirement.Presenting)) {
                 reasons[fault.seq] = "presenting"
                 continue
             }
-            if (cls.retiredBy.contains(SurfaceRetirement.PresentingAfterRaise) &&
+            if (retiredBy.contains(SurfaceRetirement.PresentingAfterRaise) &&
                 evidencePostdates(state, fault)
             ) {
                 reasons[fault.seq] = "presenting"

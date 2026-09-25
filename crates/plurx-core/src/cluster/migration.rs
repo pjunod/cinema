@@ -13,17 +13,21 @@ use std::time::Duration;
 #[cfg(feature = "hiqlite-store")]
 use std::borrow::Cow;
 #[cfg(feature = "hiqlite-store")]
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "hiqlite-store")]
 use std::io::Seek;
 #[cfg(feature = "hiqlite-store")]
 use std::net::{IpAddr, SocketAddr};
 #[cfg(feature = "hiqlite-store")]
 use std::sync::Arc;
+#[cfg(feature = "hiqlite-store")]
+use std::sync::OnceLock;
 
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+#[cfg(feature = "hiqlite-store")]
+use futures_util::StreamExt;
 use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -68,6 +72,47 @@ pub const ACTIVATION_MARKER_FILENAME: &str = "activation.json";
 /// It lives beside `plurx.db` rather than inside the target, because its whole
 /// job is to survive the target's disappearance.
 pub const ACTIVATED_SOURCE_FILENAME: &str = "hiqlite-activated.json";
+
+/// Portable backup format written by a running voter and consumed by the
+/// offline restore command. It deliberately contains no cluster secrets.
+#[cfg(feature = "hiqlite-store")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterBackupManifest {
+    pub schema_version: u32,
+    pub cluster_id: String,
+    pub node_id: String,
+    pub built_at_unix_ms: i64,
+    pub binary_version: String,
+    pub replicated_schema_version: i64,
+    pub raft_cut: ClusterBackupRaftCut,
+    pub image_sha256: String,
+    pub image_bytes: u64,
+    pub integrity_check: String,
+    pub table_counts: BTreeMap<String, u64>,
+    pub credential_key_id: Option<String>,
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterBackupRaftCut {
+    pub term: u64,
+    pub index: u64,
+    pub voters: Vec<u64>,
+    pub learners: Vec<u64>,
+}
+
+/// Operator-visible result of an offline archive verification or restore.
+#[cfg(feature = "hiqlite-store")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterRestoreReport {
+    pub cluster_id: String,
+    pub source_built_at_unix_ms: i64,
+    pub node_id: Option<String>,
+    pub remapped_files: u64,
+    pub remapped_libraries: u64,
+    pub remapped_dvr_recordings: u64,
+    pub verified_only: bool,
+}
 #[cfg(feature = "hiqlite-store")]
 const ACTIVATION_ATTEMPT_FILENAME: &str = "hiqlite-activation.in-progress";
 #[cfg(feature = "hiqlite-store")]
@@ -92,6 +137,12 @@ const HIQLITE_HEALTH_TIMEOUT: Duration = Duration::from_secs(45);
 const MEMBERSHIP_ADMISSION_TIMEOUT: Duration = Duration::from_secs(45);
 #[cfg(feature = "hiqlite-store")]
 const SNAPSHOT_CATCHUP_GRACE: Duration = Duration::from_secs(45);
+#[cfg(feature = "hiqlite-store")]
+const JOIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(feature = "hiqlite-store")]
+const JOIN_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(feature = "hiqlite-store")]
+const JOIN_ERROR_MAX_BYTES: u64 = 4 * 1024 * 1024;
 // OpenRaft gives an AppendEntries RPC one heartbeat interval. Once a leader is
 // running this Hiqlite transport it lets that RPC use the whole hard deadline,
 // and this 800 ms window admits the observed 600-700 ms durable crash-recovery
@@ -251,6 +302,13 @@ impl SelectedStore {
         self.membership.clone()
     }
 
+    /// Embedded client used by node-local operations such as materializing a
+    /// consistent Raft snapshot. Remote maintenance clients never receive it.
+    #[must_use]
+    pub fn local_client(&self) -> Option<Client> {
+        self.local_client.clone()
+    }
+
     /// Finish daemon shutdown before the Tokio runtime tears down the voter.
     ///
     /// Hiqlite 0.14 drains Raft, the WAL, and the SQL writer before it reaches
@@ -315,6 +373,10 @@ impl ActivationFailpoint {
 /// A prior interrupted attempt consumes exactly one SQLite recovery boot: its
 /// incoming target is removed, the attempt marker is fsynced away, and the
 /// unchanged legacy store is returned. A completed atomic target always wins.
+///
+/// Each startup branch (join, reopen, first activation) is boxed. Inlined,
+/// their state machines were summed into this one future, and a debug build
+/// of a caller that awaits it overflowed a 2 MiB test thread's stack.
 #[cfg(feature = "hiqlite-store")]
 pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, StoreError> {
     install_default_crypto_provider();
@@ -329,11 +391,11 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
             && path_exists(&config.cluster.join_token_file)?
             && !path_exists(&active.join(ACTIVATION_MARKER_FILENAME))?;
         if pending_join {
-            return join_fresh_store(config, daemon_lock).await;
+            return Box::pin(join_fresh_store(config, daemon_lock)).await;
         }
         readdress_single_voter_if_needed(config)?;
-        let selected = open_active_store(config, daemon_lock).await?;
-        finalize_pending_join_best_effort(config, &selected).await;
+        let selected = Box::pin(open_active_store(config, daemon_lock)).await?;
+        Box::pin(finalize_pending_join_best_effort(config, &selected)).await;
         // A crash immediately after rename may expose the target before its
         // parent-directory entry is durable. Observing it on recovery lets us
         // finish that durability boundary before clearing attempt artifacts.
@@ -367,7 +429,7 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
     }
 
     if !config.cluster.join_token_file.as_os_str().is_empty() {
-        return join_fresh_store(config, daemon_lock).await;
+        return Box::pin(join_fresh_store(config, daemon_lock)).await;
     }
 
     ensure_sqlite_source(&config.storage.data_dir)?;
@@ -411,7 +473,15 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
     let credential_key = legacy.credential_key;
     drop(legacy.store);
 
-    match activate_fresh_store(config, failpoint, daemon_lock, identity, credential_key).await {
+    match Box::pin(activate_fresh_store(
+        config,
+        failpoint,
+        daemon_lock,
+        identity,
+        credential_key,
+    ))
+    .await
+    {
         Ok(store) => Ok(store),
         Err(error) => Err(activation_failure(&config.storage.data_dir, error)),
     }
@@ -595,7 +665,11 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     let credential_key = open_active_credential_key(config, &store).await?;
     let concrete_store = Arc::new(store);
     let store: Arc<dyn Store> = concrete_store.clone();
-    let replication = status::ReplicationMonitor::replicated(client.clone());
+    let replication = status::ReplicationMonitor::replicated(
+        client.clone(),
+        active.clone(),
+        HIQLITE_DATABASE_FILENAME,
+    );
     let catalogue = CatalogueReader::replicated(
         Arc::clone(&store),
         concrete_store,
@@ -870,19 +944,52 @@ async fn post_join_request<T: Serialize>(
     path: &str,
     request: &T,
 ) -> Result<(), StoreError> {
-    let response = reqwest::Client::new()
-        .post(format!("{}{path}", payload.bootstrap_http()))
+    post_join_url(
+        &join_client()?,
+        format!("{}{path}", payload.bootstrap_http()),
+        request,
+    )
+    .await
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn join_client() -> Result<reqwest::Client, StoreError> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(JOIN_CONNECT_TIMEOUT)
+                .timeout(JOIN_TOTAL_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .cloned()
+        .map_err(|error| {
+            StoreError::Database(format!("building bounded join coordinator client: {error}"))
+        })
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn post_join_url<T: Serialize>(
+    client: &reqwest::Client,
+    url: String,
+    request: &T,
+) -> Result<(), StoreError> {
+    let response = client
+        .post(url)
         .json(request)
         .send()
         .await
-        .map_err(|error| StoreError::Database(format!("contacting join coordinator: {error}")))?;
+        .map_err(join_request_error)?;
     if response.status().is_success() {
         return Ok(());
     }
     let status = response.status();
-    let error = response
-        .json::<JoinApiError>()
-        .await
+    let error = bounded_join_error_response(response)
+        .await?
+        .and_then(|body| serde_json::from_slice::<JoinApiError>(&body).ok())
         .unwrap_or(JoinApiError {
             code: "membership_internal".to_owned(),
             message: "join coordinator refused the request".to_owned(),
@@ -891,6 +998,45 @@ async fn post_join_request<T: Serialize>(
         "{}: {} (HTTP {status})",
         error.code, error.message
     )))
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn join_request_error(error: reqwest::Error) -> StoreError {
+    if error.is_timeout() {
+        StoreError::Migration(
+            "join_request_ambiguous: the coordinator did not answer within 30 s; the request \
+             may have been accepted — re-run the same staged join, do not mint a new token"
+                .to_owned(),
+        )
+    } else {
+        StoreError::Database(format!("contacting join coordinator: {error}"))
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn bounded_join_error_response(
+    response: reqwest::Response,
+) -> Result<Option<Vec<u8>>, StoreError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > JOIN_ERROR_MAX_BYTES)
+    {
+        return Err(StoreError::Migration(format!(
+            "join_response_too_large: the coordinator error exceeded {JOIN_ERROR_MAX_BYTES} bytes"
+        )));
+    }
+    let mut body = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(join_request_error)?;
+        if bytes.len().saturating_add(chunk.len()) > JOIN_ERROR_MAX_BYTES as usize {
+            return Err(StoreError::Migration(format!(
+                "join_response_too_large: the coordinator error exceeded {JOIN_ERROR_MAX_BYTES} bytes"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok((!bytes.is_empty()).then_some(bytes))
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -1401,6 +1547,823 @@ fn verify_state_machine_snapshot_identity(
     Ok(())
 }
 
+/// Turn one already-open Raft snapshot into a portable, checksummed archive.
+///
+/// The caller opens the snapshot before calling this function. Keeping that
+/// descriptor alive is the ownership contract: Hiqlite may unlink a
+/// superseded generation while this copy runs, but it cannot change the bytes
+/// reached through the descriptor.
+#[cfg(feature = "hiqlite-store")]
+#[allow(clippy::too_many_arguments)] // one immutable provenance field per manifest source
+pub fn build_cluster_backup_artifact(
+    mut snapshot: File,
+    destination: &Path,
+    data_dir: &Path,
+    credential_key_source: Option<&Path>,
+    node_id: &str,
+    credential_key_id: Option<&str>,
+    binary_version: &str,
+    minimum_applied_index: u64,
+) -> Result<(PathBuf, ClusterBackupManifest), StoreError> {
+    if !destination.is_absolute() || !destination.is_dir() {
+        return Err(StoreError::Migration(format!(
+            "backup destination {} must be an existing absolute directory",
+            destination.display()
+        )));
+    }
+    let active = data_dir.join(HIQLITE_ACTIVE_DIRNAME);
+    let activation = read_activation_marker(&active)?;
+    let built_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let short_cluster: String = activation.cluster_id.chars().take(12).collect();
+    let built_at_name = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let artifact_name = format!("plurx-backup-{built_at_name}-{short_cluster}");
+    let staging = destination.join(format!(".{artifact_name}.{}.tmp", uuid::Uuid::new_v4()));
+    let published = destination.join(&artifact_name);
+    if published.exists() {
+        return Err(StoreError::Migration(format!(
+            "backup artefact {} already exists",
+            published.display()
+        )));
+    }
+    std::fs::create_dir(&staging)
+        .map_err(|error| migration_io("creating backup staging directory", &staging, error))?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| migration_io("protecting", &staging, error))?;
+
+    let image = staging.join(SQLITE_FILENAME);
+    let result = (|| {
+        let mut target = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&image)
+            .map_err(|error| migration_io("creating", &image, error))?;
+        std::io::copy(&mut snapshot, &mut target)
+            .and_then(|_| target.sync_all())
+            .map_err(|error| migration_io("copying snapshot into", &image, error))?;
+
+        let connection = Connection::open(&image).map_err(|error| {
+            StoreError::Migration(format!("opening backup image {}: {error}", image.display()))
+        })?;
+        let metadata: Vec<u8> = connection
+            .query_row("SELECT data FROM _metadata WHERE key='meta'", (), |row| {
+                row.get(0)
+            })
+            .map_err(|error| StoreError::Migration(format!("reading backup Raft cut: {error}")))?;
+        let (metadata, _): (hiqlite::StateMachineData, usize) =
+            bincode::serde::decode_from_slice(&metadata, bincode::config::legacy()).map_err(
+                |error| StoreError::Migration(format!("decoding backup Raft cut: {error}")),
+            )?;
+        let last_applied = metadata.last_applied_log_id.ok_or_else(|| {
+            StoreError::Migration("backup snapshot has no applied Raft position".to_owned())
+        })?;
+        if last_applied.index < minimum_applied_index {
+            return Err(StoreError::Migration(format!(
+                "backup snapshot cut {} is older than requested applied index {minimum_applied_index}",
+                last_applied.index
+            )));
+        }
+        let membership = metadata.last_membership.membership();
+        let voters: BTreeSet<u64> = membership.voter_ids().collect();
+        let learners = membership
+            .nodes()
+            .map(|(id, _)| *id)
+            .filter(|id| !voters.contains(id))
+            .collect::<Vec<_>>();
+
+        connection
+            .execute("DELETE FROM _metadata", ())
+            .map_err(|error| {
+                StoreError::Migration(format!("removing private Raft metadata: {error}"))
+            })?;
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+            .map_err(|error| {
+                StoreError::Migration(format!("canonicalizing backup image: {error}"))
+            })?;
+        let integrity_check: String = connection
+            .query_row("PRAGMA integrity_check", (), |row| row.get(0))
+            .map_err(|error| StoreError::Migration(format!("checking backup image: {error}")))?;
+        if integrity_check != "ok" {
+            return Err(StoreError::Migration(format!(
+                "backup image integrity_check returned {integrity_check:?}"
+            )));
+        }
+        let mut table_counts = BTreeMap::new();
+        for table in [
+            "users",
+            "tokens",
+            "libraries",
+            "items",
+            "files",
+            "watch_state",
+            "dvr_schedules",
+            "library_channels",
+        ] {
+            let exists: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    StoreError::Migration(format!("checking table {table}: {error}"))
+                })?;
+            let count = if exists == 0 {
+                0
+            } else {
+                connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), (), |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(|error| {
+                        StoreError::Migration(format!("counting backup table {table}: {error}"))
+                    })?
+                    .max(0) as u64
+            };
+            table_counts.insert(table.to_owned(), count);
+        }
+        drop(connection);
+        File::open(&image)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| migration_io("syncing", &image, error))?;
+        let image_sha256 = sha256_file(&image)?;
+        let image_bytes = std::fs::metadata(&image)
+            .map_err(|error| migration_io("reading metadata for", &image, error))?
+            .len();
+
+        let copied_key_id = match credential_key_source {
+            Some(key_source) => {
+                // Load first: this both refuses a disappeared/non-regular key
+                // and binds the manifest to the bytes we are about to copy.
+                // A disappearance between load and copy fails the build and
+                // the staging directory is removed rather than published.
+                let source_key = CredentialKey::load(key_source)
+                    .map_err(|error| StoreError::Identity(error.to_string()))?;
+                if credential_key_id.is_some_and(|expected| expected != source_key.id()) {
+                    return Err(StoreError::Identity(format!(
+                        "backup requested credential key {}, but source {} holds key {}",
+                        credential_key_id.unwrap_or_default(),
+                        key_source.display(),
+                        source_key.id()
+                    )));
+                }
+                let key_target = staging.join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+                std::fs::copy(key_source, &key_target).map_err(|error| {
+                    migration_io("copying credential key to", &key_target, error)
+                })?;
+                #[cfg(unix)]
+                std::fs::set_permissions(&key_target, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|error| migration_io("protecting", &key_target, error))?;
+                File::open(&key_target)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|error| migration_io("syncing", &key_target, error))?;
+                Some(source_key.id().to_owned())
+            }
+            None if credential_key_id.is_some() => {
+                return Err(StoreError::Identity(format!(
+                    "backup manifest would declare credential key {} without a source key file",
+                    credential_key_id.unwrap_or_default()
+                )));
+            }
+            None => None,
+        };
+
+        let manifest = ClusterBackupManifest {
+            schema_version: 1,
+            cluster_id: activation.cluster_id,
+            node_id: node_id.to_owned(),
+            built_at_unix_ms,
+            binary_version: binary_version.to_owned(),
+            replicated_schema_version: activation.replicated_schema_version,
+            raft_cut: ClusterBackupRaftCut {
+                term: last_applied.leader_id.term,
+                index: last_applied.index,
+                voters: voters.into_iter().collect(),
+                learners,
+            },
+            image_sha256,
+            image_bytes,
+            integrity_check,
+            table_counts,
+            credential_key_id: copied_key_id,
+        };
+        let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| StoreError::Migration(format!("encoding backup manifest: {error}")))?;
+        manifest_bytes.push(b'\n');
+        write_private_file(&staging.join("manifest.json"), &manifest_bytes)?;
+
+        let mut sums = vec![
+            format!(
+                "{}  manifest.json",
+                sha256_file(&staging.join("manifest.json"))?
+            ),
+            format!("{}  {SQLITE_FILENAME}", manifest.image_sha256),
+        ];
+        let key = staging.join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+        if key.exists() {
+            sums.push(format!(
+                "{}  {}",
+                sha256_file(&key)?,
+                crate::secrets::CREDENTIAL_KEY_FILENAME
+            ));
+        }
+        sums.push(String::new());
+        write_private_file(&staging.join("SHA256SUMS"), sums.join("\n").as_bytes())?;
+        sync_directory(&staging)?;
+        std::fs::rename(&staging, &published)
+            .map_err(|error| migration_io("publishing backup artefact", &published, error))?;
+        sync_directory(destination)?;
+        Ok((published.clone(), manifest))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+/// Verify a portable archive without changing it or any data directory.
+#[cfg(feature = "hiqlite-store")]
+pub fn verify_cluster_backup_archive(
+    archive: &Path,
+    credential_key_override: Option<&Path>,
+) -> Result<ClusterRestoreReport, StoreError> {
+    let manifest = verified_backup_manifest(archive)?;
+    let connection = open_verified_backup_image(archive, &manifest)?;
+    verify_backup_key(
+        &connection,
+        archive,
+        credential_key_override,
+        manifest.credential_key_id.as_deref(),
+    )?;
+    Ok(ClusterRestoreReport {
+        cluster_id: manifest.cluster_id,
+        source_built_at_unix_ms: manifest.built_at_unix_ms,
+        node_id: None,
+        remapped_files: 0,
+        remapped_libraries: 0,
+        remapped_dvr_recordings: 0,
+        verified_only: true,
+    })
+}
+
+/// Restore a portable archive into a fresh, fenced one-voter data directory.
+///
+/// This function is deliberately offline. It takes the same advisory lock as
+/// daemon startup and refuses any pre-existing Hiqlite target before writing.
+#[cfg(feature = "hiqlite-store")]
+pub async fn restore_cluster_backup_archive(
+    archive: &Path,
+    config: &Config,
+    remaps: &[(PathBuf, PathBuf)],
+    credential_key_override: Option<&Path>,
+) -> Result<ClusterRestoreReport, StoreError> {
+    let manifest = verified_backup_manifest(archive)?;
+    if manifest.replicated_schema_version > AUTH_SCHEMA_VERSION {
+        return Err(StoreError::Migration(format!(
+            "source database schema is v{}, but this binary only knows v{}; refusing clustering import without changing {}",
+            manifest.replicated_schema_version,
+            AUTH_SCHEMA_VERSION,
+            config.storage.data_dir.display()
+        )));
+    }
+    std::fs::create_dir_all(&config.storage.data_dir).map_err(|error| {
+        migration_io(
+            "creating restore data directory",
+            &config.storage.data_dir,
+            error,
+        )
+    })?;
+    let _daemon_lock = acquire_daemon_lock_within(&config.storage.data_dir, Duration::ZERO).await?;
+    let active = config.storage.data_dir.join(HIQLITE_ACTIVE_DIRNAME);
+    if path_exists(&active)? {
+        return Err(StoreError::Migration(format!(
+            "refusing restore because {} already exists",
+            active.display()
+        )));
+    }
+    for forbidden in [
+        config.storage.data_dir.join(HIQLITE_INCOMING_DIRNAME),
+        config
+            .storage
+            .data_dir
+            .join(HIQLITE_READDRESS_BACKUP_DIRNAME),
+    ] {
+        if path_exists(&forbidden)? {
+            return Err(StoreError::Migration(format!(
+                "refusing restore because recovery path {} already exists",
+                forbidden.display()
+            )));
+        }
+    }
+
+    let incoming = config.storage.data_dir.join(HIQLITE_INCOMING_DIRNAME);
+    let database = incoming
+        .join("state_machine")
+        .join("db")
+        .join(HIQLITE_DATABASE_FILENAME);
+    std::fs::create_dir_all(database.parent().expect("database has parent"))
+        .map_err(|error| migration_io("creating restore target", &incoming, error))?;
+    let result = (|| {
+        std::fs::copy(archive.join(SQLITE_FILENAME), &database)
+            .map_err(|error| migration_io("copying restored image to", &database, error))?;
+        let mut connection = Connection::open(&database).map_err(|error| {
+            StoreError::Migration(format!(
+                "opening restored image {}: {error}",
+                database.display()
+            ))
+        })?;
+        verify_backup_key(
+            &connection,
+            archive,
+            credential_key_override,
+            manifest.credential_key_id.as_deref(),
+        )?;
+        let (remapped_files, remapped_libraries, remapped_dvr_recordings) =
+            apply_restore_image_changes(&mut connection, &manifest, remaps)?;
+        drop(connection);
+        File::open(&database)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| migration_io("syncing", &database, error))?;
+
+        let key_source = credential_key_override
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| archive.join(crate::secrets::CREDENTIAL_KEY_FILENAME));
+        if key_source.exists() {
+            let target = config
+                .storage
+                .data_dir
+                .join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+            if target.exists() {
+                if sha256_file(&target)? != sha256_file(&key_source)? {
+                    return Err(StoreError::Migration(format!(
+                        "refusing to replace different existing credential key {}",
+                        target.display()
+                    )));
+                }
+            } else {
+                std::fs::copy(&key_source, &target)
+                    .map_err(|error| migration_io("copying credential key to", &target, error))?;
+            }
+            #[cfg(unix)]
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| migration_io("protecting", &target, error))?;
+        }
+
+        let identity = super::initialize_join_identity(
+            &config.storage.data_dir,
+            &manifest.cluster_id,
+            super::SINGLE_VOTER_RAFT_ID,
+        )?;
+        let local = configured_local_peer(config, identity.raft_id)?;
+        let membership = LocalMembership {
+            version: local_membership_version(ClusterRole::Voter),
+            cluster_id: manifest.cluster_id.clone(),
+            node_id: identity.node_id.clone(),
+            raft_id: identity.raft_id,
+            local: local.clone(),
+            bootstrap: vec![local],
+            join_token_digest: None,
+            role: ClusterRole::Voter,
+        };
+        let marker = ActivationMarker {
+            marker_version: ACTIVATION_MARKER_VERSION,
+            cluster_id: manifest.cluster_id.clone(),
+            source_backup_sha256: manifest.image_sha256.clone(),
+            source_schema_version: manifest.replicated_schema_version,
+            replicated_schema_version: manifest.replicated_schema_version,
+            imported_rows: manifest.table_counts.values().sum(),
+            table_hashes: vec![SqliteImportTableDigest {
+                table: "restore_image".to_owned(),
+                row_count: manifest.table_counts.values().sum(),
+                sha256: manifest.image_sha256.clone(),
+            }],
+            admitted_role: Some(ClusterRole::Voter),
+        };
+        write_activation_marker(&incoming, &marker)?;
+        sync_directory(&incoming)?;
+        load_or_create_secrets(&config.storage.data_dir)?;
+        load_or_create_activity_signing_key(&config.storage.data_dir)?;
+        write_local_membership(&config.storage.data_dir, &membership)?;
+        ensure_activated_source_record(&config.storage.data_dir, &marker)?;
+        std::fs::rename(&incoming, &active)
+            .map_err(|error| migration_io("publishing restored target", &active, error))?;
+        sync_directory(&config.storage.data_dir)?;
+        Ok(ClusterRestoreReport {
+            cluster_id: manifest.cluster_id.clone(),
+            source_built_at_unix_ms: manifest.built_at_unix_ms,
+            node_id: Some(identity.node_id),
+            remapped_files,
+            remapped_libraries,
+            remapped_dvr_recordings,
+            verified_only: false,
+        })
+    })();
+    if result.is_err() {
+        let _ = remove_directory_if_present(&incoming);
+    }
+    result
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn verified_backup_manifest(archive: &Path) -> Result<ClusterBackupManifest, StoreError> {
+    let archive_metadata = std::fs::symlink_metadata(archive)
+        .map_err(|error| migration_io("inspecting backup archive", archive, error))?;
+    if !archive.is_absolute()
+        || !archive_metadata.file_type().is_dir()
+        || archive_metadata.file_type().is_symlink()
+    {
+        return Err(StoreError::Migration(format!(
+            "backup archive {} must be an existing absolute directory",
+            archive.display()
+        )));
+    }
+    let manifest_path = archive.join("manifest.json");
+    require_regular_archive_file(&manifest_path)?;
+    let bytes = std::fs::read(&manifest_path)
+        .map_err(|error| migration_io("reading", &manifest_path, error))?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(StoreError::Migration(
+            "backup manifest is oversized".to_owned(),
+        ));
+    }
+    let manifest: ClusterBackupManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| StoreError::Migration(format!("decoding backup manifest: {error}")))?;
+    if manifest.schema_version != 1 || manifest.cluster_id.trim().is_empty() {
+        return Err(StoreError::Migration(
+            "backup manifest version or cluster identity is unsupported".to_owned(),
+        ));
+    }
+    let image = archive.join(SQLITE_FILENAME);
+    require_regular_archive_file(&image)?;
+    let actual_hash = sha256_file(&image)?;
+    let actual_bytes = std::fs::metadata(&image)
+        .map_err(|error| migration_io("reading metadata for", &image, error))?
+        .len();
+    if actual_hash != manifest.image_sha256 || actual_bytes != manifest.image_bytes {
+        return Err(StoreError::Migration(
+            "backup image does not match manifest hash and size".to_owned(),
+        ));
+    }
+    let sums_path = archive.join("SHA256SUMS");
+    require_regular_archive_file(&sums_path)?;
+    let sums = std::fs::read_to_string(&sums_path)
+        .map_err(|error| migration_io("reading", &sums_path, error))?;
+    if sums.len() > 16 * 1024 {
+        return Err(StoreError::Migration(
+            "backup checksum list is oversized".to_owned(),
+        ));
+    }
+    for name in ["manifest.json", SQLITE_FILENAME] {
+        let expected = sha256_file(&archive.join(name))?;
+        if !sums
+            .lines()
+            .any(|line| line == format!("{expected}  {name}"))
+        {
+            return Err(StoreError::Migration(format!(
+                "backup checksum list does not verify {name}"
+            )));
+        }
+    }
+    let key = archive.join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+    match (manifest.credential_key_id.as_deref(), key.exists()) {
+        (Some(expected_id), false) => {
+            return Err(StoreError::Identity(format!(
+                "backup manifest names credential key {expected_id}, but credentials.key is missing"
+            )));
+        }
+        (None, true) => {
+            return Err(StoreError::Identity(
+                "backup contains credentials.key, but the manifest declares no credential key"
+                    .to_owned(),
+            ));
+        }
+        _ => {}
+    }
+    if key.exists() {
+        require_regular_archive_file(&key)?;
+        let expected = sha256_file(&key)?;
+        let name = crate::secrets::CREDENTIAL_KEY_FILENAME;
+        if !sums
+            .lines()
+            .any(|line| line == format!("{expected}  {name}"))
+        {
+            return Err(StoreError::Migration(
+                "backup checksum list does not verify credentials.key".to_owned(),
+            ));
+        }
+    }
+    Ok(manifest)
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn require_regular_archive_file(path: &Path) -> Result<(), StoreError> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| migration_io("inspecting backup member", path, error))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(StoreError::Migration(format!(
+            "backup member {} must be a regular file, not a link or special file",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn open_verified_backup_image(
+    archive: &Path,
+    manifest: &ClusterBackupManifest,
+) -> Result<Connection, StoreError> {
+    let image = archive.join(SQLITE_FILENAME);
+    let connection = Connection::open_with_flags(
+        &image,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| StoreError::Migration(format!("opening backup image: {error}")))?;
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", (), |row| row.get(0))
+        .map_err(|error| StoreError::Migration(format!("checking backup image: {error}")))?;
+    if integrity != "ok" || manifest.integrity_check != "ok" {
+        return Err(StoreError::Migration(format!(
+            "backup image integrity_check returned {integrity:?}"
+        )));
+    }
+    verify_state_machine_snapshot_identity(&image, &manifest.cluster_id)?;
+    Ok(connection)
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn verify_backup_key(
+    connection: &Connection,
+    archive: &Path,
+    credential_key_override: Option<&Path>,
+    expected_key_id: Option<&str>,
+) -> Result<(), StoreError> {
+    let mut census = SealedRowCensus::default();
+    let exists: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='trakt_auth'",
+            (),
+            |row| row.get(0),
+        )
+        .map_err(|error| StoreError::Migration(format!("checking Trakt rows: {error}")))?;
+    if exists != 0 {
+        let mut statement = connection
+            .prepare("SELECT access_token, refresh_token FROM trakt_auth")
+            .map_err(|error| StoreError::Migration(format!("reading Trakt rows: {error}")))?;
+        let rows = statement
+            .query_map((), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| StoreError::Migration(format!("reading Trakt rows: {error}")))?;
+        for row in rows {
+            let (access, refresh) =
+                row.map_err(|error| StoreError::Migration(format!("reading Trakt row: {error}")))?;
+            census.observe_row(
+                &crate::secrets::SealedSecret::from_stored(access),
+                &crate::secrets::SealedSecret::from_stored(refresh),
+            );
+        }
+    }
+    let key = credential_key_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| archive.join(crate::secrets::CREDENTIAL_KEY_FILENAME));
+    if !key.exists() {
+        if let Some(expected) = expected_key_id {
+            return Err(StoreError::Identity(format!(
+                "backup manifest names credential key {expected}, but {} is missing",
+                key.display()
+            )));
+        }
+        if census.sealed_rows() == 0 {
+            return Ok(());
+        }
+    }
+    let key = secrets::load_existing_credential_key(&key, &census)
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+    if expected_key_id.is_some_and(|expected| expected != key.id()) {
+        return Err(StoreError::Identity(format!(
+            "backup manifest names credential key {}, but the supplied key is {}",
+            expected_key_id.unwrap_or_default(),
+            key.id()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn apply_restore_image_changes(
+    connection: &mut Connection,
+    manifest: &ClusterBackupManifest,
+    remaps: &[(PathBuf, PathBuf)],
+) -> Result<(u64, u64, u64), StoreError> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| StoreError::Migration(format!("starting restore transaction: {error}")))?;
+    let mut remapped_files = 0_u64;
+    let mut file_targets = BTreeMap::<String, String>::new();
+    {
+        let mut statement = transaction
+            .prepare("SELECT id, path FROM files ORDER BY id")
+            .map_err(|error| StoreError::Migration(format!("reading restored files: {error}")))?;
+        let rows = statement
+            .query_map((), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| StoreError::Migration(format!("reading restored files: {error}")))?;
+        for row in rows {
+            let (id, old) = row.map_err(|error| {
+                StoreError::Migration(format!("reading restored file: {error}"))
+            })?;
+            let new = remap_path(&old, remaps)?;
+            if new != old {
+                if let Some(collision) = file_targets.insert(new.clone(), old.clone()) {
+                    return Err(StoreError::Migration(format!(
+                        "restore remap makes file paths {collision:?} and {old:?} collide at {new:?}"
+                    )));
+                }
+                transaction
+                    .execute(
+                        "UPDATE files SET path=?1 WHERE id=?2",
+                        rusqlite::params![new, id],
+                    )
+                    .map_err(|error| {
+                        StoreError::Migration(format!("remapping file {old}: {error}"))
+                    })?;
+                remapped_files += 1;
+            }
+        }
+    }
+    let mut remapped_libraries = 0_u64;
+    {
+        let mut statement = transaction
+            .prepare("SELECT id, paths FROM libraries ORDER BY id")
+            .map_err(|error| {
+                StoreError::Migration(format!("reading restored libraries: {error}"))
+            })?;
+        let rows = statement
+            .query_map((), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| {
+                StoreError::Migration(format!("reading restored libraries: {error}"))
+            })?;
+        for row in rows {
+            let (id, raw) = row.map_err(|error| {
+                StoreError::Migration(format!("reading restored library: {error}"))
+            })?;
+            let paths: Vec<String> = serde_json::from_str(&raw).map_err(|error| {
+                StoreError::Migration(format!("decoding library {id} paths: {error}"))
+            })?;
+            let rewritten = paths
+                .iter()
+                .map(|path| remap_path(path, remaps))
+                .collect::<Result<Vec<_>, _>>()?;
+            if rewritten != paths {
+                let encoded = serde_json::to_string(&rewritten).map_err(|error| {
+                    StoreError::Migration(format!("encoding library {id} paths: {error}"))
+                })?;
+                transaction
+                    .execute(
+                        "UPDATE libraries SET paths=?1 WHERE id=?2",
+                        rusqlite::params![encoded, id],
+                    )
+                    .map_err(|error| {
+                        StoreError::Migration(format!("remapping library {id}: {error}"))
+                    })?;
+                transaction
+                    .execute("DELETE FROM library_roots WHERE library_id=?1", [id])
+                    .map_err(|error| {
+                        StoreError::Migration(format!(
+                            "resetting library {id} fingerprint: {error}"
+                        ))
+                    })?;
+                remapped_libraries += 1;
+            }
+        }
+    }
+    let mut remapped_dvr_recordings = 0_u64;
+    let dvr_recordings_exists: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='dvr_recordings'",
+            (),
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            StoreError::Migration(format!("checking restored DVR recordings: {error}"))
+        })?;
+    if dvr_recordings_exists != 0 {
+        let mut statement = transaction
+            .prepare("SELECT id, path FROM dvr_recordings WHERE path IS NOT NULL ORDER BY id")
+            .map_err(|error| {
+                StoreError::Migration(format!("reading restored DVR recordings: {error}"))
+            })?;
+        let rows = statement
+            .query_map((), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| {
+                StoreError::Migration(format!("reading restored DVR recordings: {error}"))
+            })?;
+        for row in rows {
+            let (id, old) = row.map_err(|error| {
+                StoreError::Migration(format!("reading restored DVR recording: {error}"))
+            })?;
+            let new = remap_path(&old, remaps)?;
+            if new != old {
+                transaction
+                    .execute(
+                        "UPDATE dvr_recordings SET path=?1 WHERE id=?2",
+                        rusqlite::params![new, id],
+                    )
+                    .map_err(|error| {
+                        StoreError::Migration(format!("remapping DVR recording {old}: {error}"))
+                    })?;
+                remapped_dvr_recordings += 1;
+            }
+        }
+    }
+    for table in [
+        "media_session_requests",
+        "media_session_preparations",
+        "media_session_terminal_acks",
+        "media_session_producer_recovery",
+        "media_playback_pointers",
+        "media_sessions",
+        "job_leases",
+        "cluster_operation_leases",
+        "cluster_node_removals",
+        "cluster_node_removal_attempts",
+        "cluster_node_removal_intents",
+        "cluster_node_capabilities",
+        "cluster_nodes",
+    ] {
+        let exists: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                StoreError::Migration(format!("checking restore table {table}: {error}"))
+            })?;
+        if exists != 0 {
+            transaction
+                .execute(&format!("DELETE FROM {table}"), ())
+                .map_err(|error| {
+                    StoreError::Migration(format!("clearing restored {table}: {error}"))
+                })?;
+        }
+    }
+    transaction
+        .execute(
+            "INSERT INTO settings(key,value,updated_at) VALUES(?1,?2,?3)
+             ON CONFLICT(key) DO UPDATE SET
+               value=excluded.value, updated_at=excluded.updated_at",
+            rusqlite::params![
+                crate::store::keys::CLUSTER_RESTORE_GENERATION,
+                manifest.built_at_unix_ms.to_string(),
+                manifest.built_at_unix_ms,
+            ],
+        )
+        .map_err(|error| StoreError::Migration(format!("recording restore generation: {error}")))?;
+    transaction
+        .commit()
+        .map_err(|error| StoreError::Migration(format!("committing restore image: {error}")))?;
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", (), |row| row.get(0))
+        .map_err(|error| StoreError::Migration(format!("checking restored image: {error}")))?;
+    if integrity != "ok" {
+        return Err(StoreError::Migration(format!(
+            "restored image integrity_check returned {integrity:?}"
+        )));
+    }
+    Ok((remapped_files, remapped_libraries, remapped_dvr_recordings))
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn remap_path(value: &str, remaps: &[(PathBuf, PathBuf)]) -> Result<String, StoreError> {
+    let path = Path::new(value);
+    for (from, to) in remaps {
+        if !from.is_absolute() || !to.is_absolute() {
+            return Err(StoreError::Migration(
+                "restore remap endpoints must be absolute paths".to_owned(),
+            ));
+        }
+        if path == from || path.starts_with(from) {
+            let suffix = path.strip_prefix(from).map_err(|error| {
+                StoreError::Migration(format!("applying restore remap: {error}"))
+            })?;
+            return Ok(to.join(suffix).to_string_lossy().into_owned());
+        }
+    }
+    Ok(value.to_owned())
+}
+
 #[cfg(feature = "hiqlite-store")]
 fn snapshot_sqlite_file(source: &Path, target: &Path) -> Result<(), StoreError> {
     let parent = target.parent().expect("SQLite snapshot target has parent");
@@ -1526,7 +2489,11 @@ async fn open_active_store_with_key(
         };
         let concrete_store = Arc::new(store);
         let store: Arc<dyn Store> = concrete_store.clone();
-        let replication = status::ReplicationMonitor::replicated(client.clone());
+        let replication = status::ReplicationMonitor::replicated(
+            client.clone(),
+            active.clone(),
+            HIQLITE_DATABASE_FILENAME,
+        );
         let catalogue = CatalogueReader::replicated(
             Arc::clone(&store),
             concrete_store,
@@ -3581,6 +4548,522 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "hiqlite-store")]
+    fn portable_snapshot_fixture(root: &Path, cluster_id: &str) -> PathBuf {
+        let active = root.join(HIQLITE_ACTIVE_DIRNAME);
+        std::fs::create_dir_all(&active).expect("active fixture");
+        write_activation_marker(
+            &active,
+            &ActivationMarker {
+                marker_version: ACTIVATION_MARKER_VERSION,
+                cluster_id: cluster_id.to_owned(),
+                source_backup_sha256: "a".repeat(64),
+                source_schema_version: AUTH_SCHEMA_VERSION,
+                replicated_schema_version: AUTH_SCHEMA_VERSION,
+                imported_rows: 3,
+                table_hashes: vec![SqliteImportTableDigest {
+                    table: "settings".to_owned(),
+                    row_count: 1,
+                    sha256: "b".repeat(64),
+                }],
+                admitted_role: Some(ClusterRole::Voter),
+            },
+        )
+        .expect("activation marker fixture");
+        let snapshot = root.join("published-snapshot");
+        // Build the current production schema. A hand-written subset made the
+        // restore test pass while omitting exactly the durable coordination
+        // tables the restore contract promises to clear.
+        drop(SqliteStore::open(&snapshot).expect("production snapshot schema"));
+        let connection = Connection::open(&snapshot).expect("snapshot fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE _metadata (key TEXT PRIMARY KEY, data BLOB NOT NULL);
+                 INSERT INTO settings(key,value) VALUES('instance.id', 'cluster-backup-test')
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+                 INSERT INTO users(id,username,password_hash,is_admin)
+                   VALUES(1,'restore-admin','hash',1);
+                 INSERT INTO libraries(id,name,kind,paths)
+                   VALUES(1,'Movies','movies','[\"/srv/media\"]');
+                 INSERT INTO library_roots(library_id,fingerprint) VALUES(1, 'old-root');
+                 INSERT INTO items(id,library_id,kind,title,sort_title)
+                   VALUES(1,1,'movie','Movie','Movie');
+                 INSERT INTO files(id,item_id,path,size,mtime)
+                   VALUES(1,1,'/srv/media/movie.mkv',1,1);
+                 INSERT INTO dvr_recordings(
+                   id,origin,channel_id,guide_number,channel_name,airing_start,
+                   airing_end,capture_start,capture_end,title,state,path,
+                   created_at_ms,updated_at_ms)
+                   VALUES('recording-1','manual','channel-1','1','One',1,2,1,2,
+                          'News','done','/srv/media/dvr/news.ts',1,1);
+                 INSERT INTO media_session_requests(
+                   user_id,request_id,request_fingerprint,playback_id,state,
+                   claim_expires_at_ms,incarnation_id,owner_node_id,updated_at_ms)
+                   VALUES(1,'request-1','fingerprint','playback-1','resolved',9,
+                          'incarnation-1','old-node',1);
+                 INSERT INTO media_sessions(
+                   incarnation_id,session_id,user_id,playback_id,
+                   request_fingerprint,owner_node_id,owner_epoch,
+                   lease_expires_at_ms,state,recipe_json,response_json,updated_at_ms)
+                   VALUES('incarnation-1','session-1',1,'playback-1','fingerprint',
+                          'old-node',1,9,'active','{}','{}',1);
+                 INSERT INTO media_playback_pointers(
+                   user_id,playback_id,current_incarnation_id,updated_at_ms)
+                   VALUES(1,'playback-1','incarnation-1',1);
+                 INSERT INTO media_session_preparations(
+                   user_id,playback_id,staged_incarnation_id,
+                   expected_predecessor_incarnation_id,deadline_ms,
+                   created_at_ms,updated_at_ms)
+                   VALUES(1,'playback-2','incarnation-2','incarnation-1',9,1,1);
+                 INSERT INTO media_session_terminal_acks(
+                   incarnation_id,session_id,owner_node_id,owner_epoch,
+                   client_instance_id,sequence,request_fingerprint,response_json,
+                   expires_at_ms,updated_at_ms)
+                   VALUES('incarnation-3','session-3','old-node',1,'client-1',1,
+                          'fingerprint','{}',9,1);
+                 INSERT INTO media_session_producer_recovery(
+                   user_id,playback_id,recovery_epoch,failed_incarnation_id,
+                   failed_producer_attempt,decision_sequence,failed_plan_digest,
+                   alternate_plan_digest,state,created_at_ms,updated_at_ms)
+                   VALUES(1,'playback-1','epoch-1','incarnation-1',1,1,
+                          lower(hex(zeroblob(32))),lower(hex(zeroblob(32))),
+                          'exhausted',1,1);",
+            )
+            .expect("snapshot schema");
+        let metadata = hiqlite::StateMachineData {
+            last_applied_log_id: Some(openraft::LogId::new(
+                openraft::CommittedLeaderId::new(3, 1),
+                7,
+            )),
+            ..Default::default()
+        };
+        let bytes = bincode::serde::encode_to_vec(&metadata, bincode::config::legacy())
+            .expect("snapshot metadata");
+        connection
+            .execute("INSERT INTO _metadata(key,data) VALUES('meta',?1)", [bytes])
+            .expect("metadata row");
+        drop(connection);
+        snapshot
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn cluster_backup_open_descriptor_survives_unlink_and_records_exact_cut() {
+        let data = tempfile::tempdir().expect("data fixture");
+        let destination = tempfile::tempdir().expect("destination fixture");
+        let snapshot = portable_snapshot_fixture(data.path(), "cluster-backup-test");
+        let descriptor = File::open(&snapshot).expect("open snapshot before cleanup");
+        std::fs::remove_file(&snapshot).expect("supersede snapshot");
+
+        let (artifact, manifest) = build_cluster_backup_artifact(
+            descriptor,
+            destination.path(),
+            data.path(),
+            None,
+            "node-a",
+            None,
+            "test-build",
+            7,
+        )
+        .expect("portable artefact from held descriptor");
+
+        assert_eq!(manifest.raft_cut.term, 3);
+        assert_eq!(manifest.raft_cut.index, 7);
+        let connection = Connection::open(artifact.join(SQLITE_FILENAME)).expect("artefact image");
+        let metadata_tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_metadata'",
+                (),
+                |row| row.get(0),
+            )
+            .expect("metadata table count");
+        assert_eq!(metadata_tables, 1);
+        let metadata_rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM _metadata", (), |row| row.get(0))
+            .expect("metadata row count");
+        assert_eq!(metadata_rows, 0);
+        verify_cluster_backup_archive(&artifact, None).expect("verified artefact");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn cluster_backup_refuses_a_declared_missing_key_without_publishing() {
+        let data = tempfile::tempdir().expect("data fixture");
+        let destination = tempfile::tempdir().expect("destination fixture");
+        let snapshot = portable_snapshot_fixture(data.path(), "cluster-backup-test");
+        let missing = data.path().join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+
+        let error = build_cluster_backup_artifact(
+            File::open(&snapshot).expect("snapshot"),
+            destination.path(),
+            data.path(),
+            Some(&missing),
+            "node-a",
+            Some("deadbeef"),
+            "test-build",
+            7,
+        )
+        .expect_err("a declared key must be copied or the build must fail");
+
+        assert!(error.to_string().contains("credential key file"));
+        assert_eq!(
+            std::fs::read_dir(destination.path())
+                .expect("empty destination")
+                .count(),
+            0,
+            "a failed key copy must publish neither staging nor archive"
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn cluster_backup_integrity_failure_cleans_staging_and_publishes_nothing() {
+        let data = tempfile::tempdir().expect("data fixture");
+        let destination = tempfile::tempdir().expect("destination fixture");
+        let snapshot = portable_snapshot_fixture(data.path(), "cluster-backup-test");
+        let connection = Connection::open(&snapshot).expect("corruptible snapshot");
+        connection
+            .execute_batch(
+                "PRAGMA writable_schema=ON;
+                 UPDATE sqlite_master SET rootpage=2147483647
+                   WHERE type='index' AND name='idx_items_library_kind';
+                 PRAGMA writable_schema=OFF;",
+            )
+            .expect("poison an index root page");
+        drop(connection);
+
+        build_cluster_backup_artifact(
+            File::open(&snapshot).expect("snapshot"),
+            destination.path(),
+            data.path(),
+            None,
+            "node-a",
+            None,
+            "test-build",
+            7,
+        )
+        .expect_err("integrity failure must refuse the artefact");
+
+        assert_eq!(
+            std::fs::read_dir(destination.path())
+                .expect("empty destination")
+                .count(),
+            0,
+            "integrity failure must clean staging and never publish"
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn restore_verify_missing_key_is_read_only_and_wrong_key_is_refused() {
+        let data = tempfile::tempdir().expect("data fixture");
+        let destination = tempfile::tempdir().expect("destination fixture");
+        let snapshot = portable_snapshot_fixture(data.path(), "cluster-backup-test");
+        let source_key_path = data.path().join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+        let source_key = CredentialKey::load_or_create(&source_key_path).expect("source key");
+        let (artifact, _) = build_cluster_backup_artifact(
+            File::open(&snapshot).expect("snapshot"),
+            destination.path(),
+            data.path(),
+            Some(&source_key_path),
+            "node-a",
+            Some(source_key.id()),
+            "test-build",
+            7,
+        )
+        .expect("keyed artefact");
+
+        let wrong_key_path = data.path().join("wrong-credentials.key");
+        let wrong_key = CredentialKey::load_or_create(&wrong_key_path).expect("wrong key");
+        assert_ne!(wrong_key.id(), source_key.id());
+        let wrong = verify_cluster_backup_archive(&artifact, Some(&wrong_key_path))
+            .expect_err("wrong override key must be refused");
+        assert!(wrong.to_string().contains("manifest names credential key"));
+
+        std::fs::remove_file(artifact.join(crate::secrets::CREDENTIAL_KEY_FILENAME))
+            .expect("simulate missing archived key");
+        let before = std::fs::read_dir(&artifact)
+            .expect("archive members before verify")
+            .map(|entry| {
+                let entry = entry.expect("archive member");
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(entry.path()).expect("archive member bytes"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let missing = verify_cluster_backup_archive(&artifact, None)
+            .expect_err("missing declared key must be refused");
+        assert!(missing.to_string().contains("credentials.key is missing"));
+        let after = std::fs::read_dir(&artifact)
+            .expect("archive members after verify")
+            .map(|entry| {
+                let entry = entry.expect("archive member");
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(entry.path()).expect("archive member bytes"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(after, before, "verify must be byte-for-byte read-only");
+        assert!(!artifact
+            .join(crate::secrets::CREDENTIAL_KEY_FILENAME)
+            .exists());
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test]
+    async fn restore_archive_newer_schema_refuses_before_creating_the_target() {
+        let data = tempfile::tempdir().expect("data fixture");
+        let destination = tempfile::tempdir().expect("destination fixture");
+        let snapshot = portable_snapshot_fixture(data.path(), "cluster-backup-test");
+        let (artifact, _) = build_cluster_backup_artifact(
+            File::open(&snapshot).expect("snapshot"),
+            destination.path(),
+            data.path(),
+            None,
+            "node-a",
+            None,
+            "test-build",
+            7,
+        )
+        .expect("newer-schema artefact");
+        let manifest_path = artifact.join("manifest.json");
+        let mut manifest: ClusterBackupManifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).expect("manifest bytes"))
+                .expect("manifest");
+        manifest.replicated_schema_version = AUTH_SCHEMA_VERSION + 1;
+        let mut manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("newer manifest");
+        manifest_bytes.push(b'\n');
+        std::fs::write(&manifest_path, manifest_bytes).expect("replace manifest");
+        let sums = format!(
+            "{}  manifest.json\n{}  {SQLITE_FILENAME}\n",
+            sha256_file(&manifest_path).expect("manifest hash"),
+            manifest.image_sha256
+        );
+        std::fs::write(artifact.join("SHA256SUMS"), sums).expect("replace checksums");
+        let target_parent = tempfile::tempdir().expect("target parent");
+        let target = target_parent.path().join("restored");
+        let config = membership_test_config(&target);
+
+        let error = restore_cluster_backup_archive(&artifact, &config, &[], None)
+            .await
+            .expect_err("newer schema must be refused");
+
+        assert!(error.to_string().contains("only knows"));
+        assert!(!target.exists(), "schema refusal must not create a target");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test]
+    async fn restore_archive_remaps_paths_resets_fingerprint_and_mints_fence() {
+        let data = tempfile::tempdir().expect("builder fixture");
+        let destination = tempfile::tempdir().expect("destination fixture");
+        let snapshot = portable_snapshot_fixture(data.path(), "cluster-backup-test");
+        let (artifact, _) = build_cluster_backup_artifact(
+            File::open(&snapshot).expect("snapshot"),
+            destination.path(),
+            data.path(),
+            None,
+            "old-node",
+            None,
+            "test-build",
+            7,
+        )
+        .expect("portable artefact");
+        let target_parent = tempfile::tempdir().expect("target parent");
+        let target = target_parent.path().join("restored");
+        let config = membership_test_config(&target);
+
+        let report = restore_cluster_backup_archive(
+            &artifact,
+            &config,
+            &[(PathBuf::from("/srv/media"), PathBuf::from("/mnt/nas/media"))],
+            None,
+        )
+        .await
+        .expect("offline restore");
+
+        assert_eq!(report.cluster_id, "cluster-backup-test");
+        assert_eq!(report.remapped_files, 1);
+        assert_eq!(report.remapped_libraries, 1);
+        assert_eq!(report.remapped_dvr_recordings, 1);
+        assert_ne!(report.node_id.as_deref(), Some("old-node"));
+        for secret in [
+            RAFT_SECRET_FILENAME,
+            API_SECRET_FILENAME,
+            ACTIVITY_SIGNING_KEY_FILENAME,
+        ] {
+            assert!(target.join(secret).is_file(), "missing fresh {secret}");
+        }
+        let restored = Connection::open(
+            target
+                .join(HIQLITE_ACTIVE_DIRNAME)
+                .join("state_machine/db")
+                .join(HIQLITE_DATABASE_FILENAME),
+        )
+        .expect("restored image");
+        let path: String = restored
+            .query_row("SELECT path FROM files WHERE id=1", (), |row| row.get(0))
+            .expect("restored file path");
+        assert_eq!(path, "/mnt/nas/media/movie.mkv");
+        let roots: i64 = restored
+            .query_row("SELECT COUNT(*) FROM library_roots", (), |row| row.get(0))
+            .expect("root count");
+        assert_eq!(roots, 0);
+        let dvr_path: String = restored
+            .query_row(
+                "SELECT path FROM dvr_recordings WHERE id='recording-1'",
+                (),
+                |row| row.get(0),
+            )
+            .expect("restored DVR path");
+        assert_eq!(dvr_path, "/mnt/nas/media/dvr/news.ts");
+        for table in [
+            "media_session_requests",
+            "media_session_preparations",
+            "media_session_terminal_acks",
+            "media_session_producer_recovery",
+            "media_playback_pointers",
+            "media_sessions",
+        ] {
+            let count: i64 = restored
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), (), |row| {
+                    row.get(0)
+                })
+                .unwrap_or_else(|error| panic!("count restored {table}: {error}"));
+            assert_eq!(count, 0, "restore retained dead coordination in {table}");
+        }
+        let generation: String = restored
+            .query_row(
+                "SELECT value FROM settings WHERE key=?1",
+                [crate::store::keys::CLUSTER_RESTORE_GENERATION],
+                |row| row.get(0),
+            )
+            .expect("restore generation");
+        assert_eq!(generation, report.source_built_at_unix_ms.to_string());
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn restore_archive_from_real_snapshot_starts_as_the_only_voter() {
+        install_default_crypto_provider();
+
+        let source_dir = tempfile::tempdir().expect("source data dir");
+        let source_config = membership_test_config(source_dir.path());
+        drop(
+            SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME))
+                .expect("legacy source store"),
+        );
+        let source = select_daemon_store(&source_config)
+            .await
+            .expect("source voter");
+        let client = source.local_client().expect("source local client");
+        let applied = client
+            .trigger_db_snapshot()
+            .await
+            .expect("trigger snapshot");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let metrics = client.metrics_db().await.expect("snapshot metrics");
+                if metrics
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|log| log.index >= applied)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("snapshot publication deadline");
+        let snapshots = source_dir
+            .path()
+            .join(HIQLITE_ACTIVE_DIRNAME)
+            .join("state_machine/snapshots");
+        let snapshot_id =
+            std::fs::read_to_string(snapshots.join("current")).expect("snapshot pointer");
+        let destination = tempfile::tempdir().expect("backup destination");
+        let key_path = source_dir
+            .path()
+            .join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+        let (artifact, _) = build_cluster_backup_artifact(
+            File::open(snapshots.join(snapshot_id.trim())).expect("published snapshot"),
+            destination.path(),
+            source_dir.path(),
+            Some(&key_path),
+            &source.identity.node_id,
+            Some(source.credential_key.id()),
+            "test-build",
+            applied,
+        )
+        .expect("portable artefact from real snapshot");
+        source.shutdown().await.expect("source voter shutdown");
+        drop(source);
+
+        let target_parent = tempfile::tempdir().expect("target parent");
+        let target = target_parent.path().join("restored");
+        let target_config = membership_test_config(&target);
+        let report = restore_cluster_backup_archive(&artifact, &target_config, &[], None)
+            .await
+            .expect("restore real snapshot");
+        let restored = select_daemon_store(&target_config)
+            .await
+            .expect("restored target starts");
+        let status = restored
+            .membership_manager()
+            .status()
+            .await
+            .expect("restored membership projection");
+        assert_eq!(status.nodes.len(), 1);
+        assert_eq!(
+            status.local_node_id,
+            report.node_id.expect("restored node id")
+        );
+        assert!(status.nodes[0].is_voter);
+        assert!(status.nodes[0].is_leader);
+        restored.shutdown().await.expect("restored voter shutdown");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test]
+    async fn an_accepted_join_that_never_answers_is_reported_as_ambiguous() {
+        use axum::routing::post;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("join mock listener");
+        let address = listener.local_addr().expect("join mock address");
+        tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/join",
+                post(|| async { std::future::pending::<axum::http::StatusCode>().await }),
+            );
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(50))
+            .timeout(Duration::from_millis(50))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("bounded test client");
+        let started = std::time::Instant::now();
+
+        let error = post_join_url(
+            &client,
+            format!("http://{address}/join"),
+            &serde_json::json!({ "token_digest": "accepted" }),
+        )
+        .await
+        .expect_err("the missing response is ambiguous");
+
+        assert!(matches!(error, StoreError::Migration(_)));
+        assert!(error.to_string().contains("join_request_ambiguous"));
+        assert!(error.to_string().contains("re-run the same staged join"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(feature = "hiqlite-store")]
     #[test]
     fn joined_store_open_retries_only_the_explicit_quorum_gap() {
         assert_eq!(REPLICATED_LEADER_RECOVERY_BUDGET, Duration::from_secs(16));
@@ -4475,6 +5958,32 @@ mod tests {
     /// token file, public redeem/finalize wire, local membership state, and
     /// fully-TLS voter startup. The in-process membership harness alone cannot
     /// cover any of these pre-store decisions.
+    /// 496 bytes with every branch boxed (debug, 2026-09-22). With the join,
+    /// reopen and finalize branches awaited inline it measured 9,984, so the
+    /// limit leaves room for ordinary growth and still refuses a branch
+    /// awaited inline again.
+    #[cfg(feature = "hiqlite-store")]
+    const SELECT_DAEMON_STORE_FUTURE_LIMIT: usize = 2048;
+
+    /// `select_daemon_store` is awaited inline by daemon startup and by the
+    /// join tests, so its future lives on the caller's stack. Its branches are
+    /// boxed to keep it small; awaiting one inline again summed every branch's
+    /// state machine into it and overflowed a 2 MiB debug test thread.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn select_daemon_store_future_stays_small() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let config = membership_test_config(data_dir.path());
+        let future = select_daemon_store(&config);
+        let size = std::mem::size_of_val(&future);
+        drop(future);
+        println!("select_daemon_store future: {size} bytes");
+        assert!(
+            size <= SELECT_DAEMON_STORE_FUTURE_LIMIT,
+            "select_daemon_store's future grew to {size} bytes; box the branch that grew it"
+        );
+    }
+
     #[cfg(feature = "hiqlite-store")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {
@@ -4656,22 +6165,24 @@ mod tests {
         let staged_local = configured_local_peer(&joining_config, issued.raft_id)
             .expect("configure the staged peer");
         let issued_digest = join_token_digest(&issued.token);
+        let staged_node_id = staged_identity.node_id.clone();
+        let redeem_request = RedeemJoinRequest {
+            token_digest: issued_digest.clone(),
+            raft_id: issued.raft_id,
+            node_id: staged_node_id.clone(),
+            hostname: "joining-test-node".to_owned(),
+            raft_address: staged_local.raft_address,
+            api_address: staged_local.api_address,
+            http_base: configured_artwork_url(&joining_config)
+                .expect("derive the staged node artwork origin"),
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+            protocol_min: crate::store::AUTH_PROTOCOL_MIN,
+            protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            live_tv_v1: true,
+        };
         coordinator
-            .redeem(&RedeemJoinRequest {
-                token_digest: issued_digest.clone(),
-                raft_id: issued.raft_id,
-                node_id: staged_identity.node_id,
-                hostname: "joining-test-node".to_owned(),
-                raft_address: staged_local.raft_address,
-                api_address: staged_local.api_address,
-                http_base: configured_artwork_url(&joining_config)
-                    .expect("derive the staged node artwork origin"),
-                schema_version: AUTH_SCHEMA_VERSION,
-                protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
-                protocol_min: crate::store::AUTH_PROTOCOL_MIN,
-                protocol_max: crate::store::AUTH_PROTOCOL_MAX,
-                live_tv_v1: true,
-            })
+            .redeem(&redeem_request)
             .await
             .expect("reserve the token to the staged node before its failed start");
         source_client
@@ -4682,6 +6193,14 @@ mod tests {
             )
             .await
             .expect("expire the identity-bound reservation deterministically");
+        // Treat the first successful redemption as an ambiguous transport
+        // outcome: the same staged identity must be able to repeat it after
+        // the reservation's original TTL, rather than losing the node to an
+        // orphaned `redeeming` record.
+        coordinator
+            .redeem(&redeem_request)
+            .await
+            .expect("repeat the expired identity-bound redemption");
         let joined = select_daemon_store(&joining_config)
             .await
             .expect("resume an expired identity-bound join through daemon store selection");
@@ -4698,6 +6217,19 @@ mod tests {
             local.join_token_digest.as_deref(),
             Some(issued_digest.as_str())
         );
+        let finalize_request = FinalizeJoinRequest {
+            token_digest: issued_digest.clone(),
+            raft_id: issued.raft_id,
+            node_id: staged_node_id,
+        };
+        coordinator
+            .finalize(&finalize_request)
+            .await
+            .expect("repeat finalization after the daemon lost its response");
+        coordinator
+            .finalize(&finalize_request)
+            .await
+            .expect("repeated finalization remains idempotent");
 
         // A crash after finalization but before unlink leaves exactly this
         // shape: active target + membership.json + the original token. The
@@ -6127,6 +7659,7 @@ pub mod status {
 
     use std::collections::BTreeSet;
     use std::future::Future;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -6142,6 +7675,15 @@ pub mod status {
         Client, DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot, LocalDbSnapshotMetrics,
         LocalSnapshotTransportStatus,
     };
+
+    /// The Hiqlite client type, re-exported for `tests/hiqlite_tls_provider.rs`.
+    ///
+    /// That test has to build a real client in a test binary of its own, with no
+    /// rustls crypto provider installed first — the state a fresh daemon process
+    /// is in. An integration test cannot see `plurx-core`'s own dependencies, so
+    /// the type has to reach it through here. Not part of the supported surface.
+    #[doc(hidden)]
+    pub use hiqlite::Client as HiqliteClient;
     use std::sync::{Arc, Mutex};
 
     const PASSIVE_METRICS_REFRESH: Duration = Duration::from_secs(5);
@@ -6235,6 +7777,15 @@ pub mod status {
         pub apply_lag_entries: Option<u64>,
     }
 
+    /// Fixed-cardinality sizes sampled from this process's local Hiqlite tree.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct StateMachineBytes {
+        pub db: u64,
+        pub wal: u64,
+        pub snapshots: u64,
+        pub logs: u64,
+    }
+
     /// Store-free view consumed by the Prometheus handler.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct PassiveRaftMetricsView {
@@ -6257,6 +7808,7 @@ pub mod status {
         pub watermark_local_reads_supported: bool,
         pub watermark_errors: u64,
         pub snapshot_metrics: Option<DbSnapshotMetricsSnapshot>,
+        pub state_machine_bytes: Option<StateMachineBytes>,
     }
 
     /// One quorum proof, captured while this node was eligible to serve on it.
@@ -6360,6 +7912,11 @@ pub mod status {
         watermark_local_epoch: AtomicU64,
         watermark_errors: AtomicU64,
         watermark_invalidated: AtomicBool,
+        state_machine_bytes_present: AtomicBool,
+        state_machine_db_bytes: AtomicU64,
+        state_machine_wal_bytes: AtomicU64,
+        state_machine_snapshots_bytes: AtomicU64,
+        state_machine_logs_bytes: AtomicU64,
         sampler_started: AtomicBool,
     }
 
@@ -6372,6 +7929,8 @@ pub mod status {
         watermark_source: bool,
         watermark_requires_local_binding: bool,
         snapshot_metrics: Option<LocalDbSnapshotMetrics>,
+        state_machine_path: Option<PathBuf>,
+        state_machine_filename: Option<String>,
     }
 
     impl PassiveRaftMetrics {
@@ -6383,6 +7942,8 @@ pub mod status {
                 watermark_source: local_source,
                 watermark_requires_local_binding: local_source,
                 snapshot_metrics: None,
+                state_machine_path: None,
+                state_machine_filename: None,
             }
         }
 
@@ -6397,12 +7958,51 @@ pub mod status {
                 watermark_source: true,
                 watermark_requires_local_binding: false,
                 snapshot_metrics: None,
+                state_machine_path: None,
+                state_machine_filename: None,
             }
         }
 
         fn with_snapshot_metrics(mut self, metrics: Option<LocalDbSnapshotMetrics>) -> Self {
             self.snapshot_metrics = metrics;
             self
+        }
+
+        fn with_state_machine_path(
+            mut self,
+            data_dir: PathBuf,
+            filename: impl Into<String>,
+        ) -> Self {
+            self.state_machine_path = Some(data_dir);
+            self.state_machine_filename = Some(filename.into());
+            self
+        }
+
+        fn sample_state_machine_bytes(&self) -> std::io::Result<()> {
+            let (Some(data_dir), Some(filename)) =
+                (&self.state_machine_path, &self.state_machine_filename)
+            else {
+                return Ok(());
+            };
+            let sample = state_machine_bytes(data_dir, filename)?;
+            let sequence = self.begin_write();
+            self.inner
+                .state_machine_db_bytes
+                .store(sample.db, Ordering::Relaxed);
+            self.inner
+                .state_machine_wal_bytes
+                .store(sample.wal, Ordering::Relaxed);
+            self.inner
+                .state_machine_snapshots_bytes
+                .store(sample.snapshots, Ordering::Relaxed);
+            self.inner
+                .state_machine_logs_bytes
+                .store(sample.logs, Ordering::Relaxed);
+            self.inner
+                .state_machine_bytes_present
+                .store(true, Ordering::Relaxed);
+            self.end_write(sequence);
+            Ok(())
         }
 
         /// Construct one current local/quorum proof for deterministic Store
@@ -6729,6 +8329,20 @@ pub mod status {
                 let watermark_errors = self.inner.watermark_errors.load(Ordering::Relaxed);
                 let watermark_invalidated =
                     self.inner.watermark_invalidated.load(Ordering::Relaxed);
+                let state_machine_bytes_present = self
+                    .inner
+                    .state_machine_bytes_present
+                    .load(Ordering::Relaxed);
+                let state_machine_db_bytes =
+                    self.inner.state_machine_db_bytes.load(Ordering::Relaxed);
+                let state_machine_wal_bytes =
+                    self.inner.state_machine_wal_bytes.load(Ordering::Relaxed);
+                let state_machine_snapshots_bytes = self
+                    .inner
+                    .state_machine_snapshots_bytes
+                    .load(Ordering::Relaxed);
+                let state_machine_logs_bytes =
+                    self.inner.state_machine_logs_bytes.load(Ordering::Relaxed);
                 let after = self.inner.sequence.load(Ordering::Acquire);
                 if before == after {
                     let age_seconds =
@@ -6782,6 +8396,14 @@ pub mod status {
                                 == hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION,
                         watermark_errors,
                         snapshot_metrics: self.snapshot_metrics.map(|metrics| metrics.snapshot()),
+                        state_machine_bytes: state_machine_bytes_present.then_some(
+                            StateMachineBytes {
+                                db: state_machine_db_bytes,
+                                wal: state_machine_wal_bytes,
+                                snapshots: state_machine_snapshots_bytes,
+                                logs: state_machine_logs_bytes,
+                            },
+                        ),
                     };
                 }
             }
@@ -7005,6 +8627,46 @@ pub mod status {
         u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
     }
 
+    fn state_machine_bytes(data_dir: &Path, filename: &str) -> std::io::Result<StateMachineBytes> {
+        let state_machine = data_dir.join("state_machine");
+        let database = state_machine.join("db").join(filename);
+        let wal = database.with_file_name(format!("{filename}-wal"));
+        Ok(StateMachineBytes {
+            db: regular_file_bytes(&database)?,
+            wal: regular_file_bytes(&wal)?,
+            snapshots: directory_bytes(&state_machine.join("snapshots"))?,
+            logs: directory_bytes(&data_dir.join("logs"))?,
+        })
+    }
+
+    fn regular_file_bytes(path: &Path) -> std::io::Result<u64> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => Ok(metadata.len()),
+            Ok(_) => Ok(0),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn directory_bytes(path: &Path) -> std::io::Result<u64> {
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        let mut bytes = 0_u64;
+        for entry in entries {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_file() {
+                bytes = bytes.saturating_add(entry.metadata()?.len());
+            } else if file_type.is_dir() {
+                bytes = bytes.saturating_add(directory_bytes(&entry.path())?);
+            }
+        }
+        Ok(bytes)
+    }
+
     #[async_trait::async_trait]
     trait PassiveRaftSource: Send {
         fn snapshot(&self) -> LocalDbRaftSnapshot;
@@ -7098,6 +8760,9 @@ pub mod status {
         S: PassiveRaftSource,
         F: Future<Output = ()> + Send,
     {
+        if let Err(error) = metrics.sample_state_machine_bytes() {
+            tracing::debug!(%error, "local Raft state-machine size sample failed");
+        }
         let initial = source.snapshot();
         if !metrics.publish(&initial) {
             return;
@@ -7107,7 +8772,7 @@ pub mod status {
         refresh.tick().await;
         tokio::pin!(shutdown);
         loop {
-            tokio::select! {
+            let refresh_sizes = tokio::select! {
                 biased;
                 _ = &mut shutdown => return,
                 changed = source.wait_for_change() => {
@@ -7115,8 +8780,14 @@ pub mod status {
                         metrics.record_error();
                         return;
                     }
+                    false
                 }
-                _ = refresh.tick() => {}
+                _ = refresh.tick() => true,
+            };
+            if refresh_sizes {
+                if let Err(error) = metrics.sample_state_machine_bytes() {
+                    tracing::debug!(%error, "local Raft state-machine size sample failed");
+                }
             }
             let sample = source.snapshot();
             if !metrics.publish(&sample) {
@@ -7159,13 +8830,18 @@ pub mod status {
 
         /// Monitor a local Hiqlite voter through the same client the Store uses.
         #[must_use]
-        pub fn replicated(client: Client) -> Self {
+        pub fn replicated(
+            client: Client,
+            data_dir: impl Into<PathBuf>,
+            filename: impl Into<String>,
+        ) -> Self {
             let local_metrics = client.local_db_raft_metrics().ok();
             let snapshot_metrics = client.local_db_snapshot_metrics().ok();
             let wal_status = client.local_db_wal_status().ok();
             let local_transport = client.local_snapshot_transport_status().ok();
             let passive_metrics = PassiveRaftMetrics::new(local_metrics.is_some())
-                .with_snapshot_metrics(snapshot_metrics);
+                .with_snapshot_metrics(snapshot_metrics)
+                .with_state_machine_path(data_dir.into(), filename);
             Self {
                 backend: ReplicationBackend::Replicated,
                 client: Some(client),
@@ -7548,6 +9224,37 @@ pub mod status {
                 committed_index,
                 local_read_protocol_version,
             }
+        }
+
+        #[test]
+        fn state_machine_size_sample_uses_the_fixed_local_components() {
+            let data = tempfile::tempdir().expect("temporary Hiqlite root");
+            let db_dir = data.path().join("state_machine/db");
+            let snapshots = data.path().join("state_machine/snapshots/nested");
+            let logs = data.path().join("logs");
+            std::fs::create_dir_all(&db_dir).expect("database directory");
+            std::fs::create_dir_all(&snapshots).expect("snapshot directory");
+            std::fs::create_dir_all(&logs).expect("log directory");
+            std::fs::write(db_dir.join("plurx.db"), [0_u8; 11]).expect("database fixture");
+            std::fs::write(db_dir.join("plurx.db-wal"), [0_u8; 13]).expect("WAL fixture");
+            std::fs::write(snapshots.join("snapshot"), [0_u8; 17]).expect("snapshot fixture");
+            std::fs::write(logs.join("segment"), [0_u8; 19]).expect("log fixture");
+
+            let metrics = PassiveRaftMetrics::new(true)
+                .with_state_machine_path(data.path().to_owned(), "plurx.db");
+            metrics
+                .sample_state_machine_bytes()
+                .expect("sample state-machine files");
+
+            assert_eq!(
+                metrics.snapshot().state_machine_bytes,
+                Some(StateMachineBytes {
+                    db: 11,
+                    wal: 13,
+                    snapshots: 17,
+                    logs: 19,
+                })
+            );
         }
 
         #[test]

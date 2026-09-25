@@ -17,12 +17,12 @@ use crate::error::StoreError;
 use crate::mediafacts::{FactsRow, MediaFacts};
 use crate::store::{
     directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
-    normalized_directory, ArtworkInventoryItem, ArtworkRepairFence, IdentityRepairBlocker,
-    IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot, IdentityRepairWatch,
-    MediaStore, MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome,
-    IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX,
-    IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX,
-    TOP_LEVEL_ITEM_PREDICATE,
+    item_sort_order_by, normalized_directory, ArtworkInventoryItem, ArtworkRepairFence,
+    IdentityRepairBlocker, IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot,
+    IdentityRepairWatch, MediaStore, MissingFieldOrder, MissingVideoCodecTag, ReconcileOutcome,
+    RootFingerprintStatus, SeriesHintOutcome, IDENTITY_REPAIR_EPISODES_MAX,
+    IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX,
+    IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
 };
 
 pub(super) fn identity_repair_snapshot(
@@ -31,7 +31,7 @@ pub(super) fn identity_repair_snapshot(
     show_ids: &[i64],
 ) -> Result<IdentityRepairSnapshot, StoreError> {
     const REPAIR_ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, year, overview, tmdb_id, imdb_id, season_number, episode_number, air_date, runtime_ms, poster_path, backdrop_path, added_at, updated_at, recorded_at, tags, nfo_seeded_at, metadata_at, artwork_attempted_at, artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source";
-    const REPAIR_FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, video_codec_tag";
+    const REPAIR_FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles";
     if !(IDENTITY_REPAIR_SHOWS_MIN..=IDENTITY_REPAIR_SHOWS_MAX).contains(&show_ids.len())
         || show_ids.iter().any(|id| *id <= 0)
     {
@@ -853,16 +853,7 @@ impl MediaStore for SqliteStore {
     ) -> Result<ItemPage, StoreError> {
         let genre = genre.map(str::to_owned);
         self.with_conn(move |conn| {
-            let order = match sort {
-                ItemSort::Title => "sort_title ASC",
-                ItemSort::Added => "added_at DESC, id DESC",
-                ItemSort::Year => "year IS NULL, year DESC, sort_title ASC",
-                // Best (max) file height per item, highest first; no-height items last.
-                ItemSort::Resolution => {
-                    "COALESCE((SELECT MAX(f.height) FROM files f WHERE f.item_id = items.id), -1) DESC, sort_title ASC"
-                }
-                ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC",
-            };
+            let order = item_sort_order_by(sort);
             // Genres are a JSON array (migration v13), so membership is a
             // `json_each` scan rather than an index probe. Written as
             // "no filter asked, OR the array contains it" in ONE clause so
@@ -874,24 +865,28 @@ impl MediaStore for SqliteStore {
             // typed, and "science fiction" meaning nothing while "Science
             // Fiction" works is not a distinction anybody asked for. ASCII-only
             // folding, which is all TMDB's genre vocabulary needs.
-            const GENRE: &str = "(?4 IS NULL OR EXISTS ( \
+            const GENRE_COUNT: &str = "(?2 IS NULL OR EXISTS ( \
+                 SELECT 1 FROM json_each(items.genres) WHERE value = ?2 COLLATE NOCASE))";
+            const GENRE_PAGE: &str = "(?4 IS NULL OR EXISTS ( \
                  SELECT 1 FROM json_each(items.genres) WHERE value = ?4 COLLATE NOCASE))";
-            // The two zeros fill ?2/?3 (offset and limit), which the count
-            // does not use — the genre clause is shared verbatim with the page
-            // query below and therefore has to keep its ?4. Sharing the string
-            // is the point: two hand-written copies of "does this item have
-            // this genre" is how a total stops agreeing with its page.
+            // Keep the count and page predicates structurally identical while
+            // giving each statement a gap-free binding sequence. The census
+            // below rejects either clause if a future edit breaks that rule.
+            debug_assert_eq!(
+                GENRE_COUNT.replace("?2", "?"),
+                GENRE_PAGE.replace("?4", "?")
+            );
             let total: i64 = conn.query_row(
                 &format!(
                     "SELECT COUNT(*) FROM items WHERE library_id = ?1 AND \
-                     {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE}"
+                     {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_COUNT}"
                 ),
-                params![library_id, 0, 0, genre],
+                params![library_id, genre],
                 |row| row.get(0),
             )?;
             let mut stmt = conn.prepare(&format!(
                 "SELECT {ITEM_COLS} FROM items
-                 WHERE library_id = ?1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE}
+                 WHERE library_id = ?1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_PAGE}
                  ORDER BY {order} LIMIT ?3 OFFSET ?2"
             ))?;
             let items = stmt
@@ -1663,9 +1658,11 @@ impl MediaStore for SqliteStore {
                     video_profile, width, height, bit_depth, hdr, bitrate,
                     audio_streams, subtitle_streams, probe_json, hdr_format, scanned_at,
                     dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present,
-                    video_codec_tag)
+                    video_codec_tag, field_order, max_cll, max_fall,
+                    mastering_max_luminance, luminance_source)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                         ?14, ?15, ?16, ?17, unixepoch(), ?18, ?19, ?20, ?21, ?22, ?23)
+                         ?14, ?15, ?16, ?17, unixepoch(), ?18, ?19, ?20, ?21, ?22, ?23,
+                         ?24, ?25, ?26, ?27, ?28)
                  ON CONFLICT(path) DO UPDATE SET
                      item_id = excluded.item_id,
                      size = excluded.size,
@@ -1689,6 +1686,11 @@ impl MediaStore for SqliteStore {
                      dv_el_present = excluded.dv_el_present,
                      dv_rpu_present = excluded.dv_rpu_present,
                      video_codec_tag = excluded.video_codec_tag,
+                     field_order = excluded.field_order,
+                     max_cll = excluded.max_cll,
+                     max_fall = excluded.max_fall,
+                     mastering_max_luminance = excluded.mastering_max_luminance,
+                     luminance_source = excluded.luminance_source,
                      scanned_at = unixepoch()
                  RETURNING id",
                 params![
@@ -1715,6 +1717,11 @@ impl MediaStore for SqliteStore {
                     probe.dolby_vision.el_present.map(i64::from),
                     probe.dolby_vision.rpu_present.map(i64::from),
                     probe.video_codec_tag,
+                    probe.field_order,
+                    probe.max_cll,
+                    probe.max_fall,
+                    probe.mastering_max_luminance,
+                    probe.luminance_source,
                 ],
                 |row| row.get(0),
             )?;
@@ -1785,6 +1792,43 @@ impl MediaStore for SqliteStore {
                 over_segmented_floor,
                 max_bitrate,
             })
+        })
+        .await
+    }
+
+    async fn add_downloaded_subtitle(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+    ) -> Result<bool, StoreError> {
+        let raw = crate::store::downloaded_subtitles::encode(track)?;
+        let track = track.clone();
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                crate::store::downloaded_subtitles::ADD_DOWNLOADED_SUBTITLE,
+                params![
+                    file_id,
+                    track.source_size,
+                    track.source_mtime,
+                    raw,
+                    track.provider_file_id
+                ],
+            )?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
+    async fn subtitle_candidate_file_ids(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<i64>, StoreError> {
+        self.with_read(move |conn| {
+            Ok(conn
+                .prepare(crate::store::downloaded_subtitles::CANDIDATES)?
+                .query_map(params![after_id, limit.clamp(1, 16)], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?)
         })
         .await
     }
@@ -1913,6 +1957,117 @@ impl MediaStore for SqliteStore {
                     candidate.size,
                     candidate.mtime,
                     candidate.probe_json,
+                ],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn files_missing_field_order(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingFieldOrder>, StoreError> {
+        self.with_conn(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, path, size, mtime, probe_json FROM files
+                  WHERE field_order IS NULL
+                    AND probe_json IS NOT NULL
+                    AND id > ?1
+                  ORDER BY id
+                  LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![after_id, limit.max(0)], |row| {
+                Ok(MissingFieldOrder {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    size: row.get(2)?,
+                    mtime: row.get(3)?,
+                    probe_json: row.get(4)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
+    async fn files_missing_luminance(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError> {
+        self.with_conn(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, path, size, mtime, probe_json FROM files
+                  WHERE hdr IS NOT NULL AND luminance_source IS NULL
+                    AND probe_json IS NOT NULL AND id > ?1
+                  ORDER BY id LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![after_id, limit.max(0)], |row| {
+                Ok(MissingVideoCodecTag {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    size: row.get(2)?,
+                    mtime: row.get(3)?,
+                    probe_json: row.get(4)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
+    async fn set_file_field_order(
+        &self,
+        candidate: &MissingFieldOrder,
+        field_order: &str,
+    ) -> Result<bool, StoreError> {
+        let candidate = candidate.clone();
+        let field_order = field_order.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE files SET field_order = ?1
+                  WHERE id = ?2 AND path = ?3 AND size = ?4 AND mtime = ?5
+                    AND probe_json = ?6 AND field_order IS NULL",
+                params![
+                    field_order,
+                    candidate.id,
+                    candidate.path,
+                    candidate.size,
+                    candidate.mtime,
+                    candidate.probe_json,
+                ],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn set_file_luminance(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        max_cll: Option<i64>,
+        max_fall: Option<i64>,
+        mastering_max_luminance: Option<i64>,
+        source: &str,
+    ) -> Result<bool, StoreError> {
+        let candidate = candidate.clone();
+        let source = source.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE files SET max_cll = ?1, max_fall = ?2,
+                                  mastering_max_luminance = ?3, luminance_source = ?4
+                  WHERE id = ?5 AND path = ?6 AND size = ?7 AND mtime = ?8
+                    AND probe_json = ?9 AND luminance_source IS NULL",
+                params![
+                    max_cll,
+                    max_fall,
+                    mastering_max_luminance,
+                    source,
+                    candidate.id,
+                    candidate.path,
+                    candidate.size,
+                    candidate.mtime,
+                    candidate.probe_json
                 ],
             )? == 1)
         })
@@ -2482,6 +2637,7 @@ mod tests {
                         index: 0,
                         codec: "aac".into(),
                         channels: Some(2),
+                        sample_rate: None,
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -2511,6 +2667,7 @@ mod tests {
                             index: 0,
                             codec: "truehd".into(),
                             channels: Some(8),
+                            sample_rate: None,
                             language: Some("eng".into()),
                             title: None,
                             default: true,
@@ -2519,6 +2676,7 @@ mod tests {
                             index: 1,
                             codec: "eac3".into(),
                             channels: Some(6),
+                            sample_rate: None,
                             language: Some("eng".into()),
                             title: Some("Commentary".into()),
                             default: false,
@@ -2674,6 +2832,7 @@ mod tests {
                                 index: 0,
                                 codec: "truehd".into(),
                                 channels: Some(8),
+                                sample_rate: None,
                                 language: Some("eng".into()),
                                 title: None,
                                 default: true,

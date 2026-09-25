@@ -278,6 +278,39 @@ impl HiqliteAuthStore {
 
 #[async_trait]
 impl FencedPublicationStore for HiqliteAuthStore {
+    async fn add_downloaded_subtitle_fenced(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        let raw = super::downloaded_subtitles::encode(track)?;
+        use super::downloaded_subtitles::ADD_DOWNLOADED_SUBTITLE;
+        let sql = format!("{ADD_DOWNLOADED_SUBTITLE} AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$6 AND owner_node_id=$7 AND fence=$8 AND revision=$9 AND expires_at_ms=$10)");
+        let counts = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![(
+                    sql,
+                    params!(
+                        file_id,
+                        track.source_size,
+                        track.source_mtime,
+                        raw,
+                        track.provider_file_id,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    ),
+                )],
+            )
+            .await?;
+        Ok(counts.first().copied() == Some(1))
+    }
     async fn apply_identity_repair_fenced(
         &self,
         snapshot: &IdentityRepairSnapshot,
@@ -1315,11 +1348,13 @@ impl FencedPublicationStore for HiqliteAuthStore {
                     video_profile, width, height, bit_depth, hdr, bitrate,
                     audio_streams, subtitle_streams, probe_json, hdr_format, scanned_at,
                     dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present,
-                    video_codec_tag)
+                    video_codec_tag, field_order, max_cll, max_fall,
+                    mastering_max_luminance, luminance_source)
                    SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24 WHERE EXISTS (
-                   SELECT 1 FROM job_leases WHERE resource = $25 AND owner_node_id = $26
-                     AND fence = $27 AND revision = $28 AND expires_at_ms = $29)
+                        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
+                        $25, $26, $27, $28, $29 WHERE EXISTS (
+                   SELECT 1 FROM job_leases WHERE resource = $30 AND owner_node_id = $31
+                     AND fence = $32 AND revision = $33 AND expires_at_ms = $34)
                  ON CONFLICT(path) DO UPDATE SET
                    item_id = excluded.item_id, size = excluded.size, mtime = excluded.mtime,
                    duration_ms = excluded.duration_ms, container = excluded.container,
@@ -1334,6 +1369,10 @@ impl FencedPublicationStore for HiqliteAuthStore {
                    dv_el_present = excluded.dv_el_present,
                    dv_rpu_present = excluded.dv_rpu_present,
                    video_codec_tag = excluded.video_codec_tag,
+                   field_order = excluded.field_order,
+                   max_cll = excluded.max_cll, max_fall = excluded.max_fall,
+                   mastering_max_luminance = excluded.mastering_max_luminance,
+                   luminance_source = excluded.luminance_source,
                    scanned_at = excluded.scanned_at"
                     .to_owned(),
                 params!(
@@ -1361,6 +1400,11 @@ impl FencedPublicationStore for HiqliteAuthStore {
                     probe.dolby_vision.el_present.map(i64::from),
                     probe.dolby_vision.rpu_present.map(i64::from),
                     probe.video_codec_tag.as_deref(),
+                    probe.field_order.as_deref(),
+                    probe.max_cll,
+                    probe.max_fall,
+                    probe.mastering_max_luminance,
+                    probe.luminance_source.as_deref(),
                     lease.resource.as_str(),
                     lease.owner_node_id.as_str(),
                     lease_i64("fence", lease.fence)?,

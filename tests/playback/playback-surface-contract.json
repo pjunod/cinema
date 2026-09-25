@@ -237,7 +237,8 @@
         "startup_timeout",
         "media_owner_transition",
         "vod_index_pending",
-        "vod_engine_unattested"
+        "vod_engine_unattested",
+        "transcode_capacity_pending"
       ],
       "retryable": true
     },
@@ -290,6 +291,14 @@
       "id": "control_hold",
       "context": "attached",
       "class": "hold"
+    },
+    {
+      "id": "system_interruption",
+      "context": "attached",
+      "class": "hold",
+      "retired_by": [
+        "system_resumed"
+      ]
     },
     {
       "id": "media_waiting",
@@ -354,7 +363,7 @@
     "A fault about the ATTACHED media carries `attached` and no `intent`; it is retired by that media's presentation evidence.",
     "A fault about a PENDING DESTINATION carries an `intent`. Evidence never retires it, with one exception the class table states outright: `refused` also retires on `refused_progress_ms` of continuous presentation, because a viewer whose picture has been fine for that long has been told.",
     "A fault whose `attached` generation is retired stops being about anything and is dropped (`surface_cleared {by: attached_retired}`). That is identity, not one of the class's `retired_by` rules, so it applies to blocking faults too — otherwise a `stopped` prompt would outlive the attempt it described and sit over the next one.",
-    "Each retirement reason is a property of the CLASS, not of the event: `intent_settled` retires only classes whose `retired_by` names it, so a prompt the viewer has to answer is not swept away by a seek landing underneath it. `attached_retired` is the one exception, and the note above says why.",
+    "A retirement reason normally comes from the CLASS, but a source may declare an explicit `retired_by` override when its lifecycle is narrower. `system_interruption` uses that override because `system_resumed` retires that hold without retiring unrelated holds. `attached_retired` is an identity rule rather than either kind of retirement declaration, and the note above says why.",
     "`owner_success: G` is the recovery owner reporting that its recovery produced attached generation G. There is one recovery owner per player, so it retires every `recovering` fault, not only the ones about the generation it replaced.",
     "`playback_not_requested` is the viewer no longer wanting media. A `buffering` fault is about a player that WANTS it — the wait is only a wait while something is trying to play — so a pause makes the fault about nothing and it is retired. It is on `buffering` and on no other class: a `preparing` start has not been paused by a viewer who has not seen it yet, and a blocking prompt is answered by the viewer rather than by a transport change. Resuming raises nothing back; the raise sites decide what comes back, which is the same rule every other retirement follows."
   ],
@@ -365,6 +374,49 @@
     "surface_log_only"
   ],
   "cases": [
+    {
+      "name": "system_interruption_survives_hold_timer_and_clears_on_resume",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 1000,
+          "system_paused": true
+        },
+        {
+          "t": 32000,
+          "tick": true
+        },
+        {
+          "t": 33000,
+          "system_paused": false
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "banner",
+          "class": "hold",
+          "source": "system_interruption",
+          "title": "Paused — call in progress",
+          "detail": "Paused — audio interrupted"
+        },
+        {
+          "at": 32000,
+          "surface": "banner",
+          "source": "system_interruption"
+        },
+        {
+          "at": 33000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
     {
       "name": "buffering_retired_by_unbroken_presentation",
       "events": [

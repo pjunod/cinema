@@ -6,7 +6,9 @@
 //! across every container. The raw JSON is retained verbatim so the Phase 2
 //! decision engine can consult fields we don't model yet.
 
+use std::ffi::OsString;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -20,6 +22,57 @@ fn ffprobe_bin() -> String {
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "ffprobe".to_owned())
+}
+
+/// A scan probe may read a large media file across a cold NAS mount. This is a
+/// hang ceiling, not a healthy-probe latency target.
+const SCAN_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Sixteen times the largest observed streams-and-chapters document, while
+/// still keeping a flooding child bounded.
+const SCAN_PROBE_MAX_BYTES: usize = 16 * 1024 * 1024;
+const FRAME_LUMINANCE_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+const FRAME_LUMINANCE_PROBE_MAX_BYTES: usize = 256 * 1024;
+
+struct ProbeInvocation {
+    program: OsString,
+    args: Vec<OsString>,
+    wall_time: Duration,
+    reporter: Option<String>,
+    #[cfg(test)]
+    synthetic_stdout: Option<Vec<u8>>,
+}
+
+fn probe_invocation(path: &Path) -> ProbeInvocation {
+    #[cfg(test)]
+    if let Some(invocation) = tests::fixture_invocation(path) {
+        return invocation;
+    }
+
+    let program = ffprobe_bin();
+    ProbeInvocation {
+        program: program.clone().into(),
+        args: vec![
+            "-v".into(),
+            "error".into(),
+            "-print_format".into(),
+            "json".into(),
+            "-show_format".into(),
+            "-show_streams".into(),
+            // Chapters ride along here because the alternative is probing for
+            // them when someone presses Play — a second ffprobe of a
+            // NAS-mounted file on the click-to-first-frame path, paid every
+            // single time, for data that cannot change between scans. A file
+            // with no chapters still reports `"chapters": []`, so the key's
+            // *presence* is what tells a current probe from one taken before
+            // this landed (see `markers_for` in plurxd).
+            "-show_chapters".into(),
+            path.as_os_str().to_owned(),
+        ],
+        wall_time: SCAN_PROBE_TIMEOUT,
+        reporter: Some(program),
+        #[cfg(test)]
+        synthetic_stdout: None,
+    }
 }
 
 /// The field a probe document carries to name the FFprobe build that wrote
@@ -192,43 +245,62 @@ pub async fn probe(path: &Path) -> Result<ProbeResult, ProbeError> {
     // failure it holds the one thing worth reporting — *why* ffprobe refused.
     // "Permission denied" and "Invalid data found" are opposite problems with
     // opposite fixes, and an exit code alone tells them apart for nobody.
-    let output = tokio::process::Command::new(ffprobe_bin())
-        .args([
-            "-v",
-            "error",
-            "-print_format",
-            "json",
-            "-show_format",
-            "-show_streams",
-            // Chapters ride along here because the alternative is probing for
-            // them when someone presses Play — a second ffprobe of a
-            // NAS-mounted file on the click-to-first-frame path, paid every
-            // single time, for data that cannot change between scans. A file
-            // with no chapters still reports `"chapters": []`, so the key's
-            // *presence* is what tells a current probe from one taken before
-            // this landed (see `markers_for` in plurxd).
-            "-show_chapters",
-        ])
-        .arg(path)
-        .output()
+    let invocation = probe_invocation(path);
+    let path_display = path.display().to_string();
+    #[cfg(test)]
+    let synthetic_stdout = invocation.synthetic_stdout.clone();
+    #[cfg(not(test))]
+    let synthetic_stdout: Option<Vec<u8>> = None;
+    let stdout = if let Some(stdout) = synthetic_stdout {
+        stdout
+    } else {
+        let output = crate::process::bounded::output(
+            &invocation.program,
+            &invocation.args,
+            invocation.wall_time,
+            SCAN_PROBE_MAX_BYTES,
+        )
         .await
-        .map_err(|e| ProbeError::Spawn(e.to_string()))?;
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => ProbeError::Spawn(error.to_string()),
+            std::io::ErrorKind::TimedOut => ProbeError::Transient {
+                path: path_display.clone(),
+                reason: format!("ffprobe exceeded {} s", invocation.wall_time.as_secs_f64()),
+            },
+            _ => ProbeError::Transient {
+                path: path_display.clone(),
+                reason: error.to_string(),
+            },
+        })?;
 
-    if !output.status.success() {
-        return Err(ProbeError::Failed {
-            path: path.display().to_string(),
-            code: output.status.code(),
-            reason: probe_failure_reason(&output.stderr),
-        });
-    }
-    let mut json: Value = serde_json::from_slice(&output.stdout)
+        if !output.status.success() {
+            return Err(ProbeError::Failed {
+                path: path_display,
+                code: output.status.code(),
+                reason: probe_failure_reason(&output.stderr),
+            });
+        }
+        output.stdout
+    };
+    let mut json: Value = serde_json::from_slice(&stdout)
         .map_err(|e| ProbeError::Parse(format!("ffprobe json: {e}")))?;
     // Stamped before the document is retained, so a later comparison against a
     // fresh probe can tell an unchanged source from a changed reporter.
-    if let Some(reporter) = reporter_identity_of(&ffprobe_bin()).await {
-        stamp_reporter(&mut json, reporter);
+    if let Some(reporter_bin) = invocation.reporter {
+        if let Some(reporter) = reporter_identity_of(&reporter_bin).await {
+            stamp_reporter(&mut json, reporter);
+        }
     }
     let mut result = parse_probe_json(&json);
+    // `luminance_source` is set from the selected stream's transfer rather
+    // than its display label. A Dolby Vision stream can still carry a PQ or
+    // HLG base layer; `detect_hdr` intentionally labels that stream DOVI first,
+    // but that label must not suppress the bounded frame observation.
+    if result.luminance_source.as_deref() == Some("none") {
+        if let Some(frame) = probe_first_frame_luminance(path).await {
+            apply_frame_luminance(&mut result, &frame);
+        }
+    }
     // Container comes from the extension — the decision engine keys on it
     // ("mkv" → remux, "mp4" → direct) and it's more reliable than ffmpeg's
     // comma-joined format_name.
@@ -237,6 +309,36 @@ pub async fn probe(path: &Path) -> Result<ProbeResult, ProbeError> {
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase());
     Ok(result)
+}
+
+async fn probe_first_frame_luminance(path: &Path) -> Option<Value> {
+    let output = crate::process::bounded::output(
+        ffprobe_bin(),
+        &[
+            OsString::from("-v"),
+            OsString::from("error"),
+            OsString::from("-print_format"),
+            OsString::from("json"),
+            OsString::from("-select_streams"),
+            // Uppercase `V` excludes attached pictures, matching the primary
+            // probe's first-playable-video selection.
+            OsString::from("V:0"),
+            OsString::from("-show_frames"),
+            OsString::from("-read_intervals"),
+            OsString::from("%+#1"),
+            OsString::from("-show_entries"),
+            OsString::from("frame_side_data=side_data_type,max_content,max_average,max_luminance"),
+            path.as_os_str().to_owned(),
+        ],
+        FRAME_LUMINANCE_PROBE_TIMEOUT,
+        FRAME_LUMINANCE_PROBE_MAX_BYTES,
+    )
+    .await
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
 }
 
 /// Pure parser over ffprobe JSON — unit-testable without spawning anything.
@@ -278,6 +380,7 @@ pub fn parse_probe_json(json: &Value) -> ProbeResult {
                 video_seen = true;
                 result.video_codec = str_field(stream, "codec_name");
                 result.video_codec_tag = video_codec_tag(stream);
+                result.field_order = str_field(stream, "field_order");
                 result.video_profile = str_field(stream, "profile");
                 result.width = int_field(stream, "width");
                 result.height = int_field(stream, "height");
@@ -285,12 +388,16 @@ pub fn parse_probe_json(json: &Value) -> ProbeResult {
                 result.hdr = detect_hdr(stream);
                 result.hdr_format = detect_hdr_format(stream);
                 result.dolby_vision = detect_dolby_vision(stream);
+                apply_stream_luminance(&mut result, stream);
             }
             Some("audio") => {
                 result.audio_streams.push(AudioStream {
                     index: audio_i,
                     codec: str_field(stream, "codec_name").unwrap_or_default(),
                     channels: int_field(stream, "channels"),
+                    sample_rate: str_field(stream, "sample_rate")
+                        .and_then(|rate| rate.parse::<i64>().ok())
+                        .filter(|rate| *rate > 0),
                     language: tag(stream, "language"),
                     title: tag(stream, "title"),
                     default: disposition(stream, "default"),
@@ -313,6 +420,74 @@ pub fn parse_probe_json(json: &Value) -> ProbeResult {
         }
     }
     result
+}
+
+fn apply_stream_luminance(result: &mut ProbeResult, stream: &Value) {
+    let side_data = stream.get("side_data_list").and_then(Value::as_array);
+    let found = side_data
+        .map(|entries| apply_luminance_entries(result, entries))
+        .unwrap_or(false);
+    if matches!(
+        stream.get("color_transfer").and_then(Value::as_str),
+        Some("smpte2084" | "arib-std-b67")
+    ) {
+        result.luminance_source = Some(if found { "stream" } else { "none" }.to_owned());
+    }
+}
+
+fn apply_frame_luminance(result: &mut ProbeResult, document: &Value) {
+    let found = document
+        .get("frames")
+        .and_then(Value::as_array)
+        .and_then(|frames| frames.first())
+        .and_then(|frame| frame.get("side_data_list"))
+        .and_then(Value::as_array)
+        .map(|entries| apply_luminance_entries(result, entries))
+        .unwrap_or(false);
+    if found {
+        result.luminance_source = Some("frame".to_owned());
+    }
+}
+
+fn apply_luminance_entries(result: &mut ProbeResult, entries: &[Value]) -> bool {
+    let mut found = false;
+    for side_data in entries {
+        match side_data.get("side_data_type").and_then(Value::as_str) {
+            Some(kind) if kind.contains("Content light level") => {
+                result.max_cll = positive_integer(side_data, "max_content");
+                result.max_fall = positive_integer(side_data, "max_average");
+                found |= result.max_cll.is_some() || result.max_fall.is_some();
+            }
+            Some(kind) if kind.contains("Mastering display metadata") => {
+                result.mastering_max_luminance = side_data
+                    .get("max_luminance")
+                    .and_then(Value::as_str)
+                    .and_then(parse_positive_rational_nits);
+                found |= result.mastering_max_luminance.is_some();
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+fn positive_integer(value: &Value, field: &str) -> Option<i64> {
+    value
+        .get(field)
+        .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
+        .filter(|value| *value > 0)
+}
+
+fn parse_positive_rational_nits(value: &str) -> Option<i64> {
+    let (numerator, denominator) = value.split_once('/')?;
+    let numerator = numerator.parse::<i128>().ok()?;
+    let denominator = denominator.parse::<i128>().ok()?;
+    if numerator <= 0 || denominator <= 0 {
+        return None;
+    }
+    i64::try_from(numerator / denominator)
+        .ok()
+        .filter(|value| *value > 0)
 }
 
 /// Normalize a container timestamp ("2019-06-14T18:22:03.000000Z",
@@ -557,9 +732,259 @@ fn detect_hdr_format(stream: &Value) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    #[derive(Clone, Copy)]
+    pub(crate) enum FixtureMode {
+        SleepDeadline,
+        SleepDrop,
+        Flood,
+        Fail,
+        SleepThenJson,
+    }
+
+    struct Fixture {
+        mode: FixtureMode,
+        calls: Arc<AtomicUsize>,
+        wall_time: Duration,
+    }
+
+    static FIXTURES: OnceLock<Mutex<HashMap<std::path::PathBuf, Fixture>>> = OnceLock::new();
+
+    pub(crate) struct FixtureGuard {
+        path: std::path::PathBuf,
+        pub(crate) calls: Arc<AtomicUsize>,
+    }
+
+    impl Drop for FixtureGuard {
+        fn drop(&mut self) {
+            FIXTURES
+                .get_or_init(Default::default)
+                .lock()
+                .expect("fixture registry")
+                .remove(&self.path);
+        }
+    }
+
+    pub(crate) fn install_fixture(
+        path: &Path,
+        mode: FixtureMode,
+        wall_time: Duration,
+    ) -> FixtureGuard {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let replaced = FIXTURES
+            .get_or_init(Default::default)
+            .lock()
+            .expect("fixture registry")
+            .insert(
+                path.clone(),
+                Fixture {
+                    mode,
+                    calls: Arc::clone(&calls),
+                    wall_time,
+                },
+            );
+        assert!(replaced.is_none(), "one fixture owns each media path");
+        FixtureGuard { path, calls }
+    }
+
+    pub(super) fn fixture_invocation(path: &Path) -> Option<ProbeInvocation> {
+        let registry = FIXTURES.get_or_init(Default::default);
+        let registry = registry.lock().expect("fixture registry");
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let fixture = registry.get(&canonical)?;
+        let call = fixture.calls.fetch_add(1, Ordering::Relaxed);
+        let synthetic_stdout = matches!(fixture.mode, FixtureMode::SleepThenJson) && call > 0;
+        let child = match (fixture.mode, call) {
+            (FixtureMode::SleepDeadline, _) => "scan::probe::tests::fixture_child_sleep_deadline",
+            (FixtureMode::SleepDrop, _) => "scan::probe::tests::fixture_child_sleep_drop",
+            (FixtureMode::SleepThenJson, 0) => "scan::probe::tests::fixture_child_sleep_sequence",
+            (FixtureMode::Flood, _) => "scan::probe::tests::fixture_child_flood",
+            (FixtureMode::Fail, _) => "scan::probe::tests::fixture_child_fail",
+            (FixtureMode::SleepThenJson, _) => "scan::probe::tests::fixture_child_json",
+        };
+        Some(ProbeInvocation {
+            program: std::env::current_exe()
+                .expect("test executable")
+                .into_os_string(),
+            args: vec!["--exact".into(), child.into(), "--nocapture".into()],
+            wall_time: fixture.wall_time,
+            reporter: None,
+            synthetic_stdout: synthetic_stdout
+                .then(|| br#"{"format":{"duration":"1.0"},"streams":[]}"#.to_vec()),
+        })
+    }
+
+    fn invoked_as_child(name: &str) -> bool {
+        let args = std::env::args().collect::<Vec<_>>();
+        args.windows(2)
+            .any(|pair| pair[0] == "--exact" && pair[1] == name)
+    }
+
+    fn child_pid_file(mode: &str) -> std::path::PathBuf {
+        let executable = std::env::current_exe().expect("test executable");
+        let name = executable
+            .file_name()
+            .expect("test executable name")
+            .to_string_lossy();
+        std::env::temp_dir().join(format!("plurx-scan-probe-{name}-{mode}.pid"))
+    }
+
+    #[test]
+    fn fixture_child_sleep_deadline() {
+        if !invoked_as_child("scan::probe::tests::fixture_child_sleep_deadline") {
+            return;
+        }
+        std::fs::write(
+            child_pid_file("sleep-deadline"),
+            std::process::id().to_string(),
+        )
+        .expect("publish child pid");
+        std::thread::sleep(Duration::from_secs(300));
+    }
+
+    #[test]
+    fn fixture_child_sleep_drop() {
+        if !invoked_as_child("scan::probe::tests::fixture_child_sleep_drop") {
+            return;
+        }
+        std::fs::write(child_pid_file("sleep-drop"), std::process::id().to_string())
+            .expect("publish child pid");
+        std::thread::sleep(Duration::from_secs(300));
+    }
+
+    #[test]
+    fn fixture_child_sleep_sequence() {
+        if !invoked_as_child("scan::probe::tests::fixture_child_sleep_sequence") {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(300));
+    }
+
+    #[test]
+    fn fixture_child_flood() {
+        if !invoked_as_child("scan::probe::tests::fixture_child_flood") {
+            return;
+        }
+        std::fs::write(child_pid_file("flood"), std::process::id().to_string())
+            .expect("publish child pid");
+        let chunk = vec![b'{'; 64 * 1024];
+        let mut stdout = std::io::stdout().lock();
+        for _ in 0..1024 {
+            stdout.write_all(&chunk).expect("flood stdout");
+        }
+    }
+
+    #[test]
+    fn fixture_child_fail() {
+        if !invoked_as_child("scan::probe::tests::fixture_child_fail") {
+            return;
+        }
+        std::io::stderr()
+            .write_all(b"/media/fixture.mkv: Permission denied\n")
+            .expect("failure stderr");
+        std::process::exit(13);
+    }
+
+    #[test]
+    fn fixture_child_json() {
+        if !invoked_as_child("scan::probe::tests::fixture_child_json") {
+            return;
+        }
+        std::io::stdout()
+            .write_all(br#"{"format":{"duration":"1.0"},"streams":[]}"#)
+            .expect("probe json");
+    }
+
+    async fn wait_for_pid(mode: &str) -> u32 {
+        let path = child_pid_file(mode);
+        for _ in 0..200 {
+            if let Ok(pid) = std::fs::read_to_string(&path) {
+                return pid.parse().expect("numeric child pid");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("fixture child did not publish {}", path.display());
+    }
+
+    async fn assert_pid_gone(pid: u32) {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            !crate::process::signal(pid, crate::process::ProcessSignal::Terminate)
+                .expect("inspect fixture child"),
+            "fixture child {pid} survived for two seconds"
+        );
+    }
+
+    fn media_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let directory = tempfile::tempdir().expect("media fixture");
+        let path = directory.path().join("fixture.mkv");
+        std::fs::write(&path, b"fixture").expect("media fixture bytes");
+        (directory, path)
+    }
+
+    #[tokio::test]
+    async fn sleeping_probe_is_transient_and_reaped() {
+        let _ = std::fs::remove_file(child_pid_file("sleep-deadline"));
+        let (_directory, path) = media_fixture();
+        let _fixture = install_fixture(
+            &path,
+            FixtureMode::SleepDeadline,
+            Duration::from_millis(200),
+        );
+        let started = tokio::time::Instant::now();
+        let error = probe(&path).await.expect_err("sleeping probe times out");
+        assert!(matches!(error, ProbeError::Transient { .. }));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let pid = wait_for_pid("sleep-deadline").await;
+        assert_pid_gone(pid).await;
+    }
+
+    #[tokio::test]
+    async fn flooding_probe_is_capped_drained_and_reaped() {
+        let _ = std::fs::remove_file(child_pid_file("flood"));
+        let (_directory, path) = media_fixture();
+        let _fixture = install_fixture(&path, FixtureMode::Flood, Duration::from_secs(5));
+        let error = probe(&path).await.expect_err("flood is not JSON");
+        assert!(matches!(error, ProbeError::Parse(_)));
+        let pid = wait_for_pid("flood").await;
+        assert_pid_gone(pid).await;
+    }
+
+    #[tokio::test]
+    async fn dropping_probe_future_reaps_its_child() {
+        let _ = std::fs::remove_file(child_pid_file("sleep-drop"));
+        let (_directory, path) = media_fixture();
+        let _fixture = install_fixture(&path, FixtureMode::SleepDrop, Duration::from_secs(300));
+        let task = tokio::spawn({
+            let path = path.clone();
+            async move { probe(&path).await }
+        });
+        let pid = wait_for_pid("sleep-drop").await;
+        task.abort();
+        let _ = task.await;
+        assert_pid_gone(pid).await;
+    }
+
+    #[tokio::test]
+    async fn failed_probe_keeps_its_stderr_reason() {
+        let (_directory, path) = media_fixture();
+        let _fixture = install_fixture(&path, FixtureMode::Fail, Duration::from_secs(5));
+        let error = probe(&path)
+            .await
+            .expect_err("fixture exits unsuccessfully");
+        match error {
+            ProbeError::Failed { reason, .. } => assert_eq!(reason, "Permission denied"),
+            other => panic!("expected permanent probe failure, got {other}"),
+        }
+    }
 
     #[test]
     fn parses_hdr10_movie() {
@@ -570,6 +995,7 @@ mod tests {
                   "width": 3840, "height": 2160, "pix_fmt": "yuv420p10le",
                   "color_transfer": "smpte2084" },
                 { "codec_type": "audio", "codec_name": "truehd", "channels": 8,
+                  "sample_rate": "48000",
                   "disposition": { "default": 1 }, "tags": { "language": "eng" } },
                 { "codec_type": "audio", "codec_name": "ac3", "channels": 6,
                   "tags": { "language": "fre" } },
@@ -588,10 +1014,87 @@ mod tests {
         assert_eq!(p.audio_streams.len(), 2);
         assert_eq!(p.audio_streams[0].codec, "truehd");
         assert_eq!(p.audio_streams[0].channels, Some(8));
+        assert_eq!(p.audio_streams[0].sample_rate, Some(48_000));
         assert!(p.audio_streams[0].default);
         assert_eq!(p.audio_streams[1].index, 1);
         assert_eq!(p.subtitle_streams.len(), 1);
         assert_eq!(p.subtitle_streams[0].language.as_deref(), Some("eng"));
+    }
+
+    #[test]
+    fn parses_stream_luminance_metadata_in_source_units() {
+        let document = json!({"streams": [{
+            "codec_type": "video",
+            "color_transfer": "smpte2084",
+            "side_data_list": [
+                {"side_data_type": "Content light level metadata",
+                 "max_content": 4000, "max_average": 1000},
+                {"side_data_type": "Mastering display metadata",
+                 "max_luminance": "40000000/10000"}
+            ]
+        }]});
+        let result = parse_probe_json(&document);
+        assert_eq!(result.max_cll, Some(4000));
+        assert_eq!(result.max_fall, Some(1000));
+        assert_eq!(result.mastering_max_luminance, Some(4000));
+        assert_eq!(result.luminance_source.as_deref(), Some("stream"));
+    }
+
+    #[test]
+    fn frame_luminance_upgrades_an_hdr_stream_observed_without_metadata() {
+        let mut result = parse_probe_json(&json!({"streams": [{
+            "codec_type": "video", "color_transfer": "smpte2084"
+        }]}));
+        assert_eq!(result.luminance_source.as_deref(), Some("none"));
+        apply_frame_luminance(
+            &mut result,
+            &json!({"frames": [{"side_data_list": [{
+                "side_data_type": "Content light level metadata",
+                "max_content": "1000", "max_average": "400"
+            }]}]}),
+        );
+        assert_eq!(result.max_cll, Some(1000));
+        assert_eq!(result.max_fall, Some(400));
+        assert_eq!(result.luminance_source.as_deref(), Some("frame"));
+    }
+
+    #[test]
+    fn frame_luminance_upgrades_dolby_vision_with_a_pq_base_layer() {
+        let mut result = parse_probe_json(&json!({"streams": [{
+            "codec_type": "video",
+            "color_transfer": "smpte2084",
+            "side_data_list": [{
+                "side_data_type": "DOVI configuration record",
+                "dv_profile": 7,
+                "dv_bl_signal_compatibility_id": 1
+            }]
+        }]}));
+        assert_eq!(result.hdr.as_deref(), Some("dolby_vision"));
+        assert_eq!(result.luminance_source.as_deref(), Some("none"));
+
+        apply_frame_luminance(
+            &mut result,
+            &json!({"frames": [{"side_data_list": [{
+                "side_data_type": "Content light level metadata",
+                "max_content": "4000",
+                "max_average": "1000"
+            }]}]}),
+        );
+        assert_eq!(result.max_cll, Some(4000));
+        assert_eq!(result.max_fall, Some(1000));
+        assert_eq!(result.luminance_source.as_deref(), Some("frame"));
+    }
+
+    #[test]
+    fn absent_luminance_is_an_observation_only_for_hdr() {
+        let hdr = parse_probe_json(&json!({"streams": [{
+            "codec_type": "video", "color_transfer": "arib-std-b67"
+        }]}));
+        assert_eq!(hdr.luminance_source.as_deref(), Some("none"));
+        let sdr = parse_probe_json(&json!({"streams": [{
+            "codec_type": "video", "color_transfer": "bt709"
+        }]}));
+        assert_eq!(sdr.luminance_source, None);
     }
 
     /// SDH is a *disposition*, not a naming convention. Reading the flag the
@@ -887,5 +1390,44 @@ mod tests {
             parse_probe_json(&valid_other).video_codec_tag.as_deref(),
             Some("avc1")
         );
+    }
+
+    #[test]
+    fn field_order_uses_the_first_playable_video_and_keeps_the_probe_token() {
+        let j = json!({
+            "streams": [
+                { "codec_type": "video", "codec_name": "mjpeg",
+                  "field_order": "progressive",
+                  "disposition": { "attached_pic": 1 } },
+                { "codec_type": "video", "codec_name": "mpeg2video",
+                  "field_order": "tt" },
+                { "codec_type": "video", "codec_name": "mpeg2video",
+                  "field_order": "bb" }
+            ]
+        });
+        let probe = parse_probe_json(&j);
+        assert_eq!(probe.field_order.as_deref(), Some("tt"));
+        assert_eq!(
+            crate::domain::ScanType::from_field_order(probe.field_order.as_deref()),
+            crate::domain::ScanType::Interlaced(crate::domain::FieldOrder::Tff)
+        );
+    }
+
+    #[test]
+    fn field_order_reader_is_conservative_for_every_probe_shape() {
+        use crate::domain::{FieldOrder, ScanType};
+
+        for (value, expected) in [
+            (Some("progressive"), ScanType::Progressive),
+            (Some("tt"), ScanType::Interlaced(FieldOrder::Tff)),
+            (Some("bb"), ScanType::Interlaced(FieldOrder::Bff)),
+            (Some("tb"), ScanType::Interlaced(FieldOrder::TffCoded)),
+            (Some("bt"), ScanType::Interlaced(FieldOrder::BffCoded)),
+            (Some("unknown"), ScanType::Unknown),
+            (Some("future-token"), ScanType::Unknown),
+            (None, ScanType::Unknown),
+        ] {
+            assert_eq!(ScanType::from_field_order(value), expected, "{value:?}");
+        }
     }
 }

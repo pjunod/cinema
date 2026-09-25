@@ -295,7 +295,7 @@ pub async fn image(
         _ => item.poster_path,
     };
     let filename = filename.ok_or(ApiError::NotFound("image"))?;
-    super::images::serve_cluster_artwork(&state, &filename).await
+    super::images::serve_plex_artwork(&state, &filename).await
 }
 
 /// GET /photo/:/transcode — Plex image resizer. We proxy the underlying image
@@ -329,7 +329,7 @@ pub async fn photo_transcode(
         item.poster_path
     };
     let filename = filename.ok_or(ApiError::NotFound("image"))?;
-    super::images::serve_cluster_artwork(&state, &filename).await
+    super::images::serve_plex_artwork(&state, &filename).await
 }
 
 #[derive(serde::Deserialize)]
@@ -421,7 +421,7 @@ pub async fn search(
             })
         })
         .unwrap_or_default();
-    let hits = state.store.search_items(&query, 50).await?;
+    let hits = state.catalogue.search_items(&query, 50).await?;
     let items: Vec<Item> = hits.into_iter().map(|r| r.item).collect();
     let views = views(&state, user.id, &items).await?;
     let mut elements = Vec::with_capacity(items.len());

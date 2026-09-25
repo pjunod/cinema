@@ -25,9 +25,10 @@ use sha2::{Digest, Sha256};
 use super::replicated::ReplicatedSql;
 use super::telemetry::NodeLocalTelemetry;
 use super::{
-    keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence, CacheAdminMutationClaim,
-    MetricsStore, NetworkPriorStore, PlaybackTelemetryStore, PrometheusStoreSnapshot,
-    SettingsStore, UserStore,
+    bounded_device_label, keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence,
+    CacheAdminMutationClaim, DeleteTokenByPrefixOutcome, MetricsStore, NetworkPriorStore,
+    PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore, TokenAuthentication,
+    TokenSummary, UserStore, MAX_DEVICE_LABEL_BYTES, TOKEN_SUMMARY_MAX,
 };
 use crate::domain::{
     ApiKey, NetworkPrior, NetworkPriorObservation, OfflinePackageStats, PlaybackEvent,
@@ -61,7 +62,8 @@ use crate::error::StoreError;
 // offline package claims; v35-v40 add library channels, DVR, subject matching,
 // DVR event history, and the source video sample-entry fact; v41 adds typed
 // content-analysis diagnostics, fixed retry deadlines, identity-aware request
-// indexes, and durable repair receipts. Every additive step is applied through Raft before
+// indexes, and durable repair receipts; v43 retains source luminance facts.
+// Every additive step is applied through Raft before
 // the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
@@ -99,7 +101,17 @@ const DVR_EVENT_SCHEMA_VERSION: i64 = 39;
 const VIDEO_CODEC_TAG_SCHEMA_VERSION: i64 = 40;
 const CLASSIFICATION_SCHEMA_VERSION: i64 = 41;
 const CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION: i64 = 42;
-pub const AUTH_SCHEMA_VERSION: i64 = CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION;
+const FIELD_ORDER_SCHEMA_VERSION: i64 = 43;
+// S-07 drafted the luminance columns as v43; S-08's field-order column reached
+// main first, so the luminance step appends after it.
+const LUMINANCE_SCHEMA_VERSION: i64 = 44;
+const DOWNLOADED_SUBTITLES_SCHEMA_VERSION: i64 = 45;
+const DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE: i64 = LUMINANCE_SCHEMA_VERSION;
+const FILE_GRANTS_SCHEMA_VERSION: i64 = 46;
+const FILE_GRANTS_SCHEMA_MIGRATION_SOURCE: i64 = DOWNLOADED_SUBTITLES_SCHEMA_VERSION;
+const SUBTITLE_SOURCE_SCHEMA_VERSION: i64 = 47;
+const SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE: i64 = FILE_GRANTS_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = SUBTITLE_SOURCE_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -141,6 +153,8 @@ const DVR_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERS
 const DVR_EVENT_SCHEMA_MIGRATION_SOURCE: i64 = SUBJECT_SCHEMA_VERSION;
 const VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE: i64 = DVR_EVENT_SCHEMA_VERSION;
 const CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE: i64 = CLASSIFICATION_SCHEMA_VERSION;
+const FIELD_ORDER_SCHEMA_MIGRATION_SOURCE: i64 = CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION;
+const LUMINANCE_SCHEMA_MIGRATION_SOURCE: i64 = FIELD_ORDER_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -739,6 +753,7 @@ impl StoreOperationMetrics {
 
 static STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
     LazyLock::new(StoreOperationMetrics::default);
+static STORE_VALIDATION_REFUSALS: AtomicU64 = AtomicU64::new(0);
 
 // The named P2f runner needs a production-equivalent control arm without
 // maintaining or rebuilding a historical binary. This switch exists only in
@@ -792,6 +807,7 @@ impl StoreOperationTimer {
     fn complete(mut self, outcome: StoreOperationOutcome) {
         self.metrics
             .record(self.class, outcome, self.started_at.elapsed());
+        super::record_http_store_operation(self.class.index());
         self.completed = true;
     }
 }
@@ -804,6 +820,7 @@ impl Drop for StoreOperationTimer {
                 StoreOperationOutcome::Cancelled,
                 self.started_at.elapsed(),
             );
+            super::record_http_store_operation(self.class.index());
         }
     }
 }
@@ -835,6 +852,29 @@ async fn time_store_operation<T>(
         });
         result
     }
+}
+
+/// Drive the exact production Store-operation timer from an HTTP integration
+/// test without constructing a Raft client. Unlike the old counter hook this
+/// runs the same completion path every `TimedClient` query/execute uses, so a
+/// route test proves the request-local scope reaches the physical-operation
+/// recorder rather than merely seeding the resulting array.
+#[doc(hidden)]
+pub async fn validation_time_http_store_operation(class_index: usize) {
+    let class = match class_index {
+        0 => StoreOperationClass::LocalRead,
+        1 => StoreOperationClass::AuthorityRead,
+        2 => StoreOperationClass::Write,
+        _ => panic!("Store operation class index must be fixed"),
+    };
+    time_store_operation(
+        &STORE_OPERATION_METRICS,
+        class,
+        async { Ok::<_, StoreError>(()) },
+        |_| true,
+    )
+    .await
+    .expect("validation operation succeeds");
 }
 
 #[cfg(feature = "cluster-read-cost-validation")]
@@ -1009,7 +1049,19 @@ where
 /// SQLite mode leaves these series at zero. Rendering reads only atomics and
 /// cannot execute or wait on the Store operation it describes.
 pub fn prometheus_store_operations() -> String {
-    STORE_OPERATION_METRICS.render()
+    use std::fmt::Write;
+
+    let mut out = STORE_OPERATION_METRICS.render();
+    out.push_str(
+        "# HELP plurx_store_validation_refusals_total Replicated statements refused before store I/O.\n\
+         # TYPE plurx_store_validation_refusals_total counter\n",
+    );
+    let _ = writeln!(
+        out,
+        "plurx_store_validation_refusals_total {}",
+        STORE_VALIDATION_REFUSALS.load(Ordering::Relaxed)
+    );
+    out
 }
 
 /// The only application-facing path to hiqlite. Keeping the timeout at this
@@ -2531,6 +2583,89 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(FIELD_ORDER_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (super::FILES_FIELD_ORDER_COLUMN, params!()),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    FIELD_ORDER_SCHEMA_VERSION,
+                                    now,
+                                    FIELD_ORDER_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(FIELD_ORDER_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(LUMINANCE_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::FILES_LUMINANCE_COLUMNS
+                        .iter()
+                        .map(|sql| ((*sql).to_owned(), params!()))
+                        .collect::<Vec<_>>();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            LUMINANCE_SCHEMA_VERSION,
+                            now,
+                            LUMINANCE_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(LUMINANCE_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(
+                    DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let attempt = self.client().txn(vec![
+                        (super::downloaded_subtitles::SCHEMA.to_owned(), params!()),
+                        ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                            params!(DOWNLOADED_SUBTITLES_SCHEMA_VERSION, now, DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE)),
+                    ]).await;
+                    self.settle_migration_attempt(
+                        DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(FILE_GRANTS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_durable::file_grants_migration_statements();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            FILE_GRANTS_SCHEMA_VERSION,
+                            now,
+                            FILE_GRANTS_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(FILE_GRANTS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_fragment_index_cluster::subtitle_source_schema_migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(SUBTITLE_SOURCE_SCHEMA_VERSION, now, SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -3101,8 +3236,26 @@ impl crate::store::FragmentIndexStore for HiqliteAuthStore {
             .await
     }
 
+    async fn validate_fragment_index_page(
+        &self,
+        limit: u32,
+    ) -> Result<crate::store::FragmentIndexValidationBackfill, StoreError> {
+        self.telemetry.validate_fragment_index_page(limit).await
+    }
+
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
         self.telemetry.forget_fragment_index(file_id).await
+    }
+
+    async fn holds_fragment_index_for_source(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+    ) -> Result<bool, StoreError> {
+        self.telemetry
+            .holds_fragment_index_for_source(file_id, source_size, source_mtime)
+            .await
     }
 
     async fn record_fragment_index_outcome(
@@ -3246,6 +3399,16 @@ impl crate::store::RenditionPlanStore for HiqliteAuthStore {
 impl PlaybackTelemetryStore for HiqliteAuthStore {
     async fn record_playback_event(&self, event: &PlaybackEvent) -> Result<i64, StoreError> {
         self.telemetry.record(event.clone()).await
+    }
+
+    async fn record_playback_batch(
+        &self,
+        events: &[PlaybackEvent],
+        observations: &[NetworkPriorObservation],
+    ) -> Result<u64, StoreError> {
+        self.telemetry
+            .record_batch_with_priors(events.to_vec(), observations.to_vec())
+            .await
     }
 
     async fn prune_playback_events(&self, before_ms: i64, limit: i64) -> Result<u64, StoreError> {
@@ -3947,6 +4110,9 @@ impl UserStore for HiqliteAuthStore {
         device: Option<&str>,
     ) -> Result<(), StoreError> {
         let now = self.now()?;
+        // Defence in depth behind the login admission check, so a replicated
+        // row never carries a label above the documented byte bound.
+        let device = bounded_device_label(device.map(str::to_owned));
         self.credential_mutation(vec![(
             "INSERT INTO tokens \
              (token_hash, user_id, device, created_at, last_seen_at) \
@@ -3965,6 +4131,7 @@ impl UserStore for HiqliteAuthStore {
         expected_password_hash: &str,
     ) -> Result<bool, StoreError> {
         let now = self.now()?;
+        let device = bounded_device_label(device.map(str::to_owned));
         Ok(self
             .credential_mutation(vec![(
                 "INSERT INTO tokens \
@@ -3977,23 +4144,52 @@ impl UserStore for HiqliteAuthStore {
             > 0)
     }
 
-    async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError> {
+    async fn authenticate_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<TokenAuthentication, StoreError> {
+        // The expiry policy rides the same consistent read as the token row:
+        // no extra round trip per request, and every voter judges a token
+        // against the committed policy rather than a node-local cache.
+        // Replicated statements introduce `$n` in order of first appearance,
+        // and the three setting keys appear in the projection before the
+        // token predicate, so the digest is `$4`.
         let sql = "SELECT u.id, u.username, u.password_hash, u.is_admin, u.created_at, \
-                          t.last_seen_at \
+                          t.last_seen_at, \
+                          (SELECT value FROM settings WHERE key = $1) AS expiry_enabled, \
+                          (SELECT value FROM settings WHERE key = $2) AS expiry_idle_days, \
+                          (SELECT value FROM settings WHERE key = $3) AS expiry_since \
                  FROM users u JOIN tokens t ON t.user_id = u.id \
-                 WHERE t.token_hash = $1";
+                 WHERE t.token_hash = $4";
         validate_sql(sql)?;
         let mut rows = self
             .client()
-            .query_consistent_map::<TokenUserRow, _>(sql, params!(token_hash))
+            .query_consistent_map::<TokenUserRow, _>(
+                sql,
+                params!(
+                    keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                    keys::AUTH_TOKEN_IDLE_DAYS,
+                    keys::AUTH_TOKEN_EXPIRY_SINCE,
+                    token_hash
+                ),
+            )
             .await?;
-        let row = rows.pop();
-        if let Some(row) = row.as_ref() {
-            let now = self.now()?;
-            self.refresh_token_activity_if_due(token_hash, row.last_seen_at, now)
-                .await?;
+        let Some(row) = rows.pop() else {
+            return Ok(TokenAuthentication::Unknown);
+        };
+        let now = self.now()?;
+        if let Some(policy) = row
+            .expiry
+            .filter(|policy| policy.is_expired(row.last_seen_at, now))
+        {
+            // No activity refresh: touching an expired token would revive it.
+            return Ok(TokenAuthentication::Expired {
+                idle_days: policy.idle_days,
+            });
         }
-        Ok(row.map(Into::into))
+        self.refresh_token_activity_if_due(token_hash, row.last_seen_at, now)
+            .await?;
+        Ok(TokenAuthentication::Authenticated(row.user.into()))
     }
 
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError> {
@@ -4026,6 +4222,76 @@ impl UserStore for HiqliteAuthStore {
         };
         let changed = self.credential_mutation(vec![statement]).await?[0];
         Ok(changed > 0)
+    }
+
+    async fn list_tokens_for_user(&self, user_id: i64) -> Result<Vec<TokenSummary>, StoreError> {
+        // `substr` counts characters, so `$2` characters is at most four times
+        // that many bytes: no whole legacy label crosses the Raft read path,
+        // and `TokenSummaryRow` trims what is left to the exact byte bound.
+        // Replicated statements must introduce `$n` in order of first
+        // appearance, and the label cap appears in the projection list before
+        // the user predicate, so it is `$1`.
+        let sql = "SELECT substr(token_hash, 1, 8) AS token_hash_prefix, \
+                          substr(device, 1, $1) AS device, created_at, last_seen_at \
+                   FROM tokens WHERE user_id = $2 \
+                   ORDER BY created_at, token_hash LIMIT $3";
+        validate_sql(sql)?;
+        Ok(self
+            .client()
+            .query_consistent_map::<TokenSummaryRow, _>(
+                sql,
+                params!(
+                    MAX_DEVICE_LABEL_BYTES as i64,
+                    user_id,
+                    TOKEN_SUMMARY_MAX as i64
+                ),
+            )
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    async fn delete_token_by_prefix_for_user(
+        &self,
+        user_id: i64,
+        prefix: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<DeleteTokenByPrefixOutcome, StoreError> {
+        let statement = match claim {
+            Some(claim) => (
+                "DELETE FROM tokens \
+                 WHERE user_id = $1 AND substr(token_hash, 1, 8) = $2 \
+                   AND (SELECT COUNT(*) FROM tokens \
+                        WHERE user_id = $1 AND substr(token_hash, 1, 8) = $2) = 1 \
+                   AND EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases \
+                               WHERE claim_id = $3)",
+                params!(user_id, prefix, claim.as_str()),
+            ),
+            None => (
+                "DELETE FROM tokens \
+                 WHERE user_id = $1 AND substr(token_hash, 1, 8) = $2 \
+                   AND (SELECT COUNT(*) FROM tokens \
+                        WHERE user_id = $1 AND substr(token_hash, 1, 8) = $2) = 1",
+                params!(user_id, prefix),
+            ),
+        };
+        if self.credential_mutation(vec![statement]).await?[0] > 0 {
+            return Ok(DeleteTokenByPrefixOutcome::Deleted);
+        }
+        let count_sql = "SELECT COUNT(*) AS count FROM tokens \
+                         WHERE user_id = $1 AND substr(token_hash, 1, 8) = $2";
+        validate_sql(count_sql)?;
+        let count = one_count(
+            self.client()
+                .query_consistent_map::<CountRow, _>(count_sql, params!(user_id, prefix))
+                .await?,
+        )?;
+        Ok(match count {
+            0 => DeleteTokenByPrefixOutcome::NotFound,
+            1 => DeleteTokenByPrefixOutcome::ClaimLost,
+            _ => DeleteTokenByPrefixOutcome::Ambiguous,
+        })
     }
 }
 
@@ -4138,10 +4404,18 @@ impl Clock for SystemClock {
 }
 
 pub(super) fn validate_sql(sql: &str) -> Result<(), StoreError> {
-    ReplicatedSql::new(sql)
+    validate_sql_with_refusal_counter(sql, &STORE_VALIDATION_REFUSALS)
+}
+
+fn validate_sql_with_refusal_counter(sql: &str, refusals: &AtomicU64) -> Result<(), StoreError> {
+    let result = ReplicatedSql::new(sql)
         .map(|_| ())
-        .map_err(|error| StoreError::Database(error.to_string()))?;
-    validate_parameter_order(sql)
+        .map_err(|error| StoreError::Database(error.to_string()))
+        .and_then(|()| validate_parameter_order(sql));
+    if result.is_err() {
+        StoreOperationMetrics::saturating_add(refusals, 1);
+    }
+    result
 }
 
 /// hiqlite binds parameters with rusqlite's numeric parameter index. SQLite
@@ -4320,7 +4594,12 @@ fn schema_migration_action(
         | DVR_EVENT_SCHEMA_MIGRATION_SOURCE
         | VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE
         | VIDEO_CODEC_TAG_SCHEMA_VERSION
-        | CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE => {
+        | CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE
+        | FIELD_ORDER_SCHEMA_MIGRATION_SOURCE
+        | LUMINANCE_SCHEMA_MIGRATION_SOURCE
+        | DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE
+        | FILE_GRANTS_SCHEMA_MIGRATION_SOURCE
+        | SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -4556,21 +4835,53 @@ struct UserRow {
 struct TokenUserRow {
     user: UserRow,
     last_seen_at: i64,
+    expiry: Option<crate::auth::TokenIdlePolicy>,
+}
+
+struct TokenSummaryRow {
+    token_hash_prefix: String,
+    device: Option<String>,
+    created_at: i64,
+    last_seen_at: i64,
+}
+
+impl From<&mut Row<'_>> for TokenSummaryRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            token_hash_prefix: row.get("token_hash_prefix"),
+            device: row.get("device"),
+            created_at: row.get("created_at"),
+            last_seen_at: row.get("last_seen_at"),
+        }
+    }
+}
+
+impl From<TokenSummaryRow> for TokenSummary {
+    fn from(row: TokenSummaryRow) -> Self {
+        Self {
+            token_hash_prefix: row.token_hash_prefix,
+            device: bounded_device_label(row.device),
+            created_at: row.created_at,
+            last_seen_at: row.last_seen_at,
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for TokenUserRow {
     fn from(row: &mut Row<'_>) -> Self {
         let last_seen_at = row.get("last_seen_at");
+        let enabled: Option<String> = row.get("expiry_enabled");
+        let idle_days: Option<String> = row.get("expiry_idle_days");
+        let since: Option<String> = row.get("expiry_since");
         Self {
             user: UserRow::from(&mut *row),
             last_seen_at,
+            expiry: crate::auth::TokenIdlePolicy::from_settings(
+                enabled.as_deref(),
+                idle_days.as_deref(),
+                since.as_deref(),
+            ),
         }
-    }
-}
-
-impl From<TokenUserRow> for User {
-    fn from(row: TokenUserRow) -> Self {
-        row.user.into()
     }
 }
 
@@ -5827,6 +6138,26 @@ mod tests {
             .expect_err("bracket quote cannot hide misordered placeholders");
     }
 
+    #[test]
+    fn validation_refusals_are_counted_once_before_io() {
+        let refusals = AtomicU64::new(0);
+        validate_sql_with_refusal_counter("SELECT $1", &refusals)
+            .expect("a valid statement is accepted");
+        assert_eq!(refusals.load(Ordering::Relaxed), 0);
+
+        validate_sql_with_refusal_counter("SELECT $2, $1", &refusals)
+            .expect_err("an out-of-order statement is refused");
+        assert_eq!(refusals.load(Ordering::Relaxed), 1);
+
+        validate_sql_with_refusal_counter("SELECT ?1", &refusals)
+            .expect_err("an unsupported placeholder is refused");
+        assert_eq!(refusals.load(Ordering::Relaxed), 2);
+
+        let exposition = prometheus_store_operations();
+        assert!(exposition.contains("# TYPE plurx_store_validation_refusals_total counter"));
+        assert!(exposition.contains("plurx_store_validation_refusals_total "));
+    }
+
     /// The binary that shipped before P6: it implements exactly protocol 4.
     const PREVIOUS_RELEASE: ClusterCompatibility = ClusterCompatibility {
         schema_version: AUTH_SCHEMA_VERSION,
@@ -6244,9 +6575,45 @@ mod tests {
             "v41 must advance exactly one step to the content-analysis repair schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 37,
+            FIELD_ORDER_SCHEMA_MIGRATION_SOURCE, CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION,
+            "the field-order migration must start from the exact v42 shape"
+        );
+        assert_eq!(
+            FIELD_ORDER_SCHEMA_MIGRATION_SOURCE + 1,
+            FIELD_ORDER_SCHEMA_VERSION,
+            "v42 must advance exactly one step to the field-order schema"
+        );
+        assert_eq!(
+            LUMINANCE_SCHEMA_MIGRATION_SOURCE, FIELD_ORDER_SCHEMA_VERSION,
+            "the luminance migration must start from the exact v43 shape"
+        );
+        assert_eq!(
+            LUMINANCE_SCHEMA_MIGRATION_SOURCE + 1,
+            LUMINANCE_SCHEMA_VERSION,
+            "v43 must advance exactly one step to the luminance schema"
+        );
+        assert_eq!(
+            FILE_GRANTS_SCHEMA_MIGRATION_SOURCE, DOWNLOADED_SUBTITLES_SCHEMA_VERSION,
+            "the file-grants migration must start from the exact v45 shape"
+        );
+        assert_eq!(
+            FILE_GRANTS_SCHEMA_MIGRATION_SOURCE + 1,
+            FILE_GRANTS_SCHEMA_VERSION,
+            "v45 must advance exactly one step to the file-grants schema"
+        );
+        assert_eq!(
+            SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE, FILE_GRANTS_SCHEMA_VERSION,
+            "the subtitle-source migration must start from the exact v46 shape"
+        );
+        assert_eq!(
+            SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE + 1,
+            SUBTITLE_SOURCE_SCHEMA_VERSION,
+            "v46 must advance exactly one step to the subtitle-source schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 42,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v42 step"
+            "this implementation contains every additive v5→v47 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

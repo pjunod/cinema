@@ -220,12 +220,13 @@ Runbook, with the owner-move procedure: [OPERATIONS.md](OPERATIONS.md).
 | `PLURX_HLS_FORCED_AUTOSELECT` | off | Experiment: `AUTOSELECT=YES` on forced subtitle renditions |
 | `PLURX_PGS_OVERLAY` | off | **Seeds a setting; no longer a gate.** The switch is Settings → Developer (`subtitles.pgs_overlay`). Not a production rollout until device acceptance |
 
-Two Developer switches have no environment variable at all and are set in
+Three Developer switches have no environment variable at all and are set in
 Settings → Developer:
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `subtitles.pgs_overlay` | off | Draw PGS bitmaps in the client instead of burning them into the video |
+| `subtitles.stored_sources` | on | The fragment-index pass keeps every PGS track it reads in `<cache>/runtime/subtitle-source-v1/`, and the PGS overlay and the burn path read a kept track instead of demuxing the whole source. Off stops both. The pass keeps nothing until the startup self-test passes, nor on a network/FUSE cache |
 | `playback.subtitle_not_ready_503` | off | Answer `503` + `Retry-After` for a subtitle segment whose extraction has **failed**, instead of an empty WebVTT body the player keeps. A track that is merely warming is unaffected. Confirm on a device first that AVPlayer, Media3 and hls.js keep playing video through a subtitle refusal — the card's three rows say so and do not gate the switch |
 
 `PLURX_HLS_FORCED_AUTOSELECT` is an HLS master experiment, not a setting:

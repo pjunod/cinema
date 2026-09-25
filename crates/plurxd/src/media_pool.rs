@@ -1446,6 +1446,7 @@ mod tests {
 
     fn media_file_with_tracks() -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: PathBuf::from("/media/movie.mkv"),
@@ -1455,12 +1456,17 @@ mod tests {
             container: Some("mkv".to_owned()),
             video_codec: Some("h264".to_owned()),
             video_codec_tag: None,
+            field_order: None,
             video_profile: None,
             width: Some(1920),
             height: Some(1080),
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: None,
             audio_streams: vec![AudioStream {
                 index: 4,
