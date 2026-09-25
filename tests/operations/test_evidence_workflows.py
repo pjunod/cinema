@@ -194,6 +194,9 @@ class EvidenceWorkflowCase(unittest.TestCase):
 
     def test_media_origin_and_contract_routing_remain_wired(self) -> None:
         android = self.read("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt")
+        android_builder = self.read(
+            "clients/android/app/src/main/java/tv/plurx/app/player/PlurxPlayerBuilder.kt"
+        )
         android_screen = self.read(
             "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
         )
@@ -211,7 +214,8 @@ class EvidenceWorkflowCase(unittest.TestCase):
 
         self.assertIn("return realMediaPositionMs(", android)
         self.assertIn("val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)", android)
-        self.assertIn(".setTransferListener(progressiveMediaOrigin)", android)
+        self.assertIn("transferListener = progressiveMediaOrigin,", android)
+        self.assertIn("dataSource.setTransferListener(transferListener)", android_builder)
         self.assertIn(".playerInputAdapter(", android_screen)
         self.assertIn("PlayerInputPolicy.route(surface, state(), input)", android_adapter)
         self.assertIn("PlayerInputState.Hidden ->", android_policy)
@@ -286,7 +290,7 @@ class EvidenceWorkflowCase(unittest.TestCase):
         apple_model = self.read("clients/apple/Sources/AppModel.swift")
         apple_api = self.read("clients/apple/Sources/PlurxAPI.swift")
         self.assertIn("let capturedOrigin = origin", apple_model)
-        self.assertIn("Session.shared.token == token", apple_model)
+        self.assertIn("Session.shared.credentials.token == token", apple_model)
         self.assertIn("where code == 401", apple_model)
         self.assertIn(
             "PlurxAPI(origin: capturedOrigin).logout(token: token)", apple_model

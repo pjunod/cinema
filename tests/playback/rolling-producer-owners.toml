@@ -421,7 +421,12 @@ also_in = ["crates/plurxd/src/transcode"]
 # This row's value is the whole integration tree re-measured after every plan
 # in this wave was merged together, so it is the sum of all of their deltas and
 # will not equal any single branch's arithmetic.
-expected_occurrences = 45
+# 45 -> 46 with the FFmpeg write boundary: the 250 ms poll in
+# `scratch_charge_a_transcode_starts_small_and_writes_through_the_grant`, which
+# waits for the real transcode it started to write its final playlist. Test-only,
+# bounded by its loop count, and it asserts rather than hangs. It owns no
+# producer and decides nothing about recovery.
+expected_occurrences = 46
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -1999,7 +2004,23 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # bounded held-file hashing worker, and two test-only HTTP fixture servers.
 # The hash worker holds its file until it exits; timeout discards its result
 # and it cannot publish captions. Fixture servers are aborted after use.
-expected_occurrences = 591
+# 591 -> 600 with the FFmpeg write boundary (`scratch_put.rs`). Two shipped
+# spawns: the endpoint's accept loop, owned by the session's `PutSink` and
+# aborted when it drops (it only accepts, never writes), and one task per
+# upload connection, counted in flight so `drain` can see it and deliberately
+# never aborted -- it finishes its current file write and exits when the sink
+# closes, its lane is retired or the allocation is fenced, and it holds a
+# scratch writer registration so retirement's barrier waits for it. Neither
+# owns a process, a recipe or a recovery decision. Seven are test fixtures:
+# four `spawn_blocking` calls that run a finite FFmpeg encode or remux to
+# completion, and three request senders joined before their tests end.
+# 600 -> 610: K-09 adds six joined subtitle extraction, verification and
+# test tasks. The architecture-review build adds four: the bounded boot-only
+# caption probes and shutdown-bound file-grant pruning loop. None elects a
+# rolling producer or outlives its request or queue owner.
+# +5 VOD successor handoff: one production task, the handoff expiry wake (one
+# sleep-then-kick per parked predecessor, bounded by the 2 s window), and four in its tests.
+expected_occurrences = 615
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2090,7 +2111,8 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # `kill_on_drop`, its stdin is written and closed in the same `join!` that
 # awaits `wait_with_output` under a 180 s timeout, so it cannot outlive the
 # test. No producer, no session, nothing registered.
-expected_occurrences = 48
+# +1 VOD successor handoff test fixture (a running predecessor child).
+expected_occurrences = 49
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2705,7 +2727,23 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Subtitle acquisition adds four: the 60-second background cadence, its
 # 120-second work budget, and five-second bounds on opening and hashing one
 # media file. Shutdown and lease loss cancel the async acquisition page.
-expected_occurrences = 905
+# 905 -> 921 with the FFmpeg write boundary. Shipped: in `scratch_put.rs` the
+# upload's 10 s request-head timeout, the 250 ms grant poll a starved writer
+# waits on (its end is decided by the budget, the lane or the session, never by
+# the timer), the accept loop's 50 ms back-off after an accept error, and a
+# 5 ms `std::thread::sleep` between retries of a descriptor-exhausted drain
+# sweep; in `transcode.rs` the 15 s bound on retiring a reaped attempt's lane
+# before a retry clears the directory, and the completion probe's drain bound,
+# which sits inside the actor's existing classification deadline. None is a
+# playback-progress watchdog or chooses a recipe. The other ten are test-only
+# and awaited: the receiver tests' sleeps and timeouts, and in `copyseg.rs`
+# the bounded grant-wait and starvation-signal checks.
+# 921 -> 937: K-09 adds 15 bounded worker, consumer and test waits for one
+# leased source publication. `file_grants::prune_loop` adds one daily interval
+# with a shutdown-token exit. None chooses a playback recipe or retry.
+# +8 VOD successor handoff: the 2 s handoff/reservation deadlines, the 250 ms
+# successor poll, the expiry wake instant, and test deadlines.
+expected_occurrences = 945
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2925,7 +2963,20 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # of one that exits before registration). Once per host, `kill_on_drop`,
 # bounded by a 120 s `tokio::time::timeout`, awaited to completion through
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
-expected_occurrences = 161
+# 161 -> 163 with the FFmpeg write boundary: two test-only FFmpeg commands in
+# `scratch_put.rs` that encode or remux a short fixture once to files and once
+# through the upload endpoint, so the tests can compare the objects byte for
+# byte. Each runs to completion inside `spawn_blocking` before its fixture is
+# dropped.
+# 163 -> 171 with K-09. The leased no-index source worker creates one FFmpeg
+# process, owns its stderr drain and explicit kill/reap on loss, timeout, and
+# preemption. One local ffprobe validates a newly produced Matroska subtitle
+# before publication. Six further commands are finite test fixtures: source
+# mux/probe, direct tee comparison, ASS filter/render checks, and a missing
+# subtitle source. None owns playback's rolling process or retry policy.
+# +1 VOD successor handoff test: a real sleeping child stands in for the running
+# predecessor encoder, so yielding is observed as an actual reap.
+expected_occurrences = 172
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3270,7 +3321,15 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
 # Subtitle acquisition adds two reqwest Response::status() reads for
 # HTTP status and redirect handling. Neither launches a process.
-expected_occurrences = 372
+# 372 -> 374: the `.status()` on those two test-only FFmpeg commands,
+# inventoried under `process-command-construction` above. Same children,
+# counted once in each sentinel.
+# 374 -> 380: K-09 adds four bounded Matroska probe or render `.output()`
+# calls and one HLS fixture `Response::status()` assertion. The book-content
+# handler adds one `Response::status()` read for inline range headers; neither
+# response-status read launches a process.
+# +1 the same VOD successor handoff test child.
+expected_occurrences = 381
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3386,7 +3445,12 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # `std::sync::Barrier::wait` calls in `live_tv::dvr::tests`
 # (`retirement_is_atomic_against_a_consumer_attaching` lines its two threads
 # up each round). The pattern matches the method name; neither is a process.
-expected_occurrences = 381
+# 381 -> 388 with K-09's leased no-index FFmpeg source worker. Its normal
+# path awaits the child; cancellation, deadline, and foreground preemption
+# each kill and then reap that same child before releasing the claim. These
+# seven calls add no second process owner or rolling recovery decision.
+# +3 the same test child is killed and waited on at teardown.
+expected_occurrences = 391
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -3513,7 +3577,11 @@ pattern = "kill_on_drop\\s*\\("
 # of one that exits before registration). Once per host, `kill_on_drop`,
 # bounded by a 120 s `tokio::time::timeout`, awaited to completion through
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
-expected_occurrences = 85
+# 85 -> 86 with K-09's leased no-index FFmpeg source pass. Kill-on-drop is
+# the cancellation backstop; the worker explicitly awaits ordinary exit and
+# kills/reaps on loss, deadline, or foreground preemption.
+# +1 the same test child, so a failing assertion cannot leak it.
+expected_occurrences = 87
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

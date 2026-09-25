@@ -235,12 +235,18 @@ impl HlsDeliveryFixture {
             })
             .await
             .expect("item");
+        // Consumers of stored subtitles bind a live source inode. Give this
+        // shared HTTP fixture a real file instead of a synthetic /media path.
+        let source = session_dir.join(format!("fixture-source-{}.mkv", uuid::Uuid::new_v4()));
+        std::fs::write(&source, b"fixture source").expect("fixture source");
+        let metadata = std::fs::metadata(&source).expect("fixture source metadata");
+        let stamp = crate::fragment_index_cluster::source_stamp(&metadata);
         let file_id = store
             .upsert_file(
                 item,
-                "/media/Heat.mkv",
-                1,
-                1,
+                source.to_str().expect("fixture source path"),
+                stamp.size as i64,
+                stamp.mtime,
                 &ProbeResult {
                     duration_ms: Some(6_000_000),
                     ..ProbeResult::default()
@@ -735,6 +741,7 @@ fn test_session_with_control(
         scratch: None,
         retired_release: Arc::new(RetiredRelease::new()),
         scratch_envelope: 0,
+        upload: None,
         retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
         retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
         retention_cleanup_active: Arc::new(AtomicBool::new(false)),

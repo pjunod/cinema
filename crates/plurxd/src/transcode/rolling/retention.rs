@@ -148,7 +148,9 @@ fn ensure_retention_cleanup(session: &Session) {
                 let live = live_bytes.load(Relaxed).saturating_sub(bytes);
                 live_bytes.store(live, Release);
                 if let Some((ledger, key)) = scratch.as_ref() {
-                    ledger.observe_used(*key, live);
+                    // Not a walk: writes that landed since the last one are
+                    // not in `live`, and must stay charged.
+                    ledger.observe_unlinked(*key, live);
                 }
             }
         }
@@ -310,7 +312,10 @@ pub(super) async fn gc_expired_segments(session: &Session) {
         // would find these files anyway -- they are regular files in the same
         // flat directory -- but "anyway" is up to a poll interval away, and
         // the global cap is compared against the ledger on every admission.
-        session.observe_scratch_bytes(live);
+        // Not a walk, so it leaves the landed-since-last-walk bytes alone.
+        if let Some(permit) = session.scratch.as_ref() {
+            permit.ledger().observe_unlinked(permit.key(), live);
+        }
     }
     drop(index);
     drop(producer_transition);

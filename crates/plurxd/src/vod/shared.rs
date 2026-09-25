@@ -731,6 +731,9 @@ impl Shared {
             dormant_since: StdMutex::new(Some(Instant::now())),
             closed: AtomicBool::new(false),
             warned_admission: AtomicBool::new(false),
+            permit_wait_logged: AtomicBool::new(false),
+            handoff: StdMutex::new(None),
+            handoff_expiry_armed: AtomicBool::new(false),
             demand_since: StdMutex::new(HashMap::new()),
         });
         Ok(rendition)

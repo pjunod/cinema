@@ -40,6 +40,8 @@ impl TranscodeManager {
             work_dir,
             runtime_cache,
             subtitle_cache,
+            subtitle_membership: None,
+            subtitle_jobs: None,
             rate_control: std::sync::RwLock::new(RateControlSnapshot::bitrate(caps.quality_rc)),
             artifact_qualification: std::sync::RwLock::new(ArtifactQualificationReadiness {
                 requested: false,
@@ -81,6 +83,7 @@ impl TranscodeManager {
             scratch_sample_generation: AtomicU64::new(0),
             scratch_ledger: crate::scratch_ledger::ScratchLedger::new(),
             scratch_cap: Arc::new(AtomicI64::new(HLS_SCRATCH_MAX_BYTES_DEFAULT)),
+            scratch_starved: Arc::new(tokio::sync::Notify::new()),
             cache_readers: crate::cachekeep::ActiveCacheReaders::default(),
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -290,6 +293,7 @@ impl TranscodeManager {
     ) -> Self {
         self.runtime_cache = runtime_cache;
         self.subtitle_cache = subtitle_cache;
+        self.subtitle_membership = cluster_membership.clone();
         // Renditions are durable state — admitted ones are the copy cache the
         // plan promises — so they live beside the persistent caches rather
         // than in scratch. Replaced before serving starts, like the caches.
@@ -313,6 +317,27 @@ impl TranscodeManager {
             node_id,
         });
         self
+    }
+
+    pub(crate) fn with_subtitle_jobs(mut self, jobs: Arc<crate::state::JobManager>) -> Self {
+        self.subtitle_jobs = Some(jobs);
+        self
+    }
+
+    pub(super) fn subtitle_source_access(&self) -> crate::subtitle_source::StoreAccess {
+        let access = crate::subtitle_source::StoreAccess::from_setting(
+            Arc::clone(&self.store),
+            &self.runtime_cache,
+        )
+        .on_node(self.cache_location().map(|(_, node_id)| node_id));
+        let access = match &self.subtitle_membership {
+            Some(membership) => access.with_membership(membership.clone()),
+            None => access,
+        };
+        match &self.subtitle_jobs {
+            Some(jobs) => access.with_jobs(Arc::clone(jobs)),
+            None => access,
+        }
     }
 
     pub fn with_shared_cache(

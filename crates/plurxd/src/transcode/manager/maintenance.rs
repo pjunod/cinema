@@ -600,9 +600,11 @@ impl TranscodeManager {
     /// Re-authorize one producing session, and say whether it must stay held.
     ///
     /// `Some(grant)` means the budget refused to raise this entry and the
-    /// producer has already materialized everything it is authorized to. A
-    /// denied grant is a hold, never permission to write into space nobody
-    /// accounted for.
+    /// producer has already materialized everything it is authorized to, or
+    /// that one of its writers is waiting on a refused grant. A denied grant
+    /// is a hold, never permission to write into space nobody accounted for,
+    /// and a starved writer means the producer is blocked on a write: held,
+    /// that is a hold; unheld, its progress deadline reads it as a stall.
     fn regrant_rolling_scratch(&self, session: &Session, limits: AheadLimits) -> Option<i64> {
         let permit = session.scratch.as_ref()?;
         if session.scratch_envelope <= 0 {
@@ -612,12 +614,57 @@ impl TranscodeManager {
         }
         let ledger = permit.ledger();
         let key = permit.key();
-        if ledger.regrant(key, session.scratch_envelope, limits.global_max_bytes) {
-            return None;
+        let regranted = ledger.regrant(key, session.scratch_envelope, limits.global_max_bytes);
+        if ledger.starved(key) || (!regranted && ledger.grant_exhausted(key)) {
+            return Some(ledger.grant_of(key).unwrap_or(0));
         }
-        ledger
-            .grant_exhausted(key)
-            .then(|| ledger.grant_of(key).unwrap_or(0))
+        None
+    }
+
+    /// Evaluate flow for every session whose writer just started or stopped
+    /// waiting on a refused grant, so the hold lands while the writer waits
+    /// and lifts as soon as it can write, not at the next repair pass.
+    async fn evaluate_starved_sessions(self: &Arc<Self>) {
+        let sessions = self
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .map(|(id, session)| (id.clone(), Arc::clone(session)))
+            .collect::<Vec<_>>();
+        for (id, session) in sessions {
+            let Some(permit) = session.scratch.as_ref() else {
+                continue;
+            };
+            if permit.ledger().starved(permit.key()) || session.suspended.load(Relaxed) {
+                self.ensure_flow_worker(&id, Arc::clone(&session));
+                let _ = session.control.request_flow();
+            }
+        }
+    }
+
+    /// Bind the upload endpoint a session's FFmpeg muxer writes through,
+    /// spending grants from the allocation admission just made.
+    pub(super) fn bind_scratch_upload(
+        &self,
+        dir: &std::path::Path,
+        reservation: &crate::scratch_ledger::ScratchPermit,
+        envelope: i64,
+    ) -> Result<crate::scratch_put::PutSink, String> {
+        crate::scratch_put::PutSink::bind(
+            dir.to_path_buf(),
+            Some(
+                crate::copyseg::WriteGrants::new(
+                    Arc::clone(reservation.ledger()),
+                    reservation.key(),
+                    Arc::clone(&self.scratch_cap),
+                    envelope,
+                )
+                .with_starved_signal(Arc::clone(&self.scratch_starved)),
+            ),
+        )
+        // Loopback bind fails on descriptor or port exhaustion: transient.
+        .map_err(|error| capacity_error(format!("binding the scratch upload endpoint: {error}")))
     }
 
     /// Background loop: kill and remove sessions idle beyond the timeout,
@@ -625,7 +672,13 @@ impl TranscodeManager {
     pub async fn reap_loop(self: Arc<Self>) {
         let mut ticker = tokio::time::interval(FLOW_CONTROL_REPAIR_INTERVAL);
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ticker.tick() => {}
+                () = self.scratch_starved.notified() => {
+                    self.evaluate_starved_sessions().await;
+                    continue;
+                }
+            }
             let now_unix_ms = crate::media_sessions::unix_ms();
             self.terminal_controls
                 .lock()

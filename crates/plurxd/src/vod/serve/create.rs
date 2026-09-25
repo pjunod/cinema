@@ -391,6 +391,7 @@ impl VodServe {
             last_control_snapshot: None,
             control_end: None,
             control_end_snapshot: None,
+            prepared_incarnation: None,
             terminal_cleanup: None,
             tombstone: None,
         };

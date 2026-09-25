@@ -542,7 +542,9 @@ impl TranscodeManager {
                         )
                         .await,
                 );
-                crate::subtitles::ensure_vtt(&self.subtitle_cache, file, index).await?;
+                let stored = self.subtitle_source_access();
+                crate::subtitles::ensure_vtt_with_store(&self.subtitle_cache, file, index, &stored)
+                    .await?;
             }
         }
         Ok(outcome)

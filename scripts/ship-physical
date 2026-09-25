@@ -368,6 +368,14 @@ for d in data.get("result", {}).get("devices", []):
     props = d.get("deviceProperties", {})
     hw = d.get("hardwareProperties", {})
     conn = d.get("connectionProperties", {})
+    # CoreDevice includes shutdown simulators in this list. Their stale
+    # `tunnelState=disconnected` passes the reachability check below, but a
+    # device release cannot install on them. The replacement `properties`
+    # dictionary carries the same reality field in newer Xcode versions.
+    reality = (d.get("properties", {}).get("hardware", {}).get("reality")
+               or hw.get("reality") or "").lower()
+    if reality != "physical":
+        continue
     state = (conn.get("tunnelState") or "").lower()
     if state not in ("connected", "disconnected"):
         continue

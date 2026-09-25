@@ -1737,6 +1737,11 @@ pub struct SettingsDto {
     /// store kept instead of the whole source. On by default; off makes both
     /// ignore the store entirely.
     pub subtitle_stored_sources: bool,
+    /// Let a store miss join the cluster subtitle-source queue and hydrate a
+    /// peer's verified track. The Developer readiness report is advisory.
+    pub subtitle_cluster_sources: bool,
+    /// Fill uncovered subtitle sources while the analysis pool is idle.
+    pub subtitle_backfill: bool,
     /// Make a chapter thumbnail the first time a watch page asks for one.
     /// On by default; off answers the thumbnail route 404 and runs no
     /// ffmpeg. The Developer tab's readiness rows are advisory.
@@ -2145,6 +2150,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
             true,
         ),
+        subtitle_cluster_sources: plurx_core::store::stored_switch(
+            setting(keys::SUBTITLE_CLUSTER_SOURCES).as_deref(),
+            false,
+        ),
+        subtitle_backfill: plurx_core::store::stored_switch(
+            setting(keys::SUBTITLE_BACKFILL).as_deref(),
+            false,
+        ),
         chapter_thumbnails: plurx_core::store::stored_switch(
             setting(keys::CHAPTER_THUMBNAILS).as_deref(),
             true,
@@ -2397,6 +2410,8 @@ pub struct UpdateSettings {
     pub subtitle_window_secs: Option<i64>,
     pub subtitle_not_ready_503: Option<bool>,
     pub subtitle_stored_sources: Option<bool>,
+    pub subtitle_cluster_sources: Option<bool>,
+    pub subtitle_backfill: Option<bool>,
     pub chapter_thumbnails: Option<bool>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
@@ -2558,6 +2573,8 @@ impl UpdateSettings {
             || self.subtitle_window_secs.is_some()
             || self.subtitle_not_ready_503.is_some()
             || self.subtitle_stored_sources.is_some()
+            || self.subtitle_cluster_sources.is_some()
+            || self.subtitle_backfill.is_some()
             || self.chapter_thumbnails.is_some()
             || self.live_tv_deinterlace_output.is_some()
             || self.default_audio_lang.is_some()
@@ -3351,6 +3368,18 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::SUBTITLE_STORED_SOURCES, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.subtitle_cluster_sources {
+        state
+            .store
+            .put_setting(keys::SUBTITLE_CLUSTER_SOURCES, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.subtitle_backfill {
+        state
+            .store
+            .put_setting(keys::SUBTITLE_BACKFILL, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(on) = req.chapter_thumbnails {

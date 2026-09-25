@@ -394,10 +394,6 @@ impl TranscodeManager {
         }
         let hw_slot = admission.hw_slot;
         let sw_permit = admission.sw_permit;
-        let scratch_reservation = self
-            .reserve_rolling_scratch(RollingScratchSizing::SessionCeiling)
-            .await?;
-
         let session_id = takeover
             .as_ref()
             .map(|takeover| takeover.provisional_session_id.clone())
@@ -448,6 +444,19 @@ impl TranscodeManager {
         // byte-producing decision, so it receives a fresh complete plan;
         // neither the old encoder nor its decode surface is patched in place.
         let plan = self.resolve_movie_plan(&file, &opts, encoder).await?;
+        // Every object FFmpeg's muxer writes for this session passes a
+        // scratch grant before it reaches the disk, so the session starts on
+        // its startup allowance and grows, instead of reserving the whole
+        // per-session ceiling that an unbounded writer had to.
+        let output_bitrate = transcode_output_bitrate(&opts);
+        let scratch_envelope = rolling_scratch_envelope(output_bitrate, 1.0);
+        let scratch_reservation = self
+            .reserve_rolling_scratch(RollingScratchSizing::Startup(rolling_startup_bytes(
+                output_bitrate,
+                1.0,
+            )))
+            .await?;
+        let upload = self.bind_scratch_upload(&dir, &scratch_reservation, scratch_envelope)?;
         let pacing = self.pacing(false).await;
         let automatic_decoder_recovery = self.automatic_decoder_recovery_enabled();
         let observation = DiagnosticObservation::for_plan(
@@ -455,10 +464,9 @@ impl TranscodeManager {
             &self.measured_decoders,
             automatic_decoder_recovery,
         );
-        let execution =
-            TranscodeExecution::from_options(&file, &opts, pacing, &dir.to_string_lossy())
-                .map_err(|error| error.to_string())?
-                .observing_qualified_grammar(observation.qualified_logging());
+        let execution = TranscodeExecution::from_options(&file, &opts, pacing, &upload.base_url(0))
+            .map_err(|error| error.to_string())?
+            .observing_qualified_grammar(observation.qualified_logging());
         let args = transcode::hls_args(&plan, &execution);
         if plan.input_is_hdr()
             && plan.options().pipeline == Pipeline::Cpu
@@ -542,7 +550,7 @@ impl TranscodeManager {
                         prepared,
                         &retry_plan,
                         pacing,
-                        &dir,
+                        &upload.base_url(1),
                         &presentation_contract_fingerprint,
                         self.admissions.software_pool(),
                         software_budget,
@@ -595,7 +603,7 @@ impl TranscodeManager {
                                             prepared,
                                             &alternate_plan,
                                             pacing,
-                                            &dir,
+                                            &upload.base_url(2),
                                             &presentation_contract_fingerprint,
                                             self.admissions.software_pool(),
                                             software_budget,
@@ -843,7 +851,8 @@ impl TranscodeManager {
             live_bytes: Arc::new(AtomicI64::new(0)),
             scratch: Some(scratch_reservation.bound_to(&session_id, 0)),
             retired_release: Arc::new(RetiredRelease::new()),
-            scratch_envelope: 0,
+            scratch_envelope,
+            upload: Some(upload),
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -1108,17 +1117,16 @@ impl TranscodeManager {
             .flatten()
             .map(|i| i.title)
             .unwrap_or_else(|| "(unknown)".to_owned());
-        // The copy writer is the one producer whose every object passes a
-        // Rust grant boundary before it exists, so it is the one that may
-        // start small and grow. Sizing covers the *effective* startup gate —
+        // Every object this session writes passes a Rust grant boundary
+        // before it exists, so it may start small and grow. Sizing covers the
+        // *effective* startup gate —
         // the rolling publication clock's runway, not just the copy writer's
         // own 12 s — plus one complete segment, plus the envelope, because a
         // session that cannot reach a published playlist has no client to
         // drain it and nothing to wait for.
         //
-        // Direct and transcoded output keeps the whole per-session ceiling:
-        // FFmpeg's `-f hls` writes pass no such boundary, and a measurement
-        // taken afterwards can only discover an overrun, never prevent one.
+        // FFmpeg's own `-f hls` muxer, where this session uses it, is held
+        // to the same rule through the upload endpoint bound below.
         let copy_bitrate = file
             .bitrate
             .filter(|rate| *rate > 0)
@@ -1147,6 +1155,12 @@ impl TranscodeManager {
             .await
             .map_err(|error| format!("holding Windows session directory: {error}"))?;
         let mut start_settlement = PrepublicationStartSettlement::new(dir.clone());
+        // FFmpeg's own HLS muxer -- the legacy writer, a takeover, and the
+        // legacy retry a segmenter session keeps in reserve -- uploads
+        // through this endpoint, so its objects are granted before they land
+        // exactly as the segmenter's are. Lane 0 is the initial attempt and
+        // lane 1 the retry.
+        let upload = self.bind_scratch_upload(&dir, &scratch_reservation, scratch_envelope)?;
 
         // An ffmpeg capability, read from the daemon's own record of which
         // ffmpeg it runs. It used to be read off the CACHE config — which
@@ -1208,7 +1222,7 @@ impl TranscodeManager {
             );
         }
         let pacing = self.pacing(true).await;
-        let legacy_args = || match takeover.as_ref() {
+        let legacy_args = |output: &str| match takeover.as_ref() {
             Some(takeover) => transcode::hls_copy_args_with_sequence(
                 &file,
                 start_seconds,
@@ -1218,7 +1232,7 @@ impl TranscodeManager {
                 video_options,
                 takeover.media_sequence,
                 &init_object_name(Some(takeover.owner_epoch)),
-                &dir.to_string_lossy(),
+                output,
             ),
             None => transcode::hls_copy_args_with_dolby_vision(
                 &file,
@@ -1227,7 +1241,7 @@ impl TranscodeManager {
                 options.transcode_audio,
                 pacing,
                 video_options,
-                &dir.to_string_lossy(),
+                output,
             ),
         };
         // Take over the cutting when the source is one whose keyframes can be
@@ -1247,7 +1261,7 @@ impl TranscodeManager {
                 video_options,
             )
         } else {
-            legacy_args()
+            legacy_args(&upload.base_url(0))
         };
         tracing::info!(
             session = %session_log_id(&session_id),
@@ -1290,7 +1304,7 @@ impl TranscodeManager {
         let retry = build_prepublication_copy_retry(
             segmenting,
             video_options,
-            legacy_args(),
+            legacy_args(&upload.base_url(1)),
             &presentation_contract_fingerprint,
             self.runtime_cache.clone(),
         );
@@ -1431,6 +1445,7 @@ impl TranscodeManager {
             scratch: Some(scratch_reservation.bound_to(&session_id, 0)),
             retired_release: Arc::new(RetiredRelease::new()),
             scratch_envelope,
+            upload: Some(upload),
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -1569,6 +1584,7 @@ impl TranscodeManager {
                     Arc::clone(&self.scratch_cap),
                     scratch_envelope,
                 )
+                .with_starved_signal(Arc::clone(&self.scratch_starved))
             });
             spawn_copy_reader_owner(
                 Arc::clone(&session),

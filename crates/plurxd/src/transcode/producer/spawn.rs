@@ -390,7 +390,9 @@ pub(super) fn spawn_ffmpeg(
             runtime_cache,
             progress: crate::producer_spawn::Progress::Stdout,
             descriptors,
-            env: &[],
+            // The muxer's uploads go to a loopback endpoint. An inherited
+            // `http_proxy` would send them, token and all, to the proxy.
+            env: &[("http_proxy", std::ffi::OsStr::new(""))],
         },
     )?;
     // Built before the progress observer is moved into its own task: the sink
@@ -481,7 +483,7 @@ pub(super) fn spawn_ffmpeg_pipe(
             runtime_cache,
             progress: crate::producer_spawn::Progress::Stderr,
             descriptors,
-            env: &[],
+            env: &[("http_proxy", std::ffi::OsStr::new(""))],
         },
     )?;
     let reader = Some({

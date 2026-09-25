@@ -332,7 +332,9 @@ impl PrepublicationTranscodeRetry {
         prepared: PreparedTranscodeRetry,
         plan: &ResolvedTranscode,
         pacing: Pacing,
-        dir: &std::path::Path,
+        // The upload base this recipe's muxer writes through: a lane of the
+        // session's `scratch_put` endpoint, never a bare directory.
+        output: &str,
         presentation_contract_fingerprint: &str,
         software_pool: crate::admission::SwPool,
         software_budget: usize,
@@ -368,10 +370,9 @@ impl PrepublicationTranscodeRetry {
         }
         let observation =
             DiagnosticObservation::for_plan(plan, measured_decoders, automatic_recovery_enabled);
-        let execution =
-            TranscodeExecution::from_options(file, &retry_opts, pacing, &dir.to_string_lossy())
-                .map_err(|error| error.to_string())?
-                .observing_qualified_grammar(observation.qualified_logging());
+        let execution = TranscodeExecution::from_options(file, &retry_opts, pacing, output)
+            .map_err(|error| error.to_string())?
+            .observing_qualified_grammar(observation.qualified_logging());
         let args = transcode::hls_args(plan, &execution);
         let fingerprint_body = serde_json::json!({
             "version": 2,

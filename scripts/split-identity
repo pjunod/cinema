@@ -3,6 +3,7 @@
 
 Usage: split-identity BASE SOURCE PIECE [PIECE ...]
        split-identity BASE --plan
+       split-identity BASE --moves
 
 PIECE files are concatenated in source order. Lines inside a
 ``// split: header`` / ``// split: end header`` pair are split-only module
@@ -14,8 +15,14 @@ markers in each current parent with the children named below, removes only
 the module plumbing represented by those markers, and compares the complete
 reconstructed parent byte-for-byte with BASE. The segment-index recipe also
 checks the exact count of parent-visibility additions before removing them.
-``--moves`` proves the S-14 continuation moves (M2/T3 onward) against the
-continuation's branch base. Each row of ``MOVES`` names a parent, a marker
+``--moves`` proves the S-14 continuation moves (M2/T3 onward) against BASE,
+which is the branch's current merge base with main: the reconstruction reads
+the working tree and BASE only supplies the expected parents, so after a merge
+of main the same proof is run against the new merge base. Every main change
+to a split parent has to be re-applied inside the child now holding its
+region; an ``OK`` against the new merge base shows none was dropped or
+duplicated, and the per-row counts below include the ``pub(super)`` that
+main's new cross-child items needed. Each row of ``MOVES`` names a parent, a marker
 and the child that marker stands for: the child's exact ``use super::*;``
 header is dropped, every ``pub(super) `` it gained is removed (and counted
 against the row's declared number), the result replaces the marker block,
@@ -178,10 +185,10 @@ MOVES: list[tuple[str, str, str, int]] = [
     ("crates/plurxd/src/transcode.rs", "spawn", "transcode/producer/spawn.rs", 20),
     ("crates/plurxd/src/transcode.rs", "prepublication", "transcode/rolling/prepublication.rs", 44),
     ("crates/plurxd/src/transcode.rs", "retirement", "transcode/rolling/retirement.rs", 37),
-    ("crates/plurxd/src/transcode.rs", "prepublication-executor", "transcode/producer/prepublication_executor.rs", 7),
+    ("crates/plurxd/src/transcode.rs", "prepublication-executor", "transcode/producer/prepublication_executor.rs", 8),
     ("crates/plurxd/src/transcode.rs", "attempt-child", "transcode/producer/attempt_child.rs", 38),
     ("crates/plurxd/src/transcode.rs", "publication", "transcode/rolling/publication.rs", 58),
-    ("crates/plurxd/src/transcode.rs", "session", "transcode/rolling/session.rs", 156),
+    ("crates/plurxd/src/transcode.rs", "session", "transcode/rolling/session.rs", 157),
     ("crates/plurxd/src/transcode.rs", "response", "transcode/response.rs", 31),
     ("crates/plurxd/src/transcode.rs", "hls-codecs", "transcode/hls_codecs.rs", 2),
     ("crates/plurxd/src/transcode.rs", "cluster-adoption", "transcode/cluster_adoption.rs", 43),
@@ -210,7 +217,7 @@ MOVES: list[tuple[str, str, str, int]] = [
     ("crates/plurxd/src/vodserve.rs", "vod-discovery", "vod/discovery.rs", 7),
     ("crates/plurxd/src/vodserve.rs", "vod-reader", "vod/reader.rs", 29),
     ("crates/plurxd/src/vodserve.rs", "vod-marker-prewarm", "vod/marker_prewarm.rs", 68),
-    ("crates/plurxd/src/vodserve.rs", "vod-session", "vod/session.rs", 107),
+    ("crates/plurxd/src/vodserve.rs", "vod-session", "vod/session.rs", 115),
     ("crates/plurxd/src/vodserve.rs", "vod-shared", "vod/shared.rs", 13),
     ("crates/plurxd/src/vodserve.rs", "vod-driver", "vod/driver.rs", 6),
     ("crates/plurxd/src/vodserve.rs", "vod-marker-dispatch", "vod/marker_dispatch.rs", 4),
@@ -271,7 +278,7 @@ IMPL_SPLITS: list[tuple[str, str, str, list[str], int]] = [
             "transcode/manager/publication.rs",
             "transcode/manager/maintenance.rs",
         ],
-        76,
+        78,
     ),
     (
         "crates/plurxd/src/vodserve.rs",
@@ -414,7 +421,8 @@ def main() -> int:
     if len(sys.argv) < 4:
         print(
             "usage: split-identity BASE SOURCE PIECE [PIECE ...]\n"
-            "       split-identity BASE --plan",
+            "       split-identity BASE --plan\n"
+            "       split-identity BASE --moves",
             file=sys.stderr,
         )
         return 2

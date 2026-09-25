@@ -633,10 +633,7 @@ impl TranscodeManager {
         index: i64,
     ) -> bool {
         crate::subtitle_source::stored_as_empty(
-            &crate::subtitle_source::StoreAccess::from_setting(
-                Arc::clone(&self.store),
-                &self.runtime_cache,
-            ),
+            &self.subtitle_source_access(),
             file,
             index,
             crate::subtitle_source::Live::Path(&file.path),
@@ -831,11 +828,7 @@ impl TranscodeManager {
                 // prepared-successor path, which would otherwise hold a preparation
                 // slot for the length of a full-film demux.
                 // Read lazily: a warm sidecar never reads the setting.
-                let stored = crate::subtitle_source::StoreAccess::from_setting(
-                    Arc::clone(&self.store),
-                    &self.runtime_cache,
-                )
-                .on_node(self.cache_location().map(|(_, node_id)| node_id));
+                let stored = self.subtitle_source_access();
                 match crate::subtitles::ensure_burn_source(
                     &self.subtitle_cache,
                     file,
@@ -969,6 +962,9 @@ impl TranscodeManager {
             speculative: std::sync::atomic::AtomicBool::new(false),
             queued: std::sync::Mutex::new(None),
             policy_retry: std::sync::atomic::AtomicBool::new(false),
+            handoff_wait: std::sync::atomic::AtomicBool::new(false),
+            last_refusal: std::sync::Mutex::new(None),
+            handoff_claim: std::sync::Mutex::new(None),
             #[cfg(test)]
             admission_pause: std::sync::Mutex::new(None),
         })))
@@ -1416,6 +1412,11 @@ impl TranscodeManager {
                 .await
             {
                 Ok(_) => {
+                    if speculative {
+                        self.vod
+                            .mark_prepared_incarnation(session_id, &remote.incarnation_id)
+                            .await;
+                    }
                     tracing::info!(
                         session = %session_log_id(session_id),
                         "resurrected a vod session from its durable route"

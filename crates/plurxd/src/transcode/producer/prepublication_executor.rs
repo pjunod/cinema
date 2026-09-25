@@ -136,6 +136,7 @@ pub(super) async fn execute_prepublication_transcode_retry(
     )));
     let transaction = async {
         terminate_exact_prepublication_child(&session, failed_attempt).await?;
+        retire_upload_lane(&session).await;
         clear_session_dir(&session.dir)
             .await
             .map_err(|error| format!("clearing predecessor scratch: {error}"))?;
@@ -336,6 +337,7 @@ async fn execute_prepublication_copy_retry(
     )));
     let transaction = async {
         terminate_exact_prepublication_child(&session, failed_attempt).await?;
+        retire_upload_lane(&session).await;
         clear_session_dir(&session.dir)
             .await
             .map_err(|error| format!("clearing copy-reader predecessor scratch: {error}"))?;
@@ -653,6 +655,31 @@ pub(super) fn spawn_copy_reader_owner(
     });
 }
 
+/// Refuse every further upload from the reaped attempt before its directory
+/// is cleared, and wait for the ones already under way to finish refusing.
+/// Its connections can outlive the process, and one that renamed into the
+/// cleared directory would be read as the retry's output.
+async fn retire_upload_lane(session: &Session) {
+    if let Some(upload) = session.upload.as_ref() {
+        if tokio::time::timeout(Duration::from_secs(15), upload.retire_writing_lane())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                "the replaced attempt's uploads did not settle in 15 s; they stay refused"
+            );
+        }
+    }
+}
+
+/// The bits per second a transcode produces: its video target plus its audio.
+pub(super) fn transcode_output_bitrate(opts: &TranscodeOptions) -> Option<f64> {
+    let kbps = opts
+        .video_bitrate_kbps
+        .saturating_add(opts.audio_bitrate_kbps);
+    (kbps > 0).then(|| f64::from(kbps) * 1_000.0)
+}
+
 /// Read one exact-attempt completion snapshot under the actor's classification
 /// deadline. This is a one-shot probe, not a polling recovery owner: the actor
 /// alone decides completion versus partial-success failure from the returned
@@ -665,6 +692,23 @@ async fn classify_successful_transcode_exit(
     crate::playback_control::RollingProducerCompletionDisposition,
     crate::playback_control::ProducerAttemptRejection,
 > {
+    // An upload FFmpeg finished can still be queued on the socket after it
+    // exits. With file output every object was in place at reap; draining
+    // the endpoint restores exactly that before the playlist is read.
+    // The drain gets most of the budget, never all of it: the playlist read
+    // must still run. An exited producer's last pieces are admitted without
+    // waiting on the grant, so in practice it takes milliseconds.
+    if let Some(upload) = session.upload.as_ref() {
+        let drain_deadline = probe
+            .deadline
+            .checked_sub(Duration::from_millis(750))
+            .unwrap_or(probe.deadline);
+        let _ = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(drain_deadline),
+            upload.drain(),
+        )
+        .await;
+    }
     let bytes = if session.control.current_producer_attempt() == probe.producer_attempt
         && session.compatibility_producer_attempt() == probe.producer_attempt
     {
@@ -911,6 +955,7 @@ async fn run_prepublication_producer_executor(
                         replacement.mark_admission_pending();
                         let cleanup = async {
                             terminate_exact_prepublication_child(&session, *failed_attempt).await?;
+                            retire_upload_lane(&session).await;
                             clear_session_dir(&session.dir).await.map_err(|error| {
                                 format!("clearing failed producer scratch: {error}")
                             })?;

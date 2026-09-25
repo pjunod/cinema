@@ -177,11 +177,14 @@ fn session_log_text(text: &str, session_id: &str) -> String {
 }
 
 fn ffmpeg_args_log_message(label: &str, args: &[String], session_id: &str) -> String {
-    format!("{label}: {}", session_log_text(&args.join(" "), session_id))
+    format!(
+        "{label}: {}",
+        session_log_text(&crate::scratch_put::redact(&args.join(" ")), session_id)
+    )
 }
 
 fn log_ffmpeg_stderr(session_id: &str, encoder: &str, line: &str) {
-    let line = session_log_text(line, session_id);
+    let line = session_log_text(&crate::scratch_put::redact(line), session_id);
     tracing::warn!(
         session = %session_log_id(session_id),
         encoder,
@@ -1251,6 +1254,8 @@ pub struct TranscodeManager {
     runtime_cache: PathBuf,
     /// Extracted text subtitles shared with the WebVTT endpoint.
     subtitle_cache: PathBuf,
+    subtitle_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    subtitle_jobs: Option<Arc<crate::state::JobManager>>,
     caps: EncoderCaps,
     /// Portable decoder names inventoried from this exact ffmpeg at boot.
     decoders: Vec<String>,
@@ -1352,6 +1357,9 @@ pub struct TranscodeManager {
     /// consult it outside an `async` settings read — the native copy writer
     /// asks it before every object it publishes.
     scratch_cap: Arc<AtomicI64>,
+    /// Rung by a scratch writer when its allocation starts or stops waiting
+    /// on a refused grant. The reaper answers with a flow evaluation.
+    scratch_starved: Arc<tokio::sync::Notify>,
     /// Shared with cache housekeeping. A row can say bytes exist, but only
     /// this registry can say an HTTP session on this node is using them now.
     cache_readers: crate::cachekeep::ActiveCacheReaders,

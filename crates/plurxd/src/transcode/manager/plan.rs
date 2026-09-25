@@ -1139,8 +1139,14 @@ impl TranscodeManager {
         if self.subtitle_file(file, Some(burn)).is_none() {
             return Ok(None);
         }
-        crate::subtitles::ensure_vtt_file(&self.subtitle_cache, file, burn.subtitle_index)
-            .await
-            .map(Some)
+        let stored = self.subtitle_source_access();
+        crate::subtitles::ensure_vtt_file_with_store(
+            &self.subtitle_cache,
+            file,
+            burn.subtitle_index,
+            &stored,
+        )
+        .await
+        .map(Some)
     }
 }

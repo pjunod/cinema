@@ -302,6 +302,10 @@ pub(super) struct Session {
     /// flow evaluations. Zero for a session admitted with its whole ceiling,
     /// which has nothing to grow into.
     pub(super) scratch_envelope: i64,
+    /// Where FFmpeg's HLS muxer writes for this session: every object it
+    /// uploads passes the scratch grant before it reaches the disk
+    /// ([`crate::scratch_put`]). `None` where no muxer attempt can run.
+    pub(super) upload: Option<crate::scratch_put::PutSink>,
     /// Bytes renamed out of served segment paths but not yet physically
     /// unlinked. Hidden garbage still consumes the same scratch budget.
     pub(super) retention_garbage_bytes: Arc<AtomicI64>,
@@ -617,15 +621,21 @@ impl Session {
     /// runs, a scan that happens to find few bytes is not evidence that the
     /// future capacity it was admitted with is no longer needed.
     pub(super) async fn refresh_scratch_bytes(&self) -> ScratchMeasurement {
+        // What had landed before the walk began is all the walk can be
+        // trusted to have seen.
+        let written_before = self
+            .scratch
+            .as_ref()
+            .map_or(0, |permit| permit.ledger().written_of(permit.key()));
         let measurement = self.measure_scratch_bytes().await;
         match measurement {
             ScratchMeasurement::Complete(bytes) => {
                 self.live_bytes.store(bytes, Release);
-                self.observe_scratch_bytes(bytes);
+                self.observe_scratch_bytes(bytes, written_before);
             }
             ScratchMeasurement::Absent => {
                 self.live_bytes.store(0, Release);
-                self.observe_scratch_bytes(0);
+                self.observe_scratch_bytes(0, written_before);
             }
             ScratchMeasurement::Incomplete | ScratchMeasurement::NotScratch => {}
         }
@@ -638,9 +648,11 @@ impl Session {
             .map(crate::scratch_ledger::ScratchPermit::key)
     }
 
-    pub(super) fn observe_scratch_bytes(&self, bytes: i64) {
+    pub(super) fn observe_scratch_bytes(&self, bytes: i64, written_before: i64) {
         if let Some(permit) = self.scratch.as_ref() {
-            permit.ledger().observe_used(permit.key(), bytes);
+            permit
+                .ledger()
+                .observe_walk(permit.key(), bytes, written_before);
         }
     }
 
@@ -685,6 +697,15 @@ impl Session {
         session_id: &str,
         now: Instant,
     ) -> Result<(), String> {
+        // A write the muxer's upload needed failed. FFmpeg does not read the
+        // reply, so it would keep producing objects no playlist can name.
+        if let Some(reason) = self
+            .upload
+            .as_ref()
+            .and_then(crate::scratch_put::PutSink::failure)
+        {
+            return Err(reason);
+        }
         let _ = self.refresh_scratch_bytes().await;
         if self.replacing_child.load(Acquire) {
             return Ok(());

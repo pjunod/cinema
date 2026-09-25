@@ -168,12 +168,13 @@ async fn subtitle_track_cache(
     // prevents readiness from reporting on a window the segment will not use.
     let demand_seconds = request.seek_target_ms.unwrap_or(request.position_ms).max(0) / 1_000;
     Some(
-        match crate::subtitles::sidecar_state_for_demand(
+        match crate::subtitles::sidecar_state_for_demand_with_store(
             &state.subs_dir,
             &file,
             index,
             demand_seconds,
             window_seconds,
+            &state.subtitle_source_access(),
         )
         .await
         {

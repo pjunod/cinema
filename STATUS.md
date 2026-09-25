@@ -4,6 +4,23 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Watch view: menus and Playback info escape the picture; the picture goes under the header
+
+**Branch `fix/watch-popovers-escape-picture`, pull request open as a draft;
+not merged, nothing deployed.** Paul's report of 2026-09-24 on the new web
+watch view: the Playback info readout ran past the bottom of the picture and
+was cut off there, the subtitle menu ran past its top so half of it could not
+be chosen, and scrolling the page slid the picture over the main navigation.
+One cause: the slot player's host was fixed at z-index 90 with a clip-path to
+its own box. It now sits under the page's chrome (z-index 10) and clips
+nothing; `positionMenu` / `positionStats` bound each popover to the viewport
+minus the stuck chrome (`watchPopoverBounds`) and re-run on every scroll
+frame. Record: [docs/clients/WATCH-VIEW-LAYOUT.md](docs/clients/WATCH-VIEW-LAYOUT.md)
+(“The picture under the page; the menus and the readout over it”). Browser
+acceptance extended with a thirty-track menu, the Diagnostics readout and a
+scrolled-under-the-header check; passes on fine and coarse pointers.
+Native clients untouched.
+
 ## Live TV: direct play first, 5.1 stays 5.1
 
 **Branch `fix/live-tv-direct-play`, draft pull request; not merged, nothing
@@ -34,6 +51,12 @@ Record: [docs/streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](docs/streaming/LIVE
   SAR 40:33, 480i) through the exact QSV, VAAPI and x264 producer chains on nynuc
   all publish SAR 40:33 / DAR 16:9. `scripts/live-tv-hardware` now records the
   segment's SAR/DAR. Open until the client showing it is named.
+
+**Deployment finding (same day):** the layout list led with `5.1(side)`, which
+the AAC encoder signals as ADTS configuration 0 plus a PCE; browsers read that
+as an audio track with no channels and never start, so Safari and Chrome sat
+black on 157.1. Fixed: the list is `5.1|stereo|mono`, the harness asserts a
+positive header channel count and gains `--surround`.
 
 Verified: focused Rust tests (53) + clippy `-D warnings` + fmt on nuc3;
 `make apple-test` on mba (1330 cases); Android unit tests in the pinned image
@@ -313,36 +336,6 @@ progressive. The seek-scratch reservation finding (C16) is a tracking item
 for the existing repair. §9 records what was run and what was not. No code
 changed.
 
-## Architecture review, revision 2 — after the adversarial assessment
-
-**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-revised in place; the assessment that drove it is
-[ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md)
-(210 dispositions, every appendix finding covered).** The assessment's verdict
-on the first draft — a useful defect inventory, unsafe as a direct
-implementation handoff — was right: several remedies removed the condition
-that made the existing code safe. Revision 2 withdraws or rewrites them, each
-re-checked in the tree: B-frames via `negative_cts_offsets` (refused by
-`vodgen.rs:399`'s landing check — a timeline design item now); copying the
-cache-only admin proof onto ordinary auth and replacing the two-phase logout
-with a best-effort delete (both weaken acknowledged revocation); the encoded-VOD
-SIGSTOP without a stopped→release transition on `Admissions::live_is_waiting`
-(a stopped producer yields `Step::Nothing`, so a later viewer would wait
-forever); a 60 s TTL on font attestation (re-enumeration exists to catch font
-additions under an immutable recipe); heartbeat-derived clock skew (10 s
-heartbeats cannot see a 2 s offset) and any clock evaluated inside replicated
-SQL; the `NOT EXISTS` search predicate (reproduced to hide renamed titles); a
-nonexistent `-hls_start_time_offset`; a self-contradicting release profile;
-and Media3's nonexistent `STRATEGY_ALWAYS`. Claims narrowed: the compile-only
-fast lane is Paul's 09-10 ruling, not drift — the finding is that the batch
-process it assumes has no input; "every audio transcode" → every full video
-transcode; rollback artefacts exist as `sha-` image tags, semantic tags do
-not; the CI selector run for real gives 3/16 hiqlite and 7/24 SQLite modules
-out of scope, not 7/20; the 51 "unindexed" docs are exempted by policy. The
-ten do-first items all survive on their code facts; §5 now splits the ones
-that were two changes and defers the ones that became design questions.
-§0 of the review lists every disposition. No code changed.
-
 ## Older efforts — where each one now lives
 
 Sections older than those above moved verbatim on 2026-09-24 into the
@@ -350,6 +343,7 @@ status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-20 | Architecture review, revision 2 — after the adversarial assessment | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-20 | End-to-end architecture review — ten verified do-first items, ranked | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-19 | The web app is a tree, and the bytes are the same ones | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |
 | 2026-09-17 | The twenty red tests, and the three live defects three of them were reporting | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |

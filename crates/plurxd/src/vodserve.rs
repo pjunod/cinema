@@ -75,6 +75,29 @@ const SESSION_IDLE_TTL: Duration = Duration::from_secs(300);
 /// encoders within their five-second admission budget so they can yield.
 const STOPPED_ENCODER_POLL: Duration = Duration::from_secs(1);
 
+/// How long one refused prepared successor's request keeps its own viewer's
+/// predecessor from producing. The successor refreshes it on every refused
+/// retry (its driver polls every 250 ms while it waits), so it expires on its
+/// own shortly after the successor either starts or goes away, and the
+/// predecessor is never parked by a successor that no longer exists.
+const HANDOFF_REQUEST_TTL: Duration = Duration::from_secs(2);
+
+/// How long capacity a predecessor yielded stays reserved for its successor.
+/// The successor is woken at the release and normally claims it within one
+/// driver pass; the bound only matters when it has gone away.
+const HANDOFF_RESERVATION_TTL: Duration = Duration::from_secs(2);
+
+/// A prepared successor's request that this rendition's producer give its
+/// encoder permit back. Bound to the exact staged successor incarnation the
+/// predecessor's preparation slot names.
+#[derive(Clone)]
+struct HandoffRequest {
+    until: Instant,
+    incarnation: String,
+    successor: Weak<Rendition>,
+    wanted: crate::admission::TranscodeResourceEstimate,
+}
+
 /// How long a rendition with no attached sessions is kept warm before an
 /// un-admitted one is purged. Admitted renditions are the completed cache and
 /// are never purged here — cache retention is `cachekeep`'s job, not a TTL's.

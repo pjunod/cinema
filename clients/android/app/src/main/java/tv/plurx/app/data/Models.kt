@@ -71,6 +71,7 @@ data class Item(
     val kind: String,
     val parent_id: Long? = null,
     val title: String,
+    val sort_title: String? = null,
     val year: Int? = null,
     val overview: String? = null,
     val poster: String? = null,
@@ -332,6 +333,19 @@ data class OpenPublicationResponse(
     val revision: ReadingRevision,
     val publication: PublicationManifest,
     val limits: PublicationLimits,
+)
+
+@Serializable
+data class FileGrantRequest(
+    val purpose: String = "open_in",
+    val ttl_secs: Int = 900,
+)
+
+@Serializable
+data class FileGrantResponse(
+    val url: String,
+    val expires_at: Long,
+    val grant_id: String,
 )
 
 @Serializable

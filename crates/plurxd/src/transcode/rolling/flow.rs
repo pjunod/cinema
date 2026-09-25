@@ -72,12 +72,11 @@ pub(super) const ROLLING_SCRATCH_UNKNOWN_RATE_BYTES: i64 = 256 * 1024 * 1024;
 /// remaining uncontrolled initial burst, and the writes already issued when a
 /// suspension lands.
 ///
-/// For the native copy writer this is a convenience, not the bound — every
-/// object passes an exact grant at `copyseg::publish_file`, so an
-/// under-estimated envelope makes the writer wait rather than overrun. For
-/// direct FFmpeg output there is no such boundary, and the envelope is a
-/// measurement-derived allowance rather than an enforced one. That asymmetry
-/// is why only the copy path is admitted with a reduced startup reservation.
+/// For every rolling writer this is a convenience, not the bound. Each object
+/// the native copy writer publishes passes an exact grant at
+/// `copyseg::publish_file`, and each piece FFmpeg's muxer uploads passes one
+/// in `scratch_put`, so an under-estimated envelope makes the writer wait
+/// rather than overrun.
 const ROLLING_SCRATCH_ENVELOPE_SAFETY: f64 = 5.0;
 
 /// How far above a title's *average* bitrate its opening is sized.
@@ -106,12 +105,15 @@ const ROLLING_SCRATCH_EVALUATION_INTERVAL: Duration = Duration::from_secs(1);
 ///
 /// The historical answer was always the whole per-session ceiling, which is
 /// why three rolling producers exhausted an 8 GiB budget no matter how little
-/// they actually wrote. A writer whose every write passes a grant boundary
-/// can start small and grow instead; one whose writes cannot be intercepted
-/// still has to reserve the ceiling, because nothing else bounds it.
+/// they actually wrote. Every rolling writer now passes a grant boundary --
+/// the copy segmenter in `copyseg`, FFmpeg's own muxer through
+/// `scratch_put` -- so every producer starts small and grows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RollingScratchSizing {
-    /// The configured per-session ceiling plus one in-flight envelope.
+    /// The configured per-session ceiling plus one in-flight envelope. No
+    /// producer is admitted this way any more; tests use it to model the
+    /// historical whole-ceiling reservation.
+    #[cfg(test)]
     SessionCeiling,
     /// A startup allowance covering every enabled publish gate plus one
     /// complete segment, plus the enforcement envelope. Grows under an
@@ -196,6 +198,7 @@ impl RollingScratchSizing {
     pub(super) fn grant_bytes(self, limits: AheadLimits) -> i64 {
         let full = Self::ceiling(limits);
         match self {
+            #[cfg(test)]
             Self::SessionCeiling => full,
             Self::Startup(bytes) => bytes.clamp(ROLLING_SCRATCH_MIN_GRANT_BYTES.min(full), full),
         }

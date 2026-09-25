@@ -203,7 +203,12 @@ async fn complete_subtitle_playlist_response(
     }
     tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        crate::subtitles::warm_vtt(&state.subs_dir, &file, index),
+        crate::subtitles::warm_vtt_with_store(
+            &state.subs_dir,
+            &file,
+            index,
+            &state.subtitle_source_access(),
+        ),
     )
     .await
     .map_err(|_| response_publication_timeout())?;
@@ -347,7 +352,7 @@ pub(super) const SUBTITLE_SEGMENT_PUBLICATION_POLL: Duration = Duration::from_mi
 /// request that caught its cues at the deadline fails on the very next await.
 const SUBTITLE_SEGMENT_PUBLICATION_RESERVE: Duration = Duration::from_millis(750);
 
-struct ProductionSubtitleSegmentSource;
+struct ProductionSubtitleSegmentSource(crate::subtitle_source::StoreAccess);
 
 impl SubtitleSegmentSource for ProductionSubtitleSegmentSource {
     fn read_whole<'a>(
@@ -356,7 +361,9 @@ impl SubtitleSegmentSource for ProductionSubtitleSegmentSource {
         file: &'a MediaFile,
         index: i64,
     ) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
-        Box::pin(crate::subtitles::read_cached_vtt(dir, file, index))
+        Box::pin(crate::subtitles::read_cached_vtt_with_store(
+            dir, file, index, &self.0,
+        ))
     }
 
     fn read_window<'a>(
@@ -382,7 +389,9 @@ impl SubtitleSegmentSource for ProductionSubtitleSegmentSource {
         file: &'a MediaFile,
         index: i64,
     ) -> BoxFuture<'a, ()> {
-        Box::pin(crate::subtitles::warm_vtt(dir, file, index))
+        Box::pin(crate::subtitles::warm_vtt_with_store(
+            dir, file, index, &self.0,
+        ))
     }
 
     fn warm_window<'a>(
@@ -429,7 +438,9 @@ impl SubtitleSegmentSource for ProductionSubtitleSegmentSource {
         file: &'a MediaFile,
         index: i64,
     ) -> BoxFuture<'a, crate::subtitles::SidecarState> {
-        Box::pin(crate::subtitles::sidecar_state(dir, file, index))
+        Box::pin(crate::subtitles::sidecar_state_with_store(
+            dir, file, index, &self.0,
+        ))
     }
 }
 
@@ -492,7 +503,7 @@ pub(super) async fn subtitle_vtt_local_before(
         index,
         segment,
         publication_deadline,
-        &ProductionSubtitleSegmentSource,
+        &ProductionSubtitleSegmentSource(state.subtitle_source_access()),
     )
     .await
 }

@@ -955,6 +955,7 @@ impl TranscodeManager {
             scratch: None,
             retired_release: Arc::new(RetiredRelease::new()),
             scratch_envelope: 0,
+            upload: None,
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),

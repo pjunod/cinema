@@ -20,8 +20,11 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `123` — native viewer parity across phone, foldable,
-> and TV. Build 121 lands on the login screen with the server's sentence when a
+> Status: **v0.3.0**, build `125` — native viewer parity across phone, foldable,
+> and TV. Build 124 settles a progressive remux seek after later rendered video
+> crosses the requested position, even if its first frame lands slightly early;
+> background playback cannot settle that pending seek. PGS tracks display as
+> Overlay in the player. Build 121 lands on the login screen with the server's sentence when a
 > sign-in expires after its idle window, instead of leaving an HTTP 401 on Home,
 > and gives a system interruption (a call, another app taking audio) its own
 > hold notice that survives the hold timer and clears when the system resumes.

@@ -101,6 +101,14 @@ pub(super) struct Rendition {
     pub(super) closed: AtomicBool,
     /// One admission-refusal line per fill, not one per materialize.
     pub(super) warned_admission: AtomicBool,
+    /// One "waiting for an encoder permit" line per wait episode, not one per
+    /// driver pass. Cleared when a permit is granted or demand goes away.
+    pub(super) permit_wait_logged: AtomicBool,
+    /// While live, this rendition's producer must give its encoder permit to
+    /// the prepared successor named here (and not take one back).
+    pub(super) handoff: StdMutex<Option<HandoffRequest>>,
+    /// One expiry wake-up task per parked episode.
+    pub(super) handoff_expiry_armed: AtomicBool,
     /// First blocked demand per plan entry, retained across HTTP 503 retries.
     pub(super) demand_since: StdMutex<HashMap<u32, MaterializeClock>>,
 }
@@ -108,6 +116,61 @@ pub(super) struct Rendition {
 impl Rendition {
     pub(super) fn kick(&self) {
         self.wake.notify_one();
+    }
+
+    /// Ask (or keep asking) this producer to hand its permit to `successor`.
+    /// `true` when this starts a new handoff rather than refreshing one.
+    pub(super) fn request_handoff(
+        &self,
+        incarnation: &str,
+        successor: &Arc<Rendition>,
+        wanted: crate::admission::TranscodeResourceEstimate,
+    ) -> bool {
+        let now = Instant::now();
+        let mut slot = self.handoff.lock().expect("handoff lock");
+        let fresh = !slot
+            .as_ref()
+            .is_some_and(|request| request.until > now && request.incarnation == incarnation);
+        *slot = Some(HandoffRequest {
+            until: now + HANDOFF_REQUEST_TTL,
+            incarnation: incarnation.to_owned(),
+            successor: Arc::downgrade(successor),
+            wanted,
+        });
+        fresh
+    }
+
+    pub(super) fn live_handoff(&self) -> Option<HandoffRequest> {
+        self.handoff
+            .lock()
+            .expect("handoff lock")
+            .as_ref()
+            .filter(|request| request.until > Instant::now())
+            .cloned()
+    }
+
+    #[cfg(test)]
+    pub(super) fn handoff_requested(&self) -> bool {
+        self.live_handoff().is_some()
+    }
+
+    /// Drop a handoff request unless it names `live_incarnation`, and wake
+    /// the producer so a parked viewer is served at once rather than at the
+    /// request's expiry or its next GET.
+    pub(super) fn release_handoff_unless(&self, live_incarnation: Option<&str>) {
+        let released = {
+            let mut slot = self.handoff.lock().expect("handoff lock");
+            match slot.as_ref() {
+                Some(request) if Some(request.incarnation.as_str()) != live_incarnation => {
+                    *slot = None;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if released {
+            self.kick();
+        }
     }
 
     pub(super) fn failure(&self) -> Option<RenditionFailure> {
@@ -487,9 +550,28 @@ pub(super) struct Session {
     /// replay/end/maintenance path.
     pub(super) terminal_cleanup: Option<Arc<TerminalCleanup>>,
     pub(super) tombstone: Option<Terminal>,
+    /// The durable incarnation this session was primed as, when it is a
+    /// prepared successor. A predecessor hands its encoder permit only to the
+    /// session whose incarnation its own preparation slot names.
+    pub(super) prepared_incarnation: Option<String>,
 }
 
 impl Session {
+    /// Release this session's rendition from any handoff its preparation no
+    /// longer backs (abort, rejection, settlement, tombstone, or a newer
+    /// successor staged in its place).
+    fn release_stale_handoff(&self) {
+        let live = self
+            .control
+            .lock()
+            .expect("control lock")
+            .live_preparation_incarnation()
+            .map(str::to_owned);
+        if let Some(rendition) = self.rendition.as_ref() {
+            rendition.release_handoff_unless(live.as_deref());
+        }
+    }
+
     /// Move any staged M6 successor to aborting, because this session is over.
     ///
     /// Called wherever a tombstone is written, under the same registry lock
@@ -505,10 +587,13 @@ impl Session {
     /// holding a successor. What this does buy is that nothing afterwards
     /// believes the successor is still wanted.
     pub(super) fn abort_staged_preparation(&self) {
-        let mut control = self.control.lock().expect("control lock");
-        if let Some(staged) = control.staged_incarnation_id().map(str::to_owned) {
-            control.abort_preparation(&staged);
+        {
+            let mut control = self.control.lock().expect("control lock");
+            if let Some(staged) = control.staged_incarnation_id().map(str::to_owned) {
+                control.abort_preparation(&staged);
+            }
         }
+        self.release_stale_handoff();
     }
 
     pub(super) fn live_rendition(&self) -> Option<&Arc<Rendition>> {
@@ -616,6 +701,25 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                     expected_owner_epoch,
                     desired_digest,
                 );
+            if staged {
+                // A successor primed before its slot was staged may already
+                // have been refused with nothing to ask; let it ask now.
+                let live = session
+                    .control
+                    .lock()
+                    .expect("control lock")
+                    .live_preparation_incarnation()
+                    .map(str::to_owned);
+                for successor in sessions.values() {
+                    if successor.prepared_incarnation.is_some()
+                        && successor.prepared_incarnation == live
+                    {
+                        if let Some(rendition) = successor.live_rendition() {
+                            rendition.kick();
+                        }
+                    }
+                }
+            }
             staged
         })
     }
@@ -662,6 +766,7 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                 .lock()
                 .expect("control lock")
                 .begin_abort_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
+            session.release_stale_handoff();
             reserved
         })
     }
@@ -681,6 +786,7 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                 .lock()
                 .expect("control lock")
                 .reject_preparation_commit_for_owner(staged_incarnation_id, expected_owner_epoch);
+            session.release_stale_handoff();
             rejected
         })
     }
@@ -707,6 +813,7 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
             let settled =
                 control.settle_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
             drop(control);
+            session.release_stale_handoff();
             settled
         })
     }

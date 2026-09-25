@@ -1,6 +1,26 @@
 use super::*;
 
 impl VodServe {
+    /// Record the durable incarnation a speculative (prepared) session was
+    /// primed as, and wake its rendition so an earlier refusal can now look
+    /// for the predecessor that staged it.
+    pub(crate) async fn mark_prepared_incarnation(&self, session_id: &str, incarnation: &str) {
+        let rendition = {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = sessions
+                .get_mut(session_id)
+                .filter(|session| session.tombstone.is_none())
+            else {
+                return;
+            };
+            session.prepared_incarnation = Some(incarnation.to_owned());
+            session.rendition.clone()
+        };
+        if let Some(rendition) = rendition {
+            rendition.kick();
+        }
+    }
+
     /// Convert an attached prepared VOD rendition to ordinary foreground
     /// admission after its durable pointer commit. A copy rendition has no
     /// encoder and therefore needs no transition.
@@ -157,6 +177,9 @@ impl VodServe {
             dormant_since: StdMutex::new(None),
             closed: AtomicBool::new(false),
             warned_admission: AtomicBool::new(false),
+            permit_wait_logged: AtomicBool::new(false),
+            handoff: StdMutex::new(None),
+            handoff_expiry_armed: AtomicBool::new(false),
             demand_since: StdMutex::new(HashMap::new()),
         });
 
@@ -200,6 +223,7 @@ impl VodServe {
                 last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
+                prepared_incarnation: None,
                 terminal_cleanup: None,
                 tombstone: None,
             },
