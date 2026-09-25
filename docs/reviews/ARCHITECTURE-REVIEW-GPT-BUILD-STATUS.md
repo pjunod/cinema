@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — postmerge evidence PR #512 in qualification; four nodes and six reachable Apple devices deployed from `44cdfccc7` · **Updated:** 2026-09-25 12:09 UTC · **Main:** `363d48e78`
+**Status:** open — postmerge evidence PR #512 in qualification; four nodes and six reachable Apple devices deployed from `44cdfccc7` · **Updated:** 2026-09-25 12:14 UTC · **Main:** `363d48e78`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -42,7 +42,7 @@ operations and ownership tests. Its final `make history-check` passed before fas
 
 ## Postmerge evidence PR
 
-PR #512 records the rollout and baselines and repairs the caption-audit wrapper. Its sole adversarial review found an empty-test success path and stale workboard rows; both were fixed. Fast-lane #2947 then stopped in history preflight before unit jobs because the wrapper correction lacked a regression ledger entry. The `8d128e14` ledger entry is committed and local `make history-check` passed. Main `68c29657b` was merged into the PR at `f6df390ec` and that tree passed local `make history-check` with all 2,279 corrective commits accounted for. Fast-lane #2949 then ran 506 operations tests and stopped on this page header: the index says `open` while the header said `merged`. The header now states `open`. Main advanced to `363d48e78` during qualification and was integrated with both parties' workboard changes at `0702cbe84`; another fast-lane run is pending.
+PR #512 records the rollout and baselines and repairs the caption-audit wrapper. Its sole adversarial review found an empty-test success path and stale workboard rows; both were fixed. Fast-lane #2947 stopped in history preflight before unit jobs because the wrapper correction lacked evidence under phase A. A temporary ledger entry made phase A pass; current main then enabled phase B at boundary `448e803da`, which requires PR-level `Regression-Test` evidence for this branch. The PR body names `tests/operations/test_live_tv_caption_audit.py::test_audit_requires_one_completed_test`, the now-forbidden ledger entries were removed, and local `make history-check` passed with one landing commit awaiting its merge trailer. Main `68c29657b` was merged into the PR at `f6df390ec` and that tree passed local `make history-check` with all 2,279 corrective commits accounted for. Fast-lane #2949 then ran 506 operations tests and stopped on this page header: the index says `open` while the header said `merged`. The header now states `open`. Main advanced to `363d48e78` during qualification and was integrated with both parties' workboard changes at `0702cbe84`; focused status audit and current phase-B history check pass locally. Another fast-lane run is pending.
 
 ## Current impediments
 
