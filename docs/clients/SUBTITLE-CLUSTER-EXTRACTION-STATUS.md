@@ -1,6 +1,6 @@
 # Subtitle cluster extraction — implementation status
 
-**Status:** built — M0–M5 implementation complete; PR #507 merge qualification in progress; fleet and device evidence pending · **Updated:** 2026-09-24 · **Board:** K-09 · **Branch:** `plan/K-09` · **PR:** [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) · **Base:** `dafadf043`
+**Status:** built — M0–M5 implementation complete; PR #507 merge qualification in progress; fleet and device evidence pending · **Updated:** 2026-09-25 · **Board:** K-09 · **Branch:** `plan/K-09` · **PR:** [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) · **Base:** `dafadf043`
 
 The [v2 plan](SUBTITLE-CLUSTER-EXTRACTION-PLAN.md) is the contract. Its
 Execution log holds the evidence for each milestone. This page is the short
@@ -23,8 +23,12 @@ cross-node ride skip and cancel-at-publish fencing. All six are fixed in
 local `make unit` run found SQL contract and fixture errors, fixed in
 `fd7356074`; their focused reruns pass. Unchanged scratch-upload and telemetry
 tests were red on the macOS run, so the pinned Linux/FFmpeg 6 PR gate is the
-merge qualification. Pinned Rust compile, formatting and Clippy pass on the
-reviewed code, and the UI baseline produced 78 captures without page
+merge qualification. Fast lane #2953 passed preflight, Windows and web; Rust
+found the v68 migration count assertion and a shared access-line throttle in
+parallel daemon tests. Both are corrected in `e827e942c`, and their focused
+regressions pass; the new exact-head gate is pending. Pinned Rust compile,
+formatting and Clippy passed before this correction, and the UI baseline
+produced 78 captures without page
 or console errors. The plan's §6.2 fleet and device checks require a later
 deployment and are not claimed by this implementation PR.
 

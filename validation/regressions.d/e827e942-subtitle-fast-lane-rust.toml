@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e827e942"]
+points = ["core.media", "server.api"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The exact-head Rust gate found that the new subtitle schema was the intentional v68 entry while the append-only count assertion still expected v67. It also exposed a pre-existing global access-line throttle shared by parallel daemon tests, which could suppress the probe's first captured 503 warning. v6_rebuild_preserves_everything and a_refusal_storm_is_counted_exactly_and_logged_at_most_once_a_second pass as focused regressions after the count and test-router isolation changes."
