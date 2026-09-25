@@ -58,6 +58,20 @@ to race. For the same reason AC-3 only counts as *copyable* in track selection
 when MPEG-TS carries it: on an fMP4-only player a stereo AAC track beside a
 5.1 AC-3 track is the true copy and wins.
 
+## The layout list carries only ADTS-configurable layouts (2026-09-24 follow-up)
+
+The first deployment listed `5.1(side)` ahead of `5.1`. Every ATSC AC-3 5.1
+track decodes to `5.1(side)`, so `aformat` kept it, and the AAC encoder — which
+has no ADTS channel configuration for a side pair — signalled it as
+configuration 0 plus a PCE. ffprobe reads such a segment as an AAC track with
+0 channels, hls.js and the browsers' MSE the same, and the audio track never
+initialises: Safari and Chrome sat black with 0 decoded frames on 157.1 while
+the server published perfectly good segments at 1 s. The list is now
+`5.1|stereo|mono`; the side pair maps onto configuration 6 one to one. The
+hardware harness asserts an encoded AAC segment probes with a positive channel
+count, and its `--surround` mode claims a browser's H.264/AAC route on a 5.1
+output so this route is exercised against the real tuner.
+
 ## Channel ceiling semantics
 
 `output.audio_channels` on an encoded route is now an **upper bound**: the

@@ -342,11 +342,34 @@ def await_first_segment(client, playlist_url, deadline_seconds):
                          % deadline_seconds)
 
 
-def playback_body(copy_route, request_id=None):
+def playback_body(copy_route, request_id=None, surround=False):
     """The real public playback envelope, narrowed to the route under test."""
     body = {}
     if request_id is not None:
         body["request_id"] = request_id
+    if surround:
+        # A browser: H.264 in MPEG-TS, AAC decoded on a 5.1 output. This is the
+        # route the 5.1 AAC channel-configuration defect was found on.
+        body["playback"] = {
+            "v": 1,
+            "caps": {
+                "v": 2,
+                "video": [{"codec": "h264", "profiles": [], "max_height": 2160}],
+                "audio": ["aac"],
+                "containers": ["mpegts"],
+                "transports": ["hls"],
+            },
+            "hls_formats": [{"container": "mpegts", "video": "h264", "audio": "aac"}],
+            "video_limits": [{
+                "codec": "h264",
+                "max_width": 3840,
+                "max_height": 2160,
+                "max_frame_rate": {"num": 60, "den": 1},
+                "interlaced": False,
+            }],
+            "audio_limits": [{"codec": "aac", "max_channels": 6}],
+        }
+        return body
     if copy_route:
         body["playback"] = {
             "v": 1,
@@ -463,7 +486,7 @@ def run_via(client, mine, evidence, out):
     try:
         started = client.api(
             "/live-tv/channels/%s/sessions" % channel["id"], "POST",
-            playback_body(mine.copy, request_id), timeout=PUBLIC_START_DEADLINE + 10)
+            playback_body(mine.copy, request_id, mine.surround), timeout=PUBLIC_START_DEADLINE + 10)
     except ApiRefusal as error:
         refusal = error
     answer_seconds = time.monotonic() - asked_at
@@ -596,6 +619,9 @@ def split_own_args(argv):
     own.add_argument("--channel", help="pin a guide number instead of taking the first playable one")
     own.add_argument("--copy", action="store_true",
                      help="advertise HEVC/AC-3 playback so an eligible source stays direct")
+    own.add_argument("--surround", action="store_true",
+                     help="advertise a browser's H.264/AAC route with a 5.1 output, so a 5.1 "
+                          "source is converted to six-channel AAC")
     own.add_argument("--via", metavar="INGRESS",
                      help="send the public start through this non-owner node (host or URL)")
     own.add_argument("--host-address",
@@ -891,7 +917,7 @@ def main(argv):
                 client.api,
                 "/live-tv/channels/%s/sessions" % channel["id"],
                 "POST",
-                playback_body(mine.copy),
+                playback_body(mine.copy, surround=mine.surround),
                 PUBLIC_START_DEADLINE + 10,
             )
             (first_listed_seconds, first_sequence, first_names,
@@ -960,6 +986,15 @@ def main(argv):
         assert len(segments) <= LISTED_SEGMENTS, (
             "the live window published %d segments; at most %d may be listed"
             % (len(segments), LISTED_SEGMENTS))
+        # ffprobe reads these from the ADTS header without decoding. An AAC
+        # track whose layout has no channel configuration (5.1(side)) is
+        # signalled as configuration 0 plus a PCE and probes as 0 channels —
+        # exactly what browsers refuse to start.
+        if audio[0].get("codec_name") == "aac":
+            assert int(audio[0].get("channels") or 0) > 0, (
+                "the encoded AAC track carries no channel configuration in its "
+                "ADTS header (probed as %r channels); browsers cannot start it"
+                % audio[0].get("channels"))
         if not mine.copy:
             assert target_duration == 1 and durations and all(
                 0.9 <= duration <= 1.1 for duration in durations), (
@@ -988,6 +1023,15 @@ def main(argv):
                 assert int(video[0].get("height") or 0) == int(source_height), (
                     "a copy route changed source height %r to %r"
                     % (source_height, video[0].get("height")))
+        elif mine.surround:
+            assert audio[0].get("codec_name") == "aac", (
+                "--surround asked for AAC but the published segment carries %s"
+                % audio[0].get("codec_name"))
+            source_channels = evidence.get("source", {}).get("audio_channels")
+            if source_channels is not None and int(source_channels) >= 6:
+                assert int(audio[0].get("channels") or 0) == 6, (
+                    "a 5.1 source on a 5.1 output was published with %r AAC channels"
+                    % audio[0].get("channels"))
         else:
             # The legacy bodiless profile uses the configured output-height
             # ceiling. Playback-aware copy deliberately preserves the source.

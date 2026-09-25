@@ -3288,10 +3288,41 @@
 .watch-inspect strong{line-height:1.3;overflow-wrap:anywhere}
 .watch-details{background:var(--bg,#171a23);color:var(--fg,#fff);border:1px solid var(--line,#555);border-radius:14px;padding:24px;width:min(580px,calc(100% - 32px));max-height:80vh;overflow:auto}
 .watch-details::backdrop{background:rgba(0,0,0,.6)}
-.modal.watch-host{position:fixed;inset:auto;padding:0;background:transparent;z-index:90;max-width:none;max-height:none;align-items:stretch;justify-content:stretch;overflow:hidden;border-radius:12px}
+/* The slot host is the slot's rectangle, fixed, re-placed by watchLayout on
+   every scroll frame. It sits UNDER the page's sticky and fixed chrome — the
+   classic header (20), the theater bar (30) and chips (25), the phone tab
+   bars (45) — so a picture scrolled up goes behind the header the way the
+   rest of the page does, instead of riding over it as it did at z-index 90
+   with a clip-path that only knew about the viewport's edge. It clips nothing:
+   the subtitle and audio menus and the Playback info panel are taller than a
+   compact picture, and when they were clipped to it the top of a thirty-track
+   menu was unreachable and the bottom of the readout unreadable. They hang
+   over the page now, bounded to the viewport by positionMenu / positionStats
+   (watchPopoverBounds keeps them out from under the chrome). The picture's
+   rounded corners belong to its parts instead of an overflow clip. */
+.modal.watch-host{position:fixed;inset:auto;padding:0;background:transparent;z-index:10;max-width:none;max-height:none;align-items:stretch;justify-content:stretch;overflow:visible;border-radius:12px}
 .modal.watch-host .player{width:100%;height:100%;max-width:none;max-height:none;aspect-ratio:auto;border-radius:0}
 .modal.watch-host .player video{width:100%;height:100%;object-fit:contain}
+.modal.watch-host:not(.watch-full) .player,.modal.watch-host:not(.watch-full) .player video,.modal.watch-host:not(.watch-full) .ploading{border-radius:12px}
+.modal.watch-host:not(.watch-full) .watch-inline video{border-radius:12px 12px 0 0}
+.modal.watch-host:not(.watch-full) .pbar{border-radius:12px 12px 0 0}
+.modal.watch-host:not(.watch-full) .ptransport{border-radius:0 0 12px 12px}
+/* An open menu or readout is the thing being used; it paints over the bar
+   the menu may now reach up into, and over the Larger / fullscreen buttons
+   the readout hangs past (both raised to 7 below so Close and the
+   presentation changes stay reachable during a prepare; the panels' own ✕
+   is the way out while they are open). */
+.modal.watch-host:not(.watch-full) .pmenu,.modal.watch-host:not(.watch-full) .statsov{z-index:8}
+/* A fault's notice and the in-chrome spinner share the readout's corner and
+   must stay on top of it — the notice carries the fault's actions. */
+.modal.watch-host:not(.watch-full) .psurface,.modal.watch-host:not(.watch-full) .pindicator{z-index:9}
+/* The readout's stylesheet width is a viewport fraction; in a picture narrower
+   than that it hung off the picture's left edge. */
+.modal.watch-host:not(.watch-full) .statsov{width:min(736px,calc(100% - 40px));max-width:calc(100% - 40px)}
 .modal.watch-host.watch-full{inset:0;width:100%;height:100%;border-radius:0;background:#000;z-index:1000}
+/* Every menu, in every presentation: as tall as its entries until the room
+   measured by positionMenu runs out (its inline max-height), then it scrolls. */
+.pmenu{overflow-y:auto;overscroll-behavior:contain}
 #pblarger{font-size:12px;white-space:nowrap}
 @media(max-width:760px){
   .watch-stage{grid-template-columns:minmax(0,1fr);gap:12px}

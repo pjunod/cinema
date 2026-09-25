@@ -2,7 +2,7 @@
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Seek scratch reservations status</title>
 <style>body{font:16px system-ui;max-width:920px;margin:48px auto;padding:0 24px;color:#17212b;background:#f6f8fa}h1{font-size:30px}h2{font-size:20px;margin-top:36px}table{width:100%;border-collapse:collapse;background:white}td,th{text-align:left;padding:12px;border-bottom:1px solid #ddd;vertical-align:top}code{font-size:13px}pre{background:#fff;padding:16px;overflow-x:auto;border:1px solid #ddd;font-size:13px;white-space:pre-wrap}.note{padding:16px;background:#e8efff}.done{color:#136c34;font-weight:600}.wip{color:#8a5400;font-weight:600}.todo{color:#6b7280;font-weight:600}a{color:#174da1}</style>
-<h1>Seek scratch reservations</h1><p>Updated: 2026-09-20</p>
+<h1>Seek scratch reservations</h1><p>Updated: 2026-09-24</p>
 <p class="note">Repeated seeks refused playback with a 500, and then the healthy incumbent was reaped thirty seconds later.
 Executing R1–R6 of the <a href="SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md">approved RCA</a> as one combined promotion
 (units A, B and C on one effort branch). <b>Merged to main as <code>c70390bc</code>; the server side is deployed to the lab nodes. Physical acceptance is still outstanding.</b></p>
@@ -18,17 +18,22 @@ Executing R1–R6 of the <a href="SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md">appr
 <tr><td><b>A5</b> desired intent vs attached execution</td><td class="done">Built. Relative seeks count from the desired destination (110 · 120 · 130, not 110 three times), an identical in-flight create is suppressed before the generation moves, and the scrubber follows the destination.</td></tr>
 <tr><td><b>A6</b> incumbent survival</td><td class="done">Built. An unexecuted destination is no longer reported as the incumbent's seek; the shipped snapshots are replayed through the real startup actor and it survives past sixty seconds.</td></tr>
 <tr><td><b>B</b> shorter same-viewer release grace</td><td class="done">Built. Create-time <code>transport</code> metadata in the durable recipe; the exact DELETE shortens one eligible retired promise to one segment target, once, non-renewing. Apple, native, unknown and legacy keep the original grace.</td></tr>
-<tr><td><b>C</b> smaller growing reservations</td><td class="wip">Built for the native copy writer, where every object passes a grant before it exists. Direct/transcoded FFmpeg stays conservative on purpose — see the limit below.</td></tr>
+<tr><td><b>C</b> smaller growing reservations</td><td class="done">Built for every rolling writer. The native copy writer grants each object before it exists (2026-09-20); FFmpeg's own HLS muxer now uploads through a loopback endpoint that grants every piece before it lands (2026-09-24), so no producer reserves the whole ceiling. See <a href="../evidence/ffmpeg-hls-write-boundary-receipt-2026-09-24.md">the write-boundary receipt</a>.</td></tr>
 </table>
 
-<h2>The limit this ships with</h2>
-<p><b>Transcoded output still reserves the whole per-session ceiling.</b> FFmpeg's <code>-f hls</code> writes its own
+<h2>The limit this shipped with, now removed</h2>
+<p><b>Until 2026-09-24, transcoded output still reserved the whole per-session ceiling.</b> FFmpeg's <code>-f hls</code> writes its own
 segment and playlist files, and there is no Rust hook before those writes; a measurement taken afterwards can only
 discover an overrun. Three candidate mechanisms were weighed — an owned output boundary (a substantial media-pipeline
 change), a hard writable quota (<code>RLIMIT_FSIZE</code> is per file; <code>ffmpeg -fs</code> counts cumulative muxed
 bytes and would truncate a long film; project quotas need privileged provisioning), and an enforced envelope (the
 timers are cadences, not proven maxima) — and none passed. The incident path and the more-than-three-producers case are
 both the copy path, so the repair reaches them; this is named rather than hidden, on the Developer tab too.</p>
+<p><b>Resolved.</b> <code>-method PUT</code> makes FFmpeg's HLS muxer upload each object instead of writing it, and
+<code>crates/plurxd/src/scratch_put.rs</code> receives the uploads, grants every piece against the ledger before it
+writes it, and renames each object into place only once everything it names is there. The muxer and its output are
+unchanged: real FFmpeg writes the same bytes both ways. The legacy copy writer, which had quietly been admitted on the
+small allowance with no boundary at all, uses the same endpoint.</p>
 
 <h2>Evidence</h2>
 <table><tr><th>Check</th><th>Result</th></tr>
