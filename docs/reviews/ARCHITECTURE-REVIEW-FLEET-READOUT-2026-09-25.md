@@ -669,3 +669,59 @@ The same Safari POST/session failure persisted in a temporary `gui/501` Aqua
 LaunchAgent with Window Server bootstrap/TCC errors; that job and its port
 were removed. Its follow-up receipt SHA-256 is
 `c35b67a42f1c8d2dba79fad5cc061f24241631b87bc77ec7b063720f91dcff81`.
+
+## Historical `8ae8cab1e136` hour — closed at 22:26 UTC
+
+The bounded `8ae8cab1e136` collector ended cleanly after main had advanced
+to `0915b3ee9e62`. It recorded 122 uniform ticks per node from 21:25:40 to
+22:26:10 UTC (3,630 seconds), with a maximum 30-second gap. Every tick had
+the pinned build, HTTP 200, quorum, known leader and zero apply lag; none had
+an uptime reset or collection error. Thirteen independent SSH health ticks
+per node covered at least 3,600 seconds with maximum 301–302-second gaps.
+Every health tick had exact checkout/running OCI, Docker healthy, zero
+restarts and readyz/metrics 200; the sampled ten-minute logs had zero WAL,
+EMFILE or panic alerts.
+
+| Node | FD range | Commit-index increase | Snapshot builds | Build p50/p99 bucket ceilings |
+|---|---:|---:|---:|---|
+| `nynuc` | 49–64 | 37,353 | 4 | 1 s / 1 s |
+| `m6` | 55–75 | 37,352 | 4 | 0.5 s / 0.5 s |
+| `nuc4` | 62–76 | 37,352 | 4 | 0.5 s / 0.5 s |
+| `nuc3` | 47–50 | 37,351 | 4 | 0.25 s / 0.5 s |
+
+The build quantiles are histogram bucket ceilings from four builds per node,
+not measured 24-hour percentiles. All sampled apply lag values were zero,
+including at builds. The receipt also records first/last/min/max DB, WAL,
+snapshot and log bytes per node. K-02 still needs a single final-build
+24-hour B/E/S/W window and a prepared follower restart/catch-up rate A.
+
+The C-08 scraper recorded 14 samples per node from 21:25:47 to 22:26:09 UTC
+(3,622 seconds), including a supplementary post-hour sample. All 56 had
+exact build, HTTP 200, 315 RED series and zero targeted hygiene hits.
+Exposition bodies ranged from 394,049 to 395,071 bytes; the slowest scrape
+was 0.133429 seconds, below the plan's 2 MB / 500 ms flags. Total HTTP
+requests rose 10,485/14,389/7,238/7,156 on
+`nynuc`/`m6`/`nuc4`/`nuc3`. The browser and Google TV flows above supplied
+bounded activity inside this interval. They do not establish a whole
+normal-use hour, JSON-mode logs, or source-attributed failure-path counters;
+C-08 remains open on final main.
+
+The one-hour sanitized summary is
+`/private/tmp/codex-fleet-main8ae8-interim-hour-summary-20260925.json`
+(SHA-256 `0359130f02e929c397e938c08a980fa120dd72edee5a44dba59ffbf9328e55f2`).
+It names the immutable raw compressed uniform SHA-256
+`2f76a293eaaef9b0d1bd35674b04f9fef83aec96f6552c3d138f900392350b7d`,
+health SHA-256
+`402f5c643d177771764ca9df95d73252ea7561cf8a4408b07764f645e47a31ed`,
+and C-08 JSONL SHA-256
+`e74aacdcabac20ecc9d4e3b57f9fc5417db535b5e54ce6b62a6324e9f910b025`.
+No 24-hour, seven-day, busy-evening, clock-uncertainty or final-main pass is
+claimed from this closed historical interval.
+
+At 21:58:20–21:58:21 UTC, a separate read-only C-05 sidecar query on the
+still-running `8ae8cab1e136` nodes found schema v10 and zero pending or
+negative `fragment_indexes` markers everywhere: positive/total counts were
+2,270 on `nynuc`, 1,518 on `m6`, 4,327 on `nuc4` and zero on learner `nuc3`.
+Zero pending markers do not prove active postdeploy backfill or M3 storage
+availability. Sanitized receipt SHA-256
+`cab73129961001ddc1c3a80650441c20143d4e05172f26888a9fd689e250d350`.
