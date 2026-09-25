@@ -637,6 +637,7 @@ struct ReaderContext: Identifiable, Equatable {
     let title: String
     let format: String
     let revision: ReadingRevision?
+    let expectedSize: Int?
 
     var id: String { "\(itemId):\(fileId):\(format)" }
 }
@@ -670,7 +671,6 @@ struct DetailView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #if os(iOS)
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openURL) private var openURL
     @ObservedObject private var downloads = OfflineDownloadManager.shared
     @ObservedObject private var bookDownloads = OfflineBookManager.shared
     #endif
@@ -810,7 +810,7 @@ struct DetailView: View {
         .fullScreenCover(item: $reader, onDismiss: {
             Task { detail = try? await model.itemDetail(itemId) }
         }) { context in
-            if context.format == "pdf", context.revision != nil {
+            if context.format == "pdf" {
                 PDFReaderView(context: context)
                     .environmentObject(model)
             } else {
@@ -2318,8 +2318,11 @@ struct DetailView: View {
                         itemId: detail.item.id,
                         fileId: file.id,
                         title: detail.item.title,
-                        format: file.reader?.format ?? "epub",
-                        revision: file.readerRevision
+                        format: file.reader?.format
+                            ?? (file.container?.lowercased() == "pdf"
+                                || file.filename?.lowercased().hasSuffix(".pdf") == true ? "pdf" : "epub"),
+                        revision: file.readerRevision,
+                        expectedSize: file.size
                     )
                 }
             } label: {
@@ -2328,24 +2331,13 @@ struct DetailView: View {
             }
             .buttonStyle(IOSDetailPrimaryActionButtonStyle())
 
-            Button {
-                openBookExternally(file)
-            } label: {
-                Label("Open in…", systemImage: "square.and.arrow.up")
-            }
-            .buttonStyle(IOSDetailLabeledActionButtonStyle(selected: false))
-
             if BookReaderPolicy.canDownload(file, onTelevision: false) {
                 mobileBookDownloadButton(detail: detail, file: file)
             }
         } else {
-            Button {
-                openBookExternally(file)
-            } label: {
-                Label("Open in…", systemImage: "square.and.arrow.up")
-                    .font(.subheadline.weight(.semibold))
-            }
-            .buttonStyle(IOSDetailPrimaryActionButtonStyle())
+            Text("Cinema cannot read this book format on this device.")
+                .font(.subheadline)
+                .foregroundStyle(Palette.muted)
         }
     }
 
@@ -2402,12 +2394,6 @@ struct DetailView: View {
         case .downloading: return "arrow.down.circle.fill"
         case .downloaded: return "checkmark.circle.fill"
         case .failed, .missing: return "arrow.clockwise.circle"
-        }
-    }
-
-    private func openBookExternally(_ file: MediaFile) {
-        if let url = Session.shared.mediaURL("/api/v1/files/\(file.id)/content") {
-            openURL(url)
         }
     }
 

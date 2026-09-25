@@ -147,9 +147,10 @@ final class Session: @unchecked Sendable {
         return URL(string: credentials.origin + path)
     }
 
-    /// Absolute URL with the token inline — for AVPlayer / `<img>`-style loads
-    /// that can't set an Authorization header. Capability-authed HLS playlists
-    /// (which already carry an unguessable session id) don't need this.
+    /// Absolute URL with the token inline — for Plurx-owned AVPlayer /
+    /// `<img>`-style loads that cannot set an Authorization header. Never pass
+    /// this URL to another app: its query grants full account authority.
+    /// Capability-authed HLS playlists don't need this.
     func mediaURL(_ path: String) -> URL? {
         let pair = credentials
         guard let base = URL(string: path.hasPrefix("http") ? path : pair.origin + path) else { return nil }

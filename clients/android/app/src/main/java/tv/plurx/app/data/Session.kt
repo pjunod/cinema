@@ -118,7 +118,10 @@ object Session {
     fun url(path: String): String =
         if (path.startsWith("http")) path else origin + path
 
-    /** URL for media consumers that cannot attach the bearer header. */
+    /** URL for Plurx-owned media consumers that cannot attach a bearer header.
+     * Never put this URL in an external intent: its query grants full account
+     * authority. Books opened inside Plurx use the authenticated reader path.
+     */
     fun mediaUrl(path: String): String {
         val base = url(path)
         val credential = token ?: return base

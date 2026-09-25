@@ -1,8 +1,6 @@
 package tv.plurx.app.ui
 
 import android.Manifest
-import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -67,7 +65,6 @@ import tv.plurx.app.data.Item
 import tv.plurx.app.data.ItemDetail
 import tv.plurx.app.data.MediaFileDto
 import tv.plurx.app.data.ReadingState
-import tv.plurx.app.data.Session
 import tv.plurx.app.ui.components.ChoicePicker
 import tv.plurx.app.ui.components.LoadingBox
 import tv.plurx.app.ui.components.MediaFactChip
@@ -114,6 +111,7 @@ fun DetailScreen(
     onOpenItem: (Long) -> Unit,
     onViewPhoto: (Long) -> Unit,
     onRead: (itemId: Long, fileId: Long) -> Unit,
+    onReadPdf: (fileId: Long) -> Unit,
     onMakeChannel: (Item) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -160,6 +158,7 @@ fun DetailScreen(
             onOpenItem = onOpenItem,
             onViewPhoto = onViewPhoto,
             onRead = onRead,
+            onReadPdf = onReadPdf,
             onMakeChannel = onMakeChannel,
             onWatchedChanged = { refresh++ },
             onBack = onBack,
@@ -176,6 +175,7 @@ private fun DetailContent(
     onOpenItem: (Long) -> Unit,
     onViewPhoto: (Long) -> Unit,
     onRead: (itemId: Long, fileId: Long) -> Unit,
+    onReadPdf: (fileId: Long) -> Unit,
     onMakeChannel: (Item) -> Unit,
     onWatchedChanged: () -> Unit,
     onBack: () -> Unit,
@@ -220,7 +220,8 @@ private fun DetailContent(
                     seriesPlayback = seriesPlayback, resumeMs = resumeMs, canResume = canResume,
                     trackChoices = trackChoices, requestInitialFocus = formFactor == FormFactor.Television,
                     reading = detail.reading, onPlay = onPlay, onViewPhoto = onViewPhoto,
-                    onRead = onRead, onMakeChannel = onMakeChannel, onWatchedChanged = onWatchedChanged)
+                    onRead = onRead, onReadPdf = onReadPdf,
+                    onMakeChannel = onMakeChannel, onWatchedChanged = onWatchedChanged)
             }
         }
 
@@ -398,6 +399,7 @@ private fun Actions(
     onPlay: (Long, Long, Long, PreplayTracks) -> Unit,
     onViewPhoto: (Long) -> Unit,
     onRead: (itemId: Long, fileId: Long) -> Unit,
+    onReadPdf: (fileId: Long) -> Unit,
     onMakeChannel: (Item) -> Unit,
     onWatchedChanged: () -> Unit,
 ) {
@@ -446,12 +448,27 @@ private fun Actions(
             }
         } else if (item.isBook) {
             if (playable != null && formFactor != FormFactor.Television) {
-                if (offersBookReader(formFactor, playable)) {
+                if (playable.isPdfBook) {
+                    item {
+                        DetailPrimaryActionButton(
+                            onClick = { onReadPdf(playable.id) },
+                            requestInitialFocus = requestInitialFocus,
+                        ) { Text("Read PDF", fontWeight = FontWeight.SemiBold) }
+                    }
+                } else if (offersBookReader(formFactor, playable)) {
                     item {
                         DetailPrimaryActionButton(
                             onClick = { onRead(item.id, playable.id) },
                             requestInitialFocus = requestInitialFocus,
                         ) { Text(bookReadingLabel(reading, playable), fontWeight = FontWeight.SemiBold) }
+                    }
+                } else {
+                    item {
+                        Text(
+                            "Cinema cannot read this book format on this device.",
+                            color = Muted,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
                 }
                 if (playable.supportsOfflineBookReader && OfflineBooks.canUse(context)) {
@@ -481,14 +498,6 @@ private fun Actions(
                             )
                         }
                     }
-                }
-                item {
-                    TvOutlinedButton(
-                        onClick = {
-                            val url = Session.mediaUrl("/api/v1/files/${playable.id}/content")
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                        },
-                    ) { Text("Open in…", fontWeight = FontWeight.SemiBold) }
                 }
                 downloadError?.let { message ->
                     item {
@@ -649,6 +658,11 @@ internal fun bookReadingLabel(reading: ReadingState?, file: MediaFileDto): Strin
 
 internal fun offersBookReader(formFactor: FormFactor, file: MediaFileDto): Boolean =
     formFactor != FormFactor.Television && file.available && file.supportsOnlineBookReader
+
+private val MediaFileDto.isPdfBook: Boolean
+    get() = filename.endsWith(".pdf", ignoreCase = true)
+        || container.equals("pdf", ignoreCase = true)
+        || reader?.format.equals("pdf", ignoreCase = true)
 
 @Composable
 internal fun DetailPrimaryActionButton(

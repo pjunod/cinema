@@ -333,14 +333,6 @@ struct PlurxAPI {
         try await post("files/\(fileId)/publication")
     }
 
-    func mintFileGrant(fileId: Int) async throws -> FileGrantResponse {
-        struct GrantRequest: Encodable {
-            let purpose = "open_in"
-            let ttlSecs = 900
-        }
-        return try await post("files/\(fileId)/grants", body: GrantRequest())
-    }
-
     func closePublication(sessionId: String) async throws {
         try await deleteNoContent("publication/\(sessionId)")
     }

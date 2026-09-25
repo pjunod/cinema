@@ -45,6 +45,7 @@ import tv.plurx.app.ui.OfflineBookReaderScreen
 import tv.plurx.app.ui.Phase
 import tv.plurx.app.ui.PhotoScreen
 import tv.plurx.app.ui.ReaderScreen
+import tv.plurx.app.ui.PdfReaderScreen
 import tv.plurx.app.ui.SearchScreen
 import tv.plurx.app.ui.SettingsScreen
 import tv.plurx.app.ui.components.LoadingBox
@@ -224,6 +225,7 @@ private fun MainNav(
                 onOpenItem = { id -> nav.navigate("detail/$id") },
                 onViewPhoto = { id -> nav.navigate("photo/$id") },
                 onRead = { itemId, fileId -> nav.navigate("reader/$itemId/$fileId") },
+                onReadPdf = { fileId -> nav.navigate("pdf-reader/$fileId") },
                 onMakeChannel = { item ->
                     nav.navigate("library-channels?seedId=${item.id}&seedKind=${Uri.encode(item.kind)}&seedTitle=${Uri.encode(item.title)}")
                 },
@@ -239,6 +241,15 @@ private fun MainNav(
         ) { entry ->
             ReaderScreen(
                 itemId = entry.arguments!!.getLong("itemId"),
+                fileId = entry.arguments!!.getLong("fileId"),
+                onExit = { nav.popBackStackFrom(entry) },
+            )
+        }
+        composable(
+            "pdf-reader/{fileId}",
+            arguments = listOf(navArgument("fileId") { type = NavType.LongType }),
+        ) { entry ->
+            PdfReaderScreen(
                 fileId = entry.arguments!!.getLong("fileId"),
                 onExit = { nav.popBackStackFrom(entry) },
             )
