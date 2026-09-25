@@ -90,7 +90,7 @@ android {
         // on 23-27, so do not offer that insecure distribution path.
         minSdk = 28
         targetSdk = 37
-        versionCode = 125
+        versionCode = 126
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
