@@ -52,7 +52,7 @@ import tv.plurx.app.data.Session
 import java.io.File
 import kotlin.coroutines.coroutineContext
 
-private const val MAX_PDF_BYTES = 1_073_741_824L
+internal const val MAX_PDF_READER_BYTES = 1_073_741_824L
 
 private class LocalPdf(val file: File) {
     private val descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
@@ -76,7 +76,8 @@ private class LocalPdf(val file: File) {
     }
 }
 
-private suspend fun downloadPdf(cacheDir: File, fileId: Long): LocalPdf = withContext(Dispatchers.IO) {
+private suspend fun downloadPdf(cacheDir: File, fileId: Long, expectedSize: Long): LocalPdf = withContext(Dispatchers.IO) {
+    require(expectedSize in 1L..MAX_PDF_READER_BYTES) { "This PDF has an invalid or unsupported size" }
     val origin = Session.canonicalPrimaryOrigin() ?: error("Connect to a server first")
     val token = Session.token ?: error("Sign in before reading this PDF")
     val staleBefore = System.currentTimeMillis() - 24L * 60 * 60 * 1000
@@ -100,13 +101,13 @@ private suspend fun downloadPdf(cacheDir: File, fileId: Long): LocalPdf = withCo
                         val read = input.read(buffer)
                         if (read < 0) break
                         count += read
-                        if (count > MAX_PDF_BYTES) error("This PDF exceeds Cinema's 1 GiB reader limit")
+                        if (count > MAX_PDF_READER_BYTES) error("This PDF exceeds Cinema's 1 GiB reader limit")
                         output.write(buffer, 0, read)
                     }
                 }
             }
         }
-        if (temporary.length() == 0L) error("The server sent an empty PDF")
+        if (temporary.length() != expectedSize) error("The PDF changed since Cinema loaded this book. Refresh and try again")
         if (Session.canonicalPrimaryOrigin() != origin || Session.token != token) {
             error("The signed-in profile changed while opening this PDF")
         }
@@ -118,10 +119,10 @@ private suspend fun downloadPdf(cacheDir: File, fileId: Long): LocalPdf = withCo
 }
 
 @Composable
-fun PdfReaderScreen(fileId: Long, onExit: () -> Unit) {
+fun PdfReaderScreen(fileId: Long, expectedSize: Long, onExit: () -> Unit) {
     val context = LocalContext.current
-    val loaded by produceState<Result<LocalPdf>?>(null, fileId) {
-        value = runCatching { downloadPdf(context.cacheDir, fileId) }
+    val loaded by produceState<Result<LocalPdf>?>(null, fileId, expectedSize) {
+        value = runCatching { downloadPdf(context.cacheDir, fileId, expectedSize) }
     }
     val pdf = loaded?.getOrNull()
     DisposableEffect(pdf) {

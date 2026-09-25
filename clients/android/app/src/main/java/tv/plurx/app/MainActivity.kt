@@ -225,7 +225,7 @@ private fun MainNav(
                 onOpenItem = { id -> nav.navigate("detail/$id") },
                 onViewPhoto = { id -> nav.navigate("photo/$id") },
                 onRead = { itemId, fileId -> nav.navigate("reader/$itemId/$fileId") },
-                onReadPdf = { fileId -> nav.navigate("pdf-reader/$fileId") },
+                onReadPdf = { fileId, expectedSize -> nav.navigate("pdf-reader/$fileId/$expectedSize") },
                 onMakeChannel = { item ->
                     nav.navigate("library-channels?seedId=${item.id}&seedKind=${Uri.encode(item.kind)}&seedTitle=${Uri.encode(item.title)}")
                 },
@@ -246,11 +246,15 @@ private fun MainNav(
             )
         }
         composable(
-            "pdf-reader/{fileId}",
-            arguments = listOf(navArgument("fileId") { type = NavType.LongType }),
+            "pdf-reader/{fileId}/{expectedSize}",
+            arguments = listOf(
+                navArgument("fileId") { type = NavType.LongType },
+                navArgument("expectedSize") { type = NavType.LongType },
+            ),
         ) { entry ->
             PdfReaderScreen(
                 fileId = entry.arguments!!.getLong("fileId"),
+                expectedSize = entry.arguments!!.getLong("expectedSize"),
                 onExit = { nav.popBackStackFrom(entry) },
             )
         }

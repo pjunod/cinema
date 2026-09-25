@@ -111,7 +111,7 @@ fun DetailScreen(
     onOpenItem: (Long) -> Unit,
     onViewPhoto: (Long) -> Unit,
     onRead: (itemId: Long, fileId: Long) -> Unit,
-    onReadPdf: (fileId: Long) -> Unit,
+    onReadPdf: (fileId: Long, expectedSize: Long) -> Unit,
     onMakeChannel: (Item) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -175,7 +175,7 @@ private fun DetailContent(
     onOpenItem: (Long) -> Unit,
     onViewPhoto: (Long) -> Unit,
     onRead: (itemId: Long, fileId: Long) -> Unit,
-    onReadPdf: (fileId: Long) -> Unit,
+    onReadPdf: (fileId: Long, expectedSize: Long) -> Unit,
     onMakeChannel: (Item) -> Unit,
     onWatchedChanged: () -> Unit,
     onBack: () -> Unit,
@@ -399,7 +399,7 @@ private fun Actions(
     onPlay: (Long, Long, Long, PreplayTracks) -> Unit,
     onViewPhoto: (Long) -> Unit,
     onRead: (itemId: Long, fileId: Long) -> Unit,
-    onReadPdf: (fileId: Long) -> Unit,
+    onReadPdf: (fileId: Long, expectedSize: Long) -> Unit,
     onMakeChannel: (Item) -> Unit,
     onWatchedChanged: () -> Unit,
 ) {
@@ -448,10 +448,10 @@ private fun Actions(
             }
         } else if (item.isBook) {
             if (playable != null && formFactor != FormFactor.Television) {
-                if (playable.isPdfBook) {
+                if (playable.isPdfBook && playable.available && playable.size in 1L..MAX_PDF_READER_BYTES) {
                     item {
                         DetailPrimaryActionButton(
-                            onClick = { onReadPdf(playable.id) },
+                            onClick = { onReadPdf(playable.id, playable.size) },
                             requestInitialFocus = requestInitialFocus,
                         ) { Text("Read PDF", fontWeight = FontWeight.SemiBold) }
                     }
@@ -465,7 +465,13 @@ private fun Actions(
                 } else {
                     item {
                         Text(
-                            "Cinema cannot read this book format on this device.",
+                            if (playable.isPdfBook && playable.size > MAX_PDF_READER_BYTES) {
+                                "This PDF is larger than Cinema's 1 GiB reader limit."
+                            } else if (!playable.available) {
+                                "This book is unavailable on the server."
+                            } else {
+                                "Cinema cannot read this book format on this device."
+                            },
                             color = Muted,
                             style = MaterialTheme.typography.bodySmall,
                         )
