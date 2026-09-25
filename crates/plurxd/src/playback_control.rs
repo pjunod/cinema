@@ -3430,9 +3430,11 @@ impl Disposition {
 /// adopts the session's generation before its sequence or platform is
 /// judged; an owner-epoch advance resets the client sequence space before the
 /// preparation checks that can still refuse the packet; and a request's ask
-/// (`desired_digest`) and a bound terminal acknowledgement are recorded
-/// before the prepared-successor observation can answer `Unavailable`.
-/// `accept_step_rejection_order` pins each of those as a row. Making the
+/// (`desired_digest`) is recorded before the prepared-successor observation
+/// can answer `Unavailable`. (A bound terminal acknowledgement is recorded
+/// before that observation too, but a recorded one skips the observation, so
+/// it never precedes a refusal.) `accept_step_rejection_order` pins each of
+/// the three as a row, and pins the order of the sites below pairwise. Making the
 /// fence atomic would change what a refused packet leaves behind, which is an
 /// API decision (plan §3.7), so this step preserves it.
 ///
@@ -30657,6 +30659,27 @@ mod tests {
     /// asserts that the mutable `accept_at` leaves exactly the state the pure
     /// step returns, and asserts what the refused packet left behind: nothing,
     /// except in the rows marked as preserved findings.
+    ///
+    /// A row that breaks one fence shows the site is reachable, not that it
+    /// runs before its neighbour, so the order itself is pinned by a second
+    /// table: for each pair of adjacent sites, a packet that breaks **both**
+    /// and must be answered (variant and residue) by the earlier one. Swapping
+    /// any two adjacent checks fails a pair row, except where the swap cannot
+    /// be observed:
+    /// - an older owner epoch / an epoch advance, a first packet / another
+    ///   client instance, a sequence below the last / the same sequence, and
+    ///   the three prepared-successor arms are exclusive branches of one
+    ///   comparison or one `match`, so no packet breaks both;
+    /// - an epoch advance without a platform / a first packet that is not
+    ///   sequence 1: an advance that is not sequence 1 is answered by the
+    ///   advance's own sequence check first, so no packet reaches both;
+    /// - another client instance / another platform: both answer
+    ///   `StaleClient` and leave nothing behind, so their order has no
+    ///   observable consequence.
+    ///
+    /// The last pair row is not adjacent: it pins that the ask lands after the
+    /// rate floor, so a rate-limited packet cannot move what the viewer is
+    /// understood to want.
     #[test]
     fn accept_step_rejection_order() {
         #[derive(Clone, Copy, Debug)]
@@ -30706,7 +30729,7 @@ mod tests {
             media_origin_ms,
             effective_selection: prepared_selection(),
         };
-        let prepared = || {
+        let prepared = |fingerprint: Option<&str>| {
             let mut state = ControlState::default();
             assert!(state.stage_preparation(
                 staged_incarnation_id.clone(),
@@ -30714,15 +30737,14 @@ mod tests {
                 i64::MAX,
                 None,
             ));
+            let acceptance =
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor(42_000)));
+            let acceptance = match fingerprint {
+                Some(fingerprint) => acceptance.fingerprinted(fingerprint),
+                None => acceptance,
+            };
             let accepted = state
-                .accept_at(
-                    started,
-                    &generation,
-                    1,
-                    &client,
-                    1,
-                    ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor(42_000))),
-                )
+                .accept_at(started, &generation, 1, &client, 1, acceptance)
                 .expect("the staged successor is announced");
             assert!(matches!(accepted.2, ControlAction::Prepare { .. }));
             state
@@ -30897,7 +30919,7 @@ mod tests {
             ),
             row(
                 "a replay that drops the vocabulary its Prepare was issued under",
-                prepared(),
+                prepared(None),
                 later,
                 1,
                 &client,
@@ -30919,7 +30941,7 @@ mod tests {
             ),
             row(
                 "a changed payload under the bound staged identity",
-                prepared(),
+                prepared(None),
                 later,
                 1,
                 &client,
@@ -30933,7 +30955,7 @@ mod tests {
             row(
                 "a binding for another staged identity",
                 {
-                    let mut state = prepared();
+                    let mut state = prepared(None);
                     state
                         .prepared_action
                         .as_mut()
@@ -30976,7 +30998,127 @@ mod tests {
 
         let sites: Vec<&str> = rows.iter().map(|row| row.site).collect();
         assert_eq!(sites.len(), 17, "fourteen `return Err` sites, two reachable `?` sites and one preserved rollover finding");
-        for row in rows {
+
+        // Each pair row breaks two fences; the earlier one must answer.
+        let pairs = vec![
+            Row {
+                generation: uuid::Uuid::new_v4().to_string(),
+                ..row(
+                    "order: the client-instance parse before the generation",
+                    accepted(1),
+                    later,
+                    1,
+                    "not-a-uuid",
+                    2,
+                    web(),
+                    ControlStateError::StaleClient,
+                    LeftBehind::Nothing,
+                )
+            },
+            Row {
+                generation: uuid::Uuid::new_v4().to_string(),
+                ..row(
+                    "order: the generation before an older owner epoch",
+                    accepted(2),
+                    later,
+                    1,
+                    &client,
+                    2,
+                    web(),
+                    ControlStateError::StaleGeneration,
+                    LeftBehind::Nothing,
+                )
+            },
+            row(
+                "order: an epoch advance's sequence before its platform",
+                accepted(1),
+                later,
+                2,
+                &client,
+                2,
+                ControlAcceptance::new(None, None),
+                ControlStateError::StaleSequence,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "order: a first packet's sequence before its platform",
+                ControlState::default(),
+                started,
+                0,
+                &client,
+                2,
+                ControlAcceptance::new(None, None),
+                ControlStateError::StaleSequence,
+                LeftBehind::GenerationAdopted,
+            ),
+            row(
+                "order: another platform before a sequence below the last",
+                {
+                    let mut state = accepted(1);
+                    state
+                        .accept_at(later, &generation, 1, &client, 2, web())
+                        .expect("sequence 2 accepted");
+                    state
+                },
+                later + MIN_CONTROL_INTERVAL,
+                1,
+                &client,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Apple), None),
+                ControlStateError::StaleClient,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "order: another request fingerprint before the dropped Prepare vocabulary",
+                prepared(Some(&"a".repeat(64))),
+                later,
+                1,
+                &client,
+                1,
+                ControlAcceptance::new(None, None).fingerprinted(&"b".repeat(64)),
+                ControlStateError::StaleSequence,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "order: the dropped Prepare vocabulary before the rate floor",
+                prepared(None),
+                started + Duration::from_millis(100),
+                1,
+                &client,
+                1,
+                ControlAcceptance::new(None, None),
+                ControlStateError::Unavailable,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "order: the rate floor before a changed payload under the bound staged identity",
+                prepared(None),
+                started + Duration::from_millis(100),
+                1,
+                &client,
+                2,
+                ControlAcceptance::new(None, Some(&successor(43_000))),
+                ControlStateError::RateLimited(150),
+                LeftBehind::Nothing,
+            ),
+            row(
+                "order: the rate floor before the ask lands",
+                accepted(1),
+                started + Duration::from_millis(100),
+                1,
+                &client,
+                2,
+                ControlAcceptance::unavailable(None).asking(&asked_for),
+                ControlStateError::RateLimited(150),
+                LeftBehind::Nothing,
+            ),
+        ];
+        assert_eq!(
+            pairs.len(),
+            9,
+            "eight observable adjacent pairs and the ask placement"
+        );
+        for row in rows.into_iter().chain(pairs) {
             let before = row.state.clone();
             let request = || ControlRequestView {
                 generation: &row.generation,
