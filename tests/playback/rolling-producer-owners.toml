@@ -431,7 +431,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # adds the 300 ms spacing past the control rate limit and a 10 ms poll, inside
 # a two-second timeout, for the already-enqueued `resume` Store event. Both
 # are test-only and own no producer, process or recovery decision.
-expected_occurrences = 48
+# HEVC color repair: -1 test-only log-polling sleep. The old rolling-copy
+# argv fixture is replaced by direct refusal/override admission assertions;
+# no production timer or recovery owner changed.
+expected_occurrences = 47
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -2864,7 +2867,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +3 rolling publication-trap fix: the two test-only sleeps reviewed under
 # `all-async-sleeps` and the two-second `tokio::time::timeout` that bounds the
 # resume-event poll in the same test. No production timer is added.
-expected_occurrences = 977
+# HEVC color repair: -1, the same removed test-only log-polling sleep.
+# Original-header analysis uses existing bounded index-process deadlines.
+expected_occurrences = 976
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3116,7 +3121,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Neither creates a playback owner. Production window extraction retains
 # the existing command construction but now routes its pipe through
 # BoundedDiagnosticChild, which owns cancellation kill/reap and bounded I/O.
-expected_occurrences = 175
+# HEVC color repair: +5 synchronous, test-only finite FFmpeg commands in
+# fragindex::tests::hevc_original_header_scan_rejects_changed_pps_before_stripping:
+# encode the short fixture, concatenate, decode frame hashes, run production
+# fMP4 copy, and remux the A/B. testfixtures::run or Command::output collects
+# each child before its temporary directory is dropped. No detached owner.
+expected_occurrences = 180
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3489,7 +3499,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # FFmpeg .output() calls inventoried above, plus Response::builder().status()
 # in internal_media::subtitle_range. That third occurrence builds an HTTP
 # response status and starts no process. No new rolling-producer owner.
-expected_occurrences = 390
+# HEVC color repair: +2 test-only Command::output calls, for decoded frame
+# hashes and the production fMP4 copy in the changed-PPS regression. Each
+# synchronously collects a finite fixture child; no rolling lifecycle change.
+expected_occurrences = 392
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
