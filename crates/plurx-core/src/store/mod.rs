@@ -88,6 +88,7 @@ mod hiqlite_timeline_annotations;
 mod placeholder_census;
 
 pub mod replicated;
+pub mod watched_drain;
 
 pub use dv_conversion::{
     DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
@@ -3477,6 +3478,16 @@ pub trait WatchedOutboxStore: Send + Sync + 'static {
     async fn settle_watched(&self, entry: &OutboxEntry) -> Result<(), StoreError>;
     /// `(pending, ok, failed)` — for the settings page and `/metrics`.
     async fn watched_outbox_counts(&self) -> Result<(i64, i64, i64), StoreError>;
+    /// Whether any row *may* be due now, read from this node's local replica
+    /// without consensus and without a Raft proposal.
+    ///
+    /// A hint in both directions and never an authorization: `false` can be
+    /// a follower that has not applied a recent enqueue yet, `true` can be a
+    /// row a peer has since settled. The drain uses it only to decide whether
+    /// to ask the authority at all; [`due_watched`](Self::due_watched)'s
+    /// replicated claim stays the only thing that selects a row
+    /// (docs/cluster/REPLICATED-WRITE-RATE-HYGIENE.md §3.1).
+    async fn watched_outbox_hint(&self) -> Result<bool, StoreError>;
 }
 
 /// The pre-transcode cache: what has been produced, and where a copy is.
@@ -4262,6 +4273,15 @@ pub trait CoordinationStore: Send + Sync + 'static {
     ) -> Result<Option<Lease>, StoreError>;
 
     async fn release_lease(&self, lease: &Lease, now_unix_ms: i64) -> Result<bool, StoreError>;
+
+    /// This node's local, possibly stale view of `resource`'s lease expiry,
+    /// or `None` when no row is visible. No consensus and no proposal.
+    ///
+    /// A hint only: a caller may use it to *skip* an acquire while a lease is
+    /// visibly live, never to believe it holds one. A stale replica delays a
+    /// successor by its lag; it cannot grant anything, because
+    /// [`acquire_lease`](Self::acquire_lease) still decides on the authority.
+    async fn lease_expiry_hint(&self, resource: &str) -> Result<Option<i64>, StoreError>;
 }
 
 /// Durable mutations performed by singleton cluster jobs. Implementations

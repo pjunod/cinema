@@ -499,6 +499,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/library_channels.rs",
   "crates/plurx-core/src/store/sqlite/outbox.rs",
   "crates/plurx-core/src/store/sqlite/publication.rs",
+  "crates/plurx-core/src/store/watched_drain.rs",
   "crates/plurx-core/src/store/sqlite/pretranscode.rs",
   "crates/plurx-core/src/store/sqlite/sessions.rs",
   "crates/plurx-core/src/store/sqlite/trakt.rs",
@@ -773,6 +774,7 @@ title = "Watch state and external history sync"
 contract = "Native and Plex progress routes share one bounded coalescer; manual and timestamped activity outranks delayed flushes; watched state and Trakt synchronization converge without losing newer user activity."
 paths = [
   "crates/plurx-core/src/store/sqlite/{outbox,trakt,watch}.rs",
+  "crates/plurx-core/src/store/watched_drain.rs",
   "crates/plurx-core/src/trakt.rs",
   "crates/plurxd/src/{progress,trakt,watched}.rs",
   "crates/plurxd/src/http/mod.rs",

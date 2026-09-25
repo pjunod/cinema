@@ -878,6 +878,21 @@ impl WatchedOutboxStore for HiqliteAuthStore {
             .ok_or_else(|| StoreError::Database("outbox count returned no row".to_owned()))?;
         Ok((row.pending, row.ok, row.failed))
     }
+
+    async fn watched_outbox_hint(&self) -> Result<bool, StoreError> {
+        let now = self.now()?;
+        // `query_map` reads this node's replica: no leader round trip and no
+        // proposal. See the trait method for why a stale answer is safe.
+        let rows = self
+            .client()
+            .query_map::<IdRow, _>(
+                "SELECT id FROM watched_outbox \
+                 WHERE status = 'pending' AND next_at <= $1 AND claim_until <= $1 LIMIT 1",
+                params!(now),
+            )
+            .await?;
+        Ok(!rows.is_empty())
+    }
 }
 
 struct IdRow {
