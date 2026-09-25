@@ -580,10 +580,13 @@ body and the board's Notes cell, do not guess.
 
 No product code. Results go in a `### 6.1 results` subsection of this file,
 in the plan PR, as PGS plan §6.2 recorded its table. **STOP if E1 or E1b
-fails** — the tee cannot carry per-stream codecs, the double map is refused,
-or the `.vtt`/`.mks` are not byte-identical: §3.1 is redesigned before
-anything is built (the fallback is a second `ffmpeg` sharing the held fd,
-which is a second read and needs its own justification).
+fails its §6.1 pass condition** — the tee cannot carry per-stream codecs,
+the double map is refused, the `.vtt` is not byte-identical, or the `.mks`
+is neither byte-identical nor cue-identical under `-copyts` without
+`-start_at_zero`. The fallback is a second `ffmpeg` sharing the held fd,
+which is a second read and needs its own justification. Paul directed the
+executing session to choose and continue on 2026-09-24; the session chose
+§6.1's explicit cue-identity allowance (M0 record below).
 
 Files: `docs/clients/SUBTITLE-CLUSTER-EXTRACTION-PLAN.md` only.
 
@@ -713,7 +716,7 @@ Developer item renders each requirement from the real probes. Default **off**.
 | E4 | what does a 12-text (+2 styled) + 3-PGS ride cost on an index pass? | CPU and RSS within noise of the bare pass; wall time unchanged |
 | E5 | a text slave that fails mid-stream (corrupt packet, `ENOSPC` on the stage) | the index completes, exit 0, the failing representation is `malformed`/`transient`, the others are unaffected |
 
-### 6.1 results — 2026-09-24, M0 stopped at E1b
+### 6.1 results — 2026-09-24, M0 cue-identity decision
 
 The experiment ran on nuc3 with `ffmpeg` and `ffprobe` 8.0.1-3ubuntu2. A
 six-second synthetic MKV was muxed with `-copyts`: MPEG-4 video, SRT with its
@@ -730,8 +733,8 @@ mandatory null sentinel. The direct WebVTT comparison used
 | Experiment | Observed result | Disposition |
 |---|---|---|
 | E1, zero start | The tee exited 0 with empty stderr and wrote all four selected subtitle streams. Bare and tee index SHA-256 were both `6be1c084a6176e46f476f538f355174d1eb3bf5b385e3f448333c1af951b6f47`. The PGS `.sup` was 2,504 bytes. SRT WebVTT matched direct extraction at SHA-256 prefix `403c5f5a`; ASS WebVTT matched at `23ee845d`. | Pass for this fixture. |
-| E1b, zero start | The double map and Matroska slave succeeded, but the 1,143-byte tee `.mks` (`f48be786a250704b3ad2d7d18f02e8910bea22c15e3a49e5b655644d1d5ebb70`) differed from the 1,143-byte direct burn `.mks` (`4a5961ca2768514c92507b1e5afcbbd3c9680aee476dcaba4fe53ea16b6db7c3`). First byte difference: offset 221. `ffprobe` found two matching ASS packets on each side: PTS 1.500 s and 3.600 s, matching durations, payload hashes and ASS extradata. | **STOP under M0 §5's byte-identity wording.** §6.1's E1b table also permits cue identity, which this fixture has; Paul must rule on that conflict before the build continues. |
-| E1/E1b, 7.5 s start; E2–E5 | Not run after the E1b STOP. | Pending ruling. |
+| E1b, zero start | The double map and Matroska slave succeeded, but the 1,143-byte tee `.mks` (`f48be786a250704b3ad2d7d18f02e8910bea22c15e3a49e5b655644d1d5ebb70`) differed from the 1,143-byte direct burn `.mks` (`4a5961ca2768514c92507b1e5afcbbd3c9680aee476dcaba4fe53ea16b6db7c3`). First byte difference: offset 221. `ffprobe` found two matching ASS packets on each side: PTS 1.500 s and 3.600 s, matching durations, payload hashes and ASS extradata. | **Pass by cue identity** under E1b §6.1. The byte difference remains recorded. |
+| E1/E1b, 7.5 s start; E2–E5 | The first run stopped at the byte mismatch; the continued run is in progress. | In progress. |
 
 The experiment used a private temporary directory on nuc3, then removed and
 verified its removal. No product code was written and no fleet deployment was
@@ -875,4 +878,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 |---|---|---|---|---|---|
 | 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01LUY4Gc3ZFwF8xzj6Eg9Dy1 | Plan v1 | [#497](http://192.168.4.7:3000/noirr/plurx/pulls/497) | Written from `936157b4b` and the 2026-09-24 fleet read in §2.5. Reviewed by Codex the same day: request changes, R1–R7. |
 | 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01LUY4Gc3ZFwF8xzj6Eg9Dy1 | Plan v2 | [#497](http://192.168.4.7:3000/noirr/plurx/pulls/497) | All seven findings accepted and re-anchored at `0e2c3fd4` (every cited behaviour re-read in source); the three contracts added (§3.9–§3.11); schema moved to v46 after PR #498 took v45; acceptance split warm/cold; ready for an executing session. Nothing built. |
-| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M0 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | nuc3 E1 passed; E1b produced cue-identical but byte-different ASS `.mks`, triggering §5 STOP. The 7.5 s case and E2–E5 were not run. No implementation started; needs Paul's ruling on §5 versus §6.1. |
+| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M0 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | nuc3 E1 passed; E1b was cue-identical but byte-different. Paul directed the session to choose and continue; it chose §6.1's explicit cue-identity allowance. The 7.5 s case and E2–E5 are running. |
