@@ -150,3 +150,18 @@ A delayed container created by the earlier Compose operation started from image 
 After #510 advanced main to `b47c5ff88867201e595a7511fe49ef606e07307e`, the serial deployment independently verified `nynuc`, `m6` and `nuc4`: each checkout and running OCI revision matched exact main; Docker reported healthy and zero restarts, `/readyz` returned 200 and the build gauge was `v0.3.0-4087-gb47c5ff88`. At 13:49:27 UTC each reported three fresh voters, zero stale voters, quorum available, leader nuc4 and zero Raft apply lag. Verification log `/Users/pjunod/code/plurx-agent/codex-main-b47-healthy-voters-verification-20260925.log` SHA-256 `32699c5e494add8a60b231e33b81bb4f7c708f73949d73f5b38a6640e118ad8b`; quorum log SHA-256 `41ba8767281381713c49e4d957ac865829b0e96c8929b41918b1f706e67c97ae`. The authenticated m6 Cluster page independently showed build convergence at b47, three ready voters, term 18070 and maximum lag zero.
 
 The first playbook exited 2 on a transient m6 Compose container-name race (log SHA-256 `8dd1ed1891ac1507faa6fd6f77f61dacac1403a8b4b4faa9cae591b8b85da9ba`); direct checks confirmed m6 nevertheless ran the correct healthy image. An unforced nuc4 run exited 0 but left its previous e2df image running because its checkout had already advanced (log SHA-256 `ddbf4143fcd8094deb500255474c823b1aab4a2d13655ea2106aea55f1c8663f`). A forced nuc4 run exited 0 and replaced it (log SHA-256 `037205dfaa2708fe70e3eac2456f5d49984a2898fcd865ec9dffdd0479521996`). Nuc3 was not included. Three-voter success is not a four-node deployment or a new K-02/S-11 continuity window.
+
+## Synchronized current-main passive baseline — 13:49:52 UTC
+
+The b47 three-voter read-only sample spanned 0.585 seconds. Each node had exact checkout and OCI revision `b47c5ff88`, Docker healthy/restarts zero, `/readyz` 200 and Raft apply lag zero. The private receipt is `/Users/pjunod/code/plurx-agent/codex-owed-evidence-receipts-20260925/three-voter-b47-20260925T134952Z/receipt.json` (SHA-256 `5a863aa7226ceeac8f7d21bd426604f7fbad18e477e0994545c98c3c69248239`); summary SHA-256 `019523a4471c9973f912eab9ccf19adcf95bfdc834cc2005c7b3129081acedeb`, with 13 constituent file hashes verified. Nuc3 was excluded.
+
+| Row | Three-voter point observation | Acceptance still owed |
+|---|---|---|
+| K-02 | Nuc4 leader, term 18070, zero apply lag; B/E/S/W size gauges and snapshot counts present. | Gap-free 24-hour series and approved follower restart/catch-up. |
+| C-05 | Sidecar positive rows 2,260 / 1,515 / 4,291; pending zero and backfill counters zero. | Active postdeploy convergence/availability behavior. |
+| C-08 | Bodies 392,832–393,661 bytes, scrape 0.059–0.073 s, M5 families present; m6 has process-local nonzero TTFF, watched, stalled, delivered and admission counters. | New four-node normal-use hour, JSON mode and controlled active-flow checks. |
+| P-02 | Open-file soft/hard limits 524,288; file descriptors 56 / 76 / 50. | Busy sample and week without EMFILE. |
+| K-06 | `timedatectl` NTP offsets −977 / −120 / −63 µs; no `plurx_cluster_clock` metric. | Runtime clock metric and one-hour idle/loaded peer uncertainty. |
+| S-11 | QSV available 1 / 0 / 1; NVENC and VideoToolbox zero. Accepted encoder counters 3 / 0 / 0; tone-map zero. | Seven reset-aware days and controlled usage, with build/uptime continuity. |
+
+These are point readings. Nonzero process-local counters have no controlled start/end boundary, and zero counters do not prove absence across a duration.
