@@ -1,6 +1,7 @@
 # Replicated write-rate hygiene II — the classification lease and the offline claim
 
-**Status:** in progress — M1–M2 built on `plan/K-write-rate-2`; M3's fleet
+**Status:** in progress — M1–M2 built on `plan/K-write-rate-2`
+([#531](http://192.168.4.7:3000/noirr/plurx/pulls/531)); M3's fleet
 after-measurement needs a deploy · **Executes:** the two loops K-03's M0
 readout flagged outside its scope
 ([REPLICATED-WRITE-RATE-HYGIENE-M0.md](REPLICATED-WRITE-RATE-HYGIENE-M0.md) §3,
@@ -211,12 +212,14 @@ admits one pass at a time.
 Acceptance: three-voter `store_contract` — an idle minute of the pre-change
 loop (a blind claim every 2 s) measured at 30 proposals, the policy's minute
 at 2 (forced at 0 s and 30 s), 0 consistent reads, one local read per pass;
-a local wake claims on the next pass. `cargo test -p plurxd offline::claim_`
-(paused clock): an idle 10 minutes makes ≤ 21 claims (was 300) and no
-settings reads while nothing is queued; a locally created package is claimed
-within one base tick; a package re-homed from a removed node, with no wake,
-within the 10 s ceiling; a hint forced silent still claims within 30 s.
-Reverting the hint, the wake or the forced claim fails a test.
+a local wake claims on the next pass. Both backends: the queue hint follows
+the authority for its own node only. `cargo test -p plurxd
+offline::tests::claim_` (paused clock): an idle 10 minutes makes 20–21
+claims (was 300); a locally created package is claimed within one base tick;
+a package queued for this node elsewhere (re-home, re-enable), with no wake,
+within the 10 s ceiling. `plurx_core::store::offline_claim` unit tests: a
+hint that stays silent is overruled at exactly 30 s. Reverting the hint, the
+wake or the forced claim fails a test.
 
 ### 5.2 M2 — classification lease and pass hint
 
@@ -266,4 +269,31 @@ overrule them.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | plan | (this PR) | Plan written; premises re-verified at `7b7c11f35`. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | plan | #531 | `1173194ce`. Plan written; premises re-verified at `7b7c11f35`; board row K-10 claimed. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1, M2 | #531 | `170dc84b2`. Local hints `offline_queue_hint` and `classification_hint` on both backends; `plurx_core::store::offline_claim` (hint + 30 s forced claim + 2→10 s backoff + local wake) driving `OfflineManager::run`; `plurx_core::store::classification_schedule` (lease-row and pass hints, 30 min forced pass counted from the last pass anywhere, 30 s→2 min idle polls) driving a worker that holds `metadata-classification` through `acquire_cluster_job_with_policy` for a whole pass; the resource joins `CLUSTER_SINGLETON_RESOURCES`; `plurx_offline_claim_ticks_total{outcome}` and `plurx_classification_ticks_total{outcome}`. **Three-voter idle minute, measured:** offline 30 → 2 proposals (0 consistent reads, 8 local reads); classification 120 → 0 (0 consistent reads, 2 decisions × 2 local reads), and a node facing a held lease 0 proposals over 4 local looks where a blind contest is 1 per try. plurxd (paused clock): one lease for a 4-page pass (was one per page); an idle library takes no lease and reads no page for 10 min; a new item classified within 2 min + its pass; two workers on one store walk the library once (every entry revision 1); a dead peer's lease is not contested while live and is taken over when it lapses. Offline: 20–21 claims in 10 idle minutes (was 300), a local creation claimed within one tick, a package queued elsewhere within 10 s. Revert proofs, each failing its tests: offline hint ignored; forced claim removed; wake branch removed; wake not forcing with a silent hint; SQLite queue hint forced silent; lease taken per page; lease-row hint ignored; pass hint forced true; a peer's released row not counted as a pass. The hint parity contract caught a real defect before commit: SQLite numbers `$N` parameters by first appearance, so the first draft bound the version and the clock the wrong way round and the hint always fired. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 | #531 | **needs: fleet** — the after-measurement runs only on a deployed build; steps below. |
+
+### needs: M3 fleet after-measurement (GPT)
+
+```text
+GPT prompt (fleet, K-10 M3). After the merge commit carrying K-10 M1–M2
+(branch plan/K-write-rate-2, PR #531; it is stacked on K-03 #405, so both
+land together) is deployed with the usual ansible playbook to nuc4, m6,
+nynuc and nuc3:
+1. On each voter, `curl -s http://<ip>:32400/metrics | grep -E
+   'plurx_(offline_claim|classification)_ticks_total'` must list four offline
+   and five classification outcomes. Over five minutes on an idle fleet,
+   offline claimed+empty_claim grows by about 10 per voter (one per 30 s) and
+   skipped_hint by more; classification hinted_pass+forced_pass grows on at
+   most one voter, the others grow idle or not_owner.
+2. Reuse the K-03 M4 capture (or start one the same way): after a qualifying
+   12-hour idle window, run `scripts/replicated-write-capture evaluate
+   <dir>/samples.tsv --json` and report proposals/day beside
+   docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-M0.md §2.
+3. Copy (read-only, cp) the learner nuc3's /srv/plurx/hiqlite/logs/*.wal to
+   /tmp and run `scripts/replicated-write-capture attribute <copies>`; report
+   the shares of `metadata-classification` lease writes and `UPDATE
+   offline_packages` claims.
+Acceptance (§5.3): each of those two shares is below 2% of replicated
+entries on the idle fleet; report the cluster's proposals/day.
+```
