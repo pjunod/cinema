@@ -16,9 +16,9 @@ ENV ANDROID_HOME=/opt/android-sdk \
     ANDROID_SDK_ROOT=/opt/android-sdk \
     DEBIAN_FRONTEND=noninteractive
 
-# unzip for the cmdline-tools bundle; curl + ca-certificates to fetch it.
+# unzip for the cmdline-tools bundle; Python runs the release-signing verifier.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends unzip curl ca-certificates \
+    && apt-get install -y --no-install-recommends unzip curl ca-certificates python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Android command-line tools (pinned build; bump CLT_VERSION to move it). The

@@ -389,10 +389,12 @@ in [clients/android/README.md](../clients/android/README.md), and
 build type selects it. The four values come from the environment —
 `PLURX_ANDROID_KEYSTORE`, `PLURX_ANDROID_KEYSTORE_PASSWORD`,
 `PLURX_ANDROID_KEY_ALIAS`, `PLURX_ANDROID_KEY_PASSWORD` — and any one of them
-missing fails the build naming it (`requiredSigningValue`). There is
-deliberately no fallback to the debug key: Play refuses a debug-signed
-artifact, and once one is installed a properly signed build cannot upgrade it
-in place, so every device would need an uninstall first.
+missing fails the build naming it (`requiredSigningValue`). There is no debug
+fallback for the durable release identity. Existing physical installs are
+debug-signed, however, so the final sideload APK is re-signed with an audited
+certificate-rotation lineage. The old debug key is used only as the
+predecessor in that lineage; Android 9+ verifies the new release key and can
+retain installed app data across the update.
 
 `make android-release` builds it; `make android-publish` serves it at
 `/download/plurx-android.apk`. `make android` still produces the debug APK for
@@ -408,23 +410,57 @@ publish a build that has none. Only `/download/plurx-android.apk` is served;
 the mappings are not. To de-obfuscate a device stack trace, run R8's `retrace`
 against the mapping of the versionCode the device reports.
 
-What remains is operational, not structural: **generate the upload key and put
-it in the fleet vault.** It is streamed to the build host, never committed,
-never passed as a command-line argument.
+What remains is operational: **generate the durable release key and signed
+lineage, and retain both outside the repository.** The old signer must grant
+`installed-data` in the lineage or the on-device update loses its data. Stream
+the files and passwords to the build host; never commit them or pass passwords
+as command-line literals. `scripts/sign-android-release` verifies the old
+fleet certificate and new release certificate, signs the APK for rotation at
+API 28, and refuses any artifact whose manifest still supports API 23–27.
 
 ```bash
 keytool -genkey -v -keystore plurx-upload.jks \
   -keyalg RSA -keysize 2048 -validity 10000 -alias upload   # store OUTSIDE the repo
 ```
 
+For the existing physical fleet, supply the audited old keystore in
+`PLURX_ANDROID_OLD_KEYSTORE`, its alias and passwords in the matching
+`PLURX_ANDROID_OLD_KEY_*` variables, the new key in the four
+`PLURX_ANDROID_KEY*` variables above, the new certificate SHA-256 in
+`PLURX_ANDROID_RELEASE_CERT_SHA256`, and the lineage file in
+`PLURX_ANDROID_LINEAGE`. Create that lineage once, outside the repository:
+
+```bash
+apksigner rotate --out "$PLURX_ANDROID_LINEAGE" \
+  --old-signer --ks "$PLURX_ANDROID_OLD_KEYSTORE" \
+  --ks-key-alias "$PLURX_ANDROID_OLD_KEY_ALIAS" \
+  --ks-pass env:PLURX_ANDROID_OLD_KEYSTORE_PASSWORD \
+  --key-pass env:PLURX_ANDROID_OLD_KEY_PASSWORD \
+  --set-installed-data true \
+  --new-signer --ks "$PLURX_ANDROID_KEYSTORE" \
+  --ks-key-alias "$PLURX_ANDROID_KEY_ALIAS" \
+  --ks-pass env:PLURX_ANDROID_KEYSTORE_PASSWORD \
+  --key-pass env:PLURX_ANDROID_KEY_PASSWORD
+```
+
+Keep the old keystore and lineage until every installation has rotated; keep
+the durable release key and lineage for future updates. The signing helper
+uses `--rotation-min-sdk-version 28` so Android 9–12 also adopts the new key.
+
 Enrol in **Play App Signing** so Google holds the distribution key — losing an
 upload key is recoverable, losing a distribution key without Play App Signing
 means the app can never be updated again. The key generated here should be the
 one enrolled later, so the sideload fleet and Play share a signing lineage.
 
-Because the fleet's existing installs are debug-signed, the first release
-install on each device needs `adb uninstall tv.plurx.app` first. `make
-android-publish` prints that reminder.
+On Android 9+ devices whose installed certificate matches the audited old
+signer, install the lineage-signed APK with `adb install -r`; **do not
+uninstall**. Capture the installed certificate and app-data baseline first,
+canary one device, verify the new effective signer and preserved sign-in and
+offline data, then deploy the remaining devices serially. An incompatible
+signature is a stop condition. Android 8.1 and older cannot rotate an
+installed signing key; release APKs now require API 28 rather than silently
+continuing to trust the debug key on those platforms. This is an explicit
+compatibility decision for the current physical fleet, which is API 34+.
 
 ### 5.2 Build and upload
 

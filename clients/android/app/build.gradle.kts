@@ -85,8 +85,10 @@ android {
 
     defaultConfig {
         applicationId = "tv.plurx.app"
-        // 23 covers phones and the vast majority of Android TV / Google TV boxes.
-        minSdk = 23
+        // Certificate rotation preserves existing data only on Android 9+.
+        // A release APK with minSdk 23 would still trust the old debug signer
+        // on 23-27, so do not offer that insecure distribution path.
+        minSdk = 28
         targetSdk = 37
         versionCode = 125
         versionName = "0.3.0"
