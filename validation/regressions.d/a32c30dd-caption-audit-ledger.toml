@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["a32c30dd"]
-points = ["validation.framework"]
-checks = ["history-regressions"]
-reason = "This commit added the explicit history ledger for the caption audit correction. The history-regressions check verifies that the correction remains bound to a valid point and check rather than disappearing from the audit. The behavior regression itself is exercised by test_live_tv_caption_audit.py under operations-contract."
