@@ -151,6 +151,41 @@ async function main() {
       [["🔇", "Mute", "Mute"], ["🔇", "Mute", "Mute"]]);
   });
 
+  await test("live captions select the media track in every player geometry", () => {
+    const tracks=[
+      {kind:"captions",label:"English 708",language:"en",mode:"hidden"},
+      {kind:"captions",label:"English CC1",language:"en",mode:"hidden"},
+      {kind:"metadata",label:"timing",language:"",mode:"hidden"},
+    ];
+    const select={dataset:{},innerHTML:"",value:"off"};
+    const document={getElementById:id=>id==="live-tv-video"?{textTracks:tracks}
+      :id==="live-tv-captions"?select:null};
+    const controls=new Function("document","esc",[
+      shipped("liveTvCaptionTracks"),shipped("liveTvCaptionTrackLabel"),
+      shipped("liveTvRefreshCaptionControls"),shipped("liveTvSelectCaption"),
+      "return {refresh:liveTvRefreshCaptionControls,select:liveTvSelectCaption};",
+    ].join("\n"))(document,String);
+    controls.refresh();
+    assert.match(select.innerHTML,/English 708/);
+    assert.match(select.innerHTML,/English CC1/);
+    assert.doesNotMatch(select.innerHTML,/timing/);
+    assert.equal(select.value,"off");
+    controls.select("0");
+    assert.deepEqual(tracks.map(track=>track.mode),["showing","disabled","hidden"]);
+    assert.equal(select.value,"0");
+    controls.select("1");
+    assert.deepEqual(tracks.map(track=>track.mode),["disabled","showing","hidden"]);
+    assert.equal(select.value,"1");
+    controls.select("off");
+    assert.deepEqual(tracks.map(track=>track.mode),["disabled","disabled","hidden"]);
+    assert.equal(select.value,"off");
+    assert.match(shellSource().html,/id="live-tv-captions"[^>]*aria-label="Live TV captions"/);
+    assert.match(shell,/\.lth-captions\{position:absolute/);
+    // Fullscreen idle controls may fade, but keyboard users must still reach captions.
+    assert.doesNotMatch(shell,/\.lth\[data-mode="full"\]\.idle \.lth-captions/);
+    assert.match(shipped("liveTvStatsTelemetry"),/selectedCaption\?liveTvCaptionTrackLabel/);
+  });
+
   await test("protected channels are visible but never watchable", () => {
     assert.deepEqual(liveTv.channelView({ drm: true, support: "drm_unsupported" }), {
       disabled: true,
@@ -365,7 +400,7 @@ async function main() {
     });
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv",
       `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, PLAYER=null, API='/api', window={};
-       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -400,7 +435,7 @@ async function main() {
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv", "ROUTING",
       `const location=ROUTING, PLAYER=null, API='/api', window={};
        let PAGE_RENDER_GENERATION=ROUTING.generation;
-       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){} function liveTvSetMode(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -446,7 +481,7 @@ async function main() {
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv", "ROUTING", "MODES",
       `const location=ROUTING, PLAYER=null, API='/api', window={};
        let PAGE_RENDER_GENERATION=1;
-       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvSetMode(mode){ MODES.push(mode); }
        function liveTvHost(){ return document.getElementById("live-tv-host"); }
@@ -500,7 +535,7 @@ async function main() {
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval",
       "PlurxLiveTv", "PLAYER", "closePlayer", "reportProgress",
       `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, API='/api', window={};
-       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -526,7 +561,7 @@ async function main() {
     });
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv",
       `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, PLAYER=null, API='/api', window={};
-       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -551,7 +586,7 @@ async function main() {
     });
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv",
       `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, PLAYER=null, API='/api', window={};
-       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -904,7 +939,7 @@ async function main() {
     const attach = new Function(
       "LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv", "API",
       `const location={hash:"#/live-tv"}, PAGE_RENDER_GENERATION=1, window={};
-       function liveTvMessage(){} function liveTvFailure(){} function liveTvShowHost(){}
+       function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){} function liveTvShowHost(){}
        function liveTvSetMode(){} function liveTvInPip(){ return false; }
        async function stopLiveTv(){} async function watchLiveTv(){}
        ${shipped("liveTvNow")}${shipped("liveTvAttachSession")} return liveTvAttachSession;`,
@@ -1239,7 +1274,7 @@ async function main() {
     const load = new Function(
       "PlurxLiveTv", "PlaybackPolicy", "LIVE_TV", "api", "AbortSignal", "Date", "setTimeout", "clearTimeout",
       `let PAGE_RENDER_GENERATION=1; const location={hash:"#/live-tv"};
-       function renderLiveTvChannels(){} function liveTvMessage(){}
+       function renderLiveTvChannels(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){}
        // The guide read also kicks the DVR wave off; that is its own test.
        async function loadLiveTvDvr(){}
        ${shipped("loadLiveTvGuide")}${shipped("scheduleLiveTvGuide")} return loadLiveTvGuide;`,

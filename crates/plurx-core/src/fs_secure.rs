@@ -592,6 +592,23 @@ impl SecureDirectory {
     }
 
     pub async fn atomic_write_child(&self, destination: &str, bytes: &[u8]) -> io::Result<()> {
+        self.atomic_write_child_with_commit(destination, bytes, |rename| rename())
+            .await
+    }
+
+    /// Stage and sync bytes, then invoke the caller's synchronous commit
+    /// boundary around the capability-relative rename. A cancellation fence
+    /// can order its Drop against this callback without cancelling a detached
+    /// blocking write after that write has already acquired rename authority.
+    pub async fn atomic_write_child_with_commit<F>(
+        &self,
+        destination: &str,
+        bytes: &[u8],
+        commit: F,
+    ) -> io::Result<()>
+    where
+        F: FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send + 'static,
+    {
         let directory = Arc::clone(&self.file);
         let destination = destination.to_owned();
         let bytes = bytes.to_vec();
@@ -621,17 +638,20 @@ impl SecureDirectory {
             let result = (|| {
                 file.write_all(&bytes)?;
                 file.sync_all()?;
-                if unsafe {
-                    libc::renameat(
-                        directory.as_raw_fd(),
-                        temporary.as_ptr(),
-                        directory.as_raw_fd(),
-                        destination.as_ptr(),
-                    )
-                } != 0
-                {
-                    return Err(io::Error::last_os_error());
-                }
+                commit(&mut || {
+                    if unsafe {
+                        libc::renameat(
+                            directory.as_raw_fd(),
+                            temporary.as_ptr(),
+                            directory.as_raw_fd(),
+                            destination.as_ptr(),
+                        )
+                    } != 0
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                })?;
                 directory.sync_all()
             })();
             if result.is_err() {
