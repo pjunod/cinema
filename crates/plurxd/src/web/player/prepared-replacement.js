@@ -263,11 +263,11 @@ function beginPreparedReplacement(p,action){
   const originMs=sessionMediaOriginMs({vod:!!p.vod,media_origin_ms:offeredOriginMs});
   const filmMs=playbackFilmPositionMs(v,p);
   // A replacement that begins encoding at the incumbent's current second
-  // spends its entire preparation chasing a moving playhead. Begin up to four
+  // spends its entire preparation chasing a moving playhead. Begin up to three
   // seconds ahead when the incumbent already has enough runway to play
   // until that second. The buffer gate below still requires overlap with the
   // actual incumbent position before exposure, so this cannot skip content.
-  const startLeadMs=Math.min(PREPARED_BUFFER_LEAD_MS+2000,
+  const startLeadMs=Math.min(PREPARED_BUFFER_LEAD_MS+1000,
     Math.max(0,Math.round((bufferRunway(v)-3)*1000)));
   const state={actionId:action.action_id,sessionId:action.session_id,
     playlistUrl:action.playlist_url,controlBootstrap:action.control||null,
@@ -567,7 +567,9 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     health:p.health,healthObservedAt:p.healthObservedAt,
     presentationAdvancedAt:p.presentationAdvancedAt,
     muted:retired.muted,volume:retired.volume,playbackRate:retired.playbackRate,
-    defaultPlaybackRate:retired.defaultPlaybackRate};
+    defaultPlaybackRate:retired.defaultPlaybackRate,
+    opacity:retired.style.opacity,pointerEvents:retired.style.pointerEvents,
+    zIndex:retired.style.zIndex};
   // Authoritative before visible, so anything that reads PLAYER.hls during the
   // swap reads the instance that owns the picture.
   p.hls=state.hls;
@@ -593,13 +595,15 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     spare.playbackRate=intent.playbackRate;
   }catch(e){}
   spare.style.display="";
-  spare.style.position="";
-  spare.style.inset="";
-  spare.style.opacity="";
+  spare.style.opacity=streamHasVideo(p,spare)?"1":"";
   spare.style.pointerEvents="";
-  spare.style.zIndex="";
+  spare.style.zIndex="2";
   spare.removeAttribute("aria-hidden");
-  retired.style.display="none";
+  // Retain both compositor layers until the successor's first frame. Removing
+  // either element from layout here makes the first visible frame cross a
+  // full layout change, which can add several 30-fps frame intervals.
+  retired.style.opacity="0.001";
+  retired.style.pointerEvents="none";
   retired.muted=true;
   retired.setAttribute("aria-hidden","true");
   // The element the rest of the page addresses is `#video`. Swapping the ids

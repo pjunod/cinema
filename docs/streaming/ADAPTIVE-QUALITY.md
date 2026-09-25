@@ -220,10 +220,11 @@ Asymmetric *selection* (down in one move, up one rung slowly) is the whole
 trick of ABR; the constants are starting points to tune on real use.
 
 The web player offers a prepared successor for an Auto rung move when its
-incumbent can still present. It starts the successor at most four seconds
+incumbent can still present. It starts the successor at most three seconds
 ahead, waits until the successor overlaps the incumbent's film position and
 has two seconds buffered beyond it, aligns the two elements, then exposes the
-successor. The incumbent remains available until the successor presents a
+successor by changing the opacity of two already composited video layers. The
+incumbent remains available until the successor presents a
 frame. A stalled incumbent or a failed preparation falls back to a bounded
 reopen, which can interrupt playback. The interruption has an SLO
 ([PERF-PLAN.md](../performance/PERF-PLAN.md) §8.6, decision 4: p95 ≤ 2.5 s on LAN,
