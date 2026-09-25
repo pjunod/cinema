@@ -22,6 +22,10 @@
 //! matters: this script only re-runs when the sources or `.git` change, so the
 //! stamp moves exactly when the binary does.
 
+// A build script, never a daemon child: the launcher rule in clippy.toml is for
+// production code.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -1,3 +1,7 @@
+// Production children go through `process_control::spawn_job_owned`; see
+// clippy.toml.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod admission;
 use plurx_core::process::bounded as bounded_process;
 mod backup;

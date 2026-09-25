@@ -4,6 +4,10 @@
 //! modes. With `hiqlite-contract-tests`, the same scenarios also run through a
 //! remote client backed by three separate voter processes.
 
+// A test, never a daemon child: the launcher rule in clippy.toml is for
+// production code.
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
 use std::collections::BTreeSet;
