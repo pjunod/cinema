@@ -16437,7 +16437,10 @@ mod tests {
             .expect("r");
         assert_eq!(whole.status(), StatusCode::OK);
         let whole_len = body_of(whole).await;
-        assert!(whole_len > ranged_len, "the whole file is longer than the range");
+        assert!(
+            whole_len > ranged_len,
+            "the whole file is longer than the range"
+        );
         assert_eq!(
             delivered_bytes_on_this_thread("direct_play") - before,
             ranged_len + whole_len,

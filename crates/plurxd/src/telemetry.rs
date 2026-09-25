@@ -981,7 +981,9 @@ pub(crate) fn record_progress_beat(
 ) {
     let wall_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX));
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        });
     let credited = record_progress_beat_at(
         ledger,
         &METRICS,
