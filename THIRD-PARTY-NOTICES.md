@@ -15,13 +15,16 @@ and never reaches a shipped artifact (§5).
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
 fields, so an audit claiming to read licenses "from Cargo.lock" has not done
-the work. 495 source-bearing crates in the root workspace · license fields
+the work. 496 source-bearing crates in the root workspace · license fields
 verified 2026-09-17; the graph itself re-checked against `Cargo.lock`
 on 2026-09-22, when the vendored Hiqlite `backup` feature stopped
 enabling S3 and fourteen crates reached only through it left the
 resolution, and on 2026-09-24, when `ring` became the only rustls provider
 and the six crates reached only through `aws-lc-rs` (`aws-lc-rs`,
-`aws-lc-sys`, `cmake`, `dunce`, `fs_extra`, `jobserver`) left it.
+`aws-lc-sys`, `cmake`, `dunce`, `fs_extra`, `jobserver`) left it. The
+crate counts and the §4 license summary were recomputed from `cargo metadata`
+on 2026-09-25; `tests/operations/test_license_notices.py` holds the summary,
+the counts and the full list to one another.
 
 ---
 
@@ -139,28 +142,29 @@ such requirement applies.
 
 ## 4. Rust dependencies
 
-515 source-bearing crates resolve into a plurx build, excluding the five
-first-party crates and the four vendored above. Every one is permissive:
+496 source-bearing crates resolve into a plurx build, excluding the five
+first-party crates and the vendored ones above (`s3-simple` resolves only in
+the fork's optional backup graph, never in this one). Every one is permissive:
 
-| `MIT OR Apache-2.0` | 268 |
+| License expression | Crates |
+|---|---:|
+| `MIT OR Apache-2.0` | 261 |
 | `MIT` | 117 |
-| `Apache-2.0 OR MIT` | 27 |
+| `Apache-2.0 OR MIT` | 25 |
 | `Unicode-3.0` | 18 |
-| `MIT/Apache-2.0` | 17 |
+| `MIT/Apache-2.0` | 16 |
 | `Apache-2.0` | 11 |
 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 5 |
 | `Unlicense OR MIT` | 4 |
 | `Unlicense/MIT` | 4 |
 | `Apache-2.0 OR ISC OR MIT` | 3 |
 | `Apache-2.0/MIT` | 3 |
-| `BSD-3-Clause` | 3 |
-| `ISC` | 3 |
 | `Zlib OR Apache-2.0 OR MIT` | 3 |
 | `Apache-2.0 OR MIT OR Zlib` | 2 |
 | `BSD-2-Clause` | 2 |
 | `BSD-2-Clause OR Apache-2.0 OR MIT` | 2 |
 | `CDLA-Permissive-2.0` | 2 |
-| `ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)` | 2 |
+| `ISC` | 2 |
 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | 2 |
 | `MIT OR Apache-2.0 OR Zlib` | 2 |
 | `(Apache-2.0 OR MIT) AND BSD-3-Clause` | 1 |
@@ -169,10 +173,7 @@ first-party crates and the four vendored above. Every one is permissive:
 | `Apache-2.0 / MIT` | 1 |
 | `Apache-2.0 AND ISC` | 1 |
 | `Apache-2.0 OR BSL-1.0` | 1 |
-| `BSD-3-Clause AND MIT` | 1 |
-| `BSD-3-Clause/MIT` | 1 |
-| `CC0-1.0 OR MIT-0 OR Apache-2.0` | 1 |
-| `ISC AND (Apache-2.0 OR ISC)` | 1 |
+| `BSD-3-Clause` | 1 |
 | `MIT AND BSD-3-Clause` | 1 |
 | `MIT OR BSD-3-Clause` | 1 |
 | `MIT OR Zlib OR Apache-2.0` | 1 |
@@ -190,14 +191,17 @@ stores) are permissive with attribution requirements, satisfied by this file.
 Two limits worth stating rather than hiding. This table reproduces each
 crate's declared SPDX expression only: `onig_sys` and `lz4-sys`
 statically link bundled C whose own upstream notices are not carried here.
-And the repo has three lockfiles — `fuzz/Cargo.lock` and
-`spikes/hiqlite-m0/Cargo.lock` resolve 37 packages the root lock does not
-(`libfuzzer-sys`, `arbitrary`, `rkyv`, and others). All are permissive and
-neither workspace ships in any artifact, so they are out of scope for
-distribution, but they are not covered by the table above.
+And the repo has more lockfiles than the root one. `fuzz/Cargo.lock`,
+`spikes/hiqlite-m0/Cargo.lock` and `spikes/tokenizer-backends/Cargo.lock`
+together resolve 56 crate versions the root lock does not (`libfuzzer-sys`,
+`arbitrary`, `rkyv`, `fancy-regex` 0.14.0, and others), and
+`vendor/hiqlite/Cargo.lock` and `vendor/hiqlite-wal/Cargo.lock` pin the
+vendored crates' own test lanes. All are permissive and none of those
+workspaces ships in any artifact, so they are out of scope for distribution,
+but they are not covered by the table above.
 
 <details>
-<summary>Full crate list (515)</summary>
+<summary>Full crate list (496)</summary>
 
 | Crate | Version | License |
 |---|---|---|

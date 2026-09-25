@@ -9,6 +9,7 @@ already been wrong or nearly shipped wrong.
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 import re
 import unittest
@@ -70,7 +71,59 @@ def notices_table() -> set[tuple[str, str]]:
     return {(name, version.strip()) for name, version in rows}
 
 
+def notices_licenses() -> list[str]:
+    """The license column of every row of the full dependency table."""
+
+    body = NOTICES.read_text(encoding="utf-8")
+    block = body.split("<summary>", 1)[1].split("</details>", 1)[0]
+    return re.findall(r"^\| `[^`]+` \| [^|]+? \| (.+?) \|$", block, flags=re.MULTILINE)
+
+
+def license_summary() -> dict[str, int]:
+    """Section 4's license-expression summary, as {expression: crate count}."""
+
+    body = NOTICES.read_text(encoding="utf-8")
+    section = body.split("\n## 4. Rust dependencies", 1)[1].split("<details>", 1)[0]
+    return {
+        expression: int(count)
+        for expression, count in re.findall(
+            r"^\| `([^`]+)` \| (\d+) \|$", section, flags=re.MULTILINE
+        )
+    }
+
+
 class LicenseNoticesCase(unittest.TestCase):
+    def test_the_license_summary_counts_the_full_list(self):
+        """The (crate, version) checks below cannot see the summary table, so
+        it kept aws-lc and CC0 rows after the crates behind them had left the
+        graph. It is derived from the full list and must equal it.
+        """
+
+        listed = dict(sorted(Counter(notices_licenses()).items()))
+        self.assertTrue(listed, "the full crate list did not parse")
+        self.assertEqual(
+            dict(sorted(license_summary().items())),
+            listed,
+            "the section 4 summary disagrees with the full crate list; "
+            "recompute it from the list's license column",
+        )
+
+    def test_every_stated_crate_count_is_the_list_length(self):
+        body = NOTICES.read_text(encoding="utf-8")
+        rows = len(notices_licenses())
+        stated = [
+            int(count)
+            for count in re.findall(r"(\d+) source-bearing crates", body)
+            + re.findall(r"Full crate list \((\d+)\)", body)
+        ]
+        self.assertGreaterEqual(len(stated), 3, "a crate count stopped parsing")
+        self.assertEqual(
+            set(stated),
+            {rows},
+            f"THIRD-PARTY-NOTICES.md states crate counts {stated} for a list "
+            f"of {rows} rows",
+        )
+
     def test_every_resolved_dependency_is_attributed(self):
         missing = sorted(lockfile_externals() - notices_table())
         self.assertEqual(
