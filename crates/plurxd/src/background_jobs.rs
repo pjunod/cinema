@@ -343,10 +343,10 @@ impl JobFence {
                 now_ms: unix_ms()?,
             })
             .await?;
-        if result.is_some() {
+        if result {
             state.token = None;
         }
-        Ok(result.is_some())
+        Ok(result)
     }
 
     pub(crate) async fn publish_transcode(
@@ -447,10 +447,10 @@ impl JobFence {
                 now_ms: unix_ms()?,
             })
             .await?;
-        if result.is_some() {
+        if result {
             state.token = None;
         }
-        Ok(result.is_some())
+        Ok(result)
     }
 
     fn may_publish(&self) -> bool {
@@ -486,7 +486,7 @@ impl JobFence {
                     now_ms
                 })
                 .await,
-            Ok(Some(_))
+            Ok(true)
         ) {
             return Ok(());
         }

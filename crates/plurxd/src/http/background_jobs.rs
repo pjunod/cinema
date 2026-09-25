@@ -112,7 +112,9 @@ pub async fn detail(
         "waiters": waiters.waiters.iter().map(|waiter| json!({"state": waiter.state,
             "consumer_kind": waiter.consumer_kind, "target_node_id": waiter.target_node_id,
             "priority": waiter.priority, "deadline_ms": waiter.deadline_ms,
-            "updated_at_ms": waiter.updated_at_ms})).collect::<Vec<_>>(),
+            "updated_at_ms": waiter.updated_at_ms, "failed_attempts": waiter.failed_attempts,
+            "attempt_limit": waiter.attempt_limit, "not_before_ms": waiter.not_before_ms,
+            "retry_deadline_ms": waiter.retry_deadline_ms, "error_code": waiter.last_error_code})).collect::<Vec<_>>(),
         "more_waiters": waiters.next.is_some()}),
     ))
 }

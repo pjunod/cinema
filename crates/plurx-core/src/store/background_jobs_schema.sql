@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     fence INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     lease_expires_ms INTEGER,
+    failure_policy TEXT CHECK (failure_policy IS NULL OR failure_policy IN ('retry','terminal','index_retry')),
     failed_attempts INTEGER NOT NULL DEFAULT 0 CHECK (failed_attempts >= 0),
     attempt_limit INTEGER NOT NULL DEFAULT 5 CHECK (attempt_limit BETWEEN 1 AND 20),
     retry_deadline_ms INTEGER NOT NULL DEFAULT 0 CHECK (retry_deadline_ms >= 0),
@@ -59,6 +60,14 @@ CREATE TABLE IF NOT EXISTS background_job_waiters (
     receipt_expires_ms INTEGER NOT NULL,
     retain_identity INTEGER NOT NULL DEFAULT 0 CHECK (retain_identity IN (0, 1)),
     result_ref TEXT,
+    failed_attempts INTEGER NOT NULL DEFAULT 0 CHECK (failed_attempts >= 0),
+    attempt_limit INTEGER NOT NULL DEFAULT 5 CHECK (attempt_limit BETWEEN 1 AND 20),
+    not_before_ms INTEGER NOT NULL DEFAULT 0,
+    retry_deadline_ms INTEGER NOT NULL DEFAULT 0 CHECK (retry_deadline_ms >= 0),
+    participation_fence INTEGER NOT NULL DEFAULT 0 CHECK (participation_fence >= 0),
+    attempt_errors TEXT NOT NULL DEFAULT '' CHECK (length(attempt_errors) <= 2048),
+    last_error_code TEXT CHECK (last_error_code IS NULL OR length(last_error_code) <= 64),
+    index_diagnostic_json TEXT NOT NULL DEFAULT '' CHECK (length(CAST(index_diagnostic_json AS BLOB)) <= 8192),
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     PRIMARY KEY (request_scope, request_id)
@@ -164,7 +173,8 @@ BEGIN
     INSERT INTO background_job_waiters (
         request_scope, request_id, request_digest, job_id, consumer_kind,
         consumer_ref, priority, state, target_node_id, deadline_ms,
-        receipt_expires_ms, retain_identity, created_at_ms, updated_at_ms)
+        receipt_expires_ms, retain_identity, created_at_ms, updated_at_ms,
+        attempt_limit, not_before_ms, participation_fence)
     SELECT json_extract(NEW.request_json, '$.request.scope'),
         json_extract(NEW.request_json, '$.request.request_id'),
         json_extract(NEW.request_json, '$.request.request_digest'),
@@ -177,7 +187,11 @@ BEGIN
         json_extract(NEW.result_json, '$.receipt_expires_ms'),
         COALESCE(json_extract(NEW.request_json, '$.request.retain_identity'), 0),
         json_extract(NEW.request_json, '$.now_ms'),
-        json_extract(NEW.request_json, '$.now_ms')
+        json_extract(NEW.request_json, '$.now_ms'),
+        COALESCE(json_extract(NEW.request_json, '$.attempt_limit'), 5),
+        json_extract(NEW.request_json, '$.not_before_ms'),
+        COALESCE((SELECT fence FROM background_jobs WHERE id = json_extract(NEW.result_json, '$.job_id')
+            AND state = 'running' AND json_extract(NEW.request_json, '$.not_before_ms') <= json_extract(NEW.request_json, '$.now_ms')), 0)
     WHERE json_extract(NEW.result_json, '$.outcome') = 'accepted';
 
     UPDATE background_job_waiters SET priority = MAX(priority,
@@ -195,6 +209,16 @@ BEGIN
         AND EXISTS (SELECT 1 FROM background_job_waiters
             WHERE request_scope = json_extract(NEW.request_json, '$.request.scope')
             AND request_id = json_extract(NEW.request_json, '$.request.request_id') AND state = 'pending');
+
+    UPDATE background_jobs SET
+        not_before_ms = CASE WHEN state = 'queued' THEN COALESCE((SELECT MIN(not_before_ms)
+            FROM background_job_waiters WHERE job_id = background_jobs.id AND state = 'pending'), not_before_ms) ELSE not_before_ms END,
+        retry_deadline_ms = CASE WHEN EXISTS (SELECT 1 FROM background_job_waiters
+            WHERE job_id = background_jobs.id AND state = 'pending' AND retry_deadline_ms = 0) THEN 0
+            ELSE COALESCE((SELECT MAX(retry_deadline_ms) FROM background_job_waiters
+                WHERE job_id = background_jobs.id AND state = 'pending'), retry_deadline_ms) END
+    WHERE id = json_extract(NEW.result_json, '$.job_id') AND kind = 'fragment_index_build'
+        AND state IN ('queued','running') AND json_extract(NEW.result_json, '$.outcome') IN ('accepted','existing');
 
     UPDATE analysis_requests SET state = 'submitted', owner_node_id = NULL, lease_expires_ms = NULL,
         result_cache_key = json_extract(NEW.request_json, '$.fragment_domain.cache_key'),
@@ -278,9 +302,14 @@ BEGIN
           THEN 'yielded' WHEN NEW.state = 'queued' THEN 'retry' ELSE NEW.state END,
         error_code = NEW.last_error_code
     WHERE job_id = NEW.id AND fence = OLD.fence AND finished_at_ms IS NULL;
-    UPDATE background_job_waiters SET state = NEW.state, updated_at_ms = NEW.updated_at_ms
+    UPDATE background_job_attempts SET outcome = 'failed', error_code = NEW.last_error_code
+    WHERE job_id = NEW.id AND fence = NEW.fence AND (NEW.state = 'failed'
+        OR EXISTS (SELECT 1 FROM background_jobs current WHERE current.id = NEW.id AND current.state = 'failed'));
+    UPDATE background_job_waiters SET state = NEW.state,
+        last_error_code = COALESCE(NEW.last_error_code, last_error_code), updated_at_ms = NEW.updated_at_ms
     WHERE job_id = NEW.id AND state IN ('pending','awaiting_hydration')
-        AND NEW.state IN ('failed','cancelled');
+        AND NEW.state IN ('failed','cancelled')
+        AND NOT (NEW.kind = 'fragment_index_build' AND NEW.last_error_code = 'execution_abandoned');
     UPDATE background_job_waiters SET state = 'failed', updated_at_ms = NEW.updated_at_ms
     WHERE NEW.kind = 'artifact_hydrate' AND NEW.state = 'failed' AND state = 'awaiting_hydration'
         AND target_node_id = json_extract(NEW.payload_json, '$.target_node_id')
@@ -325,9 +354,22 @@ BEGIN
     WHERE NOT EXISTS (SELECT 1 FROM background_job_reservations held
         WHERE held.resource_key = 'source_io' AND held.slot = candidate.slot)
     ORDER BY candidate.slot LIMIT 1;
+    UPDATE background_job_waiters SET failed_attempts = failed_attempts + 1,
+        attempt_errors = attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired',
+        last_error_code = 'lease_expired', updated_at_ms = NEW.updated_at_ms,
+        state = CASE WHEN failed_attempts + 1 >= attempt_limit THEN 'failed' ELSE state END
+    WHERE NEW.kind = 'fragment_index_build' AND OLD.state = 'running'
+        AND job_id = NEW.id AND state = 'pending' AND participation_fence = OLD.fence;
+    UPDATE background_job_waiters SET participation_fence = NEW.fence
+    WHERE job_id = NEW.id AND state = 'pending' AND not_before_ms <= NEW.updated_at_ms
+        AND failed_attempts < attempt_limit
+        AND (retry_deadline_ms = 0 OR retry_deadline_ms > NEW.updated_at_ms)
+        AND (deadline_ms IS NULL OR deadline_ms > NEW.updated_at_ms);
     SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM background_job_reservations
         WHERE job_id = NEW.id AND fence = NEW.fence AND resource_key = 'source_io')
         THEN RAISE(ABORT, 'background source I/O reservation unavailable') END;
+    -- Project after participation and abandoned-attempt accounting have landed.
+    UPDATE background_jobs SET priority = priority WHERE id = NEW.id AND kind = 'fragment_index_build';
 END;
 
 -- next statement
@@ -359,6 +401,11 @@ END;
 CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command
 AFTER INSERT ON background_job_commands WHEN NEW.operation = 'maintain'
 BEGIN
+    UPDATE background_job_waiters SET state = 'failed', last_error_code = 'index_retry_window_expired',
+        updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE (request_scope, request_id) IN (SELECT request_scope, request_id FROM background_job_waiters
+        WHERE state = 'pending' AND retry_deadline_ms > 0 AND retry_deadline_ms <= json_extract(NEW.request_json, '$.now_ms')
+        ORDER BY retry_deadline_ms, request_scope, request_id LIMIT 128);
     UPDATE background_job_waiters SET state = 'cancelled', updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
     WHERE (request_scope, request_id) IN (SELECT delivery.request_scope, delivery.request_id FROM background_job_waiters delivery
         WHERE delivery.consumer_kind = 'background_delivery' AND delivery.state = 'pending'
@@ -380,8 +427,17 @@ BEGIN
           AND state IN ('pending','awaiting_hydration')
           AND (deadline_ms IS NULL OR deadline_ms > json_extract(NEW.request_json, '$.now_ms'))), 0)
     WHERE id IN (SELECT job_id FROM background_job_waiters
-        WHERE state = 'cancelled' AND updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+        WHERE state IN ('cancelled','failed') AND updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
         ORDER BY job_id LIMIT 128) AND state IN ('queued','running');
+    UPDATE background_jobs SET state = 'failed',
+        failed_attempts = failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
+        last_error_code = 'index_retry_window_expired', owner_node_id = NULL,
+        owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL,
+        revision = revision + 1, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE id IN (SELECT id FROM background_jobs WHERE retry_deadline_ms > 0
+        AND retry_deadline_ms <= json_extract(NEW.request_json, '$.now_ms')
+        AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract(NEW.request_json, '$.now_ms')))
+        AND revision < 9223372036854775807 ORDER BY retry_deadline_ms, id LIMIT 128);
     UPDATE background_jobs SET
         state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE 'cancelling' END,
         revision = revision + 1, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
@@ -400,18 +456,14 @@ BEGIN
         last_error_code = 'execution_abandoned', owner_node_id = NULL,
         owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL,
         revision = revision + 1, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
-    WHERE id IN (SELECT id FROM background_jobs WHERE state = 'running' AND failed_attempts >= attempt_limit - 1
+    WHERE id IN (SELECT id FROM background_jobs WHERE state = 'running'
+        AND ((kind != 'fragment_index_build' AND failed_attempts >= attempt_limit - 1)
+          OR (kind = 'fragment_index_build' AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
+            WHERE interest.job_id = background_jobs.id AND interest.state = 'pending'
+              AND interest.failed_attempts + CASE WHEN interest.participation_fence = background_jobs.fence THEN 1 ELSE 0 END < interest.attempt_limit
+              AND (interest.retry_deadline_ms = 0 OR interest.retry_deadline_ms > json_extract(NEW.request_json, '$.now_ms')))))
         AND lease_expires_ms <= json_extract(NEW.request_json, '$.now_ms')
         AND revision < 9223372036854775807 ORDER BY lease_expires_ms, id LIMIT 128);
-    UPDATE background_jobs SET state = 'failed',
-        failed_attempts = failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
-        last_error_code = 'index_retry_window_expired', owner_node_id = NULL,
-        owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL,
-        revision = revision + 1, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
-    WHERE id IN (SELECT id FROM background_jobs WHERE retry_deadline_ms > 0
-        AND retry_deadline_ms <= json_extract(NEW.request_json, '$.now_ms')
-        AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract(NEW.request_json, '$.now_ms')))
-        AND revision < 9223372036854775807 ORDER BY retry_deadline_ms, id LIMIT 128);
     DELETE FROM background_job_attempts WHERE (job_id, fence) IN (
         SELECT old.job_id, old.fence FROM background_job_attempts old
         WHERE old.finished_at_ms IS NOT NULL
@@ -567,6 +619,11 @@ BEGIN
     SELECT json_extract(NEW.request_json, '$.logical_key'), json_extract(NEW.request_json, '$.artifact.cache_key'),
         request_id, json_extract(NEW.request_json, '$.now_ms') FROM analysis_requests
     WHERE component = 'fragment_index' AND state = 'submitted'
+        AND EXISTS (SELECT 1 FROM background_job_waiters interest
+            WHERE interest.request_scope = 'analysis' AND interest.request_id = analysis_requests.request_id
+              AND interest.state = 'pending'
+              AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract(NEW.request_json, '$.now_ms'))
+              AND (interest.retry_deadline_ms = 0 OR interest.retry_deadline_ms > json_extract(NEW.request_json, '$.now_ms')))
         AND result_cache_key = json_extract(NEW.request_json, '$.artifact.cache_key')
         AND json_extract(NEW.result_json, '$.outcome') = 'published'
         AND (force_rebuild = 1 OR expected_predecessor_generation = '')
@@ -597,8 +654,13 @@ BEGIN
         revision = revision + 1, updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
     WHERE id = json_extract(NEW.result_json, '$.job_id') AND json_extract(NEW.result_json, '$.outcome') = 'published';
 
-    UPDATE background_job_waiters SET state = CASE WHEN deadline_ms <= json_extract(NEW.request_json, '$.now_ms') THEN 'cancelled' WHEN target_node_id IS NULL
+    UPDATE background_job_waiters SET state = CASE
+        WHEN deadline_ms <= json_extract(NEW.request_json, '$.now_ms') THEN 'cancelled'
+        WHEN retry_deadline_ms > 0 AND retry_deadline_ms <= json_extract(NEW.request_json, '$.now_ms') THEN 'failed'
+        WHEN target_node_id IS NULL
             OR target_node_id = json_extract(NEW.request_json, '$.token.node_id') THEN 'succeeded' ELSE 'awaiting_hydration' END,
+        last_error_code = CASE WHEN retry_deadline_ms > 0 AND retry_deadline_ms <= json_extract(NEW.request_json, '$.now_ms')
+            THEN 'index_retry_window_expired' ELSE last_error_code END,
         result_ref = json_extract(NEW.result_json, '$.result_ref'), updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
     WHERE job_id = json_extract(NEW.result_json, '$.job_id') AND state = 'pending'
         AND json_extract(NEW.result_json, '$.outcome') = 'published';
@@ -646,43 +708,60 @@ AFTER UPDATE ON background_jobs
 WHEN EXISTS (SELECT 1 FROM background_fragment_targets WHERE job_id = NEW.id)
 BEGIN
     UPDATE cluster_fragment_index_jobs SET
-        state = CASE NEW.state
-            WHEN 'succeeded' THEN CASE WHEN target_node_id = json_extract(NEW.result_ref, '$.node_id') THEN 'ready' ELSE 'queued' END
-            WHEN 'cancelling' THEN 'cancelled' ELSE NEW.state END,
-        owner_node_id = CASE WHEN NEW.state = 'running' THEN NEW.owner_node_id ELSE NULL END,
-        lease_expires_ms = CASE WHEN NEW.state = 'running' THEN NEW.lease_expires_ms ELSE NULL END,
+        state = CASE
+            WHEN NEW.state = 'succeeded' THEN CASE WHEN target_node_id = json_extract(NEW.result_ref, '$.node_id')
+                OR target_node_id = '' THEN 'ready' ELSE 'queued' END
+            WHEN NOT EXISTS (SELECT 1 FROM background_job_waiters interest WHERE interest.job_id = NEW.id
+                AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id AND interest.state IN ('pending','awaiting_hydration'))
+                THEN CASE WHEN EXISTS (SELECT 1 FROM background_job_waiters interest WHERE interest.job_id = NEW.id
+                AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id AND interest.state = 'failed') THEN 'failed' ELSE 'cancelled' END
+            WHEN NEW.state = 'running' AND NEW.kind = 'fragment_index_build' AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest WHERE interest.job_id = NEW.id
+                AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id
+                AND interest.state = 'pending' AND interest.participation_fence = NEW.fence) THEN 'queued'
+            WHEN NEW.state = 'cancelling' THEN 'cancelled' ELSE NEW.state END,
+        owner_node_id = CASE WHEN NEW.state = 'running' AND (NEW.kind != 'fragment_index_build' OR EXISTS (SELECT 1 FROM background_job_waiters interest WHERE interest.job_id = NEW.id
+                AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id
+                AND interest.state = 'pending' AND interest.participation_fence = NEW.fence)) THEN NEW.owner_node_id ELSE NULL END,
+        lease_expires_ms = CASE WHEN NEW.state = 'running' AND (NEW.kind != 'fragment_index_build' OR EXISTS (SELECT 1 FROM background_job_waiters interest WHERE interest.job_id = NEW.id
+                AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id
+                AND interest.state = 'pending' AND interest.participation_fence = NEW.fence)) THEN NEW.lease_expires_ms ELSE NULL END,
         fence = NEW.fence,
-        attempts = CASE
+        attempts = CASE WHEN NEW.kind = 'fragment_index_build' THEN COALESCE((SELECT MAX(interest.failed_attempts
+            + CASE WHEN NEW.state = 'running' AND interest.state = 'pending'
+                AND interest.participation_fence = NEW.fence THEN 1 ELSE 0 END)
+            FROM background_job_waiters interest WHERE interest.job_id = NEW.id
+                AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id), attempts)
             WHEN NEW.state = 'running' AND (OLD.state != 'running' OR NEW.fence > OLD.fence) THEN attempts + 1
             WHEN OLD.state = 'running' AND NEW.state = 'queued' AND NEW.failed_attempts = OLD.failed_attempts THEN MAX(0, attempts - 1)
             ELSE attempts END,
-        attempt_errors = CASE WHEN NEW.failed_attempts > OLD.failed_attempts THEN
-            attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END ||
-            CASE WHEN NEW.fence > OLD.fence THEN 'lease_expired'
-                WHEN CASE WHEN json_valid(NEW.index_diagnostic_json)
-                    THEN json_extract(NEW.index_diagnostic_json, '$.recorded_at_ms') END = NEW.updated_at_ms
-                THEN json_extract(NEW.index_diagnostic_json, '$.code')
-                ELSE COALESCE(NEW.last_error_code, 'execution_abandoned') END
-            ELSE attempt_errors END,
-        index_retry_deadline_ms = CASE WHEN index_retry_deadline_ms > 0 THEN index_retry_deadline_ms ELSE NEW.retry_deadline_ms END,
-        index_diagnostic_json = CASE WHEN NEW.index_diagnostic_json != '' AND NEW.index_diagnostic_json != OLD.index_diagnostic_json
-            THEN NEW.index_diagnostic_json ELSE index_diagnostic_json END,
-        not_before_ms = NEW.not_before_ms,
+        attempt_errors = CASE WHEN NEW.kind = 'fragment_index_build'
+            THEN COALESCE((SELECT interest.attempt_errors FROM background_job_waiters interest WHERE interest.job_id = NEW.id
+                AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id
+                ORDER BY interest.failed_attempts DESC, interest.updated_at_ms DESC, interest.request_scope, interest.request_id LIMIT 1), attempt_errors)
+            WHEN NEW.failed_attempts > OLD.failed_attempts THEN attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END
+                || COALESCE(NEW.last_error_code, 'execution_abandoned') ELSE attempt_errors END,
+        index_retry_deadline_ms = CASE WHEN NEW.kind = 'fragment_index_build'
+            THEN COALESCE((SELECT interest.retry_deadline_ms FROM background_job_waiters interest WHERE interest.job_id = NEW.id
+                AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id
+                ORDER BY interest.failed_attempts DESC, interest.updated_at_ms DESC, interest.request_scope, interest.request_id LIMIT 1), index_retry_deadline_ms)
+            WHEN index_retry_deadline_ms > 0 THEN index_retry_deadline_ms ELSE NEW.retry_deadline_ms END,
+        index_diagnostic_json = CASE WHEN NEW.kind = 'fragment_index_build'
+            THEN COALESCE((SELECT interest.index_diagnostic_json FROM background_job_waiters interest WHERE interest.job_id = NEW.id
+                AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id
+                ORDER BY interest.failed_attempts DESC, interest.updated_at_ms DESC, interest.request_scope, interest.request_id LIMIT 1), index_diagnostic_json)
+            WHEN NEW.index_diagnostic_json != '' THEN NEW.index_diagnostic_json ELSE index_diagnostic_json END,
+        not_before_ms = COALESCE((SELECT MIN(interest.not_before_ms) FROM background_job_waiters interest
+            WHERE interest.job_id = NEW.id AND interest.state = 'pending'
+                AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id), NEW.not_before_ms),
         last_error_code = CASE WHEN NEW.state = 'succeeded'
-            AND target_node_id != json_extract(NEW.result_ref, '$.node_id') THEN 'awaiting_hydration'
+            AND target_node_id != json_extract(NEW.result_ref, '$.node_id') AND target_node_id != '' THEN 'awaiting_hydration'
+            WHEN NEW.kind = 'fragment_index_build' THEN (SELECT interest.last_error_code FROM background_job_waiters interest WHERE interest.job_id = NEW.id
+                AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id
+                ORDER BY interest.failed_attempts DESC, interest.updated_at_ms DESC, interest.request_scope, interest.request_id LIMIT 1)
             ELSE NEW.last_error_code END,
         updated_at_ms = NEW.updated_at_ms
     WHERE (cache_key, target_node_id) IN (SELECT cache_key, target_node_id FROM background_fragment_targets WHERE job_id = NEW.id);
 
-    UPDATE analysis_attempts SET phase = CASE WHEN NEW.state = 'failed' THEN 'failed' ELSE 'canceled' END,
-        terminal_code = NEW.last_error_code, phase_updated_at_ms = NEW.updated_at_ms
-    WHERE NEW.state IN ('failed','cancelling','cancelled') AND (request_id, claim_epoch) IN (
-        SELECT request_id, fence FROM analysis_requests WHERE state = 'submitted' AND component = 'fragment_index'
-            AND (result_cache_key, target_node_id) IN (SELECT cache_key, target_node_id FROM background_fragment_targets WHERE job_id = NEW.id));
-    UPDATE analysis_requests SET state = CASE WHEN NEW.state = 'failed' THEN 'failed' ELSE 'cancelled' END,
-        last_error_code = NEW.last_error_code, updated_at_ms = NEW.updated_at_ms
-    WHERE NEW.state IN ('failed','cancelling','cancelled') AND state = 'submitted' AND component = 'fragment_index'
-        AND (result_cache_key, target_node_id) IN (SELECT cache_key, target_node_id FROM background_fragment_targets WHERE job_id = NEW.id);
 END;
 
 -- next statement
@@ -716,4 +795,104 @@ BEGIN
         json_object('job_id', job_id, 'cancelled', json('true'))
     FROM background_job_waiters WHERE request_scope = 'analysis' AND request_id = NEW.request_id
         AND state IN ('pending','awaiting_hydration');
+END;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_fragment_interest_failed
+AFTER UPDATE ON background_jobs
+WHEN NEW.kind = 'fragment_index_build' AND OLD.state = 'running' AND NEW.state = 'queued'
+    AND NEW.failed_attempts > OLD.failed_attempts
+BEGIN
+    UPDATE background_job_waiters SET
+        failed_attempts = failed_attempts + 1,
+        attempt_errors = attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END ||
+            CASE WHEN NEW.failure_policy = 'index_retry' OR NEW.index_diagnostic_json != OLD.index_diagnostic_json
+                THEN json_extract(NEW.index_diagnostic_json, '$.code') ELSE NEW.last_error_code END,
+        retry_deadline_ms = CASE WHEN NEW.failure_policy = 'index_retry' AND retry_deadline_ms = 0
+            THEN MIN(9223372036854775807 - 604800000, NEW.updated_at_ms) + 604800000 ELSE retry_deadline_ms END,
+        not_before_ms = CASE WHEN NEW.failure_policy = 'index_retry'
+            THEN MIN(9223372036854775807 - MIN(1800000 * (1 << MIN(failed_attempts, 30)), 86400000), NEW.updated_at_ms)
+                + MIN(1800000 * (1 << MIN(failed_attempts, 30)), 86400000)
+            ELSE NEW.not_before_ms END,
+        last_error_code = NEW.last_error_code,
+        index_diagnostic_json = CASE WHEN NEW.index_diagnostic_json != OLD.index_diagnostic_json
+            THEN json_set(NEW.index_diagnostic_json, '$.attempt', failed_attempts + 1)
+            ELSE index_diagnostic_json END,
+        updated_at_ms = NEW.updated_at_ms
+    WHERE job_id = NEW.id AND state = 'pending' AND participation_fence = OLD.fence;
+
+    UPDATE background_job_waiters SET state = 'failed',
+        last_error_code = CASE WHEN failed_attempts >= attempt_limit THEN 'attempt_limit'
+            WHEN retry_deadline_ms > 0 AND not_before_ms >= retry_deadline_ms THEN 'index_retry_window_expired'
+            ELSE last_error_code END,
+        updated_at_ms = NEW.updated_at_ms
+    WHERE job_id = NEW.id AND state = 'pending' AND (
+        NEW.failure_policy = 'terminal' OR failed_attempts >= attempt_limit
+        OR (retry_deadline_ms > 0 AND not_before_ms >= retry_deadline_ms));
+
+    UPDATE background_job_waiters SET index_diagnostic_json = json_set(index_diagnostic_json,
+        '$.retryable', json(CASE WHEN state = 'pending' THEN 'true' ELSE 'false' END))
+    WHERE job_id = NEW.id AND participation_fence = OLD.fence AND json_valid(index_diagnostic_json)
+        AND updated_at_ms = NEW.updated_at_ms;
+
+    UPDATE background_jobs SET
+        state = CASE WHEN EXISTS (SELECT 1 FROM background_job_waiters
+            WHERE job_id = NEW.id AND state = 'pending') THEN 'queued' ELSE 'failed' END,
+        index_diagnostic_json = CASE WHEN json_valid(NEW.index_diagnostic_json) THEN json_set(NEW.index_diagnostic_json,
+            '$.retryable', json(CASE WHEN EXISTS (SELECT 1 FROM background_job_waiters
+                WHERE job_id = NEW.id AND state = 'pending') THEN 'true' ELSE 'false' END)) ELSE NEW.index_diagnostic_json END,
+        not_before_ms = COALESCE((SELECT MIN(not_before_ms) FROM background_job_waiters
+            WHERE job_id = NEW.id AND state = 'pending'), NEW.not_before_ms),
+        retry_deadline_ms = CASE WHEN EXISTS (SELECT 1 FROM background_job_waiters
+            WHERE job_id = NEW.id AND state = 'pending' AND retry_deadline_ms = 0) THEN 0
+            ELSE COALESCE((SELECT MAX(retry_deadline_ms) FROM background_job_waiters WHERE job_id = NEW.id), 0) END,
+        last_error_code = CASE WHEN NOT EXISTS (SELECT 1 FROM background_job_waiters
+            WHERE job_id = NEW.id AND state = 'pending') THEN COALESCE((SELECT last_error_code
+                FROM background_job_waiters WHERE job_id = NEW.id AND state = 'failed'
+                ORDER BY updated_at_ms DESC, request_scope, request_id LIMIT 1), NEW.last_error_code)
+            ELSE NEW.last_error_code END
+    WHERE id = NEW.id;
+END;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_analysis_interest_terminal
+AFTER UPDATE OF state ON background_job_waiters
+WHEN NEW.request_scope = 'analysis' AND NEW.state IN ('failed','cancelled') AND OLD.state != NEW.state
+BEGIN
+    UPDATE analysis_attempts SET phase = CASE NEW.state WHEN 'failed' THEN 'failed' ELSE 'canceled' END,
+        terminal_code = NEW.last_error_code, phase_updated_at_ms = NEW.updated_at_ms
+    WHERE (request_id, claim_epoch) IN (SELECT request_id, fence FROM analysis_requests
+        WHERE request_id = NEW.request_id AND state = 'submitted');
+    UPDATE analysis_requests SET state = NEW.state, last_error_code = NEW.last_error_code,
+        updated_at_ms = NEW.updated_at_ms
+    WHERE request_id = NEW.request_id AND state = 'submitted';
+END;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_fragment_last_abandonment
+AFTER UPDATE ON background_jobs
+WHEN NEW.kind = 'fragment_index_build' AND OLD.state = 'running' AND NEW.state = 'failed'
+    AND NEW.last_error_code = 'execution_abandoned' AND NEW.failed_attempts > OLD.failed_attempts
+BEGIN
+    UPDATE background_job_waiters SET failed_attempts = failed_attempts + 1,
+        attempt_errors = attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired',
+        last_error_code = CASE WHEN failed_attempts + 1 >= attempt_limit THEN 'attempt_limit' ELSE 'lease_expired' END,
+        state = 'failed', updated_at_ms = NEW.updated_at_ms
+    WHERE job_id = NEW.id AND state = 'pending' AND participation_fence = OLD.fence;
+    UPDATE background_jobs SET priority = priority WHERE id = NEW.id;
+END;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_fragment_interest_retired
+AFTER UPDATE OF state ON background_job_waiters
+WHEN OLD.state = 'pending' AND NEW.state IN ('failed','cancelled')
+BEGIN
+    UPDATE background_jobs SET
+        not_before_ms = COALESCE((SELECT MIN(not_before_ms) FROM background_job_waiters
+            WHERE job_id = NEW.job_id AND state = 'pending'), not_before_ms),
+        retry_deadline_ms = CASE WHEN EXISTS (SELECT 1 FROM background_job_waiters
+            WHERE job_id = NEW.job_id AND state = 'pending' AND retry_deadline_ms = 0) THEN 0
+            ELSE COALESCE((SELECT MAX(retry_deadline_ms) FROM background_job_waiters
+                WHERE job_id = NEW.job_id AND state = 'pending'), retry_deadline_ms) END
+    WHERE id = NEW.job_id AND kind = 'fragment_index_build' AND state IN ('queued','running');
 END;

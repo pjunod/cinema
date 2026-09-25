@@ -158,7 +158,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 
 - Open correctness work before acceptance: migration must preserve per-interest
   fragment retry ledgers when old targets have different attempts/deadlines;
-  current shared execution totals alone do not implement that import contract.
+  per-interest ledgers are now implemented, while the importer remains outstanding.
   Missing artifact holders must enqueue bounded canonical repair. Explicit retry,
   offline-demand joining, legacy execution API removal, fairness and the final
   recovery/cancellation tests remain required; this draft is not deployable yet.
@@ -168,3 +168,10 @@ implementation is claimed; “compiled” does not mean tests passed.
   repeated cooperative cancellation. Activity labels are fetched in one bounded
   read per page; queue refresh does not block the live Activity overview.
   Test execution remains deferred until the complete PR's adversarial review.
+
+- 2026-09-25: fragment consumers now retain independent attempt limits, due
+  times, retry windows, diagnostics and participation fences. Shared execution
+  totals no longer exhaust a newly joined consumer's budget. Takeover charges
+  only participating requests; cancellation recomputes the remaining schedule.
+  Added budget-joining, takeover and delayed-interest regression contracts;
+  test execution remains deferred to the final review/fast-lane sequence.

@@ -430,8 +430,7 @@ async fn background_jobs_fragment_targets_share_claims_and_keep_domain_history()
                 now_ms: 1_002,
             })
             .await
-            .expect("typed failure")
-            .expect("settled");
+            .expect("typed failure");
         for target in ["node-a", "node-b"] {
             let domain = store
                 .cluster_fragment_index_job(&key, target)

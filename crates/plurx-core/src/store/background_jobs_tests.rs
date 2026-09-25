@@ -133,7 +133,7 @@ async fn background_jobs_cancellation_wins_renewal_and_rejects_new_interest() {
     ));
     let cleanup = store
         .resolve_claim(ResolveClaim {
-            job_id: request.id,
+            job_id: request.id.clone(),
             node_id: first.node_id,
             boot_id: first.boot_id,
             claim_id: first.claim_id,
@@ -153,8 +153,13 @@ async fn background_jobs_cancellation_wins_renewal_and_rejects_new_interest() {
             now_ms: 2_002,
         })
         .await
-        .expect("settle")
-        .expect("row");
+        .expect("settle");
+    assert!(settled);
+    let settled = store
+        .background_job(&request.id)
+        .await
+        .expect("read")
+        .expect("job");
     assert_eq!(settled.state, JobState::Cancelled);
 }
 
@@ -193,7 +198,7 @@ async fn background_jobs_priority_edits_preserve_renewal_and_takeover_rejects_ol
         })
         .await
         .expect("stale settlement");
-    assert!(stale.is_none());
+    assert!(!stale);
 }
 
 #[tokio::test]
@@ -227,8 +232,7 @@ async fn background_jobs_reservations_bound_distinct_jobs_and_yield_releases_cap
             now_ms: 2_000,
         })
         .await
-        .expect("yield")
-        .expect("settled");
+        .expect("yield");
     let job = claimed(&store, third).await;
     assert_eq!(job.fence, 1);
 }
@@ -299,8 +303,13 @@ async fn background_jobs_twenty_yields_compact_history_without_spending_failure_
                 now_ms: now_ms + 1,
             })
             .await
-            .expect("yield")
-            .expect("settled");
+            .expect("yield");
+        assert!(settled);
+        let settled = store
+            .background_job(&request.id)
+            .await
+            .expect("read")
+            .expect("job");
         assert_eq!(settled.failed_attempts, 0);
         revision = settled.revision;
         store.maintain_jobs(now_ms + 2).await.expect("upkeep");
@@ -563,8 +572,13 @@ async fn background_jobs_fragment_retry_keeps_its_window_history_and_configured_
             now_ms: 1_001,
         })
         .await
-        .expect("failure")
-        .expect("settled");
+        .expect("failure");
+    assert!(retry);
+    let retry = store
+        .background_job(&request.id)
+        .await
+        .expect("read")
+        .expect("job");
     assert_eq!(retry.state, JobState::Queued);
     assert_eq!(retry.not_before_ms, 1_001 + INDEX_RETRY_BASE_MS);
     assert_eq!(retry.retry_deadline_ms, 1_001 + INDEX_RETRY_WINDOW_MS);
@@ -582,8 +596,13 @@ async fn background_jobs_fragment_retry_keeps_its_window_history_and_configured_
             now_ms: retry.not_before_ms + 1,
         })
         .await
-        .expect("second failure")
-        .expect("settled");
+        .expect("second failure");
+    assert!(failed);
+    let failed = store
+        .background_job(&request.id)
+        .await
+        .expect("read")
+        .expect("job");
     assert_eq!(failed.state, JobState::Failed);
     assert_eq!(failed.last_error_code.as_deref(), Some("attempt_limit"));
     assert_eq!(
@@ -596,4 +615,199 @@ async fn background_jobs_fragment_retry_keeps_its_window_history_and_configured_
     assert_eq!(diagnostic.claim_fence, 2);
     assert_eq!(diagnostic.attempt, 2);
     assert!(!diagnostic.retryable);
+}
+
+#[tokio::test]
+async fn fragment_interests_keep_independent_budgets_when_joining_a_retry() {
+    use super::SettingsStore;
+    use crate::content_analysis::{IndexDiagnostic, IndexFailureCode};
+    let store = SqliteStore::open_in_memory().expect("store");
+    store
+        .put_setting(super::keys::ANALYSIS_MAX_ATTEMPTS, "2")
+        .await
+        .expect("limit");
+    let first = enqueue(1_000);
+    store.enqueue_job(first.clone()).await.expect("first");
+    let mut now_ms = 1_000;
+    for execution in 0..3 {
+        let current = store
+            .background_job(&first.id)
+            .await
+            .expect("read")
+            .expect("job");
+        now_ms = now_ms.max(current.not_before_ms);
+        if execution == 1 {
+            let later = enqueue(now_ms);
+            assert!(
+                matches!(store.enqueue_job(later).await.expect("join retry"),
+                EnqueueOutcome::Accepted { ref job_id, .. } if job_id == &first.id)
+            );
+        }
+        let job = claimed(&store, claim(&first.id, current.revision, now_ms)).await;
+        assert!(store
+            .fail_fragment_job(FragmentJobFailure {
+                token: job.token.expect("token"),
+                code: IndexFailureCode::IndexBudgetExceeded,
+                transient_allowlisted: false,
+                diagnostic: IndexDiagnostic::default(),
+                now_ms: now_ms + 1,
+            })
+            .await
+            .expect("failure"));
+        let page = store
+            .job_waiters(WaiterQuery {
+                job_id: first.id.clone(),
+                after: None,
+                limit: 100,
+            })
+            .await
+            .expect("ledgers");
+        let original = page
+            .waiters
+            .iter()
+            .find(|w| w.request_id == first.request.request_id)
+            .expect("original");
+        if execution == 1 {
+            assert_eq!(original.state, "failed");
+            assert_eq!(original.failed_attempts, 2);
+            let later = page
+                .waiters
+                .iter()
+                .find(|w| w.request_id != first.request.request_id)
+                .expect("later");
+            assert_eq!(later.state, "pending");
+            assert_eq!(later.failed_attempts, 1);
+            assert_eq!(
+                store
+                    .background_job(&first.id)
+                    .await
+                    .expect("read")
+                    .expect("job")
+                    .state,
+                JobState::Queued
+            );
+        }
+        if execution == 2 {
+            assert!(page
+                .waiters
+                .iter()
+                .all(|w| w.state == "failed" && w.failed_attempts == 2));
+            let terminal = store
+                .background_job(&first.id)
+                .await
+                .expect("read")
+                .expect("job");
+            assert_eq!(
+                terminal.failed_attempts, 3,
+                "execution totals are not a consumer's budget"
+            );
+            assert_eq!(terminal.state, JobState::Failed);
+        }
+    }
+}
+
+#[tokio::test]
+async fn fragment_takeover_charges_only_due_interests_and_keeps_fresh_budget() {
+    use super::SettingsStore;
+    let store = SqliteStore::open_in_memory().expect("store");
+    store
+        .put_setting(super::keys::ANALYSIS_MAX_ATTEMPTS, "1")
+        .await
+        .expect("limit");
+    let first = enqueue(1_000);
+    store.enqueue_job(first.clone()).await.expect("enqueue");
+    let owner = claimed(&store, claim(&first.id, 0, 1_000)).await;
+    let mut later = enqueue(2_000);
+    later.not_before_ms = 32_000;
+    store
+        .enqueue_job(later.clone())
+        .await
+        .expect("future interest");
+    let successor = claimed(&store, claim(&first.id, owner.revision, 32_000)).await;
+    assert_eq!(successor.failed_attempts, 1);
+    let interests = store
+        .job_waiters(WaiterQuery {
+            job_id: first.id.clone(),
+            after: None,
+            limit: 100,
+        })
+        .await
+        .expect("ledgers");
+    let original = interests
+        .waiters
+        .iter()
+        .find(|w| w.request_id == first.request.request_id)
+        .expect("original");
+    assert_eq!(
+        (original.state.as_str(), original.failed_attempts),
+        ("failed", 1)
+    );
+    let fresh = interests
+        .waiters
+        .iter()
+        .find(|w| w.request_id == later.request.request_id)
+        .expect("fresh");
+    assert_eq!(
+        (fresh.state.as_str(), fresh.failed_attempts),
+        ("pending", 0)
+    );
+    store
+        .maintain_jobs(63_000)
+        .await
+        .expect("last abandoned owner");
+    let terminal = store
+        .background_job(&first.id)
+        .await
+        .expect("read")
+        .expect("job");
+    assert_eq!(terminal.state, JobState::Failed);
+    let interests = store
+        .job_waiters(WaiterQuery {
+            job_id: first.id,
+            after: None,
+            limit: 100,
+        })
+        .await
+        .expect("ledgers");
+    assert!(interests
+        .waiters
+        .iter()
+        .all(|w| w.state == "failed" && w.failed_attempts == 1));
+}
+
+#[tokio::test]
+async fn fragment_cancelled_due_interest_does_not_schedule_future_interest_early() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    let first = enqueue(1_000);
+    store.enqueue_job(first.clone()).await.expect("enqueue");
+    let mut later = enqueue(2_000);
+    later.not_before_ms = 90_000;
+    store.enqueue_job(later).await.expect("future interest");
+    store
+        .cancel_waiter(CancelWaiter {
+            scope: first.request.scope,
+            request_id: first.request.request_id,
+            now_ms: 3_000,
+        })
+        .await
+        .expect("cancel");
+    let job = store
+        .background_job(&first.id)
+        .await
+        .expect("read")
+        .expect("job");
+    assert_eq!(job.state, JobState::Queued);
+    assert_eq!(job.not_before_ms, 90_000);
+    assert!(store
+        .job_candidates(CandidateQuery {
+            node_id: "node-a".into(),
+            kinds: vec![JobKind::FragmentIndexBuild],
+            now_ms: 4_000,
+            after: None,
+            limit: 100
+        })
+        .await
+        .expect("candidates")
+        .jobs
+        .is_empty());
 }

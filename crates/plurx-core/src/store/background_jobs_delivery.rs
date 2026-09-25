@@ -15,6 +15,11 @@ pub struct JobWaiter {
     pub deadline_ms: Option<i64>,
     pub result_ref: Option<String>,
     pub updated_at_ms: i64,
+    pub failed_attempts: i64,
+    pub attempt_limit: i64,
+    pub not_before_ms: i64,
+    pub retry_deadline_ms: i64,
+    pub last_error_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +53,10 @@ pub(super) const WAITERS_SQL: &str = r#"
 SELECT json_object('scope', request_scope, 'request_id', request_id, 'job_id', job_id,
     'consumer_kind', consumer_kind, 'consumer_ref', consumer_ref, 'state', state,
     'priority', priority, 'target_node_id', target_node_id, 'deadline_ms', deadline_ms,
-    'result_ref', result_ref, 'updated_at_ms', updated_at_ms) AS result_json
+    'result_ref', result_ref, 'updated_at_ms', updated_at_ms,
+    'failed_attempts', failed_attempts, 'attempt_limit', attempt_limit,
+    'not_before_ms', not_before_ms, 'retry_deadline_ms', retry_deadline_ms,
+    'last_error_code', last_error_code) AS result_json
 FROM background_job_waiters WHERE job_id = json_extract($1, '$.job_id')
     AND (json_extract($1, '$.after') IS NULL OR (request_scope, request_id) >
         (json_extract($1, '$.after.scope'), json_extract($1, '$.after.request_id')))

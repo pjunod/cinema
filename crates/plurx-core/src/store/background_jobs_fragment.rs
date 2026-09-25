@@ -35,6 +35,10 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
       AND job.lease_expires_ms = json_extract(body, '$.token.lease_expires_ms')
       AND (job.retry_deadline_ms = 0 OR job.retry_deadline_ms > json_extract(body, '$.now_ms'))
       AND job.lease_expires_ms > json_extract(body, '$.now_ms') AND job.revision < 9223372036854775807
+      AND (job.kind != 'fragment_index_build' OR EXISTS (SELECT 1 FROM background_job_waiters interest
+        WHERE interest.job_id = job.id AND interest.state = 'pending' AND interest.failed_attempts < interest.attempt_limit
+          AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract(body, '$.now_ms'))
+          AND (interest.retry_deadline_ms = 0 OR interest.retry_deadline_ms > json_extract(body, '$.now_ms'))))
       AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || job.owner_node_id)
       AND ((job.kind = 'fragment_index_build'
         AND json_extract(job.payload_json, '$.cache_key') = json_extract(body, '$.artifact.cache_key')
@@ -70,7 +74,11 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
       AND artifact.bytes = json_extract(body, '$.artifact.bytes')) THEN 1 ELSE 0 END AS artifact_matches,
     CASE WHEN json_extract(body, '$.artifact.cache_key') = json_extract(body, '$.logical_key')
       OR EXISTS (SELECT 1 FROM analysis_requests WHERE component = 'fragment_index' AND state = 'submitted'
-        AND result_cache_key = json_extract(body, '$.artifact.cache_key'))
+        AND result_cache_key = json_extract(body, '$.artifact.cache_key')
+        AND EXISTS (SELECT 1 FROM background_job_waiters interest WHERE interest.request_scope = 'analysis'
+          AND interest.request_id = analysis_requests.request_id AND interest.state = 'pending'
+          AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract(body, '$.now_ms'))
+          AND (interest.retry_deadline_ms = 0 OR interest.retry_deadline_ms > json_extract(body, '$.now_ms'))))
       OR EXISTS (SELECT 1 FROM cluster_fragment_index_heads WHERE logical_cache_key = json_extract(body, '$.logical_key')
         AND generation_cache_key = json_extract(body, '$.artifact.cache_key')) THEN 1 ELSE 0 END AS generation_matches
   FROM request LEFT JOIN background_jobs job ON job.id = json_extract(body, '$.token.job_id')

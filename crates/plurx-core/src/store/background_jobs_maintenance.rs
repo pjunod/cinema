@@ -24,7 +24,14 @@ WHERE EXISTS (SELECT 1 FROM background_job_waiters
           AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))))
   OR EXISTS (SELECT 1 FROM background_jobs
     WHERE state = 'cancelling' AND lease_expires_ms <= json_extract($1, '$.now_ms'))
-  OR EXISTS (SELECT 1 FROM background_jobs WHERE state = 'running' AND failed_attempts >= attempt_limit - 1
+  OR EXISTS (SELECT 1 FROM background_job_waiters WHERE state = 'pending'
+    AND retry_deadline_ms > 0 AND retry_deadline_ms <= json_extract($1, '$.now_ms'))
+  OR EXISTS (SELECT 1 FROM background_jobs WHERE state = 'running'
+    AND ((kind != 'fragment_index_build' AND failed_attempts >= attempt_limit - 1)
+      OR (kind = 'fragment_index_build' AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
+        WHERE interest.job_id = background_jobs.id AND interest.state = 'pending'
+          AND interest.failed_attempts + CASE WHEN interest.participation_fence = background_jobs.fence THEN 1 ELSE 0 END < interest.attempt_limit
+          AND (interest.retry_deadline_ms = 0 OR interest.retry_deadline_ms > json_extract($1, '$.now_ms')))))
     AND lease_expires_ms <= json_extract($1, '$.now_ms'))
   OR EXISTS (SELECT 1 FROM background_jobs WHERE retry_deadline_ms > 0 AND retry_deadline_ms <= json_extract($1, '$.now_ms')
     AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms'))))
