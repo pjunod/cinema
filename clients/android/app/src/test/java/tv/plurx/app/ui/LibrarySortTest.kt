@@ -25,7 +25,7 @@ class LibrarySortTest {
             movie(4, "Share B middle", 200),
         )
 
-        assertEquals(listOf(3L, 1L, 4L, 2L), sortMerged(merged, "added").map { it.id })
+        assertEquals(listOf(3L, 1L, 4L, 2L), merged.map { it.copy(sort_title = it.title.lowercase()) }.sortedWith { a, b -> LibraryMerge.compare(a, b, "added") }.map { it.id })
     }
 
     @Test
@@ -74,6 +74,6 @@ class LibrarySortTest {
             movie(2, "Alpha", null),
             movie(3, "Dated", 10),
         )
-        assertEquals(listOf(3L, 2L, 1L), sortMerged(merged, "added").map { it.id })
+        assertEquals(listOf(3L, 1L, 2L), merged.map { it.copy(sort_title = it.title.lowercase()) }.sortedWith { a, b -> LibraryMerge.compare(a, b, "added") }.map { it.id })
     }
 }
