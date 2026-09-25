@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — PR #524 gate #3073 passed regression-field validation but found a missing signing-helper catalog path; mapping added and exact-head retry pending; L-03 caption-positive web acceptance open; three voters on `60f3803d1`, current main `c99a29090` awaits postmerge rollout; nuc3 forensic hold restored · **Updated:** 2026-09-25 18:04 UTC · **Main:** `c99a29090`
+**Status:** open — PR #524 merged new main `196d2a43e` after stale-base gate #3075 was canceled; exact-tree fast lane pending; L-03 caption-positive web acceptance open; three voters on `60f3803d1`, current main awaits rollout; nuc3 forensic hold restored · **Updated:** 2026-09-25 18:08 UTC · **Main:** `196d2a43e`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
