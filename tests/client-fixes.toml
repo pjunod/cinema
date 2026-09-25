@@ -2700,3 +2700,12 @@ source = "scripts/ship-physical"
 source_anchor = "# the just-built exact-main archive on every reachable paired device."
 test = "tests/operations/test_contracts.py"
 test_anchor = "def test_ship_physical_is_a_self_contained_device_path(self):"
+# The same departing detail button can still be clicked during its exit
+# animation. The test uses the real navigation controller and displayed arrow.
+[[fixes]]
+id = "android.double-back-entry-ownership"
+commits = ["f5ab17a35"]
+source = "clients/android/app/src/main/java/tv/plurx/app/BackNavigation.kt"
+source_anchor = "internal fun NavController.popBackStackFrom(entry: NavBackStackEntry): Boolean {"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/BackNavigationTest.kt"
+test_anchor = "fun secondBackDuringExitAnimationKeepsHomeVisible()"
