@@ -2054,7 +2054,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # Merged with main's K-09 subtitle cluster extraction and the architecture
 # review client milestones (#507, #506): the value is the whole merged tree
 # re-measured after the merge.
-expected_occurrences = 622
+# +3 parallel subtitle ranges (#517), all test-only in subtitle_ranges.rs:
+# peer_refusal_and_timeout_preserve_readable_current_range awaits its owner;
+# cancellation_during_blocking_publish_prevents_obsolete_rename aborts and
+# joins its owner before releasing the staged blocking writer; and
+# current_range_is_readable_before_slow_peer_and_cancel_drops_prefetch aborts
+# and joins its owner and observes the speculative future's Drop. Production
+# run_ranges joins current and ahead futures inside the existing session
+# owner, and starts no independent task or rolling-producer election.
+expected_occurrences = 625
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2841,7 +2849,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Merged with main's C-08 M5 release-evidence metrics (#500) at
 # `259d087ed`: the value is the whole merged tree, measured by zeroing this
 # row after the merge.
-expected_occurrences = 969
+# +5 parallel subtitle ranges (#517): three production timeouts and two
+# test-only guards. internal_media::subtitle_range bounds its worker to 25 s;
+# run_ranges bounds speculative ahead work to 30 s inside the session owner;
+# prefetch bounds membership discovery to 2 s inside that ahead future.
+# Cancelling an owner drops these futures and their timers; none elects a
+# rolling producer. The two 2 s test guards bound staged-file cleanup and
+# current-cache publication polling, and are awaited before fixture teardown.
+expected_occurrences = 974
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3085,7 +3100,15 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Merged with main's K-09 subtitle cluster extraction and the architecture
 # review client milestones (#507, #506): the value is the whole merged tree
 # re-measured after the merge.
-expected_occurrences = 173
+# +2 parallel subtitle ranges (#517), both test-only in
+# indexed_late_window_matches_full_scan_with_nonzero_source_start: one FFmpeg
+# mux creates a finite 600 s 64x64/1fps synthetic MKV, and one direct full
+# subtitle extraction supplies the timestamp oracle. Each .output() is
+# awaited and its exit status checked before the temporary fixture drops.
+# Neither creates a playback owner. Production window extraction retains
+# the existing command construction but now routes its pipe through
+# BoundedDiagnosticChild, which owns cancellation kill/reap and bounded I/O.
+expected_occurrences = 175
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3454,7 +3477,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Merged with main's VOD successor encoder-permit handoff (#513) at
 # `8251d14f7`: the value is the whole merged tree, measured by zeroing this
 # row after the merge.
-expected_occurrences = 387
+# +3 parallel subtitle ranges (#517): the two awaited, finite test-only
+# FFmpeg .output() calls inventoried above, plus Response::builder().status()
+# in internal_media::subtitle_range. That third occurrence builds an HTTP
+# response status and starts no process. No new rolling-producer owner.
+expected_occurrences = 390
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
