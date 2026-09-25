@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — draft PR #524; three voters on exact current main, nuc3 forensic hold restored, device acceptance open · **Updated:** 2026-09-25 17:09 UTC · **Main:** `60f3803d1`
+**Status:** open — draft PR #524; three voters on exact current main, nuc3 forensic hold restored, device acceptance open · **Updated:** 2026-09-25 17:11 UTC · **Main:** `60f3803d1`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -55,6 +55,8 @@ PR #512 records the rollout and baselines and repairs the caption-audit wrapper.
 A separate detached Ansible controller from `nuc3` subsequently deployed `60f3803d1` to the voters. It had no host limit, so it was paused before reaching the quarantined learner and terminated after `nuc4` became healthy. During the `m6` build, two voters remained fresh and quorum stayed available with zero apply lag. The independent post-stop three-voter receipt confirms exact checkout and OCI on all three, healthy containers with zero restarts, `/readyz` and `/metrics` 200, three fresh voters, quorum and leader known, and zero apply lag: SHA-256 `30787e7f26969c099b1e53498777c27dcd171c8ed478fb02b3d363454e20d292`.
 
 The old b47 learner container on `nuc3` was unexpectedly found running from original `/srv/plurx`, starting at 14:12:58 UTC. It was stopped at 17:07:33 UTC without deleting original or forensic data. The reason it started is unknown; this does not replace the authenticated clean learner rejoin. Hold receipt SHA-256 `c0d9da2a16260390097651c7a0d19b043a59ed43d9884279d04abed2889864a1`. [The dated fleet readout](ARCHITECTURE-REVIEW-FLEET-READOUT-2026-09-25.md) carries the timeline and evidence limits.
+
+A bounded 17:10–17:11 UTC passive sample on exact `60f3803d1` recorded K-02/C-05/C-08/P-02/K-06/S-11 point values without restarting or activating workloads; receipt SHA-256 `e79d0a8c213777c6ec4efdd068fc7c4d972b80709dd2238dad217dfa853414d0`. The [dated fleet readout](ARCHITECTURE-REVIEW-FLEET-READOUT-2026-09-25.md) states the values and remaining active/duration requirements.
 
 ## Current impediments
 

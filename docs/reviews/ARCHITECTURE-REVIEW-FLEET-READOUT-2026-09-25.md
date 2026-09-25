@@ -291,3 +291,18 @@ A second Ansible controller, already running detached from `nuc3`, advanced `nyn
 The old `nuc3` Plurxd container was unexpectedly found running from 14:12:58 UTC, with b47 OCI revision and original `/srv/plurx` mounted. Its checkout was `38f61dfe6`, so checkout alone would have misreported the running build. It returned healthy and `/readyz` 200, but that does not erase the earlier `metadata_ahead_of_wal` forensic result or qualify a clean learner rejoin. The container was stopped at 17:07:33 UTC; original `/srv/plurx` and `/srv/plurx.forensic-20260925T131450Z` remained present, and no Ansible controller process remained. Sanitized hold receipt `/Users/pjunod/code/plurx-agent/codex-final-main-fleet-receipts-20260925/nuc3-learner-hold-20260925T1708Z.json` SHA-256 `c0d9da2a16260390097651c7a0d19b043a59ed43d9884279d04abed2889864a1`. The cause of the 14:12 startup was not established.
 
 These are three-voter point observations. Authenticated clean `nuc3` rejoin, gap-free four-node one-hour, 24-hour and seven-day windows, active playback and recording flows, and physical-device interaction evidence remain owed.
+
+## Exact `60f3803d1` passive point sample — 17:10–17:11 UTC
+
+A bounded read-only SSH collector captured exact source and build stamps from `nynuc`, `m6` and `nuc4`, with all three healthy and `/readyz` 200. It selected metrics and read process limits, NTP status, sidecar counts and three named log-message counts. Private receipt `/Users/pjunod/code/plurx-agent/codex-final-main-fleet-receipts-20260925/passive-60f-20260925T1711Z/receipt.json` SHA-256 `e79d0a8c213777c6ec4efdd068fc7c4d972b80709dd2238dad217dfa853414d0` hashes the bounded outputs.
+
+| Row | Passive point value | Acceptance still owed |
+|---|---|---|
+| K-02 | Snapshot build-ok count 1 on each voter, install-ok 1/0/0; DB/WAL/snapshot/log byte gauges present; apply lag 0. | Gap-free four-node 24-hour series and approved follower restart/catch-up. |
+| C-05 | Sidecar schema 10; fragment rows 2,268/1,518/4,291, pending and negative 0 on each; backfill result counters 0. | Active convergence and availability behavior. |
+| C-08 | Metrics bodies 393,549/393,448/392,825 bytes; selected TTFF, watched, stalled and delivered families present, with only m6 nonzero in this process-local sample. | Four-node normal-use hour, JSON logging and controlled active flows. |
+| P-02 | Open-file soft/hard limits 524,288; FD counts 53/55/50; OOM adjustment 0. | Two-transcode/direct/DVR busy sample and week without EMFILE. |
+| K-06 | NTP offsets +546/+836/+948 µs; no `plurx_cluster_clock` family in the selected exposition. | Idle and loaded peer-uncertainty hour with runtime metric. |
+| S-11 | QSV availability 1/0/1; VAAPI and software available on all three; encoder and tone-map sessions zero in this sample. | Seven reset-aware days and controlled use. |
+
+The guide cache stat probe succeeded on `nynuc` and exited 1 on `m6` and `nuc4`; this point sample cannot infer cache freshness on those two hosts. The three named log-message counters were zero in each bounded log tail, which is not a week-long error absence. `nuc3` was stopped before this sample. No active playback, recording or controlled restart was performed.
