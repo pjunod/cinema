@@ -107,7 +107,8 @@ const FIELD_ORDER_SCHEMA_VERSION: i64 = 43;
 const LUMINANCE_SCHEMA_VERSION: i64 = 44;
 const DOWNLOADED_SUBTITLES_SCHEMA_VERSION: i64 = 45;
 const DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE: i64 = LUMINANCE_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = DOWNLOADED_SUBTITLES_SCHEMA_VERSION;
+const FILE_GRANTS_SCHEMA_VERSION: i64 = 46;
+pub const AUTH_SCHEMA_VERSION: i64 = FILE_GRANTS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -2633,6 +2634,23 @@ impl HiqliteAuthStore {
                         attempt,
                     )
                     .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(DOWNLOADED_SUBTITLES_SCHEMA_VERSION) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_durable::file_grants_migration_statements();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            FILE_GRANTS_SCHEMA_VERSION,
+                            now,
+                            DOWNLOADED_SUBTITLES_SCHEMA_VERSION
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(DOWNLOADED_SUBTITLES_SCHEMA_VERSION, attempt)
+                        .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(

@@ -14,6 +14,7 @@ mod classification;
 mod coordination;
 mod dv_conversion;
 mod dvr;
+mod file_grants;
 mod fragindex;
 mod fragment_index_cluster;
 mod library;
@@ -1139,6 +1140,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // so the validation column appends after them.
     crate::store::fragindex::FRAGMENT_INDEXES_VALIDATION_COLUMN,
     super::downloaded_subtitles::SCHEMA,
+    // v68: one-file external-reader capabilities. Token hashes are durable;
+    // plaintext capability values never enter the database.
+    super::FILE_GRANTS_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2563,9 +2567,9 @@ mod tests {
         // the node-local publication proof C-05 drafted as v64, appended after
         // both of those for the same reason they reached main first. No
         // earlier entry moved; the list stays append-only. v67 adds durable
-        // downloaded captions to files.
+        // downloaded captions to files. v68 adds external-reader file grants.
         assert_eq!(
-            version, 67,
+            version, 68,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
