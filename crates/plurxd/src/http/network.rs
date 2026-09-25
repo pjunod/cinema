@@ -46,7 +46,7 @@ pub(crate) fn identity(headers: &HeaderMap, remote: Option<SocketAddr>) -> Optio
     })?;
     let [a, b, c, _] = address.octets();
     Some(NetworkIdentity {
-        client_class: client_class(headers),
+        client_class: client_class(headers).to_owned(),
         network_fingerprint: format!("{a}.{b}.{c}.0/24"),
         credential_generation: None,
         user_id: None,
@@ -106,7 +106,11 @@ fn parse_ipv4(raw: &str) -> Option<Ipv4Addr> {
 /// never consulted (review finding 1). The header is the one input every path
 /// already has, so deriving from it alone makes the two sides agree by
 /// construction rather than by convention.
-fn client_class(headers: &HeaderMap) -> String {
+///
+/// Every return is a literal from [`crate::telemetry::CLIENT_CLASSES`], which
+/// is what lets the same class label `plurx_ttff_ms` without the label ever
+/// carrying a User-Agent.
+pub(crate) fn client_class(headers: &HeaderMap) -> &'static str {
     let ua = headers
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
@@ -131,7 +135,7 @@ fn client_class(headers: &HeaderMap) -> String {
         ("safari/", "safari"),
     ] {
         if ua.contains(needle) {
-            return class.to_owned();
+            return class;
         }
     }
     // Native players and the HTTP stacks the native clients default to.
@@ -140,16 +144,16 @@ fn client_class(headers: &HeaderMap) -> String {
         || ua.contains("cfnetwork")
         || ua.contains("darwin/")
     {
-        return "apple".to_owned();
+        return "apple";
     }
     if ua.contains("media3")
         || ua.contains("exoplayer")
         || ua.contains("okhttp/")
         || ua.contains("android")
     {
-        return "android".to_owned();
+        return "android";
     }
-    "other".to_owned()
+    "other"
 }
 
 pub(crate) async fn stored_prior(
@@ -184,7 +188,35 @@ mod tests {
     fn class_of(user_agent: &'static str) -> String {
         let mut headers = HeaderMap::new();
         headers.insert(header::USER_AGENT, HeaderValue::from_static(user_agent));
-        client_class(&headers)
+        client_class(&headers).to_owned()
+    }
+
+    /// `plurx_ttff_ms{client}` is bounded only because the classifier can
+    /// return nothing outside the telemetry vocabulary. Every shipping UA the
+    /// other tests use, plus the empty and the hostile, must land inside it.
+    #[test]
+    fn every_client_class_is_in_the_bounded_metric_vocabulary() {
+        for ua in [
+            CHROME_WINDOWS_UA,
+            CHROME_MACOS_UA,
+            CHROME_ANDROID_UA,
+            SAFARI_MACOS_UA,
+            SAFARI_IOS_UA,
+            EDGE_WINDOWS_UA,
+            FIREFOX_WINDOWS_UA,
+            FIREFOX_IOS_UA,
+            APPLE_NATIVE_UA,
+            ANDROID_NATIVE_UA,
+            "curl/8.7.1",
+            "",
+            "Mozilla/5.0 \"><script>/../../etc/passwd",
+        ] {
+            let class = class_of(ua);
+            assert!(
+                crate::telemetry::CLIENT_CLASSES.contains(&class.as_str()),
+                "{ua:?} classified outside the metric vocabulary as {class:?}"
+            );
+        }
     }
 
     #[test]

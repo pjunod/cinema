@@ -649,6 +649,7 @@
                 last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
+                prepared_incarnation: None,
                 terminal_cleanup: None,
                 tombstone: None,
             },
@@ -696,6 +697,7 @@
                 last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
+                prepared_incarnation: None,
                 terminal_cleanup: Some(cleanup),
                 tombstone: Some(Terminal::Deleted),
             },
@@ -792,6 +794,9 @@
             dormant_since: StdMutex::new(None),
             closed: AtomicBool::new(false),
             warned_admission: AtomicBool::new(false),
+            permit_wait_logged: AtomicBool::new(false),
+            handoff: StdMutex::new(None),
+            handoff_expiry_armed: AtomicBool::new(false),
             demand_since: StdMutex::new(HashMap::new()),
         })
     }

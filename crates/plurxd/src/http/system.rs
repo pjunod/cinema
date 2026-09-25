@@ -866,6 +866,10 @@ pub async fn client_log(
     let event = client_playback_event(&ev, user.id);
     // Deliberately not `ev.ua`: the class must come from the same input the
     // read paths use, or the prior is written under a key nothing reads.
+    // The same derivation labels `plurx_ttff_ms{client}`, and it is taken
+    // here rather than from the identity below because that one is `None`
+    // for an IPv6 peer, and a start time is a start time on any address.
+    let client = super::network::client_class(&headers);
     let mut network = super::network::identity(&headers, remote);
     if let Some(ref mut id) = network {
         id.user_id = Some(user.id);
@@ -918,7 +922,7 @@ pub async fn client_log(
             Some(session_id) => transcode.session_status(session_id).await,
             None => None,
         };
-        emit_client_playback_event(store, event, info.as_ref(), network);
+        emit_client_playback_event(store, event, info.as_ref(), network, Some(client));
     });
     StatusCode::NO_CONTENT
 }
@@ -1027,6 +1031,7 @@ fn emit_client_playback_event(
     mut event: PlaybackEvent,
     info: Option<&crate::transcode::SessionInfo>,
     network: Option<crate::telemetry::NetworkIdentity>,
+    client: Option<&'static str>,
 ) {
     normalize_client_marker_prewarm(&mut event);
     if let Some(info) = info {
@@ -1036,7 +1041,7 @@ fn emit_client_playback_event(
         .session_id
         .as_deref()
         .map(crate::transcode::session_log_id);
-    crate::telemetry::emit_with_network(store, event, network);
+    crate::telemetry::emit_with_network(store, event, network, client);
 }
 
 fn normalize_client_marker_prewarm(event: &mut PlaybackEvent) {
@@ -6692,7 +6697,7 @@ mod tests {
             suspended: true,
             suspend_count: 1,
         };
-        emit_client_playback_event(Arc::clone(&store), event, Some(&info), None);
+        emit_client_playback_event(Arc::clone(&store), event, Some(&info), None, None);
         let row = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if let Some(row) = store

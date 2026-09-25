@@ -16722,7 +16722,7 @@ impl TranscodeManager {
             hw_slot: std::sync::Mutex::new(None),
             sw_permit: std::sync::Mutex::new(None),
             sw_delta_permit: std::sync::Mutex::new(None),
-            delivery: Meter::new(),
+            delivery: Meter::for_method(crate::delivery::Method::Transcode.metric_label()),
             http_waits: HttpWaitLedger::default(),
             readrate: 0.0,
             suspended: AtomicBool::new(false),
@@ -19612,6 +19612,9 @@ impl TranscodeManager {
             speculative: std::sync::atomic::AtomicBool::new(false),
             queued: std::sync::Mutex::new(None),
             policy_retry: std::sync::atomic::AtomicBool::new(false),
+            handoff_wait: std::sync::atomic::AtomicBool::new(false),
+            last_refusal: std::sync::Mutex::new(None),
+            handoff_claim: std::sync::Mutex::new(None),
             #[cfg(test)]
             admission_pause: std::sync::Mutex::new(None),
         })))
@@ -20059,6 +20062,11 @@ impl TranscodeManager {
                 .await
             {
                 Ok(_) => {
+                    if speculative {
+                        self.vod
+                            .mark_prepared_incarnation(session_id, &remote.incarnation_id)
+                            .await;
+                    }
                     tracing::info!(
                         session = %session_log_id(session_id),
                         "resurrected a vod session from its durable route"
@@ -20687,6 +20695,12 @@ impl TranscodeManager {
     #[cfg(test)]
     pub(crate) fn test_mark_live_waiting(&self) -> crate::admission::LiveWait {
         self.admissions.wait_for_slot()
+    }
+
+    /// Encoder threads the software pool has reserved right now.
+    #[cfg(test)]
+    pub(crate) fn test_software_threads_in_use(&self) -> usize {
+        self.admissions.software_in_use()
     }
 
     #[cfg(test)]
@@ -22154,7 +22168,7 @@ impl TranscodeManager {
             hw_slot: std::sync::Mutex::new(hw_slot),
             sw_permit: std::sync::Mutex::new(sw_permit),
             sw_delta_permit: std::sync::Mutex::new(None),
-            delivery: Meter::new(),
+            delivery: Meter::for_method(crate::delivery::Method::Transcode.metric_label()),
             http_waits: HttpWaitLedger::default(),
             readrate: pacing
                 .readrate
@@ -22743,7 +22757,7 @@ impl TranscodeManager {
             hw_slot: std::sync::Mutex::new(None),
             sw_permit: std::sync::Mutex::new(None),
             sw_delta_permit: std::sync::Mutex::new(None),
-            delivery: Meter::new(),
+            delivery: Meter::for_method(crate::delivery::Method::HlsCopy.metric_label()),
             http_waits: HttpWaitLedger::default(),
             readrate: pacing
                 .readrate

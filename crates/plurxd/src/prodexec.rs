@@ -156,12 +156,41 @@ pub enum Termination {
 pub struct Contention {
     pub live_waiting: bool,
     pub holds_permit: bool,
+    /// This producer's own viewer has a prepared successor that cannot start
+    /// until this permit comes back, and nothing else is waiting ahead of it.
+    ///
+    /// Stronger than `live_waiting` on purpose. An ordinary live waiter is
+    /// another viewer, so a producer still writing towards its own reader
+    /// keeps its permit. Here the reader *is* that viewer, the media it is
+    /// producing is the rendition they have asked to leave, and the segments
+    /// already published stay servable after the process is gone. Holding on
+    /// until the ahead window fills is minutes of encode during which the
+    /// switch the viewer asked for cannot begin.
+    pub handoff_waiting: bool,
 }
 
 /// Let a stopped or about-to-stop encoder return its permit to a live waiter.
 /// All other operations already move the producer and remain untouched.
 pub fn yield_step(producer: Producer, step: Step, contention: Contention) -> Step {
-    if !contention.holds_permit || !contention.live_waiting {
+    if !contention.holds_permit {
+        return step;
+    }
+    if contention.handoff_waiting {
+        // Any live process, whatever it was about to do next. A move that
+        // replaces the process (`Restart`) or a reclaim is left alone: the
+        // driver retires those itself and does not re-admit during a handoff.
+        if let (
+            Producer::Running { .. } | Producer::Stopped { .. },
+            Step::Nothing | Step::Stop | Step::Resume,
+        ) = (producer, step)
+        {
+            return Step::Terminate {
+                why: Termination::YieldToWaiter,
+            };
+        }
+        return step;
+    }
+    if !contention.live_waiting {
         return step;
     }
     match (producer, step) {
@@ -402,7 +431,56 @@ mod tests {
         Contention {
             live_waiting,
             holds_permit,
+            handoff_waiting: false,
         }
+    }
+
+    fn handoff() -> Contention {
+        Contention {
+            live_waiting: false,
+            holds_permit: true,
+            handoff_waiting: true,
+        }
+    }
+
+    #[test]
+    fn a_running_encoder_yields_to_its_own_viewers_prepared_successor() {
+        for (producer, step) in [
+            (running(40), Step::Nothing),
+            (running(40), Step::Stop),
+            (stopped(40, ahead()), Step::Nothing),
+            (stopped(40, ahead()), Step::Resume),
+        ] {
+            assert_eq!(
+                yield_step(producer, step, handoff()),
+                Step::Terminate {
+                    why: Termination::YieldToWaiter
+                },
+                "{producer:?} {step:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_handoff_never_starts_or_rewrites_a_move() {
+        for (producer, step) in [
+            (absent(Some(40)), Step::Start { at: 41 }),
+            (running(40), Step::Restart { at: 12 }),
+            (running(40), Step::MakeRoom { wanted: 1_000 }),
+            (
+                running(40),
+                Step::Terminate {
+                    why: Termination::Idle,
+                },
+            ),
+        ] {
+            assert_eq!(yield_step(producer, step, handoff()), step);
+        }
+        let copy = Contention {
+            holds_permit: false,
+            ..handoff()
+        };
+        assert_eq!(yield_step(running(40), Step::Nothing, copy), Step::Nothing);
     }
 
     #[test]
