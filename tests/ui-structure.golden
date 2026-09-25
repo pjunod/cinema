@@ -2628,11 +2628,11 @@ catalog|settings-developer@1280x860|dom|button.px-tab[aria-expanded=false aria-c
 catalog|settings-developer@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|settings-developer@1280x860|dom|button.px-tab[type=button] > span[text]|1
 catalog|settings-developer@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|11
-catalog|settings-developer@1280x860|dom|details.setdetails > summary[text]|11
+catalog|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|12
+catalog|settings-developer@1280x860|dom|details.setdetails > summary[text]|12
 catalog|settings-developer@1280x860|dom|div > h1[text]|1
-catalog|settings-developer@1280x860|dom|div > h2.section[text]|12
-catalog|settings-developer@1280x860|dom|div > p.sub[text]|12
+catalog|settings-developer@1280x860|dom|div > h2.section[text]|13
+catalog|settings-developer@1280x860|dom|div > p.sub[text]|13
 catalog|settings-developer@1280x860|dom|div > p[text]|1
 catalog|settings-developer@1280x860|dom|div#app > div#pxshell.px-shell|1
 catalog|settings-developer@1280x860|dom|div#chthumbcard.card.setcard > details.setdetails|1
@@ -2647,6 +2647,8 @@ catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > div.cardhead|1
 catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > div.hint[text]|1
 catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > div.setfoot|1
 catalog|settings-developer@1280x860|dom|div#drcard.card.setcard > label.tog|1
+catalog|settings-developer@1280x860|dom|div#enable-auto-quality.setsection > h2[text]|1
+catalog|settings-developer@1280x860|dom|div#enable-auto-quality.setsection > p[text]|1
 catalog|settings-developer@1280x860|dom|div#enable-chapter-thumbnails.setsection > h2[text]|1
 catalog|settings-developer@1280x860|dom|div#enable-chapter-thumbnails.setsection > p[text]|1
 catalog|settings-developer@1280x860|dom|div#enable-quality.setsection > h2[text]|1
@@ -2666,6 +2668,7 @@ catalog|settings-developer@1280x860|dom|div#pxshell.px-shell > main#main|1
 catalog|settings-developer@1280x860|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#chthumbcard.card.setcard|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
+catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-auto-quality.setsection|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-chapter-thumbnails.setsection|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-quality.setsection|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-seek-scratch.setsection|1
@@ -2677,7 +2680,7 @@ catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#subclusterca
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#subsrccard.card.setcard|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.local.setcard|1
-catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|4
+catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|5
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|3
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
@@ -2712,30 +2715,32 @@ catalog|settings-developer@1280x860|dom|div#vdcard.card.setcard > label.tog|1
 catalog|settings-developer@1280x860|dom|div.card.local.setcard > div.cardhead|1
 catalog|settings-developer@1280x860|dom|div.card.local.setcard > div.hint[text]|1
 catalog|settings-developer@1280x860|dom|div.card.local.setcard > label.tog|1
-catalog|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|4
+catalog|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|5
+catalog|settings-developer@1280x860|dom|div.card.setcard > div#aqerr.err[role=alert]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#backup-settings-error.err[role=alert]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#ltdeinterr.err[role=alert]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#pqherr.err[role=alert]|1
-catalog|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|4
-catalog|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|3
-catalog|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|3
+catalog|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|5
+catalog|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|4
+catalog|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|4
 catalog|settings-developer@1280x860|dom|div.card.setcard > div.setgrid|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > label.setfield|1
-catalog|settings-developer@1280x860|dom|div.card.setcard > label.tog|1
+catalog|settings-developer@1280x860|dom|div.card.setcard > label.tog|2
 catalog|settings-developer@1280x860|dom|div.card.setcard > label[text]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > select#ltdeint|1
-catalog|settings-developer@1280x860|dom|div.cardhead > div.cardtools|12
-catalog|settings-developer@1280x860|dom|div.cardhead > div|12
+catalog|settings-developer@1280x860|dom|div.cardhead > div.cardtools|13
+catalog|settings-developer@1280x860|dom|div.cardhead > div|13
+catalog|settings-developer@1280x860|dom|div.cardtools > span#aqstate.pill[text]|1
 catalog|settings-developer@1280x860|dom|div.cardtools > span#pqhstate.pill[text]|1
 catalog|settings-developer@1280x860|dom|div.cardtools > span.acc.pill[text]|1
 catalog|settings-developer@1280x860|dom|div.cardtools > span.ok.pill[text]|1
 catalog|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|9
-catalog|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|42
-catalog|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|42
+catalog|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|46
+catalog|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|46
 catalog|settings-developer@1280x860|dom|div.devcheck > p.devcheck-evidence[text]|26
-catalog|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|42
-catalog|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|42
-catalog|settings-developer@1280x860|dom|div.hint[text] > b[text]|8
+catalog|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|46
+catalog|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|46
+catalog|settings-developer@1280x860|dom|div.hint[text] > b[text]|9
 catalog|settings-developer@1280x860|dom|div.hint[text] > i[text]|1
 catalog|settings-developer@1280x860|dom|div.px-brand > a.logo[text]|1
 catalog|settings-developer@1280x860|dom|div.px-ctl > div.px-pop|1
@@ -2750,15 +2755,15 @@ catalog|settings-developer@1280x860|dom|div.px-pop > button.ghost.profile.sm|1
 catalog|settings-developer@1280x860|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
 catalog|settings-developer@1280x860|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|settings-developer@1280x860|dom|div.px-user > div.px-pop|1
-catalog|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|42
+catalog|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|46
 catalog|settings-developer@1280x860|dom|div.setdetails-body > div.hint[text]|5
 catalog|settings-developer@1280x860|dom|div.setdetails-body > div.tog|7
 catalog|settings-developer@1280x860|dom|div.setdetails-body > h2.section[text]|3
 catalog|settings-developer@1280x860|dom|div.setdetails-body > h3.devcheck-group[text]|5
-catalog|settings-developer@1280x860|dom|div.setdetails-body > p.devcheck-note[text]|9
+catalog|settings-developer@1280x860|dom|div.setdetails-body > p.devcheck-note[text]|10
 catalog|settings-developer@1280x860|dom|div.setdetails-body > p.hint[text]|1
-catalog|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|10
-catalog|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|10
+catalog|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|11
+catalog|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|11
 catalog|settings-developer@1280x860|dom|div.setgrid > label.setfield|2
 catalog|settings-developer@1280x860|dom|div.sethead > div|1
 catalog|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
@@ -2773,13 +2778,14 @@ catalog|settings-developer@1280x860|dom|label.setfield > span[text]|3
 catalog|settings-developer@1280x860|dom|label.tog > input#adr[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#chthumb[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#dhqa[type=checkbox]|1
+catalog|settings-developer@1280x860|dom|label.tog > input#pabr[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#pdp[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#pqh[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#sub503[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#subbackfill[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#subcluster[type=checkbox]|1
 catalog|settings-developer@1280x860|dom|label.tog > input#subsrc[type=checkbox]|1
-catalog|settings-developer@1280x860|dom|label.tog > span[text]|9
+catalog|settings-developer@1280x860|dom|label.tog > span[text]|10
 catalog|settings-developer@1280x860|dom|main#main > div.setlayout|1
 catalog|settings-developer@1280x860|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|settings-developer@1280x860|dom|nav.px-nav[aria-label=*] > a|5
@@ -2797,12 +2803,12 @@ catalog|settings-developer@1280x860|dom|small > code[text]|2
 catalog|settings-developer@1280x860|dom|small[text] > br|4
 catalog|settings-developer@1280x860|dom|small[text] > code[text]|6
 catalog|settings-developer@1280x860|dom|small[text] > i[text]|1
-catalog|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|10
-catalog|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|10
+catalog|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|11
+catalog|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|13
 catalog|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|22
-catalog|settings-developer@1280x860|dom|span[text] > small[text]|14
+catalog|settings-developer@1280x860|dom|span[text] > small[text]|15
 catalog|settings-developer@1280x860|dom|span[text] > small|2
-catalog|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|3
+catalog|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|4
 catalog|settings-developer@1280x860|dom|span[text] > span.pill[text]|4
 catalog|settings-developer@1280x860|dom|strong[text] > span[aria-hidden=true text]|3
 catalog|settings-developer@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
@@ -2840,24 +2846,26 @@ catalog|settings-developer@1280x860|focus|028|input#backup-keep
 catalog|settings-developer@1280x860|focus|029|summary "Readiness"
 catalog|settings-developer@1280x860|focus|030|summary "Requirements and readiness"
 catalog|settings-developer@1280x860|focus|031|a "Playback"
-catalog|settings-developer@1280x860|focus|032|input#pqh
-catalog|settings-developer@1280x860|focus|033|summary "Readiness and device qualification"
-catalog|settings-developer@1280x860|focus|034|input#pdp
-catalog|settings-developer@1280x860|focus|035|input#sub503
-catalog|settings-developer@1280x860|focus|036|summary "What to confirm before enabling"
-catalog|settings-developer@1280x860|focus|037|input#subsrc
-catalog|settings-developer@1280x860|focus|038|summary "What it needs"
-catalog|settings-developer@1280x860|focus|039|input#subcluster
-catalog|settings-developer@1280x860|focus|040|summary "What to confirm before enabling"
-catalog|settings-developer@1280x860|focus|041|input#subbackfill
-catalog|settings-developer@1280x860|focus|042|summary "Current work and readiness"
-catalog|settings-developer@1280x860|focus|043|input#chthumb
-catalog|settings-developer@1280x860|focus|044|summary "What it needs"
-catalog|settings-developer@1280x860|focus|045|input#dhqa
-catalog|settings-developer@1280x860|focus|046|summary "Cache impact and diagnostic evidence"
-catalog|settings-developer@1280x860|focus|047|input#adr
-catalog|settings-developer@1280x860|focus|048|summary "Recovery limits and diagnostic evidence"
-catalog|settings-developer@1280x860|focus|049|<wrap>
+catalog|settings-developer@1280x860|focus|032|input#pabr
+catalog|settings-developer@1280x860|focus|033|summary "Requirements and current evidence"
+catalog|settings-developer@1280x860|focus|034|input#pqh
+catalog|settings-developer@1280x860|focus|035|summary "Readiness and device qualification"
+catalog|settings-developer@1280x860|focus|036|input#pdp
+catalog|settings-developer@1280x860|focus|037|input#sub503
+catalog|settings-developer@1280x860|focus|038|summary "What to confirm before enabling"
+catalog|settings-developer@1280x860|focus|039|input#subsrc
+catalog|settings-developer@1280x860|focus|040|summary "What it needs"
+catalog|settings-developer@1280x860|focus|041|input#subcluster
+catalog|settings-developer@1280x860|focus|042|summary "What to confirm before enabling"
+catalog|settings-developer@1280x860|focus|043|input#subbackfill
+catalog|settings-developer@1280x860|focus|044|summary "Current work and readiness"
+catalog|settings-developer@1280x860|focus|045|input#chthumb
+catalog|settings-developer@1280x860|focus|046|summary "What it needs"
+catalog|settings-developer@1280x860|focus|047|input#dhqa
+catalog|settings-developer@1280x860|focus|048|summary "Cache impact and diagnostic evidence"
+catalog|settings-developer@1280x860|focus|049|input#adr
+catalog|settings-developer@1280x860|focus|050|summary "Recovery limits and diagnostic evidence"
+catalog|settings-developer@1280x860|focus|051|<wrap>
 catalog|settings-developer@1280x860|req|GET /api/v1/activity|2
 catalog|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
 catalog|settings-developer@1280x860|req|GET /api/v1/me|1
@@ -2884,11 +2892,11 @@ catalog|settings-developer@390x780|dom|button.px-tab[aria-expanded=false aria-co
 catalog|settings-developer@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|settings-developer@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|settings-developer@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|11
-catalog|settings-developer@390x780|dom|details.setdetails > summary[text]|11
+catalog|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|12
+catalog|settings-developer@390x780|dom|details.setdetails > summary[text]|12
 catalog|settings-developer@390x780|dom|div > h1[text]|1
-catalog|settings-developer@390x780|dom|div > h2.section[text]|12
-catalog|settings-developer@390x780|dom|div > p.sub[text]|12
+catalog|settings-developer@390x780|dom|div > h2.section[text]|13
+catalog|settings-developer@390x780|dom|div > p.sub[text]|13
 catalog|settings-developer@390x780|dom|div > p[text]|1
 catalog|settings-developer@390x780|dom|div#app > div#pxshell.px-shell|1
 catalog|settings-developer@390x780|dom|div#chthumbcard.card.setcard > details.setdetails|1
@@ -2903,6 +2911,8 @@ catalog|settings-developer@390x780|dom|div#drcard.card.setcard > div.cardhead|1
 catalog|settings-developer@390x780|dom|div#drcard.card.setcard > div.hint[text]|1
 catalog|settings-developer@390x780|dom|div#drcard.card.setcard > div.setfoot|1
 catalog|settings-developer@390x780|dom|div#drcard.card.setcard > label.tog|1
+catalog|settings-developer@390x780|dom|div#enable-auto-quality.setsection > h2[text]|1
+catalog|settings-developer@390x780|dom|div#enable-auto-quality.setsection > p[text]|1
 catalog|settings-developer@390x780|dom|div#enable-chapter-thumbnails.setsection > h2[text]|1
 catalog|settings-developer@390x780|dom|div#enable-chapter-thumbnails.setsection > p[text]|1
 catalog|settings-developer@390x780|dom|div#enable-quality.setsection > h2[text]|1
@@ -2922,6 +2932,7 @@ catalog|settings-developer@390x780|dom|div#pxshell.px-shell > main#main|1
 catalog|settings-developer@390x780|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#chthumbcard.card.setcard|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
+catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-auto-quality.setsection|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-chapter-thumbnails.setsection|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-quality.setsection|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-seek-scratch.setsection|1
@@ -2933,7 +2944,7 @@ catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#subclustercar
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#subsrccard.card.setcard|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.local.setcard|1
-catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|4
+catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|5
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|3
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
@@ -2968,30 +2979,32 @@ catalog|settings-developer@390x780|dom|div#vdcard.card.setcard > label.tog|1
 catalog|settings-developer@390x780|dom|div.card.local.setcard > div.cardhead|1
 catalog|settings-developer@390x780|dom|div.card.local.setcard > div.hint[text]|1
 catalog|settings-developer@390x780|dom|div.card.local.setcard > label.tog|1
-catalog|settings-developer@390x780|dom|div.card.setcard > details.setdetails|4
+catalog|settings-developer@390x780|dom|div.card.setcard > details.setdetails|5
+catalog|settings-developer@390x780|dom|div.card.setcard > div#aqerr.err[role=alert]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div#backup-settings-error.err[role=alert]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div#ltdeinterr.err[role=alert]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div#pqherr.err[role=alert]|1
-catalog|settings-developer@390x780|dom|div.card.setcard > div.cardhead|4
-catalog|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|3
-catalog|settings-developer@390x780|dom|div.card.setcard > div.setfoot|3
+catalog|settings-developer@390x780|dom|div.card.setcard > div.cardhead|5
+catalog|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|4
+catalog|settings-developer@390x780|dom|div.card.setcard > div.setfoot|4
 catalog|settings-developer@390x780|dom|div.card.setcard > div.setgrid|1
 catalog|settings-developer@390x780|dom|div.card.setcard > label.setfield|1
-catalog|settings-developer@390x780|dom|div.card.setcard > label.tog|1
+catalog|settings-developer@390x780|dom|div.card.setcard > label.tog|2
 catalog|settings-developer@390x780|dom|div.card.setcard > label[text]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > select#ltdeint|1
-catalog|settings-developer@390x780|dom|div.cardhead > div.cardtools|12
-catalog|settings-developer@390x780|dom|div.cardhead > div|12
+catalog|settings-developer@390x780|dom|div.cardhead > div.cardtools|13
+catalog|settings-developer@390x780|dom|div.cardhead > div|13
+catalog|settings-developer@390x780|dom|div.cardtools > span#aqstate.pill[text]|1
 catalog|settings-developer@390x780|dom|div.cardtools > span#pqhstate.pill[text]|1
 catalog|settings-developer@390x780|dom|div.cardtools > span.acc.pill[text]|1
 catalog|settings-developer@390x780|dom|div.cardtools > span.ok.pill[text]|1
 catalog|settings-developer@390x780|dom|div.cardtools > span.pill[text]|9
-catalog|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|42
-catalog|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|42
+catalog|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|46
+catalog|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|46
 catalog|settings-developer@390x780|dom|div.devcheck > p.devcheck-evidence[text]|26
-catalog|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|42
-catalog|settings-developer@390x780|dom|div.devcheck-head > strong[text]|42
-catalog|settings-developer@390x780|dom|div.hint[text] > b[text]|8
+catalog|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|46
+catalog|settings-developer@390x780|dom|div.devcheck-head > strong[text]|46
+catalog|settings-developer@390x780|dom|div.hint[text] > b[text]|9
 catalog|settings-developer@390x780|dom|div.hint[text] > i[text]|1
 catalog|settings-developer@390x780|dom|div.px-brand > a.logo[text]|1
 catalog|settings-developer@390x780|dom|div.px-ctl > div.px-pop|1
@@ -3006,15 +3019,15 @@ catalog|settings-developer@390x780|dom|div.px-pop > button.ghost.profile.sm|1
 catalog|settings-developer@390x780|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
 catalog|settings-developer@390x780|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|settings-developer@390x780|dom|div.px-user > div.px-pop|1
-catalog|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|42
+catalog|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|46
 catalog|settings-developer@390x780|dom|div.setdetails-body > div.hint[text]|5
 catalog|settings-developer@390x780|dom|div.setdetails-body > div.tog|7
 catalog|settings-developer@390x780|dom|div.setdetails-body > h2.section[text]|3
 catalog|settings-developer@390x780|dom|div.setdetails-body > h3.devcheck-group[text]|5
-catalog|settings-developer@390x780|dom|div.setdetails-body > p.devcheck-note[text]|9
+catalog|settings-developer@390x780|dom|div.setdetails-body > p.devcheck-note[text]|10
 catalog|settings-developer@390x780|dom|div.setdetails-body > p.hint[text]|1
-catalog|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|10
-catalog|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|10
+catalog|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|11
+catalog|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|11
 catalog|settings-developer@390x780|dom|div.setgrid > label.setfield|2
 catalog|settings-developer@390x780|dom|div.sethead > div|1
 catalog|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
@@ -3029,13 +3042,14 @@ catalog|settings-developer@390x780|dom|label.setfield > span[text]|3
 catalog|settings-developer@390x780|dom|label.tog > input#adr[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#chthumb[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#dhqa[type=checkbox]|1
+catalog|settings-developer@390x780|dom|label.tog > input#pabr[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#pdp[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#pqh[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#sub503[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#subbackfill[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#subcluster[type=checkbox]|1
 catalog|settings-developer@390x780|dom|label.tog > input#subsrc[type=checkbox]|1
-catalog|settings-developer@390x780|dom|label.tog > span[text]|9
+catalog|settings-developer@390x780|dom|label.tog > span[text]|10
 catalog|settings-developer@390x780|dom|main#main > div.setlayout|1
 catalog|settings-developer@390x780|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|settings-developer@390x780|dom|nav.px-nav[aria-label=*] > a|5
@@ -3053,12 +3067,12 @@ catalog|settings-developer@390x780|dom|small > code[text]|2
 catalog|settings-developer@390x780|dom|small[text] > br|4
 catalog|settings-developer@390x780|dom|small[text] > code[text]|6
 catalog|settings-developer@390x780|dom|small[text] > i[text]|1
-catalog|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|10
-catalog|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|10
+catalog|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|11
+catalog|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|13
 catalog|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|22
-catalog|settings-developer@390x780|dom|span[text] > small[text]|14
+catalog|settings-developer@390x780|dom|span[text] > small[text]|15
 catalog|settings-developer@390x780|dom|span[text] > small|2
-catalog|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|3
+catalog|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|4
 catalog|settings-developer@390x780|dom|span[text] > span.pill[text]|4
 catalog|settings-developer@390x780|dom|strong[text] > span[aria-hidden=true text]|3
 catalog|settings-developer@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
@@ -3090,30 +3104,32 @@ catalog|settings-developer@390x780|focus|022|input#backup-keep
 catalog|settings-developer@390x780|focus|023|summary "Readiness"
 catalog|settings-developer@390x780|focus|024|summary "Requirements and readiness"
 catalog|settings-developer@390x780|focus|025|a "Playback"
-catalog|settings-developer@390x780|focus|026|input#pqh
-catalog|settings-developer@390x780|focus|027|summary "Readiness and device qualification"
-catalog|settings-developer@390x780|focus|028|input#pdp
-catalog|settings-developer@390x780|focus|029|input#sub503
-catalog|settings-developer@390x780|focus|030|summary "What to confirm before enabling"
-catalog|settings-developer@390x780|focus|031|input#subsrc
-catalog|settings-developer@390x780|focus|032|summary "What it needs"
-catalog|settings-developer@390x780|focus|033|input#subcluster
-catalog|settings-developer@390x780|focus|034|summary "What to confirm before enabling"
-catalog|settings-developer@390x780|focus|035|input#subbackfill
-catalog|settings-developer@390x780|focus|036|summary "Current work and readiness"
-catalog|settings-developer@390x780|focus|037|input#chthumb
-catalog|settings-developer@390x780|focus|038|summary "What it needs"
-catalog|settings-developer@390x780|focus|039|input#dhqa
-catalog|settings-developer@390x780|focus|040|summary "Cache impact and diagnostic evidence"
-catalog|settings-developer@390x780|focus|041|input#adr
-catalog|settings-developer@390x780|focus|042|summary "Recovery limits and diagnostic evidence"
-catalog|settings-developer@390x780|focus|043|a.px-tab "Home"
-catalog|settings-developer@390x780|focus|044|a.px-tab "Channels"
-catalog|settings-developer@390x780|focus|045|a.px-tab "Recordings"
-catalog|settings-developer@390x780|focus|046|button.px-tab "Libraries"
-catalog|settings-developer@390x780|focus|047|button.px-tab "Search"
-catalog|settings-developer@390x780|focus|048|a.px-tab "Activity"
-catalog|settings-developer@390x780|focus|049|<wrap>
+catalog|settings-developer@390x780|focus|026|input#pabr
+catalog|settings-developer@390x780|focus|027|summary "Requirements and current evidence"
+catalog|settings-developer@390x780|focus|028|input#pqh
+catalog|settings-developer@390x780|focus|029|summary "Readiness and device qualification"
+catalog|settings-developer@390x780|focus|030|input#pdp
+catalog|settings-developer@390x780|focus|031|input#sub503
+catalog|settings-developer@390x780|focus|032|summary "What to confirm before enabling"
+catalog|settings-developer@390x780|focus|033|input#subsrc
+catalog|settings-developer@390x780|focus|034|summary "What it needs"
+catalog|settings-developer@390x780|focus|035|input#subcluster
+catalog|settings-developer@390x780|focus|036|summary "What to confirm before enabling"
+catalog|settings-developer@390x780|focus|037|input#subbackfill
+catalog|settings-developer@390x780|focus|038|summary "Current work and readiness"
+catalog|settings-developer@390x780|focus|039|input#chthumb
+catalog|settings-developer@390x780|focus|040|summary "What it needs"
+catalog|settings-developer@390x780|focus|041|input#dhqa
+catalog|settings-developer@390x780|focus|042|summary "Cache impact and diagnostic evidence"
+catalog|settings-developer@390x780|focus|043|input#adr
+catalog|settings-developer@390x780|focus|044|summary "Recovery limits and diagnostic evidence"
+catalog|settings-developer@390x780|focus|045|a.px-tab "Home"
+catalog|settings-developer@390x780|focus|046|a.px-tab "Channels"
+catalog|settings-developer@390x780|focus|047|a.px-tab "Recordings"
+catalog|settings-developer@390x780|focus|048|button.px-tab "Libraries"
+catalog|settings-developer@390x780|focus|049|button.px-tab "Search"
+catalog|settings-developer@390x780|focus|050|a.px-tab "Activity"
+catalog|settings-developer@390x780|focus|051|<wrap>
 catalog|settings-developer@390x780|req|GET /api/v1/activity|2
 catalog|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
 catalog|settings-developer@390x780|req|GET /api/v1/me|1
@@ -5404,15 +5420,15 @@ classic|settings-developer@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=me
 classic|settings-developer@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
-classic|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|11
-classic|settings-developer@1280x860|dom|details.setdetails > summary[text]|11
+classic|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|12
+classic|settings-developer@1280x860|dom|details.setdetails > summary[text]|12
 classic|settings-developer@1280x860|dom|div > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 classic|settings-developer@1280x860|dom|div > button.ghost.profile.sm|1
 classic|settings-developer@1280x860|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings-developer@1280x860|dom|div > div#profilemenu.amenu|1
 classic|settings-developer@1280x860|dom|div > h1[text]|1
-classic|settings-developer@1280x860|dom|div > h2.section[text]|12
-classic|settings-developer@1280x860|dom|div > p.sub[text]|12
+classic|settings-developer@1280x860|dom|div > h2.section[text]|13
+classic|settings-developer@1280x860|dom|div > p.sub[text]|13
 classic|settings-developer@1280x860|dom|div > p[text]|1
 classic|settings-developer@1280x860|dom|div#app > header.top|1
 classic|settings-developer@1280x860|dom|div#app > main#main|1
@@ -5428,6 +5444,8 @@ classic|settings-developer@1280x860|dom|div#drcard.card.setcard > div.cardhead|1
 classic|settings-developer@1280x860|dom|div#drcard.card.setcard > div.hint[text]|1
 classic|settings-developer@1280x860|dom|div#drcard.card.setcard > div.setfoot|1
 classic|settings-developer@1280x860|dom|div#drcard.card.setcard > label.tog|1
+classic|settings-developer@1280x860|dom|div#enable-auto-quality.setsection > h2[text]|1
+classic|settings-developer@1280x860|dom|div#enable-auto-quality.setsection > p[text]|1
 classic|settings-developer@1280x860|dom|div#enable-chapter-thumbnails.setsection > h2[text]|1
 classic|settings-developer@1280x860|dom|div#enable-chapter-thumbnails.setsection > p[text]|1
 classic|settings-developer@1280x860|dom|div#enable-quality.setsection > h2[text]|1
@@ -5440,6 +5458,7 @@ classic|settings-developer@1280x860|dom|div#enable-subtitle-sources.setsection >
 classic|settings-developer@1280x860|dom|div#enable-subtitle-sources.setsection > p[text]|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#chthumbcard.card.setcard|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
+classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-auto-quality.setsection|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-chapter-thumbnails.setsection|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-quality.setsection|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-seek-scratch.setsection|1
@@ -5451,7 +5470,7 @@ classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#subclusterca
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#subsrccard.card.setcard|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.local.setcard|1
-classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|4
+classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|5
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|3
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
@@ -5486,40 +5505,42 @@ classic|settings-developer@1280x860|dom|div#vdcard.card.setcard > label.tog|1
 classic|settings-developer@1280x860|dom|div.card.local.setcard > div.cardhead|1
 classic|settings-developer@1280x860|dom|div.card.local.setcard > div.hint[text]|1
 classic|settings-developer@1280x860|dom|div.card.local.setcard > label.tog|1
-classic|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|4
+classic|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|5
+classic|settings-developer@1280x860|dom|div.card.setcard > div#aqerr.err[role=alert]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div#backup-settings-error.err[role=alert]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div#ltdeinterr.err[role=alert]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div#pqherr.err[role=alert]|1
-classic|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|4
-classic|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|3
-classic|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|3
+classic|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|5
+classic|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|4
+classic|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|4
 classic|settings-developer@1280x860|dom|div.card.setcard > div.setgrid|1
 classic|settings-developer@1280x860|dom|div.card.setcard > label.setfield|1
-classic|settings-developer@1280x860|dom|div.card.setcard > label.tog|1
+classic|settings-developer@1280x860|dom|div.card.setcard > label.tog|2
 classic|settings-developer@1280x860|dom|div.card.setcard > label[text]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > select#ltdeint|1
-classic|settings-developer@1280x860|dom|div.cardhead > div.cardtools|12
-classic|settings-developer@1280x860|dom|div.cardhead > div|12
+classic|settings-developer@1280x860|dom|div.cardhead > div.cardtools|13
+classic|settings-developer@1280x860|dom|div.cardhead > div|13
+classic|settings-developer@1280x860|dom|div.cardtools > span#aqstate.pill[text]|1
 classic|settings-developer@1280x860|dom|div.cardtools > span#pqhstate.pill[text]|1
 classic|settings-developer@1280x860|dom|div.cardtools > span.acc.pill[text]|1
 classic|settings-developer@1280x860|dom|div.cardtools > span.ok.pill[text]|1
 classic|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|9
-classic|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|42
-classic|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|42
+classic|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|46
+classic|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|46
 classic|settings-developer@1280x860|dom|div.devcheck > p.devcheck-evidence[text]|26
-classic|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|42
-classic|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|42
-classic|settings-developer@1280x860|dom|div.hint[text] > b[text]|8
+classic|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|46
+classic|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|46
+classic|settings-developer@1280x860|dom|div.hint[text] > b[text]|9
 classic|settings-developer@1280x860|dom|div.hint[text] > i[text]|1
-classic|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|42
+classic|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|46
 classic|settings-developer@1280x860|dom|div.setdetails-body > div.hint[text]|5
 classic|settings-developer@1280x860|dom|div.setdetails-body > div.tog|7
 classic|settings-developer@1280x860|dom|div.setdetails-body > h2.section[text]|3
 classic|settings-developer@1280x860|dom|div.setdetails-body > h3.devcheck-group[text]|5
-classic|settings-developer@1280x860|dom|div.setdetails-body > p.devcheck-note[text]|9
+classic|settings-developer@1280x860|dom|div.setdetails-body > p.devcheck-note[text]|10
 classic|settings-developer@1280x860|dom|div.setdetails-body > p.hint[text]|1
-classic|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|10
-classic|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|10
+classic|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|11
+classic|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|11
 classic|settings-developer@1280x860|dom|div.setgrid > label.setfield|2
 classic|settings-developer@1280x860|dom|div.sethead > div|1
 classic|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
@@ -5543,13 +5564,14 @@ classic|settings-developer@1280x860|dom|label.setfield > span[text]|3
 classic|settings-developer@1280x860|dom|label.tog > input#adr[type=checkbox]|1
 classic|settings-developer@1280x860|dom|label.tog > input#chthumb[type=checkbox]|1
 classic|settings-developer@1280x860|dom|label.tog > input#dhqa[type=checkbox]|1
+classic|settings-developer@1280x860|dom|label.tog > input#pabr[type=checkbox]|1
 classic|settings-developer@1280x860|dom|label.tog > input#pdp[type=checkbox]|1
 classic|settings-developer@1280x860|dom|label.tog > input#pqh[type=checkbox]|1
 classic|settings-developer@1280x860|dom|label.tog > input#sub503[type=checkbox]|1
 classic|settings-developer@1280x860|dom|label.tog > input#subbackfill[type=checkbox]|1
 classic|settings-developer@1280x860|dom|label.tog > input#subcluster[type=checkbox]|1
 classic|settings-developer@1280x860|dom|label.tog > input#subsrc[type=checkbox]|1
-classic|settings-developer@1280x860|dom|label.tog > span[text]|9
+classic|settings-developer@1280x860|dom|label.tog > span[text]|10
 classic|settings-developer@1280x860|dom|main#main > div.setlayout|1
 classic|settings-developer@1280x860|dom|nav > a.active[text]|1
 classic|settings-developer@1280x860|dom|nav > a[text]|5
@@ -5564,12 +5586,12 @@ classic|settings-developer@1280x860|dom|small > code[text]|2
 classic|settings-developer@1280x860|dom|small[text] > br|4
 classic|settings-developer@1280x860|dom|small[text] > code[text]|6
 classic|settings-developer@1280x860|dom|small[text] > i[text]|1
-classic|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|10
-classic|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|10
+classic|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|11
+classic|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|13
 classic|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|22
-classic|settings-developer@1280x860|dom|span[text] > small[text]|14
+classic|settings-developer@1280x860|dom|span[text] > small[text]|15
 classic|settings-developer@1280x860|dom|span[text] > small|2
-classic|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|3
+classic|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|4
 classic|settings-developer@1280x860|dom|span[text] > span.pill[text]|4
 classic|settings-developer@1280x860|dom|strong[text] > span[aria-hidden=true text]|3
 classic|settings-developer@1280x860|focus|000|a.logo "cinema"
@@ -5604,24 +5626,26 @@ classic|settings-developer@1280x860|focus|028|input#backup-keep
 classic|settings-developer@1280x860|focus|029|summary "Readiness"
 classic|settings-developer@1280x860|focus|030|summary "Requirements and readiness"
 classic|settings-developer@1280x860|focus|031|a "Playback"
-classic|settings-developer@1280x860|focus|032|input#pqh
-classic|settings-developer@1280x860|focus|033|summary "Readiness and device qualification"
-classic|settings-developer@1280x860|focus|034|input#pdp
-classic|settings-developer@1280x860|focus|035|input#sub503
-classic|settings-developer@1280x860|focus|036|summary "What to confirm before enabling"
-classic|settings-developer@1280x860|focus|037|input#subsrc
-classic|settings-developer@1280x860|focus|038|summary "What it needs"
-classic|settings-developer@1280x860|focus|039|input#subcluster
-classic|settings-developer@1280x860|focus|040|summary "What to confirm before enabling"
-classic|settings-developer@1280x860|focus|041|input#subbackfill
-classic|settings-developer@1280x860|focus|042|summary "Current work and readiness"
-classic|settings-developer@1280x860|focus|043|input#chthumb
-classic|settings-developer@1280x860|focus|044|summary "What it needs"
-classic|settings-developer@1280x860|focus|045|input#dhqa
-classic|settings-developer@1280x860|focus|046|summary "Cache impact and diagnostic evidence"
-classic|settings-developer@1280x860|focus|047|input#adr
-classic|settings-developer@1280x860|focus|048|summary "Recovery limits and diagnostic evidence"
-classic|settings-developer@1280x860|focus|049|<wrap>
+classic|settings-developer@1280x860|focus|032|input#pabr
+classic|settings-developer@1280x860|focus|033|summary "Requirements and current evidence"
+classic|settings-developer@1280x860|focus|034|input#pqh
+classic|settings-developer@1280x860|focus|035|summary "Readiness and device qualification"
+classic|settings-developer@1280x860|focus|036|input#pdp
+classic|settings-developer@1280x860|focus|037|input#sub503
+classic|settings-developer@1280x860|focus|038|summary "What to confirm before enabling"
+classic|settings-developer@1280x860|focus|039|input#subsrc
+classic|settings-developer@1280x860|focus|040|summary "What it needs"
+classic|settings-developer@1280x860|focus|041|input#subcluster
+classic|settings-developer@1280x860|focus|042|summary "What to confirm before enabling"
+classic|settings-developer@1280x860|focus|043|input#subbackfill
+classic|settings-developer@1280x860|focus|044|summary "Current work and readiness"
+classic|settings-developer@1280x860|focus|045|input#chthumb
+classic|settings-developer@1280x860|focus|046|summary "What it needs"
+classic|settings-developer@1280x860|focus|047|input#dhqa
+classic|settings-developer@1280x860|focus|048|summary "Cache impact and diagnostic evidence"
+classic|settings-developer@1280x860|focus|049|input#adr
+classic|settings-developer@1280x860|focus|050|summary "Recovery limits and diagnostic evidence"
+classic|settings-developer@1280x860|focus|051|<wrap>
 classic|settings-developer@1280x860|req|GET /api/v1/activity|2
 classic|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
 classic|settings-developer@1280x860|req|GET /api/v1/me|1
@@ -5635,15 +5659,15 @@ classic|settings-developer@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=men
 classic|settings-developer@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|settings-developer@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|settings-developer@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
-classic|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|11
-classic|settings-developer@390x780|dom|details.setdetails > summary[text]|11
+classic|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|12
+classic|settings-developer@390x780|dom|details.setdetails > summary[text]|12
 classic|settings-developer@390x780|dom|div > button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*]|1
 classic|settings-developer@390x780|dom|div > button.ghost.profile.sm|1
 classic|settings-developer@390x780|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings-developer@390x780|dom|div > div#profilemenu.amenu|1
 classic|settings-developer@390x780|dom|div > h1[text]|1
-classic|settings-developer@390x780|dom|div > h2.section[text]|12
-classic|settings-developer@390x780|dom|div > p.sub[text]|12
+classic|settings-developer@390x780|dom|div > h2.section[text]|13
+classic|settings-developer@390x780|dom|div > p.sub[text]|13
 classic|settings-developer@390x780|dom|div > p[text]|1
 classic|settings-developer@390x780|dom|div#app > header.top|1
 classic|settings-developer@390x780|dom|div#app > main#main|1
@@ -5659,6 +5683,8 @@ classic|settings-developer@390x780|dom|div#drcard.card.setcard > div.cardhead|1
 classic|settings-developer@390x780|dom|div#drcard.card.setcard > div.hint[text]|1
 classic|settings-developer@390x780|dom|div#drcard.card.setcard > div.setfoot|1
 classic|settings-developer@390x780|dom|div#drcard.card.setcard > label.tog|1
+classic|settings-developer@390x780|dom|div#enable-auto-quality.setsection > h2[text]|1
+classic|settings-developer@390x780|dom|div#enable-auto-quality.setsection > p[text]|1
 classic|settings-developer@390x780|dom|div#enable-chapter-thumbnails.setsection > h2[text]|1
 classic|settings-developer@390x780|dom|div#enable-chapter-thumbnails.setsection > p[text]|1
 classic|settings-developer@390x780|dom|div#enable-quality.setsection > h2[text]|1
@@ -5671,6 +5697,7 @@ classic|settings-developer@390x780|dom|div#enable-subtitle-sources.setsection > 
 classic|settings-developer@390x780|dom|div#enable-subtitle-sources.setsection > p[text]|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#chthumbcard.card.setcard|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
+classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-auto-quality.setsection|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-chapter-thumbnails.setsection|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-quality.setsection|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-seek-scratch.setsection|1
@@ -5682,7 +5709,7 @@ classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#subclustercar
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#subsrccard.card.setcard|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.local.setcard|1
-classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|4
+classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|5
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|3
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
@@ -5717,40 +5744,42 @@ classic|settings-developer@390x780|dom|div#vdcard.card.setcard > label.tog|1
 classic|settings-developer@390x780|dom|div.card.local.setcard > div.cardhead|1
 classic|settings-developer@390x780|dom|div.card.local.setcard > div.hint[text]|1
 classic|settings-developer@390x780|dom|div.card.local.setcard > label.tog|1
-classic|settings-developer@390x780|dom|div.card.setcard > details.setdetails|4
+classic|settings-developer@390x780|dom|div.card.setcard > details.setdetails|5
+classic|settings-developer@390x780|dom|div.card.setcard > div#aqerr.err[role=alert]|1
 classic|settings-developer@390x780|dom|div.card.setcard > div#backup-settings-error.err[role=alert]|1
 classic|settings-developer@390x780|dom|div.card.setcard > div#ltdeinterr.err[role=alert]|1
 classic|settings-developer@390x780|dom|div.card.setcard > div#pqherr.err[role=alert]|1
-classic|settings-developer@390x780|dom|div.card.setcard > div.cardhead|4
-classic|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|3
-classic|settings-developer@390x780|dom|div.card.setcard > div.setfoot|3
+classic|settings-developer@390x780|dom|div.card.setcard > div.cardhead|5
+classic|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|4
+classic|settings-developer@390x780|dom|div.card.setcard > div.setfoot|4
 classic|settings-developer@390x780|dom|div.card.setcard > div.setgrid|1
 classic|settings-developer@390x780|dom|div.card.setcard > label.setfield|1
-classic|settings-developer@390x780|dom|div.card.setcard > label.tog|1
+classic|settings-developer@390x780|dom|div.card.setcard > label.tog|2
 classic|settings-developer@390x780|dom|div.card.setcard > label[text]|1
 classic|settings-developer@390x780|dom|div.card.setcard > select#ltdeint|1
-classic|settings-developer@390x780|dom|div.cardhead > div.cardtools|12
-classic|settings-developer@390x780|dom|div.cardhead > div|12
+classic|settings-developer@390x780|dom|div.cardhead > div.cardtools|13
+classic|settings-developer@390x780|dom|div.cardhead > div|13
+classic|settings-developer@390x780|dom|div.cardtools > span#aqstate.pill[text]|1
 classic|settings-developer@390x780|dom|div.cardtools > span#pqhstate.pill[text]|1
 classic|settings-developer@390x780|dom|div.cardtools > span.acc.pill[text]|1
 classic|settings-developer@390x780|dom|div.cardtools > span.ok.pill[text]|1
 classic|settings-developer@390x780|dom|div.cardtools > span.pill[text]|9
-classic|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|42
-classic|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|42
+classic|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|46
+classic|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|46
 classic|settings-developer@390x780|dom|div.devcheck > p.devcheck-evidence[text]|26
-classic|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|42
-classic|settings-developer@390x780|dom|div.devcheck-head > strong[text]|42
-classic|settings-developer@390x780|dom|div.hint[text] > b[text]|8
+classic|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|46
+classic|settings-developer@390x780|dom|div.devcheck-head > strong[text]|46
+classic|settings-developer@390x780|dom|div.hint[text] > b[text]|9
 classic|settings-developer@390x780|dom|div.hint[text] > i[text]|1
-classic|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|42
+classic|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|46
 classic|settings-developer@390x780|dom|div.setdetails-body > div.hint[text]|5
 classic|settings-developer@390x780|dom|div.setdetails-body > div.tog|7
 classic|settings-developer@390x780|dom|div.setdetails-body > h2.section[text]|3
 classic|settings-developer@390x780|dom|div.setdetails-body > h3.devcheck-group[text]|5
-classic|settings-developer@390x780|dom|div.setdetails-body > p.devcheck-note[text]|9
+classic|settings-developer@390x780|dom|div.setdetails-body > p.devcheck-note[text]|10
 classic|settings-developer@390x780|dom|div.setdetails-body > p.hint[text]|1
-classic|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|10
-classic|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|10
+classic|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|11
+classic|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|11
 classic|settings-developer@390x780|dom|div.setgrid > label.setfield|2
 classic|settings-developer@390x780|dom|div.sethead > div|1
 classic|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
@@ -5774,13 +5803,14 @@ classic|settings-developer@390x780|dom|label.setfield > span[text]|3
 classic|settings-developer@390x780|dom|label.tog > input#adr[type=checkbox]|1
 classic|settings-developer@390x780|dom|label.tog > input#chthumb[type=checkbox]|1
 classic|settings-developer@390x780|dom|label.tog > input#dhqa[type=checkbox]|1
+classic|settings-developer@390x780|dom|label.tog > input#pabr[type=checkbox]|1
 classic|settings-developer@390x780|dom|label.tog > input#pdp[type=checkbox]|1
 classic|settings-developer@390x780|dom|label.tog > input#pqh[type=checkbox]|1
 classic|settings-developer@390x780|dom|label.tog > input#sub503[type=checkbox]|1
 classic|settings-developer@390x780|dom|label.tog > input#subbackfill[type=checkbox]|1
 classic|settings-developer@390x780|dom|label.tog > input#subcluster[type=checkbox]|1
 classic|settings-developer@390x780|dom|label.tog > input#subsrc[type=checkbox]|1
-classic|settings-developer@390x780|dom|label.tog > span[text]|9
+classic|settings-developer@390x780|dom|label.tog > span[text]|10
 classic|settings-developer@390x780|dom|main#main > div.setlayout|1
 classic|settings-developer@390x780|dom|nav > a.active[text]|1
 classic|settings-developer@390x780|dom|nav > a[text]|5
@@ -5795,12 +5825,12 @@ classic|settings-developer@390x780|dom|small > code[text]|2
 classic|settings-developer@390x780|dom|small[text] > br|4
 classic|settings-developer@390x780|dom|small[text] > code[text]|6
 classic|settings-developer@390x780|dom|small[text] > i[text]|1
-classic|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|10
-classic|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|10
+classic|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|11
+classic|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|13
 classic|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|22
-classic|settings-developer@390x780|dom|span[text] > small[text]|14
+classic|settings-developer@390x780|dom|span[text] > small[text]|15
 classic|settings-developer@390x780|dom|span[text] > small|2
-classic|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|3
+classic|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|4
 classic|settings-developer@390x780|dom|span[text] > span.pill[text]|4
 classic|settings-developer@390x780|dom|strong[text] > span[aria-hidden=true text]|3
 classic|settings-developer@390x780|focus|000|a.logo "cinema"
@@ -5835,24 +5865,26 @@ classic|settings-developer@390x780|focus|028|input#backup-keep
 classic|settings-developer@390x780|focus|029|summary "Readiness"
 classic|settings-developer@390x780|focus|030|summary "Requirements and readiness"
 classic|settings-developer@390x780|focus|031|a "Playback"
-classic|settings-developer@390x780|focus|032|input#pqh
-classic|settings-developer@390x780|focus|033|summary "Readiness and device qualification"
-classic|settings-developer@390x780|focus|034|input#pdp
-classic|settings-developer@390x780|focus|035|input#sub503
-classic|settings-developer@390x780|focus|036|summary "What to confirm before enabling"
-classic|settings-developer@390x780|focus|037|input#subsrc
-classic|settings-developer@390x780|focus|038|summary "What it needs"
-classic|settings-developer@390x780|focus|039|input#subcluster
-classic|settings-developer@390x780|focus|040|summary "What to confirm before enabling"
-classic|settings-developer@390x780|focus|041|input#subbackfill
-classic|settings-developer@390x780|focus|042|summary "Current work and readiness"
-classic|settings-developer@390x780|focus|043|input#chthumb
-classic|settings-developer@390x780|focus|044|summary "What it needs"
-classic|settings-developer@390x780|focus|045|input#dhqa
-classic|settings-developer@390x780|focus|046|summary "Cache impact and diagnostic evidence"
-classic|settings-developer@390x780|focus|047|input#adr
-classic|settings-developer@390x780|focus|048|summary "Recovery limits and diagnostic evidence"
-classic|settings-developer@390x780|focus|049|<wrap>
+classic|settings-developer@390x780|focus|032|input#pabr
+classic|settings-developer@390x780|focus|033|summary "Requirements and current evidence"
+classic|settings-developer@390x780|focus|034|input#pqh
+classic|settings-developer@390x780|focus|035|summary "Readiness and device qualification"
+classic|settings-developer@390x780|focus|036|input#pdp
+classic|settings-developer@390x780|focus|037|input#sub503
+classic|settings-developer@390x780|focus|038|summary "What to confirm before enabling"
+classic|settings-developer@390x780|focus|039|input#subsrc
+classic|settings-developer@390x780|focus|040|summary "What it needs"
+classic|settings-developer@390x780|focus|041|input#subcluster
+classic|settings-developer@390x780|focus|042|summary "What to confirm before enabling"
+classic|settings-developer@390x780|focus|043|input#subbackfill
+classic|settings-developer@390x780|focus|044|summary "Current work and readiness"
+classic|settings-developer@390x780|focus|045|input#chthumb
+classic|settings-developer@390x780|focus|046|summary "What it needs"
+classic|settings-developer@390x780|focus|047|input#dhqa
+classic|settings-developer@390x780|focus|048|summary "Cache impact and diagnostic evidence"
+classic|settings-developer@390x780|focus|049|input#adr
+classic|settings-developer@390x780|focus|050|summary "Recovery limits and diagnostic evidence"
+classic|settings-developer@390x780|focus|051|<wrap>
 classic|settings-developer@390x780|req|GET /api/v1/activity|2
 classic|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
 classic|settings-developer@390x780|req|GET /api/v1/me|1
@@ -8138,11 +8170,11 @@ theater|settings-developer@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=me
 theater|settings-developer@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|settings-developer@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
-theater|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|11
-theater|settings-developer@1280x860|dom|details.setdetails > summary[text]|11
+theater|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|12
+theater|settings-developer@1280x860|dom|details.setdetails > summary[text]|12
 theater|settings-developer@1280x860|dom|div > h1[text]|1
-theater|settings-developer@1280x860|dom|div > h2.section[text]|12
-theater|settings-developer@1280x860|dom|div > p.sub[text]|12
+theater|settings-developer@1280x860|dom|div > h2.section[text]|13
+theater|settings-developer@1280x860|dom|div > p.sub[text]|13
 theater|settings-developer@1280x860|dom|div > p[text]|1
 theater|settings-developer@1280x860|dom|div#app > header.th-top|1
 theater|settings-developer@1280x860|dom|div#app > main#main|1
@@ -8159,6 +8191,8 @@ theater|settings-developer@1280x860|dom|div#drcard.card.setcard > div.cardhead|1
 theater|settings-developer@1280x860|dom|div#drcard.card.setcard > div.hint[text]|1
 theater|settings-developer@1280x860|dom|div#drcard.card.setcard > div.setfoot|1
 theater|settings-developer@1280x860|dom|div#drcard.card.setcard > label.tog|1
+theater|settings-developer@1280x860|dom|div#enable-auto-quality.setsection > h2[text]|1
+theater|settings-developer@1280x860|dom|div#enable-auto-quality.setsection > p[text]|1
 theater|settings-developer@1280x860|dom|div#enable-chapter-thumbnails.setsection > h2[text]|1
 theater|settings-developer@1280x860|dom|div#enable-chapter-thumbnails.setsection > p[text]|1
 theater|settings-developer@1280x860|dom|div#enable-quality.setsection > h2[text]|1
@@ -8171,6 +8205,7 @@ theater|settings-developer@1280x860|dom|div#enable-subtitle-sources.setsection >
 theater|settings-developer@1280x860|dom|div#enable-subtitle-sources.setsection > p[text]|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#chthumbcard.card.setcard|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
+theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-auto-quality.setsection|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-chapter-thumbnails.setsection|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-quality.setsection|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-seek-scratch.setsection|1
@@ -8182,7 +8217,7 @@ theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#subclusterca
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#subsrccard.card.setcard|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.local.setcard|1
-theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|4
+theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|5
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|3
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
@@ -8217,40 +8252,42 @@ theater|settings-developer@1280x860|dom|div#vdcard.card.setcard > label.tog|1
 theater|settings-developer@1280x860|dom|div.card.local.setcard > div.cardhead|1
 theater|settings-developer@1280x860|dom|div.card.local.setcard > div.hint[text]|1
 theater|settings-developer@1280x860|dom|div.card.local.setcard > label.tog|1
-theater|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|4
+theater|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|5
+theater|settings-developer@1280x860|dom|div.card.setcard > div#aqerr.err[role=alert]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div#backup-settings-error.err[role=alert]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div#ltdeinterr.err[role=alert]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div#pqherr.err[role=alert]|1
-theater|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|4
-theater|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|3
-theater|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|3
+theater|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|5
+theater|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|4
+theater|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|4
 theater|settings-developer@1280x860|dom|div.card.setcard > div.setgrid|1
 theater|settings-developer@1280x860|dom|div.card.setcard > label.setfield|1
-theater|settings-developer@1280x860|dom|div.card.setcard > label.tog|1
+theater|settings-developer@1280x860|dom|div.card.setcard > label.tog|2
 theater|settings-developer@1280x860|dom|div.card.setcard > label[text]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > select#ltdeint|1
-theater|settings-developer@1280x860|dom|div.cardhead > div.cardtools|12
-theater|settings-developer@1280x860|dom|div.cardhead > div|12
+theater|settings-developer@1280x860|dom|div.cardhead > div.cardtools|13
+theater|settings-developer@1280x860|dom|div.cardhead > div|13
+theater|settings-developer@1280x860|dom|div.cardtools > span#aqstate.pill[text]|1
 theater|settings-developer@1280x860|dom|div.cardtools > span#pqhstate.pill[text]|1
 theater|settings-developer@1280x860|dom|div.cardtools > span.acc.pill[text]|1
 theater|settings-developer@1280x860|dom|div.cardtools > span.ok.pill[text]|1
 theater|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|9
-theater|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|42
-theater|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|42
+theater|settings-developer@1280x860|dom|div.devcheck > div.devcheck-head|46
+theater|settings-developer@1280x860|dom|div.devcheck > p.devcheck-description[text]|46
 theater|settings-developer@1280x860|dom|div.devcheck > p.devcheck-evidence[text]|26
-theater|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|42
-theater|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|42
-theater|settings-developer@1280x860|dom|div.hint[text] > b[text]|8
+theater|settings-developer@1280x860|dom|div.devcheck-head > span.devcheck-status|46
+theater|settings-developer@1280x860|dom|div.devcheck-head > strong[text]|46
+theater|settings-developer@1280x860|dom|div.hint[text] > b[text]|9
 theater|settings-developer@1280x860|dom|div.hint[text] > i[text]|1
-theater|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|42
+theater|settings-developer@1280x860|dom|div.setdetails-body > div.devcheck|46
 theater|settings-developer@1280x860|dom|div.setdetails-body > div.hint[text]|5
 theater|settings-developer@1280x860|dom|div.setdetails-body > div.tog|7
 theater|settings-developer@1280x860|dom|div.setdetails-body > h2.section[text]|3
 theater|settings-developer@1280x860|dom|div.setdetails-body > h3.devcheck-group[text]|5
-theater|settings-developer@1280x860|dom|div.setdetails-body > p.devcheck-note[text]|9
+theater|settings-developer@1280x860|dom|div.setdetails-body > p.devcheck-note[text]|10
 theater|settings-developer@1280x860|dom|div.setdetails-body > p.hint[text]|1
-theater|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|10
-theater|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|10
+theater|settings-developer@1280x860|dom|div.setfoot > button.primary.sm[disabled text]|11
+theater|settings-developer@1280x860|dom|div.setfoot > span.setstate[text]|11
 theater|settings-developer@1280x860|dom|div.setgrid > label.setfield|2
 theater|settings-developer@1280x860|dom|div.sethead > div|1
 theater|settings-developer@1280x860|dom|div.setlayout > div#setbody.adminwrap|1
@@ -8277,13 +8314,14 @@ theater|settings-developer@1280x860|dom|label.setfield > span[text]|3
 theater|settings-developer@1280x860|dom|label.tog > input#adr[type=checkbox]|1
 theater|settings-developer@1280x860|dom|label.tog > input#chthumb[type=checkbox]|1
 theater|settings-developer@1280x860|dom|label.tog > input#dhqa[type=checkbox]|1
+theater|settings-developer@1280x860|dom|label.tog > input#pabr[type=checkbox]|1
 theater|settings-developer@1280x860|dom|label.tog > input#pdp[type=checkbox]|1
 theater|settings-developer@1280x860|dom|label.tog > input#pqh[type=checkbox]|1
 theater|settings-developer@1280x860|dom|label.tog > input#sub503[type=checkbox]|1
 theater|settings-developer@1280x860|dom|label.tog > input#subbackfill[type=checkbox]|1
 theater|settings-developer@1280x860|dom|label.tog > input#subcluster[type=checkbox]|1
 theater|settings-developer@1280x860|dom|label.tog > input#subsrc[type=checkbox]|1
-theater|settings-developer@1280x860|dom|label.tog > span[text]|9
+theater|settings-developer@1280x860|dom|label.tog > span[text]|10
 theater|settings-developer@1280x860|dom|main#main > div.setlayout|1
 theater|settings-developer@1280x860|dom|nav.setdestinations[aria-label=*] > a|3
 theater|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
@@ -8300,12 +8338,12 @@ theater|settings-developer@1280x860|dom|small > code[text]|2
 theater|settings-developer@1280x860|dom|small[text] > br|4
 theater|settings-developer@1280x860|dom|small[text] > code[text]|6
 theater|settings-developer@1280x860|dom|small[text] > i[text]|1
-theater|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|10
-theater|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|10
+theater|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|11
+theater|settings-developer@1280x860|dom|span.devcheck-status > span.pill.warn[text]|13
 theater|settings-developer@1280x860|dom|span.devcheck-status > span.pill[text]|22
-theater|settings-developer@1280x860|dom|span[text] > small[text]|14
+theater|settings-developer@1280x860|dom|span[text] > small[text]|15
 theater|settings-developer@1280x860|dom|span[text] > small|2
-theater|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|3
+theater|settings-developer@1280x860|dom|span[text] > span.pill.warn[text]|4
 theater|settings-developer@1280x860|dom|span[text] > span.pill[text]|4
 theater|settings-developer@1280x860|dom|strong[text] > span[aria-hidden=true text]|3
 theater|settings-developer@1280x860|focus|000|a.logo "cinema"
@@ -8340,24 +8378,26 @@ theater|settings-developer@1280x860|focus|028|input#backup-keep
 theater|settings-developer@1280x860|focus|029|summary "Readiness"
 theater|settings-developer@1280x860|focus|030|summary "Requirements and readiness"
 theater|settings-developer@1280x860|focus|031|a "Playback"
-theater|settings-developer@1280x860|focus|032|input#pqh
-theater|settings-developer@1280x860|focus|033|summary "Readiness and device qualification"
-theater|settings-developer@1280x860|focus|034|input#pdp
-theater|settings-developer@1280x860|focus|035|input#sub503
-theater|settings-developer@1280x860|focus|036|summary "What to confirm before enabling"
-theater|settings-developer@1280x860|focus|037|input#subsrc
-theater|settings-developer@1280x860|focus|038|summary "What it needs"
-theater|settings-developer@1280x860|focus|039|input#subcluster
-theater|settings-developer@1280x860|focus|040|summary "What to confirm before enabling"
-theater|settings-developer@1280x860|focus|041|input#subbackfill
-theater|settings-developer@1280x860|focus|042|summary "Current work and readiness"
-theater|settings-developer@1280x860|focus|043|input#chthumb
-theater|settings-developer@1280x860|focus|044|summary "What it needs"
-theater|settings-developer@1280x860|focus|045|input#dhqa
-theater|settings-developer@1280x860|focus|046|summary "Cache impact and diagnostic evidence"
-theater|settings-developer@1280x860|focus|047|input#adr
-theater|settings-developer@1280x860|focus|048|summary "Recovery limits and diagnostic evidence"
-theater|settings-developer@1280x860|focus|049|<wrap>
+theater|settings-developer@1280x860|focus|032|input#pabr
+theater|settings-developer@1280x860|focus|033|summary "Requirements and current evidence"
+theater|settings-developer@1280x860|focus|034|input#pqh
+theater|settings-developer@1280x860|focus|035|summary "Readiness and device qualification"
+theater|settings-developer@1280x860|focus|036|input#pdp
+theater|settings-developer@1280x860|focus|037|input#sub503
+theater|settings-developer@1280x860|focus|038|summary "What to confirm before enabling"
+theater|settings-developer@1280x860|focus|039|input#subsrc
+theater|settings-developer@1280x860|focus|040|summary "What it needs"
+theater|settings-developer@1280x860|focus|041|input#subcluster
+theater|settings-developer@1280x860|focus|042|summary "What to confirm before enabling"
+theater|settings-developer@1280x860|focus|043|input#subbackfill
+theater|settings-developer@1280x860|focus|044|summary "Current work and readiness"
+theater|settings-developer@1280x860|focus|045|input#chthumb
+theater|settings-developer@1280x860|focus|046|summary "What it needs"
+theater|settings-developer@1280x860|focus|047|input#dhqa
+theater|settings-developer@1280x860|focus|048|summary "Cache impact and diagnostic evidence"
+theater|settings-developer@1280x860|focus|049|input#adr
+theater|settings-developer@1280x860|focus|050|summary "Recovery limits and diagnostic evidence"
+theater|settings-developer@1280x860|focus|051|<wrap>
 theater|settings-developer@1280x860|req|GET /api/v1/activity|2
 theater|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
 theater|settings-developer@1280x860|req|GET /api/v1/me|1
@@ -8371,11 +8411,11 @@ theater|settings-developer@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=men
 theater|settings-developer@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|settings-developer@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|settings-developer@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
-theater|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|11
-theater|settings-developer@390x780|dom|details.setdetails > summary[text]|11
+theater|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|12
+theater|settings-developer@390x780|dom|details.setdetails > summary[text]|12
 theater|settings-developer@390x780|dom|div > h1[text]|1
-theater|settings-developer@390x780|dom|div > h2.section[text]|12
-theater|settings-developer@390x780|dom|div > p.sub[text]|12
+theater|settings-developer@390x780|dom|div > h2.section[text]|13
+theater|settings-developer@390x780|dom|div > p.sub[text]|13
 theater|settings-developer@390x780|dom|div > p[text]|1
 theater|settings-developer@390x780|dom|div#app > header.th-top|1
 theater|settings-developer@390x780|dom|div#app > main#main|1
@@ -8392,6 +8432,8 @@ theater|settings-developer@390x780|dom|div#drcard.card.setcard > div.cardhead|1
 theater|settings-developer@390x780|dom|div#drcard.card.setcard > div.hint[text]|1
 theater|settings-developer@390x780|dom|div#drcard.card.setcard > div.setfoot|1
 theater|settings-developer@390x780|dom|div#drcard.card.setcard > label.tog|1
+theater|settings-developer@390x780|dom|div#enable-auto-quality.setsection > h2[text]|1
+theater|settings-developer@390x780|dom|div#enable-auto-quality.setsection > p[text]|1
 theater|settings-developer@390x780|dom|div#enable-chapter-thumbnails.setsection > h2[text]|1
 theater|settings-developer@390x780|dom|div#enable-chapter-thumbnails.setsection > p[text]|1
 theater|settings-developer@390x780|dom|div#enable-quality.setsection > h2[text]|1
@@ -8404,6 +8446,7 @@ theater|settings-developer@390x780|dom|div#enable-subtitle-sources.setsection > 
 theater|settings-developer@390x780|dom|div#enable-subtitle-sources.setsection > p[text]|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#chthumbcard.card.setcard|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#drcard.card.setcard|1
+theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-auto-quality.setsection|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-chapter-thumbnails.setsection|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-quality.setsection|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-seek-scratch.setsection|1
@@ -8415,7 +8458,7 @@ theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#subclustercar
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#subsrccard.card.setcard|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#vdcard.card.setcard|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.local.setcard|1
-theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|4
+theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|5
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|3
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
@@ -8450,40 +8493,42 @@ theater|settings-developer@390x780|dom|div#vdcard.card.setcard > label.tog|1
 theater|settings-developer@390x780|dom|div.card.local.setcard > div.cardhead|1
 theater|settings-developer@390x780|dom|div.card.local.setcard > div.hint[text]|1
 theater|settings-developer@390x780|dom|div.card.local.setcard > label.tog|1
-theater|settings-developer@390x780|dom|div.card.setcard > details.setdetails|4
+theater|settings-developer@390x780|dom|div.card.setcard > details.setdetails|5
+theater|settings-developer@390x780|dom|div.card.setcard > div#aqerr.err[role=alert]|1
 theater|settings-developer@390x780|dom|div.card.setcard > div#backup-settings-error.err[role=alert]|1
 theater|settings-developer@390x780|dom|div.card.setcard > div#ltdeinterr.err[role=alert]|1
 theater|settings-developer@390x780|dom|div.card.setcard > div#pqherr.err[role=alert]|1
-theater|settings-developer@390x780|dom|div.card.setcard > div.cardhead|4
-theater|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|3
-theater|settings-developer@390x780|dom|div.card.setcard > div.setfoot|3
+theater|settings-developer@390x780|dom|div.card.setcard > div.cardhead|5
+theater|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|4
+theater|settings-developer@390x780|dom|div.card.setcard > div.setfoot|4
 theater|settings-developer@390x780|dom|div.card.setcard > div.setgrid|1
 theater|settings-developer@390x780|dom|div.card.setcard > label.setfield|1
-theater|settings-developer@390x780|dom|div.card.setcard > label.tog|1
+theater|settings-developer@390x780|dom|div.card.setcard > label.tog|2
 theater|settings-developer@390x780|dom|div.card.setcard > label[text]|1
 theater|settings-developer@390x780|dom|div.card.setcard > select#ltdeint|1
-theater|settings-developer@390x780|dom|div.cardhead > div.cardtools|12
-theater|settings-developer@390x780|dom|div.cardhead > div|12
+theater|settings-developer@390x780|dom|div.cardhead > div.cardtools|13
+theater|settings-developer@390x780|dom|div.cardhead > div|13
+theater|settings-developer@390x780|dom|div.cardtools > span#aqstate.pill[text]|1
 theater|settings-developer@390x780|dom|div.cardtools > span#pqhstate.pill[text]|1
 theater|settings-developer@390x780|dom|div.cardtools > span.acc.pill[text]|1
 theater|settings-developer@390x780|dom|div.cardtools > span.ok.pill[text]|1
 theater|settings-developer@390x780|dom|div.cardtools > span.pill[text]|9
-theater|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|42
-theater|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|42
+theater|settings-developer@390x780|dom|div.devcheck > div.devcheck-head|46
+theater|settings-developer@390x780|dom|div.devcheck > p.devcheck-description[text]|46
 theater|settings-developer@390x780|dom|div.devcheck > p.devcheck-evidence[text]|26
-theater|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|42
-theater|settings-developer@390x780|dom|div.devcheck-head > strong[text]|42
-theater|settings-developer@390x780|dom|div.hint[text] > b[text]|8
+theater|settings-developer@390x780|dom|div.devcheck-head > span.devcheck-status|46
+theater|settings-developer@390x780|dom|div.devcheck-head > strong[text]|46
+theater|settings-developer@390x780|dom|div.hint[text] > b[text]|9
 theater|settings-developer@390x780|dom|div.hint[text] > i[text]|1
-theater|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|42
+theater|settings-developer@390x780|dom|div.setdetails-body > div.devcheck|46
 theater|settings-developer@390x780|dom|div.setdetails-body > div.hint[text]|5
 theater|settings-developer@390x780|dom|div.setdetails-body > div.tog|7
 theater|settings-developer@390x780|dom|div.setdetails-body > h2.section[text]|3
 theater|settings-developer@390x780|dom|div.setdetails-body > h3.devcheck-group[text]|5
-theater|settings-developer@390x780|dom|div.setdetails-body > p.devcheck-note[text]|9
+theater|settings-developer@390x780|dom|div.setdetails-body > p.devcheck-note[text]|10
 theater|settings-developer@390x780|dom|div.setdetails-body > p.hint[text]|1
-theater|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|10
-theater|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|10
+theater|settings-developer@390x780|dom|div.setfoot > button.primary.sm[disabled text]|11
+theater|settings-developer@390x780|dom|div.setfoot > span.setstate[text]|11
 theater|settings-developer@390x780|dom|div.setgrid > label.setfield|2
 theater|settings-developer@390x780|dom|div.sethead > div|1
 theater|settings-developer@390x780|dom|div.setlayout > div#setbody.adminwrap|1
@@ -8510,13 +8555,14 @@ theater|settings-developer@390x780|dom|label.setfield > span[text]|3
 theater|settings-developer@390x780|dom|label.tog > input#adr[type=checkbox]|1
 theater|settings-developer@390x780|dom|label.tog > input#chthumb[type=checkbox]|1
 theater|settings-developer@390x780|dom|label.tog > input#dhqa[type=checkbox]|1
+theater|settings-developer@390x780|dom|label.tog > input#pabr[type=checkbox]|1
 theater|settings-developer@390x780|dom|label.tog > input#pdp[type=checkbox]|1
 theater|settings-developer@390x780|dom|label.tog > input#pqh[type=checkbox]|1
 theater|settings-developer@390x780|dom|label.tog > input#sub503[type=checkbox]|1
 theater|settings-developer@390x780|dom|label.tog > input#subbackfill[type=checkbox]|1
 theater|settings-developer@390x780|dom|label.tog > input#subcluster[type=checkbox]|1
 theater|settings-developer@390x780|dom|label.tog > input#subsrc[type=checkbox]|1
-theater|settings-developer@390x780|dom|label.tog > span[text]|9
+theater|settings-developer@390x780|dom|label.tog > span[text]|10
 theater|settings-developer@390x780|dom|main#main > div.setlayout|1
 theater|settings-developer@390x780|dom|nav.setdestinations[aria-label=*] > a|3
 theater|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active.settab[role=link aria-current=page text]|1
@@ -8533,12 +8579,12 @@ theater|settings-developer@390x780|dom|small > code[text]|2
 theater|settings-developer@390x780|dom|small[text] > br|4
 theater|settings-developer@390x780|dom|small[text] > code[text]|6
 theater|settings-developer@390x780|dom|small[text] > i[text]|1
-theater|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|10
-theater|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|10
+theater|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|11
+theater|settings-developer@390x780|dom|span.devcheck-status > span.pill.warn[text]|13
 theater|settings-developer@390x780|dom|span.devcheck-status > span.pill[text]|22
-theater|settings-developer@390x780|dom|span[text] > small[text]|14
+theater|settings-developer@390x780|dom|span[text] > small[text]|15
 theater|settings-developer@390x780|dom|span[text] > small|2
-theater|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|3
+theater|settings-developer@390x780|dom|span[text] > span.pill.warn[text]|4
 theater|settings-developer@390x780|dom|span[text] > span.pill[text]|4
 theater|settings-developer@390x780|dom|strong[text] > span[aria-hidden=true text]|3
 theater|settings-developer@390x780|focus|000|a.logo "cinema"
@@ -8567,30 +8613,32 @@ theater|settings-developer@390x780|focus|022|input#backup-keep
 theater|settings-developer@390x780|focus|023|summary "Readiness"
 theater|settings-developer@390x780|focus|024|summary "Requirements and readiness"
 theater|settings-developer@390x780|focus|025|a "Playback"
-theater|settings-developer@390x780|focus|026|input#pqh
-theater|settings-developer@390x780|focus|027|summary "Readiness and device qualification"
-theater|settings-developer@390x780|focus|028|input#pdp
-theater|settings-developer@390x780|focus|029|input#sub503
-theater|settings-developer@390x780|focus|030|summary "What to confirm before enabling"
-theater|settings-developer@390x780|focus|031|input#subsrc
-theater|settings-developer@390x780|focus|032|summary "What it needs"
-theater|settings-developer@390x780|focus|033|input#subcluster
-theater|settings-developer@390x780|focus|034|summary "What to confirm before enabling"
-theater|settings-developer@390x780|focus|035|input#subbackfill
-theater|settings-developer@390x780|focus|036|summary "Current work and readiness"
-theater|settings-developer@390x780|focus|037|input#chthumb
-theater|settings-developer@390x780|focus|038|summary "What it needs"
-theater|settings-developer@390x780|focus|039|input#dhqa
-theater|settings-developer@390x780|focus|040|summary "Cache impact and diagnostic evidence"
-theater|settings-developer@390x780|focus|041|input#adr
-theater|settings-developer@390x780|focus|042|summary "Recovery limits and diagnostic evidence"
-theater|settings-developer@390x780|focus|043|a "Home"
-theater|settings-developer@390x780|focus|044|a "Live TV"
-theater|settings-developer@390x780|focus|045|a "Recordings"
-theater|settings-developer@390x780|focus|046|a "Library channels"
-theater|settings-developer@390x780|focus|047|a "Activity"
-theater|settings-developer@390x780|focus|048|a.on "Settings"
-theater|settings-developer@390x780|focus|049|<wrap>
+theater|settings-developer@390x780|focus|026|input#pabr
+theater|settings-developer@390x780|focus|027|summary "Requirements and current evidence"
+theater|settings-developer@390x780|focus|028|input#pqh
+theater|settings-developer@390x780|focus|029|summary "Readiness and device qualification"
+theater|settings-developer@390x780|focus|030|input#pdp
+theater|settings-developer@390x780|focus|031|input#sub503
+theater|settings-developer@390x780|focus|032|summary "What to confirm before enabling"
+theater|settings-developer@390x780|focus|033|input#subsrc
+theater|settings-developer@390x780|focus|034|summary "What it needs"
+theater|settings-developer@390x780|focus|035|input#subcluster
+theater|settings-developer@390x780|focus|036|summary "What to confirm before enabling"
+theater|settings-developer@390x780|focus|037|input#subbackfill
+theater|settings-developer@390x780|focus|038|summary "Current work and readiness"
+theater|settings-developer@390x780|focus|039|input#chthumb
+theater|settings-developer@390x780|focus|040|summary "What it needs"
+theater|settings-developer@390x780|focus|041|input#dhqa
+theater|settings-developer@390x780|focus|042|summary "Cache impact and diagnostic evidence"
+theater|settings-developer@390x780|focus|043|input#adr
+theater|settings-developer@390x780|focus|044|summary "Recovery limits and diagnostic evidence"
+theater|settings-developer@390x780|focus|045|a "Home"
+theater|settings-developer@390x780|focus|046|a "Live TV"
+theater|settings-developer@390x780|focus|047|a "Recordings"
+theater|settings-developer@390x780|focus|048|a "Library channels"
+theater|settings-developer@390x780|focus|049|a "Activity"
+theater|settings-developer@390x780|focus|050|a.on "Settings"
+theater|settings-developer@390x780|focus|051|<wrap>
 theater|settings-developer@390x780|req|GET /api/v1/activity|2
 theater|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
 theater|settings-developer@390x780|req|GET /api/v1/me|1

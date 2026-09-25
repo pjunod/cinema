@@ -1282,6 +1282,7 @@ mod tests {
                  DROP INDEX IF EXISTS analysis_requests_one_active_source;
                  DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source;
                  DROP TABLE IF EXISTS analysis_index_repairs;
+                 DROP TABLE IF EXISTS file_grants;
                  DROP TRIGGER IF EXISTS classification_source_changed;
                  DROP TRIGGER IF EXISTS classification_au;
                  DROP TRIGGER IF EXISTS classification_ad;
@@ -1428,7 +1429,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 24] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 25] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1453,6 +1454,7 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS dvr_event_heads",
             "ADD COLUMN video_codec_tag",
             "CREATE TABLE IF NOT EXISTS media_classifications",
+            "CREATE TABLE IF NOT EXISTS file_grants",
             "CREATE TABLE analysis_index_repairs",
             "ADD COLUMN typed_code",
             // v64's field order. Like `video_codec_tag` it is an additive

@@ -2014,14 +2014,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # owns a process, a recipe or a recovery decision. Seven are test fixtures:
 # four `spawn_blocking` calls that run a finite FFmpeg encode or remux to
 # completion, and three request senders joined before their tests end.
-# 600 -> 606 with K-09 subtitle extraction. Production: one stderr drain is
-# joined after the bounded FFmpeg source pass, one descriptor verification is
-# awaited before serving a stored burn, and one representation verification is
-# awaited before streaming it to a peer. The other three are
-# test-only: a joined foreground-preemption waiter and two joined consumers
-# proving direct/offline calls share one queued source. No spawn elects a
-# rolling producer or outlives its request/queue owner.
-expected_occurrences = 606
+# 600 -> 610: K-09 adds six joined subtitle extraction, verification and
+# test tasks. The architecture-review build adds four: the bounded boot-only
+# caption probes and shutdown-bound file-grant pruning loop. None elects a
+# rolling producer or outlives its request or queue owner.
+expected_occurrences = 610
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2738,13 +2735,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # playback-progress watchdog or chooses a recipe. The other ten are test-only
 # and awaited: the receiver tests' sleeps and timeouts, and in `copyseg.rs`
 # the bounded grant-wait and starvation-signal checks.
-# 921 -> 936 with K-09. The source worker's 30-minute deadline, 500 ms
-# preemption/progress tick, and 10-minute attestation bound are owned by the
-# leased analysis request. Four consumer sleeps poll one replicated source
-# publication and local hydration without launching a second producer. The
-# remaining eight are test-only deadlines/polls for queue completion, HLS
-# warming, and refusal to fork a producer while a remote claim is running.
-expected_occurrences = 936
+# 921 -> 937: K-09 adds 15 bounded worker, consumer and test waits for one
+# leased source publication. `file_grants::prune_loop` adds one daily interval
+# with a shutdown-token exit. None chooses a playback recipe or retry.
+expected_occurrences = 937
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3323,10 +3317,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 372 -> 374: the `.status()` on those two test-only FFmpeg commands,
 # inventoried under `process-command-construction` above. Same children,
 # counted once in each sentinel.
-# 374 -> 379 with K-09. Four `.output()` calls run the local Matroska probe
-# and three awaited test probes/renders described above. The fifth is an HLS
-# fixture's `Response::status()` assertion; it launches no process.
-expected_occurrences = 379
+# 374 -> 380: K-09 adds four bounded Matroska probe or render `.output()`
+# calls and one HLS fixture `Response::status()` assertion. The book-content
+# handler adds one `Response::status()` read for inline range headers; neither
+# response-status read launches a process.
+expected_occurrences = 380
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

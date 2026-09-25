@@ -87,6 +87,16 @@ final class AttemptScopesTests: XCTestCase {
         .stallRecovery: [.open, .viewerAction],
         // `openGeneration == generation`, `viewerActionEpoch == actionEpoch`
         .itemFailureLadder: [.open, .viewerAction],
+        // `generation == seekState.generation`, `actionEpoch == viewerActionEpoch`
+        .seekIntent: [.viewerAction, .seek],
+        // The same captured intent is checked again after the control await.
+        .seekIntentAfterControl: [.viewerAction, .seek],
+        // Those two counters plus `openGeneration == itemGeneration`.
+        .nativeSeekCompletion: [.open, .viewerAction, .seek],
+        // The same native attempt is checked after subtitle reconciliation.
+        .nativeSeekAfterSelection: [.open, .viewerAction, .seek],
+        // Status sampling follows an attachment through Pause but not reopen.
+        .recoveryEvidencePoll: [.open],
     ]
 
     func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid() {
@@ -106,12 +116,9 @@ final class AttemptScopesTests: XCTestCase {
                          durationMs: 600_000, title: "Title \(file)")
     }
 
-    /// A viewer Pause, through the controller's own `togglePlayPause`, moves
-    /// exactly one of the nine epochs — `viewerActionEpoch` — and every
-    /// migrated fence reads it, so every one of them refuses the continuation
-    /// it was guarding, and says so with `scope=viewerAction`. A fence whose
-    /// set lost `.viewerAction` would let a late recovery reopen a stream the
-    /// viewer had just paused.
+    /// A viewer Pause moves only `viewerActionEpoch`. Action continuations
+    /// refuse it, while the attachment-scoped status poll keeps collecting
+    /// recovery evidence through Pause.
     @MainActor
     func testEveryMigratedFenceRefusesAContinuationAcrossAViewerPause() {
         for fence in AttemptFence.allCases {
@@ -128,21 +135,27 @@ final class AttemptScopesTests: XCTestCase {
                 [.viewerAction],
                 "a Pause is expected to move the viewer-action epoch and nothing else"
             )
-            XCTAssertFalse(
-                controller.attemptStillCurrent(captured, fence: fence),
-                "\(fence) survived a viewer Pause"
-            )
-            XCTAssertEqual(
-                controller.lastAttemptStaleDetail,
-                "fence=\(fence.rawValue) scope=viewerAction item=same"
-            )
+            if fence == .recoveryEvidencePoll {
+                XCTAssertTrue(controller.attemptStillCurrent(captured, fence: fence),
+                              "the status poll must survive a viewer Pause")
+                XCTAssertNil(controller.lastAttemptStaleDetail)
+            } else {
+                XCTAssertFalse(
+                    controller.attemptStillCurrent(captured, fence: fence),
+                    "\(fence) survived a viewer Pause"
+                )
+                XCTAssertEqual(
+                    controller.lastAttemptStaleDetail,
+                    "fence=\(fence.rawValue) scope=viewerAction item=same"
+                )
+            }
             controller.stop()
         }
     }
 
     /// A new title, through `stop()` and `start(...)`, moves the lifecycle and
     /// open generations. The black-frame fence answers to the lifecycle and
-    /// the other three to the attach attempt, so each must refuse, and each
+    /// the attachment-scoped fences to the open attempt, so each must refuse, and each
     /// must name the scope it refused on.
     @MainActor
     func testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle() {
@@ -151,8 +164,14 @@ final class AttemptScopesTests: XCTestCase {
             .blackFrameDecodeFailure: .lifecycle,
             .stallRecovery: .open,
             .itemFailureLadder: .open,
+            .nativeSeekCompletion: .open,
+            .nativeSeekAfterSelection: .open,
+            .recoveryEvidencePoll: .open,
         ]
         for fence in AttemptFence.allCases {
+            // The intent fences are intentionally scoped to the seek and
+            // viewer action; the caller checks its seek before awaiting.
+            if fence == .seekIntent || fence == .seekIntentAfterControl { continue }
             let controller = PlayerController()
             let model = AppModel()
             start(controller, model: model)

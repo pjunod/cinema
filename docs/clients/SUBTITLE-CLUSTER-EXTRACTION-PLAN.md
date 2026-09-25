@@ -168,7 +168,8 @@ of "selected but not showing".
 `ALTER TABLE files ADD COLUMN downloaded_subtitles`), a replicated, bounded
 (256 KiB, 8 per file) WebVTT caption store keyed by file id/size/mtime, and
 downloaded tracks appended to the selectable list *after* the embedded
-ordinals. Consequences for this plan: the component migration is **v46**;
+ordinals. The component migration was drafted as v46, then PR #506 took v46
+for file grants on the implementation base, so it appends as **v47**;
 downloaded tracks are never `subtitle_source` targets (they are already
 durable and replicated); and the existence of a replicated caption store is
 an alternative for *text* representations that §7.4 puts to Paul rather than
@@ -350,16 +351,16 @@ store, then writes the `extracted` publication rows.
   `ready`), and the ride-along skips a file whose eligible ordinals all have
   `extracted` rows already. Eviction, a source change, and R1's repair path
   legitimately re-read; none of those is a duplicate.
-- **Schema (v46).** The `component` CHECK on `analysis_requests` admits
+- **Schema (v47).** The `component` CHECK on `analysis_requests` admits
   `subtitle_source`; `priority` admits `foreground` (with the `valid_request`
   rule becoming `force_rebuild == (priority == "forced")` **and**
   `priority == "foreground" ⇒ component == "subtitle_source"`); `trigger`
   admits `playback`; the publication table of §3.10 is created. One
-  migration in the shape v42 used to add `skip_markers`: rename to
-  `analysis_requests_v45`, recreate, copy, re-create the indexes
+  migration in the shape v42 used to add `skip_markers`: rename the v46 table,
+  recreate, copy, re-create the indexes
   (`fragment_index_cluster.rs:295–330`), `MigrateFrom` arm, accepted-source
   list, the chain assertion, the `install_schema` object-count probe, a
-  `replicated_v46_…` contract test, and the placeholder-order census
+  `replicated_v47_…` contract test, and the placeholder-order census
   extended to every new statement. A schema bump is a stop-the-fleet event
   on hiqlite (`schema_migration_action` refuses any other version on open),
   which the ansible `serial: 1` deploy handles — it ships in a deploy of its
@@ -428,7 +429,7 @@ row (§3.9); the foreground one claims first.
   the ride-along's `subtitle_stored_sources` keeps covering §3.1's producer)
   with an advisory enable section in the shape of `subtitle_stored_sources`
   (`developer.rs:701`): the analysis queue is enabled; every voter reports
-  schema 46; at least one reachable media peer; the store is on a local
+  schema 47; at least one reachable media peer; the store is on a local
   filesystem with N GB free; and under it `subtitle_backfill` with the lease
   holder, files enqueued this process, files remaining (eligible ordinals
   without coverage), estimated remaining bytes.
@@ -472,7 +473,7 @@ No client change is in this plan. What changes:
 
 ### 3.10 Contract 2 — the publication model
 
-**Table** `subtitle_source_publications` (v46), replicated:
+**Table** `subtitle_source_publications` (v47), replicated:
 
 | column | meaning |
 |---|---|
@@ -619,17 +620,17 @@ build still reads; a `text` entry is a miss for a reader without the field; a
 no flight starts when the store answers; the window warm is not started when
 the store answered. Ships behind `subtitle_stored_sources`. Deployable alone.
 
-### M2 — Schema v46: the component, the priority, the trigger, the publication table
+### M2 — Schema v47: the component, the priority, the trigger, the publication table
 
 Files: `crates/plurx-core/src/store/hiqlite.rs` (`SUBTITLE_SOURCE_SCHEMA_VERSION
-= 46`, `AUTH_SCHEMA_VERSION`, the `MigrateFrom` arm, accepted sources, the
+= 47`, `AUTH_SCHEMA_VERSION`, the `MigrateFrom` arm, accepted sources, the
 chain assertion), `hiqlite_fragment_index_cluster.rs` (the rebuild in the v42
 shape; `valid_request` for `subtitle_source` / `foreground` / `playback`;
 `claim_analysis_request` ORDER BY; `enqueue_or_promote_subtitle_source`,
 `claim_analysis_request_foreground`, `retire_subtitle_source_ready`;
 publication CRUD), `fragment_index_cluster.rs` (SQLite twin, same ops),
 `placeholder_census.rs` (every new statement), `tests/store_contract.rs`
-(`replicated_v46_…`; the three new ops on both backends).
+(`replicated_v47_…`; the three new ops on both backends).
 
 Tests: **three simultaneous enqueues plus one existing backfill row yield
 one active row; a `foreground` join promotes a `queued` `normal` row in place
@@ -783,7 +784,7 @@ from a node that did not produce them — **no full-source extraction runs**
 
 - M1 deploys with the ordinary train; safe with the store empty.
 - M2 is the schema bump: **all voters in one `serial: 1` deploy**, nothing
-  else in it, a `STATUS.md` note naming v46. A mixed-version cluster refuses
+  else in it, a `STATUS.md` note naming v47. A mixed-version cluster refuses
   to open — the existing contract, not a new risk, but the deploy is not to
   be split across days.
 - M3–M5 deploy with the ordinary train, both switches off, then
@@ -797,8 +798,8 @@ from a node that did not produce them — **no full-source extraction runs**
 > On the plurx fleet (nynuc, m6, nuc4; ansible `media/deploy.yml -e
 > sync=false`, serial), deploy the build carrying M1–M4 of
 > `docs/clients/SUBTITLE-CLUSTER-EXTRACTION-PLAN.md`. M2 is a hiqlite schema
-> bump to v46: deploy all three voters in the same run and confirm each
-> reports schema 46 on `/readyz` before moving on. Then in Settings →
+> bump to v47: deploy all three voters in the same run and confirm each
+> reports schema 47 on `/readyz` before moving on. Then in Settings →
 > Developer turn on `subtitle_cluster_sources` (leave `subtitle_backfill`
 > off), and run §6.2 steps 1–4 on the Apple TV, the TCL tablet and Safari.
 > For each: the title, the serving node, what Maintenance → Analysis showed
@@ -846,7 +847,7 @@ from a node that did not produce them — **no full-source extraction runs**
 | `analysis_request_generation`, `request_file_analysis_for_identity`, `update_analysis_ride_along`, `provider:artwork` lease, discovery slots, `resolve_analysis_requests`, `skip_markers` arm | `crates/plurxd/src/state.rs:2538`, `:4132`, `:4330`, `:4943`, `:7291`, `:7572`, `:7799` |
 | `analysis_requests` schema and v42 rebuild | `crates/plurx-core/src/store/fragment_index_cluster.rs:88–115`, `:295–330` |
 | hiqlite twin: `valid_request`, claim SQL, active unique index, `foreground` precedent | `crates/plurx-core/src/store/hiqlite_fragment_index_cluster.rs:1154`, `:1467`, `:668`, `:238`/`:253` |
-| schema versions, `AUTH_SCHEMA_VERSION = 45` | `crates/plurx-core/src/store/hiqlite.rs:73–110` |
+| schema versions, `AUTH_SCHEMA_VERSION = 46` (file grants on base `44cdfccc7`) | `crates/plurx-core/src/store/hiqlite.rs:73–117` |
 | downloaded captions (#498) | `crates/plurx-core/src/store/downloaded_subtitles.rs`, `crates/plurxd/src/online_subtitles.rs` |
 | `subtitle_file` (ASS exclusion), `ensure_text_subtitle`, `ensure_burn_source` call | `crates/plurxd/src/transcode.rs:15617`, `:15635`, `:19375` |
 | `session_start_error` → `startup_timeout`; rendition `whole_track_state` | `crates/plurxd/src/http/hls.rs:3917`, `:11444` |
@@ -889,9 +890,9 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01LUY4Gc3ZFwF8xzj6Eg9Dy1 | Plan v2 | [#497](http://192.168.4.7:3000/noirr/plurx/pulls/497) | All seven findings accepted and re-anchored at `0e2c3fd4` (every cited behaviour re-read in source); the three contracts added (§3.9–§3.11); schema moved to v46 after PR #498 took v45; acceptance split warm/cold; ready for an executing session. Nothing built. |
 | 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M0 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | nuc3 E1 passed; E1b was cue-identical but byte-different. Paul directed the session to choose and continue; it chose §6.1's explicit cue-identity allowance. E1–E5 completed on nuc3; E5 exposed a text-verdict bug to fix in M1. |
 | 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M1 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: typed SRT/ASS/mov_text ride-along, double-mapped ASS, decoder-error veto from E5, stored VTT and styled burn consumers, and named cases. Pinned compile, format and Clippy pass; fast-lane result is tracked on PR #507. |
-| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M2 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: schema v46 on SQLite and Hiqlite, deterministic foreground join, bounded repair, publication CRUD, v45 migration and named store cases. Pinned compile, format and Clippy pass; fast-lane result is tracked on PR #507. No schema deployment. |
+| 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M2 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: subtitle schema originally drafted as Hiqlite v46 with its SQLite counterpart, deterministic foreground join, bounded repair, publication CRUD and named store cases. After PR #506 put file grants at v46 on `main`, M2 appends as Hiqlite v47 from v46. Pinned compile, format and Clippy passed on the earlier base; the merged candidate's gate is tracked on PR #507. No schema deployment. |
 | 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M3 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: merge-safe publications, portable sampled digest and receiver inode binding, authenticated bounded peer route, node A → B replicated lookup scenario and named cases. Pinned compile, format and Clippy pass; fast-lane result is tracked on PR #507. |
 | 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M4 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: no-index worker, foreground self-claim, bounded VTT/burn flights, typed progress and manual Developer switch; named cases include cold direct/offline requests. Pinned compile, format and Clippy pass; fast-lane result is tracked on PR #507. |
 | 2026-09-24 | gpt-6 | none:openai:2026-09-24 | M5 | [#507](http://192.168.4.7:3000/noirr/plurx/pulls/507) | `53b8b6fe2`: exclusive idle backfill, newest-first uncovered candidate query, telemetry and live advisory Developer diagnostics with named cases. UI baseline regenerated from 78 captures without browser errors. Pinned compile, format and Clippy pass; fast-lane result is tracked on PR #507. needs: §6.2 fleet/device checks after a later deployment, using the prompt above; no deployment by this PR. |
 
-The sole adversarial review raised six findings (four P1, two P2). Commit `b18173eb5` fixes the HLS and PGS peer paths, active-job timeout, partial-ready repair, cross-node ride skip, and cancellation fencing. Commit `fd7356074` fixes the first fast-lane SQL contracts and fixtures; all focused cases for those changes pass. The PR gate records final qualification. The candidate was merged with `dafadf043` before qualification; none of its ten changed paths touches a §8 anchor source.
+The sole adversarial review raised six findings (four P1, two P2). Commit `b18173eb5` fixes the HLS and PGS peer paths, active-job timeout, partial-ready repair, cross-node ride skip, and cancellation fencing. Commit `fd7356074` fixes the first fast-lane SQL contracts and fixtures; all focused cases for those changes pass. The PR gate records final qualification. The candidate first merged `dafadf043`, then `44cdfccc7`. All 21 §8 anchors were rechecked against the latter: file grants took Hiqlite v46, so subtitle M2 moved to v47; the direct endpoint and client retry behavior remained the same, though the native retry symbols shifted lines.

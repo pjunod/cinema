@@ -653,13 +653,13 @@ pub(super) fn analysis_attempt_errors_migration_statements(
 }
 
 const SUBTITLE_SOURCE_SCHEMA_STATEMENTS: &[&str] = &[
-    r#"CREATE TABLE analysis_attempts_v46_backup AS SELECT * FROM analysis_attempts;"#,
+    r#"CREATE TABLE analysis_attempts_v47_backup AS SELECT * FROM analysis_attempts;"#,
     r#"DROP TABLE analysis_attempts;"#,
     r#"DROP TRIGGER IF EXISTS analysis_requests_cancel_source;"#,
     r#"DROP TRIGGER IF EXISTS analysis_requests_supersede_source;"#,
     r#"DROP TRIGGER IF EXISTS analysis_requests_bound_terminal_history;"#,
     r#"DROP TRIGGER IF EXISTS analysis_requests_lifecycle_counters;"#,
-    r#"ALTER TABLE analysis_requests RENAME TO analysis_requests_v45;"#,
+    r#"ALTER TABLE analysis_requests RENAME TO analysis_requests_v46;"#,
     r#"CREATE TABLE analysis_requests (
     request_id         TEXT PRIMARY KEY,
     file_id            INTEGER NOT NULL,
@@ -687,8 +687,8 @@ const SUBTITLE_SOURCE_SCHEMA_STATEMENTS: &[&str] = &[
     created_at_ms      INTEGER NOT NULL,
     updated_at_ms      INTEGER NOT NULL
 ) STRICT;"#,
-    r#"INSERT INTO analysis_requests (request_id, file_id, source_size, source_mtime, component, video_identity, pipeline_version, requested_generation, expected_predecessor_generation, priority, trigger, force_rebuild, target_node_id, state, owner_node_id, fence, lease_expires_ms, attempts, not_before_ms, result_cache_key, last_error_code, cancel_requested, created_at_ms, updated_at_ms) SELECT request_id, file_id, source_size, source_mtime, component, video_identity, pipeline_version, requested_generation, expected_predecessor_generation, priority, trigger, force_rebuild, target_node_id, state, owner_node_id, fence, lease_expires_ms, attempts, not_before_ms, result_cache_key, last_error_code, cancel_requested, created_at_ms, updated_at_ms FROM analysis_requests_v45;"#,
-    r#"DROP TABLE analysis_requests_v45;"#,
+    r#"INSERT INTO analysis_requests (request_id, file_id, source_size, source_mtime, component, video_identity, pipeline_version, requested_generation, expected_predecessor_generation, priority, trigger, force_rebuild, target_node_id, state, owner_node_id, fence, lease_expires_ms, attempts, not_before_ms, result_cache_key, last_error_code, cancel_requested, created_at_ms, updated_at_ms) SELECT request_id, file_id, source_size, source_mtime, component, video_identity, pipeline_version, requested_generation, expected_predecessor_generation, priority, trigger, force_rebuild, target_node_id, state, owner_node_id, fence, lease_expires_ms, attempts, not_before_ms, result_cache_key, last_error_code, cancel_requested, created_at_ms, updated_at_ms FROM analysis_requests_v46;"#,
+    r#"DROP TABLE analysis_requests_v46;"#,
     r#"CREATE INDEX analysis_requests_due
     ON analysis_requests(target_node_id, state, not_before_ms, created_at_ms, request_id);"#,
     r#"CREATE INDEX analysis_requests_status
@@ -796,8 +796,8 @@ END;"#,
 ) STRICT;"#,
     r#"CREATE INDEX analysis_attempts_recent
     ON analysis_attempts(request_id, claim_epoch DESC);"#,
-    r#"INSERT INTO analysis_attempts SELECT * FROM analysis_attempts_v46_backup;"#,
-    r#"DROP TABLE analysis_attempts_v46_backup;"#,
+    r#"INSERT INTO analysis_attempts SELECT * FROM analysis_attempts_v47_backup;"#,
+    r#"DROP TABLE analysis_attempts_v47_backup;"#,
     r#"CREATE TRIGGER analysis_requests_lifecycle_counters
 AFTER UPDATE OF state ON analysis_requests
 WHEN OLD.state <> NEW.state
@@ -4977,10 +4977,10 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
 mod tests {
 
     #[test]
-    fn replicated_v46_new_statements_pass_placeholder_census() {
+    fn replicated_v47_new_statements_pass_placeholder_census() {
         for statement in super::SUBTITLE_SOURCE_SCHEMA_STATEMENTS {
             super::super::hiqlite::validate_sql(statement)
-                .expect("v46 migration statement uses ordered placeholders");
+                .expect("v47 migration statement uses ordered placeholders");
         }
     }
 

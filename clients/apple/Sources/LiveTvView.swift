@@ -1,4 +1,5 @@
 import AVKit
+import Combine
 import SwiftUI
 
 /// Kept for the app lifetime: leaving and reopening a tab cannot forget an
@@ -62,7 +63,11 @@ final class LiveTvPlayerController: ObservableObject {
     private var heartbeat: Task<Void, Never>?
     private var guideRefresh: Task<Void, Never>?
     private var channelChange: Task<Void, Never>?
-    private var timeControlObservation: NSKeyValueObservation?
+    private var itemObserver: AVPlayerItemObserver?
+    private var itemEventTask: Task<Void, Never>?
+    private var itemFailure: NSError?
+    private var itemDidFail = false
+    private let remoteCommands = LiveRemoteCommands()
     #if os(tvOS)
     private var displayCriteriaObservation: NSKeyValueObservation?
     #endif
@@ -173,7 +178,7 @@ final class LiveTvPlayerController: ObservableObject {
         expected: Int,
         compatibilityRetry: Bool
     ) throws {
-        let item = AVPlayerItem(url: try api.playlistURL(info.sessionId))
+        let item = AVPlayerItem(url: try api.playlistURL(info.playlistUrl, sessionId: info.sessionId))
         item.preferredForwardBufferDuration = 12
         player.replaceCurrentItem(with: item)
         #if os(tvOS)
@@ -191,17 +196,42 @@ final class LiveTvPlayerController: ObservableObject {
         attachedAt = Date()
         playing = true
         player.play()
+        remoteCommands.start(
+            title: channel.title,
+            playing: true,
+            play: { [weak self] in
+                guard let self, self.paused else { return }
+                self.togglePause()
+            },
+            pause: { [weak self] in
+                guard let self, !self.paused else { return }
+                self.togglePause()
+            },
+            toggle: { [weak self] in self?.togglePause() }
+        )
         surfaceMessage = nil
         message = "Playing live"
-        timeControlObservation = player.observe(
-            \.timeControlStatus,
-            options: [.initial, .new]
-        ) { [weak self] player, _ in
-            let status = player.timeControlStatus
-            let reason = player.reasonForWaitingToPlay
-            Task { @MainActor [weak self] in
-                guard let self, self.serial == expected else { return }
-                self.applyTimeControl(status: status, reason: reason)
+        let observer = AVPlayerItemObserver(item: item, player: player)
+        itemObserver = observer
+        itemEventTask = Task { @MainActor [weak self, weak observer] in
+            guard let observer else { return }
+            for await event in observer.events {
+                guard let self, self.serial == expected,
+                      self.itemObserver === observer, self.player.currentItem === item
+                else { return }
+                switch event {
+                case .timeControl(let status, let reason):
+                    self.applyTimeControl(status: status, reason: reason)
+                case .status(.failed):
+                    self.itemDidFail = true
+                    self.itemFailure = item.error as NSError?
+                case .failedToPlayToEnd(let error):
+                    self.itemDidFail = true
+                    self.itemFailure = error ?? (item.error as NSError?)
+                case .playbackStalled, .newErrorLogEntry, .playedToEnd,
+                     .interruption, .routeLost, .status:
+                    break
+                }
             }
         }
         heartbeat = Task { @MainActor [weak self] in
@@ -210,7 +240,9 @@ final class LiveTvPlayerController: ObservableObject {
                 do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
                 guard let self, self.serial == expected else { return }
                 do {
-                    if item.status == .failed { throw Self.playerFailure(item.error) }
+                    if self.itemDidFail || item.status == .failed {
+                        throw Self.playerFailure(self.itemFailure ?? (item.error as NSError?))
+                    }
                     let position = self.player.currentTime().seconds
                     self.sampleLiveEdge(item: item, position: position)
                     if !self.paused && !self.systemPaused && progress.observe(position: position) {
@@ -463,6 +495,7 @@ final class LiveTvPlayerController: ObservableObject {
             message = "Playing live"
             surfaceMessage = nil
         }
+        remoteCommands.update(title: title ?? "", playing: !paused && !systemPaused)
     }
 
     #if os(tvOS)
@@ -553,12 +586,17 @@ final class LiveTvPlayerController: ObservableObject {
     }
 
     private func detach() {
+        remoteCommands.stop()
         heartbeat?.cancel()
         heartbeat = nil
         channelChange?.cancel()
         channelChange = nil
-        timeControlObservation?.invalidate()
-        timeControlObservation = nil
+        itemObserver?.cancel()
+        itemObserver = nil
+        itemEventTask?.cancel()
+        itemEventTask = nil
+        itemFailure = nil
+        itemDidFail = false
         #if os(tvOS)
         displayCriteriaObservation?.invalidate()
         displayCriteriaObservation = nil
@@ -1892,8 +1930,8 @@ struct LiveTvView: View {
         #endif
         .background(Palette.bg)
 
-        .task { await live.load(origin: model.origin, token: Session.shared.token) }
-        .task { await dvr.load(origin: model.origin, token: Session.shared.token) }
+        .task { await live.load(origin: model.origin, token: Session.shared.credentials.token) }
+        .task { await dvr.load(origin: model.origin, token: Session.shared.credentials.token) }
         // One read of the schedule and the reminders per guide load, and none
         // in between. A plan changes when somebody changes it — every mutation
         // re-reads for itself — so a page that polled would spend a
@@ -2185,7 +2223,7 @@ struct LiveTvView: View {
             #endif
             Button("Refresh channels") {
                 showingMore = false
-                Task { await live.load(origin: model.origin, token: Session.shared.token) }
+                Task { await live.load(origin: model.origin, token: Session.shared.credentials.token) }
             }
             #if os(tvOS)
             .buttonStyle(TVReadableButtonStyle(prominent: false))
@@ -2504,7 +2542,7 @@ struct LiveTvView: View {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 Button("Refresh channels") {
-                    Task { await live.load(origin: model.origin, token: Session.shared.token) }
+                    Task { await live.load(origin: model.origin, token: Session.shared.credentials.token) }
                 }
                 Button(hideProtected ? "Show protected" : "Hide protected") { hideProtected.toggle() }
                 if live.message.contains("Cleanup is unconfirmed") {

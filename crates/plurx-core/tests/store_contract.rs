@@ -62,12 +62,13 @@ use plurx_core::store::{
     requeue_cluster_fragment_index_after_no_holder, AnalysisHistoryCursor, AnalysisHistoryFilter,
     AnalysisHistoryQuery, ArtworkRepairFence, ClusterFragmentIndexArtifact,
     ClusterFragmentIndexJob, ClusterFragmentIndexLocation, ClusterFragmentIndexStore,
-    DvConversionMode, DvConversionState, DvRecoveryGuardState, IdentityRepairOutcome, LibraryStore,
-    MediaStore, NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
-    QueueDvConversionOutcome, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome,
-    SqliteStore, Store, ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS,
-    ANALYSIS_METRIC_PRIORITIES, ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS,
-    DV_CONVERSION_LEDGER_READ_MAX, DV_RECOVERY_GUARD_READ_MAX,
+    DvConversionMode, DvConversionState, DvRecoveryGuardState, FileGrantStore,
+    IdentityRepairOutcome, LibraryStore, MediaStore, NewAnalysisRequest,
+    NewClusterFragmentIndexJob, OutboxEntry, PublicationStore, QueueDvConversionOutcome,
+    ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, SqliteStore, Store,
+    ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS, ANALYSIS_METRIC_PRIORITIES,
+    ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS, DV_CONVERSION_LEDGER_READ_MAX,
+    DV_RECOVERY_GUARD_READ_MAX,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
@@ -14876,6 +14877,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TRIGGER IF EXISTS subtitle_source_publications_delete_source;
              DROP TRIGGER IF EXISTS subtitle_source_publications_supersede_source;
              DROP TABLE IF EXISTS subtitle_source_publications;
+             DROP TABLE IF EXISTS file_grants;
              DROP TRIGGER IF EXISTS classification_source_changed;
              DROP TRIGGER IF EXISTS classification_au;
              DROP TRIGGER IF EXISTS classification_ad;
@@ -31523,11 +31525,23 @@ async fn subtitle_source_publication_crud_is_per_stamp_holder_and_representation
 }
 
 #[tokio::test]
-async fn replicated_v46_migration_from_v45_preserves_live_analysis_request_rows() {
-    let directory = tempfile::tempdir().expect("v45 migration fixture");
-    let path = directory.path().join("v45.db");
+async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_requests() {
+    let directory = tempfile::tempdir().expect("v68 migration fixture");
+    let path = directory.path().join("v68.db");
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&path).expect("open fixture"));
-    let (_, file_id) = seed_file(&store, "subtitle-m2-migration").await;
+    let (user_id, file_id) = seed_file(&store, "subtitle-m2-migration").await;
+    store
+        .create_file_grant(plurx_core::store::NewFileGrant {
+            id: "v68-reader-grant".to_owned(),
+            token_hash: "v68-reader-hash".to_owned(),
+            file_id,
+            user_id,
+            source_token_hash: "v68-source-hash".to_owned(),
+            created_at: 10,
+            expires_at: 100,
+        })
+        .await
+        .expect("seed v68 file grant");
     let request_id = uuid::Uuid::new_v4().to_string();
     let live = store
         .enqueue_analysis_request(&NewAnalysisRequest {
@@ -31536,9 +31550,9 @@ async fn replicated_v46_migration_from_v45_preserves_live_analysis_request_rows(
             source_size: 10_000,
             source_mtime: 1,
             component: "fragment_index".to_owned(),
-            pipeline_version: "v45-live".to_owned(),
+            pipeline_version: "v68-live".to_owned(),
             video_identity: String::new(),
-            requested_generation: "v45-generation".to_owned(),
+            requested_generation: "v68-generation".to_owned(),
             priority: "normal".to_owned(),
             trigger: "admin".to_owned(),
             force_rebuild: false,
@@ -31547,7 +31561,7 @@ async fn replicated_v46_migration_from_v45_preserves_live_analysis_request_rows(
             created_at_ms: 10,
         })
         .await
-        .expect("seed v45 live request");
+        .expect("seed v68 live request");
     drop(store);
 
     let conn = rusqlite::Connection::open(&path).expect("open downgrade fixture");
@@ -31565,7 +31579,7 @@ async fn replicated_v46_migration_from_v45_preserves_live_analysis_request_rows(
             |row| row.get(0),
         )
         .expect("current attempt DDL");
-    let v45_table = current_table
+    let v68_table = current_table
         .replace(
             "'fragment_index','skip_markers','subtitle_source'",
             "'fragment_index','skip_markers'",
@@ -31573,26 +31587,34 @@ async fn replicated_v46_migration_from_v45_preserves_live_analysis_request_rows(
         .replace("'normal','forced','foreground'", "'normal','forced'")
         .replace("'admin','background','playback'", "'admin','background'");
     assert_ne!(
-        v45_table, current_table,
-        "fixture must restore v45 CHECK constraints"
+        v68_table, current_table,
+        "fixture must restore v68 CHECK constraints"
     );
-    conn.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER IF EXISTS subtitle_source_publications_delete_source; DROP TRIGGER IF EXISTS subtitle_source_publications_supersede_source; DROP TABLE subtitle_source_publications; DROP TRIGGER IF EXISTS analysis_requests_cancel_source; DROP TRIGGER IF EXISTS analysis_requests_supersede_source; DROP TRIGGER IF EXISTS analysis_requests_bound_terminal_history; DROP TRIGGER IF EXISTS analysis_requests_lifecycle_counters; DROP TABLE analysis_attempts; ALTER TABLE analysis_requests RENAME TO analysis_requests_v46_fixture;")
-        .expect("remove v46-only shape");
-    conn.execute_batch(&v45_table)
-        .expect("restore v45 request table");
-    conn.execute_batch("INSERT INTO analysis_requests SELECT * FROM analysis_requests_v46_fixture; DROP TABLE analysis_requests_v46_fixture;")
-        .expect("preserve v45 live row");
+    conn.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_advance; DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_delete_source; DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_supersede_source; DROP TABLE subtitle_source_repair_epochs; DROP TRIGGER IF EXISTS subtitle_source_publications_delete_source; DROP TRIGGER IF EXISTS subtitle_source_publications_supersede_source; DROP TABLE subtitle_source_publications; DROP TRIGGER IF EXISTS analysis_requests_cancel_source; DROP TRIGGER IF EXISTS analysis_requests_supersede_source; DROP TRIGGER IF EXISTS analysis_requests_bound_terminal_history; DROP TRIGGER IF EXISTS analysis_requests_lifecycle_counters; DROP TABLE analysis_attempts; ALTER TABLE analysis_requests RENAME TO analysis_requests_v69_fixture;")
+        .expect("remove v69-only shape");
+    conn.execute_batch(&v68_table)
+        .expect("restore v68 request table");
+    conn.execute_batch("INSERT INTO analysis_requests SELECT * FROM analysis_requests_v69_fixture; DROP TABLE analysis_requests_v69_fixture;")
+        .expect("preserve v68 live row");
     conn.execute_batch(&attempts_table)
-        .expect("restore v45 attempt table");
+        .expect("restore v68 attempt table");
     conn.pragma_update(
         None,
         "user_version",
         plurx_core::store::SQLITE_SCHEMA_VERSION - 1,
     )
-    .expect("mark true v45 predecessor");
+    .expect("mark true v68 predecessor");
     drop(conn);
 
-    let migrated = SqliteStore::open(&path).expect("migrate v45 to v46");
+    let migrated = SqliteStore::open(&path).expect("migrate v68 to v69");
+    let grant = migrated
+        .file_grant_by_hash("v68-reader-hash")
+        .await
+        .expect("read file grant")
+        .expect("v68 file grant survived");
+    assert_eq!(grant.id, "v68-reader-grant");
+    assert_eq!(grant.file_id, file_id);
+    assert_eq!(grant.user_id, user_id);
     let preserved = migrated
         .analysis_request(&request_id)
         .await
@@ -31603,7 +31625,7 @@ async fn replicated_v46_migration_from_v45_preserves_live_analysis_request_rows(
     let fresh = migrated
         .enqueue_or_promote_subtitle_source(&stamp, "foreground", 20)
         .await
-        .expect("v46 accepts subtitle source")
+        .expect("v69 accepts subtitle source")
         .expect("new request");
     assert_eq!(fresh.component, "subtitle_source");
 }

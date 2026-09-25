@@ -322,10 +322,10 @@ async fn subtitle_cluster_sources(
                 evidence: format!("The cluster analysis scheduler currently reports {}.", if queue_enabled { "available" } else { "unavailable" }),
             },
             DeveloperRequirement {
-                id: "schema_v46",
-                title: "Every voter runs schema 46",
+                id: "schema_v47",
+                title: "Every voter runs schema 47",
                 status: RequirementStatus::Unobservable,
-                evidence: "This binary supports schema 46. The daemon has no per-voter schema-version reading; inspect the committed voter fleet before enabling.".to_owned(),
+                evidence: "This binary supports schema 47. The daemon has no per-voter schema-version reading; inspect the committed voter fleet before enabling.".to_owned(),
             },
             DeveloperRequirement { id: "reachable_peer", title: "A reachable media peer", status: peer_status, evidence: peer_evidence },
             DeveloperRequirement { id: "local_cache", title: "A local subtitle store", status: filesystem_status, evidence: filesystem_evidence },

@@ -42,7 +42,6 @@ async function saveStreaming(btn){
   try{
     cacheSettings(await api("/settings",{method:"PUT",body:{
       stream_readrate:document.getElementById("prr").value,
-      playback_auto_abr:document.getElementById("pabr").checked,
       hls_readrate:document.getElementById("phr").value,
       hls_burst_secs:document.getElementById("phb").value,
       hls_ahead_max_secs:document.getElementById("pha").value,
@@ -51,7 +50,6 @@ async function saveStreaming(btn){
       vod_block_budget_secs:"8",
       vod_materialize_budget_secs:document.getElementById("pvmb").value,
       vod_blocked_get_cap:document.getElementById("pvbg").value}}));
-    if(SERVER) SERVER.playback_auto_abr=SETTINGS.playback_auto_abr;
     toast("Streaming settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }

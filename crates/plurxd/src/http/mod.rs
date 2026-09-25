@@ -20,6 +20,7 @@ mod dv_disk;
 pub(crate) mod dvr;
 pub(crate) mod error;
 pub(crate) mod extract;
+pub(crate) mod file_grants;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 pub(crate) mod hls;
 pub(crate) mod images;
@@ -331,6 +332,9 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/direct"
         | "/api/v1/files/{id}/download"
         | "/api/v1/files/{id}/content"
+        | "/api/v1/files/{id}/grants"
+        | "/api/v1/grants/{id}"
+        | "/api/v1/grants/{token}/content"
         | "/api/v1/files/{id}/stream.mp4"
         | "/api/v1/files/{id}/subs/{subtitle}"
         | "/api/v1/files/{id}/subs/{index}/overlay.json"
@@ -363,6 +367,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/live-tv/guide"
         | "/api/v1/live-tv/guide/readiness"
         | "/api/v1/live-tv/guide/refresh"
+        | "/api/v1/live-tv/sessions/{capability}/master.m3u8"
         | "/api/v1/live-tv/sessions/{capability}/index.m3u8"
         | "/api/v1/live-tv/sessions/{capability}/status"
         | "/api/v1/live-tv/sessions/{capability}/keepalive"
@@ -1392,6 +1397,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/files/{id}/audio-offset", put(stream::set_audio_offset))
         .route("/files/{id}/offline-options", get(offline::options))
+        .route("/files/{id}/grants", post(file_grants::mint))
+        .route("/grants/{id}", delete(file_grants::revoke))
         .route(
             "/offline/packages/{id}",
             get(offline::package_status).delete(offline::delete_package),
@@ -1542,6 +1549,10 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/live-tv/sessions/{capability}/master.m3u8",
+            get(live_tv::master),
+        )
+        .route(
             "/live-tv/sessions/{capability}/index.m3u8",
             get(live_tv::playlist),
         )
@@ -1585,6 +1596,7 @@ pub fn router(state: AppState) -> Router {
         .route("/files/{id}/direct", get(stream::direct))
         .route("/files/{id}/download", get(stream::download))
         .route("/files/{id}/content", get(stream::book_content))
+        .route("/grants/{token}/content", get(file_grants::content))
         .route("/publication/{session}", delete(publication::close))
         .route(
             "/publication/{session}/{*resource}",

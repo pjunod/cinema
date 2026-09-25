@@ -578,16 +578,16 @@ BEGIN
 END;
 "#;
 
-/// v46: cluster subtitle extraction requests and portable publication metadata.
-/// This rebuild preserves live v45 requests and their charged attempt history.
+/// v47: cluster subtitle extraction requests and portable publication metadata.
+/// This rebuild preserves live v46 requests and their charged attempt history.
 pub const SUBTITLE_SOURCE_SCHEMA: &str = r#"
-CREATE TABLE analysis_attempts_v46_backup AS SELECT * FROM analysis_attempts;
+CREATE TABLE analysis_attempts_v47_backup AS SELECT * FROM analysis_attempts;
 DROP TABLE analysis_attempts;
 DROP TRIGGER IF EXISTS analysis_requests_cancel_source;
 DROP TRIGGER IF EXISTS analysis_requests_supersede_source;
 DROP TRIGGER IF EXISTS analysis_requests_bound_terminal_history;
 DROP TRIGGER IF EXISTS analysis_requests_lifecycle_counters;
-ALTER TABLE analysis_requests RENAME TO analysis_requests_v45;
+ALTER TABLE analysis_requests RENAME TO analysis_requests_v46;
 CREATE TABLE analysis_requests (
     request_id         TEXT PRIMARY KEY,
     file_id            INTEGER NOT NULL,
@@ -615,8 +615,8 @@ CREATE TABLE analysis_requests (
     created_at_ms      INTEGER NOT NULL,
     updated_at_ms      INTEGER NOT NULL
 ) STRICT;
-INSERT INTO analysis_requests (request_id, file_id, source_size, source_mtime, component, video_identity, pipeline_version, requested_generation, expected_predecessor_generation, priority, trigger, force_rebuild, target_node_id, state, owner_node_id, fence, lease_expires_ms, attempts, not_before_ms, result_cache_key, last_error_code, cancel_requested, created_at_ms, updated_at_ms) SELECT request_id, file_id, source_size, source_mtime, component, video_identity, pipeline_version, requested_generation, expected_predecessor_generation, priority, trigger, force_rebuild, target_node_id, state, owner_node_id, fence, lease_expires_ms, attempts, not_before_ms, result_cache_key, last_error_code, cancel_requested, created_at_ms, updated_at_ms FROM analysis_requests_v45;
-DROP TABLE analysis_requests_v45;
+INSERT INTO analysis_requests (request_id, file_id, source_size, source_mtime, component, video_identity, pipeline_version, requested_generation, expected_predecessor_generation, priority, trigger, force_rebuild, target_node_id, state, owner_node_id, fence, lease_expires_ms, attempts, not_before_ms, result_cache_key, last_error_code, cancel_requested, created_at_ms, updated_at_ms) SELECT request_id, file_id, source_size, source_mtime, component, video_identity, pipeline_version, requested_generation, expected_predecessor_generation, priority, trigger, force_rebuild, target_node_id, state, owner_node_id, fence, lease_expires_ms, attempts, not_before_ms, result_cache_key, last_error_code, cancel_requested, created_at_ms, updated_at_ms FROM analysis_requests_v46;
+DROP TABLE analysis_requests_v46;
 CREATE INDEX analysis_requests_due
     ON analysis_requests(target_node_id, state, not_before_ms, created_at_ms, request_id);
 CREATE INDEX analysis_requests_status
@@ -724,8 +724,8 @@ CREATE TABLE analysis_attempts (
 ) STRICT;
 CREATE INDEX analysis_attempts_recent
     ON analysis_attempts(request_id, claim_epoch DESC);
-INSERT INTO analysis_attempts SELECT * FROM analysis_attempts_v46_backup;
-DROP TABLE analysis_attempts_v46_backup;
+INSERT INTO analysis_attempts SELECT * FROM analysis_attempts_v47_backup;
+DROP TABLE analysis_attempts_v47_backup;
 CREATE TRIGGER analysis_requests_lifecycle_counters
 AFTER UPDATE OF state ON analysis_requests
 WHEN OLD.state <> NEW.state

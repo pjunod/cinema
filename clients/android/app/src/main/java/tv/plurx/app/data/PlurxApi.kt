@@ -136,6 +136,12 @@ interface PlurxApi {
     @GET("files/{id}/content")
     suspend fun bookContent(@Path("id") id: Long): Response<ResponseBody>
 
+    @POST("files/{id}/grants")
+    suspend fun mintFileGrant(
+        @Path("id") id: Long,
+        @Body request: FileGrantRequest,
+    ): FileGrantResponse
+
     @GET("search")
     suspend fun search(@Query("q") query: String, @Query("limit") limit: Int = 200): SearchResponse
 
