@@ -548,6 +548,14 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
         return url("live-tv", "sessions", capability, "index.m3u8").toString()
     }
 
+    /** Probe the same capability playlist before rewinding a live decoder. */
+    internal suspend fun playlistIsLive(capability: String): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val probe = Request.Builder().url(playlistUrl(capability)).head().build()
+            mediaClient.newCall(probe).execute().use { it.code == 200 }
+        }.getOrDefault(false)
+    }
+
     private suspend fun request(
         target: HttpUrl, method: String = "GET", authenticated: Boolean = false,
         body: JsonObject? = null, timeout: Long = 45, starting: Boolean = false,

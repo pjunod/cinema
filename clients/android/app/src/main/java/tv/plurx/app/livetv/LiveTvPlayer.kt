@@ -30,6 +30,17 @@ import tv.plurx.app.player.PlaybackClientLog
 import tv.plurx.app.player.postPlaybackClientLog
 import tv.plurx.app.player.logDisplayModeResult
 
+/** One live-edge rewind per attached session; a new attach resets the budget. */
+internal class LiveEdgeRecovery {
+    private var used = false
+    fun attached() { used = false }
+    fun reserve(): Boolean {
+        if (used) return false
+        used = true
+        return true
+    }
+}
+
 data class LiveTvPlayerState(
     val channels: List<LiveTvChannel> = emptyList(),
     val title: String = "Live TV",
@@ -222,6 +233,22 @@ class LiveTvPlayer private constructor(context: Context) {
             dataSource = OkHttpDataSource.Factory(api.mediaClient),
         )
         player = output
+        val watchdog = LiveTvWatchdog()
+        val liveEdgeRecovery = LiveEdgeRecovery().also { it.attached() }
+        fun reportLiveEdge(outcome: String) {
+            postPlaybackClientLog(
+                scope,
+                PlaybackClientLog(
+                    level = if (outcome == "recovered") "info" else "warn",
+                    event = "live_tv_behind_live_window",
+                    message = "Android Live TV live-edge recovery",
+                    method = "live",
+                    detail = "outcome=$outcome",
+                    ua = "Android Media3",
+                    sessionId = started.session_id,
+                ),
+            )
+        }
         // Both of these tear the player down, and they arrive from
         // inside ExoPlayer's own listener iteration. Releasing a player
         // re-entrantly from its callback is not a documented-safe
@@ -233,6 +260,22 @@ class LiveTvPlayer private constructor(context: Context) {
                 if (mine != serial) return
                 val code = liveTvPlaybackErrorCode(error.errorCode)
                 scope.launch(Dispatchers.Main) {
+                    if (mine != serial) return@launch
+                    if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
+                        val outcome = when {
+                            lease.current !== started || watchdog.expired -> "lease_lost"
+                            !liveEdgeRecovery.reserve() -> "spent"
+                            !api.playlistIsLive(started.session_id) -> "session_gone"
+                            lease.current !== started || watchdog.expired || mine != serial -> "lease_lost"
+                            else -> "recovered"
+                        }
+                        reportLiveEdge(outcome)
+                        if (outcome == "recovered") {
+                            output.seekToDefaultPosition()
+                            output.prepare()
+                            return@launch
+                        }
+                    }
                     if (mine == serial && code == "codec_unsupported" && !compatibilityRetry) {
                         retryCompatible(channel, api, lease, LiveTvCompatibility(
                             failed_video = true, failed_audio = true, failed_container = true,
@@ -254,7 +297,6 @@ class LiveTvPlayer private constructor(context: Context) {
         output.prepare()
         output.play()
         mutableState.value = mutableState.value.copy(playing = true, busy = false, paused = false, muted = false, message = "Playing live")
-        val watchdog = LiveTvWatchdog()
         heartbeat = scope.launch {
             try {
                 while (mine == serial) {
