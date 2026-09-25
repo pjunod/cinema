@@ -1727,7 +1727,7 @@ impl SqliteStore {
     /// The guard rolls back on drop, so an error or a panic inside `f` never
     /// leaves the connection mid-transaction. On an in-memory store this runs
     /// on the writer connection, where the mutex still provides the same.
-    pub(crate) async fn with_read_txn<T, F>(&self, f: F) -> Result<T, StoreError>
+    async fn with_read_txn<T, F>(&self, f: F) -> Result<T, StoreError>
     where
         F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
         T: Send + 'static,
