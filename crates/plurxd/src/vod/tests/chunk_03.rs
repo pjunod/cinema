@@ -1694,6 +1694,243 @@
         drop(permit_b);
     }
 
+    /// One viewer, one encoder permit on the node: a predecessor encoding the
+    /// rendition the viewer is watching (running, well inside its ahead
+    /// window), and the prepared successor a quality change just attached for
+    /// the same playback. The successor is speculative until the client has
+    /// seen its first frame, so it must be able to start before commit.
+    #[cfg(unix)]
+    async fn prepared_handoff_fixture(
+        base: &Path,
+    ) -> (
+        Arc<VodServe>,
+        Arc<Rendition>,
+        Arc<Rendition>,
+        Arc<crate::vodencode::Encoding>,
+    ) {
+        let serve = bare_serve(base);
+        let (file, predecessor_encoding) = encoded_fixture(base).await;
+        let successor_encoding = predecessor_encoding
+            .clone_with_admissions_for_test(predecessor_encoding.admissions.clone())
+            .await;
+        predecessor_encoding
+            .store
+            .put_setting(
+                plurx_core::store::keys::SW_POOL_THREADS,
+                &predecessor_encoding.resources.cpu_threads.max(1).to_string(),
+            )
+            .await
+            .expect("one-encoder software budget");
+        predecessor_encoding
+            .store
+            .put_setting(plurx_core::store::keys::MAX_HW_SESSIONS, "1")
+            .await
+            .expect("one-encoder hardware budget");
+        let permit = predecessor_encoding
+            .try_permit()
+            .await
+            .expect("the predecessor owns the node's only encoder permit");
+        let mut renditions = Vec::new();
+        for (name, encoding) in [
+            ("predecessor", Arc::clone(&predecessor_encoding)),
+            ("successor", Arc::clone(&successor_encoding)),
+        ] {
+            let dir = base.join(name);
+            std::fs::create_dir_all(&dir).expect("rendition base");
+            let mut rendition = synthetic_rendition(&dir).await;
+            let mutable = Arc::get_mut(&mut rendition).expect("unshared rendition");
+            mutable.key = format!("{name}-rendition");
+            mutable.recipe.file = file.clone();
+            mutable.recipe.encoding = Some(encoding);
+            serve
+                .shared
+                .renditions
+                .lock()
+                .await
+                .insert(rendition.key.clone(), Arc::clone(&rendition));
+            renditions.push(rendition);
+        }
+        let successor = renditions.pop().expect("successor");
+        let predecessor = renditions.pop().expect("predecessor");
+        successor_encoding.mark_speculative();
+        {
+            let mut manifest = predecessor.manifest.lock().await;
+            for index in 0..=3 {
+                manifest.materialize(index, 1_000, 0);
+            }
+        }
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("fake encoded predecessor");
+        predecessor
+            .slot
+            .attach_owned(child, 0, Some(Box::new(permit)))
+            .await;
+        predecessor.slot.produced(3).await;
+        insert_control_session(&serve, "old-session", Arc::clone(&predecessor), Instant::now())
+            .await;
+        insert_control_session(&serve, "new-session", Arc::clone(&successor), Instant::now())
+            .await;
+        assert!(serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("old-session")
+            .expect("predecessor session")
+            .control
+            .lock()
+            .expect("control lock")
+            .stage_preparation(
+                uuid::Uuid::new_v4().to_string(),
+                uuid::Uuid::new_v4().to_string(),
+                i64::MAX,
+                None,
+            ));
+        driver_pass(&serve.shared, &predecessor).await;
+        assert!(
+            matches!(predecessor.slot.belief().await, Producer::Running { .. }),
+            "a predecessor inside its ahead window is still producing"
+        );
+        // Drain any kick left by setup so the assertions below see only the
+        // successor's.
+        let _ = futures_util::FutureExt::now_or_never(predecessor.wake.notified());
+        (serve, predecessor, successor, successor_encoding)
+    }
+
+    /// Production (m6, f600d282): every quality change on a full encoder pool
+    /// logged `segment_pending` for the successor's init.mp4 and then
+    /// `producer_failed`, and no successor ever spawned. The successor asks as
+    /// `Speculative`, which registers no waiter, and a running predecessor
+    /// only ever yields to a registered live waiter — so the viewer's own
+    /// predecessor sat on the only permit until its 180 s ahead window filled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_prepared_successor_takes_its_own_viewers_running_predecessors_permit() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let (serve, predecessor, successor, successor_encoding) =
+            prepared_handoff_fixture(base.path()).await;
+
+        driver_pass(&serve.shared, &successor).await;
+        assert!(matches!(
+            successor.slot.belief().await,
+            Producer::Absent { .. }
+        ));
+        let asked = tokio::time::timeout(Duration::from_secs(1), predecessor.wake.notified())
+            .await
+            .is_ok();
+
+        driver_pass(&serve.shared, &predecessor).await;
+        wait_for_belief(
+            &predecessor,
+            |belief| matches!(belief, Producer::Absent { .. }),
+            "the running predecessor to give its permit back",
+        )
+        .await;
+        assert!(
+            asked,
+            "the refused successor wakes its own viewer's predecessor"
+        );
+        assert!(
+            successor_encoding.is_waiting(),
+            "the refused successor keeps retrying from its own driver instead of \
+             waiting for the next GET"
+        );
+        assert!(serve
+            .shared
+            .pool
+            .metrics_handle()
+            .prometheus()
+            .contains("plurx_vod_producer_terminations_total{why=\"yield_to_waiter\"} 1"));
+
+        // Its viewer is still attached and still wants media, but it must not
+        // take the permit back while its own successor is waiting for it.
+        let admission = Arc::new(tokio::sync::Barrier::new(2));
+        *predecessor
+            .recipe
+            .encoding
+            .as_ref()
+            .expect("encoded predecessor")
+            .admission_pause
+            .lock()
+            .expect("admission test seam") = Some(Arc::clone(&admission));
+        let observer = Arc::clone(&admission);
+        let admission_reached = tokio::spawn(async move { observer.wait().await });
+        driver_pass(&serve.shared, &predecessor).await;
+        assert!(!admission_reached.is_finished());
+        admission_reached.abort();
+        predecessor
+            .recipe
+            .encoding
+            .as_ref()
+            .expect("encoded predecessor")
+            .admission_pause
+            .lock()
+            .expect("admission test seam")
+            .take();
+
+        let permit = successor_encoding
+            .try_permit()
+            .await
+            .expect("the prepared successor is admitted with the yielded permit");
+        assert!(!successor_encoding.is_waiting());
+        drop(permit);
+    }
+
+    /// The invariants the handoff must not bend: a speculative successor never
+    /// preempts anything while another viewer is waiting for capacity, and
+    /// never touches a predecessor another viewer is also reading.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_prepared_successor_never_preempts_past_a_waiting_viewer_or_a_shared_rendition() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let (serve, predecessor, successor, successor_encoding) =
+            prepared_handoff_fixture(base.path()).await;
+
+        let other_viewer = successor_encoding.admissions.wait_for_slot();
+        driver_pass(&serve.shared, &successor).await;
+        assert!(!predecessor.handoff_requested());
+        assert!(!successor_encoding.is_waiting());
+        driver_pass(&serve.shared, &predecessor).await;
+        assert!(
+            matches!(predecessor.slot.belief().await, Producer::Running { .. }),
+            "a waiting viewer is served first; the successor does not clear its way"
+        );
+        drop(other_viewer);
+
+        insert_control_session(&serve, "someone-else", Arc::clone(&predecessor), Instant::now())
+            .await;
+        serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get_mut("someone-else")
+            .expect("second viewer")
+            .playback_id = "another-playback".into();
+        driver_pass(&serve.shared, &successor).await;
+        assert!(!predecessor.handoff_requested());
+        driver_pass(&serve.shared, &predecessor).await;
+        assert!(
+            matches!(predecessor.slot.belief().await, Producer::Running { .. }),
+            "a rendition another viewer is reading is never preempted for a handoff"
+        );
+        assert!(successor_encoding.try_permit().await.is_none());
+        perform_driver_step(
+            &serve.shared,
+            &predecessor,
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+        )
+        .await
+        .expect("cleanup fake predecessor");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn capacity_hold_status_stays_none_across_a_yield() {

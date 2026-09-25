@@ -792,6 +792,8 @@
             dormant_since: StdMutex::new(None),
             closed: AtomicBool::new(false),
             warned_admission: AtomicBool::new(false),
+            permit_wait_logged: AtomicBool::new(false),
+            handoff_requested_until: StdMutex::new(None),
             demand_since: StdMutex::new(HashMap::new()),
         })
     }

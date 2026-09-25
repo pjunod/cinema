@@ -75,6 +75,13 @@ const SESSION_IDLE_TTL: Duration = Duration::from_secs(300);
 /// encoders within their five-second admission budget so they can yield.
 const STOPPED_ENCODER_POLL: Duration = Duration::from_secs(1);
 
+/// How long one refused prepared successor's request keeps its own viewer's
+/// predecessor from producing. The successor refreshes it on every refused
+/// retry (its driver polls every 250 ms while it waits), so it expires on its
+/// own shortly after the successor either starts or goes away, and the
+/// predecessor is never parked by a successor that no longer exists.
+const HANDOFF_REQUEST_TTL: Duration = Duration::from_secs(2);
+
 /// How long a rendition with no attached sessions is kept warm before an
 /// un-admitted one is purged. Admitted renditions are the completed cache and
 /// are never purged here — cache retention is `cachekeep`'s job, not a TTL's.
@@ -1432,6 +1439,12 @@ struct Rendition {
     closed: AtomicBool,
     /// One admission-refusal line per fill, not one per materialize.
     warned_admission: AtomicBool,
+    /// One "waiting for an encoder permit" line per wait episode, not one per
+    /// driver pass. Cleared when a permit is granted or demand goes away.
+    permit_wait_logged: AtomicBool,
+    /// Until when this rendition's producer must give its encoder permit to a
+    /// prepared successor of the viewer reading it (and not take one back).
+    handoff_requested_until: StdMutex<Option<Instant>>,
     /// First blocked demand per plan entry, retained across HTTP 503 retries.
     demand_since: StdMutex<HashMap<u32, MaterializeClock>>,
 }
@@ -1439,6 +1452,18 @@ struct Rendition {
 impl Rendition {
     fn kick(&self) {
         self.wake.notify_one();
+    }
+
+    fn request_handoff(&self) {
+        *self.handoff_requested_until.lock().expect("handoff lock") =
+            Some(Instant::now() + HANDOFF_REQUEST_TTL);
+    }
+
+    fn handoff_requested(&self) -> bool {
+        self.handoff_requested_until
+            .lock()
+            .expect("handoff lock")
+            .is_some_and(|until| Instant::now() < until)
     }
 
     fn failure(&self) -> Option<RenditionFailure> {
@@ -2341,6 +2366,8 @@ impl VodServe {
             dormant_since: StdMutex::new(None),
             closed: AtomicBool::new(false),
             warned_admission: AtomicBool::new(false),
+            permit_wait_logged: AtomicBool::new(false),
+            handoff_requested_until: StdMutex::new(None),
             demand_since: StdMutex::new(HashMap::new()),
         });
 
@@ -6056,6 +6083,8 @@ impl Shared {
             dormant_since: StdMutex::new(Some(Instant::now())),
             closed: AtomicBool::new(false),
             warned_admission: AtomicBool::new(false),
+            permit_wait_logged: AtomicBool::new(false),
+            handoff_requested_until: StdMutex::new(None),
             demand_since: StdMutex::new(HashMap::new()),
         });
         Ok(rendition)
@@ -6415,6 +6444,152 @@ async fn perform_driver_step(
     Ok(performed)
 }
 
+/// An encoded rendition that wanted to start was refused an encoder permit.
+///
+/// A prepared successor (speculative priority) never registers a pool waiter,
+/// so nothing a running producer checks would ever make room for it, and on a
+/// full pool the viewer's switch could only fail. The one permit it may claim
+/// is its own viewer's: ask that viewer's predecessor to hand it over, and
+/// keep this driver polling so it takes the permit as soon as it is reaped.
+async fn report_permit_wait(
+    shared: &Arc<Shared>,
+    rendition: &Arc<Rendition>,
+    encoding: &crate::vodencode::Encoding,
+) {
+    let handoff = if encoding.is_speculative() {
+        request_predecessor_handoff(shared, rendition, encoding).await
+    } else {
+        None
+    };
+    encoding.handoff_wait.store(handoff.is_some(), Relaxed);
+    let Some(refusal) = encoding.last_refusal() else {
+        // A policy-read failure registered no capacity wait; it is retried
+        // and reported by its own path.
+        return;
+    };
+    if rendition.permit_wait_logged.swap(true, Relaxed) {
+        return;
+    }
+    tracing::info!(
+        rendition = %rendition.key,
+        priority = ?refusal.priority,
+        hardware_used = refusal.pool.hardware_used,
+        hardware_limit = refusal.hardware_limit,
+        software_used = refusal.pool.software_used,
+        software_budget = refusal.software_budget,
+        wants_hardware = encoding.resources.hardware_slot,
+        wants_threads = encoding.resources.cpu_threads,
+        live_waiters = refusal.pool.live_waiting,
+        background_holds_permit = refusal.pool.background_active,
+        over_budget = refusal.over_budget,
+        handoff_from = handoff.as_deref().unwrap_or("none"),
+        "encoded vod rendition is waiting for an encoder permit"
+    );
+}
+
+/// Ask the one predecessor that belongs to this successor's own viewer to
+/// give back its encoder permit. Returns the predecessor's rendition key.
+///
+/// Every condition here is a reason *not* to preempt anybody:
+/// - the refusal is ordinary capacity, not an impossible plan, a live viewer
+///   already waiting (speculative work never jumps one), or background work
+///   (which yields to live, never to speculative);
+/// - the predecessor is read only by sessions of this same viewer that are
+///   currently being replaced (a staged or committing preparation), so no
+///   other viewer's stream is touched;
+/// - it actually holds a process, and returning its permit is enough for this
+///   exact plan to be admitted, so it is never killed for nothing.
+async fn request_predecessor_handoff(
+    shared: &Arc<Shared>,
+    successor: &Arc<Rendition>,
+    encoding: &crate::vodencode::Encoding,
+) -> Option<String> {
+    let refusal = encoding.last_refusal()?;
+    if refusal.over_budget || refusal.pool.live_waiting > 0 || refusal.pool.background_active {
+        return None;
+    }
+    struct Attached {
+        viewer: (String, String),
+        replacing: bool,
+        rendition: Arc<Rendition>,
+    }
+    let attached: HashMap<String, Attached> = {
+        let sessions = shared.sessions.lock().await;
+        sessions
+            .iter()
+            .filter_map(|(id, session)| {
+                let rendition = session.live_rendition()?;
+                let replacing = session
+                    .control
+                    .lock()
+                    .expect("control lock")
+                    .has_live_preparation();
+                Some((
+                    id.clone(),
+                    Attached {
+                        viewer: (session.playback_id.clone(), session.user_name.clone()),
+                        replacing,
+                        rendition: Arc::clone(rendition),
+                    },
+                ))
+            })
+            .collect()
+    };
+    let viewers: HashSet<(String, String)> = attached
+        .values()
+        .filter(|attached| Arc::ptr_eq(&attached.rendition, successor))
+        .map(|attached| attached.viewer.clone())
+        .collect();
+    if viewers.is_empty() {
+        return None;
+    }
+    let being_replaced =
+        |attached: &Attached| attached.replacing && viewers.contains(&attached.viewer);
+    let mut candidates: Vec<Arc<Rendition>> = Vec::new();
+    for attached in attached.values() {
+        if being_replaced(attached)
+            && !Arc::ptr_eq(&attached.rendition, successor)
+            && !candidates
+                .iter()
+                .any(|candidate| Arc::ptr_eq(candidate, &attached.rendition))
+        {
+            candidates.push(Arc::clone(&attached.rendition));
+        }
+    }
+    for predecessor in candidates {
+        let Some(released) = predecessor.recipe.encoding.as_ref() else {
+            continue;
+        };
+        if predecessor.closed.load(Relaxed) {
+            continue;
+        }
+        let exclusive = predecessor
+            .readers
+            .lock()
+            .await
+            .keys()
+            .all(|id| attached.get(id).is_some_and(being_replaced));
+        if !exclusive {
+            continue;
+        }
+        if matches!(predecessor.slot.belief().await, Producer::Absent { .. }) {
+            // Already yielded and still parked for this handoff: keep this
+            // driver retrying without extending the predecessor's parking.
+            if predecessor.handoff_requested() {
+                return Some(predecessor.key.clone());
+            }
+            continue;
+        }
+        if !encoding.fits_after_release(&released.resources) {
+            continue;
+        }
+        predecessor.request_handoff();
+        predecessor.kick();
+        return Some(predecessor.key.clone());
+    }
+    None
+}
+
 /// One pass: demand → decide → step → carry it out.
 async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
     let mut prepared_permit = None;
@@ -6484,17 +6659,28 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             &decision,
             next_step(belief, decision.action),
         );
+        let handoff_requested =
+            rendition.recipe.encoding.is_some() && rendition.handoff_requested();
         let contention = rendition.recipe.encoding.as_ref().map_or(
             Contention {
                 live_waiting: false,
                 holds_permit: false,
+                handoff_waiting: false,
             },
             |encoding| Contention {
                 live_waiting: encoding.admissions.live_is_waiting(),
                 holds_permit: true,
+                handoff_waiting: handoff_requested,
             },
         );
         let step = yield_step(belief, step, contention);
+        let yielding_for_handoff = handoff_requested
+            && matches!(
+                step,
+                Step::Terminate {
+                    why: Termination::YieldToWaiter
+                }
+            );
         if matches!(step, Step::Start { .. } | Step::Restart { .. }) && prepared_permit.is_none() {
             if let Some(encoding) = &rendition.recipe.encoding {
                 // The old child may own this pool's only permit. Retire it before
@@ -6514,12 +6700,22 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
                         }
                     }
                 }
+                if handoff_requested {
+                    // This viewer's own prepared successor is waiting for
+                    // exactly this capacity. Competing for it as live work
+                    // would register a waiter the speculative successor can
+                    // never pass, and would take back what was just yielded.
+                    encoding.cancel_wait();
+                    return;
+                }
                 let was_waiting = encoding.has_live_wait();
                 prepared_permit = encoding.try_permit().await;
                 notify_new_vod_live_wait(shared, encoding, was_waiting, prepared_permit.is_some());
                 if prepared_permit.is_none() {
+                    report_permit_wait(shared, rendition, encoding).await;
                     return;
                 }
+                rendition.permit_wait_logged.store(false, Relaxed);
                 // Admission is not permission to execute the old decision. A
                 // seek/cancellation/publication may have changed it while waiting.
                 // Re-read producer belief and current admitted/accepted demand.
@@ -6546,6 +6742,7 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
         if !matches!(step, Step::Start { .. } | Step::Restart { .. }) {
             if let Some(encoding) = &rendition.recipe.encoding {
                 encoding.cancel_wait();
+                rendition.permit_wait_logged.store(false, Relaxed);
             }
         }
         match step {
@@ -6568,6 +6765,14 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
                     Err(error) => {
                         tracing::debug!(rendition = %rendition.key, "performing {step:?}: {error}");
                     }
+                }
+                if yielding_for_handoff {
+                    tracing::info!(
+                        rendition = %rendition.key,
+                        "gave this viewer's encoder permit to its prepared successor"
+                    );
+                    // The successor also polls, but it need not wait for it.
+                    shared.kick_all();
                 }
             }
             Step::Start { .. } | Step::Restart { .. } => {

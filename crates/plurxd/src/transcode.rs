@@ -19585,6 +19585,8 @@ impl TranscodeManager {
             speculative: std::sync::atomic::AtomicBool::new(false),
             queued: std::sync::Mutex::new(None),
             policy_retry: std::sync::atomic::AtomicBool::new(false),
+            handoff_wait: std::sync::atomic::AtomicBool::new(false),
+            last_refusal: std::sync::Mutex::new(None),
             #[cfg(test)]
             admission_pause: std::sync::Mutex::new(None),
         })))

@@ -4165,6 +4165,16 @@ impl ControlState {
         self.preparation.staged_incarnation_id()
     }
 
+    /// Whether a successor for this playback is staged or committing — that
+    /// is, being built right now to replace this session. An aborting slot is
+    /// not: that successor is being torn down and is owed nothing.
+    pub(crate) fn has_live_preparation(&self) -> bool {
+        matches!(
+            self.preparation,
+            PreparationSlot::Staged { .. } | PreparationSlot::Committing { .. }
+        )
+    }
+
     /// Whether this exact successor may still be committed.
     pub(crate) fn may_commit_preparation(&self, staged_incarnation_id: &str) -> bool {
         self.preparation.may_commit(staged_incarnation_id)

@@ -124,6 +124,16 @@ impl PermitState {
     }
 }
 
+/// What the shared pools looked like at one instant, for a log line that has
+/// to explain why an encoder could not start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolSnapshot {
+    pub hardware_used: usize,
+    pub software_used: usize,
+    pub live_waiting: usize,
+    pub background_active: bool,
+}
+
 /// A held hardware slot. Releases on drop — which is what keeps the count
 /// honest across every way a session can end, including the ones nobody
 /// remembers to write a branch for.
@@ -597,6 +607,57 @@ impl Admissions {
             .background_active()
     }
 
+    /// One consistent view of the shared pools, for attributing a refusal.
+    pub fn snapshot(&self) -> PoolSnapshot {
+        let permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        PoolSnapshot {
+            hardware_used: permits.hardware_used(),
+            software_used: permits.software_used(),
+            live_waiting: permits.live_waiting,
+            background_active: permits.background_active(),
+        }
+    }
+
+    /// Would a speculative request for `wanted` be granted if a permit sized
+    /// `released` were returned first?
+    ///
+    /// Asked before a prepared successor asks its own viewer's predecessor to
+    /// give its permit back, so that a predecessor is never terminated for a
+    /// successor that still could not start: the same speculative rules as
+    /// [`Self::try_admit_bundle`], including never crossing a live waiter or
+    /// background ownership, evaluated under the same single lock.
+    pub fn speculative_fits_after_release(
+        &self,
+        hardware_max: usize,
+        software_budget: usize,
+        wanted: &TranscodeResourceEstimate,
+        released: &TranscodeResourceEstimate,
+    ) -> bool {
+        let permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if permits.live_waiting > 0 || permits.background_active() {
+            return false;
+        }
+        let hardware_used = permits
+            .hardware_used()
+            .saturating_sub(usize::from(released.hardware_slot));
+        if wanted.hardware_slot && hardware_used >= hardware_max {
+            return false;
+        }
+        if wanted.cpu_threads > 0 {
+            let used = permits.software_used().saturating_sub(released.cpu_threads);
+            if used > 0 && used + wanted.cpu_threads > software_budget {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Take a slot if one is free. Capacity and owner change under the same
     /// mutex, which makes two racing starts unable to both succeed on the last
     /// slot and closes the waiter-registration/background-acquisition race.
@@ -828,6 +889,54 @@ pub fn software_budget() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_speculative_fit_after_release_keeps_every_priority_rule() {
+        let pool = Admissions::new();
+        let software = TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: 4,
+            decoder_threads: None,
+        };
+        let hardware = TranscodeResourceEstimate {
+            hardware_slot: true,
+            cpu_threads: 0,
+            decoder_threads: None,
+        };
+        let held = pool
+            .try_admit_bundle(1, 4, &software, Priority::Live)
+            .expect("the only software share");
+        assert!(pool
+            .try_admit_bundle(1, 4, &software, Priority::Speculative)
+            .is_none());
+        assert!(pool.speculative_fits_after_release(1, 4, &software, &software));
+        assert!(
+            !pool.speculative_fits_after_release(1, 4, &software, &hardware),
+            "returning a permit of the wrong kind admits nothing"
+        );
+        let waiter = pool.wait_for_slot();
+        assert!(
+            !pool.speculative_fits_after_release(1, 4, &software, &software),
+            "speculative work never jumps a waiting viewer"
+        );
+        drop(waiter);
+        let background = pool.try_admit_bundle(1, 4, &hardware, Priority::Background);
+        assert!(background.is_none(), "live ownership parks background work");
+        drop(held);
+        let background = pool
+            .try_admit_bundle(1, 4, &hardware, Priority::Background)
+            .expect("idle pool admits background");
+        assert!(
+            !pool.speculative_fits_after_release(1, 4, &software, &hardware),
+            "background ownership is never crossed by speculative work"
+        );
+        drop(background);
+        let snapshot = pool.snapshot();
+        assert_eq!(snapshot.hardware_used, 0);
+        assert_eq!(snapshot.software_used, 0);
+        assert_eq!(snapshot.live_waiting, 0);
+        assert!(!snapshot.background_active);
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn work(
