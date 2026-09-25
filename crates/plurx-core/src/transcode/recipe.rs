@@ -178,6 +178,7 @@ mod tests {
 
     fn media() -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 42,
             item_id: 7,
             path: PathBuf::from("/media/Heat.mkv"),

@@ -6208,6 +6208,7 @@ mod tests {
     fn media_file(path: PathBuf) -> MediaFile {
         let metadata = std::fs::metadata(&path).expect("source metadata");
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 17,
             item_id: 3,
             path,

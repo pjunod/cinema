@@ -1175,6 +1175,7 @@ mod tests {
             .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
             .unwrap_or(0);
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 41,
             item_id: 7,
             path,

@@ -33,7 +33,7 @@ const ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, yea
      book_metadata_source";
 
 pub(super) const IDENTITY_REPAIR_ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, year, overview, tmdb_id, imdb_id, season_number, episode_number, air_date, runtime_ms, poster_path, backdrop_path, added_at, updated_at, recorded_at, tags, nfo_seeded_at, metadata_at, artwork_attempted_at, artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source";
-pub(super) const IDENTITY_REPAIR_FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, mastering_max_luminance, luminance_source";
+pub(super) const IDENTITY_REPAIR_FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles";
 
 fn item_cols(alias: &str) -> String {
     ITEM_COLS
@@ -437,7 +437,7 @@ const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container,
      subtitle_streams, scanned_at, hdr_format, audio_offset_ms, \
      dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, \
      (probe_json IS NOT NULL) AS probed, video_codec_tag, field_order, \
-     max_cll, max_fall, mastering_max_luminance, luminance_source";
+     max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles";
 
 struct FileRow {
     id: i64,
@@ -456,6 +456,7 @@ struct FileRow {
     bitrate: Option<i64>,
     audio_streams: String,
     subtitle_streams: String,
+    downloaded_subtitles: String,
     scanned_at: i64,
     hdr_format: Option<String>,
     audio_offset_ms: i64,
@@ -492,6 +493,7 @@ impl From<&mut Row<'_>> for FileRow {
             bitrate: row.get("bitrate"),
             audio_streams: row.get("audio_streams"),
             subtitle_streams: row.get("subtitle_streams"),
+            downloaded_subtitles: row.get("downloaded_subtitles"),
             scanned_at: row.get("scanned_at"),
             hdr_format: row.get("hdr_format"),
             audio_offset_ms: row.get("audio_offset_ms"),
@@ -515,7 +517,8 @@ impl TryFrom<FileRow> for MediaFile {
     type Error = StoreError;
 
     fn try_from(row: FileRow) -> Result<Self, Self::Error> {
-        Ok(Self {
+        Self {
+            downloaded_subtitles: Vec::new(),
             id: row.id,
             item_id: row.item_id,
             path: row.path.into(),
@@ -551,7 +554,9 @@ impl TryFrom<FileRow> for MediaFile {
             max_fall: row.max_fall,
             mastering_max_luminance: row.mastering_max_luminance,
             luminance_source: row.luminance_source,
-        })
+        }
+        .with_downloaded_subtitles(&row.downloaded_subtitles)
+        .map_err(database_error)
     }
 }
 
@@ -2853,6 +2858,47 @@ impl MediaStore for HiqliteAuthStore {
             .await
             .map_err(database_error)?;
         Ok(row.id)
+    }
+
+    async fn add_downloaded_subtitle(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+    ) -> Result<bool, StoreError> {
+        let raw = super::downloaded_subtitles::encode(track)?;
+        let changed = self
+            .client()
+            .execute(
+                super::downloaded_subtitles::ADD_DOWNLOADED_SUBTITLE,
+                params!(
+                    file_id,
+                    track.source_size,
+                    track.source_mtime,
+                    raw,
+                    track.provider_file_id
+                ),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(changed == 1)
+    }
+
+    async fn subtitle_candidate_file_ids(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<i64>, StoreError> {
+        Ok(self
+            .client()
+            .query_consistent_map::<IdRow, _>(
+                super::downloaded_subtitles::CANDIDATES,
+                params!(after_id, limit.clamp(1, 16)),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| row.id)
+            .collect())
     }
 
     async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {

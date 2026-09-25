@@ -4320,6 +4320,41 @@ Activity without disabling offline work for everyone else. Look for
 `offline package ready`, `offline preparation failed`, and
 `offline expiry sweep failed` in Settings → Logs when diagnosing preparation.
 
+## Download missing subtitles
+
+In the web app, open **Settings → Integrations → OpenSubtitles → Configure
+OpenSubtitles**. Create an API key through the linked OpenSubtitles consumer
+page and save it here. An account username and password are optional; the
+provider determines the download allowance. The form never reads saved
+secrets back into the browser. Empty input boxes keep existing credentials;
+**Disable and clear credentials** removes them and turns automation off.
+
+Open a movie or episode, choose **Find subtitles**, select a language and
+search. Compare the release names: **File match** means OpenSubtitles reports
+a match to this file's hash; another release can have different cue timing.
+**Download** saves captions and selects the returned track for the next web
+playback. Downloaded tracks also appear in the existing subtitle pickers on
+Apple and Android after the title is refreshed. Native clients currently use
+the web app for the search/download action.
+
+For unattended acquisition, enable the automatic checkbox and enter one to
+three language codes, such as `en, fr`. The job only accepts file matches
+with complete captions; forced-only and machine/AI-translated tracks are
+left for manual choice. A full track in the requested language already
+present in the file or catalog prevents another acquisition. The job visits
+up to sixteen catalog files per pass, with a 120-second work budget and a
+persisted three-minute cooldown. After a complete catalog pass it waits
+24 hours before starting again. Playback does not wait for it.
+
+**Reading the result:** no matches means the provider returned no suitable
+subtitles for that search. A credentials error means the administrator must
+check the API key/account. A quota error means the provider allowance is
+exhausted; automatic work pauses for the provider's retry interval, or one
+hour when no interval is supplied. Provider failures leave existing tracks
+available. The caption limit is eight tracks per source revision, each at
+most 256 KiB of normalized WebVTT. Downloaded tracks survive cache cleanup
+and ordinary rescans; replacing the media invalidates its old associations.
+
 ## Pairing another application (Curator) — the runbook
 
 Another application can ask plurx to index exactly the folder it just wrote,

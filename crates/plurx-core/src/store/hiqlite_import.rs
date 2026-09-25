@@ -524,6 +524,7 @@ const TABLES: &[TablePlan] = &[
             "max_fall",
             "mastering_max_luminance",
             "luminance_source",
+            "downloaded_subtitles",
         ],
         order_by: "id",
         minimum_schema: 5,
@@ -2528,6 +2529,8 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 // stored probe JSON crosses with the row and the destination's
                 // bounded backfill recovers a valid tag afterward.
                 "NULL".to_owned()
+            } else if table.name == "files" && *column == "downloaded_subtitles" && schema_version < 67 {
+                "'[]'".to_owned()
             } else if table.name == "files" && *column == "field_order" && schema_version < 64 {
                 // The stored probe document crosses with every legacy row;
                 // the destination's fenced bounded job recovers the token.
@@ -2892,7 +2895,7 @@ mod tests {
         assert!(
             v37.ends_with(
                 "hdr_format, audio_offset_ms, NULL, NULL, NULL, NULL, NULL, NULL, NULL, \
-                 NULL, NULL, NULL, NULL"
+                 NULL, NULL, NULL, NULL, '[]'"
             ),
             "{v37}"
         );
@@ -2900,7 +2903,7 @@ mod tests {
             current.ends_with(
                 "hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, \
                  dv_el_present, dv_rpu_present, video_codec_tag, field_order, \
-                 max_cll, max_fall, mastering_max_luminance, luminance_source"
+                 max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles"
             ),
             "{current}"
         );
@@ -2916,12 +2919,14 @@ mod tests {
         let v59 = value_projection(table, 59, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
         assert!(
-            v59.ends_with("dv_el_present, dv_rpu_present, NULL, NULL, NULL, NULL, NULL, NULL"),
+            v59.ends_with(
+                "dv_el_present, dv_rpu_present, NULL, NULL, NULL, NULL, NULL, NULL, '[]'"
+            ),
             "{v59}"
         );
         assert!(current.ends_with(
             "dv_el_present, dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, \
-             mastering_max_luminance, luminance_source"
+             mastering_max_luminance, luminance_source, downloaded_subtitles"
         ));
     }
 
@@ -2935,12 +2940,12 @@ mod tests {
         let v63 = value_projection(table, 63, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
         assert!(
-            v63.ends_with("dv_rpu_present, video_codec_tag, NULL, NULL, NULL, NULL, NULL"),
+            v63.ends_with("dv_rpu_present, video_codec_tag, NULL, NULL, NULL, NULL, NULL, '[]'"),
             "{v63}"
         );
         assert!(current.ends_with(
             "dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, \
-             mastering_max_luminance, luminance_source"
+             mastering_max_luminance, luminance_source, downloaded_subtitles"
         ));
     }
 
@@ -2956,13 +2961,21 @@ mod tests {
         let v64 = value_projection(table, 64, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
         assert!(
-            v64.ends_with("video_codec_tag, field_order, NULL, NULL, NULL, NULL"),
+            v64.ends_with("video_codec_tag, field_order, NULL, NULL, NULL, NULL, '[]'"),
             "{v64}"
         );
         assert!(current.ends_with(
             "video_codec_tag, field_order, max_cll, max_fall, mastering_max_luminance, \
-             luminance_source"
+             luminance_source, downloaded_subtitles"
         ));
+    }
+
+    #[test]
+    fn pre_v67_file_projection_supplies_empty_downloaded_subtitles() {
+        let table = files_plan();
+        assert!(value_projection(table, 66, false).ends_with("luminance_source, '[]'"));
+        assert!(value_projection(table, SQLITE_SCHEMA_VERSION, false)
+            .ends_with("luminance_source, downloaded_subtitles"));
     }
 
     /// Every import plan must name the migration that actually creates its

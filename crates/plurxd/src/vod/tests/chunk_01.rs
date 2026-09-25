@@ -400,6 +400,7 @@
 
     fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path,
