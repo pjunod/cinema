@@ -2020,7 +2020,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # rolling producer or outlives its request or queue owner.
 # +5 VOD successor handoff: one production task, the handoff expiry wake (one
 # sleep-then-kick per parked predecessor, bounded by the 2 s window), and four in its tests.
-expected_occurrences = 615
+# 615 -> 619 with K-03 (replicated write-rate hygiene), all test-only. In
+# `watched::tests`: the drain loop under test in the local-delivery test, and
+# the two drains (`runner_a`, `runner_b`) of the singleton failover test; each
+# is aborted before its test returns. In `media_sessions::takeover_gate_tests`:
+# one task that flips the takeover switch after 3 virtual seconds and exits.
+# The production spawn of the watched drain in `main.rs` changed its argument
+# only. None owns a producer, a process or a recipe decision.
+expected_occurrences = 619
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2743,7 +2750,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # with a shutdown-token exit. None chooses a playback recipe or retry.
 # +8 VOD successor handoff: the 2 s handoff/reservation deadlines, the 250 ms
 # successor poll, the expiry wake instant, and test deadlines.
-expected_occurrences = 945
+# 945 -> 960 with K-03. Shipped, net +1: the watched drain's fixed 1 s
+# `tokio::time::interval` became a `tokio::time::sleep(delay)` whose length
+# the drain policy chooses (1 s working, backing off to 10 s idle, never past
+# the 30 s forced claim), and the takeover loop gains one idle
+# `tokio::time::sleep` of up to 8 s while its switches are off, cut short by a
+# local switch write. Neither decides anything about playback; both only pace
+# a background poll. Test-only, +14: the takeover gate tests' 2 s interval and
+# 3 s flip delay (virtual clock), and in `watched::tests` the 4 s settle, the
+# 1.5 s non-owner observation window, five bounded waits (3 s and 5 s
+# timeouts that assert rather than hang) and their five 20 ms polls.
+expected_occurrences = 960
 
 [[module_structures]]
 id = "bare-time-constructor"

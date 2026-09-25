@@ -1164,13 +1164,12 @@ mod tests {
             delays.iter().all(|delay| *delay <= IDLE_TICK_MAX),
             "{delays:?}"
         );
-        assert_eq!(
+        assert!(
             delays
                 .iter()
                 .filter(|delay| **delay == IDLE_TICK_MAX)
                 .count()
                 >= 10,
-            true,
             "an idle drain spends its time at the ceiling: {delays:?}"
         );
         assert!(
@@ -1302,7 +1301,7 @@ mod tests {
 
         store.enqueue_watched("{}").await.expect("enqueue");
         tokio::time::timeout(Duration::from_secs(5), async {
-            while received.lock().await.len() < 1 {
+            while received.lock().await.is_empty() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })

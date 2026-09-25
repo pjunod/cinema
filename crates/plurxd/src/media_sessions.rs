@@ -8416,7 +8416,7 @@ mod takeover_gate_tests {
         }
     }
 
-    fn interval() -> tokio::time::Interval {
+    fn takeover_interval() -> tokio::time::Interval {
         let mut interval = tokio::time::interval(TAKEOVER_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval
@@ -8429,7 +8429,7 @@ mod takeover_gate_tests {
     async fn takeover_loop_reads_the_switches_once_a_minute_while_off() {
         let switches = Switches::default();
         let mut gate = TakeoverGate::default();
-        let mut interval = interval();
+        let mut interval = takeover_interval();
         let started = tokio::time::Instant::now();
         let mut inventories = 0;
         while started.elapsed() < Duration::from_secs(600) {
@@ -8455,7 +8455,7 @@ mod takeover_gate_tests {
     async fn takeover_loop_wakes_on_a_local_flip_and_keeps_its_two_second_cadence() {
         let switches = Arc::new(Switches::default());
         let mut gate = TakeoverGate::default();
-        let mut interval = interval();
+        let mut interval = takeover_interval();
         // Settle into the off state.
         for _ in 0..3 {
             assert!(!gate.wait_for_tick(&mut interval, switches.as_ref()).await);
