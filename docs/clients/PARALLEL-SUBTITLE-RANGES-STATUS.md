@@ -28,8 +28,10 @@ The client retry ladder is unchanged. No deployment is part of this work.
 
 The implementation milestones are `ccb795c8`, `e4cbdb7c` and `ad7dda80`.
 Their normal commit hooks passed catalog lint, pinned workspace/all-target
-Clippy, formatting and JavaScript syntax. Behavioral test execution remains
-after the single adversarial review.
+Clippy, formatting and JavaScript syntax. After the single adversarial
+review, `ff7d1835` fixed cancellation during publication and all 10 range
+regressions plus the unsigned-handler regression passed; §6 and §7 record
+the review disposition and commands.
 
 Pinned local Rust 1.97.1 was verified with `rustup run 1.97.1 rustc --version`;
 `rustup run 1.97.1 cargo check -p plurxd --all-targets --offline` passed on the
@@ -58,8 +60,9 @@ latency measurement or a physical byte bound for every subtitle layout.
 | Pinned compiler loop and bounded-seek experiment | complete |
 | Authenticated peer range execution and source fencing | implemented; signed request/response, digest and cue checks, per-peer/node limits |
 | Parallel current/next window publication and playback integration | implemented; current extraction starts before peer discovery and publishes independently |
-| Named regressions and documentation | written; execution deferred until the one adversarial review |
-| One adversarial review, then focused/fast-lane tests | pending |
+| Named regressions and documentation | complete; 10 range tests and 1 unsigned-handler test passed after review fixes |
+| Single adversarial review | complete; cancellation finding fixed and acceptance limits recorded in §6 |
+| Current candidate fast-lane qualification | pending; PR is ready for the non-draft qualification run |
 | Deployment and physical client measurements | outside this change |
 
 The implementation owns `subtitle_ranges.rs`, subtitle window plumbing in
