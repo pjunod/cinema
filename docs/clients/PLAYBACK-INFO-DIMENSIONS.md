@@ -825,9 +825,9 @@ candidate.
 | M1 web | Local checks passed | Three focused Node suites and the player input fence passed. |
 | M2 Apple | Local checks passed | iOS/tvOS simulator builds and 83 selected tests per target passed. |
 | M3 Android | Local checks passed | Debug assembly and 35 selected tests passed. |
-| M4 integrated candidate | Review addressed | One adversarial review completed; current-head fast lane pending. |
+| M4 integrated candidate | Review addressed | One adversarial review completed; current-head fast lane and merge state are live on PR #526. |
 | Live Cozi source/output comparison | Unavailable | No real Cozi session was available; planned output remains labeled as planned. |
-| Promotion / deployment | Not started | Record only operations actually authorized and performed |
+| Promotion / deployment | Tracked on PR #526 | Merge only after the current-head gate; no deployment is part of this repair. |
 
 For each task PR, record the user-visible change, behavior-based regression
 names, commands run and material limitations. Keep `Regression-Test:` lines

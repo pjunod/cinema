@@ -1,6 +1,6 @@
 # Playback information dimensions — implementation status
 
-**Status:** PR ready; fast lane pending · **Started:** 2026-09-25 · **Current base:** `c99a29090` (refreshed from initial `415eb047f3`)
+**Status:** built; promotion state is live on PR #526 · **Started:** 2026-09-25 · **Current base:** `c99a29090` (refreshed from initial `415eb047f3`)
 
 This page tracks the playback information repair in one isolated clone. The
 implementation follows the supplied dimensions and aspect handoff. The
@@ -18,15 +18,15 @@ targets `main`. Package boundaries are commits in one PR under the user's
 | Apple delivery facts and presentation | Local checks passed | `148829768`; iOS and tvOS simulator builds passed; 83 selected tests passed on each. |
 | Android delivery facts and presentation | Local checks passed | `148829768`; `:app:assembleDebug` and 35 selected unit tests passed. |
 | Adversarial implementation review | Findings addressed | One review found Apple Compact label drift, Android aspect basis, unattached web plan facts, and stale handoff ledger. Follow-up code and tests passed their focused checks. |
-| History evidence | Passed locally | `make history-check`: 2,303 corrective commits, 281 client-fix anchors, eight post-boundary landing commits. One anchor per branch corrective client commit; the current main already carries immutable trailer errata for earlier PRs #519 and #522. |
-| Fast lane | Pending | PR #526 is ready. Forgejo's WIP-prefix removal emitted an edit without a lane run; this status commit will synchronize the ready head and start the lane. Require current-head `Main promotion gate` success. |
-| PR merge | Pending | Merge only after the current-head `Main promotion gate` passes. |
+| History evidence | Passed locally | `make history-check` on the refreshed base: 2,303 corrective commits, 281 client-fix anchors, nine post-boundary landing commits. One anchor per branch corrective client commit; current main carries errata for earlier PRs #519 and #522. |
+| Fast lane | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | Run 3062 passed scope, mobile version, policy, web, Apple, Android and Windows. Rust stopped before compilation when the runner cache pruner could not meet its disk reserve. The runner's unused Docker build cache was reclaimed; use the PR's current-head `Main promotion gate` for the final result. |
+| PR merge | [Live on PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526) | The PR is the authoritative merge record. Merge requires a successful current-head `Main promotion gate`. |
 | Production and physical session evidence | Unavailable | No real Live TV Cozi session or physical phone/TV capture was available in this isolated checkout. The stream frame is planned on web/Apple and measured only from an eligible Android player sample. |
 
 ## How to read the states
 
 `Local checks passed` means the focused regressions and affected client builds
-passed in the isolated clone. `Pending` means no completion evidence exists.
+passed in the isolated clone. The PR link shows the live gate and merge state.
 A green fixture alone does not verify a real broadcast's output dimensions or
 aspect.
 
@@ -34,7 +34,7 @@ The tracked pre-commit hook was installed in the isolated clone after its
 initial absence. The first commit was amended through it; catalog lint, Rust
 formatting, Clippy and embedded JavaScript syntax passed before rebasing
 `3e970ec42` onto `60f3803d1`, then merged current `main` at `c99a29090`;
-the exact candidate tree awaits fast lane checks.
+the reviewed candidate passed the tracked hook on its final status commit.
 The post-review local pass included
 `node tests/web/player-dom.test.js`, `node tests/playback/web-policy.test.js`,
 `node tests/web/live-tv.test.js`, `scripts/player-input-fence`,
@@ -45,21 +45,27 @@ run exposed a test assumption about Media3's deprecated rotation constructor;
 the test now checks the production eligibility helper. The initial iOS run
 exposed an obsolete `observeFailure` call in a pre-existing test; it now
 exercises the controller's current notification-error handler. Both affected
-suites passed on rerun. The tracked hook passed on the reviewed commits; the
-remaining fixes and status update still need a final hooked commit.
+suites passed on rerun.
 
 The history audit initially found three branch anchor errors and two earlier
 `main` merges whose messages lacked the regression trailers already present
 in their PR descriptions. The branch anchors now map each corrective client
 commit once. The permanent errata for PRs #519 and #522 arrived on `main` at
 `c99a29090`; the merge kept those more complete records and removed the
-branch duplicates. The audit passed before this base update; the fast lane
-must validate the pushed candidate.
+branch duplicates. The audit passed again on the updated base.
+
+Run 3062 failed at `ci-cache-prune` on `gha-nynuc-general-01`, before Rust
+compilation or unit tests. Its workspace had 37 GiB free against the 25 GiB
+build minimum, but the cache pruner could not satisfy its separate reserve.
+The host's Docker build cache had 17.45 GB unused; the documented operator
+cleanup reclaimed it and left 64 GiB free on the host. No CI policy or
+playback code was changed for this infrastructure failure. The next ready
+head and any retry are reported on PR #526.
 
 ## Scope decisions
 
 The user requested one larger PR, an adversarial review at the end, and a
-single fast lane pass after review. This supersedes the handoff's separate
+consolidated fast lane after review. This supersedes the handoff's separate
 package PRs and per-package test timing. Normal commits still record each
 reviewable package. No feature gate is planned: this repair changes the
 information panel and does not enable a new playback route.
