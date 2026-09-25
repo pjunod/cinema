@@ -1017,6 +1017,7 @@ paths = [
   "scripts/validate-docker-startup-budget",
   "scripts/registry-push",
   "scripts/release-cut",
+  "scripts/sign-android-release",
   "tests/operations/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "operations-contract", "container-runtime", "resource-bounds"]
