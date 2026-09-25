@@ -1,12 +1,14 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — PR #524 exact-head gate #3086 found Android versionCode 126 already on new main; candidate advanced to 127 and repeat qualification pending; L-03 caption-positive web acceptance open; three voters on `60f3803d1`, current main awaits rollout; nuc3 forensic hold restored · **Updated:** 2026-09-25 18:39 UTC · **Main:** `1d68af6eb`
+**Status:** open — PR #524 includes current main `4bba363bc7a` through merge commit `316b38dcd` (#502 K-05) after gate #3089 was canceled for a moved base; versionCode 127 release and exact-head fast lane await rerun. L-03 caption-positive acceptance and A-04 trace remain open. Three voters and the nuc3 learner are healthy; m6/nuc4 still run OCI `60f3803d1` and all nodes await #524 rollout. · **Updated:** 2026-09-25 19:13 UTC · **Main:** `4bba363bc7a`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
 queue, with the next action and evidence location visible while implementation
 and fleet work run in parallel. A `done` entry requires a merged change and
 the acceptance evidence named by its plan.
+
+**19:13 UTC rollout preflight:** Read-only cluster UI shows three fresh voters, quorum two, leader nuc4 and zero apply lag; nuc3 is a healthy learner with a fresh heartbeat on `1d68af6eb`. SSH confirms nynuc and nuc3 run that OCI revision, while m6 and nuc4 retain `60f3803d1` despite newer checkouts. A four-node exact-main rollout starts after #524 merges; the separate nuc3 membership rejoin is no longer required by the live roster. Five Android devices passed signer/API preflight, six paired Apple devices were inventoried, and installs await the merged release. Sanitized preflight receipt SHA-256: `bc5a52e38a377a2a57b5865d3cefc1bcb78ddcf2f78ae8fa443a2d50aa1afc0c`.
 
 | Lane | Current state | Next action | Evidence |
 |---|---|---|---|
