@@ -1,6 +1,6 @@
 # Android double Back — Sol build and delivery handoff
 
-**Status:** focused Android validation passed; main fast lane pending ·
+**Status:** focused Android validation passed; CI and merge state on PR #523 ·
 **Written:** 2026-09-25 · **Updated:** 2026-09-25
 **Executes:** Fable's approved diagnosis and navigation contract in the
 [RCA and proposed fix](ANDROID-DOUBLE-BACK-RCA-AND-FIX.md), including the
@@ -450,7 +450,7 @@ so the next reader does not inherit the temporary uncommitted-candidate state.
 ### 9.1 Execution update — 2026-09-25
 
 The selected navigation patch and Media3 opt-in were committed to the
-separate agent branch on main `60f3803d1`. Draft [PR #523](http://192.168.4.7:3000/noirr/plurx/pulls/523)
+separate agent branch on main `60f3803d1`. Ready [PR #523](http://192.168.4.7:3000/noirr/plurx/pulls/523)
 received one adversarial agent review with no actionable findings. The
 reviewed Android source at `855e46cf8` built app and test APKs, passed
 `lintDebug`, and passed seven selected API 36 emulator tests with zero

@@ -1,7 +1,7 @@
 # Android double Back — root cause and proposed navigation fix
 
-**Status:** focused Android validation passed; main fast lane pending; not
-released · **Written:** 2026-09-25 · **Updated:** 2026-09-25
+**Status:** focused Android validation passed; CI and merge state on PR #523;
+release acceptance pending · **Written:** 2026-09-25 · **Updated:** 2026-09-25
 
 Companion to [the Android client guide](../../clients/android/README.md)
 and [the development pipeline](../DEVELOPMENT_PIPELINE.md). This document
