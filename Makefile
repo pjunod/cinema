@@ -1768,14 +1768,12 @@ apk: android ## Build the Android debug APK (alias for android)
 # the device trusted could read the account bearer straight out of
 # `files/datastore/plurx.preferences_pb`.
 #
-# The keystore stays wherever the vault put it on the host — never in the
-# repository, never in the image — and is bind-mounted read-only for the one
-# build. `PLURX_ANDROID_KEYSTORE` names the host path here and the mount point
-# inside the container; the three secrets ride `-e NAME`, which forwards the
-# caller's value and passes nothing when the caller has none. Gradle then
-# fails naming whichever is missing (`requiredSigningValue` in
-# clients/android/app/build.gradle.kts), so an unsigned or debug-signed
-# "release" is not a reachable outcome.
+# Both keystores and the signing lineage stay on the host, outside the repo
+# and image, and are bind-mounted read-only for the one build. Passwords and
+# aliases pass by environment variable name rather than appearing in command
+# arguments. Gradle first signs with the durable release key; the helper then
+# applies the audited lineage and verifies the effective signer at API 28 and
+# 36. Any missing input or mismatch fails before publishing an APK.
 #
 # The keystore path is resolved to an absolute one before `docker run -v`
 # sees it. Docker reads a source that is not absolute as a *volume name*: the
