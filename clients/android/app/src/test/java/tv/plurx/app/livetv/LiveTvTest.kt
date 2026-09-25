@@ -54,8 +54,8 @@ class LiveTvTest {
         assertEquals("Stream aspect differs from source", changedAspect.aspectComparison)
         val unknownBasis = liveTvPictureInfo(plan, { attachedSample }, null)
         assertEquals("Not verified", unknownBasis.aspectComparison)
-        val rotated = liveTvPictureInfo(plan, { androidx.media3.common.VideoSize(704, 480, 90, 1f) }, null)
-        assertEquals("Planned output", rotated.streamNote)
+        assertNull(eligibleLiveTvVideoSample(704, 480, 90, 1f))
+        assertNull(eligibleLiveTvVideoSample(0, 480, 0, 1f))
         val unattached = liveTvPictureInfo(plan, { error("stale sample must not be read") }, null,
             format = matchingFormat, attachmentCurrent = false)
         assertEquals("Planned output", unattached.streamNote)

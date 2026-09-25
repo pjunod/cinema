@@ -1,39 +1,50 @@
 # Playback information dimensions — implementation status
 
-**Status:** building · **Started:** 2026-09-25 · **Current base:** `60f3803d1` (refreshed from initial `415eb047f3`)
+**Status:** local verification passed; fast lane pending · **Started:** 2026-09-25 · **Current base:** `60f3803d1` (refreshed from initial `415eb047f3`)
 
 This page tracks the playback information repair in one isolated clone. The
 implementation follows the supplied dimensions and aspect handoff. The
-candidate branch is `codex/playback-info-dimensions`; the intended PR targets
-`main`. Package boundaries are commits in one PR under the user's 2026-09-25
-workflow instruction.
+candidate branch is `codex/playback-info-dimensions`; [PR #526](http://192.168.4.7:3000/noirr/plurx/pulls/526)
+targets `main`. Package boundaries are commits in one PR under the user's
+2026-09-25 workflow instruction.
 
 ## Progress
 
 | Step | State | Evidence |
 |---|---|---|
 | Fresh base and toolchains | Done | Fresh Forgejo clone at the base above; Node 26.8.1, Python 3.14.7, Xcode 27.0, JDK 21.0.11. |
-| Shared web, Apple and Android field contract | Implemented; unverified | `148829768`; one label and field order across clients and modes. |
-| Web delivery facts and presentation | Implemented; unverified | `148829768`; source and planned frames, separate browser display, reason text and serial guard. |
-| Apple delivery facts and presentation | Implemented; unverified | `148829768`; optional DTO decoding, planned output and presentation size. |
-| Android delivery facts and presentation | Implemented; unverified | `148829768`; eligible Media3 frame sample, approximate pixel aspect and planned fallback. |
-| Adversarial implementation review | Findings addressed; unverified | One review found Apple Compact label drift, Android aspect basis, unattached web plan facts, and stale handoff ledger. Follow-up code and tests address them; fast lane must verify. |
-| Fast lane and affected builds | Pending | Run after review on the exact candidate commit. |
-| PR merge | Pending | Merge only after the required gate and qualification receipt. |
-| Production and physical session evidence | Pending | Record actual observations or state unavailable. |
+| Shared web, Apple and Android field contract | Local checks passed | `148829768`; fixture generation, web checks, and focused native tests passed. |
+| Web delivery facts and presentation | Local checks passed | `148829768`; three focused Node suites and `scripts/player-input-fence` passed. |
+| Apple delivery facts and presentation | Local checks passed | `148829768`; iOS and tvOS simulator builds passed; 83 selected tests passed on each. |
+| Android delivery facts and presentation | Local checks passed | `148829768`; `:app:assembleDebug` and 35 selected unit tests passed. |
+| Adversarial implementation review | Findings addressed | One review found Apple Compact label drift, Android aspect basis, unattached web plan facts, and stale handoff ledger. Follow-up code and tests passed their focused checks. |
+| Fast lane | Pending | Mark PR #526 ready after pushing the final candidate; require current-head `Main promotion gate` success. |
+| PR merge | Pending | Merge only after the current-head `Main promotion gate` passes. |
+| Production and physical session evidence | Unavailable | No real Live TV Cozi session or physical phone/TV capture was available in this isolated checkout. The stream frame is planned on web/Apple and measured only from an eligible Android player sample. |
 
 ## How to read the states
 
-`Implemented; unverified` means code exists but has not passed the final
-test pass or implementation review. `Pending` means no completion evidence exists. A green fixture alone does not
-verify a real broadcast's output dimensions or aspect.
+`Local checks passed` means the focused regressions and affected client builds
+passed in the isolated clone. `Pending` means no completion evidence exists.
+A green fixture alone does not verify a real broadcast's output dimensions or
+aspect.
 
 The tracked pre-commit hook was installed in the isolated clone after its
 initial absence. The first commit was amended through it; catalog lint, Rust
 formatting, Clippy and embedded JavaScript syntax passed before rebasing
 `3e970ec42` onto `60f3803d1`; the exact rebased tree awaits fast lane checks.
-Focused regressions and native builds remain pending under the requested
-post-review test timing.
+The post-review local pass included
+`node tests/web/player-dom.test.js`, `node tests/playback/web-policy.test.js`,
+`node tests/web/live-tv.test.js`, `scripts/player-input-fence`,
+`make validation-lint`, the docs index unittest, Android `:app:assembleDebug`,
+focused Android `:app:testDebugUnitTest`, iOS/tvOS simulator builds, and the
+focused iOS/tvOS Xcode test selections (83 passed each). The initial Android
+run exposed a test assumption about Media3's deprecated rotation constructor;
+the test now checks the production eligibility helper. The initial iOS run
+exposed an obsolete `observeFailure` call in a pre-existing test; it now
+exercises the controller's current notification-error handler. Both affected
+suites passed on rerun. The tracked hook passed on the reviewed commits; the
+remaining fixes and status update still need a final hooked commit.
 
 ## Scope decisions
 

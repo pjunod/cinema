@@ -811,7 +811,9 @@ The current execution record is [the status page](PLAYBACK-INFO-DIMENSIONS-STATU
 The table below records the imported handoff's package states as of
 2026-09-25. `Implemented; unverified` is not a completion claim. The user
 requested one integrated PR, so package PR cells are represented by commits
-on that branch. If main moves, qualify the new candidate.
+on that branch. Local focused checks passed after the adversarial review;
+the current-head fast lane remains pending. If main moves, qualify the new
+candidate.
 
 | Item | State | Evidence required / current record |
 |---|---|---|
@@ -819,12 +821,12 @@ on that branch. If main moves, qualify the new candidate.
 | Current behavior reference | Refreshed | Clone based on `415eb047f3`, then rebased onto `60f3803d1`; see status page. |
 | Fable design review | Corrections incorporated | B1–B4 and N1–N7 in §11; no second review claimed |
 | Fresh base and toolchains | Recorded | Actual base, branch and runtime versions in status page. |
-| M0 cross-client contract | Implemented; unverified | Integrated commit `148829768`; contract tests and native builds pending fast lane. |
-| M1 web | Implemented; unverified | Integrated commit `148829768`; semantic and delayed-poll regressions pending fast lane. |
-| M2 Apple | Implemented; unverified | Integrated commit `148829768`; DTO/formatter regressions and iOS/tvOS builds pending fast lane. |
-| M3 Android | Implemented; unverified | Integrated commit `148829768`; measured-frame/rotation regressions and build pending fast lane. |
-| M4 integrated candidate | Under review | Adversarial findings addressed in a follow-up commit; exact-tree fast lane pending. |
-| Live Cozi source/output comparison | Not performed | Matched source/output probes and panel, or explicit unverified limitation |
+| M0 cross-client contract | Local checks passed | Integrated commit `148829768`; generated fixture and focused client checks passed. |
+| M1 web | Local checks passed | Three focused Node suites and the player input fence passed. |
+| M2 Apple | Local checks passed | iOS/tvOS simulator builds and 83 selected tests per target passed. |
+| M3 Android | Local checks passed | Debug assembly and 35 selected tests passed. |
+| M4 integrated candidate | Review addressed | One adversarial review completed; current-head fast lane pending. |
+| Live Cozi source/output comparison | Unavailable | No real Cozi session was available; planned output remains labeled as planned. |
 | Promotion / deployment | Not started | Record only operations actually authorized and performed |
 
 For each task PR, record the user-visible change, behavior-based regression

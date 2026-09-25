@@ -2271,6 +2271,22 @@ internal data class LiveTvPictureInfo(
     val streamFormat: String,
 )
 
+internal data class LiveTvEligibleVideoSample(
+    val width: Int,
+    val height: Int,
+    val pixelWidthHeightRatio: Float,
+)
+
+internal fun eligibleLiveTvVideoSample(
+    width: Int,
+    height: Int,
+    unappliedRotationDegrees: Int,
+    pixelWidthHeightRatio: Float,
+): LiveTvEligibleVideoSample? = if (width in 1..16_384 && height in 1..16_384 &&
+    unappliedRotationDegrees == 0) {
+    LiveTvEligibleVideoSample(width, height, pixelWidthHeightRatio)
+} else null
+
 internal fun liveTvPictureInfo(
     plan: LiveTvDelivery?,
     readAttachedSample: () -> androidx.media3.common.VideoSize?,
@@ -2290,8 +2306,8 @@ internal fun liveTvPictureInfo(
     val sourceWidth = dimension(source?.width ?: if (source == null) observation?.validVideoWidth else null)
     val sourceHeight = dimension(source?.height ?: if (source == null) observation?.validVideoHeight else null)
     val sourceNote = if (source != null) "Source probe" else if (observation != null) "Last observed broadcast" else "Unavailable"
-    val eligible = (if (attachmentCurrent) readAttachedSample() else null)?.takeIf {
-        it.width in 1..16_384 && it.height in 1..16_384 && it.unappliedRotationDegrees == 0
+    val eligible = (if (attachmentCurrent) readAttachedSample() else null)?.let {
+        eligibleLiveTvVideoSample(it.width, it.height, it.unappliedRotationDegrees, it.pixelWidthHeightRatio)
     }
     val streamWidth = dimension(eligible?.width ?: plan?.output?.width)
     val streamHeight = dimension(eligible?.height ?: plan?.output?.height)
