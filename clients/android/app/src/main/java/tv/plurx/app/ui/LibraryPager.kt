@@ -32,13 +32,17 @@ internal class LibraryPager(
     private val mutable = MutableStateFlow(LibraryGridState())
     val state: StateFlow<LibraryGridState> = mutable
     private var drive: Job? = null
+    @Volatile private var invalidated = false
 
     suspend fun ensure(visibleThrough: Int) = mutex.withLock {
+        if (invalidated) return@withLock
         try {
             while (merge.decided.size < visibleThrough && !merge.complete) {
                 val (id, offset) = merge.nextRequest ?: break
                 val page = fetch(id, offset, sort)
+                if (invalidated) return@withLock
                 withContext(Dispatchers.Default) { merge.receive(id, page.items, page.total) }
+                if (invalidated) return@withLock
                 mutable.value = LibraryGridState(
                     decided = merge.decided.toList(),
                     loadedCount = merge.loadedCount,
@@ -50,25 +54,33 @@ internal class LibraryPager(
                     return@withLock
                 }
             }
-            if (ids.isEmpty()) mutable.value = LibraryGridState(complete = true)
+            if (ids.isEmpty() && !invalidated) mutable.value = LibraryGridState(complete = true)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            mutable.value = mutable.value.copy(error = e.message ?: "Couldn't load this library")
+            if (!invalidated) mutable.value = mutable.value.copy(error = e.message ?: "Couldn't load this library")
         }
+    }
+
+    fun invalidate() {
+        invalidated = true
+        drive?.cancel()
+        drive = null
+        mutable.value = LibraryGridState()
     }
 
     fun setDriveToCompletion(enabled: Boolean) {
         drive?.cancel()
-        drive = if (enabled) scope.launch { ensure(Int.MAX_VALUE) } else null
+        drive = if (enabled && !invalidated) scope.launch { ensure(Int.MAX_VALUE) } else null
     }
 
     private suspend fun loadLegacyWholeCollection() {
         val all = mutableListOf<Item>()
         for (id in ids) {
             var offset = 0
-            while (true) {
+            while (!invalidated) {
                 val page = fetch(id, offset, sort)
+                if (invalidated) return
                 all += page.items
                 offset += page.items.size
                 if (page.items.isEmpty() || offset >= page.total || page.items.size < 200) break
@@ -77,7 +89,7 @@ internal class LibraryPager(
         // An old server has no sort_title; preserve its full-walk behaviour.
         val ordered = all.map { it.copy(sort_title = legacySortTitle(it.title)) }
             .sortedWith { a, b -> LibraryMerge.compare(a, b, sort) }
-        mutable.value = LibraryGridState(ordered, ordered.size, ordered.size, complete = true)
+        if (!invalidated) mutable.value = LibraryGridState(ordered, ordered.size, ordered.size, complete = true)
     }
 }
 
