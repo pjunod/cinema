@@ -605,6 +605,15 @@ final class AppModel: ObservableObject {
         return candidates.first(where: { $0.id == id })?.name
     }
 
+    func libraryPage(_ libraryId: Int, sort: LibrarySort, offset: Int) async throws -> Page {
+        do {
+            return try await requireAPI().libraryItems(libraryId, sort: sort, offset: offset, limit: 200)
+        } catch {
+            noteAuthFailure(error)
+            throw error
+        }
+    }
+
     /// Page a collection, handing the caller everything received so far — in
     /// the requested order — as each page lands. A thousand-item library used
     /// to sit behind a spinner for five sequential round trips before showing
