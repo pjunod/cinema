@@ -1,7 +1,7 @@
 # Android double Back — root cause and proposed navigation fix
 
-**Status:** navigation patch prepared on current main; final review and gate
-pending; not released · **Written:** 2026-09-25 · **Updated:** 2026-09-25
+**Status:** navigation patch reviewed on current main; final gate pending;
+not released · **Written:** 2026-09-25 · **Updated:** 2026-09-25
 
 Companion to [the Android client guide](../../clients/android/README.md)
 and [the development pipeline](../DEVELOPMENT_PIPELINE.md). This document
@@ -284,4 +284,7 @@ regression was added, and physical Android TV double-press acceptance is
 included above. Fable reviewed the original five-test patch; the additional
 animation test was added after that review.
 
-No PR, merge, published APK, or physical-device acceptance is claimed.
+An adversarial agent review of [PR #523](http://192.168.4.7:3000/noirr/plurx/pulls/523)
+found no actionable issues in the recovered final patch, including the
+animation regression and Media3 opt-in. Merge, published APK, and physical
+device acceptance remain pending.

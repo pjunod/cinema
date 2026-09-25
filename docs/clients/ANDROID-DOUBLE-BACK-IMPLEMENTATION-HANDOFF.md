@@ -1,7 +1,7 @@
 # Android double Back — Sol build and delivery handoff
 
-**Status:** implementation prepared on current main; review and final gate
-pending · **Written:** 2026-09-25 · **Updated:** 2026-09-25
+**Status:** implementation reviewed on current main; final gate pending ·
+**Written:** 2026-09-25 · **Updated:** 2026-09-25
 **Executes:** Fable's approved diagnosis and navigation contract in the
 [RCA and proposed fix](ANDROID-DOUBLE-BACK-RCA-AND-FIX.md), including the
 required current-main rerun and corrected CI evidence.

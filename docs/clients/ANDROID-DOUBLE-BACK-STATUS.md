@@ -1,6 +1,6 @@
 # Android double Back — delivery status
 
-**Status:** implementation prepared, review and validation pending · **Updated:** 2026-09-25
+**Status:** reviewed with no findings; final validation pending · **Updated:** 2026-09-25
 
 Companion to the [root cause analysis](ANDROID-DOUBLE-BACK-RCA-AND-FIX.md)
 and [implementation handoff](ANDROID-DOUBLE-BACK-IMPLEMENTATION-HANDOFF.md).
@@ -17,14 +17,14 @@ the navigation contract.
 | Worktree | Separate agent clone at `/private/tmp/plurx-agent-android-double-back-20260925` |
 | Change | Bind Back and Exit callbacks to their originating navigation entry at 16 destinations; preserve Home and intermediate pages after repeated taps. |
 | Lint repair | Opt in to Media3's existing `UnstableApi` usage in `PlaybackService.kt`. |
-| PR | Pending |
+| PR | [#523](http://192.168.4.7:3000/noirr/plurx/pulls/523), draft |
 
 ## Milestones
 
 | Milestone | State | Evidence or next action |
 |---|---|---|
 | Recover candidate on current main | Done | The Android navigation files had no upstream changes since the candidate base; the branch was rebased again after an unrelated streaming PR reached main. |
-| Review scoped implementation | Prepared | Six instrumented regressions use the real navigation controller and Back button. Final adversarial review remains pending. |
+| Review scoped implementation | Done | One adversarial agent review of PR #523 found no actionable issues. Six instrumented regressions use the real navigation controller and Back button. |
 | Validate final tree | Pending | Run the affected fast lane once after review and review fixes, as requested for this delivery. |
 | Physical phone and Android TV | Pending | No physical device result is claimed. |
 | Merge to main | Pending | Requires resolved review and green current-head fast lane. |
