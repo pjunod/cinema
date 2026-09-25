@@ -55,6 +55,7 @@ struct Item: Codable, Identifiable, Hashable {
     var libraryId: Int?
     let kind: String
     let title: String
+    var sortTitle: String? = nil
     var year: Int?
     var overview: String?
     var poster: String?
