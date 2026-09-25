@@ -137,3 +137,33 @@ exactly on cues at 217.500–221.500 and 427.500–431.500 s. Preroll at
 still returned 427.500–431.500 s, proving no first-cue inference is needed.
 The disposable container was network-disabled, read-only apart from its
 private temporary filesystem, and automatically removed afterward.
+
+## 6. Adversarial review disposition
+
+The single adversarial review found a cancellation race during publication:
+blocking write/fsync/rename could finish after the async range owner settled.
+Publication now stages through the held secure directory and orders its final
+rename against owner cancellation with the same mutex. If cancellation wins,
+the staged file is removed without publishing; if rename wins, cancellation
+cannot settle until that rename finishes. A deterministic regression pauses
+an actual staged write, cancels its owner, publishes a successor, then releases
+the obsolete writer and checks that the successor survives.
+
+Additional regression anchors (written; execution follows review fixes):
+
+- `subtitle_ranges::tests::cancellation_during_blocking_publish_prevents_obsolete_rename`
+- `subtitle_ranges::tests::source_replacement_and_attestation_mismatch_reject_publication`
+- `subtitle_ranges::tests::peer_refusal_and_timeout_preserve_readable_current_range`
+
+The source regression uses actual sampled attestation and replaces the path
+under a held descriptor. The peer-failure regression uses the production
+fan-out seam and the cache reader used by HLS, covering refusal and the
+30-second speculative deadline without losing the current local range.
+
+Live signed handler/transport success and body-mutation rejection remain a
+deployment qualification gap. The ordinary HTTP fixture has no replicated
+membership and cannot sign a non-self request. Proving that path requires a
+controlled two-member cluster, a long indexed Matroska source, and observable
+cold HLS range requests through the real peer transport. The unsigned-handler
+and payload-validation regressions do not establish that end-to-end proof.
+No service was deployed or started for this change.

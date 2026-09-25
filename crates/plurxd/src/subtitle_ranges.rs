@@ -98,10 +98,49 @@ async fn publish(
     let directory = plurx_core::fs_secure::SecureDirectory::open(dir)
         .await
         .map_err(|e| e.to_string())?;
+    publish_owned(&directory, name, bytes, || {}).await
+}
+
+/// Cancellation and final rename share one synchronous lock. The blocking
+/// worker may continue staging after the future is dropped, but can no longer
+/// publish. If rename won first, Drop waits for its commit before the session
+/// owner can settle and admit its successor.
+async fn publish_owned<F>(
+    directory: &plurx_core::fs_secure::SecureDirectory,
+    name: &str,
+    bytes: &[u8],
+    before_commit: F,
+) -> Result<(), String>
+where
+    F: FnOnce() + Send + 'static,
+{
+    struct CancelOnDrop(std::sync::Arc<std::sync::Mutex<bool>>);
+    impl Drop for CancelOnDrop {
+        fn drop(&mut self) {
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        }
+    }
+    let allowed = std::sync::Arc::new(std::sync::Mutex::new(true));
+    let _cancel = CancelOnDrop(std::sync::Arc::clone(&allowed));
     directory
-        .atomic_write_child(name, bytes)
+        .atomic_write_child_with_commit(name, bytes, move |rename| {
+            before_commit();
+            let allowed = allowed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !*allowed {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "subtitle range publication cancelled",
+                ));
+            }
+            rename()
+        })
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|error| error.to_string())
 }
 
 /// Current range first; at most two peers work on the next grid ranges.
@@ -276,6 +315,16 @@ async fn verify_source(
     Ok(())
 }
 
+fn verify_requested_source(
+    request: &Request,
+    attested: &crate::fragment_index_cluster::AttestedSource,
+) -> Result<(), String> {
+    if request.attestation != attested.observation.source_sha256 {
+        return Err("subtitle source digest mismatch".to_owned());
+    }
+    Ok(())
+}
+
 /// Peer execution opens only the library's stored path, never a caller path.
 /// The returned bytes are bound to the sampled digest and exact range.
 pub(crate) async fn execute(
@@ -294,9 +343,7 @@ pub(crate) async fn execute(
     }
     let attested =
         crate::fragment_index_cluster::attest_source(&state.node_id, &file, None, &|_| {}).await?;
-    if request.attestation != attested.observation.source_sha256 {
-        return Err("subtitle source digest mismatch".to_owned());
-    }
+    verify_requested_source(&request, &attested)?;
     tokio::fs::create_dir_all(&state.subs_dir)
         .await
         .map_err(|e| e.to_string())?;
@@ -565,6 +612,124 @@ mod tests {
         let _next = RangeClaim::acquire(&next).expect("distinct range");
         drop(first);
         assert!(RangeClaim::acquire(&request).is_ok());
+    }
+
+    #[tokio::test]
+    async fn source_replacement_and_attestation_mismatch_reject_publication() {
+        let dir = crate::test_tempdir().expect("source");
+        let path = dir.path().join("source.mkv");
+        std::fs::write(&path, b"original source").expect("source bytes");
+        let mut file = file(path.clone());
+        let metadata = std::fs::metadata(&path).expect("metadata");
+        file.size = metadata.len() as i64;
+        file.mtime = crate::fragment_index_cluster::source_stamp(&metadata).mtime;
+        let attested = crate::fragment_index_cluster::attest_source("test", &file, None, &|_| {})
+            .await
+            .expect("sample actual source");
+        let mut request = request();
+        request.size = file.size;
+        request.mtime = file.mtime;
+        request.attestation = attested.observation.source_sha256.clone();
+        assert!(verify_requested_source(&request, &attested).is_ok());
+        assert!(verify_source(&file, &attested).await.is_ok());
+        request.attestation = "0".repeat(64);
+        assert!(verify_requested_source(&request, &attested).is_err());
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, b"replaced source").expect("same-size replacement");
+        std::fs::rename(&replacement, &path).expect("replace pathname under held descriptor");
+        assert!(verify_source(&file, &attested).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peer_refusal_and_timeout_preserve_readable_current_range() {
+        for timeout in [false, true] {
+            let dir = crate::test_tempdir().expect("cache");
+            let root = dir.path().to_owned();
+            let file = file(root.join("unused.mkv"));
+            let observed_file = file.clone();
+            let flight = tokio::spawn(async move {
+                let tmp = root.join("current.tmp");
+                let current = async {
+                    tokio::fs::write(&tmp, b"WEBVTT\n\n06:50.000 --> 06:54.000\ncurrent\n")
+                        .await
+                        .map_err(|e| e.to_string())
+                };
+                let ahead = async {
+                    if timeout {
+                        std::future::pending::<()>().await;
+                    }
+                    Err("subtitle peer refused range".to_owned())
+                };
+                run_ranges(&root, &tmp, &file, 0, 400, 200, current, ahead).await
+            });
+            // The same cache reader used by the HLS production adapter can
+            // serve current output regardless of speculative peer outcome.
+            flight
+                .await
+                .expect("owner settled")
+                .expect("current succeeded");
+            let bytes =
+                crate::subtitles::read_cached_window(dir.path(), &observed_file, 0, 400, 200)
+                    .await
+                    .expect("HLS cache read")
+                    .expect("current published");
+            assert!(String::from_utf8_lossy(&bytes).contains("current"));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_during_blocking_publish_prevents_obsolete_rename() {
+        let dir = crate::test_tempdir().expect("cache");
+        let directory = plurx_core::fs_secure::SecureDirectory::open(dir.path())
+            .await
+            .expect("held directory");
+        let (staged_tx, staged_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        struct Finished(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for Finished {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let flight = tokio::spawn(async move {
+            let finish = Finished(Some(finished_tx));
+            publish_owned(&directory, "old.vtt", b"WEBVTT\n\n", move || {
+                let _finish = finish;
+                let _ = staged_tx.send(());
+                release_rx.recv().expect("release staged writer");
+            })
+            .await
+        });
+        staged_rx
+            .await
+            .expect("blocking write reached final rename boundary");
+        flight.abort();
+        assert!(flight.await.expect_err("owner cancelled").is_cancelled());
+        // A replacement can publish now; the detached old blocking task must
+        // neither create its old range nor replace this successor afterward.
+        std::fs::write(dir.path().join("old.vtt"), b"successor").expect("successor");
+        release_tx.send(()).expect("release obsolete staged writer");
+        finished_rx.await.expect("old callback returned");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let entries = std::fs::read_dir(dir.path())
+                    .expect("cache entries")
+                    .count();
+                if entries == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("staged temporary file cleaned");
+        assert_eq!(
+            std::fs::read(dir.path().join("old.vtt")).expect("successor survives"),
+            b"successor"
+        );
     }
 
     #[tokio::test]
