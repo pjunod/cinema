@@ -180,9 +180,13 @@ it unit-tests without a video element:
   and hls.js EWMA estimates **in one move**. The reserve covers a partial
   fragment progress window that straddles a cliff; using nominal bitrate
   admitted 480p on a measured 1.1 Mb/s link and forced a second restart.
-  A draining runway also treats a fresh transfer below 0.75× the current
-  rung's encoded peak as severe; this catches the second 350 kb/s cliff while
-  its first partial sample still looks close to 240p's nominal bitrate.
+  On the bottom three rungs, a fresh transfer below the current rung's
+  nominal rate is also severe even with a deep client buffer: that rate
+  cannot sustain playback, and the buffer can hide the second 350 kb/s
+  cliff for many seconds. Higher rungs wait for the 0.7× signal because
+  the first partial fragment can straddle the old and new links; a mixed
+  3.17 Mb/s sample at 720p selected an unsustainable 360p successor on a
+  1.1 Mb/s link before the next 1.095 Mb/s sample arrived.
   The fresh transfer sample expires after 15 s. The stable EWMA deliberately
   remembers the pre-cliff link, so the fresh bound prevents that memory from
   admitting an intermediate rung.

@@ -1713,16 +1713,33 @@ test("a mixed progress sample cannot select a rung whose peak exceeds the cliff 
   assert.equal(decision.reason,"bandwidth cliff");
 });
 
-test("draining low-rung runway treats a partial transfer below peak as a cliff", () => {
+test("a low-rung transfer below nominal is urgent despite a deep buffer", () => {
   const ladder = [...serverLadder,
     { height: 240, total_kbps: 660, peak_kbps: 910 },
     { height: 144, total_kbps: 260, peak_kbps: 310 }];
   const decision = policy.decideRung({ladder,currentHeight:240,
-    estimateKbps:1100,recentEstimateKbps:663,
-    recentEstimateAtMs:9000,runwaySeconds:42,
-    previousRunwaySeconds:43,nowMs:10000});
+    estimateKbps:1100,recentEstimateKbps:626,
+    recentEstimateAtMs:9000,runwaySeconds:43,
+    previousRunwaySeconds:42,nowMs:10000});
   assert.equal(decision.height,144);
   assert.equal(decision.reason,"bandwidth cliff");
+});
+
+test("a high-rung mixed fragment waits for a clean cliff sample", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const mixed = policy.decideRung({ladder,currentHeight:720,
+    estimateKbps:8075,recentEstimateKbps:3170,
+    recentEstimateAtMs:9000,runwaySeconds:12,
+    previousRunwaySeconds:13,nowMs:10000});
+  assert.equal(mixed.height,720);
+  const clean = policy.decideRung({ladder,currentHeight:720,
+    estimateKbps:8075,recentEstimateKbps:1095,
+    recentEstimateAtMs:10500,runwaySeconds:10,
+    previousRunwaySeconds:12,nowMs:11000});
+  assert.equal(clean.height,240);
+  assert.equal(clean.reason,"bandwidth cliff");
 });
 
 test("an active supply stall without a completed slow transfer retains quality", () => {

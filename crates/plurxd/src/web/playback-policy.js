@@ -18,10 +18,11 @@
     decisionMs: 1_000,
     safeEstimateFactor: 0.95,
     severeEstimateRatio: 0.7,
-    // A transfer below three quarters of the encoded peak while runway
-    // drains is an early cliff signal on a low rung whose nominal bitrate
-    // can still look safe during a mixed progress window.
-    severePeakRatio: 0.75,
+    // The bottom three rungs have little recovery room. A fresh transfer
+    // below their nominal rate is already unsustainable even if a deep
+    // buffer briefly masks the cliff. Higher rungs wait for the stronger
+    // ratio below: their first partial fragment can straddle two links.
+    lowRungEmergencyCount: 3,
     // An in-flight fragment's first progress window can span a link change.
     // Leave room for that mixed sample and the encoded segment's peak, not
     // merely its nominal bitrate, when choosing a cliff replacement.
@@ -372,8 +373,8 @@
     const freshBandwidthCliff =
       freshRecentEstimate > 0 &&
       (freshRecentEstimate < current.total_kbps * defaults.severeEstimateRatio ||
-       (draining && freshRecentEstimate <
-         (current.peak_kbps || current.total_kbps) * defaults.severePeakRatio));
+       (currentIndex < defaults.lowRungEmergencyCount &&
+        freshRecentEstimate < current.total_kbps));
     const supplyBurst = supplyStalls >= 3;
     const starvation = activeSupplyStall || nearEmpty || supplyBurst;
     const causeKind = causeEvidence && typeof causeEvidence.kind === "string"
