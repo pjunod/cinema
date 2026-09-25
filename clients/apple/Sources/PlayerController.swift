@@ -3554,7 +3554,7 @@ final class PlayerController: ObservableObject {
                 retainControlSequence(await playbackControl.reportIntent())
             }
             guard !Task.isCancelled,
-                  attemptStillCurrent(seekAttempt, fence: .seekIntent)
+                  attemptStillCurrent(seekAttempt, fence: .seekIntentAfterControl)
             else { return }
             if recipeRevision.needsReopen {
                 await reopen(at: target)
@@ -3586,7 +3586,7 @@ final class PlayerController: ObservableObject {
                 // subtitle choice. Reconcile that retained choice on the
                 // same item before acknowledging the new destination.
                 if let item { await reconcileNativeMediaSelections(to: item) }
-                guard attemptStillCurrent(nativeAttempt, fence: .nativeSeekCompletion),
+                guard attemptStillCurrent(nativeAttempt, fence: .nativeSeekAfterSelection),
                       player.currentItem === item
                 else { return }
                 let landed = realPositionMs()
@@ -5317,14 +5317,14 @@ final class PlayerController: ObservableObject {
     private func startRecoveryEvidencePoll() {
         statusTask?.cancel()
         guard let polledSessionId = sessionId else { return }
-        let generation = openGeneration
+        let pollAttempt = snapshotAttempt()
         statusTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, let model = self.model else { return }
                 let status = try? await model.hlsStatus(polledSessionId)
                 guard !Task.isCancelled,
                       self.started,
-                      self.openGeneration == generation,
+                      self.attemptStillCurrent(pollAttempt, fence: .recoveryEvidencePoll),
                       self.sessionId == polledSessionId
                 else { return }
                 if status == nil {
