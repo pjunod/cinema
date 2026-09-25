@@ -223,7 +223,7 @@ Asymmetric *selection* (down in one move, up one rung slowly) is the whole
 trick of ABR; the constants are starting points to tune on real use.
 
 The web player offers a prepared successor for an Auto rung move when its
-incumbent can still present. It starts the successor at most three seconds
+incumbent can still present. It starts the successor at most two seconds
 ahead, waits until the successor overlaps the incumbent's film position and
 has two seconds buffered beyond it, aligns the two elements, then exposes the
 successor on its next decoded frame if the warm layer is rendering. That wait
