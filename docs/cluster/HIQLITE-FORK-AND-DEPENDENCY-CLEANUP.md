@@ -583,7 +583,9 @@ stronger than a corpus: the pinned `tokenizer.json` (sha256 `be50c362…`) is
 and none of those consults tokenizers' `SysRegex` — only `Split`,
 `ByteLevel` and `Replace` do — so the backend cannot reach an id for any
 input. Standalone builds of tokenizers 0.22.2 with each backend encode the
-fixture corpus to byte-identical ids.
+fixture corpus to byte-identical ids; that comparison is committed as
+[`spikes/tokenizer-backends`](../../spikes/tokenizer-backends/Cargo.toml) and
+runs as `make tokenizer-backends` (§5.5).
 
 **(b) The feature.** `semantic-search = ["dep:candle-core", "dep:candle-nn",
 "dep:candle-transformers", "dep:tokenizers"]` in
@@ -815,6 +817,26 @@ Acceptance: `cargo test -p plurxd library_search::semantic::tokenizer_backends_a
 corpus and prints the corpus size; the PR body records pass or the first
 divergence. On divergence, M5 drops (a) and says so.
 
+**As built (2026-09-25, #503 review):** no plurxd test can compare the two
+backends, because `candle-core` 0.11.0 forces `tokenizers/onig` (§3.7(a)
+correction) and every plurxd build therefore runs `onig`. The acceptance is
+met by two parts instead:
+
+- `tokenizer_backends_agree` (ignored; `PLURX_TEST_MINILM_DIR`) is the
+  structural check (the pinned tokenizer has no `Split`, `ByteLevel` or
+  `Replace` component, the only users of the regex backend) plus an `onig`
+  regression pin against `testdata/tokenizer_corpus.ids`.
+- `make tokenizer-backends PLURX_TEST_MINILM_DIR=<dir>` is the comparison.
+  [`spikes/tokenizer-backends`](../../spikes/tokenizer-backends/Cargo.toml) is
+  a separate workspace that depends only on `tokenizers` =0.22.2, with its
+  lock aligned to the root lock except for `fancy-regex` 0.14.0. The target
+  builds it once per backend. Both builds encode the same corpus the plurxd
+  test does: the fixture file, the shared
+  `testdata/tokenizer_programmatic_inputs.rs` and any
+  `PLURX_TEST_TOKENIZER_CORPUS`. Each build must reproduce the recorded ids.
+  The target then checks that the `fancy-regex` graph holds no `onig_sys`
+  and `cmp`s the two outputs.
+
 ### 5.6 M5 — the feature, the lanes, and the pool
 
 §3.7(b), (c) and (d), only if M0's numbers justify (b) and M4 passed for
@@ -965,6 +987,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | needs: M0. (a) cannot land (see M4); onig leaves only with (b). (b), (c) and (d) wait on M0's cost numbers per §3.7(c); no speculative feature, gate or setting was added. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | needs: the §5.1 GPT prompt run on a fast-lane runner (`gha-nynuc-general-01`…`04`, labels `self-hosted, Linux, X64, lab, general, high-cpu`) at the PR head; the nuc3 build host is not that runner and was under load from concurrent builds. M5 cites the numbers. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | unchanged: needs public upstream issues/PRs for the generic rows (owner). Patch 20 is `plurx policy` and has no upstream row. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review ([comment 4628](http://192.168.4.7:3000/noirr/plurx/pulls/503#issuecomment-4628)) | [#503](http://192.168.4.7:3000/noirr/plurx/pulls/503) | Three P2 findings, all taken. (1) The M4 two-backend run had used an uncommitted scratch crate, and the in-tree test's doc comment claimed a comparison it cannot make. The harness is now `spikes/tokenizer-backends` + `make tokenizer-backends` (§5.5 "As built"), and the programmatic inputs moved to a file both include. It reproduced the result: onig and fancy-regex identical over 143 inputs / 2094 ids, no `onig_sys` in the fancy-regex graph; one changed recorded id makes it exit non-zero. (2) THIRD-PARTY-NOTICES §4 summary and crate counts recomputed from `cargo metadata` (496 after merging main), and the `deny.toml` aws-lc comment rewritten. `LicenseNoticesCase` now holds the summary and every stated count to the full list. (3) `vendor/hiqlite/PLURX-PATCH.md`'s removal rule now separates the eight upstream-retirable rows from the twelve `plurx policy` rows, which only an owner decision retires. `test_the_removal_condition_can_be_met` pins it. The ARCHITECTURE §9 risk row's stale "Sixteen" count was corrected with it. |
 
 M4 lab-corpus corroboration (optional; the structural result already covers
 every input):
@@ -978,6 +1001,9 @@ replaced by spaces, to a UTF-8 file. Copy it to nuc3 as
 ~/work/k08-library-corpus.txt and report its line count. Nothing else.
 ```
 
-Then on nuc3: `~/work/k08-tokcmp` holds the standalone two-backend harness;
-run it with that file as the fourth argument under `--features onig` and
-`--features fancy` and `cmp` the two outputs.
+Then, from a checkout on nuc3:
+`make tokenizer-backends PLURX_TEST_MINILM_DIR=<dir holding the pinned tokenizer.json> PLURX_TEST_TOKENIZER_CORPUS=$HOME/work/k08-library-corpus.txt`.
+It runs both backends over the fixture plus that file and exits non-zero on
+any divergence. (The 2026-09-24 M4 run used an uncommitted scratch crate,
+`~/work/k08-tokcmp`, which no longer exists; the committed harness replaces
+it.)
