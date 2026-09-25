@@ -565,3 +565,31 @@ No Apple app reinstall or further test was performed. The existing Apple
 playback/caption test fixture enters through `#if DEBUG`, so it does not
 establish signed Release A-02 playback or L-03 captions; request/frame,
 filter and controller playback evidence remain owed.
+
+## Exact-main read-only acceptance surface audit — 21:39 UTC
+
+A four-node `/metrics` point audit returned HTTP 200, exact build and
+394,086–394,828-byte bodies. The selected K-02 size, snapshot and commit
+families, C-05 backfill counters, S-11 encoder availability/session and
+tone-map session families, and seven C-08 M5 release-evidence families were
+present. Targeted checks found zero route UUID, session/token/file-ID label,
+mount-path or ANSI hits in metric samples. Software and VA-API boot probes
+were available on all four; QSV was available on `nynuc`, `nuc4` and `nuc3`,
+while NVENC and VideoToolbox were unavailable. Encoder/tone-map session
+counters were zero at this idle point. `plurx_index_status`, the C-05 M3
+storage-availability family and `plurx_cluster_clock_*` had zero exported
+series on all four; the named C-05 availability and K-06 clock measurements
+therefore remain open. Sanitized point audit:
+`/private/tmp/codex-fleet-main8ae8-owed-point-audit-20260925.json`, SHA-256
+`4e24ab997d23cd9dd9170bc64f9bb2cc7949884df2b0d4a8c7f3a7caf77536a2`.
+
+On `m6`, read-only `GET /api/v1/server` returned a 32-character safe
+`x-request-id` both normally and when given the plan's deliberately unsafe
+header; the unsafe value was not echoed. Private sanitized probe SHA-256:
+`8b9a8fd9bf5c5e2566a09ba7d72892dc185154613365b7d8d45cca7ee6254283`.
+The most recent 200 Docker log lines on every node had zero ANSI escapes or
+mentions of that unsafe path; log-hygiene receipt SHA-256
+`210a6e23a85e407830712cbffa9dab98cfa9ba28c6d86128b9258ac91d09d2e0`.
+This checks the safe point surfaces of C-08. JSON-mode restart, client
+play/seek, active backfill/availability, busy P-02 load and duration windows
+were not exercised.
