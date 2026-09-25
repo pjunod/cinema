@@ -4,6 +4,42 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## P-02: four parser fuzz targets, one of which found a way to abort plurxd; the release profile measured
+
+**Branch `plan/P-02-2`, [PR #510](http://192.168.4.7:3000/noirr/plurx/pulls/510), merged 2026-09-25; not yet deployed.**
+The second pass of
+[SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md](docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md)
+took the buildable remainder that needs no lab host and no decision of
+Paul's. **M8:** the four fuzz targets of §3.6 (`fmp4_reader`, `rpu_rewrite`,
+`nfo_parse`, `epub_facts`) in their own package `fuzz/parsers/`, each with a
+generated seed corpus (`scripts/fuzz-seeds`), a nightly `parser-fuzz`
+matrix job on the PGS campaign's budget, and `scripts/fuzz-campaign` writing
+executions and corpus growth into each job's summary so a target that stops
+finding edges shows.
+
+`rpu_rewrite` found, within its first ten thousand executions, one way for
+a Dolby Vision RPU to take the daemon down and two to unwind the converting
+task, all in `dolby_vision` 3.4.0: an allocation sized from an unbounded
+ue(v) count (a ~25.8 GB `Vec::with_capacity` from eight changed bytes of the
+real Profile 7 fixture, which aborts the process), an `unimplemented!()` two
+bits from any valid RPU, and an `unreachable!()` on any level 8/9/10 block
+with an unlisted length. The parser runs inside `plurxd` on every sample of
+a converted disc remux. The crate is now vendored under
+`vendor/dolby_vision` with refusals in place of those
+([PLURX-PATCH.md](vendor/dolby_vision/PLURX-PATCH.md); five patches after
+the adversarial review), its bit reader `bitvec_helpers` beside it for two
+Exp-Golomb overflows, `dvconvert` refuses any RPU over 64 KiB before
+parsing, each fuzz input is a fixture with a test in `dvconvert`, and
+refusals report the parse error's whole chain rather than "CM v4.0".
+
+**M6's release-profile half, measured on nuc3 and not shipped:** PR 1 as
+written (`debug = "line-tables-only"`, `strip = "none"`) makes `plurxd` a
+420 MiB binary (+427 %) for a fully symbolicated backtrace; `strip =
+"debuginfo"` gives named frames without lines at +36 % (+11.5 % gzipped);
+packed split debuginfo is 230 MiB plus a 177 MiB `.dwp`. `plurxd
+diagnostic-panic` (hidden) is the check; `Cargo.toml` keeps main's profile
+and **which one ships is Paul's** (plan §7 Q6). M3 stays blocked on Paul's
+spawn-seam decision, M4 on the lab1 matrix. Board row P-02 records it.
 ## Watch view: menus and Playback info escape the picture; the picture goes under the header
 
 **Branch `fix/watch-popovers-escape-picture`, pull request open as a draft;
@@ -276,74 +312,15 @@ gate unbounded; `Drop for StartedSessionGuard` still releases only after a full
 retirement rather than after the fence; and a hold wedged before it registers
 anything still has nothing to fence. Neither client half has run on hardware.
 
-## Implementation plans for the architecture review, and one work board for every vendor
-
-**46 handoff plans** under `docs/{streaming,server,cluster,features,clients,ci}/`
-(index rows in [docs/README.md](docs/README.md)), one per finding or per
-shared mechanism, each executing named ids of
-[the review](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md) with the
-adversarial assessment's dispositions as guardrails, the current code copied
-into a contract section, and a runnable acceptance check per milestone.
-The remaining twelve landed in a second pass the same day, so **all 46
-board rows have a document**. The second pass corrected the review in
-several places worth knowing before Astra reviews: the encoded-VOD master
-already emits output geometry (only the rolling path does not) and the
-hard-coded codec string is `avc1.640034`, not `.640028`; `publish_main` is
-unreachable on `ci.yml`'s current triggers, so no `sha-` rollback image has
-been produced automatically since 2026-09-10; half the clock-skew exchange
-already exists (`x-plurx-cluster-time-ms`) and the peer-auth windows already
-assume ≤5 s; there are 29 discarded store results, not 13; removing the
-cryptr `s3` edge does not remove the second `reqwest`, and renaming the fork
-is actively expensive because the patch stack substitutes by registry name;
-`files_for_items` does not exist and there are no recorded Kodi fixtures;
-there is no HTTP access log at all; and the review's "unreplicated SQLite
-mode" is the one recovery boot, so ARCHITECTURE's 1-voter sentence is
-incomplete rather than wrong.
-
-**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md)
-is the only shared status.** The plans will be executed by Claude, GPT and
-OpenRouter sessions concurrently, so the board defines the claim protocol in
-vendor-neutral terms: a claim is a draft PR that edits the row (the push is
-the atomic step), every row and every commit carries the exact **model
-identifier** and **session id** (`Agent-Model:` / `Agent-Session:` trailers),
-statuses are a fixed vocabulary, stale rows are reclaimable after seven days
-with a note, and every plan ends with an **Execution log** table the
-executing session fills per milestone. Writers' corrections to the review
-found while reading the code are recorded at the top of each plan (for
-example: `live_tv.rs:7403` already pipes stderr; `bounded_process::output` is
-the better primitive for scan probes than the one the review named; the guide
-is cloned three times per DVR tick, not two). Astra reviews the plans next.
-
-## Architecture review, revision 3 — Astra's review merged
-
-**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-revised in place again.** Astra's independent review was written against the
-first draft; revision 3 keeps revision 2's corrected remedies and merges
-everything Astra added that the first draft had not found, each re-verified in
-the tree: an unbounded, unkillable scan probe (`scan/probe.rs:190-215`, C12);
-decode-fact lookups that hash three executable-sized inputs under a one-permit
-gate before consulting the cache and fall back to catalogue facts on any error
-(C13); item-detail badges that unpack whole fragment indexes and `stat` every
-media path with no deadline (C14); telemetry that spawns a task and a
-consistent settings read per event with no bounded queue (C15); DVR fan-out
-that writes sinks sequentially with the lock outside the timeout (L10); HDR10
-HEVC output limited to software and QSV by design (Q12); no native adaptive
-quality and dormant stall-ticket plumbing (§3.8); and two policy tests red on
-`main` — `web-policy.test.js:6007` (a stale call count) and
-`web-control.test.js:3164` under Node 22 — both reproduced here (§4.8).
-Astra's interlace experiment was re-run on this container's ffmpeg 6.1.1 with
-identical counts: the current CPU chain emits 90/90 combed frames tagged
-progressive. The seek-scratch reservation finding (C16) is a tracking item
-for the existing repair. §9 records what was run and what was not. No code
-changed.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24 into the
-status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24 and 2026-09-25
+into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-20 | Architecture review, revision 3 — Astra's review merged | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
+| 2026-09-20 | Implementation plans for the architecture review, and one work board for every vendor | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-20 | Architecture review, revision 2 — after the adversarial assessment | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-20 | End-to-end architecture review — ten verified do-first items, ranked | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-19 | The web app is a tree, and the bytes are the same ones | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |
