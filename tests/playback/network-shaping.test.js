@@ -2348,6 +2348,13 @@ test("player snapshots retain stall and hitch counts across object replacement",
     [take(null, 4, 6).lifetime_stalls, take(null, 4, 6).lifetime_hitches],
     [4, 6],
   );
+  second.recoveringStall = { player: second, kind: "supply", action: "restart",
+    position: 42, targetHeight: 240 };
+  const duringRecovery = take(second, 4, 6);
+  assert.deepEqual(duringRecovery.recovering_stall,
+    { kind: "supply", action: "restart", position: 42, target_height: 240 });
+  assert.doesNotThrow(() => JSON.stringify(duringRecovery),
+    "a persistent-stall snapshot must not return its cyclic runtime player");
   assert.deepEqual(
     [take(null, 4, 6).lifetime_stalls, take(null, 4, 6).lifetime_hitches],
     [4, 6],

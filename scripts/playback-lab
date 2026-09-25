@@ -2035,7 +2035,14 @@ function playerSnapshotExpression() {
       lifetime_hitches:typeof PLAYBACK_LIFETIME_HITCHES==='undefined'
         ?rollup.closed_hitches+rollup.last_hitches:PLAYBACK_LIFETIME_HITCHES,
       stalls_by_kind:p.stallsByKind||{supply:0,decode:0}, buffer_limits:p.bufferLimits||{},
-      stall_recoveries:p.stallRecoveries||0, recovering_stall:p.recoveringStall||null,
+      stall_recoveries:p.stallRecoveries||0,
+      // The runtime snapshot contains player:p and therefore a cycle.
+      // WebDriver serializes this return value; copying the runtime object
+      // aborts the entire trace exactly when a persistent stall is observed.
+      recovering_stall:p.recoveringStall?{
+        kind:p.recoveringStall.kind||null,action:p.recoveringStall.action||null,
+        position:p.recoveringStall.position??null,
+        target_height:p.recoveringStall.targetHeight??null}:null,
       hitches:{back:h.back||0,held:h.held||0,late:h.late||0,drop:h.drop||0,gap:h.gap||0,slow:h.slow||0,rate:h.rate==null?null:h.rate},
       decode:p.decodeInfo||null, health:p.health||null,
       source:p.source||null, audio_count:(p.audio||[]).length, subtitle_count:(p.subs||[]).length,
