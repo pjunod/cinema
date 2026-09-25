@@ -476,7 +476,7 @@ No client change is in this plan. What changes:
 | column | meaning |
 |---|---|
 | `file_id`, `source_size`, `source_mtime` | the stamp (portable part) |
-| `source_attestation` | the fragment-index sampled digest of the source, `object_version` under the `s1:` regime (`fragment_index_cluster.rs`, `ATTESTATION_REGIME`) — **portable identity** (R7) |
+| `source_attestation` | the fragment-index sampled digest of the source, `FragmentIndexSourceObservation.source_sha256` (`fragment_index_cluster.rs::attest_source`) — **portable identity** (R7). `object_version` under the `s1:` regime includes host-local metadata and is only a local fence. |
 | `node_id` | the holder |
 | `ordinal`, `kind` | the embedded subtitle ordinal and `pgs` / `text` / `text_styled` |
 | `format` | `sup` / `webvtt` / `matroska` |
@@ -516,7 +516,7 @@ source for peers but never coverage.
 **Portable identity and local binding** (R7): the receiver accepts a peer's
 artefact only when (a) the sha of the bytes matches the row, (b) the
 receiver's own live `fstat` of the file gives the same size and mtime, and
-(c) the receiver's own attestation of the file (the `cluster_fragment_index_sources` observation row (`FragmentIndexSourceObservation`)
+(c) the receiver's own attestation of the file (the `cluster_fragment_index_sources` observation row's `source_sha256`
 memo, or a fresh sampled digest — two seconds, PGS plan / repair doc) equals
 the row's `source_attestation`. Only then does it write the manifest entry
 **with its own `(dev, ino)`** from that same held fd. The fence: the held fd
