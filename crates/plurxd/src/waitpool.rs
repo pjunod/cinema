@@ -419,11 +419,12 @@ impl Drop for SlotGuard {
 pub struct RegisteredWait {
     _guard: SlotGuard,
     rx: oneshot::Receiver<WaitOutcome>,
-    /// When the pool admitted this wait: `plurx_admission_wait_seconds
-    /// {pool="vod_blocked_get"}` times from here, not from the `wait` call,
-    /// because the recheck between the two is part of what the viewer waits
-    /// through.
-    registered_at: Instant,
+    /// `plurx_admission_wait_seconds{pool="vod_blocked_get"}`, timed from
+    /// admission rather than from the `wait` call, because the recheck between
+    /// the two is part of what the viewer waits through. Taken when `wait`
+    /// resolves; otherwise it records when this wait is dropped, which covers
+    /// a recheck that found the segment and a GET the player aborted mid-wait.
+    timer: Option<crate::telemetry::AdmissionWaitTimer>,
 }
 
 impl RegisteredWait {
@@ -434,10 +435,9 @@ impl RegisteredWait {
             Err(_) => self.rx.try_recv().unwrap_or(WaitOutcome::Deadline),
         };
         // Every outcome is a wait that happened; a deadline is its long tail.
-        crate::telemetry::record_admission_wait(
-            crate::telemetry::AdmissionPool::VodBlockedGet,
-            self.registered_at.elapsed(),
-        );
+        // The registration itself can outlive this (it pins the target until
+        // the file is open), so the wait ends here, not at that drop.
+        drop(self.timer.take());
         outcome
     }
 }
@@ -629,7 +629,9 @@ impl WaitPool {
         Ok(RegisteredWait {
             _guard: guard,
             rx,
-            registered_at: Instant::now(),
+            timer: Some(crate::telemetry::AdmissionWaitTimer::start(
+                crate::telemetry::AdmissionPool::VodBlockedGet,
+            )),
         })
     }
 
@@ -844,6 +846,45 @@ mod tests {
         );
         let after = admission_waits_for_test(AdmissionPool::VodBlockedGet);
         assert!(after - before >= 2, "{before} -> {after}");
+    }
+
+    /// The waits that never reach the end of `wait` are timed too, each once:
+    /// one the player aborted while it was parked (its future dropped, the
+    /// way hyper drops a handler whose client went away), and one whose
+    /// recheck found the segment and returned before waiting at all.
+    #[tokio::test]
+    async fn an_abandoned_or_unawaited_wait_is_still_timed_once() {
+        use crate::telemetry::{admission_waits_on_this_thread, AdmissionPool};
+        let pool = WaitPool::new(4, 4);
+        let before = admission_waits_on_this_thread(AdmissionPool::VodBlockedGet);
+        let mut parked = pool.register(key(1), "viewer").expect("admitted");
+        {
+            let mut waiting = Box::pin(parked.wait(secs(30)));
+            assert!(poll_once(&mut waiting).await.is_pending(), "it parked");
+            // The GET is aborted here: its future is dropped mid-await.
+        }
+        drop(parked);
+        assert_eq!(
+            admission_waits_on_this_thread(AdmissionPool::VodBlockedGet) - before,
+            1,
+            "the aborted wait is recorded, once"
+        );
+        let found_at_recheck = pool.register(key(2), "viewer").expect("admitted");
+        drop(found_at_recheck);
+        assert_eq!(
+            admission_waits_on_this_thread(AdmissionPool::VodBlockedGet) - before,
+            2,
+            "so is one that never waited"
+        );
+        let mut served = pool.register(key(3), "viewer").expect("admitted");
+        pool.satisfy("abcd1234", 3);
+        assert_eq!(served.wait(secs(1)).await, WaitOutcome::Ready);
+        drop(served);
+        assert_eq!(
+            admission_waits_on_this_thread(AdmissionPool::VodBlockedGet) - before,
+            3,
+            "and one that was served counts once, not again at its drop"
+        );
     }
 
     #[tokio::test]

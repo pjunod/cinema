@@ -10399,6 +10399,49 @@ mod tests {
         assert_eq!(crate::telemetry::watched_ms_for_test("transcode"), replayed);
     }
 
+    /// The progress handler hands the ledger the durable row it read before
+    /// writing, so a beat that another node already credited is not credited
+    /// again here. The other node is played by a direct store write between
+    /// this node's two beats: this node then credits only the second since
+    /// that write, not the two seconds since its own last beat.
+    #[tokio::test]
+    async fn a_beat_after_another_nodes_write_credits_only_the_time_since_it() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let user = state
+            .store
+            .get_user_by_username("paul")
+            .await
+            .expect("admin lookup")
+            .expect("admin user");
+        let uri = format!("/api/v1/items/{}/progress", seeded.movie);
+        let beat = |position: i64| {
+            post(
+                &uri,
+                Some(&admin),
+                json!({ "position_ms": position, "duration_ms": 600_000, "method": "transcode" }),
+            )
+        };
+        let before = crate::telemetry::watched_ms_on_this_thread("transcode");
+        let (status, body) = call(&app, beat(60_000)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // Another node receives the next beat and commits it.
+        state
+            .store
+            .put_progress(user.id, seeded.movie, 61_000, Some(600_000))
+            .await
+            .expect("the other node's commit");
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        let (status, body) = call(&app, beat(62_000)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            crate::telemetry::watched_ms_on_this_thread("transcode") - before,
+            1_000,
+            "only the advance since the other node's beat is this node's to credit"
+        );
+    }
+
     #[tokio::test]
     async fn client_telemetry_updates_the_matching_network_prior() {
         let (app, state) = test_state();

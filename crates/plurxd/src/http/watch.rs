@@ -41,13 +41,10 @@ pub async fn progress(
     let position = req.position_ms.max(0);
     // Read before writing, so "already watched" and "just became watched"
     // are distinguishable — otherwise every beat after the crossing would
-    // re-notify.
-    let was_watched = state
-        .store
-        .watch_state(user.id, id)
-        .await?
-        .map(|w| w.watched)
-        .unwrap_or(false);
+    // re-notify. The same row is the cluster-wide previous beat the watched
+    // seconds ledger credits from when another node wrote it.
+    let durable_before = state.store.watch_state(user.id, id).await?;
+    let was_watched = durable_before.as_ref().is_some_and(|w| w.watched);
     let (watch, reported_position_ms, reported_duration_ms) = if req.recorded_at.is_some() {
         // Imported/offline facts carry their own ordering clock and are rare,
         // semantically complete writes rather than an active player's beat.
@@ -89,6 +86,7 @@ pub async fn progress(
             id,
             position,
             req.method.as_deref(),
+            durable_before.as_ref(),
         );
     }
     // Feed the Trakt scrobbler (fire-and-forget; a beat every ~5s while the

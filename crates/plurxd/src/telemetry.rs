@@ -371,6 +371,24 @@ impl PlaybackMetrics {
                 // (web `recordWaitStall`, Android `sampleStall`, Apple
                 // `ApplePlaybackStallLog`); the web's diagnosis beacon has
                 // none and adds a count without seconds, which is honest.
+                // Android and Apple report once, when the stall ends. The web
+                // reports a long wait while it is still frozen, at
+                // `PERSISTENT_STALL_MS`, with the time so far; the rest of it
+                // arrives as `stall_end` below.
+                if let Some(ms) = event.ms.filter(|value| *value > 0) {
+                    self.stalled_ms[kind].fetch_add(ms as u64, Ordering::Relaxed);
+                }
+            }
+            // The close of a stall that was already reported while it was
+            // still going (the web's persistent wait). `ms` is only the time
+            // after that report, so crediting it adds the remainder: the two
+            // reports together are the stall's whole length, and it is one
+            // stall, so the count does not move.
+            "stall_end" => {
+                let kind = label_index(
+                    Some(stall_kind(event.detail.as_deref().unwrap_or_default())),
+                    &STALL_KINDS,
+                );
                 if let Some(ms) = event.ms.filter(|value| *value > 0) {
                     self.stalled_ms[kind].fetch_add(ms as u64, Ordering::Relaxed);
                 }
@@ -724,6 +742,64 @@ pub(crate) enum AdmissionPool {
 /// ended in: a wait that timed out is still a wait, and is the long tail.
 pub(crate) fn record_admission_wait(pool: AdmissionPool, waited: Duration) {
     METRICS.record_admission_wait(pool, waited);
+    #[cfg(test)]
+    THREAD_ADMISSION_WAITS.with(|cells| cells.borrow_mut()[pool as usize] += 1);
+}
+
+/// Times one admission wait from its creation until it is dropped, and
+/// records it then. A wait is created where the request starts waiting, so
+/// every way it can end records exactly once: granted, timed out, refused
+/// after the fact, or abandoned because the request's future was dropped (a
+/// player that seeks again aborts the GET it had parked). Those abandoned
+/// waits are the seek-storm tail row 6 exists to show; a recording placed
+/// after the `await` never runs for them.
+pub(crate) struct AdmissionWaitTimer {
+    pool: AdmissionPool,
+    started: Instant,
+}
+
+impl AdmissionWaitTimer {
+    pub(crate) fn start(pool: AdmissionPool) -> Self {
+        Self {
+            pool,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for AdmissionWaitTimer {
+    fn drop(&mut self) {
+        record_admission_wait(self.pool, self.started.elapsed());
+    }
+}
+
+// Per-thread copies of the node-wide cells, for tests that must count exactly
+// what their own code path recorded while the rest of the suite runs in
+// parallel. A `#[tokio::test]` runs its handler, its response body and its
+// drops on its own thread, so these see that test's records and no other's.
+#[cfg(test)]
+thread_local! {
+    static THREAD_DELIVERED: std::cell::RefCell<[u64; METHODS.len()]> =
+        const { std::cell::RefCell::new([0; METHODS.len()]) };
+    static THREAD_WATCHED: std::cell::RefCell<[u64; METHODS.len()]> =
+        const { std::cell::RefCell::new([0; METHODS.len()]) };
+    static THREAD_ADMISSION_WAITS: std::cell::RefCell<[u64; ADMISSION_POOLS.len()]> =
+        const { std::cell::RefCell::new([0; ADMISSION_POOLS.len()]) };
+}
+
+#[cfg(test)]
+pub(crate) fn delivered_bytes_on_this_thread(method: &str) -> u64 {
+    THREAD_DELIVERED.with(|cells| cells.borrow()[label_index(Some(method), &METHODS)])
+}
+
+#[cfg(test)]
+pub(crate) fn watched_ms_on_this_thread(method: &str) -> u64 {
+    THREAD_WATCHED.with(|cells| cells.borrow()[label_index(Some(method), &METHODS)])
+}
+
+#[cfg(test)]
+pub(crate) fn admission_waits_on_this_thread(pool: AdmissionPool) -> u64 {
+    THREAD_ADMISSION_WAITS.with(|cells| cells.borrow()[pool as usize])
 }
 
 /// Credit media bytes as they are handed to a viewer's connection.
@@ -732,56 +808,122 @@ pub(crate) fn record_admission_wait(pool: AdmissionPool, waited: Duration) {
 pub(crate) fn record_delivered_bytes(method: &str, bytes: u64) {
     METRICS.delivered_bytes[label_index(Some(method), &METHODS)]
         .fetch_add(bytes, Ordering::Relaxed);
+    #[cfg(test)]
+    THREAD_DELIVERED.with(|cells| cells.borrow_mut()[label_index(Some(method), &METHODS)] += bytes);
 }
 
 /// Watched time from progress beats (C-08 M5 row 3's denominator).
 ///
 /// The progress beat is the one signal every first-party player sends every
-/// few seconds while it is open, playing or paused, and it reaches exactly
-/// one node. Each beat is compared with the previous beat for the same viewer
-/// and item **on this node**, and credits the smaller of the position's
-/// advance and the wall time between them. So: a paused player (position
-/// unchanged) credits nothing; a stall (position stuck) credits nothing; a
-/// seek (an advance more than twice the wall time, plus slack) credits
-/// nothing; a gap longer than [`WATCH_BEAT_MAX_GAP`] credits nothing. The
-/// credit is never more than the wall time between two beats, so one viewer
-/// and item can never be credited more than wall time on one node, and a
-/// viewer who moves to another node starts a fresh baseline there rather than
-/// being counted twice.
+/// few seconds while it is open, playing or paused, and each beat reaches
+/// exactly one node. A beat credits the smaller of the position's advance and
+/// the wall time since the viewer's previous beat for that item. So: a paused
+/// player (position unchanged) credits nothing; a stall (position stuck)
+/// credits nothing; a seek (an advance more than twice the wall time, plus
+/// slack) credits nothing; a gap longer than [`WATCH_BEAT_MAX_GAP`] credits
+/// nothing. The credit is never more than the wall time between two beats.
+///
+/// "The previous beat" is cluster-wide. A viewer's beats are not held to one
+/// node (the routing contract lets any non-HLS request go anywhere, and the
+/// Android client keeps no cookie), so a node's own last beat for the viewer
+/// may be older than one another node has already credited. Each beat
+/// therefore also looks at the durable progress row the handler read before
+/// writing: when another writer moved that row after this node's last beat,
+/// the row is the baseline and this node credits only the time since it.
+/// Beats alternating between N nodes are then credited once, not N times.
+/// With only one node in play the row is this node's own write and the
+/// monotonic local baseline is used, which is exact.
 #[derive(Default)]
 pub(crate) struct WatchLedger {
-    beats: Mutex<HashMap<(i64, i64), (i64, Instant)>>,
+    beats: Mutex<HashMap<(i64, i64), LedgerBeat>>,
+}
+
+/// This node's last beat for one viewer and item.
+#[derive(Clone, Copy)]
+struct LedgerBeat {
+    position_ms: i64,
+    /// The position of the beat before this one. A beat that arrives less
+    /// than a second after another can find the durable row still holding
+    /// that earlier beat of this node's own.
+    prior_position_ms: Option<i64>,
+    at: Instant,
+    /// The same moment on the wall clock, to compare with the durable row's
+    /// `updated_at` (whole seconds, written by whichever node committed it).
+    wall_ms: i64,
 }
 
 impl WatchLedger {
+    #[cfg(test)]
     fn beat(&self, user_id: i64, item_id: i64, position_ms: i64, now: Instant) -> u64 {
+        self.beat_after(user_id, item_id, position_ms, now, 0, None)
+    }
+
+    /// `durable` is the viewer's progress row as it stood before this beat
+    /// was written, or `None` when there is none (or the caller has none).
+    fn beat_after(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        position_ms: i64,
+        now: Instant,
+        now_wall_ms: i64,
+        durable: Option<&plurx_core::domain::WatchState>,
+    ) -> u64 {
         let Ok(mut beats) = self.beats.lock() else {
             return 0;
         };
         let key = (user_id, item_id);
         let previous = beats.get(&key).copied();
         if previous.is_none() && beats.len() >= WATCH_LEDGER_CAP {
-            beats.retain(|_, (_, at)| now.saturating_duration_since(*at) <= WATCH_BEAT_MAX_GAP);
+            beats.retain(|_, beat| now.saturating_duration_since(beat.at) <= WATCH_BEAT_MAX_GAP);
             if beats.len() >= WATCH_LEDGER_CAP {
                 // Full of live viewers: this one is not tracked, and is not
                 // credited, rather than evicting someone mid-film.
                 return 0;
             }
         }
-        beats.insert(key, (position_ms, now));
-        previous.map_or(0, |(previous_ms, previous_at)| {
-            watched_credit_ms(previous_ms, previous_at, position_ms, now)
+        beats.insert(
+            key,
+            LedgerBeat {
+                position_ms,
+                prior_position_ms: previous.map(|previous| previous.position_ms),
+                at: now,
+                wall_ms: now_wall_ms,
+            },
+        );
+        if let Some(row) = durable.filter(|row| moved_by_another_writer(row, previous)) {
+            let since_ms = now_wall_ms.saturating_sub(row.updated_at.saturating_mul(1_000));
+            let elapsed = Duration::from_millis(u64::try_from(since_ms).unwrap_or(0));
+            return watched_credit_ms(row.position_ms, elapsed, position_ms);
+        }
+        previous.map_or(0, |previous| {
+            watched_credit_ms(
+                previous.position_ms,
+                now.saturating_duration_since(previous.at),
+                position_ms,
+            )
         })
     }
 }
 
-fn watched_credit_ms(
-    previous_ms: i64,
-    previous_at: Instant,
-    position_ms: i64,
-    now: Instant,
-) -> u64 {
-    let elapsed = now.saturating_duration_since(previous_at);
+/// True when the durable row is a newer beat than this node's own last one:
+/// its position is neither of the two this node last saw (this node's own
+/// commits and coalesced flushes write one of those), and it was written no
+/// earlier than the last of them. `updated_at` is whole seconds, so "no earlier"
+/// allows the second it was truncated from. With no local beat at all, the
+/// row is the only baseline there is; the gap rule still ignores a stale one.
+fn moved_by_another_writer(
+    row: &plurx_core::domain::WatchState,
+    previous: Option<LedgerBeat>,
+) -> bool {
+    previous.is_none_or(|previous| {
+        row.position_ms != previous.position_ms
+            && Some(row.position_ms) != previous.prior_position_ms
+            && row.updated_at.saturating_mul(1_000).saturating_add(1_000) > previous.wall_ms
+    })
+}
+
+fn watched_credit_ms(previous_ms: i64, elapsed: Duration, position_ms: i64) -> u64 {
     if elapsed > WATCH_BEAT_MAX_GAP {
         return 0;
     }
@@ -826,24 +968,66 @@ pub(crate) fn watched_ms_for_test(method: &str) -> u64 {
 /// One live progress beat (never an offline replay, which carries its own
 /// clock). `method` is what the client says it is playing through; a value
 /// outside the playback vocabulary, or none, is `unknown`.
+///
+/// `durable` is the viewer's progress row as the handler read it before
+/// writing this beat; see [`WatchLedger`] for why the credit needs it.
 pub(crate) fn record_progress_beat(
     ledger: &WatchLedger,
     user_id: i64,
     item_id: i64,
     position_ms: i64,
     method: Option<&str>,
+    durable: Option<&plurx_core::domain::WatchState>,
 ) {
-    record_progress_beat_into(
+    let wall_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX));
+    let credited = record_progress_beat_at(
         ledger,
         &METRICS,
-        user_id,
-        item_id,
-        position_ms,
-        method,
-        Instant::now(),
+        BeatAt {
+            user_id,
+            item_id,
+            position_ms,
+            method,
+            now: Instant::now(),
+            wall_ms,
+            durable,
+        },
     );
+    #[cfg(test)]
+    THREAD_WATCHED.with(|cells| cells.borrow_mut()[label_index(method, &METHODS)] += credited);
+    #[cfg(not(test))]
+    let _ = credited;
 }
 
+struct BeatAt<'a> {
+    user_id: i64,
+    item_id: i64,
+    position_ms: i64,
+    method: Option<&'a str>,
+    now: Instant,
+    wall_ms: i64,
+    durable: Option<&'a plurx_core::domain::WatchState>,
+}
+
+fn record_progress_beat_at(ledger: &WatchLedger, metrics: &PlaybackMetrics, beat: BeatAt) -> u64 {
+    let credited = ledger.beat_after(
+        beat.user_id,
+        beat.item_id,
+        beat.position_ms,
+        beat.now,
+        beat.wall_ms,
+        beat.durable,
+    );
+    if credited > 0 {
+        metrics.watched_ms[label_index(beat.method, &METHODS)]
+            .fetch_add(credited, Ordering::Relaxed);
+    }
+    credited
+}
+
+#[cfg(test)]
 fn record_progress_beat_into(
     ledger: &WatchLedger,
     metrics: &PlaybackMetrics,
@@ -853,10 +1037,19 @@ fn record_progress_beat_into(
     method: Option<&str>,
     now: Instant,
 ) {
-    let credited = ledger.beat(user_id, item_id, position_ms, now);
-    if credited > 0 {
-        metrics.watched_ms[label_index(method, &METHODS)].fetch_add(credited, Ordering::Relaxed);
-    }
+    record_progress_beat_at(
+        ledger,
+        metrics,
+        BeatAt {
+            user_id,
+            item_id,
+            position_ms,
+            method,
+            now,
+            wall_ms: 0,
+            durable: None,
+        },
+    );
 }
 
 fn label_index<const N: usize>(value: Option<&str>, labels: &[&str; N]) -> usize {
@@ -1487,9 +1680,8 @@ fn classify(event: &PlaybackEvent) -> EventClass {
         | "control_retry_resource"
         | "control_hold_withheld"
         | "control_action_suppressed" => EventClass::Terminal,
-        "ttff" | "session_start" | "stall" | "stall_recovery" | "suspend" | "resume" => {
-            EventClass::Lifecycle
-        }
+        "ttff" | "session_start" | "stall" | "stall_end" | "stall_recovery" | "suspend"
+        | "resume" => EventClass::Lifecycle,
         _ => EventClass::Sample,
     }
 }
@@ -2210,11 +2402,145 @@ mod tests {
         assert!(text.contains(r#"plurx_stalled_seconds_total{kind="decode"} 0.800"#));
         assert!(text.contains(r#"plurx_stalled_seconds_total{kind="other"} 3.000"#));
         assert!(text.contains(r#"plurx_stalls_total{kind="supply"} 1"#));
-        // And the same stream's bytes: row 8 divides by the same cell.
-        metrics.delivered_bytes[label_index(Some("remux"), &METHODS)]
-            .fetch_add(600 * 1_000_000, Ordering::Relaxed);
+        // Row 8's numerator is pinned where it is fed: the direct-play
+        // handler (`http::tests::a_direct_play_get_credits_exactly_its_body_to_delivered_bytes`),
+        // `meter::tests` and one assertion per meter construction site.
+    }
+
+    /// The web reports a long wait while the picture is still frozen, at its
+    /// eight-second mark, and the rest when the wait ends (`stall_end`, `ms`
+    /// being only the time after the first report). Row 3 credits both, so a
+    /// 90 s stall is 90 s, not 8; and it is still one stall.
+    #[test]
+    fn a_stall_reported_while_frozen_is_credited_its_whole_length_once() {
+        let metrics = PlaybackMetrics::new();
+        for (event, ms) in [("stall", Some(8_000)), ("stall_end", Some(82_000))] {
+            metrics.record_from(
+                &PlaybackEvent {
+                    event: event.into(),
+                    method: Some("remux".into()),
+                    detail: Some("supply-persistent".into()),
+                    ms,
+                    ..PlaybackEvent::default()
+                },
+                None,
+            );
+        }
+        // A close with nothing after the report adds nothing.
+        metrics.record_from(
+            &PlaybackEvent {
+                event: "stall_end".into(),
+                detail: Some("decode-persistent".into()),
+                ..PlaybackEvent::default()
+            },
+            None,
+        );
         let text = metrics.render();
-        assert!(text.contains(r#"plurx_delivered_bytes_total{method="remux"} 600000000"#));
+        assert!(
+            text.contains(r#"plurx_stalled_seconds_total{kind="supply"} 90.000"#),
+            "{text}"
+        );
+        assert!(text.contains(r#"plurx_stalls_total{kind="supply"} 1"#));
+        assert!(text.contains(r#"plurx_stalls_total{kind="decode"} 0"#));
+        assert!(text.contains(r#"plurx_stalled_seconds_total{kind="decode"} 0.000"#));
+        assert_eq!(
+            classify(&PlaybackEvent {
+                event: "stall_end".into(),
+                ..PlaybackEvent::default()
+            }),
+            EventClass::Lifecycle,
+            "the close of a stall is kept like the stall, never sampled away"
+        );
+    }
+
+    /// A viewer whose beats alternate between two nodes (no cookie holds them
+    /// to one) is credited wall time once, not once per node: each node
+    /// takes the durable row another node wrote as the previous beat. And a
+    /// node alone, with its own coalesced writes in the row, still uses its
+    /// own exact baseline.
+    #[test]
+    fn beats_alternating_between_nodes_are_credited_once_cluster_wide() {
+        use plurx_core::domain::WatchState;
+        let base = Instant::now();
+        // Half a second past a whole second, so the row's truncated
+        // `updated_at` is exercised.
+        let wall0: i64 = 1_790_000_000_500;
+        let nodes = [WatchLedger::default(), WatchLedger::default()];
+        let mut row: Option<WatchState> = None;
+        let mut credited = 0;
+        for beat in 0..=60i64 {
+            let seconds = beat * 10;
+            let position = 100_000 + seconds * 1_000;
+            let wall = wall0 + seconds * 1_000;
+            let node = &nodes[usize::try_from(beat % 2).expect("node")];
+            credited += node.beat_after(
+                1,
+                2,
+                position,
+                base + Duration::from_secs(u64::try_from(seconds).expect("secs")),
+                wall,
+                row.as_ref(),
+            );
+            // Every beat commits: each node last wrote twenty seconds ago.
+            row = Some(WatchState {
+                position_ms: position,
+                duration_ms: Some(7_200_000),
+                watched: false,
+                updated_at: wall / 1_000,
+            });
+        }
+        assert_eq!(credited, 600_000, "ten minutes on two nodes is ten minutes");
+
+        // Paused, alternating: nothing.
+        let mut paused = 0;
+        for beat in 61..=70i64 {
+            let seconds = beat * 10;
+            let wall = wall0 + seconds * 1_000;
+            paused += nodes[usize::try_from(beat % 2).expect("node")].beat_after(
+                1,
+                2,
+                700_000,
+                base + Duration::from_secs(u64::try_from(seconds).expect("secs")),
+                wall,
+                row.as_ref(),
+            );
+            row = Some(WatchState {
+                position_ms: 700_000,
+                duration_ms: Some(7_200_000),
+                watched: false,
+                updated_at: wall / 1_000,
+            });
+        }
+        assert_eq!(paused, 0);
+
+        // One node, five-second beats, a ten-second commit window: the row
+        // holds this node's own earlier beats, never a newer one, and the
+        // credit is the local, exact one.
+        let alone = WatchLedger::default();
+        let mut own_row: Option<WatchState> = None;
+        let mut credited = 0;
+        for beat in 0..=24i64 {
+            let seconds = beat * 5;
+            let position = seconds * 1_000;
+            let wall = wall0 + seconds * 1_000;
+            credited += alone.beat_after(
+                3,
+                4,
+                position,
+                base + Duration::from_secs(u64::try_from(seconds).expect("secs")),
+                wall,
+                own_row.as_ref(),
+            );
+            if beat % 2 == 0 {
+                own_row = Some(WatchState {
+                    position_ms: position,
+                    duration_ms: None,
+                    watched: false,
+                    updated_at: wall / 1_000,
+                });
+            }
+        }
+        assert_eq!(credited, 120_000, "two minutes alone is two minutes");
     }
 
     /// Everything the ledger must not count: a paused player, a seek, a

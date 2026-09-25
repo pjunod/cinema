@@ -2562,6 +2562,7 @@ async function main() {
         " detach(player){PLAYER=player; stopPlaybackControl(player); PLAYER=null;},",
         " stall(player,video,began,generation){PLAYER=player;",
         "   return persistentWait(video,player,began,generation,player.controlIntentGeneration||0);},",
+        " end(player,resumed){PLAYER=player; return endWait(resumed);},",
         " verdictText:controlVerdictText,",
         " supersede(player){PLAYER=player; return supersedePlaybackControlIntent(player);},",
         " armedVerdict(player){PLAYER=player; return armedPlaybackControlVerdict(player);},",
@@ -2714,6 +2715,34 @@ async function main() {
     assert.notEqual(player.waitTimer,null,"presentation observation keeps the absolute deadline");
     assert.deepEqual(h.stalls[0],{kind:"presentation",startedRunway:0,currentRunway:9.6,
       detail:"presentation-persistent"});
+  }
+  {
+    // Row 3's numerator (C-08 M5). The persistent report goes out while the
+    // picture is still frozen, carrying the eight seconds so far; when the
+    // wait ends, the rest follows as `stall_end` under the same detail, so a
+    // 90 s stall reaches the server as 8 s + 82 s and is still one stall.
+    let now=8_001;
+    const h=stallHarness({clock:{now:()=>now},answer:()=>({type:"none"})});
+    const player=Object.assign(stalledPlayer(),{waitAt:1,waitStartedRunway:0});
+    const video=bufferedVideo(9.6,{play(){return Promise.resolve();}});
+    h.stub.attach(player,video,bootstrap());h.attached.push(player);await flush();
+    const observing=h.stub.stall(player,video,1,3);
+    await settleExchange();await observing;
+    assert.equal(h.stalls.length,1,"one stall report while frozen");
+    assert.notEqual(player.waitTimer,null,"the wait is still open and observed");
+    assert.deepEqual(h.log.filter(entry=>entry.event==="stall_end"),[],
+      "nothing closes before the wait ends");
+    now=90_001;
+    h.stub.end(player,true);
+    assert.deepEqual(h.log.filter(entry=>entry.event==="stall_end")
+      .map(entry=>({detail:entry.detail,ms:entry.ms})),
+      [{detail:"presentation-persistent",ms:82_000}],
+      "the close carries exactly the time after the first report");
+    h.stub.end(player,true);
+    assert.equal(h.log.filter(entry=>entry.event==="stall_end").length,1,
+      "and is sent once");
+    assert.equal(h.stalls.length,1,"the close is not a second stall");
+    h.stub.detach(player);
   }
   {
     const video=bufferedVideo(0);

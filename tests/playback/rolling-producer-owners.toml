@@ -2740,7 +2740,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # producer, a process or a response. The `tokio::time::timeout` in
 # `ArtworkCoordinator::derive_permit` and in `RegisteredWait::wait` were
 # re-bound to a local, not added.
-expected_occurrences = 923
+# 923 -> 924 (measured) with the #500 review round: one test-only
+# `tokio::time::sleep` of 1.2 s in
+# `http::tests::a_beat_after_another_nodes_write_credits_only_the_time_since_it`,
+# the wall time between a peer's simulated progress commit and this node's
+# next beat, which is what the watched-seconds credit is measured against.
+# `ArtworkCoordinator::derive_permit`'s `tokio::time::timeout` is unchanged
+# in count (it lost its `let permit =` binding, nothing else). Bounds no
+# producer, process or response.
+expected_occurrences = 924
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3439,7 +3447,12 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # (one satisfied, one run to its 5 ms deadline). `RegisteredWait` is the
 # in-process blocked-GET pool's oneshot; neither call addresses or reaps an
 # operating-system process.
-expected_occurrences = 383
+# 383 -> 385 (measured) with the #500 review round: two test-only
+# `RegisteredWait::wait` calls in
+# `waitpool::tests::an_abandoned_or_unawaited_wait_is_still_timed_once` (one
+# polled once and then dropped mid-wait, one satisfied). The in-process
+# blocked-GET pool's oneshot again; neither addresses or reaps a process.
+expected_occurrences = 385
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
