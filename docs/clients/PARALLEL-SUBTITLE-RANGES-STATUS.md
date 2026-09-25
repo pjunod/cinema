@@ -81,12 +81,14 @@ so late responses cannot publish there. A peer whose HTTP disconnect is not
 observed immediately can finish within its worker deadline; this is a
 bounded remote cancellation delay, not an immediate remote kill guarantee.
 
-The window timeline keeps the existing ownership by cue start. Cues that
-began before a window are not recovered by this path; normal contiguous
-playback uses the preceding window's slack. This implementation does not
-claim a complete arbitrary interval for very long crossing cues. PGS cannot
-use this path because palette and object state can cross display sets.
-ASS/SSA display remains converted to VTT exactly as before; styled burns
+The indexed path preserves absolute timestamps with `-copyts -start_at_zero`
+and an input seek 60 seconds before the window. It uses output `-to` only;
+output `-ss` is omitted because FFmpeg 5 rebases timestamps while newer
+versions do not. Rust then filters preroll by exact cue timestamps, retaining
+cues whose end crosses the anchor. Cues that began more than 60 seconds
+before the anchor may remain unavailable until the complete track arrives.
+PGS cannot use this path because palette and object state can cross display
+sets. ASS/SSA display still uses VTT where already supported; styled burns
 continue to require the complete Matroska representation.
 
 Named regression anchors (written, not yet executed):
@@ -94,6 +96,7 @@ Named regression anchors (written, not yet executed):
 - `subtitle_ranges::tests::range_identity_rejects_stale_stamp_bad_grid_and_bitmap`
 - `subtitle_ranges::tests::peer_range_rejects_malformed_nonfinite_and_wrong_timeline`
 - `subtitle_ranges::tests::same_range_deduplicates_and_cancel_releases_claim`
+- `subtitle_ranges::tests::absolute_window_keeps_spanning_cue_and_sparse_first_cue`
 - `subtitle_ranges::tests::current_range_is_readable_before_slow_peer_and_cancel_drops_prefetch`
 - `subtitle_ranges::tests::indexed_late_window_matches_full_scan_with_nonzero_source_start`
 - `subtitle_ranges::tests::indexed_text_starts_window_after_midpoint_while_whole_track_is_healthy`
@@ -106,9 +109,29 @@ subtitle start 8.500 s. Direct extraction returned cues at 1–4, 102–106 and
 shift. This verifies the nonzero-origin choice on that version; the named
 regression retains it for the pinned build environment.
 
-The time range bounds output cue starts, not the exact physical bytes read.
+The time range selects overlapping cues found by the bounded preroll; it does
+not bound the exact physical bytes read.
 A sparse subtitle stream can make FFmpeg read past the nominal endpoint
 until it encounters its next subtitle packet. The measured read ratios above
 are specific to a cue-every-ten-seconds fixture. Input seeking avoids the
 prefix scan; the 25-second peer deadline and bounded output remain the hard
 limits when sparse media cannot complete as quickly.
+
+## 5. Deterministic timestamp correction before review
+
+The initial output-seek variant exposed a sparse-track ambiguity: a relative
+first cue at 220 s in the 200 s window could be mistaken for absolute 220 s
+instead of 420 s. The indexed path therefore never calls the first-cue
+normalizer. Its final command omits output `-ss` and filters absolute cues
+in Rust.
+
+A disposable container from the existing nuc3 image ran both Debian FFmpeg
+5.1.9 and Jellyfin 8.1.2, without starting the stopped service. The synthetic
+fixture used a 7.5-second output timestamp offset and two text tracks: one
+with near and sparse cues, one with only sparse cues. For both binaries,
+full extraction and `-copyts -start_at_zero -ss 140 -i source -to 460` agreed
+exactly on cues at 217.500–221.500 and 427.500–431.500 s. Preroll at
+157.500–161.500 s remained absolute for Rust to discard. A sparse-only track
+still returned 427.500–431.500 s, proving no first-cue inference is needed.
+The disposable container was network-disabled, read-only apart from its
+private temporary filesystem, and automatically removed afterward.

@@ -336,9 +336,48 @@ impl Drop for Temp {
     }
 }
 
+/// Input seeking plus copyts/start_at_zero, without output -ss, produces the
+/// same absolute cue times as a full extraction on FFmpeg 5.1.9 and 8.1.2.
+/// Filter preroll explicitly, retaining cues still visible at the anchor.
+pub(crate) fn filter_absolute_window(
+    bytes: &[u8],
+    anchor: i64,
+    end: i64,
+) -> Result<Vec<u8>, String> {
+    let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+    if !text.starts_with("WEBVTT\n") {
+        return Err("invalid window header".to_owned());
+    }
+    let mut result = String::from("WEBVTT\n\n");
+    for block in text
+        .split("\n\n")
+        .skip(1)
+        .filter(|block| !block.trim().is_empty())
+    {
+        let timing = block
+            .lines()
+            .find(|line| line.contains(" --> "))
+            .ok_or("missing cue timing")?;
+        let (start, stop) = timing.split_once(" --> ").ok_or("invalid cue timing")?;
+        let start = cue_timestamp(start).ok_or("invalid cue start")?;
+        let stop = stop
+            .split_whitespace()
+            .next()
+            .and_then(cue_timestamp)
+            .ok_or("invalid cue end")?;
+        if stop < start {
+            return Err("negative cue duration".to_owned());
+        }
+        if stop > anchor as f64 && start < end as f64 {
+            result.push_str(block.trim_end_matches('\n'));
+            result.push_str("\n\n");
+        }
+    }
+    Ok(result.into_bytes())
+}
+
 /// Reject malformed cue timestamps and responses outside the requested range.
-/// Cues may extend past its end; ownership follows their start timestamp, as
-/// in the existing playback-window producer. Empty windows are valid.
+/// Cues may span the anchor or extend past the end. Empty windows are valid.
 fn valid_vtt(text: &str, anchor: i64, span: i64) -> bool {
     if text.len() as u64 > MAX_VTT || !text.starts_with("WEBVTT\n") {
         return false;
@@ -374,8 +413,9 @@ fn valid_vtt(text: &str, anchor: i64, span: i64) -> bool {
         };
         if !start.is_finite()
             || !stop.is_finite()
-            || start < anchor as f64
-            || start > end
+            || start < 0.0
+            || stop <= anchor as f64
+            || start >= end
             || stop < start
         {
             return false;
@@ -624,29 +664,53 @@ mod tests {
         let stamp = crate::fragment_index_cluster::source_stamp(&metadata);
         file.size = metadata.len() as i64;
         file.mtime = stamp.mtime;
-        let ranged = dir.path().join("ranged.vtt");
-        crate::subtitles::extract_vtt_window(&ranged, &file, 0, 400, 200)
-            .await
-            .expect("bounded extraction");
         let scan = dir.path().join("scan.vtt");
         let result = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
             .args(["-v", "error", "-i"])
             .arg(&input)
-            .args(["-ss", "400", "-to", "660", "-map", "0:s:0", "-f", "webvtt"])
+            .args(["-map", "0:s:0", "-f", "webvtt"])
             .arg(&scan)
             .output()
             .await
-            .expect("fixture operation");
+            .expect("full extraction");
         assert!(result.status.success());
-        let expected = crate::subtitles::normalize_window_cues(
-            &std::fs::read(scan).expect("fixture operation"),
-            400,
-        );
-        let actual = std::fs::read(ranged).expect("fixture operation");
-        assert_eq!(actual, expected, "indexed seek must retain exact cue times");
-        assert!(String::from_utf8(actual)
-            .expect("fixture operation")
-            .contains("late"));
+        let full = std::fs::read_to_string(scan).expect("full VTT");
+        // At anchor 200 the first cue at 410(+container origin) lies past
+        // one full window in a rebased output, defeating first-cue guessing.
+        for anchor in [200, 400] {
+            let ranged = dir.path().join(format!("ranged-{anchor}.vtt"));
+            crate::subtitles::extract_vtt_window(&ranged, &file, 0, anchor, 200)
+                .await
+                .expect("bounded extraction");
+            let expected: Vec<_> = full
+                .split("\n\n")
+                .filter(|block| block.contains("late") || (anchor == 400 && block.contains("next")))
+                .flat_map(|block| block.lines())
+                .filter(|line| line.contains(" --> "))
+                .collect();
+            let actual = std::fs::read_to_string(ranged).expect("range VTT");
+            let times: Vec<_> = actual
+                .lines()
+                .filter(|line| line.contains(" --> "))
+                .collect();
+            assert_eq!(
+                times, expected,
+                "sparse and near cues must keep full-extraction timestamps at {anchor}"
+            );
+            assert!(actual.contains("late"));
+        }
+    }
+
+    #[test]
+    fn absolute_window_keeps_spanning_cue_and_sparse_first_cue() {
+        let bytes = b"WEBVTT\n\n03:00.000 --> 03:40.000\nspanning\n\n07:00.000 --> 07:04.000\nsparse\n\n02:00.000 --> 02:04.000\nexpired\n\n08:00.000 --> 08:04.000\nafter\n";
+        let result = filter_absolute_window(bytes, 200, 460).expect("absolute filter");
+        let text = String::from_utf8(result).expect("VTT");
+        assert!(text.contains("03:00.000 --> 03:40.000"));
+        assert!(text.contains("07:00.000 --> 07:04.000"));
+        assert!(!text.contains("expired"));
+        assert!(!text.contains("after"));
+        assert!(valid_vtt(&text, 200, 200));
     }
 
     #[tokio::test]

@@ -2460,8 +2460,8 @@ where
 }
 
 /// Extract a playback text window. Indexed Matroska seeks skip preceding
-/// clusters; output bounds still select the same cue-start interval as the
-/// historical scan. The existing normalization handles old FFmpeg rebasing.
+/// clusters. Copy timestamps without output -ss keeps one absolute timeline
+/// on both old and new FFmpeg; Rust filters preroll without rebasing cues.
 pub(crate) async fn extract_vtt_window(
     tmp: &Path,
     file: &MediaFile,
@@ -2487,7 +2487,8 @@ pub(crate) async fn extract_vtt_window(
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
     command.args(["-hide_banner", "-loglevel", "error"]);
-    if crate::subtitle_ranges::indexed_text(file, index) {
+    let indexed = crate::subtitle_ranges::indexed_text(file, index);
+    if indexed {
         command.args([
             "-copyts",
             "-start_at_zero",
@@ -2495,12 +2496,15 @@ pub(crate) async fn extract_vtt_window(
             &anchor_seconds.saturating_sub(60).max(0).to_string(),
         ]);
     }
+    command.arg("-i").arg(&input);
+    // Output -ss rebases subtitles on FFmpeg 5 but not 8. With copyts and
+    // no output seek both emit the full-extraction timeline, even when the
+    // first cue is sparse or the container starts at a nonzero timestamp.
+    if !indexed {
+        command.args(["-ss", &anchor_seconds.to_string()]);
+    }
     command
-        .arg("-i")
-        .arg(&input)
         .args([
-            "-ss",
-            &anchor_seconds.to_string(),
             "-to",
             &end.to_string(),
             "-map",
@@ -2534,14 +2538,16 @@ pub(crate) async fn extract_vtt_window(
     if !diagnostics.trim().is_empty() {
         return Err("subtitle window decoder reported an error".to_owned());
     }
-    // Normalize before the file is published, so what lands in the cache is
-    // always absolute-time whatever this ffmpeg build chose to emit. Doing it
-    // here rather than at read time means the base is decided once, by the
-    // code that knows the anchor, instead of on every segment request.
     let extracted = plurx_core::fs_secure::read_bounded_regular(tmp, MAX_SIDECAR_BYTES)
         .await
         .map_err(|e| format!("reading the extracted subtitle window: {e}"))?;
-    let normalized = normalize_window_cues(&extracted, anchor_seconds);
+    let normalized = if indexed {
+        // Preroll is already in absolute source time. Never infer its base
+        // from the first cue: sparse windows make that ambiguous.
+        crate::subtitle_ranges::filter_absolute_window(&extracted, anchor_seconds, end)?
+    } else {
+        normalize_window_cues(&extracted, anchor_seconds)
+    };
     if normalized != extracted {
         tokio::fs::write(tmp, &normalized)
             .await

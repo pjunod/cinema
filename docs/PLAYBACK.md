@@ -542,7 +542,7 @@ source attestation and replacement checks fence peer results. The complete
 subtitle job continues to populate the durable store. PGS and styled burns
 retain their complete-track producers. See the
 [range implementation status](clients/PARALLEL-SUBTITLE-RANGES-STATUS.md) for
-bounds, cue-start boundary semantics and verification evidence.
+bounds, preroll boundary semantics and verification evidence.
 
 
 Downloaded OpenSubtitles captions join the same selectable list after the
